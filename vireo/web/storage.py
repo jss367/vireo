@@ -41,8 +41,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         min_detector_conf = db.min_detector_confidence_across_workspaces(
             cfg.load()
         )
-        variants = db.mask_variants_summary()
-        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
+        variants = db.masks_features.variants_summary()
+        stale = db.masks_features.find_stale(detector_confidence=min_detector_conf)
         return {
             "variants": variants,
             "total_bytes": sum(v["bytes"] for v in variants),
@@ -97,8 +97,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         emb = _dir_stats(EMB_CACHE_DIR)
         models_size = _dir_size_recursive(DEFAULT_MODELS_DIR)
         db = get_db()
-        offline_size = db.offline_original_total_bytes()
-        offline_count = db.offline_original_cached_count()
+        offline_size = db.caches.offline_original_total_bytes()
+        offline_count = db.caches.offline_original_cached_count()
         masks = _storage_masks_data(db)
         masks_size = masks["total_bytes"]
         storage_root = os.path.dirname(config["THUMB_CACHE_DIR"])
@@ -350,7 +350,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             return json_error("variant required")
         db = get_db()
         try:
-            n = db.delete_masks_for_variant(variant)
+            n = db.masks_features.delete_for_variant(variant)
         except ValueError as e:
             return json_error(str(e), 400)
         log.info("Deleted %d masks for variant %s", n, variant)
@@ -360,7 +360,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
     def api_storage_masks_delete_inactive():
         """Delete all non-active variant masks across all photos."""
         db = get_db()
-        n = db.delete_inactive_masks()
+        n = db.masks_features.delete_inactive()
         log.info("Deleted %d inactive-variant masks", n)
         return jsonify({"ok": True, "deleted": n})
 
@@ -481,7 +481,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             # Keep preview_cache table in sync with the filesystem so
             # Settings "Current usage" and eviction don't see phantoms.
             db = get_db()
-            db.preview_cache_clear_all()
+            db.caches.preview_clear_all()
             return jsonify({"ok": True})
         elif cache_type == "thumbnails":
             thumb_dir = config["THUMB_CACHE_DIR"]
@@ -617,11 +617,11 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
                 os.remove(fp)
                 deleted += 1
                 if is_paired:
-                    db.paired_preview_cache_delete(safe)
+                    db.caches.paired_preview_delete(safe)
                 elif cache_type == "previews":
                     m = sized_pat.match(safe)
                     if m:
-                        db.preview_cache_delete(int(m.group(1)), int(m.group(2)))
+                        db.caches.preview_delete(int(m.group(1)), int(m.group(2)))
                         preview_rows_removed += 1
                 elif cache_type == "thumbnails":
                     m = thumb_pat.match(safe)

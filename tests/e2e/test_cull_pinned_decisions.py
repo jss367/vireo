@@ -119,12 +119,11 @@ def test_applied_flags_win_over_fresh_suggestion(live_server, page):
     expect(_card(page, 1).locator(".cull-card-source")).to_have_text("Applied")
     expect(page.locator(".summary-stat", has_text="Already applied")).to_contain_text("1")
 
-    page.locator(".summary-link", has_text="Ignore 1 saved flags").click()
-    expect(_card(page, 1)).to_have_class(re.compile(r"\bkeep\b"))
-    expect(page.locator(".cull-card-source")).to_have_count(0)
-
-    page.locator(".summary-link", has_text="Honor 1 saved flags").click()
+    # Saved picks/rejections are always honored in the favorites-first flow.
+    expect(page.locator(".summary-link", has_text="Ignore 1 saved flags")).to_have_count(0)
+    _nudge_scoring_slider(page, _results({1: {"flag": "rejected"}}))
     expect(_card(page, 1)).to_have_class(re.compile(r"\breject\b"))
+    expect(_card(page, 1).locator(".cull-card-source")).to_have_text("Applied")
 
 
 def test_applied_flags_survive_recompute(live_server, page):

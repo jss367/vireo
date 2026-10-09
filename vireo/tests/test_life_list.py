@@ -211,7 +211,7 @@ def test_life_list_pick_promotes_lower_scored_photo(life_app):
     app, db, ids = life_app
     # p1's quality_score (0.5) is lower than p2's (0.9), proving that the
     # explicit Pick tier, rather than the algorithmic score, promoted it.
-    db.update_photo_flag(ids["p1"], "flagged")
+    db.photo_review.set_flag(ids["p1"], "flagged")
 
     data = _get_life_list(app)
     cardinal = _entry(data, "Northern Cardinal")
@@ -224,7 +224,7 @@ def test_life_list_pick_promotes_lower_scored_photo(life_app):
 
 def test_life_list_representative_stays_ahead_of_pick(life_app):
     app, db, ids = life_app
-    db.update_photo_flag(ids["p2"], "flagged")
+    db.photo_review.set_flag(ids["p2"], "flagged")
 
     resp = app.test_client().post("/api/photo-preferences", json={
         "purpose": "life_list",
@@ -634,7 +634,7 @@ def test_ordered_highlights_control_highlights_bucket_order(life_app):
 
 def test_highlights_picks_sort_before_higher_scored_unflagged(life_app):
     app, db, ids = life_app
-    db.update_photo_flag(ids["p1"], "flagged")
+    db.photo_review.set_flag(ids["p1"], "flagged")
 
     data = app.test_client().get("/api/highlights?scope=workspace").get_json()
     cardinal = next(
@@ -655,7 +655,7 @@ def test_highlights_bucket_best_score_ignores_pick_promotion(life_app):
     below buckets whose actual best photo is worse.
     """
     app, db, ids = life_app
-    db.update_photo_flag(ids["p1"], "flagged")
+    db.photo_review.set_flag(ids["p1"], "flagged")
 
     data = app.test_client().get("/api/highlights?scope=workspace").get_json()
     cardinal = next(

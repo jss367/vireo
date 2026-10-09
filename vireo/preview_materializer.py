@@ -374,7 +374,7 @@ def materialize_preview(
                 try:
                     # Standalone renders (no catalog) pass db=None.
                     if db is not None:
-                        db.preview_cache_insert(photo_id, size, len(data))
+                        db.caches.preview_insert(photo_id, size, len(data))
                 except sqlite3.Error:
                     # The file is published; an untracked preview is adopted
                     # on its next hit. Usually the photo was deleted (FK).

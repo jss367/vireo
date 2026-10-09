@@ -34,3 +34,10 @@ and license are packaged in `vireo/data/denoise/`. Vireo's denoising and
 profile-selection implementation is original code using OpenCV.
 
 Source: https://github.com/darktable-org/darktable/blob/636a7471b85ce7a65dcbbc9b6ee2946ef81eecae/data/noiseprofiles.json
+
+## Native photo filters
+
+The optional native noise-reduction and sharpening extension uses PyO3,
+rust-numpy, Rayon, and their Rust dependencies. Complete notices for the pinned
+dependencies are packaged in `vireo/data/native-detail/THIRD_PARTY_LICENSES.txt`.
+The source and locked dependency versions are in `native/detail/`.

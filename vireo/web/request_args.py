@@ -200,7 +200,7 @@ def parse_selection_photo_ids(db, body, *, json_error, limit=MAX_SELECTION_PHOTO
     if limit is not None and len(photo_ids) > limit:
         return None, json_error("too many photo_ids", 400)
 
-    visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
+    visible_ids = set(db.photo_visibility.visible_photo_ids(photo_ids))
     for pid in photo_ids:
         if pid not in visible_ids:
             return None, json_error(

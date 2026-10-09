@@ -32,7 +32,7 @@ SCHEMA_VERSION = 1
 #   5 — monotonic, linear-luminance range curves with chroma preservation.
 #   6 — scene-linear RAW decode and floating-point render/export buffers.
 #   7 — edge-aware Shadows/Highlights with local contrast preservation.
-EDIT_MATH_VERSION = 7
+EDIT_MATH_VERSION = 8
 
 _ADJUSTMENT_RANGES = {
     "exposure": (-5.0, 5.0),

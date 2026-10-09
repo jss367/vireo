@@ -84,7 +84,7 @@ def create_audit_blueprint(
         from audit import check_drift
 
         drifts = check_drift(db)
-        db.record_audit_run("drift", len(drifts))
+        db.audit.record_run("drift", len(drifts))
         return jsonify(drifts)
 
     @blueprint.route("/api/audit/orphans")
@@ -93,7 +93,7 @@ def create_audit_blueprint(
         from audit import check_orphans
 
         orphans = check_orphans(db)
-        db.record_audit_run("orphans", len(orphans))
+        db.audit.record_run("orphans", len(orphans))
         return jsonify(orphans)
 
     def _audit_workspace_roots(db):
@@ -121,7 +121,7 @@ def create_audit_blueprint(
         from audit import check_untracked
 
         untracked = check_untracked(db, _audit_workspace_roots(db))
-        db.record_audit_run("untracked", len(untracked))
+        db.audit.record_run("untracked", len(untracked))
         return jsonify(untracked)
 
     @blueprint.route("/api/audit/sidecars")
@@ -130,7 +130,7 @@ def create_audit_blueprint(
         from audit import check_stray_sidecars
 
         strays = check_stray_sidecars(_audit_workspace_roots(db))
-        db.record_audit_run("sidecars", len(strays))
+        db.audit.record_run("sidecars", len(strays))
         return jsonify(strays)
 
     @blueprint.route("/api/audit/delete-sidecars", methods=["POST"])
@@ -195,7 +195,7 @@ def create_audit_blueprint(
         # Photos are global; resolving queues sidecar writes (or rewrites
         # keywords from the XMP) under the active workspace, so it may only
         # touch a photo that workspace can see -- the same set drift lists.
-        if photo_id not in db.filter_photo_ids_in_workspace([photo_id]):
+        if photo_id not in db.photo_visibility.visible_photo_ids([photo_id]):
             return json_error("photo not found", 404)
         from audit import resolve_drift
 

@@ -299,7 +299,7 @@ def create_collections_blueprint(get_db, json_error):
         # A static collection only ever shows photos its workspace can see,
         # so storing another workspace's (or a nonexistent) id inflates
         # ``total`` and silently adopts whatever photo later reuses that id.
-        visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
+        visible_ids = set(db.photo_visibility.visible_photo_ids(photo_ids))
         foreign = [pid for pid in dict.fromkeys(photo_ids) if pid not in visible_ids]
         if foreign:
             return json_error(

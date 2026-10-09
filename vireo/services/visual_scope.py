@@ -212,7 +212,7 @@ class VisualScope:
         if candidate_photo_ids is not None:
             restrict = set(candidate_photo_ids)
             candidates = [pid for pid in candidates if pid in restrict]
-        emb_pairs = db.get_photos_with_embedding(
+        emb_pairs = db.masks_features.photos_with_embedding(
             model_name,
             photo_ids=candidates,
             include_offline_folders=include_offline_folders,

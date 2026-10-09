@@ -8,7 +8,7 @@ class PhotoReviewService:
     def set_rating(self, photo_id, rating):
         old = self.db.get_photo(photo_id)
         old_rating = old["rating"] if old else 0
-        self.db.update_photo_rating(photo_id, rating)
+        self.db.photo_review.set_rating(photo_id, rating)
         self.db.queue_change(photo_id, "rating", str(rating))
         self.db.record_edit(
             "rating",
@@ -24,7 +24,7 @@ class PhotoReviewService:
     def set_flag(self, photo_id, flag):
         old = self.db.get_photo(photo_id)
         old_flag = old["flag"] if old else "none"
-        self.db.update_photo_flag(photo_id, flag)
+        self.db.photo_review.set_flag(photo_id, flag)
         self.db.queue_flag_change_if_enabled(photo_id, flag)
         self.db.record_edit(
             "flag",
@@ -45,7 +45,7 @@ class PhotoReviewService:
             if photo_id in photos_map
         }
         valid_ids = list(old_values)
-        self.db.batch_update_photo_rating(valid_ids, rating)
+        self.db.photo_review.set_ratings(valid_ids, rating)
         for photo_id in valid_ids:
             self.db.queue_change(photo_id, "rating", str(rating))
         items = [
@@ -73,7 +73,7 @@ class PhotoReviewService:
             if photo_id in photos_map
         }
         valid_ids = list(old_values)
-        self.db.batch_update_photo_flag(valid_ids, flag)
+        self.db.photo_review.set_flags(valid_ids, flag)
         for index, photo_id in enumerate(valid_ids):
             self.db.queue_flag_change_if_enabled(
                 photo_id,

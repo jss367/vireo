@@ -102,7 +102,7 @@
     if (_escStack.length === 0) return false;
     var top = _escStack.pop();
     e.preventDefault();
-    e.stopPropagation();
+    e.stopImmediatePropagation();
     try { top.handler(e); } catch (err) { console.error('Esc handler error', err); }
     return true;
   }
@@ -113,15 +113,36 @@
   // Both listeners run in the capture phase; this dispatcher is registered at
   // module load and would otherwise win the race.
   var _dispatchPaused = false;
+  var _captureKeyHandler = null;
 
-  function pauseDispatch() { _dispatchPaused = true; }
-  function resumeDispatch() { _dispatchPaused = false; }
+  function pauseDispatch(captureHandler) {
+    _dispatchPaused = true;
+    _captureKeyHandler = captureHandler || null;
+  }
+  function resumeDispatch() { _dispatchPaused = false; _captureKeyHandler = null; }
+  function isDispatchPaused() { return _dispatchPaused; }
+
+  // Native menu accelerators can consume a key before the webview sees it.
+  // Deliver that shortcut directly to the recorder that paused dispatch.
+  function captureNativeShortcut(shortcut) {
+    if (!_dispatchPaused || !_captureKeyHandler) return false;
+    var parsed = parseShortcut(shortcut);
+    _captureKeyHandler(new KeyboardEvent('keydown', {
+      key: parsed.key, ctrlKey: parsed.ctrl, metaKey: parsed.meta,
+      shiftKey: parsed.shift, altKey: parsed.alt, cancelable: true
+    }));
+    return true;
+  }
 
   function _dispatch(e) {
     if (_dispatchPaused) return;
     // Esc runs first — even if focus is in an input, an open modal should
     // still be dismissable with Esc from a field inside it.
     if (_handleEsc(e)) return;
+    // Find owns this chord before configurable actions can navigate or edit
+    // a photo. Its later capture listener handles the event; recording still
+    // takes priority via the pause check above.
+    if (window.__TAURI_INTERNALS__ && window.VireoPageFind && matchesShortcut(e, 'ctrl+f')) return;
     if (isInputFocused()) return;
     var candidates = shortcutsForScope(_currentScope);
     for (var i = 0; i < candidates.length; i++) {
@@ -142,8 +163,8 @@
     }
   }
 
-  // Register in capture phase so the Esc-stack can stop propagation before any
-  // bubble-phase listeners on document.body fire (e.g. page-level Esc handlers).
+  // Register in capture phase so the Esc-stack stops later document capture
+  // listeners as well as bubble-phase page handlers from consuming the key.
   // This preserves the "Esc dismisses overlay without leaking to page" contract
   // that previously required individual capture-phase listeners per overlay.
   document.addEventListener('keydown', _dispatch, true);
@@ -161,6 +182,8 @@
     lockBodyScroll: lockBodyScroll,
     unlockBodyScroll: unlockBodyScroll,
     pauseDispatch: pauseDispatch,
-    resumeDispatch: resumeDispatch
+    resumeDispatch: resumeDispatch,
+    isDispatchPaused: isDispatchPaused,
+    captureNativeShortcut: captureNativeShortcut
   };
 })(window);

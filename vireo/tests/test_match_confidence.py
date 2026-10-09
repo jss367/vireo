@@ -315,12 +315,12 @@ def test_match_score_recorded_for_a_run_with_no_predictions(db):
     gates re-classification; classifier_match_scores must not inherit that.
     """
     photo_id, det = _photo(db)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "fp1", max_match_score=0.11, match_margin=0.004,
         top_species="Rufous-winged Sparrow", label_count=1255,
         score_kind="cosine",
     )
-    rows = db.get_match_scores_for_photo(photo_id)
+    rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert len(rows) == 1
     assert rows[0]["max_match_score"] == 0.11
     assert rows[0]["label_count"] == 1255
@@ -332,25 +332,25 @@ def test_match_score_recorded_for_a_run_with_no_predictions(db):
 def test_match_score_is_keyed_per_label_list(db):
     """Two lists on one detection are two rows, not an overwrite."""
     photo_id, det = _photo(db)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.19,
         score_kind="cosine")
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "us-wide", max_match_score=0.36,
         score_kind="cosine")
-    rows = db.get_match_scores_for_photo(photo_id)
+    rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert [r["max_match_score"] for r in rows] == [0.36, 0.19]
 
 
 def test_rerunning_one_list_updates_in_place(db):
     photo_id, det = _photo(db)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.19,
         score_kind="cosine")
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.22,
         score_kind="cosine")
-    rows = db.get_match_scores_for_photo(photo_id)
+    rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert len(rows) == 1
     assert rows[0]["max_match_score"] == 0.22
 
@@ -361,22 +361,22 @@ def test_clear_predictions_clears_match_scores(db):
     db.add_prediction(detection_id=det, species="House Sparrow",
                            confidence=0.8, model="BioCLIP-2.5",
                            labels_fingerprint="fp1", match_score=0.3)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "fp1", max_match_score=0.3, score_kind="cosine")
-    assert db.get_match_scores_for_photo(photo_id)
+    assert db.model_runs.get_match_scores_for_photo(photo_id)
 
     db.clear_predictions()
-    assert db.get_match_scores_for_photo(photo_id) == []
+    assert db.model_runs.get_match_scores_for_photo(photo_id) == []
 
 
 def test_clear_predictions_for_one_model_spares_the_other(db):
     photo_id, det = _photo(db)
     for model in ("BioCLIP-2.5", "iNat21 (EVA-02 Large)"):
-        db.record_classifier_match_score(
+        db.model_runs.record_classifier_match_score(
             det, model, "fp1", max_match_score=0.3, score_kind="cosine")
 
     db.clear_predictions(model="BioCLIP-2.5")
-    remaining = db.get_match_scores_for_photo(photo_id)
+    remaining = db.model_runs.get_match_scores_for_photo(photo_id)
     assert [r["classifier_model"] for r in remaining] == ["iNat21 (EVA-02 Large)"]
 
 
@@ -405,10 +405,10 @@ def test_pipeline_inspector_reports_runs_the_prediction_table_hides(app_and_db):
           "category": "animal"}],
         detector_model="full-image",
     )[0]
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         weak, "BioCLIP-2.5", "california", max_match_score=0.11,
         top_species="Common Nighthawk", score_kind="cosine")
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         full, "BioCLIP-2.5", "california", max_match_score=0.31,
         top_species="Yellow-breasted Chat", score_kind="cosine")
 
@@ -432,7 +432,7 @@ def test_pipeline_summary_uses_the_best_crop_per_model(app_and_db):
               "confidence": conf, "category": "animal"}],
             detector_model="megadetector-v6",
         )[0]
-        db.record_classifier_match_score(
+        db.model_runs.record_classifier_match_score(
             det, "BioCLIP-2.5", "california", max_match_score=score,
             score_kind="cosine")
 
@@ -449,7 +449,7 @@ def test_predictions_api_reports_match_state_per_photo(app_and_db):
     det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
     db.add_prediction(detection_id=det, species="House Sparrow",
                       confidence=0.8, model="BioCLIP-2.5", match_score=0.11)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "legacy", max_match_score=0.11, score_kind="cosine")
 
     data = app.test_client().get(
@@ -482,7 +482,7 @@ def test_calibrated_threshold_reaches_the_api(app_and_db):
     det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
     db.add_prediction(detection_id=det, species="Rufous-winged Sparrow",
                       confidence=0.99, model="BioCLIP-2.5", match_score=0.11)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "legacy", max_match_score=0.11,
         top_species="Rufous-winged Sparrow", score_kind="cosine")
 
@@ -595,13 +595,13 @@ def _reclassified_against_two_lists(db):
     db.add_prediction(detection_id=det, species="Yellow-breasted Chat",
                       confidence=0.99, model="BioCLIP-2.5",
                       labels_fingerprint="us-wide", match_score=0.40)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "us-wide", max_match_score=0.40,
         top_species="Yellow-breasted Chat", score_kind="cosine")
     db.add_prediction(detection_id=det, species="Rufous-winged Sparrow",
                       confidence=0.99, model="BioCLIP-2.5",
                       labels_fingerprint="california", match_score=0.11)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.11,
         top_species="Rufous-winged Sparrow", score_kind="cosine")
     return photo_id, det
@@ -616,7 +616,7 @@ def test_obsolete_label_list_cannot_certify_the_current_one(db):
     allowed to mark the list the user is actually looking at as matched.
     """
     photo_id, _det = _reclassified_against_two_lists(db)
-    rows = db.get_match_scores_for_photo(photo_id)
+    rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert {r["labels_fingerprint"]: r["is_current"] for r in rows} == {
         "us-wide": 0, "california": 1,
     }
@@ -628,7 +628,7 @@ def test_obsolete_label_list_cannot_certify_the_current_one(db):
 def test_superseded_runs_stay_visible_to_the_inspector(db):
     """History is not dropped — the per-run table exists to show it."""
     photo_id, _det = _reclassified_against_two_lists(db)
-    rows = db.get_match_scores_for_photo(photo_id)
+    rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert len(rows) == 2
 
 
@@ -639,10 +639,10 @@ def test_a_run_with_no_predictions_is_still_current(db):
     back to its own recency rather than being written off as superseded.
     """
     photo_id, det = _photo(db)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.11,
         score_kind="cosine")
-    rows = db.get_match_scores_for_photo(photo_id)
+    rows = db.model_runs.get_match_scores_for_photo(photo_id)
     assert [r["is_current"] for r in rows] == [1]
     assert mc.summarize_photo(rows, _COSINE_CFG)["state"] == mc.UNLISTED
 
@@ -672,13 +672,13 @@ def test_pipeline_reports_superseded_runs_with_the_current_verdict(app_and_db):
     db.add_prediction(detection_id=det, species="Yellow-breasted Chat",
                       confidence=0.99, model="BioCLIP-2.5",
                       labels_fingerprint="us-wide", match_score=0.40)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "us-wide", max_match_score=0.40,
         top_species="Yellow-breasted Chat", score_kind="cosine")
     db.add_prediction(detection_id=det, species="Rufous-winged Sparrow",
                       confidence=0.99, model="BioCLIP-2.5",
                       labels_fingerprint="california", match_score=0.11)
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.11,
         top_species="Rufous-winged Sparrow", score_kind="cosine")
 
@@ -816,11 +816,11 @@ def test_get_unscored_current_prediction_runs_matches_migrated_shape(db):
         confidence=0.99, model="BioCLIP-2.5",
         labels_fingerprint="california", match_score=0.40,
     )
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "california", max_match_score=0.40,
         top_species="Yellow-breasted Chat", score_kind="cosine",
     )
-    pairs = db.get_unscored_current_prediction_runs(photo_id)
+    pairs = db.model_runs.get_unscored_current_prediction_runs(photo_id)
     assert [(p["detection_id"], p["classifier_model"]) for p in pairs] == [
         (det, "Legacy-Model")
     ]

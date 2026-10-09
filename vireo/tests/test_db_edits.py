@@ -1,9 +1,10 @@
 """Behavior pins for the edits domain of ``Database``.
 
-The behavior tests exercise per-photo edit recipes and global edit presets
-only through the public ``Database`` façade, so they hold regardless of
-whether the SQL lives in ``db.py`` or in ``repositories/edits.py``; the
-structural tests at the end keep it in the repository.
+The behavior tests exercise per-photo edit recipes through the kept
+``Database`` methods (which run the optional workspace check) and the batch
+recipe read and global edit presets through the ``db.edits`` accessor; the
+structural tests at the end pin the accessor's shape, keep the old forwarding
+wrappers gone, and keep the SQL in the repository.
 """
 
 import ast
@@ -16,6 +17,7 @@ import textwrap
 import pytest
 from db import Database
 from image_edits import RecipeError
+from repositories.edits import EditsRepository
 
 
 @contextlib.contextmanager
@@ -195,8 +197,8 @@ def test_get_recipe_returns_none_for_empty_stored_recipe(db, photos):
 
 def test_get_recipes_empty_input_needs_no_workspace(db):
     db.set_active_workspace(None)
-    assert db.get_photo_edit_recipes([]) == {}
-    assert db.get_photo_edit_recipes(()) == {}
+    assert db.edits.get_photo_recipes([]) == {}
+    assert db.edits.get_photo_recipes(()) == {}
 
 
 def test_get_recipes_maps_ids_and_skips_bad_empty_and_missing(db, photos, caplog):
@@ -211,7 +213,7 @@ def test_get_recipes_maps_ids_and_skips_bad_empty_and_missing(db, photos, caplog
     _raw_recipe(db, empty, "{}")
     db.set_active_workspace(None)
     with caplog.at_level("WARNING"):
-        out = db.get_photo_edit_recipes([inside, outside, bad, empty, missing])
+        out = db.edits.get_photo_recipes([inside, outside, bad, empty, missing])
     assert out == {
         inside: NORMALIZED_EXPOSURE,
         outside: {"version": 1, "rotation": 90},
@@ -222,7 +224,7 @@ def test_get_recipes_maps_ids_and_skips_bad_empty_and_missing(db, photos, caplog
 def test_get_recipes_accepts_any_iterable(db, photos):
     inside, _ = photos
     _raw_recipe(db, inside, json.dumps(EXPOSURE))
-    assert db.get_photo_edit_recipes(iter([inside])) == {inside: NORMALIZED_EXPOSURE}
+    assert db.edits.get_photo_recipes(iter([inside])) == {inside: NORMALIZED_EXPOSURE}
 
 
 def test_get_recipes_chunks_past_the_sqlite_parameter_limit(db, tmp_path):
@@ -239,7 +241,7 @@ def test_get_recipes_chunks_past_the_sqlite_parameter_limit(db, tmp_path):
         [(pid, recipe_json) for pid in ids],
     )
     db.conn.commit()
-    out = db.get_photo_edit_recipes(ids)
+    out = db.edits.get_photo_recipes(ids)
     assert len(out) == 1700
     assert out[ids[-1]] == NORMALIZED_EXPOSURE
 
@@ -297,13 +299,13 @@ def _raw_preset(db, name, recipe_json):
 
 def test_presets_are_global_and_need_no_workspace(db):
     db.set_active_workspace(None)
-    saved = db.save_edit_preset("Global", EXPOSURE)
-    assert db.list_edit_presets() == [saved]
-    assert db.delete_edit_preset(saved["id"]) is True
+    saved = db.edits.save_preset("Global", EXPOSURE)
+    assert db.edits.list_presets() == [saved]
+    assert db.edits.delete_preset(saved["id"]) is True
 
 
 def test_save_preset_returns_stored_shape_and_commits(db):
-    saved = db.save_edit_preset("  Dawn ", EXPOSURE)
+    saved = db.edits.save_preset("  Dawn ", EXPOSURE)
     assert list(saved) == ["id", "name", "recipe", "updated_at"]
     assert saved["name"] == "Dawn"
     assert saved["recipe"] == NORMALIZED_EXPOSURE
@@ -319,7 +321,7 @@ def test_save_preset_returns_stored_shape_and_commits(db):
 
 
 def test_save_preset_with_fields_keeps_neutral_values(db):
-    saved = db.save_edit_preset(
+    saved = db.edits.save_preset(
         "Reset exposure",
         {"adjustments": {"exposure": 0, "contrast": 20}},
         fields=["adjustments.exposure"],
@@ -327,7 +329,7 @@ def test_save_preset_with_fields_keeps_neutral_values(db):
     assert list(saved) == ["id", "name", "recipe", "fields", "updated_at"]
     assert saved["fields"] == ["adjustments.exposure"]
     assert "contrast" not in saved["recipe"].get("adjustments", {})
-    [listed] = db.list_edit_presets()
+    [listed] = db.edits.list_presets()
     assert listed == saved
     with _reader(db) as conn:
         stored = json.loads(conn.execute(
@@ -338,35 +340,35 @@ def test_save_preset_with_fields_keeps_neutral_values(db):
 
 def test_save_preset_rejects_bad_fields(db):
     with pytest.raises(RecipeError, match="Select at least one setting"):
-        db.save_edit_preset("Empty fields", EXPOSURE, fields=[])
+        db.edits.save_preset("Empty fields", EXPOSURE, fields=[])
     with pytest.raises(RecipeError, match="Unsupported development setting"):
-        db.save_edit_preset("Bad field", EXPOSURE, fields=["nope"])
-    assert db.list_edit_presets() == []
+        db.edits.save_preset("Bad field", EXPOSURE, fields=["nope"])
+    assert db.edits.list_presets() == []
 
 
 @pytest.mark.parametrize("name", [None, 7, "", "   "])
 def test_save_preset_rejects_blank_or_non_string_name(db, name):
     with pytest.raises(ValueError, match="preset name must not be blank"):
-        db.save_edit_preset(name, EXPOSURE)
+        db.edits.save_preset(name, EXPOSURE)
 
 
 def test_save_preset_name_length_limit(db):
     assert db.EDIT_PRESET_NAME_MAX == 80
-    assert db.save_edit_preset("x" * 80, EXPOSURE)["name"] == "x" * 80
-    assert db.save_edit_preset(" " + "y" * 80 + " ", EXPOSURE)["name"] == "y" * 80
+    assert db.edits.save_preset("x" * 80, EXPOSURE)["name"] == "x" * 80
+    assert db.edits.save_preset(" " + "y" * 80 + " ", EXPOSURE)["name"] == "y" * 80
     with pytest.raises(ValueError, match="preset name must be 80 characters or fewer"):
-        db.save_edit_preset("z" * 81, EXPOSURE)
+        db.edits.save_preset("z" * 81, EXPOSURE)
 
 
 def test_save_preset_name_limit_reads_instance_attribute(db, monkeypatch):
     monkeypatch.setattr(db, "EDIT_PRESET_NAME_MAX", 5)
     with pytest.raises(ValueError, match="preset name must be 5 characters or fewer"):
-        db.save_edit_preset("sixsix", EXPOSURE)
-    assert db.save_edit_preset("five5", EXPOSURE)["name"] == "five5"
+        db.edits.save_preset("sixsix", EXPOSURE)
+    assert db.edits.save_preset("five5", EXPOSURE)["name"] == "five5"
 
 
 def test_save_preset_accepts_json_string_recipe(db):
-    saved = db.save_edit_preset(
+    saved = db.edits.save_preset(
         "From JSON", json.dumps({"rotation": 90, "adjustments": {"exposure": 0.5}})
     )
     assert saved["recipe"] == NORMALIZED_EXPOSURE
@@ -374,34 +376,34 @@ def test_save_preset_accepts_json_string_recipe(db):
 
 def test_save_preset_empty_string_recipe_needs_an_adjustment(db):
     with pytest.raises(ValueError, match="preset must include at least one adjustment"):
-        db.save_edit_preset("Blank", "")
+        db.edits.save_preset("Blank", "")
 
 
 def test_save_preset_malformed_string_recipe_raises(db):
     with pytest.raises(RecipeError, match="recipe must be valid JSON"):
-        db.save_edit_preset("Broken", "{")
+        db.edits.save_preset("Broken", "{")
 
 
 @pytest.mark.parametrize("recipe", [[1], 3, None])
 def test_save_preset_non_object_recipe_raises(db, recipe):
     with pytest.raises(RecipeError, match="recipe must be an object"):
-        db.save_edit_preset("Not an object", recipe)
+        db.edits.save_preset("Not an object", recipe)
 
 
 def test_save_preset_upsert_keeps_id_and_bumps_recipe(db):
-    first = db.save_edit_preset("Same", EXPOSURE)
-    second = db.save_edit_preset("Same", {"adjustments": {"shadows": 30}})
+    first = db.edits.save_preset("Same", EXPOSURE)
+    second = db.edits.save_preset("Same", {"adjustments": {"shadows": 30}})
     assert second["id"] == first["id"]
     assert second["recipe"]["adjustments"] == {"shadows": 30.0}
-    assert len(db.list_edit_presets()) == 1
+    assert len(db.edits.list_presets()) == 1
 
 
 def test_list_presets_skips_malformed_rows(db, caplog):
     _raw_preset(db, "Broken", "{")
     _raw_preset(db, "Bad fields", json.dumps({"recipe": {}, "fields": ["nope"]}))
-    good = db.save_edit_preset("good", EXPOSURE)
+    good = db.edits.save_preset("good", EXPOSURE)
     with caplog.at_level("WARNING"):
-        assert db.list_edit_presets() == [good]
+        assert db.edits.list_presets() == [good]
     assert "Invalid stored edit preset" in caplog.text
     assert "'Broken'" in caplog.text
     assert "'Bad fields'" in caplog.text
@@ -409,79 +411,130 @@ def test_list_presets_skips_malformed_rows(db, caplog):
 
 def test_list_presets_sorts_casefolded_and_omits_fields_for_legacy(db):
     for name in ("beta", "Alpha", "gamma", "ALPHA2"):
-        db.save_edit_preset(name, EXPOSURE)
-    listed = db.list_edit_presets()
+        db.edits.save_preset(name, EXPOSURE)
+    listed = db.edits.list_presets()
     assert [p["name"] for p in listed] == ["Alpha", "ALPHA2", "beta", "gamma"]
     assert all(list(p) == ["id", "name", "recipe", "updated_at"] for p in listed)
 
 
 def test_delete_preset_commits_and_reports_removal(db):
-    saved = db.save_edit_preset("Doomed", EXPOSURE)
-    assert db.delete_edit_preset(saved["id"]) is True
+    saved = db.edits.save_preset("Doomed", EXPOSURE)
+    assert db.edits.delete_preset(saved["id"]) is True
     assert not db.conn.in_transaction
     with _reader(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM edit_presets").fetchone()[0] == 0
-    assert db.delete_edit_preset(saved["id"]) is False
-    assert db.delete_edit_preset(12345) is False
+    assert db.edits.delete_preset(saved["id"]) is False
+    assert db.edits.delete_preset(12345) is False
 
 
-# -- structure: the SQL lives in repositories/edits.py -------------------------
+# -- structure ------------------------------------------------------------------
 
-_DELEGATED = [
+# Coordinated recipe operations kept on ``Database``: each runs the optional
+# active-workspace check before handing the SQL to the repository.
+_KEPT_RECIPE_METHODS = [
     "get_photo_edit_recipe",
-    "get_photo_edit_recipes",
     "set_photo_edit_recipe",
     "clear_photo_edit_recipe",
+]
+
+_REMOVED_EDITS_WRAPPERS = (
+    "get_photo_edit_recipes",
     "list_edit_presets",
     "save_edit_preset",
     "delete_edit_preset",
-]
+)
+
+# Repository methods reached only through the kept methods above.
+_FACADE_ONLY_EDITS_METHODS = ("get_photo_recipe", "set_photo_recipe", "clear_photo_recipe")
 
 
-@pytest.mark.parametrize("name", _DELEGATED)
-def test_edits_method_delegates_to_repository(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
-    fn = ast.parse(source).body[0]
-    attrs = {
+def _self_attrs(fn):
+    source = textwrap.dedent(inspect.getsource(fn))
+    return {
         node.attr
-        for node in ast.walk(fn)
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id == "self"
     }
+
+
+@pytest.mark.parametrize("name", _KEPT_RECIPE_METHODS)
+def test_kept_recipe_method_delegates_to_repository(name):
+    attrs = _self_attrs(getattr(Database, name))
     assert "conn" not in attrs, (
         f"Database.{name} touches self.conn; move the SQL to EditsRepository"
     )
-    assert "_edits_repository" in attrs, (
-        f"Database.{name} no longer delegates to EditsRepository"
+    assert {"_edits_repository", "_verify_photo_in_workspace"} <= attrs, (
+        f"Database.{name} no longer checks the workspace and delegates to EditsRepository"
     )
 
 
 def test_edits_facade_signatures_are_unchanged():
-    def params(name):
+    def params(owner, name):
         return [
             (p.name, p.default)
-            for p in inspect.signature(getattr(Database, name)).parameters.values()
+            for p in inspect.signature(getattr(owner, name)).parameters.values()
         ]
 
     empty = inspect.Parameter.empty
-    assert params("get_photo_edit_recipe") == [
+    assert params(Database, "get_photo_edit_recipe") == [
         ("self", empty), ("photo_id", empty), ("verify_workspace", False),
     ]
-    assert params("set_photo_edit_recipe") == [
+    assert params(Database, "set_photo_edit_recipe") == [
         ("self", empty), ("photo_id", empty), ("recipe", empty),
         ("verify_workspace", True), ("_commit", True),
     ]
-    assert params("clear_photo_edit_recipe") == [
+    assert params(Database, "clear_photo_edit_recipe") == [
         ("self", empty), ("photo_id", empty), ("verify_workspace", True),
     ]
-    assert params("save_edit_preset") == [
+    assert params(EditsRepository, "save_preset") == [
         ("self", empty), ("name", empty), ("recipe", empty), ("fields", None),
     ]
 
 
+def test_edits_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.edits`` builds a new repository each time, never a cached one."""
+    first, second = db.edits, db.edits
+    assert isinstance(first, EditsRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first.preset_name_max == Database.EDIT_PRESET_NAME_MAX
+
+
+def test_edits_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.edits``; Database keeps no aliases."""
+    for name in _REMOVED_EDITS_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.edits"
+    accessor = Database.__dict__["edits"]
+    assert isinstance(accessor, property)
+    attrs = _self_attrs(accessor.fget)
+    assert "_edits_repository" in attrs
+    assert "conn" not in attrs
+
+
+def test_production_code_uses_facade_for_single_photo_recipes():
+    """Nothing outside the data layer skips the kept recipe methods' workspace check."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    pattern = re.compile(r"\.edits\.(" + "|".join(_FACADE_ONLY_EDITS_METHODS) + r")\(")
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if rel.parts[0] in ("tests", "repositories") or rel.name == "db.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        offenders += [f"{rel}: {m.group(0)}" for m in pattern.finditer(text)]
+    assert offenders == [], (
+        "Call db.get_photo_edit_recipe / set_photo_edit_recipe / "
+        f"clear_photo_edit_recipe instead: {offenders}"
+    )
+
+
 def test_edits_repository_builds_without_an_active_workspace(db):
     db.set_active_workspace(None)
-    repo = db._edits_repository()
+    repo = db.edits
     assert repo.conn is db.conn
     assert repo.preset_name_max == Database.EDIT_PRESET_NAME_MAX

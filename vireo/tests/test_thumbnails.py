@@ -859,7 +859,7 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
     assert raw_preview_rgb[0] > 180
     assert jpeg_preview_size == (800, 600)
     assert raw_preview_size == (600, 800)
-    assert db.preview_cache_get(pid, 1920) is None
+    assert db.caches.preview_get(pid, 1920) is None
 
     jpeg_original_url = f"/photos/{pid}/original?source=jpeg"
     raw_original_url = f"/photos/{pid}/original?source=raw"
@@ -887,7 +887,7 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
         cached_jpeg, "JPEG",
     )
     os.remove(os.path.join(folder, "bird.nef"))
-    db.offline_original_upsert(
+    db.caches.offline_original_upsert(
         pid,
         os.path.relpath(cached_raw, vireo_dir),
         None,
@@ -1610,7 +1610,7 @@ def test_serve_thumbnail_does_not_unlink_cross_workspace_cache(
 
     # Switch to a workspace that doesn't have the photo's folder linked.
     other_ws = db.create_workspace("Other")
-    db.update_workspace(other_ws, last_opened_at="2030-01-01T00:00:00Z")
+    db.workspaces.update(other_ws, last_opened_at="2030-01-01T00:00:00Z")
     db.set_active_workspace(other_ws)
 
     client = app.test_client()
@@ -1626,7 +1626,7 @@ def test_serve_thumbnail_does_not_unlink_cross_workspace_cache(
 
 def _switch_to_workspace_without_photo(db):
     other_ws = db.create_workspace("Other")
-    db.update_workspace(other_ws, last_opened_at="2030-01-01T00:00:00Z")
+    db.workspaces.update(other_ws, last_opened_at="2030-01-01T00:00:00Z")
     db.set_active_workspace(other_ws)
 
 
@@ -1757,7 +1757,7 @@ def test_serve_thumbnail_404s_for_photo_outside_active_workspace(tmp_path, monke
     # uses to pick the active workspace on init, so the route inherits
     # the switch.
     other_ws = db.create_workspace("Other")
-    db.update_workspace(other_ws, last_opened_at="2030-01-01T00:00:00Z")
+    db.workspaces.update(other_ws, last_opened_at="2030-01-01T00:00:00Z")
     db.set_active_workspace(other_ws)
 
     client = app.test_client()

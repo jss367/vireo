@@ -103,7 +103,7 @@ def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
     source_path = os.path.join(folder["path"], photo["companion_path"])
     if not os.path.isfile(source_path):
         # Match the renderer's live-source-first, offline-companion fallback.
-        cached = db.offline_original_get(photo["id"])
+        cached = db.caches.offline_original_get(photo["id"])
         source_path = cached["companion_path"] if cached else None
         if not source_path:
             return False
@@ -829,7 +829,7 @@ def create_job_launchers_blueprint(
                 if os.path.exists(cache_path):
                     cache_row = None
                     try:
-                        cache_row = thread_db.preview_cache_get(photo["id"], max_size)
+                        cache_row = thread_db.caches.preview_get(photo["id"], max_size)
                     except sqlite3.Error:
                         # Treated as untracked: an edited photo's preview is
                         # then re-rendered rather than trusted.
@@ -855,7 +855,7 @@ def create_job_launchers_blueprint(
                         # Best-effort: photo may be deleted mid-job (FK error).
                         try:
                             if cache_row is None:
-                                thread_db.preview_cache_insert(
+                                thread_db.caches.preview_insert(
                                     photo["id"],
                                     max_size,
                                     os.path.getsize(cache_path),
@@ -1142,7 +1142,7 @@ def create_job_launchers_blueprint(
         # With none active nothing is visible, as the inline query binding a
         # NULL workspace id behaved, so the route answers its 400, not a 500.
         visible_set = (
-            set(db.filter_photo_ids_in_workspace(photo_ids))
+            set(db.photo_visibility.visible_photo_ids(photo_ids))
             if ctx.workspace_id is not None else set()
         )
         photo_ids = [pid for pid in photo_ids if pid in visible_set]
@@ -1269,7 +1269,7 @@ def create_job_launchers_blueprint(
         # With none active nothing is visible, as the inline query binding a
         # NULL workspace id behaved, so the route answers its 400, not a 500.
         visible_set = (
-            set(db.filter_photo_ids_in_workspace(photo_ids))
+            set(db.photo_visibility.visible_photo_ids(photo_ids))
             if ctx.workspace_id is not None else set()
         )
         photo_ids = [photo_id for photo_id in photo_ids if photo_id in visible_set]
@@ -1424,7 +1424,7 @@ def create_job_launchers_blueprint(
                                                 f"{photo_id}_{size}.jpg",
                                             )
                                             if not (
-                                                thread_db.preview_cache_get(
+                                                thread_db.caches.preview_get(
                                                     photo_id, size,
                                                 )
                                                 and os.path.exists(cache_file)
@@ -1478,7 +1478,7 @@ def create_job_launchers_blueprint(
 
                                 skipped_deleted += 1
                                 if attempted:
-                                    thread_db.offline_original_delete(
+                                    thread_db.caches.offline_original_delete(
                                         photo_id, _commit=False,
                                     )
                                     if current_photo is None:
@@ -1542,7 +1542,7 @@ def create_job_launchers_blueprint(
                                 preview_dir, f"{photo_id}_{size}.jpg",
                             )
                             if not (
-                                thread_db.preview_cache_get(photo_id, size)
+                                thread_db.caches.preview_get(photo_id, size)
                                 and os.path.exists(cache_file)
                             ):
                                 missing_size = size
@@ -2343,7 +2343,7 @@ class _MaskExtractionRun:
         per-photo cache check inside the loop handles "skip when already
         masked for this variant".
         """
-        rows = self.thread_db.get_workspace_mask_candidate_detections(
+        rows = self.thread_db.masks_features.workspace_mask_candidate_detections(
             self.min_detector_conf,
         )
         seen = set()
@@ -2474,7 +2474,7 @@ class _MaskExtractionRun:
         """
         thread_db = self.thread_db
         photo = item.photo
-        existing = item.existing = thread_db.get_photo_mask(
+        existing = item.existing = thread_db.masks_features.get_mask(
             item.photo_id, self.sam2_variant,
         )
         if existing is None:
@@ -2489,7 +2489,7 @@ class _MaskExtractionRun:
                 and existing["path"]
                 and os.path.isfile(existing["path"])):
             return False
-        state = thread_db.get_photo_mask_state(item.photo_id)
+        state = thread_db.masks_features.photo_mask_state(item.photo_id)
         if (state is not None
                 and state["active_mask_variant"]
                 == self.sam2_variant
@@ -2502,7 +2502,7 @@ class _MaskExtractionRun:
         # Denormalised subject state is stale: fall
         # through to the full recompute below, which
         # writes set_active_mask_variant +
-        # update_photo_embeddings atomically.
+        # masks_features.update_embeddings atomically.
         return False
 
     def _embed(self, proxy, mask):
@@ -2569,7 +2569,7 @@ class _MaskExtractionRun:
         else:
             mask_subject_size = None
 
-        thread_db.upsert_photo_mask(
+        thread_db.masks_features.upsert_mask(
             photo_id=photo_id,
             variant=self.sam2_variant,
             path=mask_path,
@@ -2600,10 +2600,10 @@ class _MaskExtractionRun:
         # flow via set_active_mask_variant above and are
         # intentionally NOT passed here.
         if features:
-            thread_db.update_photo_pipeline_features(
+            thread_db.masks_features.update_pipeline_features(
                 photo_id, **features, _commit=False,
             )
-        thread_db.update_photo_embeddings(
+        thread_db.masks_features.update_embeddings(
             photo_id,
             dino_subject_embedding=subj_emb_blob,
             dino_global_embedding=global_emb_blob,

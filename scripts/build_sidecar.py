@@ -29,6 +29,15 @@ def assert_no_evaluation_modules(binary_path):
         raise RuntimeError(f"Developer evaluation code leaked into the app: {unexpected}")
 
 
+def assert_native_detail_bundled(binary_path):
+    """Desktop builds must ship the accelerator, even though source installs may omit it."""
+    from PyInstaller.archive.readers import CArchiveReader
+
+    names = CArchiveReader(str(binary_path)).toc
+    if not any(name.replace("\\", "/").startswith("vireo/_native_detail.") for name in names):
+        raise RuntimeError("The sidecar is missing vireo._native_detail")
+
+
 def sign_binary(binary_path, entitlements_path=None):
     """Sign the binary with the hardened runtime for macOS notarization."""
     if platform.system() != "Darwin":
@@ -80,6 +89,11 @@ def main():
     args = parser.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Fail before a lengthy build if the optional source-install build failed.
+    sys.path.insert(0, repo_root)
+    from vireo._native_detail import Filters
+
+    Filters(1)
     target = get_target_triple()
     print(f"Building sidecar for target: {target}")
 
@@ -92,6 +106,8 @@ def main():
         "--onefile",
         "--name", "vireo-server",
         "--paths", vireo_dir,
+        "--paths", repo_root,
+        "--hidden-import", "vireo._native_detail",
         # Offline experiments have a separate environment/package. Exclude them
         # for local and release builds even if installed in the build environment.
         "--exclude-module", "encounter_eval",
@@ -191,6 +207,7 @@ def main():
         src += ".exe"
 
     assert_no_evaluation_modules(src)
+    assert_native_detail_bundled(src)
 
     dest_dir = os.path.join(repo_root, "src-tauri", "binaries")
     os.makedirs(dest_dir, exist_ok=True)

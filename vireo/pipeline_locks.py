@@ -361,7 +361,7 @@ def _workspace_regroup_lock_for_tests(workspace_id):
 #
 #   2. The denormalised writes to the ``photos`` row —
 #      ``set_active_mask_variant`` (mask_path, crop_complete,
-#      subject_tenengrad, bg_tenengrad) and ``update_photo_embeddings``
+#      subject_tenengrad, bg_tenengrad) and ``masks_features.update_embeddings``
 #      (dino_subject_embedding, dino_global_embedding) — happen
 #      regardless of variant. Two pipelines processing the same photo
 #      with DIFFERENT variants can still interleave these writes,
@@ -384,9 +384,9 @@ _PHOTO_MASK_LOCKS_GUARD = threading.Lock()
 def acquire_photo_mask(photo_id):
     """Context manager for the per-photo mask-write lock.
 
-    Held across the get_photo_mask → generate_mask → save_mask →
-    upsert_photo_mask → set_active_mask_variant → update_photo_embeddings
-    sequence in ``extract_masks_stage`` and the standalone extract-masks
+    Held across the ``masks_features.get_mask`` → generate_mask → save_mask →
+    ``masks_features.upsert_mask`` → set_active_mask_variant →
+    ``masks_features.update_embeddings`` sequence in ``extract_masks_stage`` and the standalone extract-masks
     route so concurrent writers hitting the same photo serialise. Pipelines
     on different photos don't contend.
     """

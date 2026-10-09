@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db import Database
+from repositories.duplicates import DuplicatesRepository
 
 
 def _add(db, folder_id, filename, file_hash=None, file_mtime=100.0, rating=0):
@@ -272,7 +273,7 @@ def test_check_and_resolve_for_hash_covers_scanner_flow(tmp_path):
 
 
 # -----------------------------------------------------------------------------
-# Task 9: find_duplicate_groups
+# Task 9: duplicates.find_groups
 # -----------------------------------------------------------------------------
 
 def test_find_duplicate_groups_returns_only_multi_groups(tmp_path):
@@ -292,7 +293,7 @@ def test_find_duplicate_groups_returns_only_multi_groups(tmp_path):
     # Group D: NULL hash -> should not appear
     _add(db, fid, "d.jpg")
 
-    groups = db.find_duplicate_groups()
+    groups = db.duplicates.find_groups()
     hashes = [g["file_hash"] for g in groups]
     assert "HA" in hashes
     assert "HB" not in hashes
@@ -308,7 +309,7 @@ def test_find_duplicate_groups_empty(tmp_path):
     db = Database(str(tmp_path / "t.db"))
     fid = db.add_folder(str(tmp_path))
     _add(db, fid, "solo.jpg", file_hash="SOLO")
-    assert db.find_duplicate_groups() == []
+    assert db.duplicates.find_groups() == []
 
 
 def test_find_duplicate_groups_default_excludes_resolved(tmp_path):
@@ -324,7 +325,7 @@ def test_find_duplicate_groups_default_excludes_resolved(tmp_path):
     # add_photo hook auto-resolves: clean name wins, "-2" loses.
     _add(db, fid, "owl.jpg", file_hash="HRES")
     _add(db, fid, "owl-2.jpg", file_hash="HRES")
-    groups = db.find_duplicate_groups()
+    groups = db.duplicates.find_groups()
     assert groups == []
 
 
@@ -341,7 +342,7 @@ def test_find_duplicate_groups_with_resolved_returns_both_statuses(tmp_path):
     _add(db, fid, "b copy.jpg", file_hash="HB")
     _reset_flags(db, "HB")
 
-    groups = db.find_duplicate_groups(include_resolved=True)
+    groups = db.duplicates.find_groups(include_resolved=True)
     by_hash = {g["file_hash"]: g for g in groups}
     assert by_hash["HA"]["status"] == "resolved"
     assert by_hash["HB"]["status"] == "unresolved"
@@ -364,7 +365,7 @@ def test_find_duplicate_groups_skips_purely_rejected_hashes(tmp_path):
     db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (pid,))
     db.conn.commit()
 
-    groups = db.find_duplicate_groups(include_resolved=True)
+    groups = db.duplicates.find_groups(include_resolved=True)
     assert all(g["file_hash"] != "HONLY" for g in groups)
 
 
@@ -388,7 +389,7 @@ def test_find_duplicate_groups_skips_resolved_with_multiple_kept(tmp_path):
     )
     db.conn.commit()
 
-    groups = db.find_duplicate_groups(include_resolved=True)
+    groups = db.duplicates.find_groups(include_resolved=True)
     by_hash = {g["file_hash"]: g for g in groups}
     assert by_hash["HX"]["status"] == "unresolved"
 
@@ -608,18 +609,18 @@ def test_auto_resolve_after_xmp_import_merges_loser_keywords(tmp_path):
 
 
 # -----------------------------------------------------------------------------
-# run_duplicate_scan must filter rows rejected after find_duplicate_groups
+# run_duplicate_scan must filter rows rejected after duplicates.find_groups
 # returns (race with concurrent ingest). (Codex review fix #2).
 # -----------------------------------------------------------------------------
 
 def test_run_duplicate_scan_skips_rows_rejected_after_find_groups(
     tmp_path, monkeypatch
 ):
-    """If rows are rejected between find_duplicate_groups and the per-group
+    """If rows are rejected between duplicates.find_groups and the per-group
     SELECT inside the loop, the per-group SELECT must filter them out. If the
     survivors fall below 2, the group is skipped.
 
-    We monkeypatch ``find_duplicate_groups`` to simulate the race: it returns
+    We monkeypatch ``DuplicatesRepository.find_groups`` to simulate the race: it returns
     3 candidate IDs, but 2 are already rejected at the moment the per-group
     SELECT runs — exactly the state a concurrent ingest + auto-hook would
     leave behind between the two queries.
@@ -640,7 +641,7 @@ def test_run_duplicate_scan_skips_rows_rejected_after_find_groups(
                 "SELECT id FROM photos WHERE filename = ?", (name,)
             ).fetchone()["id"]
         )
-    # Reject two BEFORE the scan; then spoof find_duplicate_groups to still
+    # Reject two BEFORE the scan; then spoof duplicates.find_groups to still
     # report all three (the race window).
     db.conn.execute(
         "UPDATE photos SET flag = 'rejected' WHERE filename IN (?, ?)",
@@ -648,10 +649,12 @@ def test_run_duplicate_scan_skips_rows_rejected_after_find_groups(
     )
     db.conn.commit()
 
-    def _stale_find_groups(include_resolved=False):
+    def _stale_find_groups(self, include_resolved=False):
         return [{"file_hash": "HRACE", "photo_ids": ids}]
 
-    monkeypatch.setattr(db, "find_duplicate_groups", _stale_find_groups)
+    # ``db.duplicates`` builds a fresh repository per access, so the spoof
+    # goes on the class to reach the scan's call.
+    monkeypatch.setattr(DuplicatesRepository, "find_groups", _stale_find_groups)
 
     # include_resolved=False to keep the legacy unresolved-only race contract
     # in scope: the resolved-group code path has its own sanity checks and
@@ -687,10 +690,10 @@ def test_run_duplicate_scan_positive_case_with_one_rejected(
     )
     db.conn.commit()
 
-    def _stale_find_groups(include_resolved=False):
+    def _stale_find_groups(self, include_resolved=False):
         return [{"file_hash": "HPOS", "photo_ids": ids}]
 
-    monkeypatch.setattr(db, "find_duplicate_groups", _stale_find_groups)
+    monkeypatch.setattr(DuplicatesRepository, "find_groups", _stale_find_groups)
 
     result = run_duplicate_scan({"progress": {}}, db, include_resolved=False)
     assert len(result["proposals"]) == 1
@@ -911,7 +914,7 @@ def test_null_flag_photos_participate_in_duplicate_resolution(tmp_path):
     db.conn.execute("UPDATE photos SET flag = NULL WHERE file_hash = 'HASHN'")
     db.conn.commit()
 
-    groups = db.find_duplicate_groups()
+    groups = db.duplicates.find_groups()
     unresolved_hashes = {g["file_hash"] for g in groups}
     assert "HASHN" in unresolved_hashes
 

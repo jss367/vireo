@@ -21,7 +21,7 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
         db, runner = get_db(), get_runner()
         # Completed history is authoritative, including cleanup receipts saved
         # after the worker finished. The runner's snapshot may predate cleanup.
-        row = db.get_job_history_row(job_id)
+        row = db.job_history.get(job_id)
         job = dict(row) if row else runner.get(job_id)
         if not job or job.get("workspace_id") != db.active_workspace_id:
             return json_error("Move job not found in this workspace", 404)
@@ -49,7 +49,7 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                     # Hold every workspace reservation through review and Trash,
                     # including workspaces created while reservations are acquired.
                     reserved = {db.active_workspace_id}
-                    while pending := {workspace["id"] for workspace in db.get_workspaces()} - reserved:
+                    while pending := {workspace["id"] for workspace in db.workspaces.list_all()} - reserved:
                         for workspace_id in sorted(pending):
                             reservations.enter_context(runner.workspace_mutation(
                                 workspace_id, exclusive=True, label=CLEANUP_LABEL))
@@ -80,7 +80,7 @@ def create_move_cleanup_blueprint(get_db, get_runner, json_error, trash_paths,
                     return json_error("The move result is still being saved; review again in a moment", 409)
                 cleanup = cleanup_source(db, source, body.get("review_token"), trash_paths)
                 result["source_cleanup"] = cleanup
-                db.set_job_history_result(job_id, json.dumps(result))
+                db.job_history.set_result(job_id, json.dumps(result))
                 return jsonify(cleanup)
         except (ValueError, OSError, WorkspaceBusyError) as exc:
             return json_error(str(exc), 409)

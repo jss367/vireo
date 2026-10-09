@@ -368,7 +368,7 @@ def test_offline_cache_job_copies_original_and_xmp(client_with_photo):
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row is not None
     assert row["status"] == "cached"
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -395,7 +395,7 @@ def test_offline_cache_picks_up_uppercase_xmp_sidecar(client_with_photo):
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row is not None
     assert row["status"] == "cached"
     assert row["xmp_path"], "expected uppercase .XMP sidecar to be cached"
@@ -436,7 +436,7 @@ def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
     cached_companion = os.path.join(vireo_dir, row["companion_path"])
@@ -455,7 +455,7 @@ def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
     assert resp.status_code == 200
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
     cached_companion = os.path.join(vireo_dir, row["companion_path"])
     assert open(cached_xmp, encoding="utf-8").read() == "version 2"
@@ -467,7 +467,7 @@ def test_offline_cache_refreshes_and_removes_xmp_sidecar(client_with_photo):
     assert resp.status_code == 200
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row["xmp_path"] is None
     assert row["companion_path"] is None
     assert not os.path.exists(cached_xmp)
@@ -533,7 +533,7 @@ def test_original_route_uses_offline_cache_despite_recent_raw_failure_marker(
     offline_resp = client.get(f"/photos/{pid}/original")
 
     assert offline_resp.status_code == 200
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row is not None and row["bytes"] > 0
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     with open(os.path.join(vireo_dir, row["original_path"]), "rb") as f:
@@ -550,7 +550,7 @@ def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_pho
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row is not None and row["status"] == "cached"
     cached_original_path = row["original_path"]
     cached_bytes = row["bytes"]
@@ -572,7 +572,7 @@ def test_offline_cache_rerun_preserves_cache_when_source_missing(client_with_pho
     assert job["result"]["skipped"] == 1
     assert job["result"]["failed"] == 0
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     assert row["status"] == "cached"
     assert row["original_path"] == cached_original_path
     assert row["bytes"] == cached_bytes
@@ -631,7 +631,7 @@ def test_offline_cache_files_removed_when_photo_deleted(client_with_photo):
     job = wait_for_job_via_client(client, resp.get_json()["job_id"])
     assert job["status"] == "completed"
 
-    row = db.offline_original_get(pid)
+    row = db.caches.offline_original_get(pid)
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     cached_original = os.path.join(vireo_dir, row["original_path"])
     cached_xmp = os.path.join(vireo_dir, row["xmp_path"])
@@ -642,7 +642,7 @@ def test_offline_cache_files_removed_when_photo_deleted(client_with_photo):
     resp = client.post("/api/audit/remove-orphans", json={"photo_ids": [pid]})
     assert resp.status_code == 200
 
-    assert db.offline_original_get(pid) is None
+    assert db.caches.offline_original_get(pid) is None
     assert not os.path.exists(cached_original)
     assert not os.path.exists(cached_xmp)
 
@@ -706,7 +706,7 @@ def test_api_folder_workspaces_lists_inherited_and_direct_memberships(app_and_db
     """
     app, db = app_and_db
     client = app.test_client()
-    active_ws = db.get_workspace(db._active_workspace_id)
+    active_ws = db.workspaces.get(db._active_workspace_id)
     root = db.conn.execute(
         "SELECT id FROM folders WHERE path = '/photos/2024'"
     ).fetchone()
@@ -1943,9 +1943,9 @@ def test_detection_cache_stats_endpoint(app_and_db):
     # Record runs for two photos across two models and re-check.
     photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
     p1, p2 = photos[0]["id"], photos[1]["id"]
-    db.record_detector_run(p1, "megadetector-v6", box_count=2)
-    db.record_detector_run(p2, "megadetector-v6", box_count=0)
-    db.record_detector_run(p1, "megadetector-v5", box_count=1)
+    db.model_runs.record_detector_run(p1, "megadetector-v6", box_count=2)
+    db.model_runs.record_detector_run(p2, "megadetector-v6", box_count=0)
+    db.model_runs.record_detector_run(p1, "megadetector-v5", box_count=1)
 
     resp = client.get('/api/detection-cache/stats')
     assert resp.status_code == 200
@@ -1984,7 +1984,7 @@ def test_encounter_species_confirm(app_and_db):
         assert len(species_tags) == 1
 
     # Verify pending changes queued
-    pending = db.get_pending_changes()
+    pending = db.pending_changes.list_all()
     kw_adds = [c for c in pending if c["change_type"] == "keyword_add"
                and c["value"] == "Blue Jay"]
     assert len(kw_adds) == len(photo_ids)
@@ -2029,7 +2029,7 @@ def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
     assert species_by_photo[nested_photo].count("Verdin") == 1
     assert species_by_photo[untagged_photo].count("Verdin") == 1
     additions = [
-        row for row in db.get_pending_changes()
+        row for row in db.pending_changes.list_all()
         if row["change_type"] == "keyword_add" and row["value"] == "Verdin"
     ]
     assert [row["photo_id"] for row in additions] == [untagged_photo]
@@ -2090,7 +2090,7 @@ def test_encounter_species_rejects_invalid_photo_ids(app_and_db):
     # Verify nothing was written for the valid ID either
     tags = db.get_photo_keywords(valid_id)
     assert not any(t["name"] == "Robin" for t in tags)
-    pending = db.get_pending_changes()
+    pending = db.pending_changes.list_all()
     assert not any(c["value"] == "Robin" for c in pending)
 
 
@@ -2341,7 +2341,7 @@ def test_encounter_species_change_cancels_pending_add(app_and_db):
     # The Sparrow add had not synced, so it should be cancelled, not followed
     # by a keyword_remove (otherwise the sidecar would see a remove for a
     # keyword that was never written).
-    changes = [dict(c) for c in db.get_pending_changes()]
+    changes = [dict(c) for c in db.pending_changes.list_all()]
     values_by_type = {(c["change_type"], c["value"]) for c in changes}
     assert ("keyword_add", "Blue Jay") in values_by_type
     assert ("keyword_add", "Sparrow") not in values_by_type
@@ -2376,7 +2376,7 @@ def test_encounter_species_change_queues_remove_after_sync(app_and_db):
 
     # Now a keyword_remove:Sparrow must be queued so the XMP drops the
     # already-written Sparrow tag.
-    values_by_type = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values_by_type = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_remove", "Sparrow") in values_by_type
     assert ("keyword_add", "Blue Jay") in values_by_type
 
@@ -2415,7 +2415,7 @@ def test_burst_override_change_untags_previous(app_and_db):
         assert "Junco" in names
         assert "Sparrow" not in names
 
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_remove", "Sparrow") in values
     assert ("keyword_add", "Junco") in values
 
@@ -2437,7 +2437,7 @@ def test_encounter_species_confirm_same_species_noop_on_keywords(app_and_db):
     assert resp.status_code == 200
     assert resp.get_json()["previous_species"] is None
 
-    values = {c["change_type"] for c in db.get_pending_changes()}
+    values = {c["change_type"] for c in db.pending_changes.list_all()}
     assert "keyword_remove" not in values
 
 
@@ -2459,7 +2459,7 @@ def test_encounter_species_replacement_is_atomic_in_history(app_and_db):
                        json={"species": "Blue Jay", "photo_ids": photo_ids})
     assert resp.status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]['action_type'] == 'pipeline_grouping'
     assert 'Sparrow' in history[0]['description']
@@ -2490,7 +2490,7 @@ def test_encounter_species_replacement_undo_restores_previous(app_and_db):
 
     # Neither species was synced, so undo should cancel the pending swap
     # outright rather than queue a keyword_remove for a never-written tag.
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_remove", "Blue Jay") not in values
     assert ("keyword_remove", "Sparrow") not in values
     # Original keyword_add:Sparrow is back in the queue because the replace
@@ -2524,7 +2524,7 @@ def test_encounter_species_replacement_undo_after_sync_queues_swap(app_and_db):
         assert "Sparrow" in names
         assert "Blue Jay" not in names
 
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_remove", "Blue Jay") in values
     assert ("keyword_add", "Sparrow") in values
 
@@ -2566,7 +2566,7 @@ def test_encounter_species_no_op_when_all_already_tagged(app_and_db):
     resp = client.post("/api/encounters/species",
                        json={"species": "Blue Jay", "photo_ids": photo_ids})
     assert resp.status_code == 200
-    assert len(db.get_edit_history()) == 1
+    assert len(db.edit_history.list_recent()) == 1
 
     # Re-confirm the SAME species on the SAME photos: all already tagged.
     resp = client.post("/api/encounters/species",
@@ -2575,7 +2575,7 @@ def test_encounter_species_no_op_when_all_already_tagged(app_and_db):
     assert resp.get_json()["ok"] is True
 
     # No new edit-history entry: the redundant confirm was a no-op.
-    assert len(db.get_edit_history()) == 1
+    assert len(db.edit_history.list_recent()) == 1
 
     # The pre-existing keyword survives — undoing leaves it intact (there's
     # nothing the redundant confirm could have queued to remove).
@@ -2620,7 +2620,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
         (detection_id,),
     ).fetchone()["id"]
     before = len([
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ])
 
@@ -2631,7 +2631,7 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
     # auditable and undoable — the entry carries a ``no_tag`` payload so
     # undo/redo touch only the prediction review status.
     accept_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == before + 1
@@ -2716,7 +2716,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
     # exists so the accept is auditable/undoable but its payload marks
     # ``no_tag`` so undo/redo do not touch the pre-existing keyword.
     accept_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == 1
@@ -2814,7 +2814,7 @@ def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_d
     # A single ``prediction_accept`` edit is recorded — it should carry
     # both prediction ids under ``prediction_ids``.
     accept_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == 1
@@ -2907,7 +2907,7 @@ def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
     # The recorded prediction_accept edit stores prediction ids as JSON,
     # not a comma-separated fallback string.
     accept_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == 1
@@ -2969,7 +2969,7 @@ def test_encounter_species_records_only_newly_tagged(app_and_db):
                        json={"species": "Blue Jay", "photo_ids": photo_ids})
     assert resp.status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]["action_type"] == "pipeline_grouping"
     # Only the (len - 1) newly-tagged photos are in the edit items.
@@ -3011,7 +3011,7 @@ def test_encounter_species_replacement_only_for_changed_photos(app_and_db):
                        json={"species": "Blue Jay", "photo_ids": photo_ids})
     assert resp.status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 1
     assert history[0]["action_type"] == "pipeline_grouping"
     # All photos gained Blue Jay (none had it), so all are recorded.
@@ -3047,7 +3047,7 @@ def test_encounter_species_rejects_photo_ids_not_in_burst(app_and_db):
     for pid in photo_ids:
         names = {k["name"] for k in db.get_photo_keywords(pid)}
         assert "Blue Jay" not in names
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
@@ -3075,7 +3075,7 @@ def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
     for pid in photo_ids[:1]:
         names = {k["name"] for k in db.get_photo_keywords(pid)}
         assert "Blue Jay" not in names
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db):
@@ -3113,7 +3113,7 @@ def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db)
     tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
     assert nested not in tagged_ids
     assert alternate_nested not in tagged_ids
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert history[0]["action_type"] == "pipeline_grouping"
 
     db.undo_last_edit()
@@ -3193,7 +3193,7 @@ def test_encounter_species_replacement_retags_same_taxon_alias(app_and_db):
     assert remaining == ["Auriparus flaviceps"], (
         f"expected only the new scientific-name row, got {remaining!r}"
     )
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert history[0]["action_type"] == "pipeline_grouping"
 
     db.undo_last_edit()
@@ -3758,7 +3758,7 @@ def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
         json={"species": "Apapane", "photo_ids": photo_ids},
     )
     assert resp.status_code == 200
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_add", "Apapane") in values
 
     # Seed the pipeline cache's confirmed_species with the LEGACY quoted
@@ -3772,7 +3772,7 @@ def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
     )
     assert resp.status_code == 200
 
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     # The stale keyword_add for the normalized spelling must be cancelled by
     # a remove that targets the same normalized value — not the raw quoted
     # cache value. If the queue used the cache spelling, both would linger.
@@ -3803,7 +3803,7 @@ def test_encounter_species_replacement_queues_stored_case_previous_name(app_and_
         json={"species": "Saffron Finch", "photo_ids": photo_ids},
     )
     assert resp.status_code == 200
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     assert ("keyword_add", "Saffron Finch") in values
 
     # Cache confirmed_species drifts to a case-variant spelling (upgraded
@@ -3816,7 +3816,7 @@ def test_encounter_species_replacement_queues_stored_case_previous_name(app_and_
     )
     assert resp.status_code == 200
 
-    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    values = {(c["change_type"], c["value"]) for c in db.pending_changes.list_all()}
     # The stale add must be cancelled by a remove that targets the same
     # stored spelling — not the lowercase cache value.
     assert ("keyword_add", "Saffron Finch") not in values
@@ -4357,7 +4357,7 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
     # The DB rows are gone, but sync_to_xmp only strips a sidecar keyword
     # when a matching keyword_remove pending change exists. Without one the
     # old species would silently linger in the XMP files.
-    changes = db.get_pending_changes()
+    changes = db.pending_changes.list_all()
     removed = {
         (c["photo_id"], c["value"])
         for c in changes
@@ -4668,7 +4668,7 @@ def test_api_photo_pipeline_diagnoses_full_image_predictions(app_and_db):
     """Synthetic full-image anchors are not below-threshold detector boxes."""
     app, db = app_and_db
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    db.update_workspace(db._active_workspace_id, config_overrides={
+    db.workspaces.update(db._active_workspace_id, config_overrides={
         "detector_confidence": 0.0,
     })
     det_id = db.save_detections(pid, [
@@ -8264,14 +8264,14 @@ def test_deleting_a_label_set_clears_it_from_every_workspace(app_and_db, tmp_pat
         labels_mod.LABELS_DIR = orig
 
     assert db.get_workspace_active_labels() == []
-    assert _json.loads(db.get_workspace(other)["config_overrides"])["active_labels"] == []
+    assert _json.loads(db.workspaces.get(other)["config_overrides"])["active_labels"] == []
 
 
 def test_pipeline_page_init_includes_workspace_overrides(app_and_db):
     """page-init response includes workspace config overrides."""
     app, db = app_and_db
     # Set a workspace override first
-    db.update_workspace(db._active_workspace_id, config_overrides={"review_min_confidence": 25})
+    db.workspaces.update(db._active_workspace_id, config_overrides={"review_min_confidence": 25})
     with app.test_client() as c:
         resp = c.get("/api/pipeline/page-init")
         assert resp.status_code == 200
@@ -8303,7 +8303,7 @@ def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
     preserving keys not in the whitelist (e.g. active_labels)."""
     app, db = app_and_db
     # Pre-set overrides with a non-whitelisted key
-    db.update_workspace(db._active_workspace_id,
+    db.workspaces.update(db._active_workspace_id,
                         config_overrides={"active_labels": ["/path/to/birds.txt"],
                                           "classification_threshold": 0.5})
     with app.test_client() as c:
@@ -9729,7 +9729,7 @@ def test_api_browse_photo_counts_leaves_out_folders_past_request_budget(
 def _read_workspace_overrides(db, ws_id):
     """Helper: read and JSON-decode the config_overrides column for ws_id."""
     import json
-    ws = db.get_workspace(ws_id)
+    ws = db.workspaces.get(ws_id)
     raw = ws["config_overrides"] if ws else None
     if not raw:
         return {}
@@ -9804,7 +9804,7 @@ def test_put_subject_types_preserves_other_overrides(app_and_db):
     """Setting subject_types must not clobber other config_overrides keys."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-5")
-    db.update_workspace(ws_id, config_overrides={"classification_threshold": 0.42})
+    db.workspaces.update(ws_id, config_overrides={"classification_threshold": 0.42})
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -9866,9 +9866,9 @@ def test_put_subject_types_normalizes_non_dict_config_overrides(app_and_db):
     The endpoint must coerce it back to {} before assigning subject_types."""
     app, db = app_and_db
     ws_id = db.create_workspace("ws-subject-non-dict")
-    # Plant a list-shaped config_overrides directly via update_workspace,
+    # Plant a list-shaped config_overrides directly via workspaces.update,
     # which json.dumps()es whatever it receives.
-    db.update_workspace(ws_id, config_overrides=["unexpected", "list"])
+    db.workspaces.update(ws_id, config_overrides=["unexpected", "list"])
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
@@ -10789,7 +10789,7 @@ def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, 
     app, db = app_and_db
     # Override the active workspace to include genre too
     ws_id = db._active_workspace_id
-    db.update_workspace(ws_id, config_overrides={"subject_types": ["taxonomy", "genre"]})
+    db.workspaces.update(ws_id, config_overrides={"subject_types": ["taxonomy", "genre"]})
     client = app.test_client()
     resp = client.get("/api/workspaces/active/subject-types")
     assert resp.status_code == 200
@@ -12812,7 +12812,7 @@ def test_api_folder_delete_removes_preview_files(app_and_db, tmp_path):
             f.write(b"\xff\xd8\xff\xd9")  # minimal JPEG SOI/EOI
         with open(legacy, "wb") as f:
             f.write(b"\xff\xd8\xff\xd9")
-        db.preview_cache_insert(pid, 1920, 4)
+        db.caches.preview_insert(pid, 1920, 4)
         created.extend([sized, legacy])
 
     client = app.test_client()
@@ -13268,7 +13268,7 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     # Rejecting Alpha's selected photo leaves another eligible Alpha photo in
     # the bucket. The stored rank is retained for undo, but it must not make the
     # active-selection filter report that Alpha still has a chosen highlight.
-    db.update_photo_flag(photo_ids["Alpha Bird"], "rejected")
+    db.photo_review.set_flag(photo_ids["Alpha Bird"], "rejected")
     assert species_for(highlight_selection="yes") == {"Gamma Bird"}
     assert species_for(
         highlight_selection="no", species_representative="no"
@@ -13276,18 +13276,18 @@ def test_highlights_curation_filters_combine_independently(app_and_db):
     assert db.get_species_highlights("Alpha Bird") == {
         "Alpha Bird": {photo_ids["Alpha Bird"]: 1}
     }
-    db.update_photo_flag(photo_ids["Alpha Bird"], "none")
+    db.photo_review.set_flag(photo_ids["Alpha Bird"], "none")
     assert species_for(highlight_selection="yes") == {"Alpha Bird", "Gamma Bird"}
 
     # Representative preferences follow the same active-state rule while
     # keeping their stored row available for an un-reject.
-    db.update_photo_flag(photo_ids["Beta Bird"], "rejected")
+    db.photo_review.set_flag(photo_ids["Beta Bird"], "rejected")
     assert species_for(species_representative="yes") == {"Gamma Bird"}
     assert db.get_species_representatives() == {
         "Beta Bird": photo_ids["Beta Bird"],
         "Gamma Bird": photo_ids["Gamma Bird"],
     }
-    db.update_photo_flag(photo_ids["Beta Bird"], "none")
+    db.photo_review.set_flag(photo_ids["Beta Bird"], "none")
     assert species_for(species_representative="yes") == {"Beta Bird", "Gamma Bird"}
 
     response = client.get(
@@ -13450,7 +13450,7 @@ def test_highlights_confirm_accepts_current_prediction(app_and_db):
     assert db.get_review_status(pred["id"], db._ws_id()) == "accepted"
     assert db.get_review_status(sibling["id"], db._ws_id()) == "rejected"
     assert "Bald Eagle" in {kw["name"] for kw in db.get_photo_keywords(pid)}
-    history = db.get_edit_history(limit=1)
+    history = db.edit_history.list_recent(limit=1)
     assert history[0]["action_type"] == "prediction_accept"
 
 
@@ -13682,7 +13682,7 @@ def test_highlights_relabel_rejects_prediction_and_replaces_species(app_and_db):
     keywords = {kw["name"] for kw in db.get_photo_keywords(pid)}
     assert "House Sparrow" in keywords
     assert "Bald Eagle" not in keywords
-    history = db.get_edit_history(limit=1)
+    history = db.edit_history.list_recent(limit=1)
     assert history[0]["action_type"] == "species_replace"
 
 
@@ -13774,7 +13774,7 @@ def test_highlights_relabel_prediction_only_undo_restores_prediction(app_and_db)
     )
     assert resp.status_code == 200
     assert db.get_review_status(pred["id"], db._ws_id()) == "rejected"
-    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+    assert db.edit_history.list_recent(limit=1)[0]["action_type"] == "keyword_add"
 
     undone = db.undo_last_edit()
     assert undone["action_type"] == "keyword_add"
@@ -14067,7 +14067,7 @@ def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
         json={"photo_ids": [pid], "species": "New Species"},
     )
     assert resp.status_code == 200
-    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+    assert db.edit_history.list_recent(limit=1)[0]["action_type"] == "keyword_add"
     assert db.get_species_representatives().get("New Species") == pid
     assert pid in (db.get_species_highlights("New Species") or {}).get(
         "New Species", {}
@@ -14506,7 +14506,7 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
         json={"photo_ids": [pid], "species": "New Species"},
     )
     assert resp.status_code == 200
-    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+    assert db.edit_history.list_recent(limit=1)[0]["action_type"] == "keyword_add"
 
     reps = db.get_species_representatives()
     # Stale Old Bird rep survives — it is NOT renamed to New Species.
@@ -16215,7 +16215,7 @@ def _seed_masks(db, tmp_path):
     ]:
         f = masks_dir / f"{pid}.{var}.png"
         f.write_bytes(b"x" * size)
-        db.upsert_photo_mask(
+        db.masks_features.upsert_mask(
             photo_id=pid, variant=var, path=str(f),
             detector_model="megadetector-v6",
             prompt_x=0, prompt_y=0, prompt_w=10, prompt_h=10,
@@ -16333,7 +16333,7 @@ def test_api_storage_masks_delete_stale(app_and_db, tmp_path):
     # Add a mask whose prompt does NOT match any detection — stale.
     f = masks_dir / f"{p1}.sam3-small.png"
     f.write_bytes(b"x" * 50)
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=p1, variant="sam3-small", path=str(f),
         detector_model="megadetector-v6",
         prompt_x=999, prompt_y=999, prompt_w=10, prompt_h=10,
@@ -16380,7 +16380,7 @@ def test_storage_masks_uses_global_threshold_not_active_workspace(
     )
     f = masks_dir / f"{pid}.sam2-small.png"
     f.write_bytes(b"x" * 50)
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="sam2-small", path=str(f),
         detector_model="megadetector-v6",
         prompt_x=0.10, prompt_y=0.10, prompt_w=0.10, prompt_h=0.10,
@@ -16465,7 +16465,7 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
             )
             emb = emb_base + np.random.RandomState(pid).randn(768).astype(np.float32) * 0.01
             emb = emb / np.linalg.norm(emb)
-            db.update_photo_pipeline_features(
+            db.masks_features.update_pipeline_features(
                 pid,
                 mask_path=f"/masks/{pid}.png",
                 subject_tenengrad=200 + i * 50,
@@ -16477,7 +16477,7 @@ def test_regroup_live_returns_per_encounter_trace(tmp_path, monkeypatch):
                 subject_y_median=120.0,
                 phash_crop=f"{pid:016x}",
             )
-            db.update_photo_embeddings(
+            db.masks_features.update_embeddings(
                 pid,
                 dino_subject_embedding=embedding_to_blob(emb),
                 dino_global_embedding=embedding_to_blob(emb),
@@ -16563,7 +16563,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
             )
             emb = emb_base + np.random.RandomState(pid).randn(768).astype(np.float32) * 0.01
             emb = emb / np.linalg.norm(emb)
-            db.update_photo_pipeline_features(
+            db.masks_features.update_pipeline_features(
                 pid,
                 mask_path=f"/masks/{pid}.png",
                 subject_tenengrad=200 + i * 50,
@@ -16575,7 +16575,7 @@ def test_regroup_live_scopes_to_collection(tmp_path, monkeypatch):
                 subject_y_median=120.0,
                 phash_crop=f"{pid:016x}",
             )
-            db.update_photo_embeddings(
+            db.masks_features.update_embeddings(
                 pid,
                 dino_subject_embedding=embedding_to_blob(emb),
                 dino_global_embedding=embedding_to_blob(emb),
@@ -17373,7 +17373,7 @@ def test_collection_preview_does_not_mask_db_failures(app_and_db, monkeypatch):
 
 def test_update_workspace_unknown_id_returns_404(app_and_db):
     """PUT /api/workspaces/<id> must 404 for an unknown workspace instead of
-    crashing on dict(None) after update_workspace silently no-ops."""
+    crashing on dict(None) after workspaces.update silently no-ops."""
     app, _db = app_and_db
     client = app.test_client()
     resp = client.put('/api/workspaces/999999', json={"name": "ghost"})
@@ -17476,13 +17476,13 @@ def test_sync_discard_reports_true_count(app_and_db):
     client = app.test_client()
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
     db.queue_change(pid, "keyword_add", "Test Bird")
-    change_id = db.get_pending_changes()[0]["id"]
+    change_id = db.pending_changes.list_all()[0]["id"]
 
     resp = client.post('/api/sync/discard',
                        json={"change_ids": [change_id, 999999]})
     assert resp.status_code == 200
     assert resp.get_json()["discarded"] == 1
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
 
 
 def test_sync_discard_records_exact_same_name_keyword(app_and_db):
@@ -17500,7 +17500,7 @@ def test_sync_discard_records_exact_same_name_keyword(app_and_db):
     db.tag_photo(pid, generated_id, source=None)
     db.tag_photo(pid, manual_id, source="manual")
     db.queue_change(pid, "keyword_add", "Wildlife")
-    change_id = db.get_pending_changes()[0]["id"]
+    change_id = db.pending_changes.list_all()[0]["id"]
 
     resp = client.post(
         "/api/sync/discard", json={"change_ids": [change_id]},
@@ -17536,7 +17536,7 @@ def test_sync_discard_chunks_large_change_sets(app_and_db):
         ],
     )
     db.conn.commit()
-    change_ids = [row["id"] for row in db.get_pending_changes()]
+    change_ids = [row["id"] for row in db.pending_changes.list_all()]
 
     resp = client.post(
         "/api/sync/discard", json={"change_ids": change_ids},
@@ -17544,7 +17544,7 @@ def test_sync_discard_chunks_large_change_sets(app_and_db):
 
     assert resp.status_code == 200
     assert resp.get_json()["discarded"] == total
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
 
 
 def test_sync_discard_clears_sibling_workspace_flat_removals(app_and_db):
@@ -18938,7 +18938,7 @@ def test_batch_accept_records_single_undo_entry(app_and_db):
     assert resp.status_code == 200, resp.get_data(as_text=True)
 
     accept_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == 1
@@ -18984,7 +18984,7 @@ def test_batch_accept_on_all_tags_full_selection_with_one_undo(app_and_db):
     assert "Osprey" in {k["name"] for k in db.get_photo_keywords(other)}
     statuses = {p["photo_id"]: p["status"] for p in db.get_predictions(photo_ids=selection)}
     assert statuses == {predicted: "accepted", existing: "accepted", other: "pending"}
-    edits = [e for e in db.get_edit_history() if e["action_type"] == "prediction_accept"]
+    edits = [e for e in db.edit_history.list_recent() if e["action_type"] == "prediction_accept"]
     assert len(edits) == 1
     assert edits[0]["description"].startswith('Accepted prediction: added "Bald Eagle"')
     # Repeating the click must not create a second undo entry.
@@ -19010,7 +19010,7 @@ def test_batch_accept_on_all_without_acceptable_predictions(app_and_db):
     assert response.status_code == 200, response.get_data(as_text=True)
     assert {k["name"] for k in db.get_photo_keywords(photo)} == {"Bald Eagle", "Osprey"}
     assert db.get_predictions(photo_ids=[photo])[0]["status"] == "pending"
-    assert db.get_edit_history()[0]["description"] == 'Added species "Bald Eagle"'
+    assert db.edit_history.list_recent()[0]["description"] == 'Added species "Bald Eagle"'
     db.undo_last_edit()
     assert {k["name"] for k in db.get_photo_keywords(photo)} == {"Osprey"}
 
@@ -19028,7 +19028,7 @@ def test_batch_accept_on_all_undo_redo_preserves_sidecar_changes(
 
     def pending_types():
         return [
-            row["change_type"] for row in db.get_pending_changes()
+            row["change_type"] for row in db.pending_changes.list_all()
             if row["photo_id"] == photo and row["value"] == "Bald Eagle"
         ]
 
@@ -19039,7 +19039,7 @@ def test_batch_accept_on_all_undo_redo_preserves_sidecar_changes(
     assert response.status_code == 200
     assert pending_types() == ([] if pending_removal else ["keyword_add"])
     if sync_after_accept:
-        db.clear_pending([row["id"] for row in db.get_pending_changes()])
+        db.clear_pending([row["id"] for row in db.pending_changes.list_all()])
     sidecar_has_keyword = pending_removal or sync_after_accept
     for _ in range(2):
         db.undo_last_edit()
@@ -19281,8 +19281,8 @@ def test_selection_prediction_suggestions_applies_confidence_threshold(app_and_d
     photo_a, _ = _seed_prediction_photo(db, "thr-a.jpg", "Bald Eagle", 0.91)
     photo_b, _ = _seed_prediction_photo(db, "thr-b.jpg", "Black Saddlebags", 0.02)
 
-    ws_id = db.get_workspaces()[0]["id"]
-    db.update_workspace(ws_id, config_overrides={"classifier_confidence": 0.5})
+    ws_id = db.workspaces.list_all()[0]["id"]
+    db.workspaces.update(ws_id, config_overrides={"classifier_confidence": 0.5})
 
     resp = client.post(
         "/api/selection/prediction-suggestions",
@@ -19319,7 +19319,7 @@ def test_batch_reject_flips_status_and_records_single_undo(app_and_db):
     assert statuses == {photo_a: "rejected", photo_b: "rejected"}
 
     reject_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_reject"
     ]
     assert len(reject_rows) == 1
@@ -19448,7 +19448,7 @@ def test_prediction_states_distinguish_empty_reasons(app_and_db):
         folder_id=folder_id, filename="state-detected.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.record_detector_run(detected_only, "MDV6", box_count=1)
+    db.model_runs.record_detector_run(detected_only, "MDV6", box_count=1)
     db.save_detections(
         detected_only,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -19482,7 +19482,7 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
         folder_id=folder_id, filename="state-fallback.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.record_detector_run(fallback_only, "MDV6", box_count=0)
+    db.model_runs.record_detector_run(fallback_only, "MDV6", box_count=0)
     db.save_detections(
         fallback_only,
         [{"box": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
@@ -19494,7 +19494,7 @@ def test_prediction_states_ignore_fallback_and_noise_detections(app_and_db):
         folder_id=folder_id, filename="state-noise.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.record_detector_run(noise_only, "MDV6", box_count=1)
+    db.model_runs.record_detector_run(noise_only, "MDV6", box_count=1)
     db.save_detections(
         noise_only,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
@@ -19526,7 +19526,7 @@ def test_batch_accept_skips_already_accepted_predictions(app_and_db):
     )
     assert first.status_code == 200, first.get_data(as_text=True)
     assert first.get_json()["accepted"] == 1
-    edits_after_first = len(db.get_edit_history(limit=50))
+    edits_after_first = len(db.edit_history.list_recent(limit=50))
 
     second = client.post(
         "/api/predictions/batch-accept", json={"prediction_ids": [pred_id]},
@@ -19537,7 +19537,7 @@ def test_batch_accept_skips_already_accepted_predictions(app_and_db):
     assert body["already_decided"] == 1
     # No second edit row: the resubmission changed nothing, so it must not
     # sit at the top of the undo stack pretending to be reversible work.
-    assert len(db.get_edit_history(limit=50)) == edits_after_first
+    assert len(db.edit_history.list_recent(limit=50)) == edits_after_first
     assert app is not None
 
 
@@ -19591,7 +19591,7 @@ def test_batch_accept_skips_rejected_predictions(app_and_db):
         "Bald Eagle": "rejected", "Golden Eagle": "accepted",
     }
     keywords_after_promotion = db.get_photo_keywords(photo_id)
-    edits_after_promotion = len(db.get_edit_history(limit=50))
+    edits_after_promotion = len(db.edit_history.list_recent(limit=50))
 
     # The stale panel submits the loser.
     stale = client.post(
@@ -19610,7 +19610,7 @@ def test_batch_accept_skips_rejected_predictions(app_and_db):
     )
     # And nothing was recorded: a no-op must not sit on the undo stack, where
     # reversing it would reset the winner's accepted state too.
-    assert len(db.get_edit_history(limit=50)) == edits_after_promotion
+    assert len(db.edit_history.list_recent(limit=50)) == edits_after_promotion
     assert app is not None
 
 
@@ -19979,8 +19979,8 @@ def test_selection_prediction_suggestions_keeps_bucket_when_matching_row_above_t
     import json as _json
 
     app, db = app_and_db
-    ws_id = db.get_workspaces()[0]["id"]
-    db.update_workspace(ws_id, config_overrides={"classifier_confidence": 0.80})
+    ws_id = db.workspaces.list_all()[0]["id"]
+    db.workspaces.update(ws_id, config_overrides={"classifier_confidence": 0.80})
 
     client = app.test_client()
     folder_id = db.get_folder_tree()[0]["id"]
@@ -20239,7 +20239,7 @@ def test_batch_accept_admits_payload_larger_than_1000(app_and_db):
     assert resp.status_code == 200, resp.get_data(as_text=True)
     # A single undo entry — even a 1,200-row payload lands as one action.
     accept_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == 1
@@ -20637,7 +20637,7 @@ def test_batch_reject_skips_superseded_label_set_rows(app_and_db):
         (db._ws_id(), stale_pred),
     ).fetchone()["status"]
     assert stale_status == "pending"
-    assert db.get_edit_history() == []
+    assert db.edit_history.list_recent() == []
 
 
 def test_batch_accept_checks_and_writes_are_one_transaction(
@@ -20764,7 +20764,7 @@ def test_batch_accept_skips_ambiguous_rows_with_alternatives(app_and_db):
     )
     pred_id = _prediction_id(db, photo_id, "TestZanclusgamma")
     alt_id = _prediction_id(db, photo_id, "TestZanclusdelta")
-    edits_before = len(db.get_edit_history(limit=50))
+    edits_before = len(db.edit_history.list_recent(limit=50))
 
     # Both halves of the contract in one call: the pending row that *has* an
     # alternative, and the alternative row itself. ``_ambiguous_prediction_ids``
@@ -20788,7 +20788,7 @@ def test_batch_accept_skips_ambiguous_rows_with_alternatives(app_and_db):
     # A no-op must leave nothing on the undo stack: Browse gates its undo
     # toast on ``accepted``, and an entry here would let Ctrl+Z reverse some
     # older, unrelated edit.
-    assert len(db.get_edit_history(limit=50)) == edits_before
+    assert len(db.edit_history.list_recent(limit=50)) == edits_before
     assert app is not None
 
 
@@ -20955,7 +20955,7 @@ def test_batch_accept_skips_rows_whose_photo_left_the_workspace(app_and_db, monk
     ).fetchone()["status"]
     assert status == "pending"
     # Batch reported no accepts, so no undo entry landed either.
-    assert db.get_edit_history(limit=5) == []
+    assert db.edit_history.list_recent(limit=5) == []
 
 
 def test_batch_reject_skips_rows_whose_photo_left_the_workspace(app_and_db, monkeypatch):
@@ -21020,7 +21020,7 @@ def test_batch_reject_skips_rows_whose_photo_left_the_workspace(app_and_db, monk
         (ws_id, pred_id),
     ).fetchone()["status"]
     assert status == "pending"
-    assert db.get_edit_history(limit=5) == []
+    assert db.edit_history.list_recent(limit=5) == []
 
 
 def test_batch_accept_skips_row_whose_consensus_drifted(app_and_db, monkeypatch):
@@ -21268,7 +21268,7 @@ def test_batch_accept_dedupes_grouped_prediction_expansion(app_and_db):
     assert resp.status_code == 200, resp.get_data(as_text=True)
 
     accept_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == 1
@@ -21441,7 +21441,7 @@ def test_batch_accept_takes_any_payload_the_suggestions_endpoint_emits(app_and_d
     assert resp.get_json()["accepted"] == len(photos)
     # A single undo entry — even a 1,200-row payload lands as one action.
     accept_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == 1
@@ -21641,7 +21641,7 @@ def test_batch_accept_does_not_re_enter_rows_a_grouped_accept_covered(app_and_db
     assert resp.status_code == 200, resp.get_data(as_text=True)
 
     accept_rows = [
-        row for row in db.get_edit_history()
+        row for row in db.edit_history.list_recent()
         if row["action_type"] == "prediction_accept"
     ]
     assert len(accept_rows) == 1
@@ -21957,7 +21957,7 @@ def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_d
         "/api/predictions/batch-accept", json={"prediction_ids": [pred_b]},
     )
     assert first.status_code == 200, first.get_data(as_text=True)
-    edits_after_first = db.get_edit_history(limit=50)
+    edits_after_first = db.edit_history.list_recent(limit=50)
     b_first_status = {
         row["photo_id"]: row["status"]
         for row in db.get_predictions(photo_ids=[photo_a, photo_b])
@@ -21978,7 +21978,7 @@ def test_batch_accept_leaves_earlier_accept_untouched_when_resubmitted(app_and_d
 
     # One new edit entry — a phantom re-accept would leave a second
     # ``no_tag`` item on this entry that undo would happily walk.
-    edits_after_second = db.get_edit_history(limit=50)
+    edits_after_second = db.edit_history.list_recent(limit=50)
     assert len(edits_after_second) == len(edits_after_first) + 1
     new_entry_id = edits_after_second[0]["id"]
     items = db.conn.execute(
@@ -22058,7 +22058,7 @@ def test_batch_reject_skips_already_accepted_predictions(app_and_db):
     assert accepted.status_code == 200, accepted.get_data(as_text=True)
     keywords_after_accept = db.get_photo_keywords(photo_id)
     assert keywords_after_accept, "accept should have tagged the photo"
-    edits_after_accept = len(db.get_edit_history(limit=50))
+    edits_after_accept = len(db.edit_history.list_recent(limit=50))
 
     resp = client.post(
         "/api/predictions/batch-reject", json={"prediction_ids": [pred_id]},
@@ -22074,7 +22074,7 @@ def test_batch_reject_skips_already_accepted_predictions(app_and_db):
     )
     assert db.get_photo_keywords(photo_id) == keywords_after_accept
     # And nothing was recorded: a no-op must not sit on the undo stack.
-    assert len(db.get_edit_history(limit=50)) == edits_after_accept
+    assert len(db.edit_history.list_recent(limit=50)) == edits_after_accept
 
 
 def test_batch_reject_skips_already_rejected_predictions(app_and_db):
@@ -22094,7 +22094,7 @@ def test_batch_reject_skips_already_rejected_predictions(app_and_db):
     )
     assert first.status_code == 200
     assert first.get_json()["rejected"] == 1
-    edits_after_first = len(db.get_edit_history(limit=50))
+    edits_after_first = len(db.edit_history.list_recent(limit=50))
 
     second = client.post(
         "/api/predictions/batch-reject", json={"prediction_ids": [pred_id]},
@@ -22103,7 +22103,7 @@ def test_batch_reject_skips_already_rejected_predictions(app_and_db):
     body = second.get_json()
     assert body["rejected"] == 0
     assert body["already_decided"] == 1
-    assert len(db.get_edit_history(limit=50)) == edits_after_first
+    assert len(db.edit_history.list_recent(limit=50)) == edits_after_first
 
 
 def _browse_js_function_body(html, signature):
@@ -24552,7 +24552,7 @@ def test_mark_reviewed_transition_and_reject_refuses_reviewed(app_and_db):
         (pred_id, ws_id),
     ).fetchone()["status"]
     assert status == "reviewed"
-    edits_after_mark = len(db.get_edit_history(limit=50))
+    edits_after_mark = len(db.edit_history.list_recent(limit=50))
 
     reject = client.post(f"/api/predictions/{pred_id}/reject")
     assert reject.status_code == 409, reject.get_data(as_text=True)
@@ -24566,7 +24566,7 @@ def test_mark_reviewed_transition_and_reject_refuses_reviewed(app_and_db):
         (pred_id, ws_id),
     ).fetchone()["status"]
     assert status == "reviewed"
-    assert len(db.get_edit_history(limit=50)) == edits_after_mark
+    assert len(db.edit_history.list_recent(limit=50)) == edits_after_mark
 
 
 def test_single_accept_refuses_reviewed_prediction(app_and_db):
@@ -24583,7 +24583,7 @@ def test_single_accept_refuses_reviewed_prediction(app_and_db):
 
     reviewed = client.post(f"/api/predictions/{pred_id}/reviewed")
     assert reviewed.status_code == 200
-    edits_after_mark = len(db.get_edit_history(limit=50))
+    edits_after_mark = len(db.edit_history.list_recent(limit=50))
     keywords_before = {k["name"] for k in db.get_photo_keywords(photo_id)}
 
     accept = client.post(f"/api/predictions/{pred_id}/accept")
@@ -24593,7 +24593,7 @@ def test_single_accept_refuses_reviewed_prediction(app_and_db):
     assert {k["name"] for k in db.get_photo_keywords(photo_id)} == keywords_before, (
         "an accept that should have been refused still tagged the photo"
     )
-    assert len(db.get_edit_history(limit=50)) == edits_after_mark
+    assert len(db.edit_history.list_recent(limit=50)) == edits_after_mark
 
 
 def test_batch_endpoints_skip_reviewed_predictions(app_and_db):
@@ -25239,7 +25239,7 @@ def test_encounter_species_add_mode_keeps_existing_species(app_and_db):
     }
     # The keyword add changed the burst override, so it is recorded as a
     # grouping edit wrapping the photo edit (main's persistent-history rule).
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert history[0]["action_type"] == "pipeline_grouping"
     wrapped = db.conn.execute(
         "SELECT new_value FROM edit_history WHERE id = ?", (history[0]["id"],)
@@ -25386,7 +25386,7 @@ def test_encounter_species_remove_mode_untags_one_species(app_and_db):
         "species_list": ["Green-winged Teal"],
     }
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert history[0]["action_type"] == "pipeline_grouping"
     wrapped = db.conn.execute(
         "SELECT new_value FROM edit_history WHERE id = ?", (history[0]["id"],)
@@ -26436,7 +26436,7 @@ def test_batch_accept_same_species_with_different_keyword_names(
             assert adds == names
 
     assert_accepted()
-    edits = [e for e in db.get_edit_history() if e["action_type"] == "prediction_accept"]
+    edits = [e for e in db.edit_history.list_recent() if e["action_type"] == "prediction_accept"]
     assert len(edits) == 1
     assert client.post("/api/undo").status_code == 200
     assert all(not db.get_photo_keywords(p) for p in photos)
@@ -26472,7 +26472,7 @@ def test_batch_accept_rejects_distinct_taxa_with_same_display_name(app_and_db):
     assert all(not db.get_photo_keywords(p) for p in photos)
     assert {r["status"] for r in db.get_predictions(photo_ids=photos)} == {"pending"}
     assert [tuple(r) for r in db.conn.execute("SELECT * FROM keywords ORDER BY id")] == keywords_before
-    assert not [e for e in db.get_edit_history() if e["action_type"] == "prediction_accept"]
+    assert not [e for e in db.edit_history.list_recent() if e["action_type"] == "prediction_accept"]
 
 
 @pytest.mark.parametrize("on_all", [False, True])
@@ -26574,7 +26574,7 @@ def test_alias_merge_preserves_status_only_prediction_undo(app_and_db, earlier_s
         }])
     response = client.post("/api/predictions/batch-accept", json={"prediction_ids": pred_ids})
     assert response.status_code == 200, response.get_data(as_text=True)
-    accept_id = next(e["id"] for e in db.get_edit_history() if e["action_type"] == "prediction_accept")
+    accept_id = next(e["id"] for e in db.edit_history.list_recent() if e["action_type"] == "prediction_accept")
     item = db.conn.execute(
         "SELECT old_value, new_value FROM edit_history_items WHERE edit_id = ? AND photo_id = ?",
         (accept_id, photo_b),

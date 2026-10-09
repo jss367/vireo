@@ -7,6 +7,7 @@ import os
 import sqlite3
 import time
 import unicodedata
+from typing import TYPE_CHECKING
 
 import dir_listing_cache
 from keyword_identity import resolve_import_alias
@@ -16,6 +17,29 @@ from keyword_normalization import (
 )
 from new_images import get_shared_cache
 from repositories import UNSET as _UNSET  # sentinel for "not provided" vs explicit None
+
+if TYPE_CHECKING:
+    from repositories.audit import AuditRepository
+    from repositories.caches import CachesRepository
+    from repositories.detections import DetectionsRepository
+    from repositories.duplicates import DuplicatesRepository
+    from repositories.edit_history import EditHistoryRepository
+    from repositories.edits import EditsRepository
+    from repositories.exif_search import ExifSearchRepository
+    from repositories.inat import InatRepository
+    from repositories.job_history import JobHistoryRepository
+    from repositories.local_folders import LocalFolderRepository
+    from repositories.masks_features import MasksFeaturesRepository
+    from repositories.model_runs import ModelRunsRepository
+    from repositories.pending_archives import PendingArchiveRepository
+    from repositories.photo_labels import PhotoLabelRepository
+    from repositories.photo_review import PhotoReviewRepository
+    from repositories.photo_visibility import PhotoVisibilityRepository
+    from repositories.processes import ProcessesRepository
+    from repositories.stats import StatsRepository
+    from repositories.sync import SyncRepository
+    from repositories.workspace_folders import WorkspaceFolderRepository
+    from repositories.workspaces import WorkspaceRepository
 
 log = logging.getLogger(__name__)
 
@@ -856,7 +880,7 @@ class Database:
 
     def _restore_active_workspace(self):
         """Restore the last-used workspace on an already initialized schema."""
-        last_id = self._workspace_repository(scoped=False).most_recently_opened_id()
+        last_id = self._workspace_repository().most_recently_opened_id()
         if last_id is None:
             raise RuntimeError("Vireo database has no workspace after schema initialization")
         self.set_active_workspace(last_id)
@@ -993,13 +1017,18 @@ class Database:
 
         return ProcessesRepository(self.conn)
 
-    def get_saved_processes(self):
-        """Return all saved processes ordered for display (sort_order, id)."""
-        return self._processes_repository().list_all()
+    @property
+    def processes(self) -> ProcessesRepository:
+        """The saved-process domain: ``db.processes.list_all()``, ``.get(id)``, ``.create(name, ...)``.
 
-    def get_saved_process(self, process_id):
-        """Return one saved process as a dict, or None if it doesn't exist."""
-        return self._processes_repository().get(process_id)
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_processes_repository``, exactly as a forwarding
+        wrapper called at that moment would. Saved processes are global, so it
+        needs no active workspace. Update and delete stay on ``Database``
+        (``update_saved_process`` / ``delete_saved_process``), which check the
+        row exists first.
+        """
+        return self._processes_repository()
 
     def resolve_process(self, process_id):
         """Expand a saved-process id into a full stage-flags dict over _BASE.
@@ -1009,7 +1038,7 @@ class Database:
         """
         import process_strategies as ps
 
-        proc = self.get_saved_process(process_id)
+        proc = self.processes.get(process_id)
         if proc is None:
             raise ValueError(f"unknown process id: {process_id!r}")
         return {**ps._BASE, **{k: proc[k] for k in ps.FLAG_FIELDS}}
@@ -1026,24 +1055,6 @@ class Database:
             skip_regroup, miss_enabled, review_mode,
         )
 
-    def create_saved_process(self, name, *, skip_classify=False,
-                             skip_extract_masks=False, skip_eye_keypoints=False,
-                             skip_regroup=False, miss_enabled=True,
-                             review_mode=None):
-        """Insert a saved process and return its id.
-
-        Raises ValueError on a blank/duplicate name or a bad review_mode.
-        """
-        return self._processes_repository().create(
-            name,
-            skip_classify=skip_classify,
-            skip_extract_masks=skip_extract_masks,
-            skip_eye_keypoints=skip_eye_keypoints,
-            skip_regroup=skip_regroup,
-            miss_enabled=miss_enabled,
-            review_mode=review_mode,
-        )
-
     def update_saved_process(self, process_id, *, name=None,
                              skip_classify=None, skip_extract_masks=None,
                              skip_eye_keypoints=None, skip_regroup=None,
@@ -1054,10 +1065,11 @@ class Database:
         review_mode which is legitimately None) is untouched. Raises
         ValueError on a blank/duplicate name or a bad review_mode.
         """
-        current = self.get_saved_process(process_id)
+        repo = self._processes_repository()
+        current = repo.get(process_id)
         if current is None:
             return False
-        return self._processes_repository().update(
+        return repo.update(
             process_id,
             current,
             name=name,
@@ -1077,9 +1089,10 @@ class Database:
         The app-wide global default (config.json) is cleared by the caller,
         which owns config-file I/O. Does not run inside an outer transaction.
         """
-        if self.get_saved_process(process_id) is None:
+        repo = self._processes_repository()
+        if repo.get(process_id) is None:
             return False
-        return self._processes_repository().delete(process_id)
+        return repo.delete(process_id)
 
     def repair_missing_folder_parents(self):
         """Fill parent_id for legacy folder rows whose parent path is known."""
@@ -1151,7 +1164,7 @@ class Database:
         """Clear cache for every workspace linked to any of the given folder_ids."""
         if not folder_ids:
             return
-        ws_ids = self._workspace_repository(scoped=False).ids_for_folders(folder_ids)
+        ws_ids = self._workspace_repository().ids_for_folders(folder_ids)
         self._new_images_cache.invalidate_workspaces(self._db_path, ws_ids)
 
     def invalidate_new_images_cache_for_workspace(self, workspace_id):
@@ -1207,7 +1220,7 @@ class Database:
 
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
-        workspace_id = self._workspace_repository(scoped=False).create(
+        workspace_id = self._workspace_repository().create(
             name, config_overrides, ui_state
         )
         # SQLite INTEGER PRIMARY KEY (without AUTOINCREMENT) can reuse a deleted
@@ -1216,35 +1229,6 @@ class Database:
         # entry so the new workspace starts clean.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
         return workspace_id
-
-    def get_workspace(self, workspace_id):
-        """Return a single workspace by id, or None."""
-        return self._workspace_repository(scoped=False).get(workspace_id)
-
-    def get_workspace_id_by_name(self, name):
-        """Return the id of the workspace named exactly ``name``, or None."""
-        return self._workspace_repository(scoped=False).id_for_name(name)
-
-    def get_workspaces(self):
-        """Return all workspaces, pinned first then alphabetical."""
-        return self._workspace_repository(scoped=False).list_all()
-
-    def update_workspace(self, workspace_id, name=None, config_overrides=_UNSET,
-                         ui_state=_UNSET, last_opened_at=None,
-                         pinned_at=_UNSET):
-        """Update workspace fields. Only provided args are updated.
-
-        For config_overrides and ui_state, pass None to clear the value
-        (set DB column to NULL), or omit the argument to leave it unchanged.
-        """
-        self._workspace_repository(scoped=False).update(
-            workspace_id,
-            name=name,
-            config_overrides=config_overrides,
-            ui_state=ui_state,
-            last_opened_at=last_opened_at,
-            pinned_at=pinned_at,
-        )
 
     def get_effective_config(self, global_config):
         """Return config with workspace overrides applied over global config.
@@ -1259,7 +1243,7 @@ class Database:
         import config_schema
         from config import _deep_merge
 
-        ws = self.get_workspace(self._active_workspace_id)
+        ws = self.workspaces.get(self._active_workspace_id)
         if not ws or not ws["config_overrides"]:
             return global_config
         try:
@@ -1309,7 +1293,7 @@ class Database:
             default = float(default)
         except (TypeError, ValueError):
             default = 0.2
-        workspaces = self.get_workspaces()
+        workspaces = self.workspaces.list_all()
         if not workspaces:
             return default
         values = []
@@ -1390,7 +1374,7 @@ class Database:
 
     def get_workspace_active_labels(self):
         """Return the active_labels list from workspace config_overrides, or None."""
-        ws = self.get_workspace(self._ws_id())
+        ws = self.workspaces.get(self._ws_id())
         if not ws or not ws["config_overrides"]:
             return None
         try:
@@ -1402,111 +1386,72 @@ class Database:
         except (json.JSONDecodeError, TypeError):
             return None
 
-    def get_tabs(self):
-        """Return the active workspace's ordered list of pinned tab nav-ids.
-
-        Entries not in ``ALL_NAV_IDS`` are dropped so that pages retired in
-        past releases (e.g. ``zoom_test``) don't leave dead slots in the
-        navbar's ``TABS`` array — a dead id makes cmd+number reserve a slot
-        that renders nothing and makes ``adjacentTabId()`` return an id that
-        ``pageById`` doesn't know, which throws on close-adjacent.
-        """
-        return self._workspace_repository().get_tabs()
-
-    def set_tabs(self, tabs):
-        """Replace the active workspace's tabs with the given ordered list.
-
-        Validates every entry against ALL_NAV_IDS. Rejects duplicates so the
-        UI invariant "each pinned page appears exactly once" is enforced at
-        the storage layer.
-        Returns the new list.
-        """
-        return self._workspace_repository().set_tabs(tabs)
-
-    def pin_tab(self, nav_id):
-        """Append nav_id to the active workspace's tabs if not present.
-
-        Raises ValueError if nav_id is not in ALL_NAV_IDS.
-        Returns the new list.
-        """
-        return self._workspace_repository().pin_tab(nav_id)
-
-    def unpin_tab(self, nav_id):
-        """Remove nav_id from the active workspace's tabs if present.
-
-        Raises ValueError if nav_id is not in ALL_NAV_IDS.
-        Returns the new list.
-        """
-        return self._workspace_repository().unpin_tab(nav_id)
-
     def _photo_visibility_repository(self):
+        """Build the photo-visibility repository on this connection.
+
+        It receives ``self._ws_id`` uncalled: the grant and revoke writes take
+        their workspace id as an argument and never resolve it, while
+        ``visible_photo_ids``, ``affected_workspaces`` and
+        ``preserve_for_move`` resolve the active workspace (raising
+        ``RuntimeError`` when none is set) before running any SQL.
+        """
         from repositories.photo_visibility import PhotoVisibilityRepository
 
-        return PhotoVisibilityRepository(self.conn)
-
-    def grant_workspace_photos(self, workspace_id, photo_ids):
-        self._photo_visibility_repository().grant(workspace_id, photo_ids)
-
-    def revoke_workspace_photo_grants_for_folders(self, workspace_id, folder_ids):
-        self._photo_visibility_repository().revoke_for_folders(workspace_id, folder_ids)
-
-    def grant_verified_twin_photos(self, workspace_id, rows):
-        self._photo_visibility_repository().grant_verified_twins(workspace_id, rows)
-
-    def grant_verified_twin_photos_tracked(self, workspace_id, rows):
-        """Grant twins and report the fresh grants and promoted folders.
-
-        Returns ``(new_grant_ids, promoted_folder_ids)``. See
-        :meth:`PhotoVisibilityRepository.grant_verified_twins_tracked`.
-        """
-        return self._photo_visibility_repository().grant_verified_twins_tracked(
-            workspace_id, rows,
+        return PhotoVisibilityRepository(
+            self.conn, self._ws_id, chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
-    def revoke_photo_grants(self, workspace_id, photo_ids):
-        """Revoke the specified ``workspace_photos`` rows (no sibling expansion)."""
-        self._photo_visibility_repository().revoke_grants(workspace_id, photo_ids)
+    @property
+    def photo_visibility(self) -> PhotoVisibilityRepository:
+        """Photo-level workspace access: ``db.photo_visibility.visible_photo_ids(ids)`` and friends.
 
-    def demote_folders_to_missing(self, folder_ids):
-        """Revert folders to ``status='missing'`` (import mount-loss rollback)."""
-        self._photo_visibility_repository().demote_folders_to_missing(folder_ids)
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_photo_visibility_repository``, exactly as a
+        forwarding wrapper called at that moment would. Accessing it never
+        needs a workspace; the methods that act on the active workspace
+        resolve it when they run (and raise there when none is set). Do not
+        hold the returned repository across ``set_active_workspace``.
+        """
+        return self._photo_visibility_repository()
 
-    def photo_move_affected_workspaces(self, photo_ids):
-        return self._photo_visibility_repository().affected_workspaces(photo_ids, self._ws_id())
-
-    def preserve_photo_visibility_for_move(self, photo_id, keep_visible):
-        self._photo_visibility_repository().preserve_for_move(photo_id, self._ws_id(), keep_visible)
-
-    def _workspace_repository(self, *, scoped=True):
+    def _workspace_repository(self):
         """Build the workspace repository on this connection.
 
-        ``scoped=True`` binds it to the active workspace (raising
-        ``RuntimeError`` when none is set); catalog-wide methods pass
-        ``scoped=False`` and take the workspace id as an argument.
+        It receives ``self._ws_id`` uncalled: the active-workspace methods
+        (tabs, new-images snapshots) resolve it first thing, raising
+        ``RuntimeError`` when none is set, while the catalog-wide methods take
+        the workspace id as an argument and never resolve it.
         """
         from repositories.workspaces import WorkspaceRepository
 
         return WorkspaceRepository(
             self.conn,
-            self._ws_id() if scoped else None,
+            self._ws_id,
             allowed_nav_ids=ALL_NAV_IDS,
             default_tabs=DEFAULT_TABS,
             nav_id_aliases=NAV_ID_ALIASES,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
-    def set_workspace_group_state(self, workspace_id, fingerprint, when_ts):
-        """Record that grouping completed for `workspace_id` at `when_ts`
-        with the given `fingerprint`. Pipeline page treats fingerprint
-        mismatch as "Outdated" so the user knows a regroup is pending.
+    @property
+    def workspaces(self) -> WorkspaceRepository:
+        """The workspace domain: ``db.workspaces.get(id)``, ``.update(id, ...)``, ``.get_tabs()``, ...
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_workspace_repository``. Accessing it never needs
+        a workspace. The tab and new-images-snapshot methods act on the
+        workspace active when they run and raise ``RuntimeError`` when none is
+        set; the row methods (``get``, ``id_for_name``, ``list_all``,
+        ``update``, ``set_group_state``, ``forget_label_file``) take an id or
+        span every workspace and work with none active. Creating and deleting
+        a workspace stay on ``Database`` (``create_workspace`` /
+        ``delete_workspace``) because they also clear the new-images cache.
         """
-        self._workspace_repository(scoped=False).set_group_state(
-            workspace_id, fingerprint, when_ts
-        )
+        return self._workspace_repository()
 
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
-        ws = self.get_workspace(self._ws_id())
+        ws = self.workspaces.get(self._ws_id())
         overrides = {}
         if ws and ws["config_overrides"]:
             try:
@@ -1516,22 +1461,11 @@ class Database:
             if not isinstance(overrides, dict):
                 overrides = {}
         overrides["active_labels"] = labels_files
-        self.update_workspace(self._ws_id(), config_overrides=overrides)
-
-    def forget_label_file(self, labels_file):
-        """Drop a deleted label set from every workspace's selection.
-
-        Deleting a set in Settings removes the file and the global active
-        list, but a workspace override pointing at it used to survive —
-        a selection naming a file that no longer exists, which no
-        checkbox can clear because the UI only lists files it can find.
-        Returns the number of workspaces changed.
-        """
-        return self._workspace_repository(scoped=False).forget_label_file(labels_file)
+        self.workspaces.update(self._ws_id(), config_overrides=overrides)
 
     def delete_workspace(self, workspace_id):
         """Delete a workspace and all its scoped data (cascade)."""
-        self._workspace_repository(scoped=False).delete(workspace_id)
+        self._workspace_repository().delete(workspace_id)
         # Drop any cached new-images payload for this workspace. Without this,
         # if the deleted id is later reused by SQLite for a new workspace,
         # ``get_new_images_for_workspace`` could serve the prior workspace's
@@ -1575,8 +1509,10 @@ class Database:
         """Build the workspace-folder membership repository on this connection.
 
         Every membership method takes its workspace id explicitly, so the
-        repository is not bound to the active workspace; the wrappers that
-        default to it call ``_ws_id()`` themselves.
+        repository is not bound to the active workspace; the façade methods
+        that default to it (``_photo_in_workspace``,
+        ``get_workspace_visible_folder_ids``, ``get_workspace_root_folder_ids``
+        and the like) resolve it themselves.
         """
         from repositories.workspace_folders import WorkspaceFolderRepository
 
@@ -1585,6 +1521,23 @@ class Database:
             path_for_subtree_match=_path_for_subtree_match,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
+
+    @property
+    def workspace_folders(self) -> WorkspaceFolderRepository:
+        """Workspace-folder membership: ``db.workspace_folders.list_workspaces_for_folder(id)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_workspace_folder_repository``, exactly as a
+        forwarding wrapper called at that moment would. Every method takes its
+        workspace id explicitly, so accessing it never needs an active
+        workspace. Membership changes that also walk subtrees, record
+        removals or invalidate the new-images cache (``add_workspace_folder``,
+        ``remove_workspace_folder_tree``, ``get_workspace_folders``, ...)
+        and the reads that default to the active workspace
+        (``_photo_in_workspace``, ``get_workspace_visible_folder_ids``) stay
+        on ``Database``.
+        """
+        return self._workspace_folder_repository()
 
     def _add_workspace_folder_no_commit(
             self, workspace_id, folder_id, *, is_root=True, restore_removed=False):
@@ -1600,14 +1553,15 @@ class Database:
         Internal merges preserve removed descendants unless the caller
         explicitly asks to restore them.
         """
+        repo = self._workspace_folder_repository()
         folder_ids = self._folder_subtree_ids_by_path(folder_id)
         if not restore_removed:
-            removed = self._removed_workspace_folder_ids(workspace_id)
+            removed = repo.removed_ids(workspace_id)
             # The directly imported/scanned folder is intentional. Known
             # descendants need their own scan or explicit add to restore
             # them; registering a parent must not resurrect missing rows.
             folder_ids = [fid for fid in folder_ids if fid == folder_id or fid not in removed]
-        self._workspace_folder_repository().add_no_commit(
+        repo.add_no_commit(
             workspace_id, folder_id, folder_ids,
             is_root=is_root, restore_removed=restore_removed)
 
@@ -1642,19 +1596,12 @@ class Database:
             self._db_path, [workspace_id],
         )
 
-    def _removed_workspace_folder_ids(self, workspace_id):
-        return self._workspace_folder_repository().removed_ids(workspace_id)
-
-    def _folder_removal_root_ids(self, folder_ids):
-        """Find topmost surviving paths without walking every subtree again."""
-        return self._workspace_folder_repository().removal_root_ids(folder_ids)
-
     def _remember_workspace_folder_removals(self, workspace_id, folder_ids, *, recursive=False):
         """Record removals in the caller's unlink/delete transaction."""
+        repo = self._workspace_folder_repository()
         folder_ids = list(folder_ids)
-        roots = self._folder_removal_root_ids(folder_ids) if recursive else set()
-        self._workspace_folder_repository().remember_removals(
-            workspace_id, folder_ids, roots, recursive=recursive)
+        roots = repo.removal_root_ids(folder_ids) if recursive else set()
+        repo.remember_removals(workspace_id, folder_ids, roots, recursive=recursive)
 
     def remove_workspace_folder(self, workspace_id, folder_id):
         """Unlink a single folder from a workspace."""
@@ -1673,28 +1620,6 @@ class Database:
         # backlog. Drop the cached payload so the banner reflects the change.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
-    def get_local_session_folder_ids(self, root_folder_id):
-        """Ids of every folder in the local session rooted at ``root_folder_id``."""
-        return self._workspace_folder_repository().local_session_folder_ids(root_folder_id)
-
-    def unlink_exact_workspace_folders_no_commit(self, workspace_id, folder_ids):
-        """Delete exactly these folders' ``workspace_folders`` rows, uncommitted.
-
-        No subtree walk, removal record, ``workspace_photos`` cleanup or cache
-        invalidation; the caller commits.
-        """
-        self._workspace_folder_repository().unlink_exact_no_commit(workspace_id, folder_ids)
-
-    def transfer_exact_workspace_folders_no_commit(self, source_workspace_id,
-                                                   target_workspace_id, folder_ids):
-        """Move exactly these folder links to ``target_workspace_id`` (non-root), uncommitted.
-
-        No subtree walk or cache invalidation; the caller commits.
-        """
-        self._workspace_folder_repository().transfer_exact_no_commit(
-            source_workspace_id, target_workspace_id, folder_ids,
-        )
-
     def _materialize_workspace_descendants(self, workspace_id):
         """Ensure linked folders include all known path descendants.
 
@@ -1710,15 +1635,11 @@ class Database:
             candidate_ids.update(self._local_source_descendant_ids(root_path))
         if candidate_ids:
             candidate_ids -= repo.linked_ids(workspace_id)
-        candidate_ids -= self._removed_workspace_folder_ids(workspace_id)
+        candidate_ids -= repo.removed_ids(workspace_id)
         if not candidate_ids:
             return
         repo.link_descendants(workspace_id, candidate_ids)
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
-
-    def mark_workspace_folder_roots(self, workspace_id, folder_ids):
-        """Mark specific linked folders as user-facing roots."""
-        self._workspace_folder_repository().mark_roots(workspace_id, folder_ids)
 
     def get_workspace_folders(self, workspace_id):
         """Return all explicit folder links for a workspace.
@@ -1729,16 +1650,6 @@ class Database:
         """
         self._materialize_workspace_descendants(workspace_id)
         return self._workspace_folder_repository().list_folders(workspace_id)
-
-    def get_folder_workspaces(self, folder_id):
-        """Return every workspace in which ``folder_id`` is visible.
-
-        Include direct links plus read-only inheritance from recursive roots.
-        Do not materialize the inferred descendant row: some import and repair
-        paths create deliberately restricted exact non-root links that must not
-        expand merely because the user inspected a folder's memberships.
-        """
-        return self._workspace_folder_repository().list_workspaces_for_folder(folder_id)
 
     def get_workspace_root_folder_ids(self, workspace_id=None):
         """Return just the ids of the workspace's user-facing roots.
@@ -1801,10 +1712,6 @@ class Database:
             workspace_id, folder_id,
         )
 
-    def workspace_has_direct_folder_link(self, workspace_id, folder_id):
-        """True iff ``workspace_id`` has its own ``workspace_folders`` row for the folder."""
-        return self._workspace_folder_repository().has_direct_link(workspace_id, folder_id)
-
     def get_audit_root_paths(self, workspace_id=None):
         """Paths of the active workspace's audit scan roots.
 
@@ -1830,7 +1737,8 @@ class Database:
         ``JPG`` instead of ``.jpg`` or vice versa. Lowercasing here means the
         UI never has to think about case, and storing-side variations
         (``.jpg`` vs ``.JPG`` from older imports) collapse into one option.
-        Empty/NULL extensions are skipped.
+        Empty/NULL extensions are skipped. A RAW+JPEG pair contributes both
+        formats, since the extension rule matches a photo by either file.
 
         Folders whose status is not ``'ok'`` or ``'partial'`` are excluded so
         the dropdown stays consistent with ``_build_collection_query``, which
@@ -1855,9 +1763,9 @@ class Database:
             dict with keys: folders_moved, pending_changes_moved,
             photo_preferences_moved
         """
-        if not self.get_workspace(source_ws_id):
+        if not self.workspaces.get(source_ws_id):
             raise ValueError(f"Source workspace {source_ws_id} not found")
-        if not self.get_workspace(target_ws_id):
+        if not self.workspaces.get(target_ws_id):
             raise ValueError(f"Target workspace {target_ws_id} not found")
         if source_ws_id == target_ws_id:
             raise ValueError("Source and target workspace are the same")
@@ -1930,7 +1838,7 @@ class Database:
 
     def ensure_default_workspace(self):
         """Create the Default workspace if it doesn't exist. Returns its id."""
-        default_id = self._workspace_repository(scoped=False).default_id()
+        default_id = self._workspace_repository().default_id()
         if default_id is not None:
             return default_id
         return self.create_workspace("Default")
@@ -2156,66 +2064,34 @@ class Database:
 
     # -- Library integrity verification --
 
-    def _audit_repository(self, *, scoped=True):
+    def _audit_repository(self):
         """Build the audit repository on this connection.
 
-        ``scoped=True`` binds it to the active workspace (raising
-        ``RuntimeError`` when none is set); the catalog-wide hash-check
-        write passes ``scoped=False`` and takes the photo id as an argument.
+        It receives ``self._ws_id`` uncalled: the audit-run and integrity
+        reads resolve it first thing (raising ``RuntimeError`` when no
+        workspace is active), while the catalog-wide hash-check write takes
+        the photo id as an argument and never resolves it.
         """
         from repositories.audit import AuditRepository
 
         return AuditRepository(
             self.conn,
-            self._ws_id() if scoped else None,
+            self._ws_id,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
-    def record_audit_run(self, check_name, problem_count):
-        """Record that an audit check ran now and what it found.
+    @property
+    def audit(self) -> AuditRepository:
+        """The library-audit domain: ``db.audit.record_run(...)``, ``.update_photo_hash_check(...)``, ...
 
-        One row per (workspace, check); re-running a check overwrites its
-        previous row. The audit summary reads these to decide whether the
-        archive can honestly be called intact.
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_audit_repository``. Accessing it never needs a
+        workspace; ``record_run``, ``get_runs`` and the ``get_integrity_*``
+        reads act on the workspace active when they run and raise
+        ``RuntimeError`` when none is set, and ``update_photo_hash_check``
+        works by photo id with none active.
         """
-        self._audit_repository().record_run(check_name, problem_count)
-
-    def get_audit_runs(self):
-        """Return {check_name: {ran_at, problem_count}} for this workspace."""
-        return self._audit_repository().get_runs()
-
-    def get_integrity_photos(self):
-        """Return workspace photos with the fields hash verification needs."""
-        return self._audit_repository().get_integrity_photos()
-
-    def get_integrity_flagged(self):
-        """Return workspace photos whose last hash check found a problem."""
-        return self._audit_repository().get_integrity_flagged()
-
-    def get_integrity_stats(self):
-        """Return hash-verification coverage for the active workspace.
-
-        ``unchecked`` is load-bearing for the summary banner: photos added
-        after the last verify run have hash_checked_at NULL, so a green
-        light can't silently cover files that were never re-hashed.
-        """
-        return self._audit_repository().get_integrity_stats()
-
-    def update_photo_hash_check(self, photo_id, status, file_hash=None,
-                                commit=True, clear_file_hash=False):
-        """Record a hash-verification verdict for one photo.
-
-        When ``file_hash`` is given the stored baseline is replaced too
-        (first-time baselining, or the user accepting an external edit).
-        Set ``clear_file_hash=True`` to explicitly NULL the stored hash:
-        used for zero-byte files so ``EMPTY_FILE_SHA256`` never lands in
-        the ``file_hash`` column (it would otherwise collide as an exact
-        duplicate of every other empty placeholder).
-        """
-        self._audit_repository(scoped=False).update_photo_hash_check(
-            photo_id, status, file_hash=file_hash, commit=commit,
-            clear_file_hash=clear_file_hash,
-        )
+        return self._audit_repository()
 
     def get_missing_folders(self):
         """Return missing folders in the active workspace with photo counts."""
@@ -2298,7 +2174,7 @@ class Database:
                 # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
                 # in a single IN(...) clause. Stage the ids in a
                 # connection-local temp table and join through that instead.
-                self._stage_scope_ids("missing_subtree_ids", subtree_ids)
+                self.stats.stage_scope_ids("missing_subtree_ids", subtree_ids)
                 subtree_clause = (
                     " AND f.id IN (SELECT id FROM missing_subtree_ids)"
                 )
@@ -2916,7 +2792,7 @@ class Database:
         * ``preserved_off_staging_identities`` — active-workspace subset of
           the above whose survivor is NOT one of the staged photo ids the
           caller captured before the merge. Reported as a list of
-          ``staged_sync_scope`` identity keys (``change_token`` or
+          ``pending_changes.staged_scope`` identity keys (``change_token`` or
           ``("id", id)``) so the caller can filter out edits its pre-transfer
           drain already classified as undeliverable (a flag under
           ``sync_flags_to_xmp`` off) and NOT count them as "queued during
@@ -3063,7 +2939,10 @@ class Database:
         active_ws = self._ws_id()
         if (active_ws is not None
                 and not self.workspace_has_folder_link(folder_id, active_ws)
-                and any(row["id"] == active_ws for row in self.get_folder_workspaces(folder_id))):
+                and any(
+                    row["id"] == active_ws
+                    for row in self._workspace_folder_repository().list_workspaces_for_folder(folder_id)
+                )):
             # Synthetic photo-grant membership cannot authorize a cascade.
             # Preserve catalog cleanup/unlink callers with no visible claim,
             # including physical ancestor aliases protected by foreign links.
@@ -3184,6 +3063,20 @@ class Database:
             self.conn, chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
+    @property
+    def duplicates(self) -> DuplicatesRepository:
+        """The exact-duplicate domain: ``db.duplicates.find_groups()``, ``.reopen(hash)``, ...
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_duplicates_repository``, exactly as a forwarding
+        wrapper called at that moment would. Every method is catalog-wide, so
+        it needs no active workspace. Resolution stays on ``Database``
+        (``apply_duplicate_resolution``, ``bulk_resolve_by_folder``,
+        ``check_and_resolve_duplicates_for_hash``) because it re-tags the
+        winner through ``tag_photo``.
+        """
+        return self._duplicates_repository()
+
     def check_and_resolve_duplicates_for_hash(self, file_hash: str) -> dict | None:
         """Look up non-rejected photos sharing this hash; if >=2, resolve.
 
@@ -3202,58 +3095,6 @@ class Database:
                 "Duplicate auto-resolve failed for hash %s: %s", file_hash, e,
             )
         return None
-
-    def find_duplicate_groups(self, include_resolved=False):
-        """Return duplicate groups for the duplicate-scan job.
-
-        Each group is ``{file_hash, photo_ids: [...], status}`` where
-        ``status`` is either ``'unresolved'`` (2+ non-rejected rows; user
-        action needed to pick a winner) or ``'resolved'`` (exactly one
-        non-rejected row plus one or more rejected rows sharing the hash;
-        the auto-resolver already handled it during scan, but the loser
-        files may still be on disk).
-
-        ``include_resolved=False`` (the default) returns only unresolved
-        groups, preserving the legacy contract for callers that want
-        actionable items. Pass True from the duplicates page to surface
-        already-handled pairs so the user can clean up loser files from
-        disk — those pairs are otherwise invisible.
-
-        ``photo_ids`` includes both the kept and the rejected rows for
-        resolved groups; downstream code disambiguates by re-querying
-        ``flag`` per row.
-        """
-        return self._duplicates_repository().find_groups(
-            include_resolved=include_resolved,
-        )
-
-    def get_live_duplicate_photo_ids(self, file_hash):
-        """Ids of the non-rejected photos with ``file_hash``."""
-        return self._duplicates_repository().live_ids_for_hash(file_hash)
-
-    def get_live_duplicate_paths(self, file_hash):
-        """Rows (``filename``, ``path``) of the non-rejected photos with
-        ``file_hash`` whose folder row exists."""
-        return self._duplicates_repository().live_paths_for_hash(file_hash)
-
-    def get_duplicate_loser_candidates(self, photo_ids):
-        """``{photo_id: row}`` (``id``, ``flag``, ``file_hash``, ``filename``,
-        ``folder_path``) for the named photos that exist."""
-        return self._duplicates_repository().loser_candidate_rows(photo_ids)
-
-    def get_duplicate_loser_disk_summary(self):
-        """Row (``n``, ``total_bytes``) over rejected photos whose hash a
-        non-rejected photo shares."""
-        return self._duplicates_repository().loser_disk_summary()
-
-    def is_duplicate_group_member(self, photo_id):
-        """Whether ``photo_id`` shares its ``file_hash`` with another photo
-        (rejected rows included). Catalog-wide, like the duplicate scan."""
-        return self._duplicates_repository().is_group_member(photo_id)
-
-    def photo_workspace_names(self, photo_ids):
-        """Return ``{photo_id: [names of the workspaces that show it]}``."""
-        return self._duplicates_repository().workspace_names(photo_ids)
 
     def apply_duplicate_resolution(self, photo_ids):
         """Resolve a group of photos sharing a file_hash.
@@ -3396,18 +3237,6 @@ class Database:
             })
 
         return {"resolved": resolved, "skipped": skipped}
-
-    def reopen_duplicate_group(self, file_hash):
-        """Un-reject the rows sharing this file_hash that duplicate
-        resolution rejected (those recorded in ``duplicate_rejections``).
-
-        Used by the duplicate scan when the kept file has gone missing on
-        disk but a rejected sibling still exists — clearing the rejection
-        lets the next proposal pass run Rule 0 and promote the survivor.
-        A row the user rejected by hand stays rejected.
-        Returns the number of rows un-rejected.
-        """
-        return self._duplicates_repository().reopen(file_hash)
 
     # Columns to return in photo list queries (excludes large fields)
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
@@ -3576,57 +3405,6 @@ class Database:
         """
         return self._keyword_repository().count_in_workspace()
 
-    def count_pending_changes(self):
-        """Return pending changes count."""
-        return self._sync_repository().count()
-
-    def staged_sync_scope_by_photos(self, photo_ids):
-        """Photo-id scoped variant of :meth:`staged_sync_scope`.
-
-        Used by the post-transfer residual check for a NAS send: the
-        tracked-merge path in ``send_pending_archive`` reparents each staged
-        photo onto the destination folder id, so a folder-id-scoped re-read
-        would miss any edit queued during the copy and the completed job
-        would falsely claim no metadata missed the transfer. Photo ids
-        survive the reparent, so the caller captures them before the move
-        and passes them here. Return shape matches ``staged_sync_scope``.
-        """
-        return self._sync_repository().staged_scope_by_photos(photo_ids)
-
-    def staged_sync_scope(self, folder_ids):
-        """Return ``(changes, photos_here, photos_elsewhere, photos_here_with_sibling_edits)``.
-
-        ``changes`` is a list of ``(identity, change_id, photo_id)``, where
-        ``identity`` is the row's ``change_token`` -- a uuid assigned at
-        insert. Callers comparing one read against the next must key on it
-        rather than on the id: ``pending_changes.id`` is a bare rowid SQLite
-        re-issues to the next insert, so a change queued right after a sync
-        cleared one can arrive wearing the id that just left, and look to the
-        caller like a row it has already dealt with. The column is nullable
-        with no backfill, so rows predating it fall back to the id and keep
-        exactly the exposure they have always had.
-
-        ``change_ids`` and ``photos_here`` cover the active workspace only,
-        matching what ``sync.sync_to_xmp`` will actually write: the queue is
-        workspace-scoped by design and the ordinary sync job respects that.
-
-        ``photos_elsewhere`` counts photos whose only queued edits belong to
-        another workspace. The sidecar is global to the photo, so those edits
-        are real and this sync will not write them -- the banner has to say so
-        rather than let a number read as "everything is covered".
-
-        ``photos_here_with_sibling_edits`` counts photos in ``photos_here``
-        that *also* have queued edits in a sibling workspace. Those photos are
-        already promised by the "here" number, so they must not double-count
-        into ``photos_elsewhere`` (which would read as extra photos rather
-        than the same photo carrying two workspaces' edits). The overlap is
-        reported separately so the UI can still warn that the sibling's
-        changes on those photos will remain unwritten after the pre-transfer
-        sync -- the sidecar is shared and only the active workspace's edits
-        travel with it.
-        """
-        return self._sync_repository().staged_scope(folder_ids)
-
     # Coverage signals shown on the dashboard. Each entry is a (key, SQL
     # predicate) pair; the predicate references the ``photos`` alias ``p`` and
     # returns 1 when that pipeline stage has run for the row. Detection and
@@ -3657,21 +3435,42 @@ class Database:
         ]
         return ",\n                ".join(parts)
 
-    def _stats_repository(self, *, scoped=True):
+    def _stats_repository(self, *, require_workspace=True):
         """Build the stats repository on this connection.
 
-        ``scoped=True`` binds it to the active workspace (raising
-        ``RuntimeError`` when none is set). ``scoped=False`` serves the
+        It receives ``self._ws_id`` uncalled, and each workspace-scoped read
+        resolves it before running any SQL. ``require_workspace=True`` (the
+        default, used by the coordinated counters below) also resolves it
+        here, so those methods still raise ``RuntimeError`` with no active
+        workspace before they read config or stage a photo scope.
+        ``require_workspace=False`` serves the ``db.stats`` accessor and the
         readers that take an explicit workspace id (the classification
-        inventory) and the temp-table scope staging.
+        inventory).
         """
         from repositories.stats import StatsRepository
 
+        if require_workspace:
+            self._ws_id()
         return StatsRepository(
             self.conn,
-            self._ws_id() if scoped else None,
+            self._ws_id,
             coverage_photo_columns=self._COVERAGE_PHOTO_COLUMNS,
         )
+
+    @property
+    def stats(self) -> StatsRepository:
+        """The dashboard and pipeline-plan counters: ``db.stats.stage_scope_ids(...)``, ...
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_stats_repository``. Accessing it never needs a
+        workspace; the workspace-scoped reads resolve the workspace active
+        when they run and raise ``RuntimeError`` when none is set, while
+        ``stage_scope_ids`` and the readers taking an explicit workspace id
+        (``classification_inventory_counts``, ``sampled_top1_medians``) work
+        with none active. The counters that resolve config or a photo scope
+        first stay on ``Database`` (``count_*``, ``get_coverage_stats``, ...).
+        """
+        return self._stats_repository(require_workspace=False)
 
     def _dashboard_scope_clause(
         self,
@@ -3852,10 +3651,6 @@ class Database:
             return 0
         return self._workspace_folder_repository().unlinked_folder_count(ws, unique)
 
-    def _stage_scope_ids(self, table, ids):
-        """Stage a read scope without opening or committing a caller transaction."""
-        self._stats_repository(scoped=False).stage_scope_ids(table, ids)
-
     def _scope_clause(self, photo_ids, table_alias="p"):
         """Build a (clause, params) pair to scope a query to photo_ids.
 
@@ -3879,7 +3674,7 @@ class Database:
         if len(ids) <= _SQLITE_PARAM_CHUNK_SIZE:
             placeholders = ",".join("?" for _ in ids)
             return f" AND {table_alias}.id IN ({placeholders})", ids
-        self._stage_scope_ids("scope_ids", ids)
+        self.stats.stage_scope_ids("scope_ids", ids)
         return f" AND {table_alias}.id IN (SELECT id FROM scope_ids)", []
 
     def count_real_detections_in_scope(self, photo_ids=None, min_conf=None):
@@ -4100,14 +3895,14 @@ class Database:
                 self._active_workspace_id = saved_active
 
         total_real_detections, pair_rows, pred_counts = (
-            self._stats_repository(scoped=False).classification_inventory_counts(
+            self._stats_repository(require_workspace=False).classification_inventory_counts(
                 workspace_id, min_conf,
             )
         )
 
         # Median top-1 confidence per pair, via a sampled top-1-per-detection set.
         # Bounded by median_sample_per_pair to keep total work small.
-        medians = self._sampled_top1_medians(
+        medians = self.stats.sampled_top1_medians(
             workspace_id, min_conf, median_sample_per_pair,
         )
 
@@ -4133,19 +3928,6 @@ class Database:
             "pairs": pairs,
             "total_predictions_rows": total_pred_rows,
         }
-
-    def _sampled_top1_medians(self, workspace_id, min_conf, sample_per_pair):
-        """Return {(model, fingerprint): (median, sample_size)} from a sampled
-        set of top-1-per-detection prediction confidences.
-
-        SQLite has no built-in median; we pull a per-pair sample (at most
-        ``sample_per_pair`` rows) of the max confidence per (detection, model,
-        fingerprint) tuple and median in Python. Sampling is fine for the UX
-        signal — if classified_dets is small, the sample is the whole set.
-        """
-        return self._stats_repository(scoped=False).sampled_top1_medians(
-            workspace_id, min_conf, sample_per_pair,
-        )
 
     def count_photos_pending_masks(self, photo_ids=None, min_conf=None,
                                    sam2_variant=None):
@@ -4229,7 +4011,7 @@ class Database:
         stored prompt that no longer matches the photo's primary
         detection.
 
-        Reuses the staleness predicate from ``find_stale_masks`` — a
+        Reuses the staleness predicate from ``masks_features.find_stale`` — a
         mask is fresh only when its stored ``(detector_model,
         prompt_xywh)`` equals the selected non-full-image
         detection on the same photo (with optional ``detector_confidence``
@@ -4702,7 +4484,7 @@ class Database:
         """Return whether a ``location`` change is queued for ``photo_id``.
 
         Reads across workspaces for the same reason
-        :meth:`get_pending_keyword_removal_keys` does: photo metadata is
+        ``pending_changes.keyword_removal_keys`` does: photo metadata is
         global even though the sync queue is presented per workspace. Import
         callers use it to decide whether a sidecar's Vireo-written location
         keywords are still current or describe a place the user has already
@@ -4812,47 +4594,6 @@ class Database:
             folder_id, folder_subtree_ids=self.get_folder_subtree_ids,
         )
 
-    def update_photo_rating(self, photo_id, rating, verify_workspace=True):
-        """Set photo rating (0-5).
-
-        Args:
-            verify_workspace: when True (the default), raises ValueError if
-                the photo is not in the active workspace's folders.  Pass
-                False from background jobs that already scope their photo
-                lists, or from undo/redo where the edit history is already
-                workspace-scoped.
-        """
-        self._photo_review_repository().set_rating(
-            photo_id, rating, verify_workspace=verify_workspace
-        )
-
-    def batch_update_photo_rating(self, photo_ids, rating, verify_workspace=True):
-        """Set rating for multiple photos in a single transaction.
-
-        Args:
-            verify_workspace: when True, raises ValueError if any photo is
-                not in the active workspace.
-        """
-        self._photo_review_repository().set_ratings(
-            photo_ids, rating, verify_workspace=verify_workspace
-        )
-
-    def update_photo_flag(self, photo_id, flag, verify_workspace=True, _commit=True):
-        """Set photo flag ('none', 'flagged', 'rejected').
-
-        Args:
-            verify_workspace: when True (the default), raises ValueError if
-                the photo is not in the active workspace's folders.
-            _commit: If False, skip the internal commit (caller is responsible
-                     for committing the transaction). Callers that hold
-                     ``BEGIN IMMEDIATE`` — the prediction decision lock, for
-                     example — must pass False so the writer lock is not
-                     released mid-decision.
-        """
-        self._photo_review_repository().set_flag(
-            photo_id, flag, verify_workspace=verify_workspace, _commit=_commit
-        )
-
     def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True,
                                        _commit=True):
         """Set whether a photo is excluded from wildlife detection/classification.
@@ -4865,25 +4606,6 @@ class Database:
             photo_id, excluded, _commit=_commit,
         )
 
-    def get_wildlife_excluded_states(self, photo_ids):
-        """``{photo_id: 0 or 1}`` for the named photos the active workspace can see.
-
-        Ids that don't exist or sit outside the workspace are absent. Raises
-        ``RuntimeError`` when no workspace is active.
-        """
-        return self._photo_review_repository().wildlife_excluded_states(photo_ids)
-
-    def batch_update_photo_flag(self, photo_ids, flag, verify_workspace=True):
-        """Set flag for multiple photos in a single transaction.
-
-        Args:
-            verify_workspace: when True, raises ValueError if any photo is
-                not in the active workspace.
-        """
-        self._photo_review_repository().set_flags(
-            photo_ids, flag, verify_workspace=verify_workspace
-        )
-
     def _photo_review_repository(self):
         from repositories.photo_review import PhotoReviewRepository
 
@@ -4893,48 +4615,52 @@ class Database:
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
+    @property
+    def photo_review(self) -> PhotoReviewRepository:
+        """Ratings and flags: ``db.photo_review.set_flag(photo_id, "flagged")`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_photo_review_repository``, exactly as a
+        forwarding wrapper called at that moment would, so it carries the
+        workspace active at the access (``None`` when unset; the
+        ``verify_workspace=True`` writes and ``wildlife_excluded_states``
+        raise ``RuntimeError`` then). Do not hold the returned repository
+        across ``set_active_workspace``.
+
+        The wildlife-exclusion toggle stays on ``Database`` as
+        ``update_photo_wildlife_excluded`` because its workspace check is
+        ``_verify_photo_in_workspace``, not the repository's.
+        """
+        return self._photo_review_repository()
+
     from repositories.photo_labels import VALID_COLOR_LABELS
 
-    def set_color_label(self, photo_id, color):
-        """Set a color label for a photo in the active workspace."""
-        self._photo_label_repository().set(photo_id, color)
-
-    def remove_color_label(self, photo_id):
-        """Remove the color label for a photo in the active workspace."""
-        self._photo_label_repository().remove(photo_id)
-
-    def get_color_label(self, photo_id):
-        """Return the color label for a photo in the active workspace, or None."""
-        return self._photo_label_repository().get(photo_id)
-
-    def get_color_labels_for_photos(self, photo_ids):
-        """Return a dict of {photo_id: color} for the active workspace."""
-        return self._photo_label_repository().get_for_photos(photo_ids)
-
-    def filter_photo_ids_in_workspace(self, photo_ids):
-        """Return existing, active-workspace photo IDs in input order."""
-        return self._photo_label_repository().visible_photo_ids(photo_ids)
-
-    def batch_set_color_label(self, photo_ids, color):
-        """Set or remove color label for multiple photos in the active workspace."""
-        self._photo_label_repository().set_many(photo_ids, color)
-
-    def get_color_label_descriptions(self):
-        """Return color-label descriptions for the active workspace."""
-        return self._photo_label_repository().get_descriptions()
-
-    def set_color_label_description(self, color, description):
-        """Set or clear one color-label description in the active workspace."""
-        return self._photo_label_repository().set_description(color, description)
-
     def _photo_label_repository(self):
+        """Build the color-label repository on this connection.
+
+        It receives ``self._ws_id`` uncalled, and every repository method
+        resolves it before doing anything else, so a call with no active
+        workspace raises ``RuntimeError`` where the eager resolution here
+        used to.
+        """
         from repositories.photo_labels import PhotoLabelRepository
 
         return PhotoLabelRepository(
             self.conn,
-            self._ws_id(),
+            self._ws_id,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
+
+    @property
+    def photo_labels(self) -> PhotoLabelRepository:
+        """Workspace color labels: ``db.photo_labels.set(photo_id, "red")`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_photo_label_repository``. Accessing it never
+        needs a workspace; each method reads the one active when it runs.
+        Do not hold the returned repository across ``set_active_workspace``.
+        """
+        return self._photo_label_repository()
 
     def _edits_repository(self):
         """Build the edits repository on this connection.
@@ -4950,15 +4676,27 @@ class Database:
             preset_name_max=self.EDIT_PRESET_NAME_MAX,
         )
 
+    @property
+    def edits(self) -> EditsRepository:
+        """Edit recipes and presets: ``db.edits.get_photo_recipes(ids)``, ``db.edits.list_presets()``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_edits_repository``. The domain is catalog-wide,
+        so it needs no active workspace.
+
+        The single-photo recipe reads and writes stay on ``Database``
+        (``get_photo_edit_recipe``, ``set_photo_edit_recipe``,
+        ``clear_photo_edit_recipe``) because they run the optional
+        active-workspace check first; call those, not the repository methods
+        behind them.
+        """
+        return self._edits_repository()
+
     def get_photo_edit_recipe(self, photo_id, verify_workspace=False):
         """Return the normalized edit recipe dict for a photo, or None."""
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
         return self._edits_repository().get_photo_recipe(photo_id)
-
-    def get_photo_edit_recipes(self, photo_ids):
-        """Return {photo_id: normalized recipe dict} for the given photos."""
-        return self._edits_repository().get_photo_recipes(photo_ids)
 
     def set_photo_edit_recipe(self, photo_id, recipe, verify_workspace=True, _commit=True):
         """Set or clear a non-destructive edit recipe for a photo.
@@ -4982,30 +4720,6 @@ class Database:
     # --- edit presets (global reusable development settings) ----------------------
 
     EDIT_PRESET_NAME_MAX = 80
-
-    def list_edit_presets(self):
-        """Return all edit presets, sorted case-insensitively by name.
-
-        Presets are global (not workspace-scoped): they capture a look, and a
-        look is the same look in every workspace.
-        """
-        return self._edits_repository().list_presets()
-
-    def save_edit_preset(self, name, recipe, fields=None):
-        """Create or overwrite (by trimmed name) a global edit preset.
-
-        Explicit fields retain just the selected settings, including neutral
-        values. Legacy callers keep adjustments-only preset semantics.
-        Raises ValueError (or RecipeError, its subclass) for a blank or
-        overlong name or malformed settings. Legacy calls also require an
-        effective adjustment; explicit fields may store neutral resets.
-        Returns the stored preset dict.
-        """
-        return self._edits_repository().save_preset(name, recipe, fields=fields)
-
-    def delete_edit_preset(self, preset_id):
-        """Delete an edit preset. Returns True if a row was removed."""
-        return self._edits_repository().delete_preset(preset_id)
 
     def prune_pipeline_cache_for_ids(self, ids):
         """Remove ``ids`` from the workspace's pipeline review cache file.
@@ -5135,7 +4849,7 @@ class Database:
         return {"deleted": len(all_ids), "ids": all_ids, "files": files}
 
     # ------------------------------------------------------------------
-    # preview_cache LRU
+    # caches: preview_cache LRU and offline originals (db.caches)
     # ------------------------------------------------------------------
     def _caches_repository(self):
         """Build the preview/offline-original cache repository on this connection.
@@ -5152,117 +4866,18 @@ class Database:
             commit_with_retry=commit_with_retry,
         )
 
-    def preview_cache_insert(self, photo_id, size, bytes_):
-        """Insert or replace a preview_cache entry. last_access_at = now()."""
-        self._caches_repository().preview_insert(photo_id, size, bytes_)
+    @property
+    def caches(self) -> CachesRepository:
+        """The preview-cache and offline-original domain: ``db.caches.preview_get(...)``.
 
-    def preview_cache_touch(self, photo_id, size):
-        """Update last_access_at for an existing entry. No-op if missing."""
-        self._caches_repository().preview_touch(photo_id, size)
-
-    def preview_cache_delete(self, photo_id, size):
-        """Delete a preview_cache entry (caller removes the file)."""
-        self._caches_repository().preview_delete(photo_id, size)
-
-    def preview_cache_entry_count(self):
-        """Number of tracked ordinary plus paired preview entries."""
-        return self._caches_repository().preview_entry_count()
-
-    def preview_cache_average_bytes(self):
-        """Mean size of the non-empty ordinary and paired preview entries, or None."""
-        return self._caches_repository().preview_average_bytes()
-
-    def preview_cache_delete_all_except(self, keep_keys):
-        """Delete every ordinary preview entry except the ``(photo_id, size)``
-        pairs in ``keep_keys``. Does not commit."""
-        self._caches_repository().preview_delete_all_except(keep_keys)
-
-    def preview_cache_total_bytes(self):
-        """Return total bytes tracked across ordinary and paired previews."""
-        return self._caches_repository().preview_total_bytes()
-
-    def preview_cache_oldest_first(self):
-        """Return all rows ordered by last_access_at ascending (oldest first)."""
-        return self._caches_repository().preview_oldest_first()
-
-    def preview_cache_get(self, photo_id, size):
-        """Return the row for (photo_id, size), or None."""
-        return self._caches_repository().preview_get(photo_id, size)
-
-    def is_preview_cache_invalid(self, photo_id, size):
-        """True when ``(photo_id, size)``'s on-disk preview must not be adopted.
-
-        The caller creates ``preview_cache_invalidations`` first
-        (``preview_cache.ensure_preview_cache_invalidations_table``).
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_caches_repository``, exactly as a forwarding
+        wrapper called at that moment would, so the connection and the
+        module's ``execute_with_retry`` / ``commit_with_retry`` (which tests
+        patch) are resolved per use. Do not hold the returned repository
+        across a patch of those helpers or a connection swap.
         """
-        return self._caches_repository().preview_invalidated(photo_id, size)
-
-    def paired_preview_cache_insert(self, photo_id, filename, bytes_):
-        """Register a source-keyed preview in the publisher's transaction."""
-        self._caches_repository().paired_preview_insert(photo_id, filename, bytes_)
-
-    def paired_preview_cache_get(self, filename):
-        return self._caches_repository().paired_preview_get(filename)
-
-    def paired_preview_cache_touch(self, filename):
-        self._caches_repository().paired_preview_touch(filename)
-
-    def paired_preview_cache_oldest_first(self):
-        return self._caches_repository().paired_preview_oldest_first()
-
-    def paired_preview_cache_delete(self, filename):
-        """Delete one paired preview entry (caller removes the file)."""
-        self._caches_repository().paired_preview_delete(filename)
-
-    def preview_cache_delete_entries(self, preview_keys, paired_filenames):
-        """Delete ordinary entries by (photo_id, size) and paired ones by filename."""
-        self._caches_repository().preview_delete_entries(preview_keys, paired_filenames)
-
-    def preview_cache_clear_all(self):
-        """Delete every ordinary and paired preview entry (caller removes the files)."""
-        self._caches_repository().preview_clear_all()
-
-    # ------------------------------------------------------------------
-    # offline original cache
-    # ------------------------------------------------------------------
-    def offline_original_upsert(
-        self,
-        photo_id,
-        original_path,
-        xmp_path,
-        companion_path,
-        bytes_,
-        source_size,
-        source_mtime,
-        cached_at,
-        status,
-        error=None,
-    ):
-        self._caches_repository().offline_original_upsert(
-            photo_id,
-            original_path,
-            xmp_path,
-            companion_path,
-            bytes_,
-            source_size,
-            source_mtime,
-            cached_at,
-            status,
-            error,
-        )
-
-    def offline_original_get(self, photo_id):
-        return self._caches_repository().offline_original_get(photo_id)
-
-    def offline_original_delete(self, photo_id, _commit=True):
-        self._caches_repository().offline_original_delete(photo_id, _commit=_commit)
-
-    def offline_original_total_bytes(self):
-        return self._caches_repository().offline_original_total_bytes()
-
-    def offline_original_cached_count(self):
-        """Number of offline originals with ``status='cached'``."""
-        return self._caches_repository().offline_original_cached_count()
+        return self._caches_repository()
 
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""
@@ -5324,56 +4939,48 @@ class Database:
         """Set ``thumb_path`` to NULL for ``photo_ids`` and commit once."""
         self._photos_repository(scoped=False).clear_thumb_paths(photo_ids)
 
-    def _masks_features_repository(self, *, scoped=True):
+    def _masks_features_repository(self):
         """Build the masks/features repository on this connection.
 
-        Mask, feature and embedding rows are catalog-wide; ``scoped=True``
-        binds the active workspace (raising ``RuntimeError`` when none is
-        set) for the pipeline selectors that read through it.
-        ``commit_with_retry`` is read from this module at call time so tests
-        that patch ``db.commit_with_retry`` still apply.
+        Mask, feature and embedding rows are catalog-wide. The repository
+        receives ``self._ws_id`` uncalled: the workspace-scoped pipeline
+        selectors resolve it (raising ``RuntimeError`` when no workspace is
+        active) before running any SQL, and every other method never
+        resolves it. ``commit_with_retry`` is read from this module at call
+        time so tests that patch ``db.commit_with_retry`` still apply, and
+        the storage cleanup deletes receive ``_safe_remove_mask_file`` (the
+        masks-directory containment check) as ``remove_file``.
         """
         from repositories.masks_features import MasksFeaturesRepository
 
         return MasksFeaturesRepository(
             self.conn,
-            self._ws_id() if scoped else None,
+            self._ws_id,
             commit_with_retry=commit_with_retry,
+            remove_file=self._safe_remove_mask_file,
         )
 
-    def get_photo_mask(self, photo_id, variant):
-        return self._masks_features_repository(scoped=False).get_mask(
-            photo_id, variant,
-        )
+    @property
+    def masks_features(self) -> MasksFeaturesRepository:
+        """SAM masks, pipeline features and embeddings: ``db.masks_features.get_mask(...)``.
 
-    def get_workspace_photo_ids_with_mask_variant(self, variant):
-        """Ids of the active workspace's photos that have a ``variant`` mask row."""
-        return self._masks_features_repository().workspace_photo_ids_with_variant(
-            variant,
-        )
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_masks_features_repository``, exactly as a
+        forwarding wrapper called at that moment would. Accessing it never
+        needs a workspace; the workspace-scoped selectors
+        (``variant_coverage``, ``workspace_photo_ids_with_variant``,
+        ``workspace_mask_candidate_detections``, ``photos_with_embedding``)
+        read the active workspace when they run and raise ``RuntimeError``
+        before any SQL when none is set, while the photo- and variant-keyed
+        reads and writes work in any workspace. Do not hold the returned
+        repository across ``set_active_workspace``.
 
-    def get_photo_pipeline_features(self, photo_id):
-        """One photo's pipeline-feature columns, or None. Not workspace-scoped."""
-        return self._masks_features_repository(scoped=False).pipeline_feature_row(
-            photo_id,
-        )
-
-    def list_masks_for_photo(self, photo_id):
-        return self._masks_features_repository(
-            scoped=False,
-        ).list_masks_for_photo(photo_id)
-
-    def get_active_mask_variant(self, photo_id):
-        """The photo's ``active_mask_variant``, or None (unset or unknown id)."""
-        return self._masks_features_repository(scoped=False).active_variant(photo_id)
-
-    def get_photo_mask_path(self, photo_id):
-        """The photo's denormalized ``mask_path``, or None (unset or unknown id)."""
-        return self._masks_features_repository(scoped=False).photo_mask_path(photo_id)
-
-    def get_photo_mask_state(self, photo_id):
-        """Row (``active_mask_variant``, ``dino_embedding_variant``, ``quality_input_recipe``), or None."""
-        return self._masks_features_repository(scoped=False).photo_mask_state(photo_id)
+        Work that reads the workspace config or the photo scope first stays
+        on ``Database`` (``set_active_mask_variant``, ``delete_stale_masks``,
+        ``sam_variant_rerun_warning``, ``get_photos_missing_masks``,
+        ``list_photos_for_eye_keypoint_stage``, ``upsert_photo_embedding``).
+        """
+        return self._masks_features_repository()
 
     def set_active_mask_variant(self, photo_id, variant, _commit=True, *, weak_rescue_min_conf=None):
         """Mark `variant` as active for `photo_id` and denormalize its
@@ -5389,7 +4996,7 @@ class Database:
         import config as cfg
         effective = self.get_effective_config(cfg.load())
         min_conf = effective.get("detector_confidence", 0.2)
-        self._masks_features_repository(scoped=False).set_active_variant(
+        self._masks_features_repository().set_active_variant(
             photo_id, variant, min_conf, _commit,
             weak_rescue_min_conf=weak_rescue_min_conf,
         )
@@ -5442,71 +5049,18 @@ class Database:
         except OSError:
             log.warning("Failed to remove mask file %s", abs_path)
 
-    def delete_masks_for_variant(self, variant):
-        """Delete all photo_masks rows + files for a variant.
-        Refuses if the variant is active for any photo (caller must
-        switch active first)."""
-        return self._masks_features_repository(scoped=False).delete_for_variant(
-            variant, self._safe_remove_mask_file,
-        )
-
-    def delete_inactive_masks(self):
-        """Delete all photo_masks rows + files except the active variant
-        per photo. Returns the number of rows deleted.
-
-        Photos whose ``active_mask_variant IS NULL`` are skipped entirely
-        (we never delete the only mask we know about). The user must
-        promote a variant to active first via the pipeline page; the
-        sentinel migration variant ``'unknown'`` is set as active for
-        legacy photos, so this is only the partial-state case where a
-        prior pipeline run wrote ``photo_masks`` but crashed before
-        ``set_active_mask_variant`` ran.
-        """
-        return self._masks_features_repository(scoped=False).delete_inactive(
-            self._safe_remove_mask_file,
-        )
-
-    def find_stale_masks(self, detector_confidence=None):
-        """Return masks whose prompts differ from the selected primary.
-
-        Selection uses the same manual-choice, quality, confidence, and ID
-        ordering as extraction. When supplied, ``detector_confidence`` hides
-        boxes below the workspace floor before selection. A mask matching a
-        secondary or now-hidden detection is stale even if its row remains
-        cached for later reuse.
-        """
-        return self._masks_features_repository(scoped=False).find_stale(
-            detector_confidence=detector_confidence,
-        )
-
     def delete_stale_masks(self, detector_confidence=None):
         """Remove rows + files for masks whose prompt no longer matches
         the current primary detection. Skips active variants (caller can
         re-run them through the pipeline instead of dropping the
         currently-displayed mask).
 
-        ``detector_confidence`` is forwarded to :meth:`find_stale_masks`
-        so the deletion set matches the count the storage card shows.
+        ``detector_confidence`` is forwarded to ``find_stale`` so the
+        deletion set matches the count the storage card shows.
         """
-        stale = self.find_stale_masks(detector_confidence=detector_confidence)
-        return self._masks_features_repository(scoped=False).delete_stale(
-            stale, self._safe_remove_mask_file,
-        )
-
-    def mask_variant_coverage(self):
-        """Per-variant photo coverage in the **active workspace**.
-
-        photo_masks rows are global (a single mask file is shared across
-        workspaces), but the pipeline page wants workspace-scoped numbers
-        so a user with a small workspace doesn't see counts dominated by
-        photos they can't see. For each variant present in photo_masks,
-        return the count of distinct workspace photos that have a row for
-        that variant, plus the count of those that also have it active.
-
-        Returns: list of dicts {variant, count, active_count} ordered by
-        variant name. Variants with zero workspace photos are omitted.
-        """
-        return self._masks_features_repository().variant_coverage()
+        repo = self._masks_features_repository()
+        stale = repo.find_stale(detector_confidence=detector_confidence)
+        return repo.delete_stale(stale)
 
     def sam_variant_rerun_warning(
         self,
@@ -5532,6 +5086,9 @@ class Database:
                 "detector_confidence", 0.2,
             )
 
+        # Resolve the workspace before staging the photo scope, as the
+        # eagerly scoped repository did.
+        self._ws_id()
         repo = self._masks_features_repository()
         scope_sql, scope_params = self._scope_clause(photo_ids)
         return repo.sam_variant_rerun_warning(
@@ -5539,98 +5096,6 @@ class Database:
             selected_max_ratio=selected_max_ratio,
             alternate_min_ratio=alternate_min_ratio,
         )
-
-    def mask_variants_summary(self):
-        """Per-variant summary: count, total bytes (best-effort, sums
-        on-disk file sizes), and active_count.
-
-        Returns: list of dicts ordered by variant name.
-        """
-        return self._masks_features_repository(scoped=False).variants_summary()
-
-    def upsert_photo_mask(
-        self, photo_id, variant, path,
-        detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-        subject_size=None, subject_tenengrad=None,
-        bg_tenengrad=None, crop_complete=None, _commit=True,
-        quality_input_recipe=None,
-        subject_clip_high=None, subject_clip_low=None, subject_y_median=None,
-        bg_separation=None, phash_crop=None, noise_estimate=None,
-    ):
-        """Insert or replace a mask row for (photo_id, variant).
-
-        ``_commit=False`` lets a caller include the row in a larger atomic
-        per-photo persistence transaction.
-        """
-        self._masks_features_repository(scoped=False).upsert_mask(
-            photo_id, variant, path,
-            detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-            subject_size=subject_size, subject_tenengrad=subject_tenengrad,
-            bg_tenengrad=bg_tenengrad, crop_complete=crop_complete,
-            _commit=_commit, quality_input_recipe=quality_input_recipe,
-            subject_clip_high=subject_clip_high,
-            subject_clip_low=subject_clip_low,
-            subject_y_median=subject_y_median, bg_separation=bg_separation,
-            phash_crop=phash_crop, noise_estimate=noise_estimate,
-        )
-
-    def save_subject_raw_analysis(self, detection_id, report, _commit=True):
-        """Keep original and corrected measurements together for each detection."""
-        self._masks_features_repository(
-            scoped=False,
-        ).save_subject_raw_analysis(detection_id, report, _commit=_commit)
-
-    def update_photo_pipeline_features(
-        self,
-        photo_id,
-        mask_path=_UNSET,
-        subject_tenengrad=_UNSET,
-        bg_tenengrad=_UNSET,
-        crop_complete=_UNSET,
-        bg_separation=_UNSET,
-        subject_clip_high=_UNSET,
-        subject_clip_low=_UNSET,
-        subject_y_median=_UNSET,
-        phash_crop=_UNSET,
-        noise_estimate=_UNSET,
-        eye_x=_UNSET,
-        eye_y=_UNSET,
-        eye_conf=_UNSET,
-        eye_tenengrad=_UNSET,
-        eye_kp_fingerprint=_UNSET,
-        quality_input_recipe=_UNSET,
-        _commit=True,
-    ):
-        """Update pipeline feature columns for a photo.
-
-        Only updates columns whose values are explicitly provided (not _UNSET).
-        ``_commit=False`` lets a caller include the update in a larger atomic
-        per-photo persistence transaction.
-        """
-        self._masks_features_repository(scoped=False).update_pipeline_features(
-            photo_id,
-            mask_path=mask_path,
-            subject_tenengrad=subject_tenengrad,
-            bg_tenengrad=bg_tenengrad,
-            crop_complete=crop_complete,
-            bg_separation=bg_separation,
-            subject_clip_high=subject_clip_high,
-            subject_clip_low=subject_clip_low,
-            subject_y_median=subject_y_median,
-            phash_crop=phash_crop,
-            noise_estimate=noise_estimate,
-            eye_x=eye_x,
-            eye_y=eye_y,
-            eye_conf=eye_conf,
-            eye_tenengrad=eye_tenengrad,
-            eye_kp_fingerprint=eye_kp_fingerprint,
-            quality_input_recipe=quality_input_recipe,
-            _commit=_commit,
-        )
-
-    def get_workspace_mask_candidate_detections(self, min_conf):
-        """The active workspace's non-``full-image`` detections at ``min_conf``+, primary first per photo."""
-        return self._masks_features_repository().workspace_mask_candidate_detections(min_conf)
 
     def get_photos_missing_masks(self, folder_ids=None):
         """Get photos that have detections but no masks yet.
@@ -5646,6 +5111,9 @@ class Database:
             list of dicts with id, folder_id, filename, detection_box (JSON string), detection_conf
         """
         import config as cfg
+        # Resolve the workspace before reading the config, as the eagerly
+        # scoped repository did.
+        self._ws_id()
         repo = self._masks_features_repository()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -5689,6 +5157,10 @@ class Database:
         """
         import config as cfg
         from pipeline import EYE_KP_FINGERPRINT_VERSION
+        # Resolve the workspace before reading the config or staging the
+        # photo scope (an empty scope returns early), as the eagerly scoped
+        # repository did.
+        self._ws_id()
         repo = self._masks_features_repository()
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
@@ -5701,31 +5173,6 @@ class Database:
         return repo.list_photos_for_eye_keypoint_stage(
             min_conf, extra_where, scope_params,
             eye_kp_fingerprint_version=EYE_KP_FINGERPRINT_VERSION,
-        )
-
-    def update_photo_embeddings(
-        self, photo_id, dino_subject_embedding=None, dino_global_embedding=None,
-        variant=None, _commit=True,
-    ):
-        """Store DINOv2 embedding BLOBs for a photo.
-
-        Args:
-            photo_id: photo ID
-            dino_subject_embedding: bytes (float32 numpy array .tobytes())
-            dino_global_embedding: bytes (float32 numpy array .tobytes())
-            variant: DINOv2 variant name that produced the embeddings
-                (e.g. "vit-b14"). Stored so the pipeline can detect stale
-                embeddings after a variant switch and drop them instead of
-                feeding mismatched-dim vectors to cosine similarity.
-            _commit: commit immediately by default. Set False only when the
-                caller owns a larger transaction and will commit it.
-        """
-        self._masks_features_repository(scoped=False).update_embeddings(
-            photo_id,
-            dino_subject_embedding=dino_subject_embedding,
-            dino_global_embedding=dino_global_embedding,
-            variant=variant,
-            _commit=_commit,
         )
 
     # -- Keywords --
@@ -6676,9 +6123,16 @@ class Database:
 
         return LocalFolderRepository(self.conn)
 
-    def get_local_folder_states(self, root_folder_ids):
-        """``local_folders`` rows (root id, state, timestamps) for these roots, by root id."""
-        return self._local_folder_repository().state_rows(root_folder_ids)
+    @property
+    def local_folders(self) -> LocalFolderRepository:
+        """The folder-level local-copy domain: ``db.local_folders.state_rows(ids)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_local_folder_repository``, exactly as a
+        forwarding wrapper called at that moment would. The domain is
+        catalog-wide, so it needs no active workspace.
+        """
+        return self._local_folder_repository()
 
     def _exif_search_repository(self):
         """Build the (catalog-wide) EXIF search text backfill on this connection."""
@@ -6686,13 +6140,16 @@ class Database:
 
         return ExifSearchRepository(self.conn, commit_with_retry)
 
-    def count_exif_search_unindexed(self):
-        """Photos metadata search cannot prefilter by stored EXIF values yet."""
-        return self._exif_search_repository().count_unindexed()
+    @property
+    def exif_search(self) -> ExifSearchRepository:
+        """The EXIF search-text backfill: ``db.exif_search.index_batch(after_id, limit)``.
 
-    def index_exif_search_batch(self, after_id, limit):
-        """Store search text for the next unindexed photos; see ``ExifSearchRepository``."""
-        return self._exif_search_repository().index_batch(after_id, limit)
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_exif_search_repository``, so the connection and
+        the module's ``commit_with_retry`` are read per use. The domain is
+        catalog-wide, so it needs no active workspace.
+        """
+        return self._exif_search_repository()
 
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.
@@ -8187,12 +7644,6 @@ class Database:
             photo_id, model, labels_fingerprint=labels_fingerprint,
         )
 
-    def get_photo_embedding(self, photo_id, model, variant=''):
-        """Return the embedding blob for (photo_id, model, variant), or None."""
-        return self._masks_features_repository(scoped=False).get_embedding(
-            photo_id, model, variant,
-        )
-
     def upsert_photo_embedding(self, photo_id, model, embedding_bytes,
                                variant='', verify_workspace=False):
         """Store an embedding blob for (photo_id, model, variant).
@@ -8209,21 +7660,8 @@ class Database:
         """
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
-        self._masks_features_repository(scoped=False).upsert_embedding(
+        self._masks_features_repository().upsert_embedding(
             photo_id, model, embedding_bytes, variant,
-        )
-
-    def get_photos_with_embedding(
-        self, model, variant='', photo_ids=None, include_offline_folders=False,
-    ):
-        """Return (photo_id, embedding_blob) pairs in the active workspace
-        with a stored embedding for ``(model, variant)``.
-
-        Pass ``photo_ids`` to restrict the result to a subset.
-        """
-        return self._masks_features_repository().photos_with_embedding(
-            model, variant=variant, photo_ids=photo_ids,
-            include_offline_folders=include_offline_folders,
         )
 
     def clear_prediction_group_info(self, detection_id, model,
@@ -8476,35 +7914,23 @@ class Database:
             commit_with_retry=commit_with_retry,
         )
 
-    def record_detector_run(
-        self,
-        photo_id,
-        detector_model,
-        box_count,
-        runtime_fingerprint="legacy",
-        input_fingerprint=None,
-    ):
-        """Record that `detector_model` was run on `photo_id`.
+    @property
+    def model_runs(self) -> ModelRunsRepository:
+        """Detector and classifier run records: ``db.model_runs.record_detector_run(...)``.
 
-        Global across workspaces — the output is a pure function of (photo, model).
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_model_runs_repository``, exactly as a forwarding
+        wrapper called at that moment would, so the connection and the
+        module's ``commit_with_retry`` (which tests patch) are resolved per
+        use. Every model-run table is catalog-wide, so no method needs an
+        active workspace.
+
+        ``detector_run_is_pinned`` stays on ``Database`` as well: the
+        detection writes receive it as their ``is_pinned`` callback, so a
+        patch of it on ``db`` reaches them. The classify preflight reads that
+        resolve the workspace's detector floor stay there too.
         """
-        self._model_runs_repository().record_detector_run(
-            photo_id,
-            detector_model,
-            box_count,
-            runtime_fingerprint,
-            input_fingerprint,
-        )
-
-    def get_global_detection_stats(self):
-        """Return global (workspace-agnostic) detector-cache counts.
-
-        `detector_runs` is shared across workspaces by design — switching
-        workspaces or bumping a threshold never invalidates these rows —
-        so the settings page surfaces this as a single "N photos x M
-        models cached" figure.
-        """
-        return self._model_runs_repository().get_global_detection_stats()
+        return self._model_runs_repository()
 
     def detector_run_is_pinned(self, photo_id, detector_model):
         """Return whether any workspace manually reviewed this detector output.
@@ -8518,208 +7944,6 @@ class Database:
         return self._model_runs_repository().detector_run_is_pinned(
             photo_id,
             detector_model,
-        )
-
-    def get_detector_run_photo_ids(
-        self, detector_model, runtime_fingerprint=None,
-    ):
-        """Return the set of photo_ids with a consistent cached detector run.
-
-        Includes empty-scene photos (box_count=0) — which is the whole point:
-        without this, we'd re-run the model forever on photos with no animals.
-
-        Excludes torn states where `detector_runs.box_count > 0` but no matching
-        row exists in `detections`. That shape happens when a reclassify pass
-        clears detections (via `clear_detections`) and then the job fails
-        before writing fresh rows (model init error, etc.). Leaving such
-        photos in the skip set would strand them on full-image fallback
-        until the user manually forces another reclassify.
-        """
-        return self._model_runs_repository().get_detector_run_photo_ids(
-            detector_model,
-            runtime_fingerprint,
-        )
-
-    def record_classifier_run(
-        self,
-        detection_id,
-        classifier_model,
-        labels_fingerprint,
-        prediction_count,
-        labels_fingerprint_full=None,
-        runtime_fingerprint="legacy",
-        input_fingerprint=None,
-        input_recipe=None,
-    ):
-        self._model_runs_repository().record_classifier_run(
-            detection_id,
-            classifier_model,
-            labels_fingerprint,
-            prediction_count,
-            labels_fingerprint_full,
-            runtime_fingerprint,
-            input_fingerprint,
-            input_recipe,
-        )
-
-    def record_classifier_match_score(
-        self,
-        detection_id,
-        classifier_model,
-        labels_fingerprint,
-        max_match_score,
-        match_margin=None,
-        top_species=None,
-        label_count=None,
-        score_kind=None,
-    ):
-        """Record how well the best label in a list actually matched.
-
-        Written for every completed run, including runs that produced no
-        prediction at all — unlike ``record_classifier_run``, whose zero-count
-        rows are suppressed because that table gates re-classification. A run
-        that matched nothing is the most informative case here, so suppressing
-        it would defeat the purpose.
-
-        ``max_match_score`` must be the best score over the entire label list,
-        not merely over the predictions that cleared the confidence threshold.
-        """
-        self._model_runs_repository().record_classifier_match_score(
-            detection_id,
-            classifier_model,
-            labels_fingerprint,
-            max_match_score,
-            match_margin,
-            top_species,
-            label_count,
-            score_kind,
-        )
-
-    def has_classifier_match_score(
-        self, detection_id, classifier_model, labels_fingerprint,
-    ):
-        """True when ``classifier_match_scores`` records this exact run.
-
-        A completed classifier run whose every label fell under the
-        confidence floor writes a match-score row but no prediction rows —
-        that outcome ("nothing in your list fits") is exactly what the
-        feature exists to record, and the per-detection cache gate in
-        ``classify_job._classify_photos`` uses this to honor it instead of
-        re-running the model on a stored no-match.
-        """
-        return self._model_runs_repository().has_classifier_match_score(
-            detection_id,
-            classifier_model,
-            labels_fingerprint,
-        )
-
-    def get_unscored_current_prediction_runs(self, photo_id):
-        """Return ``(detection_id, classifier_model)`` pairs displayed without a score.
-
-        A migrated catalog carries predictions from models that ran before
-        ``classifier_match_scores`` existed: those predictions still surface in
-        the panel because ``get_predictions`` pins to their (still latest)
-        ``labels_fingerprint``, but the score table is empty for them. The
-        blanket "no label in this list matches" verdict must not be applied
-        over those rows — the legacy model was never judged.
-
-        Returns one entry per current-fingerprint ``(detection, model)`` pair
-        that has at least one prediction row on the photo but no row in
-        ``classifier_match_scores`` under the same fingerprint. Callers hand
-        these to ``match_confidence.summarize_photo`` so the photo-level
-        rollup can degrade to ``uncalibrated`` rather than declaring every
-        displayed prediction unlisted.
-
-        Not workspace-scoped — ``photo_id`` is assumed already verified by the
-        caller, as the existing per-photo routes do before reaching here.
-        """
-        return self._model_runs_repository().get_unscored_current_prediction_runs(
-            photo_id,
-        )
-
-    def get_match_scores_for_photo(self, photo_id):
-        """Return match-score rows for every detection on one photo.
-
-        Rows are returned for all detections regardless of detector threshold:
-        the caller decides what to show, and a detection hidden by the current
-        threshold is often exactly the one a user is asking about.
-
-        Every run is returned, including ones superseded by a later
-        re-classification against a different label list — the Pipeline
-        Inspector's per-run table deliberately shows the history. Each row is
-        stamped ``is_current`` so the user-facing verdict can be built from the
-        same label set as the predictions on screen: re-running a detection
-        against a second list leaves the first list's row in this table, and a
-        strong match from an abandoned list must not be allowed to certify the
-        weak list that replaced it.
-
-        ``is_current`` follows ``get_predictions``: the latest
-        ``labels_fingerprint`` per ``(detection_id, classifier_model)`` as the
-        predictions table orders it. A run that produced no prediction at all
-        has no row to pin against — and that run is the single most important
-        one here — so it falls back to the most recent match-score row for the
-        same pair.
-
-        Not workspace-scoped — ``photo_id`` is assumed already verified by the
-        caller, as the existing per-photo routes do before reaching here.
-        """
-        return self._model_runs_repository().get_match_scores_for_photo(photo_id)
-
-    def get_current_prediction_detector_confidences(self, photo_id, *, full_image):
-        """Rows (``id``, ``detector_confidence``) of a photo's current-label-set predictions.
-
-        ``full_image=True`` reads the full-image pseudo-detection's, otherwise
-        every real detection's regardless of threshold. Not workspace-scoped.
-        """
-        return self._model_runs_repository().current_prediction_detector_confidences(
-            photo_id, full_image=full_image,
-        )
-
-    def get_classifier_runs_for_photo(self, photo_id, *, full_image):
-        """Rows (``prediction_count``, ``detector_confidence``) of a photo's classifier runs.
-
-        ``full_image=True`` reads the full-image pseudo-detection's runs,
-        otherwise every real detection's regardless of threshold.
-        """
-        return self._model_runs_repository().classifier_runs_for_photo(
-            photo_id, full_image=full_image,
-        )
-
-    def get_classifier_run_keys(self, detection_id, runtime_fingerprint=None):
-        return self._model_runs_repository().get_classifier_run_keys(
-            detection_id,
-            runtime_fingerprint,
-        )
-
-    def get_classifier_run_key_gate(self, detection_id, runtime_fingerprint):
-        """Return ``(accepted, rejected)`` classifier-run key sets for a detection.
-
-        These gates serve normal-image runs. A RAW recipe always requires
-        fresh normal inference, even when a manual decision pins its species.
-
-        ``accepted`` mirrors what ``get_classifier_run_keys(detection_id,
-        runtime_fingerprint=runtime_fingerprint)`` returns — keys whose row
-        the runtime cache gate would honor for this detection.
-
-        ``rejected`` are keys that DO have a classifier_runs row for the
-        detection but whose row would be filtered out by the fingerprint
-        rule (fingerprint mismatch, not ``'legacy'``, and no per-
-        prediction ``prediction_review`` override marks them as still
-        valid). The pipeline uses this set to reconcile the cache-hit
-        preflight — ``count_classifier_runs`` counts every existing row
-        regardless of runtime_fingerprint, so a photo whose only row is
-        rejected here would otherwise sit in ``cached_est`` yet never
-        register as a cache hit or as a fall-through miss, leaving
-        ``_classification_eta_progress`` believing a phantom future cache
-        hit is still coming.
-
-        ``runtime_fingerprint`` must be provided; passing ``None`` would
-        make every row look mismatched, which is not a useful signal
-        (that's the reclassify path, where the gate is bypassed anyway).
-        """
-        return self._model_runs_repository().get_classifier_run_key_gate(
-            detection_id,
-            runtime_fingerprint,
         )
 
     def get_classifier_run_cache_hits(
@@ -8913,33 +8137,6 @@ class Database:
             fresh_processed_photo_ids=fresh_processed_photo_ids,
         )
 
-    def get_labels_fingerprints(self):
-        """Return all rows from the labels_fingerprints sidecar.
-
-        Each row records the (fingerprint, sources, label_count) triple a
-        classify run wrote — single-file runs list one source, merged-set
-        runs list several. Used by the inventory endpoint to identify
-        merged fingerprints that are still current (sources on disk and
-        unchanged) so they don't get marked stale.
-        """
-        return self._model_runs_repository().get_labels_fingerprints()
-
-    def upsert_labels_fingerprint(
-        self,
-        fingerprint,
-        display_name,
-        sources,
-        label_count,
-        full_fingerprint=None,
-    ):
-        self._model_runs_repository().upsert_labels_fingerprint(
-            fingerprint,
-            display_name,
-            sources,
-            label_count,
-            full_fingerprint,
-        )
-
     def get_review_status(self, prediction_id, workspace_id):
         return self._prediction_repository().get_review_status(prediction_id, workspace_id)
 
@@ -8953,7 +8150,7 @@ class Database:
         """Build the detections repository on this connection.
 
         ``detections`` is catalog-wide, so the repository takes no workspace
-        id; the misses wrappers resolve ``_ws_id()`` and the scope clause and
+        id; the misses methods resolve ``_ws_id()`` and the scope clause and
         pass them in, and the readers resolve their confidence floors here.
         """
         from repositories.detections import DetectionsRepository
@@ -8963,6 +8160,25 @@ class Database:
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
             commit_with_retry=commit_with_retry,
         )
+
+    @property
+    def detections(self) -> DetectionsRepository:
+        """Detector output: ``db.detections.get_ids_for_photos(ids)``, ``db.detections.clear(pid)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_detections_repository``, so the connection and
+        the module's ``commit_with_retry`` are read per use. The table is
+        catalog-wide, so the accessor needs no active workspace.
+
+        Work that adds a check, a config lookup or a second step stays on
+        ``Database``: ``save_detections`` / ``write_detection_batch`` (the
+        required-model check and the pinned-run lookup), ``get_detections``,
+        ``get_detections_for_photos`` and ``get_predictions_for_detection``
+        (the effective confidence floors), the misses methods (workspace and
+        filter scope) and ``delete_detections_by_ids`` (the primary-subject
+        re-sync). Call those, not the repository methods behind them.
+        """
+        return self._detections_repository()
 
     def save_detections(
         self,
@@ -8993,23 +8209,6 @@ class Database:
             raise ValueError("detector_model is required")
         return self._detections_repository().save(
             photo_id, detections, detector_model, runtime_fingerprint,
-        )
-
-    def _upsert_detection_rows(
-        self,
-        photo_id,
-        detector_model,
-        detections,
-        runtime_fingerprint="legacy",
-    ):
-        """Content-addressed UPSERT of detection rows for one (photo, model).
-
-        Returns the list of unique IDs in first-seen order. Does NOT commit —
-        the caller controls the transaction so the detector_runs row can be
-        written in the same commit (see `write_detection_batch`).
-        """
-        return self._detections_repository().upsert_rows(
-            photo_id, detector_model, detections, runtime_fingerprint,
         )
 
     def write_detection_batch(
@@ -9071,14 +8270,6 @@ class Database:
             min_conf = effective.get("detector_confidence", 0.2)
         return self._detections_repository().get(photo_id, min_conf, detector_model)
 
-    def get_detection_confidence_summary(self, photo_ids):
-        """Rows (``photo_id``, ``max_conf``, ``n``): each photo's best detector confidence and detection count.
-
-        Over every detector model, with no confidence floor; photos with no
-        detection have no row.
-        """
-        return self._detections_repository().confidence_summary(photo_ids)
-
     def get_detections_for_photos(self, photo_ids, min_conf=None,
                                   detector_model=None):
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
@@ -9133,25 +8324,9 @@ class Database:
             detection_id, min_classifier_conf, classifier_model, labels_fingerprint,
         )
 
-    def clear_detections(self, photo_id, detector_model=None):
-        """Remove detections (and cascaded predictions) for a photo.
-
-        Also clears the matching ``detector_runs`` rows so a subsequent
-        non-reclassify pass actually re-runs MegaDetector. Without this,
-        a reclassify that clears detections but leaves the run key behind
-        (e.g. because model init then failed) would cause future runs to
-        skip detection forever — the gate in ``_detect_subjects`` treats
-        any ``detector_runs`` entry as authoritative.
-
-        Global: no workspace scoping. If `detector_model` is None, all
-        detector models for this photo are cleared; otherwise only the
-        rows for that model.
-        """
-        self._detections_repository().clear(photo_id, detector_model)
-
     def get_existing_detection_photo_ids(self, detector_model="megadetector-v6"):
-        """Back-compat shim — prefer get_detector_run_photo_ids."""
-        return self.get_detector_run_photo_ids(detector_model)
+        """Back-compat shim — prefer ``db.model_runs.get_detector_run_photo_ids``."""
+        return self.model_runs.get_detector_run_photo_ids(detector_model)
 
     def list_misses(self, category=None, since=None, photo_ids=None):
         """Return photos flagged as misses in the active workspace.
@@ -9221,27 +8396,6 @@ class Database:
         scope_clause, scope_params = self._scope_clause(photo_ids)
         return repo.reject_misses(col, ws_id, since, scope_clause, scope_params)
 
-    def get_detection_subject_exposure_ev(self, detection_id):
-        """The subject analysis's ``exposure_ev`` for one detection, or None if unanalysed."""
-        return self._detections_repository().subject_exposure_ev(detection_id)
-
-    def get_detection_ids_for_photos(self, photo_ids):
-        """Return {photo_id: set(detection_id, ...)} for the given photo IDs.
-
-        The detections table is global (no workspace_id). Used to snapshot
-        pre-run detection IDs so that a reclassify pass can delete only the
-        *stale* rows after fresh ones have been inserted, avoiding the
-        cascade-delete that would destroy other-model predictions.
-
-        No threshold filter: the caller needs to see every existing row,
-        including low-confidence ones, so they can all be cleaned up.
-
-        IDs are queried in chunks of at most 900 to stay safely under
-        SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
-        typically 999 in production builds).
-        """
-        return self._detections_repository().get_ids_for_photos(photo_ids)
-
     def delete_detections_by_ids(self, detection_ids):
         """Delete specific detection rows by primary key.
 
@@ -9281,6 +8435,28 @@ class Database:
             self.conn, self._ws_id, chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
         )
 
+    @property
+    def pending_changes(self) -> SyncRepository:
+        """The pending XMP sync queue: ``db.pending_changes.list_all()`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_sync_repository``, exactly as a forwarding
+        wrapper called at that moment would. The repository holds
+        ``self._ws_id`` as a resolver, so the active workspace is still read
+        lazily at the point each method reads it (and raises there when none
+        is set). Do not hold the returned repository across
+        ``set_active_workspace``.
+
+        Coordinated queue work stays on ``Database``: ``queue_change`` (bound
+        by name into the keyword-provenance and location repositories, so a
+        patch of ``Database.queue_change`` reaches them), the claim and token
+        removal with their empty-input guards, ``remove_pending_changes``,
+        ``clear_pending``, ``clear_pending_by_token`` and
+        ``queue_flag_change_if_enabled``. Queue a change through
+        ``db.queue_change``, not ``db.pending_changes.queue``.
+        """
+        return self._sync_repository()
+
     def queue_change(self, photo_id, change_type, value, workspace_id=None, _commit=True):
         """Add a change to the sync queue, skipping redundant intents.
 
@@ -9297,40 +8473,6 @@ class Database:
             photo_id, change_type, value, workspace_id=workspace_id, _commit=_commit,
         )
 
-    def get_pending_changes(self):
-        """Return all pending changes ordered by creation time."""
-        return self._sync_repository().list_all()
-
-    def get_pending_changes_for_review(self, workspace_id):
-        """``workspace_id``'s pending changes, oldest first, each with the
-        photo's ``filename``, ``folder_id`` and ``folder_path``."""
-        return self._sync_repository().list_for_review(workspace_id)
-
-    def get_pending_change_counts(self):
-        """The active workspace's queue totals and per-type counts in one read.
-
-        The first row has ``change_type`` NULL, ``changes`` the queue length
-        and ``photos`` the distinct photo count; each later row is one
-        ``change_type`` with its ``changes`` count.
-        """
-        return self._sync_repository().status_counts()
-
-    def count_photos_with_queued_location_change(self):
-        """Photos in the active workspace's queue with a ``location`` change
-        that carry a location keyword."""
-        return self._sync_repository().count_queued_location_photos()
-
-    def get_pending_changes_by_ids(self, change_ids):
-        """The active workspace's pending rows among ``change_ids``."""
-        return self._sync_repository().get_by_ids(change_ids)
-
-    def delete_workspace_pending_changes(self, workspace_id):
-        """Delete every pending change in ``workspace_id`` and return the rows.
-
-        Does not commit; the caller owns the transaction.
-        """
-        return self._sync_repository().delete_workspace(workspace_id)
-
     def claim_pending_changes_for_sync(self, changes):
         """Mark selected edits as possibly written and return surviving rows.
 
@@ -9344,25 +8486,13 @@ class Database:
             return []
         return self._sync_repository().claim_for_sync(changes)
 
-    def get_pending_keyword_removal_keys(self, photo_id, hierarchical=False):
-        """Return normalized keyword keys awaiting removal for a photo.
-
-        Reads across workspaces because photo metadata is global even though
-        the sync queue is presented per workspace. ``keyword_remove_flat``
-        suppresses flat XMP re-imports only; callers processing hierarchical
-        entries request ``hierarchical=True`` and receive full removals only.
-        """
-        return self._sync_repository().keyword_removal_keys(
-            photo_id, hierarchical=hierarchical,
-        )
-
     def get_embedded_keyword_offered_keys(self, photo_id):
         """Normalized keys the scanner has imported from the image file itself.
 
-        The pending-removal filter above suppresses a value only until the
-        next XMP sync clears the queue entry, but Vireo never writes into
-        image files, so a later full scan or image rewrite re-reads the same
-        embedded value. The scanner records every embedded value it offers to
+        The pending-removal filter (``db.pending_changes.keyword_removal_keys``)
+        suppresses a value only until the next XMP sync clears the queue
+        entry, but Vireo never writes into image files, so a later full scan
+        or image rewrite re-reads the same embedded value. The scanner records every embedded value it offers to
         a photo here so ``_import_embedded_keywords_for_photo`` can filter
         them out on later passes -- a user removal is not silently undone when
         the queued removal has already been synced away.
@@ -9394,12 +8524,6 @@ class Database:
             losing_id, surviving_id,
         )
 
-    def _pending_keyword_sidecar_alias(self, photo_id, workspace_id, value):
-        """Return whether another queued keyword edit reaches this sidecar."""
-        return self._sync_repository().keyword_sidecar_alias(
-            photo_id, workspace_id, value,
-        )
-
     def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
         """Delete matching pending changes, preserving captured keyword intents.
 
@@ -9422,7 +8546,7 @@ class Database:
         inverse = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
         for row in removed:
             if row["change_type"] in inverse and (
-                row["sync_started"] or self._pending_keyword_sidecar_alias(photo_id, ws_id, row["value"])
+                row["sync_started"] or repo.keyword_sidecar_alias(photo_id, ws_id, row["value"])
             ):
                 kind = inverse[row["change_type"]]
                 self.queue_change(photo_id, kind, row["value"], workspace_id=ws_id, _commit=False)
@@ -9476,7 +8600,7 @@ class Database:
             expected_tokens=expected_tokens,
         )
         if synced_changes:
-            self.clear_equivalent_flat_removals(synced_changes, _commit=False)
+            repo.clear_equivalent_flat_removals(synced_changes, _commit=False)
         if _commit:
             repo.commit()
 
@@ -9504,20 +8628,8 @@ class Database:
             clear_equivalent_flat_removals=clear_equivalent_flat_removals,
         )
         if synced_changes:
-            self.clear_equivalent_flat_removals(synced_changes, _commit=False)
+            repo.clear_equivalent_flat_removals(synced_changes, _commit=False)
         repo.commit()
-
-    def get_flat_keyword_removals(self, photo_id, keyword_name):
-        """Queued ``keyword_remove_flat`` rows for a photo's keyword, in every workspace.
-
-        Matched case-insensitively; each row is a ``{"workspace_id",
-        "value"}`` dict.
-        """
-        return self._sync_repository().flat_keyword_removals(photo_id, keyword_name)
-
-    def clear_equivalent_flat_removals(self, changes, _commit=True):
-        """Clear shared-sidecar flat removals represented by ``changes``."""
-        self._sync_repository().clear_equivalent_flat_removals(changes, _commit=_commit)
 
     def queue_flag_change_if_enabled(self, photo_id, flag, workspace_id=None, _commit=True):
         """Queue a flag write when the active config opts into XMP flag sync."""
@@ -9552,23 +8664,48 @@ class Database:
 
     # -- Edit History --
 
-    def _edit_history_repository(self, *, scoped=True):
+    def _edit_history_repository(self):
         """Build the edit-history repository on this connection.
 
-        ``scoped=True`` binds it to the active workspace (raising
-        ``RuntimeError`` when none is set); id-keyed helpers pass
-        ``scoped=False``.
+        It receives ``self._ws_id`` uncalled: the methods that act on the
+        active workspace's history resolve it (raising ``RuntimeError`` when
+        none is set) before running any SQL, while the id-keyed helpers never
+        resolve it. ``_NON_UNDOABLE`` is read here, at build time, so the
+        undo/redo cursor reads skip the same action types the façade does,
+        and the relabel-curation restores receive
+        ``_restore_species_representative`` as their callback.
         """
         from repositories.edit_history import EditHistoryRepository
 
         return EditHistoryRepository(
             self.conn,
-            self._ws_id() if scoped else None,
+            self._ws_id,
+            non_undoable=self._NON_UNDOABLE,
+            restore_species_representative=self._restore_species_representative,
         )
 
-    def get_edit_action_and_new_value(self, edit_id):
-        """Row (``action_type``, ``new_value``) of one edit-history entry, or None."""
-        return self._edit_history_repository(scoped=False).action_and_new_value(edit_id)
+    @property
+    def edit_history(self) -> EditHistoryRepository:
+        """The undo/redo edit history: ``db.edit_history.list_recent()`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_edit_history_repository``, exactly as a
+        forwarding wrapper called at that moment would. Accessing it never
+        needs a workspace; the history listings and the undo/redo cursor
+        reads (``list_recent``, ``recipe_history_for_photo``,
+        ``latest_undoable``, ``count_undoable``, ``oldest_redoable``) read
+        the active workspace when they run and raise ``RuntimeError`` before
+        any SQL when none is set, while the id-keyed reads
+        (``action_and_new_value``, ``item_photo_ids``, ``has_changed_items``,
+        ``keyword_name``) work in any workspace. Do not hold the returned
+        repository across ``set_active_workspace``.
+
+        Recording an edit (``record_edit``, which prunes after a committed
+        record), undo and redo, and their replay handlers stay on
+        ``Database``, and so does ``_prediction_scope``, which the
+        prediction-review replay receives as a callback.
+        """
+        return self._edit_history_repository()
 
     def record_edit(self, action_type, description, new_value, items, is_batch=False, _commit=True):
         """Record an edit action with per-photo before/after values.
@@ -9587,41 +8724,6 @@ class Database:
         if _commit:
             self._prune_edit_history()
         return edit_id
-
-    def get_edit_history(self, limit=50, offset=0):
-        """Return recent edit history entries (most recent first) with item counts."""
-        return self._edit_history_repository().list_recent(limit, offset)
-
-    def get_photo_edit_recipe_history(self, photo_id, limit):
-        """The workspace's ``edit_recipe`` history items for one photo, newest first.
-
-        Rows carry ``id``, ``description``, ``created_at``, ``undone``,
-        ``old_value`` and ``new_value``; undone edits are included. Raises
-        ``RuntimeError`` when no workspace is active.
-        """
-        return self._edit_history_repository().recipe_history_for_photo(photo_id, limit)
-
-    def get_next_undo_summary(self):
-        """``id`` and ``description`` of the edit undo would reverse next, or None."""
-        return self._edit_history_repository().latest_undoable(self._NON_UNDOABLE)
-
-    def count_undoable_edits(self):
-        """How many of the active workspace's edits undo can still reverse."""
-        return self._edit_history_repository().count_undoable(self._NON_UNDOABLE)
-
-    def get_next_redo_summary(self):
-        """``id`` and ``description`` of the edit redo would replay next, or None."""
-        return self._edit_history_repository().oldest_redoable(self._NON_UNDOABLE)
-
-    def get_edit_item_photo_ids(self, edit_id, *, distinct=False):
-        """The ``photo_id`` of each of an edit's items; ``distinct=True`` drops repeats."""
-        return self._edit_history_repository(scoped=False).item_photo_ids(
-            edit_id, distinct=distinct,
-        )
-
-    def edit_has_changed_items(self, edit_id):
-        """Whether any of an edit's items changed its value."""
-        return self._edit_history_repository(scoped=False).has_changed_items(edit_id)
 
     # Action types that appear in history but cannot be reversed
     _NON_UNDOABLE = (
@@ -9649,11 +8751,11 @@ class Database:
         names the edit it will actually reverse. Retirement commits on its own;
         valid combined photo/group edits retain the writer lock until complete.
         """
-        found = self._edit_history_repository().next_undo(self._NON_UNDOABLE)
+        found = self._edit_history_repository().next_undo()
         if not found:
             return None
         entry, items = found
-        history = self._edit_history_repository(scoped=False)
+        history = self._edit_history_repository()
 
         if entry['action_type'] == 'pipeline_grouping':
             from services.grouping_history import (
@@ -9667,7 +8769,7 @@ class Database:
                     apply_grouping_photo_edit(self, entry, items, undo=True)
                     history.mark_undone(entry['id'])
             except GroupingHistoryStale:
-                self._retire_stale_grouping_entry(entry['id'])
+                history.retire_stale_grouping_entry(entry['id'])
                 history.commit()
                 raise GroupingHistoryStale(
                     'That grouping or species action was superseded by newer analysis. '
@@ -9683,7 +8785,7 @@ class Database:
                 with restore_species_confirm_cache_edit(self, entry, undo=True):
                     history.mark_undone(entry['id'])
             except GroupingHistoryStale:
-                self._retire_stale_grouping_entry(entry['id'])
+                history.retire_stale_grouping_entry(entry['id'])
                 history.commit()
                 raise GroupingHistoryStale(
                     'That grouping or species action was superseded by newer analysis. '
@@ -9702,11 +8804,11 @@ class Database:
         correctly. Stale cache-linked actions are retired and reported without
         replaying another entry, just as in ``undo_last_edit``.
         """
-        found = self._edit_history_repository().next_redo(self._NON_UNDOABLE)
+        found = self._edit_history_repository().next_redo()
         if not found:
             return None
         entry, items = found
-        history = self._edit_history_repository(scoped=False)
+        history = self._edit_history_repository()
 
         if entry['action_type'] == 'pipeline_grouping':
             from services.grouping_history import (
@@ -9720,7 +8822,7 @@ class Database:
                     apply_grouping_photo_edit(self, entry, items, undo=False)
                     history.mark_redone(entry['id'])
             except GroupingHistoryStale:
-                self._retire_stale_grouping_entry(entry['id'])
+                history.retire_stale_grouping_entry(entry['id'])
                 history.commit()
                 raise GroupingHistoryStale(
                     'That grouping or species action was superseded by newer analysis. '
@@ -9736,7 +8838,7 @@ class Database:
                 with restore_species_confirm_cache_edit(self, entry, undo=False):
                     history.mark_redone(entry['id'])
             except GroupingHistoryStale:
-                self._retire_stale_grouping_entry(entry['id'])
+                history.retire_stale_grouping_entry(entry['id'])
                 history.commit()
                 raise GroupingHistoryStale(
                     'That grouping or species action was superseded by newer analysis. '
@@ -9777,14 +8879,6 @@ class Database:
         if not conn._commit_holds:
             conn.commit()
 
-    def _retire_stale_grouping_entry(self, entry_id):
-        """Retire stale cache state while retaining any reversible photo edit.
-
-        The caller commits this retirement and reports it to the user before
-        another action can run. This helper never applies a photo change.
-        """
-        self._edit_history_repository(scoped=False).retire_stale_grouping_entry(entry_id)
-
     # ------------------------------------------------------------------
     # Undo / redo
     #
@@ -9820,7 +8914,7 @@ class Database:
 
     def _edit_set_flag(self, pid, value):
         # Edit history is already workspace-scoped; skip re-verification
-        self.update_photo_flag(pid, value, verify_workspace=False)
+        self.photo_review.set_flag(pid, value, verify_workspace=False)
         self.queue_flag_change_if_enabled(pid, value)
 
     def _edit_set_wildlife_excluded(self, pid, value):
@@ -9830,9 +8924,9 @@ class Database:
 
     def _edit_set_color_label(self, pid, value):
         if value:
-            self.set_color_label(pid, value)
+            self.photo_labels.set(pid, value)
         else:
-            self.remove_color_label(pid)
+            self.photo_labels.remove(pid)
 
     def _edit_set_edit_recipe(self, pid, value):
         self.set_photo_edit_recipe(
@@ -9843,14 +8937,14 @@ class Database:
 
     def _undo_rating(self, entry, item):
         pid, old_val = item['photo_id'], item['old_value']
-        self.update_photo_rating(pid, int(old_val), verify_workspace=False)
+        self.photo_review.set_rating(pid, int(old_val), verify_workspace=False)
         if old_val != entry['new_value']:
             self.remove_pending_changes(pid, 'rating', entry['new_value'])
             self.queue_change(pid, 'rating', old_val)
 
     def _redo_rating(self, entry, item):
         pid, old_val, new_val = item['photo_id'], item['old_value'], item['new_value']
-        self.update_photo_rating(
+        self.photo_review.set_rating(
             pid, int(new_val) if new_val else 0, verify_workspace=False,
         )
         if old_val != new_val:
@@ -9858,9 +8952,6 @@ class Database:
             self.queue_change(pid, 'rating', new_val)
 
     # -- keyword helpers shared by the keyword / species handlers ----------
-
-    def _keyword_name(self, keyword_id):
-        return self._edit_history_repository(scoped=False).keyword_name(keyword_id)
 
     def _flip_pending_keyword_change(self, pid, name, cancel_type, queue_type):
         """Reverse one side of the pending-sidecar queue for a keyword.
@@ -9877,7 +8968,7 @@ class Database:
 
     def _retag_for_edit(self, pid, keyword_id):
         """Re-add a keyword removed by an edit; returns the keyword name."""
-        name = self._keyword_name(keyword_id)
+        name = self._edit_history_repository().keyword_name(keyword_id)
         if name is None:
             # Deleting a keyword deliberately retires it. Old history must
             # not recreate it or strand the history cursor on a foreign key.
@@ -9894,7 +8985,7 @@ class Database:
     def _untag_for_edit(self, pid, keyword_id):
         """Remove a keyword added by an edit; returns the keyword name."""
         self.untag_photo(pid, keyword_id)
-        name = self._keyword_name(keyword_id)
+        name = self._edit_history_repository().keyword_name(keyword_id)
         if name:
             self._flip_pending_keyword_change(
                 pid, name, 'keyword_add', 'keyword_remove',
@@ -9903,7 +8994,7 @@ class Database:
 
     def _prediction_scope(self, pred_id):
         """``(detection_id, classifier_model, labels_fingerprint)`` or None."""
-        return self._edit_history_repository(scoped=False).prediction_scope(pred_id)
+        return self._edit_history_repository().prediction_scope(pred_id)
 
     # -- keyword_remove ---------------------------------------------------
 
@@ -9940,7 +9031,7 @@ class Database:
         raw_kid = (item['new_value'] if action == 'prediction_accept' else None) or entry['new_value']
         # A no-tag accept (a species-less burst pick) records no keyword.
         kid = int(raw_kid) if raw_kid or not skip_tag else None
-        kw_name = self._keyword_name(kid) if kid is not None else None
+        kw_name = self._edit_history_repository().keyword_name(kid) if kid is not None else None
         if not skip_tag:
             if action == 'prediction_accept' and (
                 not old_val or old_meta.get('keyword_only') or old_meta.get('symmetric_keyword_queue')
@@ -9952,7 +9043,7 @@ class Database:
                 for removal in old_meta.get('flat_removals', []):
                     # A shared workspace can be deleted between the edit and
                     # undo. Restore only records whose workspace still exists.
-                    if self._edit_history_repository(scoped=False).workspace_exists(
+                    if self._edit_history_repository().workspace_exists(
                         removal['workspace_id'],
                     ):
                         self.queue_change(
@@ -9966,7 +9057,7 @@ class Database:
         if action == 'keyword_add':
             self._restore_edit_prediction_status(old_meta)
             if kw_name:
-                self._restore_relabel_curation(
+                self._edit_history_repository().restore_relabel_curation(
                     entry['workspace_id'], pid, kw_name,
                     old_meta.get('curation'),
                 )
@@ -9981,7 +9072,7 @@ class Database:
         raw_kid = (item['new_value'] if action == 'prediction_accept' else None) or entry['new_value']
         # A no-tag accept (a species-less burst pick) records no keyword.
         kid = int(raw_kid) if raw_kid or not skip_tag else None
-        kw_name = self._keyword_name(kid) if kid is not None else None
+        kw_name = self._edit_history_repository().keyword_name(kid) if kid is not None else None
         if not skip_tag:
             if action == 'prediction_accept' and (
                 not old_val or old_meta.get('keyword_only') or old_meta.get('symmetric_keyword_queue')
@@ -9998,7 +9089,7 @@ class Database:
         if action == 'keyword_add':
             self._reject_edit_prediction(old_meta)
             if kw_name:
-                self._reapply_relabel_curation(
+                self._edit_history_repository().reapply_relabel_curation(
                     entry['workspace_id'], pid, kw_name,
                     old_meta.get('curation'),
                 )
@@ -10056,6 +9147,7 @@ class Database:
         if not pred_ids:
             return
         # Resolve the active workspace up front, before any status write.
+        self._ws_id()
         history = self._edit_history_repository()
         accepted_by_scope = {}
         for pred_id in pred_ids:
@@ -10098,7 +9190,7 @@ class Database:
         for old_kid in old_meta.get("keyword_ids") or []:
             self._retag_for_edit(pid, old_kid)
         if new_kw_name:
-            self._restore_relabel_curation(
+            self._edit_history_repository().restore_relabel_curation(
                 entry['workspace_id'], pid, new_kw_name,
                 old_meta.get('curation'),
             )
@@ -10112,7 +9204,7 @@ class Database:
             self._untag_for_edit(pid, old_kid)
         new_kw_name = self._retag_for_edit(pid, new_kid) if new_kid else None
         if new_kw_name:
-            self._reapply_relabel_curation(
+            self._edit_history_repository().reapply_relabel_curation(
                 entry['workspace_id'], pid, new_kw_name,
                 old_meta.get('curation'),
             )
@@ -10138,40 +9230,6 @@ class Database:
         'keyword_remove': _redo_keyword_remove,
         'species_replace': _redo_species_replace,
     }
-
-    def _restore_relabel_curation(
-        self, workspace_id, photo_id, new_species, curation,
-    ):
-        """Undo the curation migration performed by ``api_highlights_relabel``.
-
-        For each ``species_highlights`` row the relabel moved from an old
-        species bucket to ``new_species``, delete the row at ``new_species``
-        and re-insert it at the end of the old bucket (unless the photo
-        already appears there). For each ``photo_preferences`` row moved
-        by the relabel, delete the row at ``(new_species, purpose)`` and
-        re-insert it at ``(old_species, purpose)``. For each rep-only
-        ``species_representatives`` row moved with no matching
-        ``photo_preferences`` row, delete the row at ``new_species`` and
-        re-insert it at ``old_species``. Best-effort: if the target row no
-        longer exists (state has changed since the relabel), the
-        corresponding restore is a no-op.
-        """
-        self._edit_history_repository(scoped=False).restore_relabel_curation(
-            workspace_id, photo_id, new_species, curation,
-            restore_species_representative=self._restore_species_representative,
-        )
-
-    def _reapply_relabel_curation(
-        self, workspace_id, photo_id, new_species, curation,
-    ):
-        """Redo the curation migration reversed by
-        :meth:`_restore_relabel_curation`. Moves rows from each recorded
-        old species back onto ``new_species``.
-        """
-        self._edit_history_repository(scoped=False).reapply_relabel_curation(
-            workspace_id, photo_id, new_species, curation,
-            restore_species_representative=self._restore_species_representative,
-        )
 
     def _edit_old_value_meta(self, old_value):
         """Parse edit item old_value, including newer JSON metadata payloads."""
@@ -10392,14 +9450,6 @@ class Database:
         collection isn't in the active workspace.
         """
         return self._collection_repository().duplicate(collection_id)
-
-    def create_new_images_snapshot(self, file_paths):
-        """Persist a snapshot of new-image file paths for the active workspace.
-
-        Returns the new snapshot id. An empty path list is allowed — the caller
-        decides how to handle zero-file snapshots (the pipeline short-circuits).
-        """
-        return self._workspace_repository().create_new_images_snapshot(file_paths)
 
     def get_new_images_snapshot(self, snapshot_id):
         """Return snapshot metadata + file paths, or None if not found / cross-workspace.
@@ -11256,7 +10306,6 @@ class Database:
         "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
         "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
         "lens": ("MIN(p.lens)", "LOWER(p.lens)"),
-        "extension": ("LOWER(p.extension)", "LOWER(p.extension)"),
     }
 
     def get_filter_field_values(self, field, rules=None, q=None, limit=20,
@@ -11380,26 +10429,26 @@ class Database:
 
     def create_default_collections_for_all_workspaces(self):
         """Create missing default smart collections in every workspace."""
-        for ws in self.get_workspaces():
+        for ws in self.workspaces.list_all():
             self.create_default_collections(workspace_id=ws["id"])
 
     # ------ iNaturalist submissions ------
-
-    def record_inat_submission(self, photo_id, observation_id, observation_url):
-        """Record a successful iNaturalist submission."""
-        self._inat_repository().record_submission(
-            photo_id, observation_id, observation_url
-        )
-
-    def get_inat_submissions(self, photo_ids):
-        """Return {photo_id: {observation_id, observation_url, submitted_at}} for given IDs."""
-        return self._inat_repository().get_submissions(photo_ids)
 
     def _inat_repository(self):
         """Build the (catalog-wide) iNaturalist repository on this connection."""
         from repositories.inat import InatRepository
 
         return InatRepository(self.conn, chunk_size=_SQLITE_PARAM_CHUNK_SIZE)
+
+    @property
+    def inat(self) -> InatRepository:
+        """The iNaturalist submission records: ``db.inat.record_submission(...)``, ``.get_submissions(ids)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_inat_repository``. Submissions are keyed by
+        photo, so it needs no active workspace.
+        """
+        return self._inat_repository()
 
     # -- Job history (``JobRunner`` owns the table and its own writes) --
 
@@ -11409,49 +10458,40 @@ class Database:
 
         return JobHistoryRepository(self.conn)
 
-    def get_last_completed_job(self, job_type):
-        """Newest completed ``job_type`` job that stored a result, or None.
+    @property
+    def job_history(self) -> JobHistoryRepository:
+        """The job-history domain: ``db.job_history.get(job_id)`` and friends.
 
-        A row (``id``, ``started_at``, ``finished_at``, raw ``result`` JSON).
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_job_history_repository``, exactly as a forwarding
+        wrapper called at that moment would, so the connection and any
+        workspace scoping are resolved per use. Do not hold the returned
+        repository across ``set_active_workspace``.
         """
-        return self._job_history_repository().last_completed_with_result(job_type)
-
-    def get_job_history_row(self, job_id):
-        """The full ``job_history`` row for ``job_id`` (any workspace), or None."""
-        return self._job_history_repository().get(job_id)
-
-    def set_job_history_result(self, job_id, result_json):
-        """Replace a ``job_history`` row's ``result`` JSON and commit."""
-        self._job_history_repository().set_result(job_id, result_json)
+        return self._job_history_repository()
 
     # -- Pending NAS transfers --
 
-    def _pending_archive_repository(self, *, scoped=True):
+    def _pending_archive_repository(self):
         """Build the pending-NAS-transfer repository on this connection.
 
-        ``scoped=True`` binds it to the active workspace (raising
-        ``RuntimeError`` when none is set); ``set_pending_archive_state``
-        addresses a transfer by its unique id and passes ``scoped=False``.
+        It receives ``self._ws_id`` uncalled: the workspace-scoped listing and
+        discard resolve it (raising ``RuntimeError`` when no workspace is
+        active) before running any SQL, while ``set_state`` addresses a
+        transfer by its unique id and never resolves it.
         """
         from repositories.pending_archives import PendingArchiveRepository
 
-        return PendingArchiveRepository(
-            self.conn, self._ws_id() if scoped else None,
-        )
+        return PendingArchiveRepository(self.conn, self._ws_id)
 
-    def get_open_pending_archives(self):
-        """The active workspace's transfers not yet ``complete``, oldest first.
+    @property
+    def pending_archives(self) -> PendingArchiveRepository:
+        """The pending-NAS-transfer domain: ``db.pending_archives.delete(id)`` and friends.
 
-        Each row carries every ``pending_archives`` column plus
-        ``review_collection_id`` and ``collection_name`` (NULL when the
-        import's review collection is gone).
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_pending_archive_repository``. Accessing it never
+        needs a workspace; ``open_with_review_collection`` and ``delete`` are
+        scoped to the active workspace and raise ``RuntimeError`` when none is
+        set, and ``set_state`` works by id in any workspace.
         """
-        return self._pending_archive_repository().open_with_review_collection()
-
-    def delete_pending_archive(self, archive_id):
-        """Forget one of the active workspace's transfers (the row only) and commit."""
-        self._pending_archive_repository().delete(archive_id)
-
-    def set_pending_archive_state(self, archive_id, state, error=""):
-        """Set a transfer's ``state`` and ``error`` by id, in any workspace, and commit."""
-        self._pending_archive_repository(scoped=False).set_state(archive_id, state, error)
+        return self._pending_archive_repository()

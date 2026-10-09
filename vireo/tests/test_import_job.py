@@ -2347,8 +2347,10 @@ def test_dup_workspace_link_failure_marks_unsafe(tmp_path, monkeypatch):
     def flaky_link(self, workspace_id, rows):
         raise OSError("simulated photo visibility write failure")
 
-    monkeypatch.setattr(Database, "grant_verified_twin_photos", flaky_link)
-    monkeypatch.setattr(Database, "grant_verified_twin_photos_tracked", flaky_link)
+    from repositories.photo_visibility import PhotoVisibilityRepository
+
+    monkeypatch.setattr(PhotoVisibilityRepository, "grant_verified_twins", flaky_link)
+    monkeypatch.setattr(PhotoVisibilityRepository, "grant_verified_twins_tracked", flaky_link)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,
@@ -2409,8 +2411,10 @@ def test_dup_workspace_link_runtime_error_marks_unsafe(
     def flaky_link(self, workspace_id, rows):
         raise OSError("simulated photo visibility write failure")
 
-    monkeypatch.setattr(Database, "grant_verified_twin_photos", flaky_link)
-    monkeypatch.setattr(Database, "grant_verified_twin_photos_tracked", flaky_link)
+    from repositories.photo_visibility import PhotoVisibilityRepository
+
+    monkeypatch.setattr(PhotoVisibilityRepository, "grant_verified_twins", flaky_link)
+    monkeypatch.setattr(PhotoVisibilityRepository, "grant_verified_twins_tracked", flaky_link)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,

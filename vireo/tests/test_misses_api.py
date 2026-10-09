@@ -140,9 +140,9 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
             "value": [ids["no_subject"], ids["clipped"]],
         }]),
     )
-    db.update_photo_rating(ids["no_subject"], 2)
-    db.update_photo_rating(ids["clipped"], 5)
-    db.set_color_label(ids["clipped"], "red")
+    db.photo_review.set_rating(ids["no_subject"], 2)
+    db.photo_review.set_rating(ids["clipped"], 5)
+    db.photo_labels.set(ids["clipped"], "red")
     keyword_id = db.add_keyword("keeper")
     db.tag_photo(ids["clipped"], keyword_id)
 
@@ -159,8 +159,8 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
 
 def test_api_misses_accepts_universal_filter_rules(client, db_with_misses):
     _, db, ids = db_with_misses
-    db.update_photo_rating(ids["no_subject"], 2)
-    db.update_photo_rating(ids["clipped"], 5)
+    db.photo_review.set_rating(ids["no_subject"], 2)
+    db.photo_review.set_rating(ids["clipped"], 5)
     rules = {
         "mode": "all",
         "rules": [
@@ -611,7 +611,7 @@ def test_api_misses_recompute_preserves_custom_derived_thresholds(
     import config as cfg
 
     _, db, _ = db_with_misses
-    db.update_workspace(db._active_workspace_id, config_overrides={
+    db.workspaces.update(db._active_workspace_id, config_overrides={
         "pipeline": {
             "miss_det_confidence": 0.4,
             "miss_det_confidence_burst": 0.05,
@@ -650,7 +650,7 @@ def test_api_bulk_reject_records_edit_history(client, db_with_misses):
     assert r.status_code == 200
     assert r.get_json()["rejected"] == 1
 
-    history = db.get_edit_history(limit=5, offset=0)
+    history = db.edit_history.list_recent(limit=5, offset=0)
     assert history, "bulk reject did not record an edit_history entry"
     entry = history[0]
     assert entry["action_type"] == "flag"
@@ -699,7 +699,7 @@ def test_api_bulk_reject_undo_restores_original_null_flag(client, db_with_misses
         c["photo_id"] == pid
         and c["change_type"] == "flag"
         and c["value"] == "none"
-        for c in db.get_pending_changes()
+        for c in db.pending_changes.list_all()
     )
 
 
@@ -707,7 +707,7 @@ def test_api_bulk_reject_no_matches_skips_edit_history(client, db_with_misses):
     """If nothing matches (empty category), no edit_history entry is written —
     avoids cluttering the undo log with no-op rows."""
     _, db, _ = db_with_misses
-    before = len(db.get_edit_history(limit=50, offset=0))
+    before = len(db.edit_history.list_recent(limit=50, offset=0))
     r = client.post(
         "/api/misses/reject",
         data=json.dumps({"category": "clipped",
@@ -716,7 +716,7 @@ def test_api_bulk_reject_no_matches_skips_edit_history(client, db_with_misses):
     )
     assert r.status_code == 200
     assert r.get_json()["rejected"] == 0
-    after = len(db.get_edit_history(limit=50, offset=0))
+    after = len(db.edit_history.list_recent(limit=50, offset=0))
     assert before == after
 
 

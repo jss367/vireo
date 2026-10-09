@@ -156,6 +156,8 @@ def create_system_blueprint(
         """Reveal a photo or folder in the OS file manager.
 
         Body: {"photo_id": <int>} OR {"folder_id": <int>}
+        Photo requests with "scope": "duplicates" use catalog-wide duplicate
+        membership instead of workspace visibility, like duplicate thumbnails.
 
         Photo reveals select the file in its parent directory (macOS ``open
         -R``, Windows ``explorer /select,``, Linux ``xdg-open <parent dir>``).
@@ -184,11 +186,12 @@ def create_system_blueprint(
                 pid_int = int(pid_raw)
             except (TypeError, ValueError):
                 return json_error("photo_id must be an integer")
-            # verify_workspace=True enforces that the photo's folder is
-            # linked to the active workspace — otherwise this endpoint would
-            # expose absolute filesystem paths for photos hidden from the
-            # current workspace.
-            photo = db.get_photo(pid_int, verify_workspace=True)
+            # Duplicate results are library-wide. Match their thumbnail
+            # membership guard without allowing arbitrary hidden photos.
+            duplicate_scope = body.get("scope") == "duplicates"
+            if duplicate_scope and not db.duplicates.is_group_member(pid_int):
+                return json_error("photo not found", 404)
+            photo = db.get_photo(pid_int, verify_workspace=not duplicate_scope)
             if not photo:
                 return json_error("photo not found", 404)
             folder_row = db.get_folder(photo["folder_id"])
@@ -582,7 +585,7 @@ def create_system_blueprint(
                 "missing_folder_count": len(db.get_missing_folders()),
                 "folder_count": db.count_folders(),
                 "keyword_count": db.count_keywords_in_workspace(),
-                "pending_changes": db.count_pending_changes(),
+                "pending_changes": db.pending_changes.count(),
                 "db_size": db_size,
                 "thumb_cache_size": thumb_size,
             }
@@ -647,7 +650,8 @@ def create_system_blueprint(
         db = None
         try:
             db = get_db()
-            ws = db.get_active_workspace()
+            ws_id = db.active_workspace_id
+            ws = db.workspaces.get(ws_id) if ws_id is not None else None
             ws_name = ws["name"] if ws else "unknown"
             folder_count = db.count_all_folders()
             photo_count = db.count_catalog_photos()

@@ -388,6 +388,9 @@ async function nativeMenuCopyDiagnostics() {
 window.handleNativeMenuCommand = async function(command) {
   try {
     switch (command) {
+      case 'find':
+        window.VireoPageFind.open();
+        break;
       case 'new_workspace':
         if (window.vireoWorkspaceSwitcher) vireoWorkspaceSwitcher.showCreate();
         else nativeMenuRoute('/workspace');

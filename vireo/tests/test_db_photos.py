@@ -325,7 +325,7 @@ def test_get_best_batch_rows_by_ids(db, lib):
 
 def test_get_photo_flags_ratings_and_eyes(db, lib):
     assert db.get_photo_flags_ratings_and_eyes([]) == {}
-    db.update_photo_flag(lib["b"], "flagged")
+    db.photo_review.set_flag(lib["b"], "flagged")
     db.conn.execute(
         "UPDATE photos SET rating = 3, eye_x = 0.25, eye_y = 0.5, eye_conf = 0.9,"
         " eye_tenengrad = 12.0 WHERE id = ?",
@@ -530,10 +530,10 @@ def test_get_photos_pages_and_scopes(db, lib):
 
 
 def test_listing_filters_agree(db, lib):
-    db.update_photo_rating(lib["a"], 5)
-    db.update_photo_rating(lib["b"], 2)
-    db.update_photo_flag(lib["b"], "flagged")
-    db.set_color_label(lib["a"], "red")
+    db.photo_review.set_rating(lib["a"], 5)
+    db.photo_review.set_rating(lib["b"], 2)
+    db.photo_review.set_flag(lib["b"], "flagged")
+    db.photo_labels.set(lib["a"], "red")
     kid = db.add_keyword("Heron")
     db.tag_photo(lib["a"], kid)
     db.tag_photo(lib["b"], kid)
@@ -563,7 +563,7 @@ def test_listing_filters_agree(db, lib):
 
 
 def test_listing_keyword_uses_distinct_and_color_join_param_order(db, lib):
-    db.set_color_label(lib["a"], "red")
+    db.photo_labels.set(lib["a"], "red")
     statements = _trace(db)
     db.get_photos(keyword="x", color_label="red")
     db.get_photo_ids(keyword="x", color_label="red")
@@ -689,7 +689,7 @@ def test_get_calendar_data(db, lib):
     assert db.get_calendar_data(2023, folder_id=lib["child"])["days"] == {
         "2023-06-01": 1,
     }
-    db.update_photo_rating(lib["b"], 4)
+    db.photo_review.set_rating(lib["b"], 4)
     assert db.get_calendar_data(
         2024, rules=[{"field": "rating", "op": ">=", "value": 4}],
     )["days"] == {"2024-03-07": 1}
@@ -742,7 +742,7 @@ def test_get_browse_summary(db, lib, isolated_config):
     by_folder = db.get_browse_summary(folder_id=lib["child"])
     assert by_folder["filtered_total"] == 1
     assert by_folder["top_species"] == []
-    db.update_photo_rating(lib["a"], 5)
+    db.photo_review.set_rating(lib["a"], 5)
     ruled = db.get_browse_summary(
         rules=[{"field": "rating", "op": ">=", "value": 5}],
     )

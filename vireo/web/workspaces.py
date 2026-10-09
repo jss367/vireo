@@ -132,14 +132,14 @@ def create_workspace_blueprint(
         nav_id, error = _nav_id()
         if error:
             return error
-        return jsonify({"ok": True, "tabs": get_db().pin_tab(nav_id)})
+        return jsonify({"ok": True, "tabs": get_db().workspaces.pin_tab(nav_id)})
 
     @blueprint.post("/api/workspace/tabs/unpin")
     def unpin_tab():
         nav_id, error = _nav_id()
         if error:
             return error
-        return jsonify({"ok": True, "tabs": get_db().unpin_tab(nav_id)})
+        return jsonify({"ok": True, "tabs": get_db().workspaces.unpin_tab(nav_id)})
 
     @blueprint.post("/api/workspace/tabs/reorder")
     def reorder_tabs():
@@ -148,7 +148,7 @@ def create_workspace_blueprint(
         if not isinstance(tabs, list):
             return json_error("tabs must be a list", 400)
         try:
-            result = get_db().set_tabs(tabs)
+            result = get_db().workspaces.set_tabs(tabs)
         except ValueError as exc:
             return json_error(str(exc), 400)
         return jsonify({"ok": True, "tabs": result})
@@ -157,7 +157,7 @@ def create_workspace_blueprint(
     def get_tabs():
         db = get_db()
         try:
-            tabs = db.get_tabs()
+            tabs = db.workspaces.get_tabs()
         except Exception:
             log.warning("Could not read workspace tabs; showing defaults", exc_info=True)
             tabs = list(DEFAULT_TABS)
@@ -166,13 +166,13 @@ def create_workspace_blueprint(
     @blueprint.route("/api/workspaces")
     def api_get_workspaces():
         db = get_db()
-        workspaces = db.get_workspaces()
+        workspaces = db.workspaces.list_all()
         return jsonify([dict(w) for w in workspaces])
 
     @blueprint.route("/api/workspaces/active")
     def api_get_active_workspace():
         db = get_db()
-        ws = db.get_workspace(db.active_workspace_id)
+        ws = db.workspaces.get(db.active_workspace_id)
         if not ws:
             return json_error("No active workspace", 404)
         result = dict(ws)
@@ -236,7 +236,7 @@ def create_workspace_blueprint(
                 if seed_name is not None:
                     match = next(
                         (
-                            p for p in db.get_saved_processes()
+                            p for p in db.processes.list_all()
                             if p["name"] == seed_name
                         ),
                         None,
@@ -255,7 +255,7 @@ def create_workspace_blueprint(
             pid = pipeline_overrides["default_process_id"]
             if not isinstance(pid, int) or isinstance(pid, bool):
                 return json_error("default_process_id must be an integer or null")
-            if db.get_saved_process(pid) is None:
+            if db.processes.get(pid) is None:
                 return json_error(f"unknown process id: {pid}")
         return None
 
@@ -268,7 +268,7 @@ def create_workspace_blueprint(
         """
         if not isinstance(name, str) or not name.strip():
             return json_error("Name is required")
-        taken_id = db.get_workspace_id_by_name(name.strip())
+        taken_id = db.workspaces.id_for_name(name.strip())
         if taken_id is not None and taken_id != ws_id:
             return json_error(
                 f"A workspace named {name.strip()!r} already exists", 409,
@@ -340,8 +340,8 @@ def create_workspace_blueprint(
                 # Link selected folders if provided
                 for folder_id in folder_ids:
                     db.add_workspace_folder(ws_id, folder_id)
-                db.mark_workspace_folder_roots(ws_id, folder_ids)
-                ws = db.get_workspace(ws_id)
+                db.workspace_folders.mark_roots(ws_id, folder_ids)
+                ws = db.workspaces.get(ws_id)
             return jsonify(dict(ws))
         except Exception as e:
             log.warning("Workspace creation failed", exc_info=True)
@@ -350,7 +350,7 @@ def create_workspace_blueprint(
     @blueprint.route("/api/workspaces/<int:ws_id>", methods=["PUT"])
     def api_update_workspace(ws_id):
         db = get_db()
-        existing_ws = db.get_workspace(ws_id)
+        existing_ws = db.workspaces.get(ws_id)
         if not existing_ws:
             return json_error("Workspace not found", 404)
         body = request.get_json(silent=True) or {}
@@ -385,14 +385,14 @@ def create_workspace_blueprint(
                 LOCATION_KEYWORDS_SETTING,
             )
         try:
-            db.update_workspace(ws_id, **kwargs)
+            db.workspaces.update(ws_id, **kwargs)
         except sqlite3.IntegrityError:
             # A concurrent rename took the name after the check above.
             db.rollback()
             return json_error(
                 f"A workspace named {kwargs.get('name')!r} already exists", 409,
             )
-        ws = db.get_workspace(ws_id)
+        ws = db.workspaces.get(ws_id)
         if overrides_changing and prev_effective_location_keywords:
             new_effective = workspace_effective_setting(
                 ws["config_overrides"],
@@ -407,7 +407,7 @@ def create_workspace_blueprint(
     def api_delete_workspace(ws_id):
         db = get_db()
         # Prevent deleting the last workspace
-        workspaces = db.get_workspaces()
+        workspaces = db.workspaces.list_all()
         if len(workspaces) <= 1:
             return json_error("Cannot delete the only workspace")
         # Prevent deleting the active workspace
@@ -446,7 +446,7 @@ def create_workspace_blueprint(
     @blueprint.route("/api/workspaces/<int:ws_id>/activate", methods=["POST"])
     def api_activate_workspace(ws_id):
         db = get_db()
-        ws = db.get_workspace(ws_id)
+        ws = db.workspaces.get(ws_id)
         if not ws:
             return json_error("Workspace not found", 404)
         from datetime import datetime
@@ -455,19 +455,19 @@ def create_workspace_blueprint(
         body = request.get_json(silent=True) or {}
         current_path = body.get("current_path")
         if current_path and db.active_workspace_id:
-            old_ws = db.get_workspace(db.active_workspace_id)
+            old_ws = db.workspaces.get(db.active_workspace_id)
             if old_ws:
                 try:
                     ui = json.loads(old_ws["ui_state"]) if old_ws["ui_state"] else {}
                 except (json.JSONDecodeError, TypeError):
                     ui = {}
                 ui["last_path"] = current_path
-                db.update_workspace(db.active_workspace_id, ui_state=ui)
+                db.workspaces.update(db.active_workspace_id, ui_state=ui)
 
         # Activate the new workspace
         db.set_active_workspace(ws_id)
         db.create_default_collections(workspace_id=ws_id)
-        db.update_workspace(ws_id, last_opened_at=datetime.now().isoformat())
+        db.workspaces.update(ws_id, last_opened_at=datetime.now().isoformat())
 
         # Return the target workspace's saved page path
         restore_path = None
@@ -483,7 +483,7 @@ def create_workspace_blueprint(
     @blueprint.route("/api/workspaces/<int:ws_id>/pin", methods=["POST"])
     def api_pin_workspace(ws_id):
         db = get_db()
-        ws = db.get_workspace(ws_id)
+        ws = db.workspaces.get(ws_id)
         if not ws:
             return json_error("Workspace not found", 404)
         body = request.get_json(silent=True) or {}
@@ -491,11 +491,11 @@ def create_workspace_blueprint(
         if not isinstance(pinned, bool):
             return json_error("`pinned` must be a boolean")
         from datetime import datetime
-        db.update_workspace(
+        db.workspaces.update(
             ws_id,
             pinned_at=datetime.now().isoformat() if pinned else None,
         )
-        return jsonify(dict(db.get_workspace(ws_id)))
+        return jsonify(dict(db.workspaces.get(ws_id)))
 
     @blueprint.route("/api/workspaces/<int:ws_id>/folders", methods=["GET"])
     def api_workspace_folders(ws_id):
@@ -512,7 +512,7 @@ def create_workspace_blueprint(
             return json_error("folder_id is required")
         # Pre-check both sides of the link — an unknown id would otherwise
         # hit the workspace_folders FK and 500.
-        if not db.get_workspace(ws_id):
+        if not db.workspaces.get(ws_id):
             return json_error("Workspace not found", 404)
         if not db.get_folder(folder_id):
             return json_error("Folder not found", 404)
@@ -556,7 +556,7 @@ def create_workspace_blueprint(
         db = get_db()
         # Pre-check the workspace — an unknown id would otherwise hit the
         # workspace_folder_removals FK when we record the tombstone and 500.
-        if not db.get_workspace(ws_id):
+        if not db.workspaces.get(ws_id):
             return json_error("Workspace not found", 404)
         # Removing a staged root while local work is active would leave
         # local_workspace_folders and the manifest covering paths the UI no
@@ -600,9 +600,9 @@ def create_workspace_blueprint(
                     )
             db.remove_workspace_folder_tree(ws_id, folder_id)
             for descendant_id in descendant_root_ids:
-                mapped_ids = db.get_local_session_folder_ids(descendant_id)
-                db.revoke_workspace_photo_grants_for_folders(ws_id, mapped_ids)
-                db.unlink_exact_workspace_folders_no_commit(ws_id, mapped_ids)
+                mapped_ids = db.workspace_folders.local_session_folder_ids(descendant_id)
+                db.photo_visibility.revoke_for_folders(ws_id, mapped_ids)
+                db.workspace_folders.unlink_exact_no_commit(ws_id, mapped_ids)
             if descendant_root_ids:
                 db.commit()
         # Unlinking a folder tree removes photos from the workspace's scope;
@@ -677,7 +677,7 @@ def create_workspace_blueprint(
             # Validate source workspace and folder ownership before creating a
             # new workspace to avoid orphans if the move would fail.
             if new_ws_name:
-                if not db.get_workspace(ws_id):
+                if not db.workspaces.get(ws_id):
                     return json_error(f"Source workspace {ws_id} not found")
                 source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
                 for fid in folder_ids:
@@ -712,9 +712,9 @@ def create_workspace_blueprint(
                 swept = False
                 for descendant_ids in descendant_root_ids_by_folder.values():
                     for descendant_id in descendant_ids:
-                        mapped_ids = db.get_local_session_folder_ids(descendant_id)
-                        db.revoke_workspace_photo_grants_for_folders(ws_id, mapped_ids)
-                        db.transfer_exact_workspace_folders_no_commit(
+                        mapped_ids = db.workspace_folders.local_session_folder_ids(descendant_id)
+                        db.photo_visibility.revoke_for_folders(ws_id, mapped_ids)
+                        db.workspace_folders.transfer_exact_no_commit(
                             ws_id, target_ws_id, mapped_ids,
                         )
                         if mapped_ids:
@@ -733,7 +733,7 @@ def create_workspace_blueprint(
     def api_workspace_config():
         """Get the active workspace's config overrides."""
         db = get_db()
-        ws = db.get_workspace(db.active_workspace_id)
+        ws = db.workspaces.get(db.active_workspace_id)
         if not ws:
             return jsonify({})
         overrides = {}
@@ -779,7 +779,7 @@ def create_workspace_blueprint(
         # All-settings region can't race with a curated workspace-form save
         # and silently drop a recent override.
         with settings_write_lock:
-            ws = db.get_workspace(db.active_workspace_id)
+            ws = db.workspaces.get(db.active_workspace_id)
             existing = {}
             if ws and ws["config_overrides"]:
                 try:
@@ -814,7 +814,7 @@ def create_workspace_blueprint(
                     existing.pop(k, None)
                 else:
                     existing[k] = v
-            db.update_workspace(db.active_workspace_id, config_overrides=existing if existing else None)
+            db.workspaces.update(db.active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
     @blueprint.route("/api/workspaces/active/subject-types", methods=["GET"])
@@ -858,7 +858,7 @@ def create_workspace_blueprint(
         # autosave on the same workspace can't read this same overrides
         # snapshot and overwrite our subject_types change with stale data.
         with settings_write_lock:
-            ws = db.get_workspace(ws_id)
+            ws = db.workspaces.get(ws_id)
             if not ws:
                 return json_error("workspace not found", 404)
             existing = {}
@@ -877,7 +877,7 @@ def create_workspace_blueprint(
             if not isinstance(existing, dict):
                 existing = {}
             existing["subject_types"] = cleaned
-            db.update_workspace(ws_id, config_overrides=existing)
+            db.workspaces.update(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
     def _new_images_walk_fns(db, ws_id):
@@ -946,7 +946,7 @@ def create_workspace_blueprint(
         # ``on_spawn`` only fires when this kickoff actually starts a new
         # worker (cache truly cold) — cache hits and reuse of an in-flight
         # walk skip job creation, so navbar polls don't clutter the list.
-        ws_row = db.get_workspace(ws_id)
+        ws_row = db.workspaces.get(ws_id)
         ws_name = ws_row["name"] if ws_row else f"workspace #{ws_id}"
         runner = get_runner()
 
@@ -1193,7 +1193,7 @@ def create_workspace_blueprint(
 
         def create_snapshot_from_result(result):
             file_paths = list(result.get("sample") or [])
-            snap_id = db.create_new_images_snapshot(file_paths)
+            snap_id = db.workspaces.create_new_images_snapshot(file_paths)
             folders = sorted({os.path.dirname(p) for p in file_paths})
             return jsonify({
                 "snapshot_id": snap_id,
@@ -1294,7 +1294,7 @@ def create_workspace_blueprint(
         ws_id = db.active_workspace_id
         if not ws_id:
             return json_error("No active workspace", status=400)
-        ws = db.get_workspace(ws_id)
+        ws = db.workspaces.get(ws_id)
         min_conf = db.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2,
         )
@@ -1455,7 +1455,7 @@ def create_workspace_blueprint(
         # its sources still exist and re-merging them reproduces the same
         # fingerprint; otherwise the contents drifted and it's stale.
         current_fps = {ls["fingerprint"] for ls in label_sets} | {TOL_SENTINEL}
-        for row in db.get_labels_fingerprints():
+        for row in db.model_runs.get_labels_fingerprints():
             sources = row.get("sources") or []
             if len(sources) <= 1:
                 continue  # single-file already covered by label_sets

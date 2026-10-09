@@ -112,7 +112,7 @@ def offline_original_abs(vireo_dir, row):
 
 def cached_original_for_photo(db, photo_id, vireo_dir):
     """Return the cached original path if present on disk, else None."""
-    row = db.offline_original_get(photo_id)
+    row = db.caches.offline_original_get(photo_id)
     path = offline_original_abs(vireo_dir, row)
     if path and os.path.isfile(path):
         return path
@@ -132,7 +132,7 @@ def resolve_original_path(
     source-first behavior.
     """
     folder_id = photo["folder_id"]
-    offline_row = db.offline_original_get(photo["id"])
+    offline_row = db.caches.offline_original_get(photo["id"])
     cached = offline_original_abs(vireo_dir, offline_row)
     source_path = (
         os.path.join(folders[folder_id], photo["filename"])
@@ -192,7 +192,7 @@ def cache_photo_original(db, photo, vireo_dir, folders):
 def _cache_photo_original(db, photo, vireo_dir, folders):
     folder_id = photo["folder_id"]
     now = time.time()
-    existing = db.offline_original_get(photo["id"])
+    existing = db.caches.offline_original_get(photo["id"])
     existing_path = offline_original_abs(vireo_dir, existing)
     # If a prior run cached this photo and the cached file is still on disk,
     # treat it as the source-of-record for offline access when the live source
@@ -212,7 +212,7 @@ def _cache_photo_original(db, photo, vireo_dir, folders):
                 "bytes": existing["bytes"],
                 "path": existing_path,
             }
-        db.offline_original_upsert(
+        db.caches.offline_original_upsert(
             photo["id"],
             original_path=None,
             xmp_path=None,
@@ -236,7 +236,7 @@ def _cache_photo_original(db, photo, vireo_dir, folders):
                 "bytes": existing["bytes"],
                 "path": existing_path,
             }
-        db.offline_original_upsert(
+        db.caches.offline_original_upsert(
             photo["id"],
             original_path=None,
             xmp_path=None,
@@ -342,7 +342,7 @@ def _cache_photo_original(db, photo, vireo_dir, folders):
     ):
         _unlink_cached_rel(vireo_dir, existing["companion_path"])
 
-    db.offline_original_upsert(
+    db.caches.offline_original_upsert(
         photo["id"],
         original_path=original_rel,
         xmp_path=xmp_rel,

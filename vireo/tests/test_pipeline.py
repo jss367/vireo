@@ -55,7 +55,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
             emb = emb_base + np.random.RandomState(pid).randn(768).astype(np.float32) * 0.01
             emb = emb / np.linalg.norm(emb)
 
-            db.update_photo_pipeline_features(
+            db.masks_features.update_pipeline_features(
                 pid,
                 mask_path=f"/masks/{pid}.png",
                 subject_tenengrad=200 + i * 50 + enc_idx * 10,
@@ -67,7 +67,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
                 subject_y_median=120.0,
                 phash_crop=f"{pid:016x}",
             )
-            db.update_photo_embeddings(
+            db.masks_features.update_embeddings(
                 pid,
                 dino_subject_embedding=embedding_to_blob(emb),
                 dino_global_embedding=embedding_to_blob(emb),
@@ -91,7 +91,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
             # this photo as eligible. Skipping this would silently
             # collapse eye_keypoint_target_photos to zero across every
             # readiness test that uses this helper.
-            db.upsert_photo_mask(
+            db.masks_features.upsert_mask(
                 pid, "sam2-small", f"/masks/{pid}.png",
                 detector_model="megadetector",
                 prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
@@ -385,7 +385,7 @@ def test_load_photo_features_subject_absent_ignores_non_mdv6_detections(tmp_path
     # Lower the workspace's detector_confidence to 0.0 so a confidence=0
     # synthetic full-image row WOULD pass the threshold if not filtered.
     ws_id = db._active_workspace_id
-    db.update_workspace(ws_id, config_overrides={"detector_confidence": 0.0})
+    db.workspaces.update(ws_id, config_overrides={"detector_confidence": 0.0})
 
     pid = db.add_photo(fid, "x.jpg", ".jpg", 100, 1.0)
     # MDV6: empty-scene run (canonical "detector confirmed empty")
@@ -1075,7 +1075,7 @@ def test_compute_review_readiness_full_features(tmp_path):
     # Backfill eye keypoints for every photo so coverage is 100%.
     for enc_ids in ids:
         for pid in enc_ids:
-            db.update_photo_pipeline_features(
+            db.masks_features.update_pipeline_features(
                 pid,
                 eye_x=0.5,
                 eye_y=0.5,
@@ -1114,7 +1114,7 @@ def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
         pids.append(pid)
 
     # Exactly one mask out of four → 25% coverage, at the threshold.
-    db.update_photo_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
+    db.masks_features.update_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
 
     out = compute_review_readiness(db)
     assert out["state"] == "computable"
@@ -1127,7 +1127,7 @@ def test_compute_review_readiness_at_mask_threshold_boundary(tmp_path):
     assert "masks_partial" in out["enhancing_missing"]
 
     # Asymmetric companion: drop the only mask → 0/4, below threshold.
-    db.update_photo_pipeline_features(pids[0], mask_path=None)
+    db.masks_features.update_pipeline_features(pids[0], mask_path=None)
     out_below = compute_review_readiness(db)
     assert out_below["state"] == "insufficient"
     assert out_below["with_masks"] == 0
@@ -1163,7 +1163,7 @@ def test_compute_review_readiness_below_threshold_uses_ceiling(tmp_path):
         pids.append(pid)
 
     # 1 mask out of 5 → 20% coverage, strictly below the 25% threshold.
-    db.update_photo_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
+    db.masks_features.update_pipeline_features(pids[0], mask_path=f"/masks/{pids[0]}.png")
 
     out = compute_review_readiness(db)
     assert out["state"] == "insufficient"
@@ -1247,8 +1247,8 @@ def test_compute_review_readiness_ignores_no_subject_photos_for_enhancers(tmp_pa
             {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
         ])
         db.add_prediction(det_ids[0], "robin", 0.9, "bioclip", category="match")
-        db.update_photo_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
-        db.update_photo_embeddings(
+        db.masks_features.update_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
+        db.masks_features.update_embeddings(
             pid,
             dino_subject_embedding=embedding_to_blob(emb),
             dino_global_embedding=embedding_to_blob(emb),
@@ -1291,7 +1291,7 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
     )
     emb = np.ones(768, dtype=np.float32)
     emb = emb / np.linalg.norm(emb)
-    db.update_photo_pipeline_features(
+    db.masks_features.update_pipeline_features(
         pid,
         mask_path=f"/masks/{pid}.png",
         eye_x=None,
@@ -1304,7 +1304,7 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
     # so the tightened readiness counts (count_eye_keypoint_eligible /
     # _attemptable) treat this photo as eligible — without it the target
     # collapses to zero and the assertions below fail.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         pid, "sam2-small", f"/masks/{pid}.png",
         detector_model="megadetector-v6",
         prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
@@ -1313,7 +1313,7 @@ def test_compute_review_readiness_eye_attempts_clear_eye_gap(tmp_path):
         "UPDATE photos SET active_mask_variant=? WHERE id=?",
         ("sam2-small", pid),
     )
-    db.update_photo_embeddings(
+    db.masks_features.update_embeddings(
         pid,
         dino_subject_embedding=embedding_to_blob(emb),
         dino_global_embedding=embedding_to_blob(emb),
@@ -1341,12 +1341,12 @@ def _add_eligible_photo(db, fid, filename, species_conf, *, taxonomy_class):
         det_ids[0], "subject", species_conf, "bioclip", category="match",
         taxonomy={"class": taxonomy_class} if taxonomy_class else None,
     )
-    db.update_photo_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
+    db.masks_features.update_pipeline_features(pid, mask_path=f"/masks/{pid}.png")
     # The eye-stage readiness counts (count_eye_keypoint_eligible /
     # _attemptable) require an active photo_masks row whose prompt
     # matches the selected primary detection. Seed it so eligible photos
     # in these tests count toward eye_keypoint_target_photos.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         pid, "sam2-small", f"/masks/{pid}.png",
         detector_model="megadetector-v6",
         prompt_x=0.2, prompt_y=0.2, prompt_w=0.4, prompt_h=0.4,
@@ -2314,7 +2314,7 @@ def _add_photo_with_embedding(db, fid, filename, emb, variant=None, ts=None):
         timestamp=(ts or datetime(2026, 3, 20, 10, 0, 0)).isoformat(),
         width=4000, height=3000,
     )
-    db.update_photo_embeddings(
+    db.masks_features.update_embeddings(
         pid,
         dino_subject_embedding=embedding_to_blob(emb),
         dino_global_embedding=embedding_to_blob(emb),
@@ -2441,7 +2441,7 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
     )
     # Register the mask through the mask-variant path so the stale-mask
     # predicate can confirm the row matches the primary detection.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.8, prompt_h=0.8,
@@ -2561,7 +2561,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=other_pid, variant="test",
         path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
@@ -2644,7 +2644,7 @@ def test_eye_keypoint_stage_resource_cancel_does_not_count_photo_as_processed(
         model="bioclip-2.5", category="match",
         taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=other_pid, variant="test",
         path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
@@ -2734,7 +2734,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
         detector_model="MegaDetector",
     )
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=other_pid, variant="test",
         path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
@@ -2833,7 +2833,7 @@ def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
     # Register the mask through the same path production uses, so
     # ``list_photos_for_eye_keypoint_stage``'s stale-mask predicate
     # can confirm the mask row matches the primary detection's prompt.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=pid, variant="test", path=str(tmp_path / "mask.png"),
         detector_model="MegaDetector",
         prompt_x=0.125, prompt_y=0.167, prompt_w=0.75, prompt_h=0.667,
@@ -3406,7 +3406,7 @@ def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
     # (helper sorts by confidence DESC), but if we drop the high-conf box
     # the low-conf one now surfaces — proving the read-time filter actually
     # changed behavior without any detection-row writes.
-    db.update_workspace(ws_id,
+    db.workspaces.update(ws_id,
                         config_overrides={"detector_confidence": 0.01})
 
     # Delete just the high-conf detection to confirm the low-conf one now
@@ -3428,7 +3428,7 @@ def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
 
     # Raise the threshold back above 0.05 — the low-conf box disappears
     # again, purely through read-time filtering.
-    db.update_workspace(ws_id,
+    db.workspaces.update(ws_id,
                         config_overrides={"detector_confidence": 0.5})
     photos = load_photo_features(db)
     assert photos[0]["detection_box"] is None

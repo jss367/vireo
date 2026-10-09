@@ -25,7 +25,7 @@ def masked_photo(live_server, tmp_path):
     arr[:, :128] = 255
     mask_path = folder / f'{photo_id}.sam2-small.png'
     Image.fromarray(arr, 'L').save(mask_path)
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id, 'sam2-small', str(mask_path), 'megadetector-v6',
         0.0, 0.0, 0.5, 1.0,
     )
@@ -91,7 +91,7 @@ def test_feather_only_does_not_freeze_an_obsolete_active_mask(
     arr[:, 128:] = 255
     Image.fromarray(arr, 'L').save(replacement)
     db = live_server['db']
-    db.upsert_photo_mask(masked_photo, 'sam2-small', str(replacement), 'megadetector-v6',
+    db.masks_features.upsert_mask(masked_photo, 'sam2-small', str(replacement), 'megadetector-v6',
                          0.0, 0.0, 0.5, 1.0)
     with page.expect_response(lambda r: '/edit-mask-preview?' in r.url and 'feather=61' in r.url) as live:
         page.locator('#featherRange').evaluate("el => {el.value='61'; el.dispatchEvent(new Event('input', {bubbles:true}));}")

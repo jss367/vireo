@@ -309,7 +309,7 @@ def test_pipeline_save_process_as_new_uses_in_page_dialog(live_server, page):
 
     expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
     expect(page.locator("#strategySelect")).to_have_value(
-        str(next(p["id"] for p in db.get_saved_processes()
+        str(next(p["id"] for p in db.processes.list_all()
                  if p["name"] == "Bird review"))
     )
     expect(page.locator("#processEditorStatus")).to_have_text("Saved “Bird review”.")
@@ -318,7 +318,7 @@ def test_pipeline_save_process_as_new_uses_in_page_dialog(live_server, page):
 def test_pipeline_rename_process_uses_in_page_dialog(live_server, page):
     url = live_server["url"]
     db = live_server["db"]
-    process_id = db.create_saved_process("Old process name")
+    process_id = db.processes.create("Old process name")
     page.goto(f"{url}/pipeline")
     page.locator("#strategySelect").select_option(str(process_id))
 
@@ -334,13 +334,13 @@ def test_pipeline_rename_process_uses_in_page_dialog(live_server, page):
     expect(page.locator("#strategySelect option:checked")).to_have_text(
         "Renamed process"
     )
-    assert db.get_saved_process(process_id)["name"] == "Renamed process"
+    assert db.processes.get(process_id)["name"] == "Renamed process"
 
 
 def test_pipeline_delete_process_uses_in_page_confirmation(live_server, page):
     url = live_server["url"]
     db = live_server["db"]
-    process_id = db.create_saved_process("Disposable process")
+    process_id = db.processes.create("Disposable process")
     page.goto(f"{url}/pipeline")
     page.locator("#strategySelect").select_option(str(process_id))
 
@@ -354,7 +354,7 @@ def test_pipeline_delete_process_uses_in_page_confirmation(live_server, page):
 
     expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
     expect(page.locator("#strategySelect")).to_have_value("__custom__")
-    assert db.get_saved_process(process_id) is None
+    assert db.processes.get(process_id) is None
 
 
 def test_pipeline_delete_dialog_keeps_original_process_target(live_server, page):
@@ -362,8 +362,8 @@ def test_pipeline_delete_dialog_keeps_original_process_target(live_server, page)
     which process the confirmation deletes."""
     url = live_server["url"]
     db = live_server["db"]
-    original_id = db.create_saved_process("Delete this process")
-    other_id = db.create_saved_process("Keep this process")
+    original_id = db.processes.create("Delete this process")
+    other_id = db.processes.create("Keep this process")
     page.goto(f"{url}/pipeline")
     page.locator("#strategySelect").select_option(str(original_id))
 
@@ -387,8 +387,8 @@ def test_pipeline_delete_dialog_keeps_original_process_target(live_server, page)
     expect(page.locator("#processEditorModal")).not_to_have_class(
         re.compile(r"\bopen\b")
     )
-    assert db.get_saved_process(original_id) is None
-    assert db.get_saved_process(other_id)["name"] == "Keep this process"
+    assert db.processes.get(original_id) is None
+    assert db.processes.get(other_id)["name"] == "Keep this process"
 
 
 def test_pipeline_process_dialog_validates_name_and_closes_with_escape(

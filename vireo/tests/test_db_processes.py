@@ -1,8 +1,8 @@
 """Behavior pins for the saved-processes domain of ``Database``.
 
-These tests exercise the saved-process methods only through the public
-``Database`` façade, so they hold whether the SQL lives in ``db.py`` or in
-``repositories/processes.py``. They pin return shapes and ordering, field
+These tests exercise listing, reading and creating saved processes through
+the ``db.processes`` accessor, and updating, deleting and resolving them
+through the ``Database`` methods that stay on the façade. They pin return shapes and ordering, field
 validation and coercion, error messages, commit boundaries, and how
 ``delete_saved_process`` rewrites workspace ``config_overrides`` (including
 rows it must skip). ``test_saved_processes.py`` covers seeding and the
@@ -18,6 +18,7 @@ import textwrap
 import process_strategies as ps
 import pytest
 from db import Database
+from repositories.processes import ProcessesRepository
 
 _DICT_KEYS = {
     "id", "name", "skip_classify", "skip_extract_masks", "skip_eye_keypoints",
@@ -64,10 +65,10 @@ def _overrides_raw(db, workspace_id):
 
 
 def test_get_saved_process_returns_dict_with_python_types(db):
-    pid = db.create_saved_process(
+    pid = db.processes.create(
         "Typed", skip_classify=True, miss_enabled=False, review_mode="species",
     )
-    proc = db.get_saved_process(pid)
+    proc = db.processes.get(pid)
     assert type(proc) is dict
     assert set(proc) == _DICT_KEYS
     assert proc["id"] == pid
@@ -82,31 +83,31 @@ def test_get_saved_process_returns_dict_with_python_types(db):
 
 
 def test_get_saved_process_missing_returns_none(db):
-    assert db.get_saved_process(987654) is None
+    assert db.processes.get(987654) is None
 
 
 def test_get_saved_process_coerces_nonzero_integers_to_true(db):
-    pid = db.create_saved_process("Raw")
+    pid = db.processes.create("Raw")
     db.conn.execute(
         "UPDATE saved_processes SET skip_regroup = 7, is_seed = 2 WHERE id = ?",
         (pid,),
     )
     db.conn.commit()
-    proc = db.get_saved_process(pid)
+    proc = db.processes.get(pid)
     assert proc["skip_regroup"] is True
     assert proc["is_seed"] is True
 
 
 def test_get_saved_processes_orders_by_sort_order_then_id(db):
     _clear_processes(db)
-    a = db.create_saved_process("A")
-    b = db.create_saved_process("B")
-    c = db.create_saved_process("C")
+    a = db.processes.create("A")
+    b = db.processes.create("B")
+    c = db.processes.create("C")
     # Tie a and c on sort_order 5 and put b first: id breaks the tie.
     db.conn.execute("UPDATE saved_processes SET sort_order = 5 WHERE id IN (?, ?)", (a, c))
     db.conn.execute("UPDATE saved_processes SET sort_order = 1 WHERE id = ?", (b,))
     db.conn.commit()
-    procs = db.get_saved_processes()
+    procs = db.processes.list_all()
     assert type(procs) is list
     assert [p["id"] for p in procs] == [b, a, c]
     assert all(set(p) == _DICT_KEYS for p in procs)
@@ -114,14 +115,14 @@ def test_get_saved_processes_orders_by_sort_order_then_id(db):
 
 def test_get_saved_processes_empty_table_returns_empty_list(db):
     _clear_processes(db)
-    assert db.get_saved_processes() == []
+    assert db.processes.list_all() == []
 
 
 # -- resolve_process ---------------------------------------------------------
 
 
 def test_resolve_process_layers_flags_over_base(db):
-    pid = db.create_saved_process(
+    pid = db.processes.create(
         "Resolve", skip_classify=True, skip_regroup=True, review_mode="species",
     )
     flags = db.resolve_process(pid)
@@ -147,7 +148,7 @@ def test_resolve_process_unknown_id_message(db):
 
 
 def test_create_commits_and_is_visible_to_another_connection(db):
-    pid = db.create_saved_process("Visible")
+    pid = db.processes.create("Visible")
     assert isinstance(pid, int)
     assert not db.conn.in_transaction
     row = _raw_row(db, pid)
@@ -156,7 +157,7 @@ def test_create_commits_and_is_visible_to_another_connection(db):
 
 
 def test_create_defaults(db):
-    pid = db.create_saved_process("Defaults")
+    pid = db.processes.create("Defaults")
     row = _raw_row(db, pid)
     assert (row["skip_classify"], row["skip_extract_masks"],
             row["skip_eye_keypoints"], row["skip_regroup"],
@@ -165,7 +166,7 @@ def test_create_defaults(db):
 
 
 def test_create_strips_name_and_stores_flags_as_0_or_1(db):
-    pid = db.create_saved_process(
+    pid = db.processes.create(
         "  Padded  ", skip_classify="yes", skip_extract_masks=5,
         skip_eye_keypoints=[1], skip_regroup=0, miss_enabled="",
     )
@@ -177,52 +178,52 @@ def test_create_strips_name_and_stores_flags_as_0_or_1(db):
 
 
 def test_create_appends_after_max_sort_order(db):
-    procs = db.get_saved_processes()
+    procs = db.processes.list_all()
     top = max(p["sort_order"] for p in procs)
     db.conn.execute(
         "UPDATE saved_processes SET sort_order = 40 WHERE id = ?", (procs[0]["id"],)
     )
     db.conn.commit()
-    pid = db.create_saved_process("After")
-    assert db.get_saved_process(pid)["sort_order"] == max(top, 40) + 1
+    pid = db.processes.create("After")
+    assert db.processes.get(pid)["sort_order"] == max(top, 40) + 1
 
 
 def test_create_into_empty_table_starts_sort_order_at_zero(db):
     _clear_processes(db)
-    first = db.create_saved_process("First")
-    second = db.create_saved_process("Second")
-    assert db.get_saved_process(first)["sort_order"] == 0
-    assert db.get_saved_process(second)["sort_order"] == 1
+    first = db.processes.create("First")
+    second = db.processes.create("Second")
+    assert db.processes.get(first)["sort_order"] == 0
+    assert db.processes.get(second)["sort_order"] == 1
 
 
 @pytest.mark.parametrize("name", ["", "   ", None, 7])
 def test_create_rejects_blank_or_non_string_name(db, name):
-    before = db.get_saved_processes()
+    before = db.processes.list_all()
     with pytest.raises(ValueError, match="process name is required"):
-        db.create_saved_process(name)
-    assert db.get_saved_processes() == before
+        db.processes.create(name)
+    assert db.processes.list_all() == before
 
 
 @pytest.mark.parametrize("mode", ["Species", "whatever", "", 0])
 def test_create_rejects_bad_review_mode(db, mode):
     with pytest.raises(ValueError, match=r"review_mode must be 'species' or null"):
-        db.create_saved_process("Bad mode", review_mode=mode)
-    assert all(p["name"] != "Bad mode" for p in db.get_saved_processes())
+        db.processes.create("Bad mode", review_mode=mode)
+    assert all(p["name"] != "Bad mode" for p in db.processes.list_all())
 
 
 def test_create_duplicate_name_message_uses_stripped_name(db):
-    db.create_saved_process("Dup")
+    db.processes.create("Dup")
     with pytest.raises(ValueError, match=r"a process named 'Dup' already exists") as exc:
-        db.create_saved_process("  Dup ")
+        db.processes.create("  Dup ")
     assert isinstance(exc.value.__cause__, sqlite3.IntegrityError)
-    assert [p["name"] for p in db.get_saved_processes()].count("Dup") == 1
+    assert [p["name"] for p in db.processes.list_all()].count("Dup") == 1
 
 
 # -- update ------------------------------------------------------------------
 
 
 def test_update_commits_and_returns_true(db):
-    pid = db.create_saved_process("Before")
+    pid = db.processes.create("Before")
     assert db.update_saved_process(pid, name="  After  ", skip_eye_keypoints=True) is True
     assert not db.conn.in_transaction
     row = _raw_row(db, pid)
@@ -236,21 +237,21 @@ def test_update_missing_returns_false_without_opening_transaction(db):
 
 
 def test_update_with_no_fields_rewrites_same_values(db):
-    pid = db.create_saved_process(
+    pid = db.processes.create(
         "Same", skip_classify=True, miss_enabled=False, review_mode="species",
     )
-    before = db.get_saved_process(pid)
+    before = db.processes.get(pid)
     assert db.update_saved_process(pid) is True
-    assert db.get_saved_process(pid) == before
+    assert db.processes.get(pid) == before
 
 
 def test_update_each_flag_independently(db):
-    pid = db.create_saved_process("Flags")
+    pid = db.processes.create("Flags")
     db.update_saved_process(pid, skip_classify=True)
     db.update_saved_process(pid, skip_extract_masks=True)
     db.update_saved_process(pid, skip_regroup=True)
     db.update_saved_process(pid, miss_enabled=False)
-    proc = db.get_saved_process(pid)
+    proc = db.processes.get(pid)
     assert proc["skip_classify"] is True
     assert proc["skip_extract_masks"] is True
     assert proc["skip_eye_keypoints"] is False
@@ -258,54 +259,54 @@ def test_update_each_flag_independently(db):
     assert proc["miss_enabled"] is False
     # False is a real value, not "leave unchanged" (only None is).
     db.update_saved_process(pid, skip_classify=False)
-    assert db.get_saved_process(pid)["skip_classify"] is False
+    assert db.processes.get(pid)["skip_classify"] is False
 
 
 def test_update_preserves_is_seed_and_sort_order(db):
-    seed = db.get_saved_processes()[0]
+    seed = db.processes.list_all()[0]
     assert db.update_saved_process(seed["id"], name="Renamed seed")
-    after = db.get_saved_process(seed["id"])
+    after = db.processes.get(seed["id"])
     assert after["is_seed"] is True
     assert after["sort_order"] == seed["sort_order"]
 
 
 def test_update_review_mode_sentinel_vs_explicit_none(db):
-    pid = db.create_saved_process("Review", review_mode="species")
+    pid = db.processes.create("Review", review_mode="species")
     db.update_saved_process(pid, name="Review2")
-    assert db.get_saved_process(pid)["review_mode"] == "species"
+    assert db.processes.get(pid)["review_mode"] == "species"
     db.update_saved_process(pid, review_mode=None)
-    assert db.get_saved_process(pid)["review_mode"] is None
+    assert db.processes.get(pid)["review_mode"] is None
 
 
 def test_update_bad_review_mode_leaves_row_untouched(db):
-    pid = db.create_saved_process("Keep")
-    before = db.get_saved_process(pid)
+    pid = db.processes.create("Keep")
+    before = db.processes.get(pid)
     with pytest.raises(ValueError, match=r"review_mode must be 'species' or null"):
         db.update_saved_process(pid, name="Changed", review_mode="nope")
-    assert db.get_saved_process(pid) == before
+    assert db.processes.get(pid) == before
 
 
 def test_update_blank_name_rejected(db):
-    pid = db.create_saved_process("Named")
+    pid = db.processes.create("Named")
     with pytest.raises(ValueError, match="process name is required"):
         db.update_saved_process(pid, name="   ")
-    assert db.get_saved_process(pid)["name"] == "Named"
+    assert db.processes.get(pid)["name"] == "Named"
 
 
 def test_update_duplicate_name_message_uses_stripped_name(db):
-    db.create_saved_process("Taken")
-    pid = db.create_saved_process("Mine")
+    db.processes.create("Taken")
+    pid = db.processes.create("Mine")
     with pytest.raises(ValueError, match=r"a process named 'Taken' already exists") as exc:
         db.update_saved_process(pid, name=" Taken  ")
     assert isinstance(exc.value.__cause__, sqlite3.IntegrityError)
-    assert db.get_saved_process(pid)["name"] == "Mine"
+    assert db.processes.get(pid)["name"] == "Mine"
 
 
 # -- delete ------------------------------------------------------------------
 
 
 def test_delete_commits_and_is_visible_to_another_connection(db):
-    pid = db.create_saved_process("Gone")
+    pid = db.processes.create("Gone")
     assert db.delete_saved_process(pid) is True
     assert not db.conn.in_transaction
     assert _raw_row(db, pid) is None
@@ -322,7 +323,7 @@ def test_delete_missing_returns_false_and_leaves_workspaces_alone(db):
 
 
 def test_delete_rewrites_only_the_matching_pointer(db):
-    pid = db.create_saved_process("Target")
+    pid = db.processes.create("Target")
     ws = db.create_workspace(
         "WS",
         config_overrides={
@@ -345,7 +346,7 @@ def test_delete_rewrites_only_the_matching_pointer(db):
 
 
 def test_delete_rewrites_every_referencing_workspace(db):
-    pid = db.create_saved_process("Shared")
+    pid = db.processes.create("Shared")
     ws_ids = [
         db.create_workspace(
             f"WS{i}", config_overrides={"pipeline": {"default_process_id": pid}},
@@ -371,16 +372,16 @@ def test_delete_rewrites_every_referencing_workspace(db):
     ],
 )
 def test_delete_skips_workspaces_it_cannot_or_need_not_rewrite(db, raw):
-    pid = db.create_saved_process("Skip")
+    pid = db.processes.create("Skip")
     ws = db.create_workspace("WS")
     _set_overrides_raw(db, ws, raw)
     assert db.delete_saved_process(pid) is True
     assert _overrides_raw(db, ws) == raw
-    assert db.get_saved_process(pid) is None
+    assert db.processes.get(pid) is None
 
 
 def test_delete_skips_null_overrides(db):
-    pid = db.create_saved_process("Nulls")
+    pid = db.processes.create("Nulls")
     ws = db.create_workspace("WS")
     assert _overrides_raw(db, ws) is None
     assert db.delete_saved_process(pid) is True
@@ -389,7 +390,7 @@ def test_delete_skips_null_overrides(db):
 
 def test_delete_compares_pointer_by_equality(db):
     # A string pointer "N" is not the integer id N; only == matches rewrite.
-    pid = db.create_saved_process("Typed pointer")
+    pid = db.processes.create("Typed pointer")
     ws_str = db.create_workspace(
         "WSstr", config_overrides={"pipeline": {"default_process_id": str(pid)}},
     )
@@ -398,7 +399,7 @@ def test_delete_compares_pointer_by_equality(db):
 
 
 def test_delete_mixed_rows_rewrites_matches_and_skips_malformed(db):
-    pid = db.create_saved_process("Mixed")
+    pid = db.processes.create("Mixed")
     bad = db.create_workspace("Bad")
     good = db.create_workspace(
         "Good", config_overrides={"pipeline": {"default_process_id": pid}},
@@ -411,11 +412,11 @@ def test_delete_mixed_rows_rewrites_matches_and_skips_malformed(db):
 
 def test_static_helpers_stay_callable_on_database(db):
     """The private static helpers remain on ``Database`` for any caller."""
-    pid = db.create_saved_process("Static", skip_regroup=True)
+    pid = db.processes.create("Static", skip_regroup=True)
     row = db.conn.execute(
         "SELECT * FROM saved_processes WHERE id = ?", (pid,)
     ).fetchone()
-    assert Database._saved_process_row_to_dict(row) == db.get_saved_process(pid)
+    assert Database._saved_process_row_to_dict(row) == db.processes.get(pid)
     assert db._saved_process_row_to_dict(row)["skip_regroup"] is True
     assert Database._normalize_process_fields(
         " N ", 1, 0, "x", None, True, "species",
@@ -428,9 +429,9 @@ def test_static_helpers_stay_callable_on_database(db):
 
 def test_saved_processes_do_not_require_an_active_workspace(db):
     db.set_active_workspace(None)
-    pid = db.create_saved_process("Global")
-    assert db.get_saved_process(pid)["name"] == "Global"
-    assert any(p["id"] == pid for p in db.get_saved_processes())
+    pid = db.processes.create("Global")
+    assert db.processes.get(pid)["name"] == "Global"
+    assert any(p["id"] == pid for p in db.processes.list_all())
     assert db.resolve_process(pid)["skip_classify"] is False
     assert db.update_saved_process(pid, skip_classify=True) is True
     assert db.delete_saved_process(pid) is True
@@ -438,16 +439,20 @@ def test_saved_processes_do_not_require_an_active_workspace(db):
 
 # -- structure: the saved-process SQL lives in the repository ------------------
 
-# Database methods whose SQL moved to repositories/processes.py. Each stays on
-# Database as a thin wrapper so existing call sites keep working; none may
-# reach the connection directly again. ``resolve_process`` has no SQL and
-# composes ``get_saved_process`` on the façade, so it is not listed.
+# Coordinated Database methods over repositories/processes.py: each checks
+# the row exists before writing, so it stays on the façade; none may reach the
+# connection directly again. ``resolve_process`` has no SQL and composes
+# ``db.processes.get``, so it is not listed.
 _DELEGATING_PROCESS_METHODS = (
+    "update_saved_process",
+    "delete_saved_process",
+)
+
+# The forwarding wrappers ``db.processes`` replaced.
+_REMOVED_PROCESS_WRAPPERS = (
     "get_saved_processes",
     "get_saved_process",
     "create_saved_process",
-    "update_saved_process",
-    "delete_saved_process",
 )
 
 # Pure static helpers that forward to the repository's static helpers.
@@ -505,12 +510,17 @@ def test_update_saved_process_shares_the_unset_sentinel_with_the_repository():
 
 
 def test_process_wrapper_signatures_are_unchanged():
-    sig = inspect.signature(Database.create_saved_process)
-    assert str(sig) == (
-        "(self, name, *, skip_classify=False, skip_extract_masks=False, "
-        "skip_eye_keypoints=False, skip_regroup=False, miss_enabled=True, "
-        "review_mode=None)"
-    )
+    sig = inspect.signature(ProcessesRepository.create)
+    assert [(p.name, p.kind.name, p.default) for p in sig.parameters.values()] == [
+        ("self", "POSITIONAL_OR_KEYWORD", inspect.Parameter.empty),
+        ("name", "POSITIONAL_OR_KEYWORD", inspect.Parameter.empty),
+        ("skip_classify", "KEYWORD_ONLY", False),
+        ("skip_extract_masks", "KEYWORD_ONLY", False),
+        ("skip_eye_keypoints", "KEYWORD_ONLY", False),
+        ("skip_regroup", "KEYWORD_ONLY", False),
+        ("miss_enabled", "KEYWORD_ONLY", True),
+        ("review_mode", "KEYWORD_ONLY", None),
+    ]
     sig = inspect.signature(Database.update_saved_process)
     assert list(sig.parameters) == [
         "self", "process_id", "name", "skip_classify", "skip_extract_masks",
@@ -523,11 +533,67 @@ def test_process_wrapper_signatures_are_unchanged():
     )
 
 
-def test_existence_checks_go_through_the_facade(db, monkeypatch):
-    """update/delete ask ``Database.get_saved_process`` whether the row exists."""
-    pid = db.create_saved_process("Patched")
-    monkeypatch.setattr(db, "get_saved_process", lambda process_id: None)
+def test_existence_checks_go_through_the_repository_get(db, monkeypatch):
+    """update/delete ask ``ProcessesRepository.get`` whether the row exists.
+
+    The patch goes on the class: ``db.processes`` builds a fresh repository on
+    every access, so a class-level patch reaches every existence check.
+    """
+    pid = db.processes.create("Patched")
+    monkeypatch.setattr(ProcessesRepository, "get", lambda self, process_id: None)
     assert db.update_saved_process(pid, name="Nope") is False
     assert db.delete_saved_process(pid) is False
+    with pytest.raises(ValueError, match="unknown process id"):
+        db.resolve_process(pid)
     monkeypatch.undo()
-    assert db.get_saved_process(pid)["name"] == "Patched"
+    assert db.processes.get(pid)["name"] == "Patched"
+
+
+def test_processes_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.processes`` builds a new repository each time, never a cached one."""
+    first, second = db.processes, db.processes
+    assert isinstance(first, ProcessesRepository)
+    assert first is not second
+    assert first.conn is db.conn
+
+
+def test_processes_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.processes``; Database keeps no aliases."""
+    for name in _REMOVED_PROCESS_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.processes"
+    accessor = Database.__dict__["processes"]
+    assert isinstance(accessor, property)
+    attrs = {
+        node.attr
+        for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(accessor.fget))))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "_processes_repository" in attrs
+    assert "conn" not in attrs
+
+
+def test_production_code_updates_and_deletes_through_the_facade():
+    """Nothing outside the data layer skips the existence check.
+
+    ``ProcessesRepository.update`` / ``delete`` assume the row exists (update
+    needs the current row to merge over); ``Database.update_saved_process`` /
+    ``delete_saved_process`` check first.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    pattern = re.compile(r"\.processes\.(update|delete)\(")
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if rel.parts[0] in ("tests", "repositories") or rel.name == "db.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        offenders += [f"{rel}: {m.group(0)}" for m in pattern.finditer(text)]
+    assert offenders == [], (
+        "Call db.update_saved_process / db.delete_saved_process instead: "
+        f"{offenders}"
+    )

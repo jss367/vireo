@@ -11,15 +11,84 @@ import pytest
 from services.preview_workers import PreviewWorkers, parse_request
 
 
+def publish_started_marker(path):
+    # exists() is a cross-process readiness signal: publish only a full PID.
+    marker = Path(path)
+    temporary = marker.with_name(marker.name + '.tmp')
+    temporary.write_text(str(os.getpid()))
+    os.replace(temporary, marker)
+
+
 def render_probe(payload, output):
     if payload.get('started'):
-        Path(payload['started']).write_text(str(os.getpid()))
+        publish_started_marker(payload['started'])
     if payload.get('crash'):
         os._exit(7)
     if payload.get('hang'):
         time.sleep(60)
     Path(output).write_bytes(str(payload.get('value', os.getpid())).encode())
     return 200, '', 'probe'
+
+
+def render_native_probe(payload, output):
+    import numpy as np
+    from detail_backend import detail_thread_budget, filters_for_image
+
+    image = np.random.default_rng(7).random((512, 2048), dtype=np.float32)
+    with detail_thread_budget(payload['threads']), filters_for_image(image.size) as filters:
+        assert filters is not None
+        if payload.get('started'):
+            publish_started_marker(payload['started'])
+        if payload.get('peer'):
+            wait_until(lambda: Path(payload['peer']).exists())
+        while True:
+            result = filters.bilateral(image, 1.6, .07, 3)
+            if not payload.get('repeat'):
+                break
+        Path(output).write_text(json.dumps({
+            'pid': os.getpid(), 'threads': filters.thread_count,
+            'sum': float(result.sum()),
+        }))
+    return 200, '', 'native'
+
+
+def test_native_work_can_be_cancelled_and_worker_recovers(tmp_path):
+    pytest.importorskip('vireo._native_detail')
+    pool = PreviewWorkers(render_native_probe, workers=1, threads=2, timeout=15)
+    marker = tmp_path / 'native-started'
+    try:
+        with ThreadPoolExecutor(1) as threads:
+            old = threads.submit(pool.render, {'repeat': True, 'threads': 2, 'started': str(marker)}, 'native', 1)
+            wait_until(marker.exists)
+            old_pid = int(marker.read_text())
+            pool.cancel('native', 2)
+            assert old.result(timeout=5)[0] == 409
+            recovered = pool.render({'threads': 2}, 'native', 3)
+            assert recovered[0] == 200
+            info = json.loads(recovered[1])
+            assert info['pid'] != old_pid
+            assert info['threads'] == 2
+    finally:
+        pool.close()
+
+
+def test_concurrent_native_previews_use_independent_bounded_pools(tmp_path):
+    pytest.importorskip('vireo._native_detail')
+    pool = PreviewWorkers(render_native_probe, workers=2, threads=2, timeout=15)
+    markers = [tmp_path / 'first', tmp_path / 'second']
+    try:
+        with ThreadPoolExecutor(2) as threads:
+            pending = [threads.submit(pool.render, {
+                'threads': 2, 'started': str(markers[i]), 'peer': str(markers[1 - i]),
+            }, f'native-{i}', 1) for i in range(2)]
+            responses = [item.result(timeout=20) for item in pending]
+        assert all(response[0] == 200 for response in responses)
+        first, second = [json.loads(response[1]) for response in responses]
+        assert first['pid'] != second['pid']
+        assert first['threads'] == second['threads'] == 2
+        assert first['sum'] == second['sum']
+    finally:
+        pool.close()
 
 
 def wait_until(predicate, timeout=10):

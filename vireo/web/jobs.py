@@ -80,7 +80,7 @@ def create_jobs_blueprint(
         db = get_db()
         active = [_strip_heavy_for_list(j) for j in runner.list_jobs()]
         history = [_strip_heavy_for_list(j) for j in runner.get_history(db, limit=10)]
-        ws_rows = db.get_workspaces()
+        ws_rows = db.workspaces.list_all()
         ws_names = {w["id"]: w["name"] for w in ws_rows}
         return jsonify({
             "active": active,
@@ -700,7 +700,7 @@ def create_jobs_blueprint(
             for r in result["results"]:
                 ctx.checkpoint(job)
                 if r["group_size"] > 1 and r["is_best"]:
-                    thread_db.update_photo_flag(r["photo_id"], "flagged",
+                    thread_db.photo_review.set_flag(r["photo_id"], "flagged",
                                                 verify_workspace=False)
                     best_count += 1
 
@@ -932,13 +932,13 @@ def create_jobs_blueprint(
                     thread_db, ctx.workspace_id, collection_id,
                     snapshot_photo_ids=snapshot_photo_ids,
                 ):
-                    thread_db.set_workspace_group_state(
+                    thread_db.workspaces.set_group_state(
                         workspace_id=ctx.workspace_id,
                         fingerprint=compute_group_fingerprint(effective_cfg),
                         when_ts=int(time.time()),
                     )
                 else:
-                    thread_db.set_workspace_group_state(
+                    thread_db.workspaces.set_group_state(
                         workspace_id=ctx.workspace_id,
                         fingerprint=None,
                         when_ts=None,

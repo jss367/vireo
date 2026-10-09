@@ -246,6 +246,10 @@ async function samplePointColorAt(e) {
   if (x < 0 || y < 0 || x > 1 || y > 1) return;
   var photoId = editorState.photoId, startKey = recipeKey(editorState.recipe);
   var sampleUrl = new URL(displayed.currentSrc || displayed.src, window.location.href);
+  // Sampling is an independent render, not a replay of the displayed image's
+  // already-consumed sequence or a replacement for the editor's active work.
+  sampleUrl.searchParams.delete('preview_session');
+  sampleUrl.searchParams.delete('preview_seq');
   var recipe = previewRecipe();
   // Sample at the input of Point Color, so subsequent color changes cannot
   // move the selection away from its own original sample.

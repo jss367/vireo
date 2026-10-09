@@ -320,17 +320,17 @@ def test_classifier_partial_flush_is_not_a_cache_hit(db, tmp_path):
     did = db.save_detections(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": .9}], "test-detector")[0]
     _record_batch_classifier_runs(db, [{"detection_id": did}], "test-model", "test-labels", [{"detection_id": did}])
     assert db.conn.execute("SELECT count(*) FROM predictions WHERE detection_id=?", (did,)).fetchone()[0] == 0
-    accepted, _ = db.get_classifier_run_key_gate(did, "some-current-runtime")
+    accepted, _ = db.model_runs.get_classifier_run_key_gate(did, "some-current-runtime")
     assert ("test-model", "test-labels") not in accepted
 
 
 def test_failed_folder_transfer_leaves_no_workspace(app_and_db):
     app, db = app_and_db
     child = db.conn.execute("SELECT id FROM folders WHERE parent_id IS NOT NULL LIMIT 1").fetchone()[0]
-    before = len(db.get_workspaces())
+    before = len(db.workspaces.list_all())
     response = app.test_client().post(f"/api/workspaces/{db._ws_id()}/move-folders", json={"folder_ids": [child], "new_workspace_name": "Failed transfer destination"})
     assert response.status_code == 400, response.json
-    assert len(db.get_workspaces()) == before
+    assert len(db.workspaces.list_all()) == before
 
 
 def test_staging_lock_failure_allows_retry(db, tmp_path):

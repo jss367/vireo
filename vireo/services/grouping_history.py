@@ -504,7 +504,7 @@ def apply_grouping_photo_edit(db, entry, items, *, undo):
         pid = item["photo_id"]
         if action == "flag":
             value = item["old_value" if undo else "new_value"]
-            db.update_photo_flag(pid, value, _commit=False)
+            db.photo_review.set_flag(pid, value, _commit=False)
             db.queue_flag_change_if_enabled(pid, value, _commit=False)
             continue
         if action not in ("keyword_add", "species_replace"):
@@ -514,11 +514,11 @@ def apply_grouping_photo_edit(db, entry, items, *, undo):
         remove_ids, add_ids = (new_ids, old_ids) if undo else (old_ids, new_ids)
         for kid in remove_ids:
             db.untag_photo(pid, kid, _commit=False)
-            name = db._keyword_name(kid)
+            name = db.edit_history.keyword_name(kid)
             if name and db.remove_pending_changes(pid, 'keyword_add', name, _commit=False) == 0:
                 db.queue_change(pid, 'keyword_remove', name, _commit=False)
         for kid in add_ids:
             db.tag_photo(pid, kid, source='manual', _commit=False)
-            name = db._keyword_name(kid)
+            name = db.edit_history.keyword_name(kid)
             if name and db.remove_pending_changes(pid, 'keyword_remove', name, _commit=False) == 0:
                 db.queue_change(pid, 'keyword_add', name, _commit=False)

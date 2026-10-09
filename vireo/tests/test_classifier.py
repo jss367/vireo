@@ -1113,7 +1113,9 @@ def test_upgrade_reuses_legacy_set_only_with_exact_label_identity(tmp_path, monk
     source.write_text("bird\n" + ("dog\n" if source_changed else "cat\n"))
     # Older caches have no label list in their manifest. Reconstruct a
     # candidate from the catalog's recorded source files, then verify its key.
-    db = SimpleNamespace(get_labels_fingerprints=lambda: [{"sources": [str(source)]}])
+    db = SimpleNamespace(model_runs=SimpleNamespace(
+        get_labels_fingerprints=lambda: [{"sources": [str(source)]}],
+    ))
     monkeypatch.setattr(classify_job, "get_saved_labels", lambda: [])
     classify_job._reuse_saved_label_embeddings(db, "ViT-B-16", str(model_dir), ["bird", "cat", "dog"])
     individual = LabelEmbeddingCache(cache.cache_dir, identity, 512)

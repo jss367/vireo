@@ -222,7 +222,7 @@ def test_gps_discrepancy_review_requires_selection_and_queues_only_selected(live
     page.locator('#locationReviewAssign').click()
     expect(page.locator('[data-gps-select]')).to_have_count(1)
     expect(page.locator('#locationReviewCorrectionStatus')).to_contain_text('1 correction queued')
-    pending = live_server['db'].get_pending_changes()
+    pending = live_server['db'].pending_changes.list_all()
     assert [(p['photo_id'], p['change_type']) for p in pending] == [(photo_ids[0], 'location')]
     # Keeping the second photo writes no metadata and survives reopening.
     page.locator('#locationReviewSelectAll').click()
@@ -253,7 +253,7 @@ def test_gps_discrepancy_skip_and_distance_filter_do_not_change_metadata(live_se
     page.locator('#locationReviewDistance').fill('1000')
     page.locator('#locationReviewDistance').press('Tab')
     expect(page.locator('#locationReviewEmptyTitle')).to_have_text('No locations to review')
-    assert live_server['db'].get_pending_changes() == []
+    assert live_server['db'].pending_changes.list_all() == []
     assert live_server['db'].conn.execute('SELECT COUNT(*) FROM location_gps_reviews').fetchone()[0] == 0
 
 

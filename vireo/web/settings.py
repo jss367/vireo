@@ -99,7 +99,7 @@ def queue_location_keyword_cleanup_on_global_off(
     if prev_global_val == cur_global_val:
         return
     try:
-        workspaces = db.get_workspaces()
+        workspaces = db.workspaces.list_all()
     except Exception:
         log.warning(
             "Failed to enumerate workspaces for %s cleanup check",
@@ -136,7 +136,7 @@ def read_workspace_overrides(db):
     create/update APIs) to ``{}`` so dotted-key mutation in the schema
     write paths can't crash on a malformed override.
     """
-    ws = db.get_workspace(db.active_workspace_id)
+    ws = db.workspaces.get(db.active_workspace_id)
     if not ws or not ws["config_overrides"]:
         return {}
     try:
@@ -147,7 +147,7 @@ def read_workspace_overrides(db):
     return parsed if isinstance(parsed, dict) else {}
 
 def write_workspace_overrides(db, overrides):
-    db.update_workspace(
+    db.workspaces.update(
         db.active_workspace_id,
         config_overrides=overrides if overrides else None,
     )
@@ -478,7 +478,7 @@ def create_settings_blueprint(
                             "pipeline.default_process_id must be an integer "
                             "or null", status=400,
                         )
-                    if get_db().get_saved_process(pid) is None:
+                    if get_db().processes.get(pid) is None:
                         return json_error(
                             f"unknown process id: {pid}", status=400
                         )
@@ -508,7 +508,7 @@ def create_settings_blueprint(
         out = dict(schema.SCHEMA)
         spec = dict(out.get("pipeline.default_process_id", {}))
         if spec:
-            procs = db.get_saved_processes()
+            procs = db.processes.list_all()
             spec["type"] = "enum"
             # Return numeric ids so the settings renderer, which selects the
             # active option via strict equality against the effective value,
@@ -560,7 +560,7 @@ def create_settings_blueprint(
         # Workspace layer: parse config_overrides for the active workspace.
         workspace_layer = {}
         db = get_db()
-        ws = db.get_workspace(db.active_workspace_id)
+        ws = db.workspaces.get(db.active_workspace_id)
         if ws and ws["config_overrides"]:
             try:
                 overrides = (
@@ -624,7 +624,7 @@ def create_settings_blueprint(
         if (
             key == "pipeline.default_process_id"
             and value is not None
-            and get_db().get_saved_process(value) is None
+            and get_db().processes.get(value) is None
         ):
             return json_error(f"unknown process id: {value}", status=400)
 
@@ -700,7 +700,7 @@ def create_settings_blueprint(
         if (
             key == "pipeline.default_process_id"
             and value is not None
-            and db.get_saved_process(value) is None
+            and db.processes.get(value) is None
         ):
             return json_error(f"unknown process id: {value}", status=400)
         with settings_write_lock:
@@ -799,7 +799,7 @@ def create_settings_blueprint(
         if isinstance(pipeline_raw, dict):
             pid = pipeline_raw.get("default_process_id")
             if isinstance(pid, int):
-                match = get_db().get_saved_process(pid)
+                match = get_db().processes.get(pid)
                 if match is not None:
                     import process_strategies as ps
 
@@ -871,7 +871,7 @@ def create_settings_blueprint(
                 if seed_name is not None:
                     match = next(
                         (
-                            p for p in get_db().get_saved_processes()
+                            p for p in get_db().processes.list_all()
                             if p["name"] == seed_name
                         ),
                         None,
@@ -908,7 +908,7 @@ def create_settings_blueprint(
                 pipeline_payload["default_process_id"] = None
             elif isinstance(name_val, str):
                 candidates = [
-                    p for p in get_db().get_saved_processes()
+                    p for p in get_db().processes.list_all()
                     if p["name"] == name_val
                 ]
                 translated_pid = None
@@ -968,7 +968,7 @@ def create_settings_blueprint(
             if (
                 pid_val is not _MISSING
                 and pid_val is not None
-                and get_db().get_saved_process(pid_val) is None
+                and get_db().processes.get(pid_val) is None
             ):
                 errors[pid_key] = f"unknown process id: {pid_val}"
 

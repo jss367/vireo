@@ -1,9 +1,9 @@
 """Behavior pins for the model-runs domain of ``Database``.
 
-The behavior tests exercise the model-run methods only through the public
-``Database`` façade, so they hold whether the SQL lives in ``db.py`` or in
-``repositories/model_runs.py``; the structural tests at the end keep it in
-the repository. They cover detector runs (recording, global stats, the
+The behavior tests go through the ``db.model_runs`` accessor and the
+coordinated ``Database`` methods that stay on the façade; the structural
+tests at the end pin the accessor's shape, keep the old forwarding wrappers
+gone and keep the SQL in ``repositories/model_runs.py``. They cover detector runs (recording, global stats, the
 review pin, the cached-run skip set), classifier runs and their runtime
 gates, match scores, the classify preflight's cache-hit and
 unclassifiable sets, and the labels-fingerprint sidecar.
@@ -19,6 +19,7 @@ import config as cfg
 import db as db_module
 import pytest
 from db import AUTO_MATCH_REVIEW_MARKER, Database
+from repositories.model_runs import ModelRunsRepository
 
 MODEL = "BioCLIP-2.5"
 
@@ -75,7 +76,7 @@ def _pred(db, detection_id, fingerprint, species="Robin", model=MODEL,
 
 
 def _usable(db, detection_id, fingerprint="fp-a", model=MODEL, **run_kwargs):
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         detection_id, model, fingerprint, prediction_count=1, **run_kwargs,
     )
     return _pred(db, detection_id, fingerprint, model=model)
@@ -87,7 +88,7 @@ def _review(db, prediction_id, status, individual=None):
 
 
 def _set_floor(db, value):
-    db.update_workspace(
+    db.workspaces.update(
         db._ws_id(), config_overrides={"detector_confidence": value},
     )
 
@@ -97,7 +98,7 @@ def _set_floor(db, value):
 
 def test_record_detector_run_inserts_upserts_and_commits(db):
     pid = _photo(db, "a.jpg")
-    db.record_detector_run(pid, "megadetector-v6", 2)
+    db.model_runs.record_detector_run(pid, "megadetector-v6", 2)
 
     reader = _reader(db)
     row = reader.execute(
@@ -109,7 +110,7 @@ def test_record_detector_run_inserts_upserts_and_commits(db):
     assert row["box_count"] == 2
     assert row["run_at"] is not None
 
-    db.record_detector_run(
+    db.model_runs.record_detector_run(
         pid, "megadetector-v6", 0,
         runtime_fingerprint="rt-2", input_fingerprint="in-2",
     )
@@ -124,16 +125,16 @@ def test_record_detector_run_inserts_upserts_and_commits(db):
 
 
 def test_get_global_detection_stats_counts_distinct_photos_and_models(db):
-    assert db.get_global_detection_stats() == {
+    assert db.model_runs.get_global_detection_stats() == {
         "photo_count": 0, "model_count": 0,
     }
     fid = _folder(db)
     p1 = _photo(db, "a.jpg", fid)
     p2 = _photo(db, "b.jpg", fid)
-    db.record_detector_run(p1, "megadetector-v6", 1)
-    db.record_detector_run(p1, "megadetector-v5", 0)
-    db.record_detector_run(p2, "megadetector-v6", 3)
-    assert db.get_global_detection_stats() == {
+    db.model_runs.record_detector_run(p1, "megadetector-v6", 1)
+    db.model_runs.record_detector_run(p1, "megadetector-v5", 0)
+    db.model_runs.record_detector_run(p2, "megadetector-v6", 3)
+    assert db.model_runs.get_global_detection_stats() == {
         "photo_count": 2, "model_count": 2,
     }
 
@@ -170,18 +171,18 @@ def test_get_detector_run_photo_ids_excludes_torn_runs(db):
     torn = _photo(db, "torn.jpg", fid)
     ok = _photo(db, "ok.jpg", fid)
     other = _photo(db, "other.jpg", fid)
-    db.record_detector_run(empty, "megadetector-v6", 0)
-    db.record_detector_run(torn, "megadetector-v6", 2)
-    db.record_detector_run(ok, "megadetector-v6", 1)
+    db.model_runs.record_detector_run(empty, "megadetector-v6", 0)
+    db.model_runs.record_detector_run(torn, "megadetector-v6", 2)
+    db.model_runs.record_detector_run(ok, "megadetector-v6", 1)
     _det(db, ok, "megadetector-v6")
-    db.record_detector_run(other, "megadetector-v5", 0)
+    db.model_runs.record_detector_run(other, "megadetector-v5", 0)
     # A detection under a different model does not make the torn row whole.
     _det(db, torn, "megadetector-v5")
 
-    result = db.get_detector_run_photo_ids("megadetector-v6")
+    result = db.model_runs.get_detector_run_photo_ids("megadetector-v6")
     assert isinstance(result, set)
     assert result == {empty, ok}
-    assert db.get_detector_run_photo_ids("missing-model") == set()
+    assert db.model_runs.get_detector_run_photo_ids("missing-model") == set()
 
 
 def test_get_detector_run_photo_ids_runtime_filter(db):
@@ -193,25 +194,25 @@ def test_get_detector_run_photo_ids_runtime_filter(db):
     auto = _photo(db, "auto.jpg", fid)
     pending = _photo(db, "pending.jpg", fid)
 
-    db.record_detector_run(match, "megadetector-v6", 0,
+    db.model_runs.record_detector_run(match, "megadetector-v6", 0,
                            runtime_fingerprint="rt-new")
-    db.record_detector_run(legacy, "megadetector-v6", 0)
-    db.record_detector_run(stale, "megadetector-v6", 0,
+    db.model_runs.record_detector_run(legacy, "megadetector-v6", 0)
+    db.model_runs.record_detector_run(stale, "megadetector-v6", 0,
                            runtime_fingerprint="rt-old")
     for pid, status, individual in (
         (reviewed, "accepted", None),
         (auto, "accepted", AUTO_MATCH_REVIEW_MARKER),
         (pending, "pending", None),
     ):
-        db.record_detector_run(pid, "megadetector-v6", 1,
+        db.model_runs.record_detector_run(pid, "megadetector-v6", 1,
                                runtime_fingerprint="rt-old")
         det = _det(db, pid, "megadetector-v6")
         _review(db, _pred(db, det, "fp-a"), status, individual=individual)
 
-    assert db.get_detector_run_photo_ids("megadetector-v6") == {
+    assert db.model_runs.get_detector_run_photo_ids("megadetector-v6") == {
         match, legacy, stale, reviewed, auto, pending,
     }
-    assert db.get_detector_run_photo_ids(
+    assert db.model_runs.get_detector_run_photo_ids(
         "megadetector-v6", runtime_fingerprint="rt-new",
     ) == {match, legacy, reviewed}
 
@@ -231,7 +232,7 @@ def test_record_classifier_run_inserts_upserts_and_commits_with_retry(
 
     det = _det(db, _photo(db, "a.jpg"))
     monkeypatch.setattr(db_module, "commit_with_retry", recording)
-    db.record_classifier_run(det, MODEL, "fp-a", 3)
+    db.model_runs.record_classifier_run(det, MODEL, "fp-a", 3)
     assert commits == [db.conn]
 
     reader = _reader(db)
@@ -245,7 +246,7 @@ def test_record_classifier_run_inserts_upserts_and_commits_with_retry(
         "input_fingerprint": None, "run_at": None, "prediction_count": 3,
     }
 
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det, MODEL, "fp-a", 5, labels_fingerprint_full="full-a",
         runtime_fingerprint="rt", input_fingerprint="in",
         input_recipe="raw",
@@ -257,7 +258,7 @@ def test_record_classifier_run_inserts_upserts_and_commits_with_retry(
     assert (rows[0]["labels_fingerprint_full"], rows[0]["runtime_fingerprint"],
             rows[0]["input_fingerprint"], rows[0]["prediction_count"],
             rows[0]["input_recipe"]) == ("full-a", "rt", "in", 5, "raw")
-    db.record_classifier_run(det, MODEL, "fp-b", 1)
+    db.model_runs.record_classifier_run(det, MODEL, "fp-b", 1)
     assert reader.execute(
         "SELECT COUNT(*) FROM classifier_runs WHERE detection_id = ?", (det,),
     ).fetchone()[0] == 2
@@ -276,7 +277,7 @@ def test_record_classifier_match_score_upserts_and_commits_with_retry(
 
     det = _det(db, _photo(db, "a.jpg"))
     monkeypatch.setattr(db_module, "commit_with_retry", recording)
-    db.record_classifier_match_score(det, MODEL, "fp-a", 0.4)
+    db.model_runs.record_classifier_match_score(det, MODEL, "fp-a", 0.4)
     assert commits == [db.conn]
 
     reader = _reader(db)
@@ -287,7 +288,7 @@ def test_record_classifier_match_score_upserts_and_commits_with_retry(
     assert (row["match_margin"], row["top_species"], row["label_count"],
             row["score_kind"]) == (None, None, None, None)
 
-    db.record_classifier_match_score(
+    db.model_runs.record_classifier_match_score(
         det, MODEL, "fp-a", 0.7, match_margin=0.1, top_species="Robin",
         label_count=12, score_kind="cosine",
     )
@@ -303,38 +304,38 @@ def test_record_classifier_match_score_upserts_and_commits_with_retry(
 
 def test_has_classifier_match_score_matches_the_exact_key(db):
     det = _det(db, _photo(db, "a.jpg"))
-    assert db.has_classifier_match_score(det, MODEL, "fp-a") is False
-    db.record_classifier_match_score(det, MODEL, "fp-a", 0.2)
-    assert db.has_classifier_match_score(det, MODEL, "fp-a") is True
-    assert db.has_classifier_match_score(det, MODEL, "fp-b") is False
-    assert db.has_classifier_match_score(det, "other", "fp-a") is False
-    assert db.has_classifier_match_score(det + 1, MODEL, "fp-a") is False
+    assert db.model_runs.has_classifier_match_score(det, MODEL, "fp-a") is False
+    db.model_runs.record_classifier_match_score(det, MODEL, "fp-a", 0.2)
+    assert db.model_runs.has_classifier_match_score(det, MODEL, "fp-a") is True
+    assert db.model_runs.has_classifier_match_score(det, MODEL, "fp-b") is False
+    assert db.model_runs.has_classifier_match_score(det, "other", "fp-a") is False
+    assert db.model_runs.has_classifier_match_score(det + 1, MODEL, "fp-a") is False
 
 
 def test_get_unscored_current_prediction_runs(db):
     fid = _folder(db)
     pid = _photo(db, "a.jpg", fid)
     other = _photo(db, "b.jpg", fid)
-    assert db.get_unscored_current_prediction_runs(pid) == []
+    assert db.model_runs.get_unscored_current_prediction_runs(pid) == []
 
     det = _det(db, pid, "megadetector-v6")
     _pred(db, det, "fp-old")
     _pred(db, det, "fp-new", species="Wren")
     # A score recorded only for the superseded list does not cover the
     # current one.
-    db.record_classifier_match_score(det, MODEL, "fp-old", 0.8)
+    db.model_runs.record_classifier_match_score(det, MODEL, "fp-old", 0.8)
     other_det = _det(db, other)
     _pred(db, other_det, "fp-new")
 
-    rows = db.get_unscored_current_prediction_runs(pid)
+    rows = db.model_runs.get_unscored_current_prediction_runs(pid)
     assert rows == [{
         "detection_id": det, "classifier_model": MODEL,
         "detector_model": "megadetector-v6", "labels_fingerprint": "fp-new",
     }]
     assert isinstance(rows[0], dict)
 
-    db.record_classifier_match_score(det, MODEL, "fp-new", 0.3)
-    assert db.get_unscored_current_prediction_runs(pid) == []
+    db.model_runs.record_classifier_match_score(det, MODEL, "fp-new", 0.3)
+    assert db.model_runs.get_unscored_current_prediction_runs(pid) == []
 
 
 def test_get_current_prediction_detector_confidences(db):
@@ -342,7 +343,7 @@ def test_get_current_prediction_detector_confidences(db):
     pid = _photo(db, "a.jpg", fid)
     other = _photo(db, "b.jpg", fid)
     for full_image in (False, True):
-        assert db.get_current_prediction_detector_confidences(
+        assert db.model_runs.current_prediction_detector_confidences(
             pid, full_image=full_image,
         ) == []
 
@@ -354,9 +355,9 @@ def test_get_current_prediction_detector_confidences(db):
     _pred(db, _det(db, other), "fp-new")
 
     # Only the latest label set per (detection, model), at any confidence.
-    rows = db.get_current_prediction_detector_confidences(pid, full_image=False)
+    rows = db.model_runs.current_prediction_detector_confidences(pid, full_image=False)
     assert [(r["id"], r["detector_confidence"]) for r in rows] == [(current, 0.05)]
-    rows = db.get_current_prediction_detector_confidences(pid, full_image=True)
+    rows = db.model_runs.current_prediction_detector_confidences(pid, full_image=True)
     assert [(r["id"], r["detector_confidence"]) for r in rows] == [(full_pred, 1.0)]
 
 
@@ -364,38 +365,38 @@ def test_get_classifier_runs_for_photo(db):
     fid = _folder(db)
     pid = _photo(db, "a.jpg", fid)
     other = _photo(db, "b.jpg", fid)
-    assert db.get_classifier_runs_for_photo(pid, full_image=False) == []
+    assert db.model_runs.classifier_runs_for_photo(pid, full_image=False) == []
 
     low = _det(db, pid, "megadetector-v6", conf=0.05)
-    db.record_classifier_run(low, MODEL, "fp-a", prediction_count=0)
-    db.record_classifier_run(low, MODEL, "fp-b", prediction_count=2)
+    db.model_runs.record_classifier_run(low, MODEL, "fp-a", prediction_count=0)
+    db.model_runs.record_classifier_run(low, MODEL, "fp-b", prediction_count=2)
     full = _det(db, pid, "full-image", conf=1.0)
-    db.record_classifier_run(full, MODEL, "fp-a", prediction_count=5)
-    db.record_classifier_run(_det(db, other), MODEL, "fp-a", prediction_count=1)
+    db.model_runs.record_classifier_run(full, MODEL, "fp-a", prediction_count=5)
+    db.model_runs.record_classifier_run(_det(db, other), MODEL, "fp-a", prediction_count=1)
 
-    rows = db.get_classifier_runs_for_photo(pid, full_image=False)
+    rows = db.model_runs.classifier_runs_for_photo(pid, full_image=False)
     assert sorted(
         (r["prediction_count"], r["detector_confidence"]) for r in rows
     ) == [(0, 0.05), (2, 0.05)]
-    rows = db.get_classifier_runs_for_photo(pid, full_image=True)
+    rows = db.model_runs.classifier_runs_for_photo(pid, full_image=True)
     assert [(r["prediction_count"], r["detector_confidence"]) for r in rows] == [(5, 1.0)]
 
 
 def test_get_match_scores_for_photo_orders_and_stamps_is_current(db):
     fid = _folder(db)
     pid = _photo(db, "a.jpg", fid)
-    assert db.get_match_scores_for_photo(pid) == []
+    assert db.model_runs.get_match_scores_for_photo(pid) == []
 
     det = _det(db, pid, "megadetector-v6", conf=0.05)
     _pred(db, det, "fp-old")
     _pred(db, det, "fp-new", species="Wren")
-    db.record_classifier_match_score(det, MODEL, "fp-old", 0.9)
-    db.record_classifier_match_score(det, MODEL, "fp-new", 0.3)
+    db.model_runs.record_classifier_match_score(det, MODEL, "fp-old", 0.9)
+    db.model_runs.record_classifier_match_score(det, MODEL, "fp-new", 0.3)
 
     # No predictions at all: the latest match-score row is current.
     bare = _det(db, pid, "megadetector-v6", conf=0.5)
-    db.record_classifier_match_score(bare, MODEL, "fp-x", 0.5)
-    db.record_classifier_match_score(bare, MODEL, "fp-y", 0.1)
+    db.model_runs.record_classifier_match_score(bare, MODEL, "fp-x", 0.5)
+    db.model_runs.record_classifier_match_score(bare, MODEL, "fp-y", 0.1)
     db.conn.execute(
         """UPDATE classifier_match_scores SET run_at = ?
             WHERE detection_id = ? AND labels_fingerprint = ?""",
@@ -403,9 +404,9 @@ def test_get_match_scores_for_photo_orders_and_stamps_is_current(db):
     )
     db.conn.commit()
     other_det = _det(db, _photo(db, "b.jpg", fid))
-    db.record_classifier_match_score(other_det, MODEL, "fp-a", 1.0)
+    db.model_runs.record_classifier_match_score(other_det, MODEL, "fp-a", 1.0)
 
-    rows = db.get_match_scores_for_photo(pid)
+    rows = db.model_runs.get_match_scores_for_photo(pid)
     assert [(r["detection_id"], r["labels_fingerprint"], r["is_current"])
             for r in rows] == [
         (det, "fp-old", 0),
@@ -421,13 +422,13 @@ def test_get_match_scores_for_photo_orders_and_stamps_is_current(db):
 
 def test_get_match_scores_is_current_breaks_run_at_ties_by_rowid(db):
     det = _det(db, _photo(db, "a.jpg"))
-    db.record_classifier_match_score(det, MODEL, "fp-x", 0.5)
-    db.record_classifier_match_score(det, MODEL, "fp-y", 0.4)
+    db.model_runs.record_classifier_match_score(det, MODEL, "fp-x", 0.5)
+    db.model_runs.record_classifier_match_score(det, MODEL, "fp-y", 0.4)
     db.conn.execute(
         "UPDATE classifier_match_scores SET run_at = '2020-01-01 00:00:00'",
     )
     db.conn.commit()
-    rows = db.get_match_scores_for_photo(
+    rows = db.model_runs.get_match_scores_for_photo(
         db.conn.execute(
             "SELECT photo_id FROM detections WHERE id = ?", (det,),
         ).fetchone()[0],
@@ -439,60 +440,60 @@ def test_get_match_scores_is_current_breaks_run_at_ties_by_rowid(db):
 
 def test_get_classifier_run_keys_filters_recipe_incomplete_and_runtime(db):
     det = _det(db, _photo(db, "a.jpg"))
-    assert db.get_classifier_run_keys(det) == set()
+    assert db.model_runs.get_classifier_run_keys(det) == set()
 
-    db.record_classifier_run(det, MODEL, "fp-current", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-current", 1,
                              runtime_fingerprint="rt-new")
-    db.record_classifier_run(det, MODEL, "fp-legacy", 1)
-    db.record_classifier_run(det, MODEL, "fp-stale", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-legacy", 1)
+    db.model_runs.record_classifier_run(det, MODEL, "fp-stale", 1,
                              runtime_fingerprint="rt-old")
-    db.record_classifier_run(det, MODEL, "fp-reviewed", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-reviewed", 1,
                              runtime_fingerprint="rt-old")
-    db.record_classifier_run(det, MODEL, "fp-auto", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-auto", 1,
                              runtime_fingerprint="rt-old")
-    db.record_classifier_run(det, MODEL, "fp-raw", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-raw", 1,
                              runtime_fingerprint="rt-new", input_recipe="raw")
-    db.record_classifier_run(det, MODEL, "fp-incomplete", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-incomplete", 1,
                              runtime_fingerprint="incomplete")
     _review(db, _pred(db, det, "fp-reviewed"), "rejected")
     _review(db, _pred(db, det, "fp-auto"), "accepted",
             individual=AUTO_MATCH_REVIEW_MARKER)
 
-    assert db.get_classifier_run_keys(det) == {
+    assert db.model_runs.get_classifier_run_keys(det) == {
         (MODEL, "fp-current"), (MODEL, "fp-legacy"), (MODEL, "fp-stale"),
         (MODEL, "fp-reviewed"), (MODEL, "fp-auto"),
     }
-    assert db.get_classifier_run_keys(det, runtime_fingerprint="rt-new") == {
+    assert db.model_runs.get_classifier_run_keys(det, runtime_fingerprint="rt-new") == {
         (MODEL, "fp-current"), (MODEL, "fp-legacy"), (MODEL, "fp-reviewed"),
     }
 
 
 def test_get_classifier_run_key_gate_partitions_rows(db):
     det = _det(db, _photo(db, "a.jpg"))
-    assert db.get_classifier_run_key_gate(det, None) == (set(), set())
-    assert db.get_classifier_run_key_gate(det, "rt-new") == (set(), set())
+    assert db.model_runs.get_classifier_run_key_gate(det, None) == (set(), set())
+    assert db.model_runs.get_classifier_run_key_gate(det, "rt-new") == (set(), set())
 
-    db.record_classifier_run(det, MODEL, "fp-current", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-current", 1,
                              runtime_fingerprint="rt-new")
-    db.record_classifier_run(det, MODEL, "fp-legacy", 1)
-    db.record_classifier_run(det, MODEL, "fp-stale", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-legacy", 1)
+    db.model_runs.record_classifier_run(det, MODEL, "fp-stale", 1,
                              runtime_fingerprint="rt-old")
-    db.record_classifier_run(det, MODEL, "fp-reviewed", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-reviewed", 1,
                              runtime_fingerprint="rt-old")
-    db.record_classifier_run(det, MODEL, "fp-auto", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-auto", 1,
                              runtime_fingerprint="rt-old")
-    db.record_classifier_run(det, MODEL, "fp-raw", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-raw", 1,
                              runtime_fingerprint="rt-new", input_recipe="raw")
-    db.record_classifier_run(det, MODEL, "fp-incomplete", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-incomplete", 1,
                              runtime_fingerprint="incomplete")
-    db.record_classifier_run(det, MODEL, "fp-raw-reviewed", 1,
+    db.model_runs.record_classifier_run(det, MODEL, "fp-raw-reviewed", 1,
                              input_recipe="raw")
     _review(db, _pred(db, det, "fp-reviewed"), "accepted", individual="Robin")
     _review(db, _pred(db, det, "fp-auto"), "accepted",
             individual=AUTO_MATCH_REVIEW_MARKER)
     _review(db, _pred(db, det, "fp-raw-reviewed"), "accepted")
 
-    accepted, rejected = db.get_classifier_run_key_gate(det, "rt-new")
+    accepted, rejected = db.model_runs.get_classifier_run_key_gate(det, "rt-new")
     assert accepted == {
         (MODEL, "fp-current"), (MODEL, "fp-legacy"), (MODEL, "fp-reviewed"),
     }
@@ -501,10 +502,10 @@ def test_get_classifier_run_key_gate_partitions_rows(db):
         (MODEL, "fp-incomplete"), (MODEL, "fp-raw-reviewed"),
     }
     # Mirrors the runtime-filtered key set.
-    assert accepted == db.get_classifier_run_keys(
+    assert accepted == db.model_runs.get_classifier_run_keys(
         det, runtime_fingerprint="rt-new",
     )
-    assert db.get_classifier_run_key_gate(det, None) == (set(), set())
+    assert db.model_runs.get_classifier_run_key_gate(det, None) == (set(), set())
 
 
 # -- classify preflight: cache hits -------------------------------------------
@@ -543,7 +544,7 @@ def test_cache_hits_ignore_negative_confidence_predictions_and_other_keys(db):
     other_fp = _photo(db, "fp.jpg", fid)
 
     d = _det(db, neg)
-    db.record_classifier_run(d, MODEL, "fp-a", 1)
+    db.model_runs.record_classifier_run(d, MODEL, "fp-a", 1)
     _pred(db, d, "fp-a", confidence=-1)
     _usable(db, _det(db, other_model), model="other")
     _usable(db, _det(db, other_fp), fingerprint="fp-b")
@@ -710,11 +711,11 @@ def test_cache_hits_db_full_image_anchor_requires_consistent_detector_run(db):
     for pid in (consistent, torn, empty_run, blocked):
         _usable(db, _det(db, pid, "full-image", conf=0))
     # consistent: a detector run with a surviving (below-floor) box.
-    db.record_detector_run(consistent, "megadetector-v6", 1)
+    db.model_runs.record_detector_run(consistent, "megadetector-v6", 1)
     _det(db, consistent, "megadetector-v6", conf=0.05)
     # torn: box_count > 0 but no megadetector-v6 rows remain.
-    db.record_detector_run(torn, "megadetector-v6", 2)
-    db.record_detector_run(empty_run, "megadetector-v6", 0)
+    db.model_runs.record_detector_run(torn, "megadetector-v6", 2)
+    db.model_runs.record_detector_run(empty_run, "megadetector-v6", 0)
     # blocked: a confident non-animal box blocks the fallback.
     _det(db, blocked, "megadetector-v6", conf=0.9, category="vehicle")
 
@@ -884,8 +885,8 @@ def test_unclassifiable_fresh_path_with_processed_ids(db):
 
 
 def test_labels_fingerprint_upsert_round_trip_and_commit(db):
-    assert db.get_labels_fingerprints() == []
-    db.upsert_labels_fingerprint("fp-a", "Birds", ["/a.txt"], 10,
+    assert db.model_runs.get_labels_fingerprints() == []
+    db.model_runs.upsert_labels_fingerprint("fp-a", "Birds", ["/a.txt"], 10,
                                  full_fingerprint="full-a")
     reader = _reader(db)
     row = reader.execute(
@@ -895,9 +896,9 @@ def test_labels_fingerprint_upsert_round_trip_and_commit(db):
     assert not db.conn.in_transaction
 
     # A later write without the full digest keeps the stored one.
-    db.upsert_labels_fingerprint("fp-a", "Birds 2", ["/a.txt", "/b.txt"], 11)
-    db.upsert_labels_fingerprint("fp-b", None, None, None)
-    rows = sorted(db.get_labels_fingerprints(), key=lambda r: r["fingerprint"])
+    db.model_runs.upsert_labels_fingerprint("fp-a", "Birds 2", ["/a.txt", "/b.txt"], 11)
+    db.model_runs.upsert_labels_fingerprint("fp-b", None, None, None)
+    rows = sorted(db.model_runs.get_labels_fingerprints(), key=lambda r: r["fingerprint"])
     assert rows == [
         {"fingerprint": "fp-a", "full_fingerprint": "full-a",
          "display_name": "Birds 2", "sources": ["/a.txt", "/b.txt"],
@@ -908,9 +909,9 @@ def test_labels_fingerprint_upsert_round_trip_and_commit(db):
     assert reader.execute(
         "SELECT sources_json FROM labels_fingerprints WHERE fingerprint = 'fp-b'",
     ).fetchone()[0] == "[]"
-    db.upsert_labels_fingerprint("fp-a", "Birds 3", [], 1,
+    db.model_runs.upsert_labels_fingerprint("fp-a", "Birds 3", [], 1,
                                  full_fingerprint="full-a2")
-    assert [r["full_fingerprint"] for r in db.get_labels_fingerprints()
+    assert [r["full_fingerprint"] for r in db.model_runs.get_labels_fingerprints()
             if r["fingerprint"] == "fp-a"] == ["full-a2"]
     reader.close()
 
@@ -928,15 +929,14 @@ def test_get_labels_fingerprints_tolerates_malformed_sources(db, raw, expected):
         ("fp", raw),
     )
     db.conn.commit()
-    assert db.get_labels_fingerprints()[0]["sources"] == expected
+    assert db.model_runs.get_labels_fingerprints()[0]["sources"] == expected
 
 
 # -- structure ----------------------------------------------------------------
 
-_DELEGATING_MODEL_RUN_METHODS = (
+_REMOVED_MODEL_RUN_WRAPPERS = (
     "record_detector_run",
     "get_global_detection_stats",
-    "detector_run_is_pinned",
     "get_detector_run_photo_ids",
     "record_classifier_run",
     "record_classifier_match_score",
@@ -947,10 +947,17 @@ _DELEGATING_MODEL_RUN_METHODS = (
     "get_classifier_runs_for_photo",
     "get_classifier_run_keys",
     "get_classifier_run_key_gate",
-    "get_classifier_run_cache_hits",
-    "get_unclassifiable_photos",
     "get_labels_fingerprints",
     "upsert_labels_fingerprint",
+)
+
+# Still on ``Database``: ``detector_run_is_pinned`` is bound into the
+# detection writes as their ``is_pinned`` callback, and the classify
+# preflight reads resolve the workspace's detector floor first.
+_FACADE_MODEL_RUN_METHODS = (
+    "detector_run_is_pinned",
+    "get_classifier_run_cache_hits",
+    "get_unclassifiable_photos",
 )
 
 
@@ -966,8 +973,50 @@ def _self_attrs(fn_obj):
     }
 
 
-@pytest.mark.parametrize("name", _DELEGATING_MODEL_RUN_METHODS)
-def test_model_run_method_delegates_to_repository(name):
+def test_model_runs_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.model_runs`` builds a new repository each time, never a cached one.
+
+    Every model-run table is catalog-wide, so it needs no workspace, and it
+    carries the module's ``commit_with_retry`` as it is at access time.
+    """
+    first, second = db.model_runs, db.model_runs
+    assert isinstance(first, ModelRunsRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first.auto_match_review_marker == AUTO_MATCH_REVIEW_MARKER
+    assert first.commit_with_retry is db_module.commit_with_retry
+    db.set_active_workspace(None)
+    assert db.model_runs.get_global_detection_stats() == {"photo_count": 0, "model_count": 0}
+
+
+def test_accessor_writes_reach_a_patched_commit_with_retry(db, monkeypatch):
+    det = _det(db, _photo(db, "a.jpg"))
+    db.model_runs.get_classifier_run_keys(det)  # an access before the patch
+    commits = []
+    real = db_module.commit_with_retry
+
+    def recording(conn, *args, **kwargs):
+        commits.append(conn)
+        return real(conn, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, "commit_with_retry", recording)
+    db.model_runs.record_classifier_run(det, MODEL, "fp-a", 1)
+    assert commits == [db.conn]
+
+
+def test_model_runs_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.model_runs``; Database keeps no aliases."""
+    for name in _REMOVED_MODEL_RUN_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.model_runs"
+    accessor = Database.__dict__["model_runs"]
+    assert isinstance(accessor, property)
+    attrs = _self_attrs(accessor.fget)
+    assert "_model_runs_repository" in attrs
+    assert "conn" not in attrs
+
+
+@pytest.mark.parametrize("name", _FACADE_MODEL_RUN_METHODS)
+def test_facade_model_run_method_delegates_to_repository(name):
     attrs = _self_attrs(getattr(Database, name))
     assert "conn" not in attrs, (
         f"Database.{name} touches self.conn; move the SQL to ModelRunsRepository"
@@ -975,6 +1024,12 @@ def test_model_run_method_delegates_to_repository(name):
     assert "_model_runs_repository" in attrs, (
         f"Database.{name} no longer delegates to ModelRunsRepository"
     )
+
+
+def test_pin_check_is_bound_into_the_detection_writes():
+    """Why ``detector_run_is_pinned`` stays: the detection writes take it as a callback."""
+    source = textwrap.dedent(inspect.getsource(Database.write_detection_batch))
+    assert "is_pinned=self.detector_run_is_pinned" in source
 
 
 def test_count_classifier_runs_composes_through_the_facade():

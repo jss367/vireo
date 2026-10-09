@@ -9,40 +9,73 @@ This repository owns the SQL those steps read and write: the
 cache-entry retirement, the prediction-review replay, the relabel-curation
 restore and re-apply, and pruning.
 
-Methods that act on the active workspace use ``self.workspace_id``, which
-the façade resolves with ``Database._ws_id()`` when it builds the
-repository. Id-keyed helpers are built with ``workspace_id=None``. Where a
-moved body called another ``Database`` method mid-statement, the façade
-passes that method in as a callback so patches of it still apply.
+Methods that act on the active workspace's history use ``self.workspace_id``,
+which resolves ``workspace_id_fn`` (``Database._ws_id``) when read: each of
+them reads it before running any SQL, so with no workspace active they raise
+``RuntimeError`` having touched nothing. Building the repository never
+resolves it, and the id-keyed helpers never read it. The undo/redo cursor
+reads skip ``non_undoable`` (``Database._NON_UNDOABLE``, read when the
+façade builds the repository). Where a moved body called another
+``Database`` method mid-statement, the façade passes that method in as a
+callback (``restore_species_representative``, ``prediction_scope``) so
+patches of it still apply.
+
+Callers reach it as ``db.edit_history`` (a fresh repository per access, see
+``Database.edit_history``) for the history listings, the cursor reads and the
+id-keyed lookups; recording, undo and redo stay on ``Database``.
 """
 
 import json
+import sqlite3
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 
 class EditHistoryRepository:
-    def __init__(self, conn, workspace_id):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        workspace_id_fn: Callable[[], int],
+        *,
+        non_undoable: Sequence[str],
+        restore_species_representative: Callable[..., Any],
+    ) -> None:
         self.conn = conn
-        self.workspace_id = workspace_id
+        self.workspace_id_fn = workspace_id_fn
+        # Action types that appear in history but cannot be reversed.
+        self.non_undoable = non_undoable
+        # ``Database._restore_species_representative``, for the relabel
+        # curation restores.
+        self.restore_species_representative = restore_species_representative
 
-    def commit(self):
+    @property
+    def workspace_id(self) -> int:
+        """The active workspace id, resolved at each read (raises if none)."""
+        return self.workspace_id_fn()
+
+    def commit(self) -> None:
         """Commit the connection's open transaction."""
         self.conn.commit()
 
     # -- history rows ---------------------------------------------------------
 
-    def record(self, action_type, description, new_value, items, is_batch=False, _commit=True):
+    def record(
+        self, action_type: str, description: str, new_value: str | None,
+        items: Iterable[Mapping[str, Any]], is_batch: bool = False, _commit: bool = True,
+    ) -> int:
         """Insert an edit and its per-photo items; see ``Database.record_edit``.
 
         The façade runs the history prune after a committed record.
         """
+        ws = self.workspace_id
         # Clear redo stack — new edit invalidates undone entries
         self.conn.execute(
             "DELETE FROM edit_history WHERE workspace_id = ? AND undone = 1",
-            (self.workspace_id,),
+            (ws,),
         )
         cur = self.conn.execute(
             "INSERT INTO edit_history (workspace_id, action_type, description, new_value, is_batch) VALUES (?, ?, ?, ?, ?)",
-            (self.workspace_id, action_type, description, new_value, 1 if is_batch else 0),
+            (ws, action_type, description, new_value, 1 if is_batch else 0),
         )
         edit_id = cur.lastrowid
         for item in items:
@@ -54,7 +87,7 @@ class EditHistoryRepository:
             self.conn.commit()
         return edit_id
 
-    def list_recent(self, limit=50, offset=0):
+    def list_recent(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Return recent edit history entries (most recent first) with item counts."""
         rows = self.conn.execute(
             """SELECT eh.*, COUNT(ehi.id) as item_count
@@ -72,13 +105,14 @@ class EditHistoryRepository:
                 entry['new_value'] = None
         return entries
 
-    def recipe_history_for_photo(self, photo_id, limit):
-        """The workspace's ``edit_recipe`` items for one photo, newest first.
+    def recipe_history_for_photo(self, photo_id: int, limit: int) -> list[sqlite3.Row]:
+        """The active workspace's ``edit_recipe`` items for one photo, newest first.
 
         Rows carry ``id``, ``description``, ``created_at``, ``undone`` (from
         the edit) and ``old_value``, ``new_value`` (from the photo's item),
         ordered by ``created_at`` then ``id`` descending, at most ``limit``.
-        Undone edits are included.
+        Undone edits are included. Raises ``RuntimeError`` when no workspace
+        is active.
         """
         return self.conn.execute(
             """SELECT eh.id, eh.description, eh.created_at, eh.undone,
@@ -95,8 +129,9 @@ class EditHistoryRepository:
 
     # -- undo / redo cursor ---------------------------------------------------
 
-    def next_undo(self, non_undoable):
+    def next_undo(self) -> tuple[dict[str, Any], list[sqlite3.Row]] | None:
         """Return ``(entry, items)`` for the newest undoable edit, or None."""
+        non_undoable = self.non_undoable
         placeholders = ",".join("?" for _ in non_undoable)
         entry = self.conn.execute(
             f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
@@ -112,8 +147,9 @@ class EditHistoryRepository:
         ).fetchall()
         return entry, items
 
-    def next_redo(self, non_undoable):
+    def next_redo(self) -> tuple[dict[str, Any], list[sqlite3.Row]] | None:
         """Return ``(entry, items)`` for the oldest undone edit, or None."""
+        non_undoable = self.non_undoable
         placeholders = ",".join("?" for _ in non_undoable)
         entry = self.conn.execute(
             f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
@@ -129,8 +165,9 @@ class EditHistoryRepository:
         ).fetchall()
         return entry, items
 
-    def latest_undoable(self, non_undoable):
-        """``id`` and ``description`` of the newest undoable edit, or None."""
+    def latest_undoable(self) -> sqlite3.Row | None:
+        """``id`` and ``description`` of the edit undo would reverse next, or None."""
+        non_undoable = self.non_undoable
         placeholders = ",".join("?" for _ in non_undoable)
         return self.conn.execute(
             f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
@@ -138,16 +175,21 @@ class EditHistoryRepository:
             (self.workspace_id, *non_undoable),
         ).fetchone()
 
-    def count_undoable(self, non_undoable):
-        """How many edits are undoable (not undone, not a non-undoable type)."""
+    def count_undoable(self) -> int:
+        """How many of the active workspace's edits undo can still reverse.
+
+        Not undone, and not one of the ``non_undoable`` action types.
+        """
+        non_undoable = self.non_undoable
         placeholders = ",".join("?" for _ in non_undoable)
         return self.conn.execute(
             f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders})",
             (self.workspace_id, *non_undoable),
         ).fetchone()[0]
 
-    def oldest_redoable(self, non_undoable):
+    def oldest_redoable(self) -> sqlite3.Row | None:
         """``id`` and ``description`` of the edit redo would replay next, or None."""
+        non_undoable = self.non_undoable
         placeholders = ",".join("?" for _ in non_undoable)
         return self.conn.execute(
             f"SELECT id, description FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
@@ -155,7 +197,7 @@ class EditHistoryRepository:
             (self.workspace_id, *non_undoable),
         ).fetchone()
 
-    def item_photo_ids(self, edit_id, *, distinct=False):
+    def item_photo_ids(self, edit_id: int, *, distinct: bool = False) -> list[int]:
         """The ``photo_id`` of each of an edit's items; ``distinct=True`` drops repeats."""
         sql = (
             "SELECT DISTINCT photo_id FROM edit_history_items WHERE edit_id = ?"
@@ -164,24 +206,24 @@ class EditHistoryRepository:
         )
         return [row["photo_id"] for row in self.conn.execute(sql, (edit_id,))]
 
-    def has_changed_items(self, edit_id):
+    def has_changed_items(self, edit_id: int) -> bool:
         """Whether any of an edit's items has ``old_value != new_value``."""
         return self.conn.execute(
             "SELECT 1 FROM edit_history_items WHERE edit_id = ? AND old_value != new_value LIMIT 1",
             (edit_id,),
         ).fetchone() is not None
 
-    def mark_undone(self, entry_id):
+    def mark_undone(self, entry_id: int) -> None:
         """Flag an entry as undone and commit."""
         self.conn.execute("UPDATE edit_history SET undone = 1 WHERE id = ?", (entry_id,))
         self.conn.commit()
 
-    def mark_redone(self, entry_id):
+    def mark_redone(self, entry_id: int) -> None:
         """Clear an entry's undone flag and commit."""
         self.conn.execute("UPDATE edit_history SET undone = 0 WHERE id = ?", (entry_id,))
         self.conn.commit()
 
-    def retire_stale_grouping_entry(self, entry_id):
+    def retire_stale_grouping_entry(self, entry_id: int) -> None:
         """Retire stale cache state while retaining any reversible photo edit.
 
         The caller commits this retirement and reports it to the user before
@@ -206,7 +248,7 @@ class EditHistoryRepository:
                 return
         self.conn.execute("DELETE FROM edit_history WHERE id = ?", (entry_id,))
 
-    def action_and_new_value(self, entry_id):
+    def action_and_new_value(self, entry_id: int) -> sqlite3.Row | None:
         """Row (``action_type``, ``new_value``) of one entry, or None."""
         return self.conn.execute(
             "SELECT action_type, new_value FROM edit_history WHERE id = ?",
@@ -215,13 +257,14 @@ class EditHistoryRepository:
 
     # -- lookups used by the replay handlers ----------------------------------
 
-    def keyword_name(self, keyword_id):
+    def keyword_name(self, keyword_id: int) -> str | None:
+        """The keyword's ``name``, or None for an unknown id."""
         row = self.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
         return row['name'] if row else None
 
-    def prediction_scope(self, pred_id):
+    def prediction_scope(self, pred_id: int) -> tuple[int, str, str] | None:
         """``(detection_id, classifier_model, labels_fingerprint)`` or None."""
         row = self.conn.execute(
             """SELECT detection_id, classifier_model AS model, labels_fingerprint
@@ -232,7 +275,7 @@ class EditHistoryRepository:
             return None
         return (row["detection_id"], row["model"], row["labels_fingerprint"])
 
-    def workspace_exists(self, workspace_id):
+    def workspace_exists(self, workspace_id: int) -> bool:
         """True while the workspace row is still present."""
         return self.conn.execute(
             'SELECT 1 FROM workspaces WHERE id = ?', (workspace_id,),
@@ -240,7 +283,9 @@ class EditHistoryRepository:
 
     # -- prediction review replay ---------------------------------------------
 
-    def undo_prediction_accept_statuses(self, pred_ids, prediction_scope):
+    def undo_prediction_accept_statuses(
+        self, pred_ids: Iterable[int], prediction_scope: Callable[[int], tuple[int, str, str] | None],
+    ) -> None:
         """Reset each recorded prediction's scope to its pre-accept state.
 
         ``pred_ids`` is non-empty; ``prediction_scope`` is the façade's
@@ -291,7 +336,7 @@ class EditHistoryRepository:
         if seen_scopes:
             self.conn.commit()
 
-    def reject_accept_siblings(self, accepted_by_scope):
+    def reject_accept_siblings(self, accepted_by_scope: Mapping[tuple[int, str, str], set[int]]) -> None:
         """Re-reject the open siblings of each re-accepted scope.
 
         ``accepted_by_scope`` maps ``(detection_id, model, fingerprint)`` to
@@ -330,15 +375,25 @@ class EditHistoryRepository:
     # -- relabel curation -----------------------------------------------------
 
     def restore_relabel_curation(
-        self, workspace_id, photo_id, new_species, curation, *,
-        restore_species_representative,
-    ):
+        self, workspace_id: int, photo_id: int, new_species: str, curation: Mapping[str, Any] | None,
+    ) -> None:
         """Undo the curation migration performed by ``api_highlights_relabel``.
 
-        ``restore_species_representative`` is the façade's
-        ``_restore_species_representative``. See
-        ``Database._restore_relabel_curation`` for the row-by-row rules.
+        For each ``species_highlights`` row the relabel moved from an old
+        species bucket to ``new_species``, delete the row at ``new_species``
+        and re-insert it at the end of the old bucket (unless the photo
+        already appears there). For each ``photo_preferences`` row moved
+        by the relabel, delete the row at ``(new_species, purpose)`` and
+        re-insert it at ``(old_species, purpose)``. For each rep-only
+        ``species_representatives`` row moved with no matching
+        ``photo_preferences`` row, delete the row at ``new_species`` and
+        re-insert it at ``old_species``. Best-effort: if the target row no
+        longer exists (state has changed since the relabel), the
+        corresponding restore is a no-op. Representatives are restored
+        through ``restore_species_representative`` (the façade's
+        ``_restore_species_representative``).
         """
+        restore_species_representative = self.restore_species_representative
         if not curation:
             return
         hl_prev = curation.get("hl_prev") or []
@@ -480,13 +535,13 @@ class EditHistoryRepository:
             )
 
     def reapply_relabel_curation(
-        self, workspace_id, photo_id, new_species, curation, *,
-        restore_species_representative,
-    ):
+        self, workspace_id: int, photo_id: int, new_species: str, curation: Mapping[str, Any] | None,
+    ) -> None:
         """Redo the curation migration reversed by
         :meth:`restore_relabel_curation`. Moves rows from each recorded
         old species back onto ``new_species``.
         """
+        restore_species_representative = self.restore_species_representative
         if not curation:
             return
         hl_prev = curation.get("hl_prev") or []
@@ -601,13 +656,14 @@ class EditHistoryRepository:
 
     # -- pruning --------------------------------------------------------------
 
-    def prune(self, max_entries, preserve_wildlife_discard):
+    def prune(self, max_entries: int, preserve_wildlife_discard: bool) -> None:
         """Delete this workspace's oldest done entries beyond ``max_entries``.
 
         Undone entries awaiting redo are never pruned. While
         ``preserve_wildlife_discard`` is true, a discarded Wildlife keyword
         add is kept too; see ``Database._prune_edit_history``.
         """
+        ws = self.workspace_id
         protected_clause = ""
         if preserve_wildlife_discard:
             # A discarded manual keyword add deliberately leaves no pending
@@ -630,6 +686,6 @@ class EditHistoryRepository:
                       ORDER BY created_at DESC, id DESC LIMIT ?
                   )
                   {protected_clause}""",
-            (self.workspace_id, self.workspace_id, max_entries),
+            (ws, ws, max_entries),
         )
         self.conn.commit()

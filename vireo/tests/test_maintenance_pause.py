@@ -1,12 +1,41 @@
 """Pause integration at real per-photo and database transaction boundaries."""
 import json
 import os
+import sys
 import threading
 import time
+import traceback
 
 import pytest
 from PIL import Image
 from wait import wait_for_job_via_client
+
+
+@pytest.fixture(autouse=True)
+def _isolate_unrelated_job_startup(monkeypatch):
+    # These tests exercise work/transaction pause boundaries. OS inhibitor
+    # startup precedes that work and has its own five-second Windows budget.
+    # Its lifecycle is covered separately by test_jobs_power/test_power.
+    import power
+    from jobs import JobRunner
+
+    monkeypatch.setattr(power, "start_platform_inhibitor", lambda reason: None)
+    # The per-photo boundary clock must not include a separate history
+    # connection's startup commit/fsync. Running rows, checkpoints and final
+    # persistence have dedicated integration coverage in test_jobs.py.
+    # Keep all work, checkpoint and completion database writes real here.
+    monkeypatch.setattr(JobRunner, "_record_job_started", lambda self, job: None)
+
+
+def _wait_for_boundary(entered, runner, job_id):
+    if entered.wait(5):
+        return
+    frames = sys._current_frames()
+    stacks = []
+    for thread in threading.enumerate():
+        if thread.name.startswith("vireo-") and thread.ident in frames:
+            stacks.append(thread.name + "\n" + "".join(traceback.format_stack(frames[thread.ident])))
+    pytest.fail(f"Worker did not reach pause boundary: {runner.get(job_id)}\n" + "\n".join(stacks))
 
 
 def _wait_status(runner, job_id, status):
@@ -60,7 +89,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
         "photo_ids": [first, second], "destination": str(destination),
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -122,7 +151,7 @@ def test_culling_pauses_during_metadata_loading(client_with_photo, monkeypatch, 
     runner = app._job_runner
     job_id = client.post("/api/jobs/cull", json={}).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -170,7 +199,7 @@ def test_lightroom_import_pauses_during_catalog_read(client_with_photo, monkeypa
         "catalogs": [str(catalog_path)],
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -216,7 +245,7 @@ def test_previews_pause_before_eviction(client_with_photo, monkeypatch, action):
     runner = app._job_runner
     job_id = client.post("/api/jobs/previews", json={"photo_ids": [photo_id]}).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -270,7 +299,7 @@ def test_full_import_pauses_between_phases(client_with_photo, monkeypatch, phase
     assert response.status_code == 200, response.get_json()
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -319,7 +348,7 @@ def test_card_scan_pauses_during_discovery(app_and_db, monkeypatch, tmp_path, ac
     }).get_json()["job_id"]
     manifest = card_cleanup.manifest_path(app.config["CARD_CLEANUP_DIR"], job_id)
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -381,7 +410,7 @@ def test_staging_verification_pauses_during_enumeration(
         "path": root,
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -430,7 +459,7 @@ def test_culling_pauses_before_publishing_final_result(client_with_photo, monkey
     runner = app._job_runner
     job_id = client.post("/api/jobs/cull", json={}).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -474,7 +503,7 @@ def test_cache_pause_finishes_current_photo_and_preserves_progress(
         f"/api/jobs/{endpoint}", json={"photo_ids": [first, second]},
     ).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         response = client.post(f"/api/jobs/{job_id}/pause")
         assert response.status_code == 200
         assert runner.get(job_id)["status"] == "pausing"
@@ -482,8 +511,8 @@ def test_cache_pause_finishes_current_photo_and_preserves_progress(
         paused = _wait_status(runner, job_id, "paused")
         assert paused["progress"]["current"] == 1
         assert calls == [first]
-        assert db.offline_original_get(first) is not None
-        assert db.offline_original_get(second) is None
+        assert db.caches.offline_original_get(first) is not None
+        assert db.caches.offline_original_get(second) is None
         # Pausing must release the writer, so unrelated catalog work can run.
         db.conn.execute("UPDATE photos SET rating=3 WHERE id=?", (first,))
         db.conn.commit()
@@ -492,7 +521,7 @@ def test_cache_pause_finishes_current_photo_and_preserves_progress(
         if action == "resume":
             assert finished["status"] == "completed", finished
             assert calls == [first, second]
-            assert db.offline_original_get(second) is not None
+            assert db.caches.offline_original_get(second) is not None
         else:
             assert finished["status"] == "cancelled", finished
             assert calls == [first]
@@ -528,7 +557,7 @@ def test_hash_verification_commits_before_pause(
     monkeypatch.setattr(scanner, "compute_file_hash", hash_file)
     job_id = client.post("/api/jobs/verify-hashes").get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -537,14 +566,14 @@ def test_hash_verification_commits_before_pause(
         assert db.conn.execute(
             "SELECT COUNT(*) FROM photos WHERE hash_status='ok'",
         ).fetchone()[0] == 1
-        assert not db.get_audit_runs()
+        assert not db.audit.get_runs()
         db.conn.execute("UPDATE photos SET rating=4 WHERE id=?", (first,))
         db.conn.commit()
         assert client.post(f"/api/jobs/{job_id}/{action}").status_code == 200
         finished = wait_for_job_via_client(client, job_id)
         assert finished["status"] == ("completed" if action == "resume" else "cancelled")
         assert len(calls) == (photo_count if action == "resume" else 1)
-        assert bool(db.get_audit_runs()) == (action == "resume")
+        assert bool(db.audit.get_runs()) == (action == "resume")
     finally:
         release.set()
         runner.cancel_job(job_id)
@@ -603,7 +632,7 @@ def test_final_file_write_pauses_after_completion(
     assert response.status_code == 200, response.get_json()
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         assert runner.get(job_id)["status"] == "pausing"
         release.set()
@@ -672,7 +701,7 @@ def test_previews_pause_after_final_photo_defers_eviction(
     assert response.status_code == 200, response.get_json()
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         assert runner.get(job_id)["status"] == "pausing"
         release.set()
@@ -722,7 +751,7 @@ def test_callback_checkpoint_retains_state_and_unwinds_on_cancel(app_and_db, act
 
     job_id = ctx.start_job("test-checkpoint", work, pausable=True)
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -777,7 +806,7 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
     client_with_photo, monkeypatch, action,
 ):
     import sharpness
-    from db import Database
+    from repositories.photo_review import PhotoReviewRepository
 
     app, db, first = client_with_photo
     second = _second_photo(db, first)
@@ -786,7 +815,7 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
     entered = threading.Event()
     release = threading.Event()
     flagged = []
-    original = Database.update_photo_flag
+    original = PhotoReviewRepository.set_flag
 
     monkeypatch.setattr(sharpness, "score_collection_photos", lambda *args, **kwargs: {
         "results": [
@@ -795,19 +824,19 @@ def test_sharpness_auto_flags_observe_pause_and_cancel(
         ],
     })
 
-    def flag_photo(worker_db, photo_id, flag, **kwargs):
+    def flag_photo(review, photo_id, flag, **kwargs):
         if not flagged:
             entered.set()
             assert release.wait(5)
-        original(worker_db, photo_id, flag, **kwargs)
+        original(review, photo_id, flag, **kwargs)
         flagged.append(photo_id)
 
-    monkeypatch.setattr(Database, "update_photo_flag", flag_photo)
+    monkeypatch.setattr(PhotoReviewRepository, "set_flag", flag_photo)
     response = client.post("/api/jobs/sharpness", json={})
     assert response.status_code == 200
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
         assert runner.get(job_id)["status"] == "pausing"
         release.set()
@@ -864,7 +893,7 @@ def test_export_observes_pause_after_metadata_finishes(
     assert response.status_code == 200
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert client.post(f"/api/jobs/{job_id}/pause").status_code == 200
         assert runner.get(job_id)["status"] == "pausing"
         release.set()
@@ -905,7 +934,7 @@ def test_ingest_can_pause_during_discovery(app_and_db, monkeypatch, tmp_path):
         "source": str(source), "destination": str(tmp_path / "archive"),
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -957,7 +986,7 @@ def test_ingest_pauses_between_metadata_batches(
         "skip_duplicates": skip_duplicates,
     }).get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -1008,7 +1037,7 @@ def test_snapshot_backed_import_in_place_is_not_pausable(app_and_db, tmp_path):
     frozen = snap_root / "frozen.jpg"
     Image.new("RGB", (8, 8), "red").save(frozen)
     db.add_folder(str(snap_root), name="snap")
-    snap_id = db.create_new_images_snapshot([str(frozen)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(frozen)])
     snap_resp = client.post("/api/jobs/import-in-place", json={
         "source_snapshot_id": snap_id,
         "after_import": None,
@@ -1051,7 +1080,7 @@ def test_import_photos_checkpoints_before_after_import_chain(
         "SELECT COUNT(*) FROM collections",
     ).fetchone()[0]
     cull_ready_id = next(
-        pr["id"] for pr in db.get_saved_processes()
+        pr["id"] for pr in db.processes.list_all()
         if pr["name"] == "Cull-ready"
     )
 
@@ -1090,7 +1119,7 @@ def test_import_photos_checkpoints_before_after_import_chain(
     assert resp.status_code == 200, resp.get_json()
     job_id = resp.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert runner.pause_job(job_id)
         release.set()
         _wait_status(runner, job_id, "paused")
@@ -1138,7 +1167,7 @@ def test_import_handoff_rejects_late_parent_pause(request, monkeypatch, tmp_path
         "ok": True, "photo_ids": [photo_id], "discovered": 1,
         "copied": 1, "failed": 0, "total": 1,
     })
-    process_id = next(p["id"] for p in db.get_saved_processes() if p["name"] == "Cull-ready")
+    process_id = next(p["id"] for p in db.processes.list_all() if p["name"] == "Cull-ready")
     source = tmp_path / "card-handoff"
     source.mkdir()
     Image.new("RGB", (8, 8), "blue").save(source / "new.jpg")
@@ -1151,7 +1180,7 @@ def test_import_handoff_rejects_late_parent_pause(request, monkeypatch, tmp_path
     assert response.status_code == 200, response.get_json()
     job_id = response.get_json()["job_id"]
     try:
-        assert entered.wait(5)
+        _wait_for_boundary(entered, runner, job_id)
         assert not children
         assert client.post(f"/api/jobs/{job_id}/pause").status_code == 409
         assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 404

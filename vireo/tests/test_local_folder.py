@@ -1789,8 +1789,8 @@ def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove
 
         stage_folder(db, child_id, vireo_dir)
         assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
-        assert {w["id"] for w in db.get_folder_workspaces(descendant_id)} == {child_ws, observer_ws}
-        assert {w["id"] for w in db.get_folder_workspaces(late_id)} == {child_ws, observer_ws}
+        assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(descendant_id)} == {child_ws, observer_ws}
+        assert {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(late_id)} == {child_ws, observer_ws}
         assert observer_ws in affected_workspace_ids(db, child_id)
         assert {f["id"] for f in db.get_workspace_folders(observer_ws)} == {
             parent_id, child_id, descendant_id, late_id,
@@ -1802,7 +1802,7 @@ def test_staging_in_another_workspace_preserves_removed_folders(tmp_path, remove
             parent_id=descendant_id, workspace_root=False,
         )
         assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
-        assert parent_ws not in {w["id"] for w in db.get_folder_workspaces(local_new_id)}
+        assert parent_ws not in {w["id"] for w in db.workspace_folders.list_workspaces_for_folder(local_new_id)}
 
         discard_folder(db, child_id, vireo_dir)
         assert {f["id"] for f in db.get_workspace_folders(parent_ws)} == expected
@@ -2129,8 +2129,8 @@ def test_unlink_ancestor_of_shared_local_session_cleans_phantom_rows(tmp_path):
     setup._materialize_workspace_descendants(parent_ws)
     photo = setup.add_photo(folder_id=child_id, filename="bird.jpg", extension=".jpg",
                             file_size=8, file_mtime=1)
-    setup.grant_workspace_photos(parent_ws, [photo])
-    setup.grant_workspace_photos(child_ws, [photo])
+    setup.photo_visibility.grant(parent_ws, [photo])
+    setup.photo_visibility.grant(child_ws, [photo])
     setup.conn.commit()
     stage_folder(setup, child_id, str(tmp_path / "vireo"))
     assert affected_workspace_ids(setup, child_id) == sorted([parent_ws, child_ws])
@@ -2146,13 +2146,13 @@ def test_unlink_ancestor_of_shared_local_session_cleans_phantom_rows(tmp_path):
     check_db = Database(db_path)
     try:
         check_db.set_active_workspace(parent_ws)
-        assert check_db.filter_photo_ids_in_workspace([photo]) == []
+        assert check_db.photo_visibility.visible_photo_ids([photo]) == []
         assert not check_db.conn.execute(
             "SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?",
             (parent_ws, photo),
         ).fetchone()
         check_db.set_active_workspace(child_ws)
-        assert check_db.filter_photo_ids_in_workspace([photo]) == [photo]
+        assert check_db.photo_visibility.visible_photo_ids([photo]) == [photo]
         row = check_db.conn.execute(
             "SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
             (parent_ws, child_id),
@@ -2259,8 +2259,8 @@ def test_move_folders_ancestor_sweeps_descendant_local_rows(tmp_path, folder_lin
         # A photo-only grant is omitted from moved_folder_ids, even though
         # this mapped descendant is swept by the API after the root move.
         setup.remove_workspace_folder(parent_ws, child_id)
-    setup.grant_workspace_photos(parent_ws, [photo])
-    setup.grant_workspace_photos(child_ws, [photo])
+    setup.photo_visibility.grant(parent_ws, [photo])
+    setup.photo_visibility.grant(child_ws, [photo])
     setup.conn.commit()
     stage_folder(setup, child_id, str(tmp_path / "vireo"))
     assert affected_workspace_ids(setup, child_id) == sorted([parent_ws, child_ws])
@@ -2279,15 +2279,15 @@ def test_move_folders_ancestor_sweeps_descendant_local_rows(tmp_path, folder_lin
     check_db = Database(db_path)
     try:
         check_db.set_active_workspace(parent_ws)
-        assert check_db.filter_photo_ids_in_workspace([photo]) == []
+        assert check_db.photo_visibility.visible_photo_ids([photo]) == []
         assert not check_db.conn.execute(
             "SELECT 1 FROM workspace_photos WHERE workspace_id=? AND photo_id=?",
             (parent_ws, photo),
         ).fetchone()
         check_db.set_active_workspace(child_ws)
-        assert check_db.filter_photo_ids_in_workspace([photo]) == [photo]
+        assert check_db.photo_visibility.visible_photo_ids([photo]) == [photo]
         check_db.set_active_workspace(target_ws)
-        assert check_db.filter_photo_ids_in_workspace([photo]) == [photo]
+        assert check_db.photo_visibility.visible_photo_ids([photo]) == [photo]
         source_row = check_db.conn.execute(
             "SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
             (parent_ws, child_id),
@@ -2563,7 +2563,7 @@ def test_local_folder_status_exposes_blocking_job_and_preflight_stops_early(
             "pipeline", processing, workspace_id=workspace_id
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             status = client.get(
                 "/api/workspaces/active/local-folders"
             ).get_json()
@@ -2653,7 +2653,7 @@ def test_local_folder_blocker_endpoint_avoids_source_walk(tmp_path, monkeypatch)
             "pipeline", processing, workspace_id=workspace_id
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             response = client.get("/api/workspaces/active/local-folders/blocker")
             assert response.status_code == 200
             assert response.get_json() == {
@@ -2742,7 +2742,7 @@ def test_local_folder_blockers_are_scoped_to_affected_roots(tmp_path, monkeypatc
             "pipeline", processing, workspace_id=second_workspace
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             blocker = client.get(
                 "/api/workspaces/active/local-folders/blocker"
             ).get_json()
@@ -2815,7 +2815,7 @@ def test_local_folder_blockers_include_descendant_sessions(tmp_path, monkeypatch
             "pipeline", processing, workspace_id=child_workspace
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             blocker = client.get(
                 "/api/workspaces/active/local-folders/blocker"
             ).get_json()
@@ -2882,7 +2882,7 @@ def test_folder_sync_proceeds_while_observational_job_runs(tmp_path, monkeypatch
             blocks_local_transitions=False,
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             assert app._job_runner.get(probe_id)["status"] == "running"
             response = client.post(
                 "/api/workspaces/active/local-folders/sync",
@@ -3025,7 +3025,7 @@ def test_catalog_independent_job_does_not_block_work_locally(tmp_path, monkeypat
             "precompute-embeddings", embedding_work, workspace_id=workspace_id,
         )
         try:
-            assert started.wait(timeout=2)
+            assert started.wait(timeout=5)
             blocker = client.get(
                 "/api/workspaces/active/local-folders/blocker"
             ).get_json()

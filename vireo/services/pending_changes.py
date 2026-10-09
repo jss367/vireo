@@ -30,7 +30,7 @@ def queue_keyword_add(db, photo_id, keyword_name, workspace_id=None, _commit=Tru
     # explicitly re-adds that term. Clear it across every workspace that
     # owns the shared sidecar; otherwise "Use XMP" can filter the term
     # out and detach this fresh association before the add is written.
-    db.clear_equivalent_flat_removals(
+    db.pending_changes.clear_equivalent_flat_removals(
         [{
             "photo_id": photo_id,
             "change_type": "keyword_remove_flat",

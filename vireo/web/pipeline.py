@@ -356,7 +356,7 @@ def create_pipeline_blueprint(
     def api_list_processes():
         """List all saved processes (global; ordered for the pickers)."""
         db = get_db()
-        return jsonify(db.get_saved_processes())
+        return jsonify(db.processes.list_all())
 
     @blueprint.route("/api/processes", methods=["POST"])
     def api_create_process():
@@ -366,10 +366,10 @@ def create_pipeline_blueprint(
         if err is not None:
             return json_error(err)
         try:
-            pid = db.create_saved_process(**kwargs)
+            pid = db.processes.create(**kwargs)
         except ValueError as e:
             return json_error(str(e))
-        return jsonify(db.get_saved_process(pid))
+        return jsonify(db.processes.get(pid))
 
     @blueprint.route("/api/processes/<int:process_id>", methods=["PUT"])
     def api_update_process(process_id):
@@ -384,7 +384,7 @@ def create_pipeline_blueprint(
             return json_error(str(e))
         if not existed:
             return json_error("process not found", 404)
-        return jsonify(db.get_saved_process(process_id))
+        return jsonify(db.processes.get(process_id))
 
     @blueprint.route("/api/processes/<int:process_id>", methods=["DELETE"])
     def api_delete_process(process_id):
@@ -576,7 +576,7 @@ def create_pipeline_blueprint(
         # autosave can't read this same overrides snapshot and overwrite the
         # pipeline change with stale data.
         with settings_write_lock:
-            ws = db.get_workspace(db.active_workspace_id)
+            ws = db.workspaces.get(db.active_workspace_id)
             current_overrides = {}
             if ws and ws["config_overrides"]:
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -590,7 +590,7 @@ def create_pipeline_blueprint(
             pipeline_section.update(pipeline_updates)
             current_overrides["pipeline"] = pipeline_section
 
-            db.update_workspace(db.active_workspace_id, config_overrides=current_overrides)
+            db.workspaces.update(db.active_workspace_id, config_overrides=current_overrides)
 
         return jsonify({"pipeline": pipeline_section, "status": "saved"})
 
@@ -726,7 +726,7 @@ def create_pipeline_blueprint(
                 for p in results.get("photos", [])
                 if p.get("id") is not None
             }
-            row = db.get_workspace(db.active_workspace_id)
+            row = db.workspaces.get(db.active_workspace_id)
             last_group_fp = row["last_group_fingerprint"] if row else None
             current_group_fp = compute_group_fingerprint(effective_cfg)
             if not last_group_fp:
@@ -769,7 +769,7 @@ def create_pipeline_blueprint(
                     review_readiness["enhancing_missing"].insert(0, "masks_partial")
             review_readiness["missing_required"] = []
 
-        ws = db.get_workspace(db.active_workspace_id)
+        ws = db.workspaces.get(db.active_workspace_id)
         ws_overrides = {}
         if ws and ws["config_overrides"]:
             try:
@@ -795,7 +795,7 @@ def create_pipeline_blueprint(
                 "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", False),
                 "preview_max_size": effective_cfg.get("preview_max_size", 1920),
             },
-            "mask_variant_coverage": db.mask_variant_coverage(),
+            "mask_variant_coverage": db.masks_features.variant_coverage(),
             "sam_variant_warning": db.sam_variant_rerun_warning(sam2_variant),
             "results": results,
             "results_cache_info": results_cache_info,
@@ -898,7 +898,7 @@ def create_pipeline_blueprint(
         # features and the edit recipe for any global photo id.
         if db.get_photo(photo_id, verify_workspace=True) is None:
             return json_error("Photo not found", 404)
-        row = db.get_photo_pipeline_features(photo_id)
+        row = db.masks_features.pipeline_feature_row(photo_id)
         if not row:
             return json_error("Photo not found", 404)
         result = dict(row)
@@ -1557,17 +1557,17 @@ def create_pipeline_blueprint(
             for pid in picks:
                 old = old_flags.get(pid, "none")
                 if old != "flagged":
-                    db.update_photo_flag(pid, "flagged", _commit=False)
+                    db.photo_review.set_flag(pid, "flagged", _commit=False)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": "flagged"})
             for pid in rejects:
                 old = old_flags.get(pid, "none")
                 if old != "rejected":
-                    db.update_photo_flag(pid, "rejected", _commit=False)
+                    db.photo_review.set_flag(pid, "rejected", _commit=False)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": "rejected"})
             for pid in candidates:
                 old = old_flags.get(pid, "none")
                 if old in ("flagged", "rejected"):
-                    db.update_photo_flag(pid, "none", _commit=False)
+                    db.photo_review.set_flag(pid, "none", _commit=False)
                     flag_items.append({"photo_id": pid, "old_value": old, "new_value": "none"})
         except ValueError as e:
             return json_error(str(e), 403)
@@ -1650,7 +1650,7 @@ def create_pipeline_blueprint(
             )
         db = get_db()
         # Raises with no active workspace, before any SQL runs.
-        photo_ids = db.get_workspace_photo_ids_with_mask_variant(variant)
+        photo_ids = db.masks_features.workspace_photo_ids_with_variant(variant)
         updated = 0
         # Batch: skip the per-row commit_with_retry inside
         # set_active_mask_variant and commit once after the loop. A
@@ -1759,7 +1759,7 @@ def create_pipeline_blueprint(
         # `predictions` above, and a run this page hides is very often the one
         # that produced the species the user is asking about.
         import match_confidence
-        match_rows = db.get_match_scores_for_photo(photo_id)
+        match_rows = db.model_runs.get_match_scores_for_photo(photo_id)
         for row in match_rows:
             # Per-row verdicts as well as the summary: this page is the one
             # place that shows every run side by side, so each needs its own
@@ -1776,20 +1776,20 @@ def create_pipeline_blueprint(
             match_rows,
             effective_cfg,
             unscored_current_runs=(
-                db.get_unscored_current_prediction_runs(photo_id)
+                db.model_runs.get_unscored_current_prediction_runs(photo_id)
             ),
         )
 
-        current_pred_rows = db.get_current_prediction_detector_confidences(
+        current_pred_rows = db.model_runs.current_prediction_detector_confidences(
             photo_id, full_image=False,
         )
-        classifier_runs = db.get_classifier_runs_for_photo(
+        classifier_runs = db.model_runs.classifier_runs_for_photo(
             photo_id, full_image=False,
         )
-        full_image_pred_rows = db.get_current_prediction_detector_confidences(
+        full_image_pred_rows = db.model_runs.current_prediction_detector_confidences(
             photo_id, full_image=True,
         )
-        full_image_classifier_runs = db.get_classifier_runs_for_photo(
+        full_image_classifier_runs = db.model_runs.classifier_runs_for_photo(
             photo_id, full_image=True,
         )
         max_raw_conf = (

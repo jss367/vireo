@@ -62,14 +62,14 @@ def test_complete_review_replaces_species_preserves_other_tags_and_queues_xmp(wr
     added = db.conn.execute('''SELECT k.source_taxon_id,pk.source FROM keywords k
         JOIN photo_keywords pk ON pk.keyword_id=k.id WHERE pk.photo_id=? AND k.source_taxon_id=102''', (pid,)).fetchone()
     assert tuple(added) == (102, 'manual')
-    pending = {(r['change_type'], r['value']) for r in db.get_pending_changes()}
+    pending = {(r['change_type'], r['value']) for r in db.pending_changes.list_all()}
     assert ('keyword_remove', 'Spotted Redshank') in pending
     stored_name = db.conn.execute('SELECT name FROM keywords WHERE source_taxon_id=102').fetchone()[0]
     assert ('keyword_add', stored_name) in pending
-    assert len(db.get_edit_history()) == 2
+    assert len(db.edit_history.list_recent()) == 2
     with connect(queue) as conn:
         assert sync_review_tags(conn, pid)['status'] == 'applied'
-    assert len(db.get_edit_history()) == 2
+    assert len(db.edit_history.list_recent()) == 2
     # Each change uses existing undo handlers.
     assert db.undo_last_edit()
     assert db.undo_last_edit()
@@ -104,7 +104,7 @@ def test_library_failure_rolls_back_tags_but_retains_reference_and_retry(writabl
     assert result['status'] == 'pending'
     assert 'simulated disk failure' in result['error']
     assert keywords(db, pid) == preserved | {old}
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
     with connect(queue) as conn:
         assert json.loads(conn.execute('SELECT taxa FROM reviews').fetchone()[0]) == ['inat:102']
         monkeypatch.setattr(Database, 'record_edit', original)
@@ -127,7 +127,7 @@ def test_retry_after_library_commit_does_not_repeat_or_overwrite_later_edits(wri
     with connect(queue) as conn:
         assert sync_review_tags(conn, pid)['status'] == 'applied'
     assert keywords(db, pid) == preserved
-    assert len(db.get_edit_history()) == 2
+    assert len(db.edit_history.list_recent()) == 2
 
 
 @pytest.mark.parametrize('change', ['identity', 'hash_cleared', 'workspace'])
@@ -144,7 +144,7 @@ def test_tag_updates_reject_changed_photo_or_workspace(writable_queue, change):
     assert result['status'] == 'pending'
     assert 'no longer matches' in result['error']
     assert keywords(db, pid) == preserved | {old}
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_http_save_updates_tags_and_reports_retriable_failure(writable_queue, monkeypatch):
@@ -192,11 +192,11 @@ def test_http_save_updates_tags_and_reports_retriable_failure(writable_queue, mo
 
 def test_individually_shared_photo_can_sync_review_tags(writable_queue):
     queue, db, pid, old, preserved = writable_queue
-    db.grant_workspace_photos(db._ws_id(), [pid])
+    db.photo_visibility.grant(db._ws_id(), [pid])
     db.conn.execute('DELETE FROM workspace_folders')
     db.conn.commit()
     result = save_and_sync(queue, pid, ['inat:102'])
     assert result['status'] == 'applied', result
     assert old not in keywords(db, pid)
     assert preserved <= keywords(db, pid)
-    assert db.get_pending_changes()
+    assert db.pending_changes.list_all()

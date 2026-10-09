@@ -82,7 +82,7 @@ def test_choice_remembered_when_detection_temporarily_disappears(db, subject_pho
     photo_id, ids, path = subject_photo
     select_primary(db, photo_id, ids[0])
     original = dict(db.get_detections(photo_id)[0])
-    db.clear_detections(photo_id)
+    db.detections.clear(photo_id)
     assert payload(db, photo_id)["choice_unavailable"]
     db.write_detection_batch(photo_id, original["detector_model"], [{
         "box": {k: original["box_" + k] for k in "xywh"}, "confidence": .95, "category": "animal"}])
@@ -110,9 +110,9 @@ def test_stale_masks_follow_selected_subject(db, subject_photo):
     det = db.get_detections(photo_id)[0]
     db.conn.execute("""INSERT INTO photo_masks(photo_id,variant,path,created_at,detector_model,prompt_x,prompt_y,prompt_w,prompt_h)
         VALUES (?,'test','mask.png',1,?,?,?,?,?)""", (photo_id,det["detector_model"],*(det["box_" + k] for k in "xywh")))
-    assert db.find_stale_masks() == []
+    assert db.masks_features.find_stale() == []
     select_primary(db, photo_id, ids[0])
-    assert len(db.find_stale_masks()) == 1
+    assert len(db.masks_features.find_stale()) == 1
     assert db.count_extract_stale("test") == 0
 
 
@@ -223,13 +223,13 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
     # Raise the workspace's detector_confidence above ids[1]'s 0.7 so the
     # current effective primary flips to ids[0] (0.95) WITHOUT syncing
     # photo_subject_state, which still names ids[1].
-    db.update_workspace(db._ws_id(), config_overrides={'detector_confidence': 0.8})
+    db.workspaces.update(db._ws_id(), config_overrides={'detector_confidence': 0.8})
     det_lo = next(d for d in db.get_detections(photo_id, min_conf=0.8)
                   if d['id'] == ids[0])
     # A re-extraction under the new floor would rewrite the mask row with
     # the new primary's prompt; activating that mask must not raise even
     # though the cached state still points at the previous subject.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=photo_id, variant='test', path='mask.png',
         detector_model=det_lo['detector_model'],
         prompt_x=det_lo['box_x'], prompt_y=det_lo['box_y'],
@@ -303,7 +303,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     # ids[1] — which now falls below the confidence join. Under the old
     # predicate every detection would be excluded; under the fix, ids[0]
     # surfaces once the mask has been regenerated for it.
-    db.update_workspace(db._ws_id(), config_overrides={'detector_confidence': 0.8})
+    db.workspaces.update(db._ws_id(), config_overrides={'detector_confidence': 0.8})
     # Before regeneration the cached mask still points at ids[1]'s
     # prompt, so the stale-mask predicate excludes the photo — the eye
     # stage will not run keypoint inference against a wrong-subject
@@ -314,7 +314,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     # stage must resolve the primary at the current floor.
     det_lo = next(d for d in db.get_detections(photo_id, min_conf=0.8)
                   if d['id'] == ids[0])
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id=photo_id, variant='test', path='mask.png',
         detector_model=det_lo['detector_model'],
         prompt_x=det_lo['box_x'], prompt_y=det_lo['box_y'],
@@ -329,7 +329,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
 def test_empty_redetection_clears_previous_subject_quality(db, subject_photo):
     photo_id, ids, path = subject_photo
     analyze_photo(db, photo_id, path)
-    db.clear_detections(photo_id)
+    db.detections.clear(photo_id)
     assert analyze_photo(db, photo_id, path) == 0
     assert db.conn.execute('SELECT quality_score FROM photos WHERE id=?', (photo_id,)).fetchone()[0] is None
 
@@ -348,7 +348,7 @@ def test_reclassify_cancellation_clears_previous_subject(db, subject_photo, monk
     db.conn.execute("UPDATE photos SET mask_path='old.png', eye_x=.7, dino_subject_embedding=X'01' WHERE id=?", (photo_id,))
     db.conn.commit()
     # Standalone Classify clears immediately before entering _detect_batch.
-    db.clear_detections(photo_id)
+    db.detections.clear(photo_id)
 
     def detect(_path):
         if cancel_during_detection:
@@ -404,7 +404,7 @@ def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, mo
     analyze_photo(db, photo_id, path)
     db.conn.execute("UPDATE photos SET mask_path='old.png', eye_x=.7, dino_subject_embedding=X'01' WHERE id=?", (photo_id,))
     if empty:
-        db.clear_detections(photo_id)
+        db.detections.clear(photo_id)
         db.write_detection_batch(photo_id, "megadetector-v6", [])
     else:
         db.conn.execute("UPDATE detections SET detector_confidence=.1 WHERE photo_id=?", (photo_id,))
@@ -414,7 +414,7 @@ def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, mo
     photo = dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
     classify_job._detect_batch([photo], {photo["folder_id"]: str(path.parent)},
         None, {"id": 1}, False, db, det_conf_threshold=.2,
-        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6") if known_run else set())
+        already_detected_ids=db.model_runs.get_detector_run_photo_ids("megadetector-v6") if known_run else set())
     row = db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
     for column in ("mask_path", "eye_x", "dino_subject_embedding", "quality_score"):
         assert row[column] is None

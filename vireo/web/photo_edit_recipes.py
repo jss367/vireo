@@ -28,9 +28,9 @@ def _create_current_local_mask_snapshot(
     import local_masks
 
     for attempt in range(3):
-        variant = db.get_active_mask_variant(photo_id)
+        variant = db.masks_features.active_variant(photo_id)
         mask_row = (
-            db.get_photo_mask(photo_id, variant) if variant else None
+            db.masks_features.get_mask(photo_id, variant) if variant else None
         )
         try:
             return local_masks.create_snapshot(
@@ -59,8 +59,8 @@ def _local_mask_stale(db, photo_id, recipe):
     if not recipe or not recipe.get("local"):
         return False
     import local_masks
-    variant = db.get_active_mask_variant(photo_id)
-    mask_row = db.get_photo_mask(photo_id, variant) if variant else None
+    variant = db.masks_features.active_variant(photo_id)
+    mask_row = db.masks_features.get_mask(photo_id, variant) if variant else None
     return local_masks.is_stale(recipe, mask_row)
 
 
@@ -227,8 +227,8 @@ def create_photo_edit_recipes_blueprint(
         if not isinstance(ids, list) or not ids or any(type(pid) is not int for pid in ids):
             return json_error("photo_ids must be a non-empty list of integers")
         db = get_db()
-        visible_ids = db.filter_photo_ids_in_workspace(ids)
-        recipe_map = db.get_photo_edit_recipes(visible_ids)
+        visible_ids = db.photo_visibility.visible_photo_ids(ids)
+        recipe_map = db.edits.get_photo_recipes(visible_ids)
         recipes = [recipe_map.get(pid) for pid in visible_ids]
         values = {}
         for field in FIELDS:
@@ -320,9 +320,9 @@ def create_photo_edit_recipes_blueprint(
         has_local = bool(recipe.get("local")) and (fields is None or "local" in fields)
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
 
-        visible_ids = db.filter_photo_ids_in_workspace(ids)
+        visible_ids = db.photo_visibility.visible_photo_ids(ids)
         visible_set = set(visible_ids)
-        old_recipes = db.get_photo_edit_recipes(visible_ids)
+        old_recipes = db.edits.get_photo_recipes(visible_ids)
         # Slider edits need no photo metadata. Geometry and local masks use
         # dimensions, loaded in chunks only for those operations.
         needs_dimensions = has_local or bool(fields and {"rotation", "flip"}.intersection(fields))
@@ -418,7 +418,7 @@ def create_photo_edit_recipes_blueprint(
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         limit = min(max(1, request.args.get("limit", 50, type=int)), 200)
-        rows = db.get_photo_edit_recipe_history(photo_id, limit)
+        rows = db.edit_history.recipe_history_for_photo(photo_id, limit)
 
         from image_edits import copy_recipe
 

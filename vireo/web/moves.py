@@ -92,16 +92,16 @@ def create_moves_blueprint(get_db, json_error):
             # Date moves act on the physical subtree, including detached
             # descendants. Validate the linked root, then preview that exact
             # planner scope rather than filtering it through Browse membership.
-            if not db.workspace_has_direct_folder_link(db.active_workspace_id, folder_id):
+            if not db.workspace_folders.has_direct_link(db.active_workspace_id, folder_id):
                 return json_error("folder not found", 404)
             from move import folder_date_move_photo_ids
 
             photo_ids = folder_date_move_photo_ids(db, folder_id)
-            return jsonify({"workspaces": db.photo_move_affected_workspaces(photo_ids)})
+            return jsonify({"workspaces": db.photo_visibility.affected_workspaces(photo_ids)})
         photo_ids, err = parse_selection_photo_ids(db, body, json_error=json_error, limit=None)
         if err is not None:
             return err
-        return jsonify({"workspaces": db.photo_move_affected_workspaces(photo_ids)})
+        return jsonify({"workspaces": db.photo_visibility.affected_workspaces(photo_ids)})
 
     @blueprint.route("/api/move-rules", methods=["GET"])
     def api_list_move_rules():

@@ -334,7 +334,8 @@ def compute_all_quality_features(image, mask):
         mask: boolean array (H, W)
 
     Returns:
-        dict with all feature values ready for update_photo_pipeline_features()
+        dict with all feature values ready for
+        ``db.masks_features.update_pipeline_features()``
     """
     exposure = compute_exposure_stats(image, mask)
 

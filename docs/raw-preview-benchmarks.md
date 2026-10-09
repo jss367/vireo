@@ -21,7 +21,20 @@ dimensions and these names, but omits file paths and image contents. Include
 representative 24–60 MP cameras when available; a synthetic DNG smoke test in
 the normal test suite verifies the harness but does not represent camera speed.
 
-Install the development dependencies, close other heavy applications, then run:
+Use an isolated environment with the declared runtime and development dependencies,
+then close other heavy applications. The runner rejects missing/outdated runtime
+dependencies and an imported OpenCV that differs from the installed headless
+distribution. For example, from the repository root:
+
+```sh
+python -m venv .context/preview-benchmark-venv
+.context/preview-benchmark-venv/bin/python -m pip install -e '.[dev]' 'opencv-python-headless==4.13.0.92'
+source .context/preview-benchmark-venv/bin/activate
+```
+
+The OpenCV pin matches the committed references. Other environment differences
+still require a fresh local baseline; comparisons intentionally require matching
+environments. Record a baseline with:
 
 ```sh
 python scripts/benchmark_raw_previews.py \
@@ -71,8 +84,9 @@ smoke test and tests the comparison logic. Changes to this measurement protocol
 must increment the report schema version.
 
 Schema 2 reports include the executed command (with manifest/output/baseline paths
-redacted), Git revision, dirty-tree flag, CPU model, CPU accelerator mode and
-numeric-library versions. Commit code before recording a reference report so the
+redacted), Git revision, dirty-tree flag, CPU model, CPU accelerator mode,
+numeric-library versions and installed versions of every declared runtime
+dependency. Commit code before recording a reference report so the
 revision identifies the measured implementation. Source revisions are provenance,
 not comparison constraints, because before/after runs must use different code.
 The worker-process and aggregate-memory protocol differs from schema 1; the
@@ -105,6 +119,13 @@ after decoding, in addition to live buffers. The report also includes the fit
 scenarios and every individual timing sample.
 
 ## Native-resolution filtering optimization
+
+The [Rust photo editing filter experiment](photo-editing-rust-experiment.md)
+compares an isolated Rust prototype with NumPy, SciPy, and OpenCV for recipes that
+also include standard noise reduction and sharpening. It includes numerical
+fidelity checks and measurements through the supervised preview endpoint.
+Those detail-filter results measure a different recipe from the basic tone-only
+reference tables below.
 
 Profiling the 46 MP endpoint identified the tone pass, particularly spatial
 Shadows/Highlights, as the main rendering cost. Its one-million-pixel row strips
@@ -152,25 +173,105 @@ wall-clock timing in CI.
 
 The [schema 2 worker report](performance/raw-preview-workers.json) records the
 24 MP and 46 MP corpus on an Apple M3 Max, using four numeric threads and five
-samples per scenario. It was recorded from clean revision `51023c555` after the
-test runs finished. Every request used the supervised child-process path and
-passed the linear-source and output-dimension checks.
+samples per scenario. This refreshed reference uses OpenCV 4.13.0.92, satisfying
+the declared dependency minimum, and replaces the earlier OpenCV 4.11 report.
+It was recorded from clean revision `cd86a0a43` after the test runs finished.
+Every request used the supervised child-process path and passed the linear-source
+and output-dimension checks. Installed versions of all declared runtime dependencies
+are included in the report.
 
 | Source | Preview | Cache | Median | p95 | Peak server and child memory |
 | --- | --- | --- | ---: | ---: | ---: |
-| 24 MP | Quick | Cold | 1.32 s | 1.62 s | 1,209 MiB |
-| 24 MP | Quick | Warm | 143 ms | 153 ms | 1,138 MiB |
-| 24 MP | Native | Cold | 6.63 s | 6.88 s | 2,467 MiB |
-| 24 MP | Native | Warm | 5.62 s | 5.70 s | 2,509 MiB |
-| 46 MP | Quick | Cold | 2.26 s | 2.64 s | 1,946 MiB |
-| 46 MP | Quick | Warm | 142 ms | 157 ms | 1,407 MiB |
-| 46 MP | Native | Cold | 12.55 s | 12.84 s | 3,639 MiB |
-| 46 MP | Native | Warm | 10.60 s | 10.86 s | 3,694 MiB |
+| 24 MP | Quick | Cold | 1.34 s | 1.67 s | 1,427 MiB |
+| 24 MP | Quick | Warm | 145 ms | 151 ms | 1,253 MiB |
+| 24 MP | Native | Cold | 6.87 s | 7.90 s | 2,870 MiB |
+| 24 MP | Native | Warm | 5.70 s | 5.72 s | 2,831 MiB |
+| 46 MP | Quick | Cold | 2.27 s | 2.63 s | 2,064 MiB |
+| 46 MP | Quick | Warm | 150 ms | 167 ms | 1,570 MiB |
+| 46 MP | Native | Cold | 12.82 s | 13.07 s | 3,958 MiB |
+| 46 MP | Native | Warm | 10.82 s | 11.46 s | 3,982 MiB |
 
-This is a new reference under the process-worker protocol, not a speedup claim
-against the historical reports. It measures sequential requests with one active
-render child; simultaneous renders can consume more memory. The report includes
-the command, complete source revision, CPU and library versions for repeat runs.
+This measures sequential requests with one active render child; simultaneous
+renders can consume more memory. It is a reference for the recorded environment,
+not a speed comparison against reports made with different dependencies. The
+command, complete source revision, CPU and library versions support repeat runs.
+
+## Real-RAW contention benchmark
+
+`scripts/benchmark_raw_preview_stress.py` uses the same local corpus and production
+HTTP handlers with concurrent Flask test clients. At least two RAW files are
+required. Each scenario/sample gets a fresh server, catalog and worker pool;
+the corpus is read-only. It defaults to the production two numeric threads per
+worker, three samples, and six edits spaced 60 ms apart:
+
+```sh
+python scripts/benchmark_raw_preview_stress.py \
+  --manifest .context/raw-benchmark/corpus.json \
+  --machine-label dedicated-benchmark-machine \
+  --output .context/raw-benchmark/stress.json
+```
+
+- **Rapid edits:** start a native render for each camera, wait until the child
+  enters the render handler, then replace it with a burst of quick previews.
+- **Photo navigation:** alternate corpus photos within one tab, issuing explicit
+  cancellation before each replacement request.
+- **Multiple tabs:** three independent sessions compete for two workers, first
+  with edit bursts and then with concurrent native refinements. The third tab
+  exercises queueing while the native renders expose aggregate memory pressure.
+
+The report stores individual samples and p50/p95 for cancellation acknowledgement
+(superseding dispatch to the old HTTP request's 409 response), worker reaping
+(superseding dispatch to child termination/join completion), latest quick-preview
+completion, navigation cancellation POSTs, and native refinements. Reap timings
+cover only cancelled requests observed entering a child that was then stopped;
+queued cancellations and completed renders that retain a healthy worker have no
+reap sample. An unobserved metric is `null`, never a fabricated zero. Counts show
+how many cancellations and reaps each trial actually exercised. With only three
+trials, tails are descriptive observations, not a statistically stable budget.
+
+Memory is aggregate resident set size (RSS) for the server and descendants,
+sampled every 10 ms, including
+caches and the in-process HTTP harness. Shared pages can be counted twice and
+short peaks can be missed. Timing includes thread dispatch and worker startup,
+but excludes browser display and network transfer. Worker-start marker files and
+a parent-side stop observer add a small instrumentation cost; the production
+render function and worker limits are unchanged. All marker files and catalogs
+are temporary, and reports omit local corpus paths and process IDs.
+
+Unexpected statuses (including overload and timeout), failed latest requests,
+8-bit fallbacks and incorrect dimensions fail the run. These scenarios validate
+responsiveness under a bounded workload, not maximum admission capacity or a
+fixed RAM ceiling. Existing worker/browser tests cover deterministic cancellation
+and stale-display behavior; this benchmark adds actual camera timing and memory.
+
+### Recorded contention results
+
+The [stress report](performance/raw-preview-stress.json) uses the same two cameras
+on the original Apple M3 Max and clean revision `a0848d0a0`, with the production
+two threads per worker and three trials per scenario. It was rerun in a fully
+isolated environment with the same declared runtime dependency versions as the
+sequential baseline, after correcting worker-reap attribution to use actual
+start order per PID. This replaces the earlier report recorded at `cd86a0a43`.
+No other tests or benchmarks from this task ran concurrently. All 12 trials
+passed: 135 requests, 108 superseded responses, and 15 observed worker reaps.
+Timings below pool individual observations across each scenario's three trials.
+
+| Scenario | Cancellation ack p95 | Worker reap p95 | Latest quick median / p95 | Peak aggregate RSS |
+| --- | ---: | ---: | ---: | ---: |
+| 24 MP rapid edits | 30.39 ms | 59.85 ms | 1.89 / 2.93 s | 1,194 MiB |
+| 46 MP rapid edits | 20.87 ms | 49.68 ms | 2.89 / 3.07 s | 1,678 MiB |
+| Photo navigation | 36.97 ms | 41.89 ms | 3.76 / 3.90 s | 1,220 MiB |
+| Three tabs | 46.84 ms | 85.37 ms | 3.54 / 6.53 s | 6,676 MiB |
+
+The three tabs use the 24 MP, 46 MP and 24 MP photos, respectively. Native
+refinements in that scenario had a 14.35-second median and 31.69-second p95,
+including queue time. Cancellation acknowledgement is fast, but completing the
+latest preview still needs worker startup and a fresh RAW decode after a worker
+is discarded. The three-tab case also shows that two bounded workers can consume
+about 6.5 GiB together. These are observed costs on a shared machine, not fixed
+latency or memory guarantees. Differences from the earlier run cannot be
+attributed to the instrumentation fix: shared-machine load and the small sample
+count also affect these measurements.
 
 ## Stalled preview recovery
 

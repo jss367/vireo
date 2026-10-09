@@ -425,7 +425,7 @@ def test_database_export_bundle_import_and_duplicate_fanout(tmp_path):
         labels_fingerprint=labels_short,
         labels_fingerprint_full=labels_full,
     )
-    source.record_classifier_run(
+    source.model_runs.record_classifier_run(
         detection_id,
         "bioclip-2.5",
         labels_short,
@@ -434,7 +434,7 @@ def test_database_export_bundle_import_and_duplicate_fanout(tmp_path):
         runtime_fingerprint=classifier_runtime,
         input_fingerprint=classifier_input_fp,
     )
-    source.upsert_labels_fingerprint(
+    source.model_runs.upsert_labels_fingerprint(
         labels_short,
         "European birds",
         ["europe.txt"],
@@ -649,14 +649,14 @@ def test_fresh_classifier_run_is_promoted_and_published(tmp_path):
     )[0]
     labels_full = "5" * 64
     labels_short = labels_full[:12]
-    source.upsert_labels_fingerprint(
+    source.model_runs.upsert_labels_fingerprint(
         labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
     )
     source.add_prediction(
         detection_id, "Robin", 0.92, "BioCLIP",
         labels_fingerprint=labels_short,
     )
-    source.record_classifier_run(
+    source.model_runs.record_classifier_run(
         detection_id, "BioCLIP", labels_short, prediction_count=1,
     )
 
@@ -734,14 +734,14 @@ def test_evicted_working_copy_classifier_run_stays_local_only(tmp_path):
     )[0]
     labels_full = "5" * 64
     labels_short = labels_full[:12]
-    source.upsert_labels_fingerprint(
+    source.model_runs.upsert_labels_fingerprint(
         labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
     )
     source.add_prediction(
         detection_id, "Robin", 0.92, "BioCLIP",
         labels_fingerprint=labels_short,
     )
-    source.record_classifier_run(
+    source.model_runs.record_classifier_run(
         detection_id, "BioCLIP", labels_short, prediction_count=1,
     )
 
@@ -1077,7 +1077,7 @@ def test_classification_deferred_until_detector_run_available(tmp_path):
         tmp_path / "destination.db", "photo.jpg",
     )
     labels_short = "3" * 12
-    destination.upsert_labels_fingerprint(
+    destination.model_runs.upsert_labels_fingerprint(
         labels_short, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
     # Only the classification artifact is present — no detector artifact
@@ -1114,7 +1114,7 @@ def test_unknown_classifier_runtime_is_quarantined_not_installed(tmp_path):
     destination, _folder_id, _photo_id = _database_with_photo(
         tmp_path / "destination.db", "photo.jpg",
     )
-    destination.upsert_labels_fingerprint(
+    destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
 
@@ -1183,7 +1183,7 @@ def test_materialize_local_store_honors_persisted_trust(tmp_path):
     destination, _folder_id, _photo_id = _database_with_photo(
         tmp_path / "destination.db", "photo.jpg",
     )
-    destination.upsert_labels_fingerprint(
+    destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
     store = ArtifactStore(tmp_path / "cache")
@@ -1210,7 +1210,7 @@ def test_materialize_local_store_honors_persisted_trust(tmp_path):
     destination2, _f, _p = _database_with_photo(
         tmp_path / "destination2.db", "photo.jpg",
     )
-    destination2.upsert_labels_fingerprint(
+    destination2.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
     untrusted = materialize_local_store(destination2, store=fresh_store)
@@ -1390,7 +1390,7 @@ def _materialized_classification(tmp_path, name, **artifact_kwargs):
     destination, _folder_id, photo_id = _database_with_photo(
         tmp_path / name, "photo.jpg",
     )
-    destination.upsert_labels_fingerprint(
+    destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
     applied = materialize_artifacts(
@@ -1470,17 +1470,17 @@ def test_match_strength_survives_publish_and_export(tmp_path):
     )[0]
     labels_full = "5" * 64
     labels_short = labels_full[:12]
-    source.upsert_labels_fingerprint(
+    source.model_runs.upsert_labels_fingerprint(
         labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
     )
     source.add_prediction(
         detection_id, "Robin", 0.92, "BioCLIP",
         labels_fingerprint=labels_short, match_score=0.31,
     )
-    source.record_classifier_run(
+    source.model_runs.record_classifier_run(
         detection_id, "BioCLIP", labels_short, prediction_count=1,
     )
-    source.record_classifier_match_score(
+    source.model_runs.record_classifier_match_score(
         detection_id, "BioCLIP", labels_short, max_match_score=0.31,
         match_margin=0.04, top_species="Robin", label_count=1255,
         score_kind="cosine",
@@ -1570,11 +1570,11 @@ def test_zero_candidate_run_is_publishable_when_it_recorded_a_match(tmp_path):
     )[0]
     labels_full = "7" * 64
     labels_short = labels_full[:12]
-    source.upsert_labels_fingerprint(
+    source.model_runs.upsert_labels_fingerprint(
         labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
     )
     # No add_prediction at all — this run produced nothing.
-    source.record_classifier_match_score(
+    source.model_runs.record_classifier_match_score(
         detection_id, "BioCLIP", labels_short, max_match_score=0.09,
         match_margin=0.002, top_species="Robin", label_count=1255,
         score_kind="cosine",
@@ -1657,7 +1657,7 @@ def test_replacement_artifact_without_match_clears_prior_summary(tmp_path):
     destination, _folder_id, _photo_id = _database_with_photo(
         tmp_path / "replace.db", "photo.jpg",
     )
-    destination.upsert_labels_fingerprint(
+    destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
     # First materialization records a summary row.
@@ -1723,7 +1723,7 @@ def test_replacement_artifact_with_match_overwrites_prior_summary(tmp_path):
     destination, _folder_id, _photo_id = _database_with_photo(
         tmp_path / "replace-with-match.db", "photo.jpg",
     )
-    destination.upsert_labels_fingerprint(
+    destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
     first_runtime = runtime_fingerprint({
@@ -1813,7 +1813,7 @@ def test_enriched_artifact_wins_over_pre_feature_same_identity(tmp_path):
             tmp_path / f"identity-{'enriched-first' if order[0] is enriched else 'pre-first'}.db",
             "photo.jpg",
         )
-        destination.upsert_labels_fingerprint(
+        destination.model_runs.upsert_labels_fingerprint(
             "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
         )
         materialize_artifacts(
@@ -1852,7 +1852,7 @@ def test_backfill_enriches_a_prior_pre_feature_materialize(tmp_path):
     destination, _folder_id, _photo_id = _database_with_photo(
         tmp_path / "backfill.db", "photo.jpg",
     )
-    destination.upsert_labels_fingerprint(
+    destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
     pre_feature = classification_artifact(
@@ -1918,7 +1918,7 @@ def test_backfill_never_overwrites_existing_match_scores(tmp_path):
     destination, _folder_id, _photo_id = _database_with_photo(
         tmp_path / "no-overwrite.db", "photo.jpg",
     )
-    destination.upsert_labels_fingerprint(
+    destination.model_runs.upsert_labels_fingerprint(
         "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
     )
     original = classification_artifact(
@@ -2028,7 +2028,7 @@ def test_complete_enrichment_beats_partial_enrichment_same_identity(tmp_path):
         destination, _folder_id, _photo_id = _database_with_photo(
             tmp_path / f"partial-{label}.db", "photo.jpg",
         )
-        destination.upsert_labels_fingerprint(
+        destination.model_runs.upsert_labels_fingerprint(
             "3" * 12, "Test labels", [], 1, full_fingerprint="3" * 64,
         )
         materialize_artifacts(
@@ -2092,7 +2092,7 @@ def test_materialize_prefers_installed_classifier_runtime(tmp_path):
     from computation_cache import materialize_artifacts
 
     db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
-    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    db.model_runs.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
     r_old = runtime_fingerprint({"rev": "old-taxonomy"})
     r_new = runtime_fingerprint({"rev": "new-taxonomy"})
     a_old = classification_artifact(
@@ -2129,7 +2129,7 @@ def test_materialize_ignores_unrecognized_existing_classifier_runtime(tmp_path):
     from computation_cache import materialize_artifacts
 
     db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
-    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    db.model_runs.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
     r_old = runtime_fingerprint({"rev": "old-taxonomy"})
     r_new = runtime_fingerprint({"rev": "new-taxonomy"})
     a_old = classification_artifact(
@@ -2165,7 +2165,7 @@ def test_materialize_competing_classifier_runtimes_settle_on_one(tmp_path):
     from computation_cache import materialize_artifacts
 
     db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
-    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    db.model_runs.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
     r_a = runtime_fingerprint({"rev": "a"})
     r_b = runtime_fingerprint({"rev": "b"})
     artifacts = [
@@ -2196,7 +2196,7 @@ def test_materialize_keeps_every_per_detection_classification(tmp_path):
     from computation_cache import materialize_artifacts
 
     db, _folder_id, _photo_id = _database_with_photo(tmp_path / "db.db", "p.jpg")
-    db.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
+    db.model_runs.upsert_labels_fingerprint("3" * 12, "L", [], 1, full_fingerprint="3" * 64)
     box_a = {"x": 0.10, "y": 0.10, "w": 0.20, "h": 0.20}
     box_b = {"x": 0.60, "y": 0.60, "w": 0.20, "h": 0.20}
     detections = detection_artifact(subjects=[
@@ -2280,7 +2280,7 @@ def test_exported_classification_keeps_input_recipe(tmp_path):
         detection_id, "Robin", 0.9, "bioclip-2.5",
         labels_fingerprint=full[:12], labels_fingerprint_full=full,
     )
-    source.record_classifier_run(
+    source.model_runs.record_classifier_run(
         detection_id, "bioclip-2.5", full[:12], prediction_count=1,
         labels_fingerprint_full=full, runtime_fingerprint=CLASSIFIER_RUNTIME,
         input_fingerprint=classifier_fp, input_recipe="raw-subject-v1",

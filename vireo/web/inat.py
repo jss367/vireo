@@ -137,7 +137,7 @@ def create_inat_blueprint(
         upload_url = "https://www.inaturalist.org/observations/upload"
 
         # Check submission history
-        subs = db.get_inat_submissions([photo_id])
+        subs = db.inat.get_submissions([photo_id])
         already = photo_id in subs
 
         user_cfg = cfg.load()
@@ -782,7 +782,7 @@ def create_inat_blueprint(
         except inat.InatApiError as e:
             return json_error(str(e), 502)
 
-        db.record_inat_submission(photo_id, obs_id, obs_url)
+        db.inat.record_submission(photo_id, obs_id, obs_url)
         return jsonify({"observation_id": obs_id, "observation_url": obs_url})
 
     @blueprint.route("/api/inat/submit-batch", methods=["POST"])
@@ -884,7 +884,7 @@ def create_inat_blueprint(
                     description=sub.get("description"),
                     geoprivacy=sub.get("geoprivacy", "open"),
                 )
-                db.record_inat_submission(photo_id, obs_id, obs_url)
+                db.inat.record_submission(photo_id, obs_id, obs_url)
                 results.append({"photo_id": photo_id, "observation_id": obs_id, "observation_url": obs_url})
             except inat.InatPartialUploadError as e:
                 results.append({
@@ -911,7 +911,7 @@ def create_inat_blueprint(
             return json_error("photo_ids must be comma-separated integers")
 
         db = get_db()
-        subs = db.get_inat_submissions(photo_ids)
+        subs = db.inat.get_submissions(photo_ids)
         # Convert keys to strings for JSON
         return jsonify({str(k): v for k, v in subs.items()})
 

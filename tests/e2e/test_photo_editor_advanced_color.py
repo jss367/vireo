@@ -377,6 +377,22 @@ def test_curve_mouse_keyboard_and_legacy_promotion(live_server, page, color_phot
     assert page.evaluate('saveRecipe()') is True
 
 
+def test_find_escape_preserves_active_color_picker(live_server, page, color_photo):
+    page.goto(f"{live_server['url']}/edit/{color_photo}")
+    expect(page.locator('#editorFilename')).to_have_text('color-study.png')
+    _wait_color_preview(page)
+    page.locator('#pointColorPick').click()
+    expect(page.locator('#pointColorPick')).to_have_attribute('aria-pressed', 'true')
+    page.evaluate('window.__TAURI_INTERNALS__ = {}')
+    page.keyboard.press('Control+F')
+    expect(page.locator('#pageFindPanel')).to_be_visible()
+    page.keyboard.press('Escape')
+    expect(page.locator('#pageFindPanel')).to_be_hidden()
+    expect(page.locator('#pointColorPick')).to_have_attribute('aria-pressed', 'true')
+    page.keyboard.press('Escape')
+    expect(page.locator('#pointColorPick')).to_have_attribute('aria-pressed', 'false')
+
+
 def test_photo_color_picker_samples_before_point_color_and_cancels(live_server, page, color_photo):
     photo_id = color_photo
     page.goto(f"{live_server['url']}/edit/{photo_id}")
@@ -526,6 +542,29 @@ def test_point_color_samples_the_displayed_native_resolution(live_server, page, 
     }""")
     page.mouse.click(position['x'], position['y'])
     expect(page.locator('#pointColorStatus')).to_contain_text('Color sampled')
+    assert page.evaluate("new URL(sampledRender.url).searchParams.has('preview_session')") is False
+    assert page.evaluate("new URL(sampledRender.url).searchParams.has('preview_seq')") is False
     assert page.evaluate('sampledRender.width') == 2600
     assert page.evaluate("new URL(sampledRender.url).searchParams.get('size')") == '2600'
     assert page.evaluate('pointColorSamples()[0].sample') == page.evaluate('clickedColorSample')
+
+
+@pytest.mark.parametrize('change', ['recipe', 'photo'])
+def test_pending_color_sample_ignores_changed_editor(live_server, page, color_photo, change):
+    page.goto(f"{live_server['url']}/edit/{color_photo}")
+    _wait_color_preview(page)
+    page.evaluate("""() => {
+      _loadImage = url => new Promise(resolve => {
+        window.pendingSampleUrl = url;
+        window.releaseColorSample = () => resolve(document.getElementById('editorImg'));
+      });
+    }""")
+    page.locator('#pointColorPick').click()
+    page.locator('#editorImg').click(force=True)
+    expect(page.locator('#pointColorStatus')).to_have_text('Sampling color…')
+    assert page.evaluate("new URL(pendingSampleUrl).searchParams.has('preview_session')") is False
+    assert page.evaluate("new URL(pendingSampleUrl).searchParams.has('preview_seq')") is False
+    assert page.evaluate("new URL(document.getElementById('editorImg').src).searchParams.has('preview_session')") is True
+    page.evaluate("change => { if (change === 'recipe') setAdjustment('exposure', 0.4); else editorState.photoId += 1; }", change)
+    page.evaluate('async () => { releaseColorSample(); await Promise.resolve(); }')
+    assert page.evaluate('pointColorSamples()') == []

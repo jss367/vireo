@@ -208,7 +208,7 @@ def create_predictions_blueprint(
         results = []
         pred_dicts = [dict(p) for p in preds]
         attach_species_representatives(db, pred_dicts)
-        recipes_by_photo = db.get_photo_edit_recipes({
+        recipes_by_photo = db.edits.get_photo_recipes({
             p.get("photo_id") for p in pred_dicts if p.get("photo_id") is not None
         })
         # Same recomputation as the selection aggregator: the stored
@@ -292,10 +292,10 @@ def create_predictions_blueprint(
             effective_cfg = db.get_effective_config(cfg.load())
             response["match_states"] = {
                 str(pid): match_confidence.summarize_photo(
-                    db.get_match_scores_for_photo(pid),
+                    db.model_runs.get_match_scores_for_photo(pid),
                     effective_cfg,
                     unscored_current_runs=(
-                        db.get_unscored_current_prediction_runs(pid)
+                        db.model_runs.get_unscored_current_prediction_runs(pid)
                     ),
                 )
                 for pid in explicit_photo_ids
@@ -333,7 +333,7 @@ def create_predictions_blueprint(
         """
         if not photos:
             return photos
-        recipes = db.get_photo_edit_recipes(
+        recipes = db.edits.get_photo_recipes(
             [photo["photo_id"] for photo in photos],
         )
         for photo in photos:
@@ -930,7 +930,7 @@ def create_predictions_blueprint(
                     continue
                 photo_id = item["photo_id"]
                 item_species = db.get_keyword_name(int(item["new_value"]))
-                flat_removals = db.get_flat_keyword_removals(photo_id, item_species)
+                flat_removals = db.pending_changes.flat_keyword_removals(photo_id, item_species)
                 # accept_prediction queues an add directly. Reconcile it
                 # with any pending removal before applying the shared helper.
                 db.remove_pending_changes(photo_id, "keyword_add", item_species, _commit=False)
@@ -1850,7 +1850,7 @@ def create_predictions_blueprint(
                     )
                     added_picks = []
                     for pid in actionable_picks:
-                        db.update_photo_flag(pid, "flagged", _commit=False)
+                        db.photo_review.set_flag(pid, "flagged", _commit=False)
                         if pid in already_has_species:
                             continue
                         db.tag_photo(pid, kid, source="manual", _commit=False)
@@ -1865,11 +1865,11 @@ def create_predictions_blueprint(
                     already_has_species = set()
                     added_picks = []
                     for pid in actionable_picks:
-                        db.update_photo_flag(pid, "flagged", _commit=False)
+                        db.photo_review.set_flag(pid, "flagged", _commit=False)
 
                 # Reject rejects
                 for pid in actionable_rejects:
-                    db.update_photo_flag(pid, "rejected", _commit=False)
+                    db.photo_review.set_flag(pid, "rejected", _commit=False)
             except ValueError as e:
                 # ``prediction_decisions.under_prediction_decision_lock``'s
                 # finally will roll back the still-open transaction; returning

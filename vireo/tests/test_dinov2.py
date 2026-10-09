@@ -557,7 +557,7 @@ def test_db_embedding_storage_roundtrip(tmp_path):
     subj_emb = np.random.randn(768).astype(np.float32)
     global_emb = np.random.randn(768).astype(np.float32)
 
-    db.update_photo_embeddings(
+    db.masks_features.update_embeddings(
         pid,
         dino_subject_embedding=embedding_to_blob(subj_emb),
         dino_global_embedding=embedding_to_blob(global_emb),
@@ -605,7 +605,7 @@ def test_db_embedding_partial_update(tmp_path):
     subj_emb = np.zeros(768, dtype=np.float32)
 
     # Store both
-    db.update_photo_embeddings(
+    db.masks_features.update_embeddings(
         pid,
         dino_subject_embedding=embedding_to_blob(subj_emb),
         dino_global_embedding=embedding_to_blob(global_emb),
@@ -613,7 +613,7 @@ def test_db_embedding_partial_update(tmp_path):
 
     # Update only subject
     new_subj = np.full(768, 0.5, dtype=np.float32)
-    db.update_photo_embeddings(
+    db.masks_features.update_embeddings(
         pid,
         dino_subject_embedding=embedding_to_blob(new_subj),
         dino_global_embedding=embedding_to_blob(global_emb),

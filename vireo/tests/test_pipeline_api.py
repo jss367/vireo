@@ -954,7 +954,7 @@ def test_pipeline_local_processing_skips_archive_when_previews_fail(
 
     seed_db = Database(db_path)
     ws_id = seed_db._active_workspace_id
-    seed_db.set_workspace_group_state(
+    seed_db.workspaces.set_group_state(
         ws_id, fingerprint="stale-group-fingerprint", when_ts=1714579200,
     )
     seed_db.close()
@@ -3055,7 +3055,7 @@ def test_pipeline_rejects_source_snapshot_id(setup, tmp_path):
     img_path = folder / "IMG_001.JPG"
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     db.add_folder(str(folder))
-    snap_id = db.create_new_images_snapshot([str(img_path)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
     db.conn.close()
 
     with app.test_client() as c:
@@ -3139,7 +3139,7 @@ def test_pipeline_rejects_snapshot_combined_with_stale_sources(setup, tmp_path):
     img_path = folder / "IMG_001.JPG"
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     db.add_folder(str(folder))
-    snap_id = db.create_new_images_snapshot([str(img_path)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
     db.conn.close()
 
     with app.test_client() as c:
@@ -3170,7 +3170,7 @@ def test_pipeline_rejects_destination_with_snapshot(setup, tmp_path):
     img_path = folder / "IMG_001.JPG"
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     db.add_folder(str(folder))
-    snap_id = db.create_new_images_snapshot([str(img_path)])
+    snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
     db.conn.close()
 
     dest = tmp_path / "dest"
@@ -3256,11 +3256,11 @@ def _seed_workspace_with_masks(db_path):
                       file_size=1, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
                       file_size=1, file_mtime=1.0)
-    db.upsert_photo_mask(p1, "sam2-small", "/m/a.small.png",
+    db.masks_features.upsert_mask(p1, "sam2-small", "/m/a.small.png",
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
-    db.upsert_photo_mask(p2, "sam2-small", "/m/b.small.png",
+    db.masks_features.upsert_mask(p2, "sam2-small", "/m/b.small.png",
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
-    db.upsert_photo_mask(p1, "sam2-large", "/m/a.large.png",
+    db.masks_features.upsert_mask(p1, "sam2-large", "/m/a.large.png",
         detector_model="md", prompt_x=0, prompt_y=0, prompt_w=0, prompt_h=0)
     db.set_active_mask_variant(p1, "sam2-small")
     db.set_active_mask_variant(p2, "sam2-small")
@@ -3284,7 +3284,7 @@ def _seed_workspace_with_large_only_masks(db_path):
               "confidence": 0.9, "category": "animal"}],
             detector_model="megadetector-v6",
         )
-        db.upsert_photo_mask(
+        db.masks_features.upsert_mask(
             pid, "sam2-large", f"/m/{pid}.large.png",
             detector_model="megadetector-v6",
             prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -3592,17 +3592,17 @@ def test_active_mask_variant_endpoint_is_workspace_scoped(setup):
 
         # Seed the same variant in both workspaces so the only thing
         # keeping ws_b out of the update is the workspace join.
-        db.upsert_photo_mask(p_a, "sam2-small", "/m/a.small.png",
+        db.masks_features.upsert_mask(p_a, "sam2-small", "/m/a.small.png",
             detector_model="md", prompt_x=0, prompt_y=0,
             prompt_w=0, prompt_h=0)
-        db.upsert_photo_mask(p_b, "sam2-small", "/m/b.small.png",
+        db.masks_features.upsert_mask(p_b, "sam2-small", "/m/b.small.png",
             detector_model="md", prompt_x=0, prompt_y=0,
             prompt_w=0, prompt_h=0)
 
         # Mark ws_a as the most-recently-opened so a fresh Database()
         # inside _get_db() picks it as the active workspace.
-        db.update_workspace(ws_b, last_opened_at="2026-01-01T00:00:00")
-        db.update_workspace(ws_a, last_opened_at="2026-05-01T00:00:00")
+        db.workspaces.update(ws_b, last_opened_at="2026-01-01T00:00:00")
+        db.workspaces.update(ws_a, last_opened_at="2026-05-01T00:00:00")
     finally:
         db.close()
 
@@ -3648,7 +3648,7 @@ def test_live_burst_gap_preserves_encounter_continuity(setup, tmp_path, endpoint
 
     app, db_path = setup
     with Database(db_path) as db:
-        db.update_workspace(db._ws_id(), config_overrides={
+        db.workspaces.update(db._ws_id(), config_overrides={
             "detector_confidence": 0.2,
             "pipeline": {"burst_time_gap": saved_gap, "weak_detection_confidence": 0.12,
                          "weak_detection_rescue_enabled": True},

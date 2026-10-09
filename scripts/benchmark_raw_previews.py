@@ -9,6 +9,7 @@ empty. Timings include decode, edits and JPEG encoding, but not browser display.
 import argparse
 import gc
 import hashlib
+import importlib.metadata
 import io
 import json
 import math
@@ -20,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +65,31 @@ def environment(threads, machine_label):
     import rawpy
     import scipy
 
+    # Refuse to publish a reference from an environment below the project's
+    # declared requirements, even if the benchmark happens to render there.
+    from packaging.requirements import Requirement
+
+    requirements = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['dependencies']
+    dependencies = {}
+    for specification in requirements:
+        requirement = Requirement(specification)
+        if requirement.marker and not requirement.marker.evaluate():
+            continue
+        installed = importlib.metadata.version(requirement.name)
+        dependencies[requirement.name] = installed
+        if not requirement.specifier.contains(installed):
+            raise ValueError(f'Benchmark requires {specification}; installed {installed}')
+    # A shadow at the same upstream version shares cv2.__version__, so verify no
+    # other OpenCV distribution is installed before trusting the version compare.
+    for shadow in ('opencv-python', 'opencv-contrib-python', 'opencv-contrib-python-headless'):
+        try:
+            importlib.metadata.version(shadow)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        raise ValueError(f'{shadow} shadows opencv-python-headless; use an isolated environment')
+    opencv_distribution = importlib.metadata.version('opencv-python-headless')
+    if cv2.__version__.split('.')[:3] != opencv_distribution.split('.')[:3]:
+        raise ValueError('Imported OpenCV differs from opencv-python-headless; use an isolated environment')
     cpu = platform.processor() or platform.machine()
     if platform.system() == 'Darwin':
         detected = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True, check=False)
@@ -73,14 +100,15 @@ def environment(threads, machine_label):
             'rawpy': rawpy.__version__, 'libraw': list(rawpy.libraw_version),
             'numpy': numpy.__version__, 'pillow': PIL.__version__,
             'scipy': scipy.__version__, 'opencv': cv2.__version__,
-            'cpu_model': cpu, 'accelerator_mode': 'cpu', 'preview_worker_limit': 2}
+            'cpu_model': cpu, 'accelerator_mode': 'cpu', 'preview_worker_limit': 2,
+            'dependencies': dependencies}
 
 
-def provenance(argv):
+def provenance(argv, *, script='benchmark_raw_previews.py'):
     """Record build identity and a reproducible command without local paths."""
     revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True, check=False)
     dirty = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True, text=True, check=False)
-    command = ['python', 'scripts/benchmark_raw_previews.py']
+    command = ['python', 'scripts/' + script]
     redact = None
     for argument in argv:
         flag, separator, _ = argument.partition('=')
@@ -104,13 +132,19 @@ def corpus_entries(manifest):
     entries = json.loads(manifest.read_text())
     if not isinstance(entries, list) or not entries:
         raise ValueError('Manifest must be a nonempty list of {name, path} entries')
-    names = set()
+    names, paths = set(), set()
     for entry in entries:
         name = entry['name']
         if not isinstance(name, str) or not name or name in names:
             raise ValueError('Each corpus entry needs a unique, nonempty name')
         names.add(name)
         path = (manifest.parent / Path(entry['path']).expanduser()).resolve()
+        # Distinct names resolving to one RAW collapse to a single row in
+        # Database.add_photo (filename is unique per folder), so navigation
+        # and multi-tab scenarios would silently reuse one photo id.
+        if str(path) in paths:
+            raise ValueError(f'Corpus entry {name!r} resolves to {path}, already used by another entry')
+        paths.add(str(path))
         with path.open('rb') as stream:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         with rawpy.imread(str(path)) as raw:

@@ -1,8 +1,9 @@
 """Behavior pins for the detections domain of ``Database``.
 
-The tests exercise the detection and miss methods only through the public
-``Database`` façade, so they hold whether the SQL lives in ``db.py`` or in
-``repositories/detections.py``. They cover the content-addressed detection
+The tests exercise the coordinated detection and miss methods through the
+``Database`` façade and the pass-through operations (``upsert_rows``,
+``clear``, ``get_ids_for_photos``, ``confidence_summary``,
+``subject_exposure_ev``) through the ``db.detections`` accessor. They cover the content-addressed detection
 upsert and its stale-row sweep, the atomic detection batch (runtime
 retirement, the review pin, rollback), the threshold-at-read-time readers,
 clears and id-based deletes, and the workspace-scoped misses queue.
@@ -19,6 +20,7 @@ import db as db_module
 import pytest
 from db import Database
 from detection_id import detection_id
+from repositories.detections import DetectionsRepository
 
 MODEL = "megadetector-v6"
 
@@ -239,7 +241,7 @@ def test_save_empty_list_clears_same_runtime_rows(db):
 
 def test_upsert_detection_rows_leaves_the_transaction_open(db):
     pid = _photo(db)
-    ids = db._upsert_detection_rows(pid, MODEL, [_d(x=0.1)], "rt")
+    ids = db.detections.upsert_rows(pid, MODEL, [_d(x=0.1)], "rt")
     assert db.conn.in_transaction
     with _reader(db) as reader:
         assert reader.execute(
@@ -581,7 +583,7 @@ def test_clear_detections_for_every_model(db):
     db.write_detection_batch(pid, MODEL, [_d()])
     db.write_detection_batch(pid, "other-det", [_d()])
     db.write_detection_batch(other, MODEL, [_d()])
-    db.clear_detections(pid)
+    db.detections.clear(pid)
     assert not db.conn.in_transaction
     with _reader(db) as reader:
         assert reader.execute(
@@ -598,7 +600,7 @@ def test_clear_detections_for_one_model(db):
     pid = _photo(db)
     db.write_detection_batch(pid, MODEL, [_d()])
     (kept,) = db.write_detection_batch(pid, "other-det", [_d()])
-    db.clear_detections(pid, detector_model=MODEL)
+    db.detections.clear(pid, detector_model=MODEL)
     assert not db.conn.in_transaction
     assert [r["id"] for r in _det_rows(db, pid)] == [kept]
     assert _run_row(db, pid) is None
@@ -606,13 +608,15 @@ def test_clear_detections_for_one_model(db):
 
 
 def test_get_existing_detection_photo_ids_delegates(db, monkeypatch):
+    from repositories.model_runs import ModelRunsRepository
+
     calls = []
 
-    def fake(detector_model):
+    def fake(self, detector_model):
         calls.append(detector_model)
         return {1, 2}
 
-    monkeypatch.setattr(db, "get_detector_run_photo_ids", fake)
+    monkeypatch.setattr(ModelRunsRepository, "get_detector_run_photo_ids", fake)
     assert db.get_existing_detection_photo_ids() == {1, 2}
     assert db.get_existing_detection_photo_ids("other") == {1, 2}
     assert calls == ["megadetector-v6", "other"]
@@ -621,7 +625,7 @@ def test_get_existing_detection_photo_ids_delegates(db, monkeypatch):
 def test_get_detection_subject_exposure_ev(db):
     pid = _photo(db)
     det = _raw_det(db, pid)
-    assert db.get_detection_subject_exposure_ev(det) is None
+    assert db.detections.subject_exposure_ev(det) is None
     db.conn.execute(
         """INSERT INTO detection_subjects
              (detection_id, source_key, crop, quality_score, exposure_ev, features)
@@ -630,13 +634,13 @@ def test_get_detection_subject_exposure_ev(db):
     )
     db.conn.commit()
     # 0.0 is a real correction, not a missing analysis.
-    assert db.get_detection_subject_exposure_ev(det) == 0.0
+    assert db.detections.subject_exposure_ev(det) == 0.0
     db.conn.execute(
         "UPDATE detection_subjects SET exposure_ev = -1.25 WHERE detection_id = ?",
         (det,),
     )
-    assert db.get_detection_subject_exposure_ev(det) == -1.25
-    assert db.get_detection_subject_exposure_ev(99999) is None
+    assert db.detections.subject_exposure_ev(det) == -1.25
+    assert db.detections.subject_exposure_ev(99999) is None
 
 
 def test_get_detection_ids_for_photos(db):
@@ -645,8 +649,8 @@ def test_get_detection_ids_for_photos(db):
     a = _raw_det(db, p1, conf=0.01)
     b = _raw_det(db, p1, model="other-det")
     c = _raw_det(db, p2)
-    assert db.get_detection_ids_for_photos([]) == {}
-    assert db.get_detection_ids_for_photos(
+    assert db.detections.get_ids_for_photos([]) == {}
+    assert db.detections.get_ids_for_photos(
         iter([p1, p2, p3])) == {p1: {a, b}, p2: {c}}
 
 
@@ -655,7 +659,7 @@ def test_get_detection_ids_for_photos_chunks_by_900(db):
     pids = _bulk_photos(db, fid, 901)
     det = _raw_det(db, pids[-1])
     statements = _trace(db)
-    assert db.get_detection_ids_for_photos(pids) == {pids[-1]: {det}}
+    assert db.detections.get_ids_for_photos(pids) == {pids[-1]: {det}}
     db.conn.set_trace_callback(None)
     selects = [s for s in statements if "FROM detections" in s]
     assert [s.count(",") + 1 for s in selects] == [900 + 1, 1 + 1]
@@ -945,10 +949,10 @@ def test_get_detection_confidence_summary_covers_every_model_and_chunks(
     _raw_det(db, a, conf=0.3, x=0.0)
     _raw_det(db, a, conf=0.05, model="other-detector", x=0.1)
     _raw_det(db, b, conf=None, x=0.0)
-    assert db.get_detection_confidence_summary([]) == []
+    assert db.detections.confidence_summary([]) == []
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
     statements = _trace(db)
-    rows = db.get_detection_confidence_summary([a, b, bare])
+    rows = db.detections.confidence_summary([a, b, bare])
     db.conn.set_trace_callback(None)
     # No confidence floor and no model filter; a photo without detections
     # has no row.
@@ -958,21 +962,34 @@ def test_get_detection_confidence_summary_covers_every_model_and_chunks(
 
 # -- structure ---------------------------------------------------------------
 
+# Coordinated detection operations kept on ``Database``: each adds a check, a
+# config floor, workspace/filter scope or a follow-up step before or after
+# the repository call.
 _DELEGATING_DETECTION_METHODS = (
     "save_detections",
-    "_upsert_detection_rows",
     "write_detection_batch",
     "get_detections",
     "get_detections_for_photos",
     "get_predictions_for_detection",
-    "clear_detections",
     "list_misses",
     "clear_miss_flag",
     "bulk_reject_miss_category",
-    "get_detection_ids_for_photos",
     "delete_detections_by_ids",
+)
+
+_REMOVED_DETECTION_WRAPPERS = (
+    "_upsert_detection_rows",
+    "clear_detections",
+    "get_detection_ids_for_photos",
     "get_detection_subject_exposure_ev",
     "get_detection_confidence_summary",
+)
+
+# Repository methods reached only through the kept methods above.
+_FACADE_ONLY_DETECTION_METHODS = (
+    "save", "write_batch", "get", "get_for_photos", "get_predictions",
+    "delete_by_ids", "miss_column", "miss_where", "list_miss_photos",
+    "attach_miss_detections", "clear_miss_flag", "reject_misses",
 )
 
 
@@ -999,10 +1016,63 @@ def test_detection_method_delegates_to_repository(name):
     )
 
 
+def test_detections_is_a_fresh_repository_on_the_connection_per_access(db, monkeypatch):
+    """``db.detections`` builds a new repository each time, never a cached one.
+
+    It carries the module's ``commit_with_retry`` as read at the access, so a
+    patch of that helper reaches writes made through the accessor.
+    """
+    first, second = db.detections, db.detections
+    assert isinstance(first, DetectionsRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first.commit_with_retry is db_module.commit_with_retry
+
+    def recording(conn, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(db_module, "commit_with_retry", recording)
+    assert db.detections.commit_with_retry is recording
+
+
+def test_detections_has_no_forwarding_wrappers_on_database():
+    """The pass-through operations are reached through ``db.detections``."""
+    for name in _REMOVED_DETECTION_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.detections"
+    accessor = Database.__dict__["detections"]
+    assert isinstance(accessor, property)
+    attrs = _self_attrs(accessor.fget)
+    assert "_detections_repository" in attrs
+    assert "conn" not in attrs
+
+
+def test_production_code_uses_facade_for_coordinated_detection_work():
+    """Nothing outside the data layer reaches past a kept ``Database`` method."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    pattern = re.compile(
+        r"\.detections\.(" + "|".join(_FACADE_ONLY_DETECTION_METHODS) + r")\("
+    )
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if rel.parts[0] in ("tests", "repositories") or rel.name == "db.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        offenders += [f"{rel}: {m.group(0)}" for m in pattern.finditer(text)]
+    assert offenders == [], (
+        "Call the Database method instead (db.save_detections, "
+        "db.write_detection_batch, db.get_detections, db.list_misses, "
+        f"db.delete_detections_by_ids, ...): {offenders}"
+    )
+
+
 def test_existing_detection_photo_ids_composes_through_the_facade():
     attrs = _self_attrs(Database.get_existing_detection_photo_ids)
     assert "conn" not in attrs
-    assert "get_detector_run_photo_ids" in attrs
+    assert "model_runs" in attrs
 
 
 def test_pin_check_stays_on_the_facade():

@@ -14,7 +14,7 @@ import json
 import logging
 import os
 
-from duplicate_scan import attach_workspace_names, revalidate_scan_result
+from duplicate_scan import attach_workspace_names, catalog_cleanup_result, revalidate_scan_result
 from flask import Blueprint, jsonify, request
 from photo_payload import attach_nested_edit_recipes
 from sql_chunks import chunked
@@ -72,7 +72,7 @@ def create_duplicates_blueprint(
         total_rejected = 0
         deferred_hashes = []
         for h in hashes:
-            ids = db.get_live_duplicate_photo_ids(h)
+            ids = db.duplicates.live_ids_for_hash(h)
             if len(ids) < 2:
                 continue
             result = db.apply_duplicate_resolution(ids)
@@ -172,7 +172,7 @@ def create_duplicates_blueprint(
         # The lookup is chunked — bulk cleanup actions may hand us thousands
         # of ids at once, and SQLite builds with the legacy 999-parameter cap
         # would otherwise fail before any cleanup runs.
-        rows_by_id = db.get_duplicate_loser_candidates(photo_ids)
+        rows_by_id = db.duplicates.loser_candidate_rows(photo_ids)
 
         # One query per distinct hash to find kept-row anchors. Cheap because
         # the hash column is indexed and a typical bulk action shares hashes
@@ -181,7 +181,7 @@ def create_duplicates_blueprint(
         hashes = {r["file_hash"] for r in rows_by_id.values() if r["file_hash"]}
         anchors_by_hash = {}
         for h in hashes:
-            anchors = db.get_live_duplicate_paths(h)
+            anchors = db.duplicates.live_paths_for_hash(h)
             anchors_by_hash[h] = [os.path.join(a["path"], a["filename"]) for a in anchors]
 
         trash_candidates = []
@@ -316,6 +316,11 @@ def create_duplicates_blueprint(
             "failed": failed,
         })
 
+    @blueprint.route("/api/duplicates/cleanup", methods=["GET"])
+    def api_duplicates_cleanup():
+        """Current catalog cleanup candidates, independent of saved scans."""
+        return jsonify(catalog_cleanup_result(get_db()))
+
     @blueprint.route("/api/duplicates/last-scan", methods=["GET"])
     def api_duplicates_last_scan():
         """Return the most recent completed duplicate-scan's result.
@@ -337,7 +342,7 @@ def create_duplicates_blueprint(
         ``{found: true, job_id, started_at, finished_at, result}``.
         """
         db = get_db()
-        row = db.get_last_completed_job("duplicate-scan")
+        row = db.job_history.last_completed_with_result("duplicate-scan")
         if row is None:
             return jsonify({"found": False})
         try:
@@ -376,7 +381,7 @@ def create_duplicates_blueprint(
         exists before trashing.
         """
         db = get_db()
-        row = db.get_duplicate_loser_disk_summary()
+        row = db.duplicates.loser_disk_summary()
         return jsonify({
             "count": row["n"],
             "total_size": row["total_bytes"],

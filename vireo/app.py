@@ -1196,7 +1196,7 @@ def _migrate_legacy_preview_cache(app):
                 try:
                     os.rename(src, dst)
                     st = os.stat(dst)
-                    db.preview_cache_insert(photo_id, target_size, st.st_size)
+                    db.caches.preview_insert(photo_id, target_size, st.st_size)
                     migrated += 1
                 except OSError as e:
                     log.warning("Failed to migrate legacy preview %s: %s", src, e)
@@ -1211,7 +1211,7 @@ def _migrate_legacy_preview_cache(app):
             photo_id = int(m.group(1))
             size = int(m.group(2))
             path = os.path.join(preview_dir, fname)
-            if db.preview_cache_get(photo_id, size):
+            if db.caches.preview_get(photo_id, size):
                 continue
             photo_row = db.conn.execute(
                 "SELECT 1 FROM photos WHERE id=?", (photo_id,)
@@ -1225,7 +1225,7 @@ def _migrate_legacy_preview_cache(app):
                 continue
             try:
                 st = os.stat(path)
-                db.preview_cache_insert(photo_id, size, st.st_size)
+                db.caches.preview_insert(photo_id, size, st.st_size)
                 adopted += 1
             except OSError as e:
                 log.warning("Failed to adopt sized preview %s: %s", path, e)
@@ -1619,7 +1619,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         initialize_schema=(db_path == ":memory:"),
     )
     log.info("Database init took %.2fs (workspace: %s)", time.time() - _t0,
-             init_db.get_workspace(init_db.active_workspace_id)["name"])
+             init_db.workspaces.get(init_db.active_workspace_id)["name"])
     # Startup/maintenance passes; the per-app instance caches the startup
     # taxonomy parse so overlapping one-time migrations and the immediate
     # background species pass do not each parse taxonomy.json.

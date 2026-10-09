@@ -97,7 +97,7 @@ def test_stage_finds_eye_on_reference_mammal(tmp_path):
     mask = np.ones((img.height, img.width), dtype=np.uint8) * 255
     mask_path = tmp_path / "mask.png"
     Image.fromarray(mask, mode="L").save(mask_path)
-    db.update_photo_pipeline_features(pid, mask_path=str(mask_path))
+    db.masks_features.update_pipeline_features(pid, mask_path=str(mask_path))
 
     # Bbox covers the subject area of the fixture — loose enough to include
     # the eye. If your fixture's subject is in a different region, tune this.

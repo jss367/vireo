@@ -27,8 +27,10 @@ import numpy as np
 from PIL import Image
 
 try:
+    from .detail_backend import filters_for_image
     from .float_image import FloatImage
 except ImportError:
+    from detail_backend import filters_for_image
     from float_image import FloatImage
 
 try:
@@ -163,24 +165,35 @@ def _detail_params(sharpen, sharpen_radius, noise_reduction, scale):
     return params
 
 
-def _run_detail(rgb, params):
+def _run_detail(rgb, params, filters=None):
     """Run the detail pass on a float32 (H, W, 3) array in [0, 1]."""
+    gaussian = _gaussian_blur
+    bilateral = _bilateral
+    if filters is not None and rgb.shape[0] * rgb.shape[1] <= 8_000_000 and np.isfinite(rgb).all():
+        bilateral = filters.bilateral
+
+        def gaussian(array, sigma):
+            kernel = _gaussian_kernel(sigma)
+            if len(kernel) > 129:
+                return _gaussian_blur(array, sigma)
+            return filters.gaussian(array, kernel)
+
     out = rgb
     nr = params["nr"]
     if nr:
         y = _luma(out)
         chroma = out - y[..., None]
-        y_filtered = _bilateral(
+        y_filtered = bilateral(
             y, nr["sigma_spatial"], nr["sigma_range"], nr["radius"]
         )
         y = y + (y_filtered - y) * np.float32(nr["blend"])
-        chroma_filtered = _gaussian_blur(chroma, nr["sigma_chroma"])
+        chroma_filtered = gaussian(chroma, nr["sigma_chroma"])
         chroma = chroma + (chroma_filtered - chroma) * np.float32(nr["blend"])
         out = np.clip(y[..., None] + chroma, 0.0, 1.0)
     sharpen = params["sharpen"]
     if sharpen:
         y = _luma(out)
-        delta = (y - _gaussian_blur(y, sharpen["sigma"])) * np.float32(
+        delta = (y - gaussian(y, sharpen["sigma"])) * np.float32(
             sharpen["gain"]
         )
         out = np.clip(out + delta[..., None], 0.0, 1.0)
@@ -220,21 +233,21 @@ def apply_detail(img, *, sharpen=0.0, sharpen_radius=1.0, noise_reduction=0.0,
 
     halo = params["halo"]
     rows_per_tile = max(1, _DETAIL_TILE_PIXELS // max(1, width))
-    for top in range(0, height, rows_per_tile):
-        bottom = min(top + rows_per_tile, height)
-        ext_top = max(0, top - halo)
-        ext_bottom = min(height, bottom + halo)
-        tile = src[ext_top:ext_bottom, :, :3].astype(np.float32)
-        if not floating:
-            tile /= 255.0
-        result = _run_detail(tile, params)
-        result = result[top - ext_top : bottom - ext_top]
-        output[top:bottom, :, :3] = (
-            result if floating else np.clip(result * 255.0 + 0.5, 0, 255).astype(np.uint8)
-        )
-        if channels == 4:
-            output[top:bottom, :, 3] = src[top:bottom, :, 3]
-
+    with filters_for_image(height * width) as filters:
+        for top in range(0, height, rows_per_tile):
+            bottom = min(top + rows_per_tile, height)
+            ext_top = max(0, top - halo)
+            ext_bottom = min(height, bottom + halo)
+            tile = src[ext_top:ext_bottom, :, :3].astype(np.float32)
+            if not floating:
+                tile /= 255.0
+            result = _run_detail(tile, params, filters)
+            result = result[top - ext_top : bottom - ext_top]
+            output[top:bottom, :, :3] = (
+                result if floating else np.clip(result * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            )
+            if channels == 4:
+                output[top:bottom, :, 3] = src[top:bottom, :, 3]
     if floating:
         return FloatImage(output, encoding="srgb")
     return Image.fromarray(output, "RGBA" if channels == 4 else "RGB")

@@ -371,7 +371,7 @@ class StartupTasks:
         check_db = None
         try:
             check_db = Database(db_path)
-            total = check_db.count_exif_search_unindexed()
+            total = check_db.exif_search.count_unindexed()
         except Exception:
             log.exception("EXIF search backfill: pending check failed")
             return
@@ -391,7 +391,7 @@ class StartupTasks:
                 after_id = 0
                 job["progress"]["total"] = total
                 while not runner.is_cancelled(job["id"]):
-                    batch = thread_db.index_exif_search_batch(after_id, 500)
+                    batch = thread_db.exif_search.index_batch(after_id, 500)
                     if batch is None:
                         break
                     after_id, count = batch

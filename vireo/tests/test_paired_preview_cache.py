@@ -21,9 +21,9 @@ def seed(db, root, *, size=700_000):
     paired.parent.mkdir(parents=True, exist_ok=True)
     ordinary.write_bytes(b'a' * size)
     paired.write_bytes(b'b' * size)
-    db.preview_cache_insert(pid, 1920, size)
+    db.caches.preview_insert(pid, 1920, size)
     with db.conn:
-        db.paired_preview_cache_insert(pid, paired.name, size)
+        db.caches.paired_preview_insert(pid, paired.name, size)
     return pid, ordinary, paired
 
 
@@ -31,7 +31,7 @@ def seed(db, root, *, size=700_000):
 def test_preview_families_share_one_lru(db, tmp_path, monkeypatch, oldest):
     pid, ordinary, paired = seed(db, tmp_path)
     monkeypatch.setattr(cfg, 'load', lambda: {'preview_cache_max_mb': 1})
-    assert db.preview_cache_total_bytes() == 1_400_000
+    assert db.caches.preview_total_bytes() == 1_400_000
     with db.conn:
         db.conn.execute('UPDATE preview_cache SET last_access_at=?',
                         (1 if oldest == 'ordinary' else 2,))
@@ -41,7 +41,7 @@ def test_preview_families_share_one_lru(db, tmp_path, monkeypatch, oldest):
     assert ordinary.exists() == (oldest == 'paired')
     assert paired.exists() == (oldest == 'ordinary')
     assert paired_preview_ready(db, str(paired)) == (oldest == 'ordinary')
-    assert db.preview_cache_total_bytes() == 700_000
+    assert db.caches.preview_total_bytes() == 700_000
 
 
 def test_failed_paired_unlink_remains_accounted_for(db, tmp_path, monkeypatch):
@@ -56,11 +56,11 @@ def test_failed_paired_unlink_remains_accounted_for(db, tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, 'remove', fail_paired)
     evict_if_over_quota(db, str(tmp_path))
-    assert db.preview_cache_total_bytes() == 700_000
+    assert db.caches.preview_total_bytes() == 700_000
     assert paired_preview_ready(db, str(paired))
     monkeypatch.setattr(os, 'remove', real_remove)
     evict_if_over_quota(db, str(tmp_path))
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
     assert not paired.exists()
 
 
@@ -77,8 +77,8 @@ def test_paired_cache_survives_reopen_and_startup_reconciles_orphans(db, tmp_pat
         assert not untracked.exists()
         paired.unlink()
         assert reconcile_preview_cache(reopened, str(tmp_path)) == 1
-        assert reopened.paired_preview_cache_get(paired.name) is None
-        assert reopened.preview_cache_total_bytes() == 10
+        assert reopened.caches.paired_preview_get(paired.name) is None
+        assert reopened.caches.preview_total_bytes() == 10
 
 
 def test_delete_removes_paired_files_and_rows_before_photo_id_reuse(db, tmp_path):
@@ -87,8 +87,8 @@ def test_delete_removes_paired_files_and_rows_before_photo_id_reuse(db, tmp_path
     cleanup_cached_files_for_deleted_photos(str(tmp_path / 'thumbs'), files["files"],
                                           vireo_dir=str(tmp_path))
     assert not paired.exists()
-    assert db.paired_preview_cache_get(paired.name) is None
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.paired_preview_get(paired.name) is None
+    assert db.caches.preview_total_bytes() == 0
 
 
 def test_storage_reports_lists_and_clears_paired_previews(client_with_photo):
@@ -105,14 +105,14 @@ def test_storage_reports_lists_and_clears_paired_previews(client_with_photo):
     })
     assert response.status_code == 200
     assert not paired.exists()
-    assert db.paired_preview_cache_get(paired.name) is None
+    assert db.caches.paired_preview_get(paired.name) is None
     assert ordinary.exists()
     paired.write_bytes(b'0123456789')
     with db.conn:
-        db.paired_preview_cache_insert(int(paired.name.split('_')[0]), paired.name, 10)
+        db.caches.paired_preview_insert(int(paired.name.split('_')[0]), paired.name, 10)
     response = client.post('/api/storage/clear', json={'type': 'previews'})
     assert response.status_code == 200
-    assert db.preview_cache_total_bytes() == 0
+    assert db.caches.preview_total_bytes() == 0
     assert not paired.exists()
 
 

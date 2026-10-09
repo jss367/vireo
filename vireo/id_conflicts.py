@@ -49,7 +49,7 @@ def build_comparison(db, collection_id, photo_ids=None):
     species_identities = db.get_species_keywords_for_photos(row_ids, include_identities=True)
     species_by_photo = {pid: [entry["name"] for entry in entries]
                         for pid, entries in species_identities.items()}
-    edit_recipes_by_photo = db.get_photo_edit_recipes(row_ids)
+    edit_recipes_by_photo = db.edits.get_photo_recipes(row_ids)
     taxonomy = load_local_taxonomy()
 
     names = _SpeciesNames(

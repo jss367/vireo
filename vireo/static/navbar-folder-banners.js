@@ -890,10 +890,9 @@ async function checkDupCleanup() {
     }
 
     if (count > 0 && !_isDupCleanupDismissed(count)) {
-      const s = count === 1 ? '' : 's';
       const sizeStr = formatBytesNav(data.total_size || 0);
-      msg.textContent = count + ' duplicate file copy' + (count === 1 ? '' : ' copies') +
-        ' could be cleaned up from disk (' + sizeStr + ').';
+      msg.textContent = count + ' duplicate file ' + (count === 1 ? 'copy' : 'copies') +
+        ' could be cleaned up from disk (estimated ' + sizeStr + ').';
       banner.dataset.count = String(count);
       banner.style.display = 'flex';
     } else {

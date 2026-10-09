@@ -161,10 +161,10 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
     # sync_flags_to_xmp off). Tracked so the drain stops instead of re-running
     # them forever, and so the residual count below does not report them as
     # edits that "missed the transfer" -- a different claim, and a false one.
-    # Keyed on row identity, never on the row id; see ``staged_sync_scope``.
+    # Keyed on row identity, never on the row id; see ``SyncRepository.staged_scope``.
     undeliverable = set()
     for _ in range(_MAX_SYNC_DRAIN_PASSES):
-        changes, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
+        changes, _here, _elsewhere, _overlap = db.pending_changes.staged_scope(folder_ids)
         pending = [entry for entry in changes if entry[0] not in undeliverable]
         if not pending:
             break
@@ -193,7 +193,7 @@ def _sync_staged_metadata(db, progress, sync_job_lock, folder_ids):
                 + ". The local originals are untouched. Fix the sidecars and "
                 "try again, or use Send to NAS to transfer without syncing first."
             )
-        after, _here, _elsewhere, _overlap = db.staged_sync_scope(folder_ids)
+        after, _here, _elsewhere, _overlap = db.pending_changes.staged_scope(folder_ids)
         remaining = {key for key, _cid, _pid in after}
         # Counted as photos, not as per-pass tallies: one photo edited across
         # two passes is one sidecar, and the banner counts distinct photos too.
@@ -244,7 +244,7 @@ def _residual_staged_changes(db, photo_ids, undeliverable):
     queue. The caller says so in the summary.
     """
     try:
-        changes, _here, _elsewhere, _overlap = db.staged_sync_scope_by_photos(photo_ids)
+        changes, _here, _elsewhere, _overlap = db.pending_changes.staged_scope_by_photos(photo_ids)
         return sum(1 for key, _cid, _pid in changes if key not in undeliverable)
     except Exception:
         log.warning("Could not re-check the sync queue after a NAS transfer", exc_info=True)
@@ -1094,7 +1094,7 @@ def create_imports_blueprint(
         from pending_archives import active_archive_jobs
         db = get_db()
         jobs = active_archive_jobs(get_runner(), db.require_workspace_id())
-        rows = db.get_open_pending_archives()
+        rows = db.pending_archives.open_with_review_collection()
         # Only pay for the folder read when something is actually pending —
         # three pages poll this endpoint every 5s with an empty list most of
         # the time.
@@ -1104,7 +1104,7 @@ def create_imports_blueprint(
             sending = any(j.get("type") == "send-to-nas"
                           and (j.get("config") or {}).get("pending_archive_id") == row["id"] for j in jobs)
             folder_ids = _folder_ids_under(ws_folders, row["staging_destination"])
-            _changes, here, elsewhere, overlap = db.staged_sync_scope(folder_ids)
+            _changes, here, elsewhere, overlap = db.pending_changes.staged_scope(folder_ids)
             items.append({
                 "id": row["id"], "destination": row["destination"],
                 "folder_ids": folder_ids,
@@ -1151,7 +1151,7 @@ def create_imports_blueprint(
                 return json_error("Local originals are available. Send them to NAS before removing this transfer", 409)
             # Forget only the transfer, never files or catalog entries. This is
             # explicit recovery for lost storage, including interrupted sends.
-            db.delete_pending_archive(archive_id)
+            db.pending_archives.delete(archive_id)
         return jsonify({"ok": True})
 
     @blueprint.post("/api/import/pending-archives/<archive_id>/send")
@@ -1210,7 +1210,7 @@ def create_imports_blueprint(
             def work(job):
                 with Database(db_path) as thread_db:
                     thread_db.set_active_workspace(workspace_id)
-                    thread_db.set_pending_archive_state(archive_id, "sending")
+                    thread_db.pending_archives.set_state(archive_id, "sending")
                     steps = None
                     try:
                         remote = json.loads(archive["target_json"]).get("transport") != "mounted"
@@ -1367,7 +1367,7 @@ def create_imports_blueprint(
                             steps.finish("cleanup", error=(
                                 f"Local cleanup needs attention at {archive['staging_destination']}: "
                                 f"{result['cleanup_error']}"))
-                        thread_db.set_pending_archive_state(archive_id, "complete")
+                        thread_db.pending_archives.set_state(archive_id, "complete")
                         try:
                             invalidate_missing_originals()
                         except Exception:
@@ -1378,7 +1378,7 @@ def create_imports_blueprint(
                     except Exception as e:
                         if steps is not None:
                             steps.fail(str(e), status="cancelled" if runner.is_cancelled(job["id"]) else "failed")
-                        thread_db.set_pending_archive_state(archive_id, "pending", str(e))
+                        thread_db.pending_archives.set_state(archive_id, "pending", str(e))
                         raise
 
             job_id, _, _ = runner.start_singleton(

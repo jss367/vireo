@@ -10,6 +10,19 @@ function formatFileSize(bytes) {
   return (bytes / 1073741824).toFixed(1) + ' GB';
 }
 
+// The card's format label. A RAW+JPEG pair is one photo whose extension is
+// the RAW's, with the JPEG in companion_path; label it "NEF + JPG" so a card
+// the extension filter matched by its JPEG says why. The companion's format
+// comes from its basename, as the server's extension filter reads it.
+function cardExtensionLabel(p) {
+  var label = p.extension ? String(p.extension).replace(/^\./, '').toUpperCase() : '';
+  var base = p.companion_path ? String(p.companion_path).split(/[\\/]/).pop() : '';
+  var m = base.match(/^\.*[^.][\s\S]*(\.[^.]+)$/);
+  var companion = m ? m[1].slice(1).toUpperCase() : '';
+  if (!companion || companion === label) return label;
+  return label ? label + ' + ' + companion : companion;
+}
+
 function renderSpeciesBadges(species, inline) {
   if (!Array.isArray(species) || species.length === 0) return '';
   var maxShow = 3;
@@ -67,8 +80,10 @@ function renderCardField(field, p) {
       }
       return '';
     case 'extension':
-      if (p.extension) return '<span style="font-size:10px;color:var(--text-ghost);">' + escapeHtml(p.extension.toUpperCase()) + '</span>';
-      return '';
+      var extLabel = cardExtensionLabel(p);
+      if (!extLabel) return '';
+      var extTitle = p.companion_path ? ' title="' + escapeAttr(p.filename + ' + ' + p.companion_path) + '"' : '';
+      return '<span class="grid-card-ext" style="font-size:10px;color:var(--text-ghost);"' + extTitle + '>' + escapeHtml(extLabel) + '</span>';
     case 'quality_score':
       if (p.quality_score != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Quality score">' + p.quality_score.toFixed(2) + '</span>';
       return '';
@@ -272,8 +287,9 @@ function renderPhotoCard(p, idx) {
       inatBadge +
       wildlifeBadge +
       representativeBadge +
-      pairBadge +
-      speciesBadgeHtml +
+      (pairBadge
+        ? '<div class="grid-card-bottom-overlay">' + speciesBadgeHtml + pairBadge + '</div>'
+        : speciesBadgeHtml) +
     '</div>' +
     '<div class="grid-card-info">' +
       renderCardInfo(p) +

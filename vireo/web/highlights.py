@@ -198,7 +198,7 @@ class _HighlightsRelabel:
             )
             # Snapshot the original rank so undo can restore each
             # highlighted photo at its original position instead of
-            # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+            # dumping it at MAX(rank)+1 (see EditHistoryRepository.restore_relabel_curation).
             self.hl_prev_by_pid.setdefault(row["photo_id"], []).append({
                 "species": old_species_name,
                 "rank": row["rank"],
@@ -1024,7 +1024,7 @@ def create_highlights_blueprint(get_db, json_error):
         if any(isinstance(pid, bool) or not isinstance(pid, int) for pid in photo_ids):
             return json_error("photo_ids must be a list of integers")
         photo_ids = list(dict.fromkeys(photo_ids))
-        visible_ids = set(db.filter_photo_ids_in_workspace(photo_ids))
+        visible_ids = set(db.photo_visibility.visible_photo_ids(photo_ids))
         foreign = [pid for pid in photo_ids if pid not in visible_ids]
         if foreign:
             return json_error(

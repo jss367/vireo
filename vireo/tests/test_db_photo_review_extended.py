@@ -2,14 +2,13 @@
 
 Complements ``test_db_photo_review.py`` (ratings/flags basics) with the
 wildlife-excluded bit, color labels and their descriptions, commit
-visibility, and structural checks for both repositories.
+visibility, and a structural check on the kept wildlife-exclusion write.
 
-The behavior tests exercise ratings, flags, the wildlife-excluded bit, and
-workspace-scoped color labels (and their descriptions) only through the
-public ``Database`` façade, so they hold regardless of whether the SQL lives
-in ``db.py`` or in ``repositories/photo_review.py`` /
-``repositories/photo_labels.py``; the structural tests at the end keep it in
-the repositories.
+The behavior tests go through the ``db.photo_review`` and ``db.photo_labels``
+accessors (and the visibility filter through ``db.photo_visibility``), plus
+``Database.update_photo_wildlife_excluded``, the one coordinated write kept
+on the façade. The accessor-shape tests live in ``test_db_photo_review.py``
+and ``test_db_photo_labels.py``.
 """
 
 import ast
@@ -99,7 +98,7 @@ def outsider(db):
 
 
 def test_update_photo_rating_writes_and_commits(db, photos):
-    db.update_photo_rating(photos[0], 4)
+    db.photo_review.set_rating(photos[0], 4)
     assert not db.conn.in_transaction
     assert _column(db, photos[0], "rating") == 4
     assert _column(db, photos[1], "rating") == 0
@@ -110,42 +109,42 @@ def test_update_photo_rating_rejects_photo_outside_workspace(db, outsider):
         ValueError,
         match=f"Photo {outsider} does not belong to the active workspace",
     ):
-        db.update_photo_rating(outsider, 5)
+        db.photo_review.set_rating(outsider, 5)
     assert _column(db, outsider, "rating") == 0
 
 
 def test_update_photo_rating_skips_check_when_asked(db, outsider):
-    db.update_photo_rating(outsider, 3, verify_workspace=False)
+    db.photo_review.set_rating(outsider, 3, verify_workspace=False)
     assert _column(db, outsider, "rating") == 3
 
 
 def test_update_photo_rating_without_workspace(db, photos):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db.update_photo_rating(photos[0], 2)
+        db.photo_review.set_rating(photos[0], 2)
     # The unverified path never needs the active workspace.
-    db.update_photo_rating(photos[0], 2, verify_workspace=False)
+    db.photo_review.set_rating(photos[0], 2, verify_workspace=False)
     assert _column(db, photos[0], "rating") == 2
 
 
 def test_batch_update_photo_rating_writes_all_and_commits(db, photos):
-    db.batch_update_photo_rating(photos[:2], 5)
+    db.photo_review.set_ratings(photos[:2], 5)
     assert not db.conn.in_transaction
     assert [_column(db, pid, "rating") for pid in photos] == [5, 5, 0]
 
 
 def test_batch_update_photo_rating_empty_is_a_noop(db, photos):
     db.set_active_workspace(None)
-    db.batch_update_photo_rating([], 5)
+    db.photo_review.set_ratings([], 5)
     assert not db.conn.in_transaction
     assert [_column(db, pid, "rating") for pid in photos] == [0, 0, 0]
 
 
 def test_batch_update_photo_rating_verifies_before_writing(db, photos, outsider):
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
-        db.batch_update_photo_rating([photos[0], outsider], 4)
+        db.photo_review.set_ratings([photos[0], outsider], 4)
     assert _column(db, photos[0], "rating") == 0
-    db.batch_update_photo_rating([photos[0], outsider], 4, verify_workspace=False)
+    db.photo_review.set_ratings([photos[0], outsider], 4, verify_workspace=False)
     assert _column(db, photos[0], "rating") == 4
     assert _column(db, outsider, "rating") == 4
 
@@ -154,7 +153,7 @@ def test_batch_update_photo_rating_chunks(db, monkeypatch):
     folder_id = db.add_folder("/many", name="many")
     ids = _add_photos(db, folder_id, 5)
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
-    db.batch_update_photo_rating(ids, 1)
+    db.photo_review.set_ratings(ids, 1)
     assert [_column(db, pid, "rating") for pid in ids] == [1] * 5
 
 
@@ -167,7 +166,7 @@ def test_batch_update_photo_rating_rolls_back_partial_chunks(db, monkeypatch):
         f"WHEN NEW.id = {ids[2]} BEGIN SELECT RAISE(ABORT, 'blocked'); END"
     )
     with pytest.raises(sqlite3.IntegrityError, match="blocked"):
-        db.batch_update_photo_rating(ids, 3)
+        db.photo_review.set_ratings(ids, 3)
     assert not db.conn.in_transaction
     # The first two chunks were written, then rolled back.
     assert [_column(db, pid, "rating") for pid in ids] == [0, 0, 0]
@@ -177,13 +176,13 @@ def test_batch_update_photo_rating_rolls_back_partial_chunks(db, monkeypatch):
 
 
 def test_update_photo_flag_writes_and_commits(db, photos):
-    db.update_photo_flag(photos[0], "flagged")
+    db.photo_review.set_flag(photos[0], "flagged")
     assert not db.conn.in_transaction
     assert _column(db, photos[0], "flag") == "flagged"
 
 
 def test_update_photo_flag_can_leave_commit_to_caller(db, photos):
-    db.update_photo_flag(photos[0], "rejected", _commit=False)
+    db.photo_review.set_flag(photos[0], "rejected", _commit=False)
     assert db.conn.in_transaction
     assert _column(db, photos[0], "flag") == "none"
     db.conn.commit()
@@ -192,14 +191,14 @@ def test_update_photo_flag_can_leave_commit_to_caller(db, photos):
 
 def test_update_photo_flag_rejects_photo_outside_workspace(db, outsider):
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
-        db.update_photo_flag(outsider, "flagged")
+        db.photo_review.set_flag(outsider, "flagged")
     assert _column(db, outsider, "flag") == "none"
-    db.update_photo_flag(outsider, "flagged", verify_workspace=False)
+    db.photo_review.set_flag(outsider, "flagged", verify_workspace=False)
     assert _column(db, outsider, "flag") == "flagged"
 
 
 def test_batch_update_photo_flag_writes_all_and_commits(db, photos):
-    db.batch_update_photo_flag(photos[1:], "rejected")
+    db.photo_review.set_flags(photos[1:], "rejected")
     assert not db.conn.in_transaction
     assert [_column(db, pid, "flag") for pid in photos] == [
         "none", "rejected", "rejected",
@@ -208,14 +207,14 @@ def test_batch_update_photo_flag_writes_all_and_commits(db, photos):
 
 def test_batch_update_photo_flag_verifies_before_writing(db, photos, outsider):
     with pytest.raises(ValueError, match="does not belong to the active workspace"):
-        db.batch_update_photo_flag([photos[0], outsider], "flagged")
+        db.photo_review.set_flags([photos[0], outsider], "flagged")
     assert _column(db, photos[0], "flag") == "none"
-    db.batch_update_photo_flag([outsider], "flagged", verify_workspace=False)
+    db.photo_review.set_flags([outsider], "flagged", verify_workspace=False)
     assert _column(db, outsider, "flag") == "flagged"
 
 
 def test_batch_update_photo_flag_empty_is_a_noop(db, photos):
-    db.batch_update_photo_flag([], "flagged")
+    db.photo_review.set_flags([], "flagged")
     assert not db.conn.in_transaction
     assert [_column(db, pid, "flag") for pid in photos] == ["none"] * 3
 
@@ -279,17 +278,17 @@ def test_update_photo_wildlife_excluded_can_leave_the_write_uncommitted(db, phot
 
 def test_get_wildlife_excluded_states_reads_visible_photos(db, photos, outsider):
     db.update_photo_wildlife_excluded(photos[1], True)
-    assert db.get_wildlife_excluded_states(
+    assert db.photo_review.wildlife_excluded_states(
         [photos[0], photos[1], outsider, 987_654]
     ) == {photos[0]: 0, photos[1]: 1}
-    assert db.get_wildlife_excluded_states([]) == {}
+    assert db.photo_review.wildlife_excluded_states([]) == {}
 
 
 def test_get_wildlife_excluded_states_chunks(db, photos, monkeypatch):
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
     statements = []
     db.conn.set_trace_callback(statements.append)
-    states = db.get_wildlife_excluded_states(photos)
+    states = db.photo_review.wildlife_excluded_states(photos)
     db.conn.set_trace_callback(None)
     assert states == {pid: 0 for pid in photos}
     assert len([s for s in statements if "wildlife_excluded, 0)" in s]) == 2
@@ -298,7 +297,7 @@ def test_get_wildlife_excluded_states_chunks(db, photos, monkeypatch):
 def test_get_wildlife_excluded_states_without_workspace(db, photos):
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db.get_wildlife_excluded_states(photos)
+        db.photo_review.wildlife_excluded_states(photos)
 
 
 # -- color labels -------------------------------------------------------------
@@ -306,49 +305,49 @@ def test_get_wildlife_excluded_states_without_workspace(db, photos):
 
 def test_color_label_set_get_remove_commits(db, photos):
     ws = db._ws_id()
-    assert db.get_color_label(photos[0]) is None
-    db.set_color_label(photos[0], "red")
+    assert db.photo_labels.get(photos[0]) is None
+    db.photo_labels.set(photos[0], "red")
     assert not db.conn.in_transaction
     assert _labels_table(db) == [(photos[0], ws, "red")]
-    db.set_color_label(photos[0], "blue")
-    assert db.get_color_label(photos[0]) == "blue"
+    db.photo_labels.set(photos[0], "blue")
+    assert db.photo_labels.get(photos[0]) == "blue"
     assert _labels_table(db) == [(photos[0], ws, "blue")]
-    db.remove_color_label(photos[0])
+    db.photo_labels.remove(photos[0])
     assert not db.conn.in_transaction
-    assert db.get_color_label(photos[0]) is None
+    assert db.photo_labels.get(photos[0]) is None
     assert _labels_table(db) == []
 
 
 def test_set_color_label_rejects_unknown_color(db, photos):
     with pytest.raises(ValueError, match=r"Invalid color label: pink\. Must be one of"):
-        db.set_color_label(photos[0], "pink")
+        db.photo_labels.set(photos[0], "pink")
     assert _labels_table(db) == []
 
 
 def test_color_labels_are_workspace_scoped(db, photos):
     first = db._ws_id()
-    db.set_color_label(photos[0], "green")
+    db.photo_labels.set(photos[0], "green")
     second = db.create_workspace("Second")
     db.set_active_workspace(second)
-    assert db.get_color_label(photos[0]) is None
-    assert db.get_color_labels_for_photos(photos) == {}
-    db.set_color_label(photos[0], "purple")
-    db.remove_color_label(photos[0])
+    assert db.photo_labels.get(photos[0]) is None
+    assert db.photo_labels.get_for_photos(photos) == {}
+    db.photo_labels.set(photos[0], "purple")
+    db.photo_labels.remove(photos[0])
     db.set_active_workspace(first)
-    assert db.get_color_label(photos[0]) == "green"
+    assert db.photo_labels.get(photos[0]) == "green"
 
 
 def test_color_label_methods_require_active_workspace(db, photos):
     db.set_active_workspace(None)
     calls = [
-        lambda: db.set_color_label(photos[0], "red"),
-        lambda: db.remove_color_label(photos[0]),
-        lambda: db.get_color_label(photos[0]),
-        lambda: db.get_color_labels_for_photos([]),
-        lambda: db.filter_photo_ids_in_workspace([]),
-        lambda: db.batch_set_color_label([], "red"),
-        lambda: db.get_color_label_descriptions(),
-        lambda: db.set_color_label_description("red", "x"),
+        lambda: db.photo_labels.set(photos[0], "red"),
+        lambda: db.photo_labels.remove(photos[0]),
+        lambda: db.photo_labels.get(photos[0]),
+        lambda: db.photo_labels.get_for_photos([]),
+        lambda: db.photo_visibility.visible_photo_ids([]),
+        lambda: db.photo_labels.set_many([], "red"),
+        lambda: db.photo_labels.get_descriptions(),
+        lambda: db.photo_labels.set_description("red", "x"),
     ]
     for call in calls:
         with pytest.raises(RuntimeError, match="No active workspace set"):
@@ -356,11 +355,11 @@ def test_color_label_methods_require_active_workspace(db, photos):
 
 
 def test_get_color_labels_for_photos(db, photos, monkeypatch):
-    assert db.get_color_labels_for_photos([]) == {}
-    db.set_color_label(photos[0], "red")
-    db.set_color_label(photos[2], "yellow")
+    assert db.photo_labels.get_for_photos([]) == {}
+    db.photo_labels.set(photos[0], "red")
+    db.photo_labels.set(photos[2], "yellow")
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 1)
-    labels = db.get_color_labels_for_photos(photos + [999_999])
+    labels = db.photo_labels.get_for_photos(photos + [999_999])
     assert labels == {photos[0]: "red", photos[2]: "yellow"}
     assert isinstance(labels, dict)
 
@@ -370,43 +369,43 @@ def test_filter_photo_ids_in_workspace_keeps_order_and_dedupes(
 ):
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
     requested = [photos[2], outsider, photos[0], 999_999, photos[2], photos[1]]
-    assert db.filter_photo_ids_in_workspace(requested) == [
+    assert db.photo_visibility.visible_photo_ids(requested) == [
         photos[2], photos[0], photos[1],
     ]
-    assert db.filter_photo_ids_in_workspace([]) == []
-    assert db.filter_photo_ids_in_workspace(iter([photos[1]])) == [photos[1]]
+    assert db.photo_visibility.visible_photo_ids([]) == []
+    assert db.photo_visibility.visible_photo_ids(iter([photos[1]])) == [photos[1]]
 
 
 def test_batch_set_color_label_sets_and_clears(db, photos, monkeypatch):
     ws = db._ws_id()
     monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 2)
-    db.batch_set_color_label(photos, "green")
+    db.photo_labels.set_many(photos, "green")
     assert not db.conn.in_transaction
     assert _labels_table(db) == [(pid, ws, "green") for pid in sorted(photos)]
-    db.batch_set_color_label(photos[:1], "red")
-    assert db.get_color_labels_for_photos(photos) == {
+    db.photo_labels.set_many(photos[:1], "red")
+    assert db.photo_labels.get_for_photos(photos) == {
         photos[0]: "red", photos[1]: "green", photos[2]: "green",
     }
-    db.batch_set_color_label(photos, None)
+    db.photo_labels.set_many(photos, None)
     assert not db.conn.in_transaction
     assert _labels_table(db) == []
 
 
 def test_batch_set_color_label_clear_leaves_other_workspaces(db, photos):
     first = db._ws_id()
-    db.batch_set_color_label(photos, "blue")
+    db.photo_labels.set_many(photos, "blue")
     second = db.create_workspace("Second")
     db.set_active_workspace(second)
-    db.batch_set_color_label(photos, None)
+    db.photo_labels.set_many(photos, None)
     db.set_active_workspace(first)
-    assert db.get_color_labels_for_photos(photos) == dict.fromkeys(photos, "blue")
+    assert db.photo_labels.get_for_photos(photos) == dict.fromkeys(photos, "blue")
 
 
 def test_batch_set_color_label_empty_and_invalid(db, photos):
-    db.batch_set_color_label([], "not-a-color")
+    db.photo_labels.set_many([], "not-a-color")
     assert not db.conn.in_transaction
     with pytest.raises(ValueError, match=r"Invalid color label: pink\. Must be one of"):
-        db.batch_set_color_label(photos, "pink")
+        db.photo_labels.set_many(photos, "pink")
     assert _labels_table(db) == []
 
 
@@ -428,7 +427,7 @@ def test_batch_set_color_label_empty_and_invalid(db, photos):
 )
 def test_get_color_label_descriptions_falls_back_to_empty(db, raw):
     _raw_overrides(db, db._ws_id(), raw)
-    assert db.get_color_label_descriptions() == {}
+    assert db.photo_labels.get_descriptions() == {}
 
 
 def test_get_color_label_descriptions_filters_and_strips(db):
@@ -445,7 +444,7 @@ def test_get_color_label_descriptions_filters_and_strips(db):
             }
         }),
     )
-    assert db.get_color_label_descriptions() == {
+    assert db.photo_labels.get_descriptions() == {
         "red": "Keepers",
         "yellow": "Maybe",
     }
@@ -456,34 +455,34 @@ def test_get_color_label_descriptions_missing_workspace_row(db):
     db.set_active_workspace(ghost)
     db.conn.execute("DELETE FROM workspaces WHERE id = ?", (ghost,))
     db.conn.commit()
-    assert db.get_color_label_descriptions() == {}
+    assert db.photo_labels.get_descriptions() == {}
 
 
 def test_set_color_label_description_normalizes_and_commits(db):
     ws = db._ws_id()
     _raw_overrides(db, ws, json.dumps({"keep": True}))
-    result = db.set_color_label_description("red", "  Best \n  of   day ")
+    result = db.photo_labels.set_description("red", "  Best \n  of   day ")
     assert result == "Best of day"
     assert not db.conn.in_transaction
     assert json.loads(_stored_overrides(db, ws)) == {
         "keep": True,
         "color_label_descriptions": {"red": "Best of day"},
     }
-    assert db.get_color_label_descriptions() == {"red": "Best of day"}
+    assert db.photo_labels.get_descriptions() == {"red": "Best of day"}
 
 
 def test_set_color_label_description_clearing_drops_key_and_nulls_column(db):
     ws = db._ws_id()
-    db.set_color_label_description("red", "Keepers")
-    db.set_color_label_description("blue", "Edit")
-    assert db.set_color_label_description("red", "   ") == ""
+    db.photo_labels.set_description("red", "Keepers")
+    db.photo_labels.set_description("blue", "Edit")
+    assert db.photo_labels.set_description("red", "   ") == ""
     assert json.loads(_stored_overrides(db, ws)) == {
         "color_label_descriptions": {"blue": "Edit"},
     }
-    assert db.set_color_label_description("blue", "") == ""
+    assert db.photo_labels.set_description("blue", "") == ""
     assert _stored_overrides(db, ws) is None
     # Clearing a color that was never set is harmless.
-    assert db.set_color_label_description("green", "") == ""
+    assert db.photo_labels.set_description("green", "") == ""
     assert _stored_overrides(db, ws) is None
 
 
@@ -492,7 +491,7 @@ def test_set_color_label_description_keeps_other_overrides_when_clearing(db):
     _raw_overrides(
         db, ws, json.dumps({"x": 1, "color_label_descriptions": {"red": "a"}})
     )
-    db.set_color_label_description("red", "")
+    db.photo_labels.set_description("red", "")
     assert json.loads(_stored_overrides(db, ws)) == {"x": 1}
 
 
@@ -503,7 +502,7 @@ def test_set_color_label_description_keeps_other_overrides_when_clearing(db):
 def test_set_color_label_description_replaces_malformed_overrides(db, raw):
     ws = db._ws_id()
     _raw_overrides(db, ws, raw)
-    db.set_color_label_description("purple", "Share")
+    db.photo_labels.set_description("purple", "Share")
     stored = json.loads(_stored_overrides(db, ws))
     assert stored["color_label_descriptions"] == {"purple": "Share"}
 
@@ -511,13 +510,13 @@ def test_set_color_label_description_replaces_malformed_overrides(db, raw):
 def test_set_color_label_description_validation(db):
     ws = db._ws_id()
     with pytest.raises(ValueError, match=r"Invalid color label: pink\. Must be one of"):
-        db.set_color_label_description("pink", "x")
+        db.photo_labels.set_description("pink", "x")
     with pytest.raises(ValueError, match="description must be a string"):
-        db.set_color_label_description("red", None)
-    assert db.set_color_label_description("red", "x" * 120) == "x" * 120
+        db.photo_labels.set_description("red", None)
+    assert db.photo_labels.set_description("red", "x" * 120) == "x" * 120
     with pytest.raises(ValueError, match="description must be 120 characters or fewer"):
-        db.set_color_label_description("red", "y" * 121)
-    assert db.get_color_label_descriptions() == {"red": "x" * 120}
+        db.photo_labels.set_description("red", "y" * 121)
+    assert db.photo_labels.get_descriptions() == {"red": "x" * 120}
     assert json.loads(_stored_overrides(db, ws)) == {
         "color_label_descriptions": {"red": "x" * 120},
     }
@@ -529,42 +528,43 @@ def test_valid_color_labels_constant_on_database():
     )
 
 
-# -- structure: the photo-review SQL lives in the repositories ----------------
+# -- structure ------------------------------------------------------------------
 
-# Database methods that delegate to a repository, mapped to the factory each
-# must go through. Each stays on Database as a thin wrapper so existing call
-# sites keep working; none may reach the connection directly again.
-_DELEGATING_PHOTO_REVIEW_METHODS = {
-    "update_photo_rating": "_photo_review_repository",
-    "batch_update_photo_rating": "_photo_review_repository",
-    "update_photo_flag": "_photo_review_repository",
-    "update_photo_wildlife_excluded": "_photo_review_repository",
-    "get_wildlife_excluded_states": "_photo_review_repository",
-    "batch_update_photo_flag": "_photo_review_repository",
-    "set_color_label": "_photo_label_repository",
-    "remove_color_label": "_photo_label_repository",
-    "get_color_label": "_photo_label_repository",
-    "get_color_labels_for_photos": "_photo_label_repository",
-    "filter_photo_ids_in_workspace": "_photo_label_repository",
-    "batch_set_color_label": "_photo_label_repository",
-    "get_color_label_descriptions": "_photo_label_repository",
-    "set_color_label_description": "_photo_label_repository",
-}
+def test_wildlife_excluded_write_stays_a_coordinated_database_method():
+    """``update_photo_wildlife_excluded`` runs the façade's workspace check first.
 
-
-@pytest.mark.parametrize("name", sorted(_DELEGATING_PHOTO_REVIEW_METHODS))
-def test_photo_review_method_delegates_to_repository(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
-    fn = ast.parse(source).body[0]
+    It is the one write in these domains that stays on ``Database``: it checks
+    ``_verify_photo_in_workspace`` and then hands the SQL to the review
+    repository, never to the connection.
+    """
+    source = textwrap.dedent(
+        inspect.getsource(Database.update_photo_wildlife_excluded)
+    )
     attrs = {
         node.attr
-        for node in ast.walk(fn)
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id == "self"
     }
-    factory = _DELEGATING_PHOTO_REVIEW_METHODS[name]
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to the repository"
+    assert "conn" not in attrs
+    assert {"_verify_photo_in_workspace", "_photo_review_repository"} <= attrs
+
+
+def test_production_code_uses_facade_for_the_wildlife_exclusion_write():
+    """Nothing outside the data layer skips ``update_photo_wildlife_excluded``'s check."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    pattern = re.compile(r"\.photo_review\.set_wildlife_excluded\(")
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if rel.parts[0] in ("tests", "repositories") or rel.name == "db.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        offenders += [f"{rel}: {m.group(0)}" for m in pattern.finditer(text)]
+    assert offenders == [], (
+        f"Call db.update_photo_wildlife_excluded instead: {offenders}"
     )
-    assert factory in attrs, f"Database.{name} no longer delegates via {factory}"

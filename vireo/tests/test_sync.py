@@ -53,7 +53,7 @@ def test_rating_return_to_previous_value_syncs_latest(tmp_path, db, batch, histo
     assert sync_to_xmp(db) == {"synced": 1, "failed": 0, "failures": [],
                                "ok": True, "errors": []}
     assert read_sync_preview_metadata(xmp_path)["rating"] == str(expected_rating)
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_sync_to_xmp_writes_keyword_add(tmp_path):
@@ -79,7 +79,7 @@ def test_sync_to_xmp_writes_keyword_add(tmp_path):
     assert 'Northern cardinal' in keywords
 
     # Pending changes should be cleared
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
 
 def test_sync_to_xmp_keyword_add_canonicalizes_existing_variant(tmp_path):
@@ -111,7 +111,7 @@ def test_sync_to_xmp_keyword_add_canonicalizes_existing_variant(tmp_path):
 
     keywords = read_keywords(xmp_path)
     assert keywords == {'apapane'}
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
 
 def test_sync_to_xmp_keyword_add_preserves_hierarchies_with_matching_segment(
@@ -189,7 +189,7 @@ def test_sync_to_xmp_keyword_remove_flat_leaves_matching_hierarchy(tmp_path):
     assert 'Verdin' not in flat
     assert 'Desert Verdin' in flat
     assert 'Verdin|Desert Verdin' in read_hierarchical_keywords(xmp_path)
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
 
 @pytest.mark.parametrize("checkpoint_changes", [1, 500])
@@ -292,7 +292,7 @@ def test_sync_to_xmp_writes_edit_recipe(tmp_path):
     content = open(xmp_path).read()
     assert "vireo:editRecipe" in content
     assert "&quot;crop&quot;" in content
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
 
 def test_sync_to_xmp_writes_rating_after_edit_recipe_creates_sidecar(tmp_path):
@@ -366,7 +366,7 @@ def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
     original_token = db.queue_change(pid, "keyword_add", "Osprey")
-    (original_row,) = db.get_pending_changes()
+    (original_row,) = db.pending_changes.list_all()
     original_id = original_row["id"]
 
     real_clear_by_token = db.clear_pending_by_token
@@ -385,7 +385,7 @@ def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch
             replacement_token = db.queue_change(
                 pid, "keyword_add", "Kestrel",
             )
-            (replacement_row,) = db.get_pending_changes()
+            (replacement_row,) = db.pending_changes.list_all()
             assert replacement_row["id"] == original_id
             assert replacement_row["change_token"] == replacement_token
             assert replacement_token != original_token
@@ -400,7 +400,7 @@ def test_sync_to_xmp_clears_by_change_token_not_just_rowid(tmp_path, monkeypatch
     assert "Osprey" in read_keywords(xmp_path)
 
     # The replacement must still be queued -- the fix's whole point.
-    remaining = db.get_pending_changes()
+    remaining = db.pending_changes.list_all()
     assert [(c["change_type"], c["value"]) for c in remaining] == [
         ("keyword_add", "Kestrel"),
     ]
@@ -421,7 +421,7 @@ def test_sync_to_xmp_limits_sync_to_selected_change_ids(tmp_path):
 
     db.queue_change(pid, "keyword_add", "Northern cardinal")
     db.queue_change(pid, "rating", "4")
-    pending = db.get_pending_changes()
+    pending = db.pending_changes.list_all()
     ids_by_type = {c["change_type"]: c["id"] for c in pending}
 
     result = sync_to_xmp(db, change_ids=[ids_by_type["keyword_add"]])
@@ -435,7 +435,7 @@ def test_sync_to_xmp_limits_sync_to_selected_change_ids(tmp_path):
     )
     assert desc.get("{http://ns.adobe.com/xap/1.0/}Rating") is None
 
-    remaining = db.get_pending_changes()
+    remaining = db.pending_changes.list_all()
     assert [(c["change_type"], c["value"]) for c in remaining] == [("rating", "4")]
 
 
@@ -457,7 +457,7 @@ def test_sync_to_xmp_handles_missing_file(tmp_path):
     assert len(result['failures']) == 1
 
     # Pending changes should still be there for retry
-    assert len(db.get_pending_changes()) == 1
+    assert len(db.pending_changes.list_all()) == 1
 
 
 def test_sync_from_xmp_updates_db(tmp_path):
@@ -679,7 +679,7 @@ def test_sync_to_xmp_reports_unsupported_flag_changes_when_disabled(tmp_path, mo
     assert result['failed'] == 1
     assert result['failures'][0]['error'] == 'unsupported change type: flag'
     assert before == after
-    assert len(db.get_pending_changes()) == 1
+    assert len(db.pending_changes.list_all()) == 1
 
 
 def test_sync_to_xmp_writes_flag_when_enabled(tmp_path, monkeypatch):
@@ -706,7 +706,7 @@ def test_sync_to_xmp_writes_flag_when_enabled(tmp_path, monkeypatch):
 
     assert result['synced'] == 1
     assert result['failed'] == 0
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
     tree = ET.parse(xmp_path)
     desc = tree.getroot().find(
@@ -740,7 +740,7 @@ def test_sync_to_xmp_treats_legacy_null_flag_as_none(tmp_path, monkeypatch):
 
     assert result['synced'] == 1
     assert result['failed'] == 0
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
     tree = ET.parse(xmp_path)
     desc = tree.getroot().find(
@@ -784,7 +784,7 @@ def test_sync_to_xmp_writes_effective_location(tmp_path, monkeypatch):
 
     assert result["synced"] == 1
     assert result["failed"] == 0
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
     desc = ET.parse(xmp_path).getroot().find(
         './/{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description'
@@ -899,7 +899,7 @@ def test_sync_to_xmp_clears_location_change_without_writing_when_disabled(tmp_pa
 
     assert result["synced"] == 1
     assert result["failed"] == 0
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
     with open(xmp_path) as f:
         content = f.read()
     assert "GPSLatitude" not in content
@@ -929,7 +929,7 @@ def test_sync_to_xmp_disabled_location_change_removes_stale_vireo_gps(tmp_path, 
 
     assert result["synced"] == 1
     assert result["failed"] == 0
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
     with open(xmp_path) as f:
         content = f.read()
     assert "GPSLatitude" not in content
@@ -1077,7 +1077,7 @@ def test_sync_to_xmp_add_survives_normalized_remove_for_same_photo(tmp_path):
     kw = read_keywords(xmp_path)
     assert "apapane" in kw
     assert "‘apapane" not in kw
-    assert len(db.get_pending_changes()) == 0
+    assert len(db.pending_changes.list_all()) == 0
 
 
 def test_sync_to_xmp_selected_add_pulls_in_paired_legacy_remove(tmp_path):
@@ -1104,7 +1104,7 @@ def test_sync_to_xmp_selected_add_pulls_in_paired_legacy_remove(tmp_path):
 
     db.queue_change(pid, "keyword_remove", "‘apapane")
     db.queue_change(pid, "keyword_add", "apapane")
-    pending = db.get_pending_changes()
+    pending = db.pending_changes.list_all()
     ids_by_type = {c["change_type"]: c["id"] for c in pending}
 
     result = sync_to_xmp(db, change_ids=[ids_by_type["keyword_add"]])
@@ -1113,7 +1113,7 @@ def test_sync_to_xmp_selected_add_pulls_in_paired_legacy_remove(tmp_path):
     kw = read_keywords(xmp_path)
     assert kw == {"apapane"}
 
-    remaining = db.get_pending_changes()
+    remaining = db.pending_changes.list_all()
     assert remaining == []
 
 
@@ -1244,7 +1244,7 @@ def test_sync_result_reports_partial_failure_to_the_job_layer(tmp_path, monkeypa
     assert result["errors"] and "Permission denied" in result["errors"][0]
     # The count belongs in the summary so one NAS-wide cause reads as one line.
     assert "(1 photo)" in result["errors"][0]
-    assert len(db.get_pending_changes()) == 1
+    assert len(db.pending_changes.list_all()) == 1
 
 
 def test_sync_failure_reasons_are_deduplicated(tmp_path, monkeypatch):
@@ -1345,7 +1345,7 @@ def test_sync_panel_does_not_report_zero_for_a_resultless_failure():
     """A crashed sync must not render as "Wrote 0, failed on 0".
 
     When ``sync_to_xmp`` raises before returning -- a failing
-    ``get_pending_changes`` or ``clear_pending`` -- the JobRunner completes the
+    ``pending_changes.list_all`` or ``clear_pending`` -- the JobRunner completes the
     job with a null result. Defaulting the counters to zero would state a
     count the run never established, and if ``clear_pending`` is what failed,
     sidecars had already been written. The guard is on the counters rather
@@ -1476,7 +1476,7 @@ def test_sync_publishes_each_sidecar_once(tmp_path, monkeypatch):
     metadata = read_sync_preview_metadata(xmp_path)
     assert metadata["rating"] == "4"
     assert metadata["flag"] == "flagged"
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
 
 
 def test_sync_skips_publishing_an_already_correct_sidecar(tmp_path, monkeypatch):
@@ -1503,7 +1503,7 @@ def test_sync_skips_publishing_an_already_correct_sidecar(tmp_path, monkeypatch)
     assert result["failed"] == 0
     assert published == []
     assert os.path.getmtime(xmp_path) == before
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
 
 
 def test_sync_writes_independent_sidecars_concurrently(tmp_path):
@@ -1774,7 +1774,7 @@ def test_sync_decouples_failure_between_case_variant_sidecars(tmp_path):
     assert "Osprey" in read_keywords(mixed_path)
     # The successful photo's queue is cleared even though its case-folded
     # neighbour failed; only the failed photo's edit stays queued for retry.
-    assert [c["photo_id"] for c in db.get_pending_changes()] == [b_id]
+    assert [c["photo_id"] for c in db.pending_changes.list_all()] == [b_id]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs elevation")
@@ -1852,7 +1852,7 @@ def test_sync_reports_a_malformed_queue_row_without_aborting_the_run(tmp_path):
     assert result["failures"][0]["photo_id"] == bad_id
     assert read_keywords(good_xmp) == {"Osprey"}
     # The good photo's row is retired; the malformed one stays queued.
-    assert [c["photo_id"] for c in db.get_pending_changes()] == [bad_id]
+    assert [c["photo_id"] for c in db.pending_changes.list_all()] == [bad_id]
 
 
 def test_sync_serializes_folder_rows_that_differ_only_in_case(tmp_path):
@@ -1978,7 +1978,7 @@ def test_sync_clears_rows_that_predate_the_change_token_column(tmp_path):
     result = sync.sync_to_xmp(db)
     assert result["ok"], result
     assert result["synced"] == 1, result
-    assert db.count_pending_changes() == 0, "a NULL-token row was left queued"
+    assert db.pending_changes.count() == 0, "a NULL-token row was left queued"
     db.close()
 
 
@@ -2033,7 +2033,7 @@ def test_sync_to_xmp_writes_location_keywords(tmp_path, monkeypatch):
     result = sync_to_xmp(db)
 
     assert result["synced"] == 1 and result["failed"] == 0
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
     assert read_keywords(xmp_path) == {"House finch", "Kumeyaay Lake"}
     assert read_hierarchical_keywords(xmp_path) == [
         "United States|California|Kumeyaay Lake"
@@ -2131,7 +2131,7 @@ def test_sync_to_xmp_keeps_pipe_named_location_change_queued(
     assert any("|" in reason for reason in result["errors"])
     assert read_keywords(xmp_path) == set()
     assert read_hierarchical_keywords(xmp_path) == []
-    assert [c["change_type"] for c in db.get_pending_changes()] == ["location"]
+    assert [c["change_type"] for c in db.pending_changes.list_all()] == ["location"]
     db.close()
 
 
@@ -2285,7 +2285,7 @@ def test_sync_to_xmp_defers_location_when_config_read_fails(
 
     assert result["synced"] == 0
     assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
-    pending_kinds = [c["change_type"] for c in db.get_pending_changes()]
+    pending_kinds = [c["change_type"] for c in db.pending_changes.list_all()]
     assert "location" in pending_kinds
     db.close()
 
@@ -2333,7 +2333,7 @@ def test_sync_to_xmp_defers_location_when_config_file_is_corrupt(
 
     assert result["synced"] == 0
     assert read_keywords(xmp_path) == {"Kumeyaay Lake"}
-    pending_kinds = [c["change_type"] for c in db.get_pending_changes()]
+    pending_kinds = [c["change_type"] for c in db.pending_changes.list_all()]
     assert "location" in pending_kinds
     db.close()
 
@@ -2379,7 +2379,7 @@ def test_sync_to_xmp_preserves_ordinary_keyword_matching_cleared_location_leaf(
     assert "Paris" in read_keywords(xmp_path)
     assert read_hierarchical_keywords(xmp_path) == []
     assert read_vireo_location_keywords(xmp_path) is None
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
     db.close()
 
 
@@ -2414,7 +2414,7 @@ def test_sync_to_xmp_preserves_ordinary_keyword_matching_reassigned_location_lea
     sync_to_xmp(db)
 
     assert read_keywords(xmp_path) == {"Paris", "London"}
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
     db.close()
 
 
@@ -2510,7 +2510,7 @@ def test_sync_checkpoint_survives_interruption_and_retry(tmp_path, db, monkeypat
     result = sync.sync_to_xmp(db)
     assert result["synced"] == 2
     assert set(writes) == {path for _, path in photos[1:]}
-    assert db.get_pending_changes() == []  # final flush below either threshold
+    assert db.pending_changes.list_all() == []  # final flush below either threshold
 
 
 def test_sync_checkpoint_preserves_failures_and_reports_counts(tmp_path, db, monkeypatch):
@@ -2539,7 +2539,7 @@ def test_sync_checkpoint_preserves_failures_and_reports_counts(tmp_path, db, mon
     assert result["synced"] == 1
     assert result["failed"] == 3
     assert progress[-1] == dict(current=3, total=3, synced=1, failed=3, checkpoint=1)
-    assert {(c["photo_id"], c["change_type"]) for c in db.get_pending_changes()} == {
+    assert {(c["photo_id"], c["change_type"]) for c in db.pending_changes.list_all()} == {
         (good, "flag"), (failed, "keyword_add"), (malformed, "rating"),
     }
 
@@ -2568,7 +2568,7 @@ def test_sync_checkpoint_waits_for_shared_sidecar_group(tmp_path, db, monkeypatc
         progress.append(p)
         if p["checkpoint"]:
             assert len(writes) == 2
-            assert not db.get_pending_changes()
+            assert not db.pending_changes.list_all()
 
     sync.sync_to_xmp(db, status_callback=observe)
     assert progress[-1]["checkpoint"] == 1
@@ -2583,13 +2583,13 @@ def test_sync_legacy_checkpoint_keeps_tokened_replacement(tmp_path, db, monkeypa
     db.queue_change(pid, "keyword_add", "Osprey")
     db.conn.execute("UPDATE pending_changes SET change_token = NULL")
     db.conn.commit()
-    rowid = db.get_pending_changes()[0]["id"]
+    rowid = db.pending_changes.list_all()[0]["id"]
     real_clear = db.clear_pending
 
     def replace_before_clear(*args, **kwargs):
         db.remove_pending_changes(pid)
         db.queue_change(pid, "rating", "5")
-        assert db.get_pending_changes()[0]["id"] == rowid
+        assert db.pending_changes.list_all()[0]["id"] == rowid
         return real_clear(*args, **kwargs)
 
     monkeypatch.setattr(db, "clear_pending", replace_before_clear)
@@ -2597,7 +2597,7 @@ def test_sync_legacy_checkpoint_keeps_tokened_replacement(tmp_path, db, monkeypa
     sync.sync_to_xmp(db)
     # Cancelling a possibly-written add now leaves a tokened inverse, which
     # reuses the legacy rowid. Neither that repair nor the new rating is cleared.
-    assert [c["change_type"] for c in db.get_pending_changes()] == ["keyword_remove", "rating"]
+    assert [c["change_type"] for c in db.pending_changes.list_all()] == ["keyword_remove", "rating"]
 
 
 def test_sync_checkpoint_failure_keeps_unacknowledged_changes(tmp_path, db, monkeypatch):
@@ -2624,7 +2624,7 @@ def test_sync_checkpoint_failure_keeps_unacknowledged_changes(tmp_path, db, monk
     progress = []
     with pytest.raises(OSError, match="checkpoint failed"):
         sync.sync_to_xmp(db, status_callback=progress.append)
-    assert [c["photo_id"] for c in db.get_pending_changes()] == photos[1:]
+    assert [c["photo_id"] for c in db.pending_changes.list_all()] == photos[1:]
     assert progress[-1]["checkpoint"] == 1
     assert progress[-1]["current"] == 1
 
@@ -2658,7 +2658,7 @@ def test_cancel_keyword_during_write_keeps_durable_repair(
             for _ in range(toggles):
                 editor_db._flip_pending_keyword_change(pid, keyword, kind, opposite[kind])
                 kind = opposite[kind]
-            observed.extend(dict(c) for c in editor_db.get_pending_changes())
+            observed.extend(dict(c) for c in editor_db.pending_changes.list_all())
         finally:
             editor_db.close()
         if write_fails:
@@ -2671,13 +2671,13 @@ def test_cancel_keyword_during_write_keeps_durable_repair(
     assert first["ok"] is not write_fails
     desired_kind = opposite[initial_kind] if toggles % 2 else initial_kind
     assert [c["change_type"] for c in observed] == [desired_kind]
-    assert [c["change_type"] for c in db.get_pending_changes()] == [desired_kind]
+    assert [c["change_type"] for c in db.pending_changes.list_all()] == [desired_kind]
     # Reopen before the drain: no in-memory registry may be needed for repair.
     resumed = Database(db._db_path, initialize_schema=False)
     try:
         resumed.set_active_workspace(db._ws_id())
         assert sync.sync_to_xmp(resumed)["ok"]
-        assert not resumed.get_pending_changes()
+        assert not resumed.pending_changes.list_all()
     finally:
         resumed.close()
     assert (keyword in xmp.read_keywords(path)) is (desired_kind == "keyword_add")
@@ -2699,7 +2699,7 @@ def test_keyword_cancelled_before_sync_claim_is_not_written(tmp_path, db, monkey
     monkeypatch.setattr(db, "claim_pending_changes_for_sync", cancel_then_claim)
     assert sync.sync_to_xmp(db)["synced"] == 0
     assert not read_keywords(path)
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 @pytest.mark.parametrize("alias", ["raw_jpeg", "sidecar_symlink", "folder_symlink"])
@@ -2738,7 +2738,7 @@ def test_shared_sidecar_preserves_interleaved_edits(tmp_path, db, alias, kind):
         assert read_sync_preview_metadata(path)["rating"] == "3"
     else:
         assert read_keywords(path) == {"Kestrel"}
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_shared_sidecar_keeps_latest_intent_per_field(tmp_path, db, monkeypatch):
@@ -2779,10 +2779,10 @@ def test_shared_sidecar_failure_retains_order_for_retry(tmp_path, db, monkeypatc
     with monkeypatch.context() as patch:
         patch.setattr(sync, "_write_photo_sync", fail_middle)
         assert not sync.sync_to_xmp(db)["ok"]
-    assert len(db.get_pending_changes()) == 3
+    assert len(db.pending_changes.list_all()) == 3
     assert sync.sync_to_xmp(db)["ok"]
     assert read_sync_preview_metadata(path)["rating"] == "3"
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_shared_sidecar_keyword_rename_stays_together(tmp_path, db):
@@ -2832,7 +2832,7 @@ def test_unwritten_keyword_round_trip_still_cancels(tmp_path, db, kind):
     opposite = "keyword_remove" if kind == "keyword_add" else "keyword_add"
     db.queue_change(pid, kind, "Osprey")
     db._flip_pending_keyword_change(pid, "Osprey", kind, opposite)
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_sync_claim_does_not_take_a_replacement_with_reused_id(tmp_path, db, monkeypatch):
@@ -2847,13 +2847,13 @@ def test_sync_claim_does_not_take_a_replacement_with_reused_id(tmp_path, db, mon
     def replace_then_claim(changes):
         db.remove_pending_changes(pid)
         db.queue_change(pid, "keyword_add", "Kestrel")
-        assert db.get_pending_changes()[0]["id"] == changes[0]["id"]
+        assert db.pending_changes.list_all()[0]["id"] == changes[0]["id"]
         return real_claim(changes)
 
     monkeypatch.setattr(db, "claim_pending_changes_for_sync", replace_then_claim)
     assert sync.sync_to_xmp(db)["synced"] == 0
     assert not read_keywords(path)
-    remaining = db.get_pending_changes()
+    remaining = db.pending_changes.list_all()
     assert [c["value"] for c in remaining] == ["Kestrel"]
     assert not remaining[0]["sync_started"]
 
@@ -2865,21 +2865,21 @@ def test_sync_claim_only_marks_selected_rows(tmp_path, db):
     pid, _ = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
     db.queue_change(pid, "keyword_add", "Kestrel")
-    selected = db.get_pending_changes()[0]["id"]
+    selected = db.pending_changes.list_all()[0]["id"]
     assert sync.sync_to_xmp(db, change_ids=[selected])["ok"]
     db._flip_pending_keyword_change(pid, "Kestrel", "keyword_add", "keyword_remove")
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_started_keyword_cancellation_rolls_back_with_edit(tmp_path, db):
     db.set_active_workspace(db.ensure_default_workspace())
     pid, _ = _setup_photo_with_xmp(tmp_path, db)
     db.queue_change(pid, "keyword_add", "Osprey")
-    claimed = db.claim_pending_changes_for_sync(db.get_pending_changes())
+    claimed = db.claim_pending_changes_for_sync(db.pending_changes.list_all())
     db.remove_pending_changes(pid, "keyword_add", "Osprey", _commit=False)
-    assert [c["change_type"] for c in db.get_pending_changes()] == ["keyword_remove"]
+    assert [c["change_type"] for c in db.pending_changes.list_all()] == ["keyword_remove"]
     db.conn.rollback()
-    assert [dict(c) for c in db.get_pending_changes()] == [dict(c) for c in claimed]
+    assert [dict(c) for c in db.pending_changes.list_all()] == [dict(c) for c in claimed]
 
 
 def test_shared_sidecar_preparation_failure_retains_newer_edits(tmp_path, db):
@@ -2895,12 +2895,12 @@ def test_shared_sidecar_preparation_failure_retains_newer_edits(tmp_path, db):
     result = sync.sync_to_xmp(db)
     assert result["failed"] == 2
     assert result["synced"] == 0
-    assert len(db.get_pending_changes()) == 2
+    assert len(db.pending_changes.list_all()) == 2
     db.conn.execute("UPDATE pending_changes SET value = '1' WHERE photo_id = ?", (first,))
     db.conn.commit()
     assert sync.sync_to_xmp(db)["ok"]
     assert read_sync_preview_metadata(path)["rating"] == "2"
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 @pytest.mark.parametrize("fail_middle", [False, True])
@@ -2931,10 +2931,10 @@ def test_sync_case_aliases_preserve_order_and_retry(tmp_path, db, monkeypatch, f
         with monkeypatch.context() as patch:
             patch.setattr(sync, "_write_photo_sync", fail_alias)
             assert not sync.sync_to_xmp(db, create_missing_sidecars=True)["ok"]
-        assert len(db.get_pending_changes()) == 3
+        assert len(db.pending_changes.list_all()) == 3
     assert sync.sync_to_xmp(db, create_missing_sidecars=True)["ok"]
     assert read_sync_preview_metadata(path)["rating"] == "3"
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 @pytest.mark.parametrize("failure_kind", ["write", "prepare"])
@@ -2976,7 +2976,7 @@ def test_sync_distinct_missing_aliases_make_independent_progress(
     result = sync.sync_to_xmp(db)
     assert result["synced"] == 1
     assert result["failed"] == 1
-    assert [c["photo_id"] for c in db.get_pending_changes()] == [bad]
+    assert [c["photo_id"] for c in db.pending_changes.list_all()] == [bad]
     assert read_keywords(backing[good_path]) == {"Osprey"}
     assert not sync.sync_to_xmp(db)["ok"]
     assert written == [good_path]
@@ -2999,13 +2999,13 @@ def test_sync_missing_case_alias_preparation_failure_keeps_shared_queue(tmp_path
     result = sync.sync_to_xmp(db)
     assert result["synced"] == 0
     assert result["failed"] == 2
-    assert len(db.get_pending_changes()) == 2
+    assert len(db.pending_changes.list_all()) == 2
     assert os.path.exists(path)
     db.conn.execute("UPDATE pending_changes SET value = '3' WHERE photo_id = ?", (first,))
     db.conn.commit()
     assert sync.sync_to_xmp(db)["ok"]
     assert read_sync_preview_metadata(path)["rating"] == "3"
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_sync_missing_case_alias_removal_survives_failed_add(tmp_path, db, monkeypatch):
@@ -3036,10 +3036,10 @@ def test_sync_missing_case_alias_removal_survives_failed_add(tmp_path, db, monke
     assert result["synced"] == 0
     assert result["failed"] == 2
     assert not os.path.exists(path)
-    assert len(db.get_pending_changes()) == 2
+    assert len(db.pending_changes.list_all()) == 2
     assert sync.sync_to_xmp(db)["ok"]
     assert "Osprey" not in read_keywords(path)
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 @pytest.mark.parametrize("initially_present", [False, True])
@@ -3077,7 +3077,7 @@ def test_keyword_edit_during_sync_keeps_corrective_intent(
     sync.sync_to_xmp(db)
     expected_present = not initially_present if revert_again else initially_present
     assert read_keywords(path) == ({'Osprey'} if expected_present else set())
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
     assert not db.conn.execute('SELECT * FROM pending_changes WHERE sync_started = 1').fetchall()
 
 
@@ -3100,10 +3100,10 @@ def test_interrupted_sync_claim_survives_restart(tmp_path, db, monkeypatch):
     with Database(db._db_path, initialize_schema=False) as restarted:
         restarted.set_active_workspace(db._ws_id())
         restarted._flip_pending_keyword_change(pid, 'Osprey', 'keyword_add', 'keyword_remove')
-        assert [(c["change_type"], c["sync_started"]) for c in restarted.get_pending_changes()] == [("keyword_remove", 1)]
+        assert [(c["change_type"], c["sync_started"]) for c in restarted.pending_changes.list_all()] == [("keyword_remove", 1)]
         monkeypatch.setattr(sync, '_write_photo_sync', original_write)
         assert sync.sync_to_xmp(restarted)['synced'] == 1
-        assert not restarted.get_pending_changes()
+        assert not restarted.pending_changes.list_all()
     assert read_keywords(path) == set()
 
 
@@ -3132,7 +3132,7 @@ def test_shared_sidecar_preserves_interleaved_intents(tmp_path, db, kind, values
                         'Osprey' if kind == 'keyword' else value)
     result = sync.sync_to_xmp(db)
     assert result['synced'] == 2
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
     if kind == 'rating':
         assert read_sync_preview_metadata(path)['rating'] == values[-1]
     else:
@@ -3158,11 +3158,11 @@ def test_shared_sidecar_failure_retries_the_whole_sequence(tmp_path, db, monkeyp
 
     monkeypatch.setattr(sync, '_write_photo_sync', fail_second)
     assert sync.sync_to_xmp(db)['failed'] == 2
-    assert len(db.get_pending_changes()) == 3
+    assert len(db.pending_changes.list_all()) == 3
     monkeypatch.setattr(sync, '_write_photo_sync', original_write)
     assert sync.sync_to_xmp(db)['synced'] == 2
     assert read_sync_preview_metadata(path)['rating'] == '3'
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_sidecar_resolution_failure_does_not_abort_other_photos(tmp_path, db, monkeypatch):
@@ -3186,7 +3186,7 @@ def test_sidecar_resolution_failure_does_not_abort_other_photos(tmp_path, db, mo
     assert result['synced'] == 1
     assert result['failed'] == 1
     assert read_keywords(good_path) == {'Osprey'}
-    assert [c['photo_id'] for c in db.get_pending_changes()] == [bad]
+    assert [c['photo_id'] for c in db.pending_changes.list_all()] == [bad]
 
 
 @pytest.mark.parametrize('alias', ['raw_jpeg', 'sidecar_symlink', 'folder_symlink'])
@@ -3225,7 +3225,7 @@ def test_keyword_cancellation_does_not_hide_latest_shared_sidecar_intent(
     db._flip_pending_keyword_change(first, 'Osprey', initial, inverse)
     assert sync_to_xmp(db)['synced'] == 2
     assert read_keywords(path) == ({'Osprey'} if initially_present else set())
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_keyword_cancellation_distinguishes_case_sensitive_sidecars(tmp_path, db):
@@ -3243,7 +3243,7 @@ def test_keyword_cancellation_distinguishes_case_sensitive_sidecars(tmp_path, db
     db.queue_change(first, 'keyword_add', 'Osprey')
     db.queue_change(second, 'keyword_add', 'Osprey')
     db._flip_pending_keyword_change(second, 'Osprey', 'keyword_add', 'keyword_remove')
-    assert not [c for c in db.get_pending_changes() if c['photo_id'] == second]
+    assert not [c for c in db.pending_changes.list_all() if c['photo_id'] == second]
     assert sync_to_xmp(db)['synced'] == 1
     assert read_keywords(other_path) == {'Osprey'}
     assert set(read_hierarchical_keywords(other_path)) == {'People|Osprey'}
@@ -3282,7 +3282,7 @@ def test_undo_keyword_add_after_sync_capture(tmp_path, db, monkeypatch, first_sy
         assert [k['id'] for k in db.get_photo_keywords(pid)] == [keyword]
     assert sync.sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == ({'Osprey'} if redo else set())
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 @pytest.mark.parametrize('failed_index', [0, 1])
@@ -3327,7 +3327,7 @@ def test_casefold_collision_write_failure_leaves_other_sidecar_successful(tmp_pa
     for _ in range(2):
         result = sync.sync_to_xmp(db)
         assert result['failed'] == 1
-        assert {c['photo_id'] for c in db.get_pending_changes()} == {photos[failed_index]}
+        assert {c['photo_id'] for c in db.pending_changes.list_all()} == {photos[failed_index]}
     assert read_sync_preview_metadata(paths[1 - failed_index])['rating'] == ('3' if failed_index else '2')
 
 
@@ -3356,11 +3356,11 @@ def test_failed_case_alias_is_retained_when_other_write_creates_sidecar(tmp_path
     result = sync.sync_to_xmp(db, create_missing_sidecars=True)
     shared = os.path.exists(paths[0]) and os.path.samefile(*paths)
     assert result['failed'] == (2 if shared else 1)
-    assert {c['photo_id'] for c in db.get_pending_changes()} == (set(photos) if shared else {photos[0]})
+    assert {c['photo_id'] for c in db.pending_changes.list_all()} == (set(photos) if shared else {photos[0]})
     monkeypatch.setattr(sync, '_write_photo_sync', write)
     assert sync.sync_to_xmp(db, create_missing_sidecars=True)['failed'] == 0
     assert read_sync_preview_metadata(paths[1])['rating'] == '2'
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 @pytest.mark.parametrize('initial, inverse, expected', [
@@ -3388,7 +3388,7 @@ def test_opposing_keyword_intents_use_normalized_identity(tmp_path, db, monkeypa
     monkeypatch.setattr(sync, '_write_photo_sync', write)
     assert sync.sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == expected
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 def test_shared_sidecar_repeated_add_after_case_variant_removal(tmp_path, db):
@@ -3404,4 +3404,4 @@ def test_shared_sidecar_repeated_add_after_case_variant_removal(tmp_path, db):
     db.queue_change(first, 'keyword_add', 'Osprey')
     assert sync_to_xmp(db)['failed'] == 0
     assert read_keywords(path) == {'Osprey'}
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()

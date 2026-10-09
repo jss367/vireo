@@ -1,0 +1,40 @@
+.cull-filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 20px 0 10px; }
+.cull-filters label { font-size: 13px; color: var(--text-secondary); }
+.cull-filters input, #cullCompareReference { padding: 8px; border: 1px solid var(--border-primary); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary); }
+#cullSpeciesPicker { position: relative; min-width: 240px; max-width: 480px; }
+#cullSpeciesPicker summary { cursor: pointer; padding: 10px 12px; border: 1px solid var(--border-primary); border-radius: 6px; background: var(--bg-secondary); }
+.cull-species-menu { position: absolute; top: 100%; left: 0; width: min(360px, 85vw); z-index: 20; padding: 12px; background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 6px; box-shadow: 0 8px 24px #0005; }
+#cullSpeciesSearch { width: 100%; margin-bottom: 8px; }
+#cullSpeciesOptions { max-height: 280px; overflow: auto; margin-top: 8px; }
+#cullSpeciesOptions label { display: flex; gap: 8px; align-items: center; padding: 8px 2px; cursor: pointer; }
+.cull-hint { color: var(--text-dim); font-size: 12px; line-height: 1.5; margin: 6px 0 12px; }
+.cull-favorites { position: sticky; top: 52px; z-index: 4; background: var(--bg-secondary); padding: 16px; border-bottom: 1px solid var(--border-primary); max-height: min(370px, calc(50vh - 80px)); overflow: auto; }
+.cull-favorites-heading { font-weight: 600; font-size: 17px; }
+.cull-favorites-heading span { font-size: 12px; color: var(--accent); margin-left: 6px; }
+.cull-day-label { font-size: 12px; font-weight: 600; margin: 10px 0 8px; color: var(--text-secondary); }
+.cull-favorite-card { width: 220px; }
+.cull-card.reference { box-shadow: 0 0 0 2px var(--accent); }
+.cull-card-image { position: relative; }
+.cull-image-button { display: block; width: 100%; background: none; border: none; padding: 0; cursor: pointer; }
+.cull-card img { object-fit: contain; background: var(--bg-primary); }
+.cull-card-action, .cull-card-source { border: none; z-index: 1; }
+.cull-card-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cull-card-controls button, #cullRejectedPhotos button { border: 1px solid var(--border-primary); border-radius: 4px; padding: 4px 6px; font-size: 11px; color: var(--text-secondary); background: var(--bg-tertiary); cursor: pointer; }
+.cull-card-controls button:hover { color: var(--accent); border-color: var(--accent); }
+.cull-remaining-heading { padding: 16px 16px 4px; font-size: 15px; font-weight: 600; }
+.cull-remaining-heading .cull-hint { display: block; font-weight: normal; }
+.cull-empty { padding: 40px 20px; text-align: center; color: var(--text-dim); }
+#cullRejectedDialog { background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-primary); border-radius: 10px; padding: 24px; width: min(900px, 90vw); max-height: 85vh; }
+#cullRejectedDialog::backdrop { background: #000a; }
+#cullRejectedPhotos { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; max-height: 55vh; overflow: auto; margin: 16px 0; }
+#cullRejectedPhotos img { width: 100%; height: 120px; object-fit: contain; }
+#cullRejectedPhotos div { font-size: 12px; overflow-wrap: anywhere; }
+.cull-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.cull-compare-actions { display: flex; gap: 8px; padding: 10px 14px; }
+@media (max-width: 700px) { .cull-favorites { position: static; max-height: none; } #cullSpeciesPicker { min-width: 180px; } .species-header { flex-wrap: wrap; } }
+
+.species-section { overflow: clip; }
+
+#cullCompareReference { background: #181b20; color: #f4f4f4; border-color: #ffffff40; max-width: 320px; }
+
+.pose-group { scroll-margin-top: min(440px, calc(50vh - 20px)); scroll-margin-bottom: 48px; }

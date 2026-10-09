@@ -99,6 +99,17 @@ class FeatureReader:
                 })
         return result
 
+    @property
+    def model_runs(self):
+        """``db.model_runs`` as the current loader reads it.
+
+        The loader asks ``db.model_runs.get_detector_run_photo_ids(...)``; the
+        reader answers that one read itself. ``get_detector_run_photo_ids``
+        stays callable on the reader directly for historical loaders, which
+        called the old ``Database`` wrapper of that name.
+        """
+        return self
+
     def get_detector_run_photo_ids(self, detector_model):
         # Evaluation always loads explicit session IDs. The production loader
         # stages this scope before requesting detector completion evidence.

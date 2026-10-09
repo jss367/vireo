@@ -104,6 +104,11 @@
     align-items: center; justify-content: center;
     color: var(--text-ghost); font-size: 11px;
   }
+  .dup-card .thumb-wrap { position: relative; aspect-ratio: 4/3; }
+  .dup-card .thumb-wrap .thumb-placeholder { position: absolute; inset: 0; }
+  .dup-card .thumb-wrap .thumb { opacity: 0; height: 100%; }
+  .dup-card .thumb-wrap.loaded .thumb { opacity: 1; }
+  .dup-card .thumb-wrap.loaded .thumb-placeholder { display: none; }
   .dup-card .badge {
     display: inline-block; margin-top: 6px;
     padding: 2px 8px; border-radius: 3px;
@@ -312,8 +317,21 @@
       <div class="sub">Find exact-byte duplicate photos and remove the extra copies.</div>
     </div>
     <div>
-      <button id="scanBtn" class="btn-primary" onclick="startScan()">Scan for duplicate files</button>
+      <button id="scanBtn" class="btn-primary" onclick="startScan()" disabled>Scan for duplicate files</button>
     </div>
+  </div>
+
+  <div id="initialLoading" class="progress-box" role="status">
+    <span class="spinner"></span> Loading duplicate results…
+  </div>
+  <div id="loadError" class="group-warning" role="alert" style="display:none;">
+    <span id="loadErrorText"></span>
+    <button type="button" class="btn-secondary" onclick="tryRestoreLastScan()">Try again</button>
+  </div>
+  <div id="catalogBanner" class="group-warning" style="display:none;">
+    Showing currently rejected duplicate copies from your catalog. No scan is needed to review these.
+    Disk availability is checked before moving files to Trash. Sizes are catalog estimates.
+    <button type="button" class="btn-secondary" onclick="tryRestoreLastScan(true)">Refresh cleanup</button>
   </div>
 
   <div id="progress" class="progress-box" style="display:none;">
@@ -329,7 +347,7 @@
 
   <div id="results"></div>
 
-  <div id="emptyState" class="empty-state">
+  <div id="emptyState" class="empty-state" style="display:none;">
     <div class="label">Click <b>Scan for duplicate files</b> to find exact-byte duplicates in your library.</div>
   </div>
 
@@ -343,6 +361,7 @@
 
 <script src="/static/duplicates-card.js"></script>
 <script src="/static/duplicates-restore.js"></script>
+<script src="/static/duplicates-reveal.js"></script>
 <script>
   var _proposals = [];
   var _currentJobId = null;
@@ -376,51 +395,11 @@
 
   function hideRestoredBanner() {
     document.getElementById('restoredBanner').style.display = 'none';
-  }
-
-  async function tryRestoreLastScan() {
-    if (_scanInProgress) return;
-    try {
-      var data = await safeFetch('/api/duplicates/last-scan', undefined, { toast: false });
-      // The user may have clicked Scan while we were awaiting the response.
-      // Don't clobber the in-progress scan's UI with stale results — that
-      // would re-enable the scan button and risk overlapping scan jobs.
-      if (_scanInProgress) return;
-      if (!data || !data.found) return;
-      // Wait for the first ``refreshFilterMatches`` pass to populate
-      // ``_filterMatchedIds`` before rendering. Without this, a persisted /
-      // deep-linked filter races against ``VireoFilter.init`` on
-      // DOMContentLoaded — if the last-scan fetch resolves first, groups
-      // the filter would hide still render with their resolve/trash actions
-      // enabled until the filter query later re-renders (r3619553534).
-      // ``_filterReady`` always resolves (even without filters: the no-op
-      // pass in ``refreshFilterMatches`` still marks the epoch ready), so
-      // this never blocks indefinitely.
-      await _filterReady;
-      if (_scanInProgress) return;
-      renderResults(data.result || {});
-      var banner = document.getElementById('restoredBanner');
-      document.getElementById('restoredAgo').textContent =
-        formatTimeAgo(data.finished_at);
-      var stale = (data.result && data.result.stale_group_count) || 0;
-      var remaining = (data.result && (data.result.proposals || []).length) || 0;
-      // When every group is stale the empty-state message in ``results``
-      // already explains that the scan is out of date — don't repeat it
-      // here or the banner contradicts and duplicates the main message.
-      document.getElementById('restoredStale').textContent = (stale && remaining)
-        ? ' ' + stale.toLocaleString() + (stale === 1
-            ? ' group from that scan no longer matches your catalog and is hidden.'
-            : ' groups from that scan no longer match your catalog and are hidden.')
-        : '';
-      document.getElementById('restoredFreshness').textContent =
-        restoredFreshnessText(data.result || {});
-      banner.style.display = '';
-    } catch (e) {
-      // best-effort; fall through to the normal empty-state UI
-    }
+    document.getElementById('catalogBanner').style.display = 'none';
   }
 
   async function startScan() {
+    cancelDuplicateLoad();
     var scanBtn = document.getElementById('scanBtn');
     _scanInProgress = true;
     scanBtn.disabled = true;
@@ -626,7 +605,7 @@
 
   function groupMatchesFilter(group) {
     if (!_filterMatchedIds) return true;
-    var members = [group.winner].concat(group.losers || []);
+    var members = [group.winner].concat(group.other_kept || [], group.losers || []);
     return members.some(function(p) {
       return p && p.id != null && _filterMatchedIds.has(p.id);
     });
@@ -733,7 +712,13 @@
       // added since, or a stale group's hash that still forms one.
       var staleCount = result.stale_group_count || 0;
       var newCount = result.new_group_count || 0;
-      if (newCount > 0) {
+      if (result.catalog_cleanup) {
+        document.getElementById('summary').style.display = 'none';
+        document.getElementById('applyBar').style.display = 'none';
+        document.getElementById('results').innerHTML =
+          '<div class="no-results">No rejected duplicate copies are pending cleanup. ' +
+          'Scan for duplicate files to check for other matches.</div>';
+      } else if (newCount > 0) {
         document.getElementById('results').innerHTML =
           '<div class="no-results">The last scan is out of date — ' +
           newCount.toLocaleString() +
@@ -757,9 +742,9 @@
 
     // Summary
     var unresolvedGroupCount = unresolved.length;
-    var unresolvedLoserCount = result.loser_count || 0;
-    var resolvedGroupCount = result.resolved_group_count || resolved.length;
-    var resolvedLoserCount = result.resolved_loser_count ||
+    var unresolvedLoserCount = unresolved.reduce(function(n, p) { return n + (p.losers || []).length; }, 0);
+    var resolvedGroupCount = resolved.length;
+    var resolvedLoserCount =
       resolved.reduce(function(n, p) { return n + (p.losers || []).length; }, 0);
     var emptyFileGroupCount = resolved.reduce(function(n, p) {
       return n + (p.empty_file_group ? 1 : 0);
@@ -781,7 +766,8 @@
 
     var summary = document.getElementById('summary');
     summary.style.display = '';
-    var summaryHtml = '<div class="summary-bar">' +
+    var summaryHtml = '<div class="summary-bar">';
+    if (!result.catalog_cleanup) summaryHtml +=
       '<div class="summary-stat"><div class="num">' + unresolvedGroupCount + '</div>' +
         '<div class="label">Need review</div></div>' +
       '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + unresolvedLoserCount + '</div>' +
@@ -791,7 +777,7 @@
         '<div class="summary-stat"><div class="num">' + resolvedGroupCount + '</div>' +
           '<div class="label">Cleanup pending</div></div>' +
         '<div class="summary-stat"><div class="num">' + formatBytes(resolvedBytes) + '</div>' +
-          '<div class="label">Extra files on disk</div></div>';
+          '<div class="label">Estimated extra file size</div></div>';
       if (emptyFileGroupCount > 0) {
         summaryHtml +=
           '<div class="summary-stat"><div class="num" style="color:var(--warning, #d69e2e);">' +
@@ -845,18 +831,21 @@
       // Auto-expand if the user came from the disk-cleanup banner. Detection
       // is intentionally simple \u2014 query string is the most direct way to
       // pass intent through a hard navigation without needing storage state.
-      var autoExpand = window.location.search.indexOf('show=resolved') !== -1;
+      var autoExpand = result.catalog_cleanup || new URLSearchParams(window.location.search).get('show') === 'resolved';
       var listClass = 'resolved-list' + (autoExpand ? ' expanded' : '');
       var toggleClass = 'resolved-toggle' + (autoExpand ? ' expanded' : '');
       html += '<div class="section-header">' +
         '<div>' +
           '<h2 class="' + toggleClass + '" id="resolvedToggle" onclick="toggleResolvedSection()">' +
-            '<span class="chev">&#9656;</span> Resolved — cleanup pending' +
+            '<span class="chev">&#9656;</span> ' +
+            (result.catalog_cleanup ? 'Rejected copies — cleanup pending' : 'Resolved — cleanup pending') +
           '</h2>' +
           '<div class="section-sub">' +
           (emptyFileGroupCount === resolvedGroupCount
             ? 'These groups are zero-byte files, usually from an interrupted copy or storage problem. Check the original source or backup before deleting anything.'
-            : 'Vireo already picked which copy to keep for ' +
+            : result.catalog_cleanup
+              ? 'These copies are already rejected in your catalog. Kept copies are shown alongside them; disk availability will be verified before cleanup.'
+              : 'Vireo already picked which copy to keep for ' +
               resolvedGroupCount + ' group' + (resolvedGroupCount === 1 ? '' : 's') +
               ', but the extra copies (' + formatBytes(resolvedBytes) +
               ') are still on disk. Empty-file groups need source or backup checks before cleanup.') +
@@ -1002,9 +991,7 @@
         'Keep ' + escapeHtml(label) + ' for all ' + bucket.group_count +
         '</button>';
     });
-    html += '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ')" ' +
-      'title="Open all bucket folders in your OS file manager">' +
-      escapeHtml(window.VIREO_REVEAL_LABEL) + '</button>';
+    html += bucketRevealButton(bi);
     html += '<label class="delete-toggle">' +
       '<input type="checkbox" data-bi="' + bi + '" data-delete-toggle> ' +
       'Also move extras to Trash</label>';
@@ -1012,29 +999,6 @@
     html += '<div class="bucket-status" data-bi="' + bi + '" data-bucket-status></div>';
     html += '</div>';
     return html;
-  }
-
-  async function revealBucketFolders(bi) {
-    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
-    if (!bucket || !bucket.folders || bucket.folders.length === 0) return;
-    try {
-      var data = await safeFetch('/api/folders/reveal', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ paths: bucket.folders }),
-      });
-      var revealed = (data.revealed || []).length;
-      var skipped = (data.skipped || []).length;
-      var failed = (data.failed || []).length;
-      if (failed > 0) {
-        showToast('Revealed ' + revealed + ', ' + failed + ' failed', 'error');
-      } else if (skipped > 0) {
-        showToast('Revealed ' + revealed + ', ' + skipped + ' unknown to Vireo', 'success');
-      }
-      // Silent on full success — Finder windows opening is feedback enough.
-    } catch (e) {
-      showToast('Reveal failed: ' + (e.message || 'error'), 'error');
-    }
   }
 
   function bulkResolveByFolderIdx(bi, fi) {
@@ -1129,10 +1093,7 @@
       '<button class="keep-btn" data-retry-trash onclick="retryBucketTrash(this)">' +
         'Retry ' + n + ' file' + (n === 1 ? '' : 's') + ' to Trash' +
       '</button>' +
-      '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ')" ' +
-        'title="Open all bucket folders in your OS file manager">' +
-        escapeHtml(window.VIREO_REVEAL_LABEL) +
-      '</button>';
+      bucketRevealButton(Number(bi));
   }
 
   async function retryBucketTrash(btn) {
@@ -1404,18 +1365,21 @@
     html += '<div class="dup-group-header">';
     if (group.empty_file_group) {
       html += '<label style="cursor:default;">' +
-              (losers.length + 1) + ' zero-byte files detected</label>';
+              (losers.length + 1 + (group.other_kept || []).length) + ' zero-byte files detected</label>';
     } else {
       html += '<label style="cursor:default;">' +
               losers.length + ' extra ' +
               (losers.length === 1 ? 'copy' : 'copies') +
-              ' rejected during scan</label>';
+              ' already rejected</label>';
     }
     html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
     html += '</div>';
     html += renderGroupWarning(group);
     html += '<div class="dup-row">';
     html += renderCard(winner, true, null, false);
+    (group.other_kept || []).forEach(function(kept) {
+      html += renderCard(kept, true, null, false);
+    });
     losers.forEach(function(loser) {
       html += renderCard(loser, false, loser.reason, true, winnerProtected, winnerOffline);
     });
@@ -1803,6 +1767,7 @@
   }
 
   function clearResults() {
+    cancelDuplicateLoad();
     _proposals = [];
     _currentJobId = null;
     // Drop the cached scan snapshot too. Otherwise a later filter-bar

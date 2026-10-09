@@ -1,10 +1,10 @@
 """Behavior pins for ``photo_exif_search_text``, metadata search's EXIF prefilter.
 
 Triggers keep each photo's searchable tag values current on every EXIF
-write; ``count_exif_search_unindexed`` / ``index_exif_search_batch`` backfill
-photos written before them; a changed definition empties the table and
-rebuilds the triggers. The structural test at the end keeps the backfill SQL
-in ``repositories/exif_search.py``.
+write; ``db.exif_search.count_unindexed`` / ``index_batch`` backfill photos
+written before them; a changed definition empties the table and rebuilds the
+triggers. The structural tests at the end pin the ``db.exif_search`` accessor
+and keep the old forwarding wrappers gone.
 """
 
 import ast
@@ -16,6 +16,7 @@ import time
 
 import pytest
 from db import Database
+from repositories.exif_search import ExifSearchRepository
 
 
 def _text(db, photo_id):
@@ -80,18 +81,18 @@ def test_backfill_indexes_photos_in_batches(db):
                         (json.dumps({"EXIF": {"Model": f"cam{pid}"}}), pid))
     db.conn.execute("DELETE FROM photo_exif_search_text")
     db.conn.commit()
-    unindexed = db.count_exif_search_unindexed()
+    unindexed = db.exif_search.count_unindexed()
     assert unindexed >= 5
 
     after_id, indexed, batches = 0, 0, 0
-    while (batch := db.index_exif_search_batch(after_id, 2)) is not None:
+    while (batch := db.exif_search.index_batch(after_id, 2)) is not None:
         after_id, count = batch
         indexed += count
         batches += 1
         assert not db.conn.in_transaction
     assert indexed == unindexed
     assert batches == -(-unindexed // 2)
-    assert db.count_exif_search_unindexed() == 0
+    assert db.exif_search.count_unindexed() == 0
     assert all(_text(db, pid) == [f"cam{pid}"] for pid in pids)
 
 
@@ -100,7 +101,7 @@ def test_backfill_keeps_rows_triggers_wrote(photo):
     db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?",
                     (json.dumps({"EXIF": {"Model": "Z9"}}), pid))
     db.conn.commit()
-    assert db.index_exif_search_batch(0, 100) is None
+    assert db.exif_search.index_batch(0, 100) is None
     assert _text(db, pid) == ["Z9"]
 
 
@@ -117,7 +118,7 @@ def test_changed_definition_rebuilds_triggers_and_empties_table(tmp_path):
 
     db = Database(path)
     try:
-        assert db.count_exif_search_unindexed() == 1
+        assert db.exif_search.count_unindexed() == 1
         db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?",
                         (json.dumps({"EXIF": {"Model": "Z9"}}), pid))
         db.conn.commit()
@@ -165,7 +166,7 @@ def test_startup_backfill_job_indexes_unindexed_photos(tmp_path, monkeypatch):
     check = Database(db_path)
     try:
         assert _text(check, pid) == ["Z9"]
-        assert check.count_exif_search_unindexed() == 0
+        assert check.exif_search.count_unindexed() == 0
     finally:
         check.close()
 
@@ -174,23 +175,43 @@ def test_startup_backfill_job_indexes_unindexed_photos(tmp_path, monkeypatch):
     assert len([j for j in runner.list_jobs() if j["type"] == "exif_search_backfill"]) == 1
 
 
-# -- structure: the backfill SQL lives in the repository ----------------------
-
-_DELEGATING_METHODS = ("count_exif_search_unindexed", "index_exif_search_batch")
+# -- structure ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", _DELEGATING_METHODS)
-def test_exif_search_method_delegates_to_repository(name):
-    source = textwrap.dedent(inspect.getsource(getattr(Database, name)))
-    fn = ast.parse(source).body[0]
+def test_exif_search_is_a_fresh_repository_on_the_connection_per_access(db, monkeypatch):
+    """``db.exif_search`` builds a new repository each time, never a cached one.
+
+    It carries the module's ``commit_with_retry`` as read at the access, so a
+    patch of that helper reaches the next backfill batch.
+    """
+    import db as db_module
+
+    first, second = db.exif_search, db.exif_search
+    assert isinstance(first, ExifSearchRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first._commit_with_retry is db_module.commit_with_retry
+
+    def recording(conn, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(db_module, "commit_with_retry", recording)
+    assert db.exif_search._commit_with_retry is recording
+
+
+def test_exif_search_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.exif_search``; Database keeps no aliases."""
+    for name in ("count_exif_search_unindexed", "index_exif_search_batch"):
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.exif_search"
+    accessor = Database.__dict__["exif_search"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
     attrs = {
         node.attr
-        for node in ast.walk(fn)
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id == "self"
     }
-    assert "conn" not in attrs, (
-        f"Database.{name} touches self.conn; move the SQL to ExifSearchRepository"
-    )
     assert "_exif_search_repository" in attrs
+    assert "conn" not in attrs

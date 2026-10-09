@@ -1,33 +1,46 @@
 """Persistence for workspace-scoped photo ratings and flags.
 
 Ratings (0-5) and flags (``'none'`` / ``'flagged'`` / ``'rejected'``) live on
-``photos`` rows, but the workspace check runs against ``workspace_folders``
-so a photo whose folder is not linked to the active workspace cannot be
-rated or flagged from the façade's write paths. ``Database`` builds the
-repository with ``self._active_workspace_id`` — not ``self._ws_id()`` — so
-``_photo_review_repository()`` never raises off the active workspace; the
-``verify_workspace=True`` writes still raise if the workspace is unset,
-because ``_verify_photo`` demands one. ``Database`` keeps the wrappers
-(``update_photo_rating``, ``batch_update_photo_rating``,
-``update_photo_flag``, ``batch_update_photo_flag``) as one-line delegations
-and calls in here for the SQL. ``_commit=False`` on ``set_flag`` is
-carried through unchanged for callers that already hold ``BEGIN IMMEDIATE``
-(the prediction-decision lock), so the writer lock is not released
-mid-decision. The wildlife-exclusion toggle (``update_photo_wildlife_excluded``)
+``photos`` rows, but the workspace check runs against
+``photo_workspace_visibility`` so a photo the active workspace cannot see
+cannot be rated or flagged through the ``verify_workspace=True`` writes.
+``Database`` builds the repository with ``self._active_workspace_id`` — not
+``self._ws_id()`` — so ``_photo_review_repository()`` (and the
+``db.photo_review`` accessor) never raises off the active workspace; the
+``verify_workspace=True`` writes and ``wildlife_excluded_states`` still raise
+if the workspace is unset. ``_commit=False`` on ``set_flag`` is carried
+through unchanged for callers that already hold ``BEGIN IMMEDIATE`` (the
+prediction-decision lock), so the writer lock is not released mid-decision.
+
+Callers reach it as ``db.photo_review`` (a fresh repository per access, see
+``Database.photo_review``); there are no forwarding wrappers on ``Database``.
+The wildlife-exclusion toggle (``Database.update_photo_wildlife_excluded``)
 is a different column whose workspace check stays on ``Database``; its write
-(``_commit=False`` for a batch that records one edit and commits once) and
-the workspace-visible state read behind ``get_wildlife_excluded_states``
-live here.
+(``set_wildlife_excluded``, ``_commit=False`` for a batch that records one
+edit and commits once) lives here but is reached only through that method.
 """
+
+import sqlite3
+from collections.abc import Collection, Iterable, Iterator
 
 
 class PhotoReviewRepository:
-    def __init__(self, conn, workspace_id, *, chunk_size=800):
+    def __init__(
+        self, conn: sqlite3.Connection, workspace_id: int | None, *, chunk_size: int = 800,
+    ) -> None:
         self.conn = conn
         self.workspace_id = workspace_id
         self.chunk_size = chunk_size
 
-    def set_rating(self, photo_id, rating, *, verify_workspace=True):
+    def set_rating(self, photo_id: int, rating: int, *, verify_workspace: bool = True) -> None:
+        """Set a photo's rating (0-5) and commit.
+
+        ``verify_workspace=True`` (the default) raises ``ValueError`` if the
+        photo is not visible in the active workspace (``RuntimeError`` when
+        none is set). Pass False from background jobs that already scope
+        their photo lists, or from undo/redo where the edit history is
+        already workspace-scoped.
+        """
         if verify_workspace:
             self._verify_photo(photo_id)
         self.conn.execute(
@@ -35,7 +48,14 @@ class PhotoReviewRepository:
         )
         self.conn.commit()
 
-    def set_ratings(self, photo_ids, rating, *, verify_workspace=True):
+    def set_ratings(
+        self, photo_ids: Collection[int], rating: int, *, verify_workspace: bool = True,
+    ) -> None:
+        """Set the rating of several photos in one transaction.
+
+        ``verify_workspace=True`` checks every photo first and raises
+        ``ValueError`` before writing if any is outside the active workspace.
+        """
         self._set_many(
             photo_ids,
             "rating",
@@ -43,7 +63,17 @@ class PhotoReviewRepository:
             verify_workspace=verify_workspace,
         )
 
-    def set_flag(self, photo_id, flag, *, verify_workspace=True, _commit=True):
+    def set_flag(
+        self, photo_id: int, flag: str, *, verify_workspace: bool = True, _commit: bool = True,
+    ) -> None:
+        """Set a photo's flag (``'none'``, ``'flagged'``, ``'rejected'``).
+
+        ``verify_workspace`` works as in ``set_rating``. ``_commit=False``
+        skips the commit (the caller owns the transaction). Callers that
+        hold ``BEGIN IMMEDIATE`` — the prediction decision lock, for
+        example — must pass False so the writer lock is not released
+        mid-decision.
+        """
         if verify_workspace:
             self._verify_photo(photo_id)
         self.conn.execute(
@@ -52,7 +82,7 @@ class PhotoReviewRepository:
         if _commit:
             self.conn.commit()
 
-    def set_wildlife_excluded(self, photo_id, excluded, *, _commit=True):
+    def set_wildlife_excluded(self, photo_id: int, excluded: bool, *, _commit: bool = True) -> None:
         self.conn.execute(
             "UPDATE photos SET wildlife_excluded = ? WHERE id = ?",
             (1 if excluded else 0, photo_id),
@@ -60,8 +90,12 @@ class PhotoReviewRepository:
         if _commit:
             self.conn.commit()
 
-    def wildlife_excluded_states(self, photo_ids):
-        """``{photo_id: 0 or 1}`` for the named photos the workspace can see."""
+    def wildlife_excluded_states(self, photo_ids: Iterable[int]) -> dict[int, int]:
+        """``{photo_id: 0 or 1}`` for the named photos the active workspace can see.
+
+        Ids that don't exist or sit outside the workspace are absent. Raises
+        ``RuntimeError`` when no workspace is active.
+        """
         if self.workspace_id is None:
             raise RuntimeError("No active workspace set")
         states = {}
@@ -82,7 +116,10 @@ class PhotoReviewRepository:
                 states[row["id"]] = int(row["excluded"])
         return states
 
-    def set_flags(self, photo_ids, flag, *, verify_workspace=True):
+    def set_flags(
+        self, photo_ids: Collection[int], flag: str, *, verify_workspace: bool = True,
+    ) -> None:
+        """Set the flag of several photos in one transaction; see ``set_ratings``."""
         self._set_many(
             photo_ids,
             "flag",
@@ -122,7 +159,7 @@ class PhotoReviewRepository:
                 f"Photo {photo_id} does not belong to the active workspace"
             )
 
-    def _chunks(self, values):
+    def _chunks(self, values: Iterable[int]) -> Iterator[list[int]]:
         values = list(values)
         return (
             values[index:index + self.chunk_size]

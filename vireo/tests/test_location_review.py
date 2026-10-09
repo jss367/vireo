@@ -177,7 +177,7 @@ def test_discrepancy_preview_uses_real_distance_and_is_read_only(discrepancy_cat
     assert all(p['distance_m'] == pytest.approx(701.294, abs=.01) for p in photos)
     assert photos[0]['assigned_location']['name'] == 'Kumeyaay Lake'
     assert discrepancy_preview(client, minimum_distance_m=702) == []
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
     assert list(folder.iterdir()) == []
 
 
@@ -187,8 +187,8 @@ def test_keep_is_remembered_but_coordinate_changes_require_review(discrepancy_ca
     assert resolve(client, photos[:1], 'keep').get_json() == {'reviewed': 1, 'queued': 0}
     assert len(discrepancy_preview(client)) == 2
     assert len(discrepancy_preview(client, include_reviewed=True)) == 3
-    assert db.get_pending_changes() == []
-    assert len(db.get_edit_history()) == 1
+    assert db.pending_changes.list_all() == []
+    assert len(db.edit_history.list_recent()) == 1
     assert db.undo_last_edit() is None
     db.conn.execute('UPDATE keywords SET latitude=32.85 WHERE id=?', (keyword,))
     db.conn.commit()
@@ -205,7 +205,7 @@ def test_discrepancy_reviews_respect_history_limit(discrepancy_catalog, action):
     for photo in photos:
         assert resolve(client, [photo], action).status_code == 200
 
-    history = db.get_edit_history()
+    history = db.edit_history.list_recent()
     assert len(history) == 2
     assert {row['photo_id'] for row in db.conn.execute('SELECT photo_id FROM edit_history_items')} == {
         photo['id'] for photo in photos[-2:]
@@ -215,7 +215,7 @@ def test_discrepancy_reviews_respect_history_limit(discrepancy_catalog, action):
         assert discrepancy_preview(client) == []
         assert db.conn.execute('SELECT COUNT(*) FROM location_gps_reviews').fetchone()[0] == 3
     else:
-        assert {row['photo_id'] for row in db.get_pending_changes()} == {photo['id'] for photo in photos}
+        assert {row['photo_id'] for row in db.pending_changes.list_all()} == {photo['id'] for photo in photos}
 
 
 def test_explicit_reapply_reaches_sidecar_and_preserves_original(discrepancy_catalog):
@@ -231,7 +231,7 @@ def test_explicit_reapply_reaches_sidecar_and_preserves_original(discrepancy_cat
     # Queueing is not success on disk, and a retry is idempotent.
     assert len(discrepancy_preview(client)) == 3
     assert resolve(client, photos[:1], 'assigned').status_code == 200
-    assert len(db.get_pending_changes()) == 1
+    assert len(db.pending_changes.list_all()) == 1
     assert sync_to_xmp(db)['synced'] == 1
     metadata = read_sync_preview_metadata(original.with_suffix('.xmp'))
     assert metadata['location']['latitude'] == pytest.approx(32.841515)
@@ -284,7 +284,7 @@ def test_stale_batch_is_rejected_without_partial_changes(discrepancy_catalog):
     db.conn.execute('UPDATE photos SET longitude=-117.04 WHERE id=?', (photo_ids[-1],))
     db.conn.commit()
     assert resolve(client, photos, 'assigned').status_code == 409
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
     assert resolve(client, photos, 'keep').status_code == 409
     assert db.conn.execute('SELECT COUNT(*) FROM location_gps_reviews').fetchone()[0] == 0
 
@@ -298,7 +298,7 @@ def test_settings_and_pending_changes_are_respected(discrepancy_catalog):
     config['write_assigned_location_to_xmp'] = False
     cfg.save(config)
     assert resolve(client, photos, 'assigned').status_code == 409
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
     db.queue_change(photos[0]['id'], 'location', 'effective')
     assert resolve(client, photos, 'keep').status_code == 409
     assert db.conn.execute('SELECT COUNT(*) FROM location_gps_reviews').fetchone()[0] == 0
@@ -362,7 +362,7 @@ def test_sidecar_change_invalidates_preview(discrepancy_catalog):
     sidecar = (folder / photos[0]['filename']).with_suffix('.xmp')
     write_gps_location(sidecar, 33, -117)
     assert resolve(client, photos, 'assigned').status_code == 409
-    assert db.get_pending_changes() == []
+    assert db.pending_changes.list_all() == []
 
 
 @pytest.mark.parametrize('change', ['unrelated', 'coordinates', 'assignment', 'path'])
@@ -398,7 +398,7 @@ def test_sidecar_reads_allow_writers_and_revalidate_database(discrepancy_catalog
     response = resolve(client, photos, 'assigned')
     assert response.status_code == (200 if change == 'unrelated' else 409)
     assert len(calls) == 1  # The locked revalidation must use cached sidecar evidence.
-    assert len(db.get_pending_changes()) == (1 if change == 'unrelated' else 0)
+    assert len(db.pending_changes.list_all()) == (1 if change == 'unrelated' else 0)
 
 
 @pytest.mark.parametrize('merge_kind', ['archive_collision', 'archive_phantom', 'relocate', 'raw_jpeg'])

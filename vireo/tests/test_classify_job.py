@@ -702,7 +702,7 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
     mock_db = MagicMock()
     mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
     # Photo 1 already has detections in the database
-    mock_db.get_detector_run_photo_ids.return_value = {1}
+    mock_db.model_runs.get_detector_run_photo_ids.return_value = {1}
     mock_db.get_detections.return_value = [
         {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
          "detector_confidence": 0.9, "category": "animal"},
@@ -742,7 +742,7 @@ def test_detect_subjects_skips_weight_download_when_all_cached(tmp_path):
 
     mock_db = MagicMock()
     mock_db.get_effective_config.return_value = {"detector_confidence": 0.2}
-    mock_db.get_detector_run_photo_ids.return_value = {1}
+    mock_db.model_runs.get_detector_run_photo_ids.return_value = {1}
     mock_db.get_detections.return_value = [
         {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
          "detector_confidence": 0.9, "category": "animal"},
@@ -772,7 +772,7 @@ def test_detect_subjects_skips_weight_download_for_empty_reclassify(tmp_path):
     job = _make_job()
 
     mock_db = MagicMock()
-    mock_db.get_detector_run_photo_ids.return_value = set()
+    mock_db.model_runs.get_detector_run_photo_ids.return_value = set()
 
     with patch("detector.ensure_megadetector_weights") as mock_ensure:
         _detect_subjects(
@@ -879,7 +879,7 @@ def test_detect_batch_propagates_resource_wait_cancelled(tmp_path):
     (``ResourceWaitCancelled`` subclasses ``RuntimeError``).
 
     Codex P1: on the reclassify path the caller has already called
-    ``db.clear_detections(photo["id"])`` for this photo before
+    ``db.detections.clear(photo["id"])`` for this photo before
     invoking ``_detect_batch``. If the cancel is silently swallowed
     here, the classify recovery rebuilds predictions using the
     full-image fallback and lands a committed catalog change even
@@ -1155,7 +1155,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     classify_job._detect_batch(
         photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
         det_conf_threshold=0.2,
-        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+        already_detected_ids=db.model_runs.get_detector_run_photo_ids("megadetector-v6"),
     )
     assert call_count["n"] == 1
 
@@ -1163,7 +1163,7 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     classify_job._detect_batch(
         photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
         det_conf_threshold=0.2,
-        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+        already_detected_ids=db.model_runs.get_detector_run_photo_ids("megadetector-v6"),
     )
     assert call_count["n"] == 1, "detect_animals should not be re-called for empty photos"
 
@@ -1201,17 +1201,17 @@ def test_detect_batch_does_not_cache_failed_detector_runs(tmp_path, monkeypatch)
     classify_job._detect_batch(
         photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
         det_conf_threshold=0.2,
-        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+        already_detected_ids=db.model_runs.get_detector_run_photo_ids("megadetector-v6"),
     )
     assert call_count["n"] == 1, "detector was called"
     # No detector_run row should have been written for the failed run
-    assert db.get_detector_run_photo_ids("megadetector-v6") == set()
+    assert db.model_runs.get_detector_run_photo_ids("megadetector-v6") == set()
 
     # A second pass must call the detector again (no cached "already done")
     classify_job._detect_batch(
         photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
         det_conf_threshold=0.2,
-        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+        already_detected_ids=db.model_runs.get_detector_run_photo_ids("megadetector-v6"),
     )
     assert call_count["n"] == 2, "failed photos must be retried on next pass"
 
@@ -1396,7 +1396,7 @@ def test_detect_batch_subject_analysis_uses_working_copy_when_source_offline(
     photo = dict(db.get_photo(photo_id))
     photos = [photo]
     folders = {folder_id: offline_dir}
-    already_detected_ids = db.get_detector_run_photo_ids("megadetector-v6")
+    already_detected_ids = db.model_runs.get_detector_run_photo_ids("megadetector-v6")
 
     seen_paths = []
     def fake_analyze_photo(db_arg, photo_arg, image_path, **kwargs):
@@ -1449,13 +1449,13 @@ def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
     ]
     mock_db = MagicMock()
     # Gate fires (run key present) but no cached prediction rows.
-    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
     mock_db.get_predictions_for_detection.return_value = []
-    mock_db.get_photo_embedding.return_value = None
+    mock_db.masks_features.get_embedding.return_value = None
     # No measured match-score summary for this triple either — a torn
     # write from a crashed local job (or a suppressed ``match`` row),
     # not a completed no-match. Must fall through to classify.
-    mock_db.has_classifier_match_score.return_value = False
+    mock_db.model_runs.has_classifier_match_score.return_value = False
 
     # Need a real image on disk so _prepare_image succeeds.
     import os
@@ -1516,11 +1516,11 @@ def test_classify_photos_honors_measured_zero_candidate_run(tmp_path):
 
     mock_clf = MagicMock()
     mock_db = MagicMock()
-    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
     mock_db.get_predictions_for_detection.return_value = []
-    mock_db.get_photo_embedding.return_value = None
+    mock_db.masks_features.get_embedding.return_value = None
     # The measured summary says the run happened and matched nothing.
-    mock_db.has_classifier_match_score.return_value = True
+    mock_db.model_runs.has_classifier_match_score.return_value = True
 
     import os
     img_path = os.path.join(str(tmp_path), "bird.jpg")
@@ -1629,7 +1629,7 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
 def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monkeypatch):
     """If the user cancels while model load / embedding computation is
     running, the destructive reclassify purge (clear_predictions /
-    clear_detections) MUST NOT execute. Without the pre-purge cancel
+    detections.clear) MUST NOT execute. Without the pre-purge cancel
     gate, the post-detection gate returns with predictions_stored=0 but
     the cache is already wiped.
     """
@@ -2022,11 +2022,11 @@ def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
     # No real detections → full-image path. Existing full-image
     # detection is cached.
     mock_db.get_detections.return_value = [{"id": 999}]
-    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
     mock_db.get_predictions_for_detection.return_value = [
         {"species": "Robin", "confidence": 0.9, "detection_id": 999},
     ]
-    mock_db.get_photo_embedding.return_value = None
+    mock_db.masks_features.get_embedding.return_value = None
 
     raw_results, failed, skipped = _classify_photos(
         photos=photos,
@@ -2082,10 +2082,10 @@ def test_classify_photos_honors_measured_zero_candidate_full_image_run(tmp_path)
     # predictions; but a measured match-score row records the run as a
     # zero-candidate no-match.
     mock_db.get_detections.return_value = [{"id": 999}]
-    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
     mock_db.get_predictions_for_detection.return_value = []
-    mock_db.get_photo_embedding.return_value = None
-    mock_db.has_classifier_match_score.return_value = True
+    mock_db.masks_features.get_embedding.return_value = None
+    mock_db.model_runs.has_classifier_match_score.return_value = True
 
     import os
     img_path = os.path.join(str(tmp_path), "bird.jpg")
@@ -2105,7 +2105,7 @@ def test_classify_photos_honors_measured_zero_candidate_full_image_run(tmp_path)
         labels_fingerprint="fp-x",
     )
 
-    mock_db.has_classifier_match_score.assert_called_with(999, "BioCLIP", "fp-x")
+    mock_db.model_runs.has_classifier_match_score.assert_called_with(999, "BioCLIP", "fp-x")
     assert skipped == 1, (
         "the full-image gate must honor the measured no-match summary"
     )
@@ -3579,7 +3579,7 @@ def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     det_id = det_ids[0]
 
     # Pre-seed a classifier run — any subsequent invocation should bail
-    db.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=0)
+    db.model_runs.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=0)
 
     calls = {"n": 0}
     def fake_classify(*a, **kw):
@@ -3632,7 +3632,7 @@ def test_classify_detection_gated_does_not_cache_zero_count(tmp_path, monkeypatc
         labels_fingerprint="abc123",
         labels=["Robin"], reclassify=False,
     )
-    assert db.get_classifier_run_keys(det_id) == set(), (
+    assert db.model_runs.get_classifier_run_keys(det_id) == set(), (
         "zero-prediction classify_fn must not record a run key"
     )
 
@@ -3672,8 +3672,8 @@ def test_record_batch_classifier_runs_skips_zero_count(tmp_path):
         db, batch, "bioclip-2", "abc123", raw_results
     )
 
-    keys_ok = db.get_classifier_run_keys(det_ok)
-    keys_failed = db.get_classifier_run_keys(det_failed)
+    keys_ok = db.model_runs.get_classifier_run_keys(det_ok)
+    keys_failed = db.model_runs.get_classifier_run_keys(det_failed)
     assert keys_ok == set(), "output is not reusable until predictions are persisted"
     assert db.conn.execute("SELECT runtime_fingerprint FROM classifier_runs WHERE detection_id=?", (det_ok,)).fetchone()[0] == "incomplete"
     assert keys_failed == set(), "failed detection must NOT be cached"
@@ -3732,7 +3732,7 @@ def test_publish_classifier_runs_promotes_after_predictions_persist(tmp_path):
 
     labels_full = "5" * 64
     labels_short = labels_full[:12]
-    db.upsert_labels_fingerprint(
+    db.model_runs.upsert_labels_fingerprint(
         labels_short, "Test birds", [], 1, full_fingerprint=labels_full,
     )
 
@@ -3868,7 +3868,7 @@ def test_all_photos_cache_satisfied_requires_matching_predictions_row(tmp_path):
     ], detector_model="megadetector-v6")[0]
 
     # Torn write: classifier_runs exists, predictions do not.
-    db.record_classifier_run(det_id, "BioCLIP", "fp-cached",
+    db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                              prediction_count=1)
 
     # Coverage query must refuse — with either the fully-specified
@@ -3967,7 +3967,7 @@ def test_classify_photos_iterates_over_detections(tmp_path):
     ]
 
     mock_db = MagicMock()
-    mock_db.get_photo_embedding.return_value = None
+    mock_db.masks_features.get_embedding.return_value = None
 
     # Use side_effect to return a fresh Image each call, since _prepare_image
     # closes the original image after cropping (resource leak fix).
@@ -4028,7 +4028,7 @@ def test_classify_photos_new_photo(tmp_path):
     mock_clf.classify_batch_with_embedding.return_value = [(fake_preds, fake_embedding)]
 
     mock_db = MagicMock()
-    mock_db.get_photo_embedding.return_value = None
+    mock_db.masks_features.get_embedding.return_value = None
 
     # Use side_effect to return a fresh Image each call, since _flush_batch
     # closes images after classification (resource leak fix).
@@ -4086,12 +4086,12 @@ def test_classify_photos_skips_existing(tmp_path):
     mock_clf = MagicMock()
     mock_db = MagicMock()
     # Detection 101 has a cached classifier_run for (BioCLIP, legacy).
-    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "legacy")}
+    mock_db.model_runs.get_classifier_run_keys.return_value = {("BioCLIP", "legacy")}
     mock_db.get_predictions_for_detection.return_value = [
         {"species": "Northern Cardinal", "confidence": 0.95,
          "detection_id": 101},
     ]
-    mock_db.get_photo_embedding.return_value = None
+    mock_db.masks_features.get_embedding.return_value = None
 
     detection_map = {
         1: [{"id": 101, "box_x": 0.1, "box_y": 0.1,
@@ -4289,10 +4289,10 @@ def test_flush_batch_writes_per_detection_embedding(tmp_path):
 
     # Per-detection variants recover each detection's own embedding
     # rather than whichever landed last on the photo-level row.
-    per_a = db.get_photo_embedding(
+    per_a = db.masks_features.get_embedding(
         photo_id, "test-model", variant=f"det:{det_ids[0]}",
     )
-    per_b = db.get_photo_embedding(
+    per_b = db.masks_features.get_embedding(
         photo_id, "test-model", variant=f"det:{det_ids[1]}",
     )
     assert per_a is not None and per_b is not None
@@ -4301,7 +4301,7 @@ def test_flush_batch_writes_per_detection_embedding(tmp_path):
     # Photo-level (variant='') stays populated for legacy consumers
     # (culling, similarity search); last-wins is unchanged from prior
     # behavior — just no longer the sole source of the classify cache.
-    photo_level = db.get_photo_embedding(photo_id, "test-model")
+    photo_level = db.masks_features.get_embedding(photo_id, "test-model")
     assert photo_level is not None
 
 
@@ -4724,7 +4724,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
     mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
-    mock_db_instance.get_photo_embedding.return_value = None
+    mock_db_instance.masks_features.get_embedding.return_value = None
     # Subject-skip gate: with no subject types configured the gate is a no-op.
     mock_db_instance.get_subject_types.return_value = set()
     mock_db_instance.filter_out_subject_tagged.side_effect = (
@@ -5397,7 +5397,7 @@ def test_detect_subjects_stops_when_cancelled(tmp_path):
     ]
     mock_db = MagicMock()
     # Everything cached → no weights download attempt before the loop.
-    mock_db.get_detector_run_photo_ids.return_value = {1, 2}
+    mock_db.model_runs.get_detector_run_photo_ids.return_value = {1, 2}
 
     detect = MagicMock()
     with patch("classify_job.detect_animals", detect), \
@@ -5436,7 +5436,7 @@ def test_detect_subjects_skips_weight_download_when_cancelled(tmp_path):
     mock_db = MagicMock()
     # Nothing cached → needs_fresh_detection is True, the un-fixed code
     # would call ensure_megadetector_weights before noticing the cancel.
-    mock_db.get_detector_run_photo_ids.return_value = set()
+    mock_db.model_runs.get_detector_run_photo_ids.return_value = set()
 
     detect = MagicMock()
     weights = MagicMock()
@@ -5576,7 +5576,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
     failure / ONNX hiccup) must leave that photo's detections and
     predictions untouched and not queue it for a post-cancel rebuild.
 
-    ``_detect_subjects`` used to run the global ``clear_detections`` before
+    ``_detect_subjects`` used to run the global ``detections.clear`` before
     each photo's re-detection, so a ``None`` result stranded the photo and
     had to be patched over by always queueing it for rebuild. Detections
     are now replaced only when the new result lands, so there is nothing
@@ -5697,7 +5697,7 @@ def test_classify_photos_drops_pending_batch_on_mid_loop_cancel(tmp_path):
     mock_db = MagicMock()
     mock_db.get_detections.return_value = []
     mock_db.save_detections.return_value = [101]
-    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.model_runs.get_classifier_run_keys.return_value = set()
     mock_db.get_predictions_for_detection.return_value = []
 
     photos = [
@@ -5728,7 +5728,7 @@ def test_classify_photos_drops_pending_batch_on_mid_loop_cancel(tmp_path):
     # batch contents.
     clf.classify_batch.assert_not_called()
     clf.classify_batch_with_embedding.assert_not_called()
-    mock_db.record_classifier_run.assert_not_called()
+    mock_db.model_runs.record_classifier_run.assert_not_called()
     assert raw_results == []
 
 
@@ -5746,7 +5746,7 @@ def test_weights_download_failure_degrades_to_full_image(tmp_path):
 
     photos = [{"id": 1, "filename": "a.jpg", "folder_id": 10}]
     mock_db = MagicMock()
-    mock_db.get_detector_run_photo_ids.return_value = set()  # needs download
+    mock_db.model_runs.get_detector_run_photo_ids.return_value = set()  # needs download
 
     with patch("classify_job.detect_animals", MagicMock()), \
          patch("classify_job.get_primary_detection", MagicMock()), \
@@ -5793,7 +5793,7 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
     mock_db = MagicMock()
     mock_db.get_detections.return_value = []
     mock_db.save_detections.return_value = [101]
-    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.model_runs.get_classifier_run_keys.return_value = set()
     mock_db.get_predictions_for_detection.return_value = []
 
     clf = MagicMock()
@@ -5841,7 +5841,7 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
         # also be wiped in the fallback path, otherwise the
         # latest-fingerprint-per-detection filter in get_predictions
         # would surface them alongside the new fallback rows. The
-        # normal reclassify path's per-photo clear_detections cascade
+        # normal reclassify path's per-photo detections.clear cascade
         # has already wiped predictions across all fingerprints, so an
         # unfiltered clear here is a no-op repeat in that path.
         assert call.kwargs.get("labels_fingerprint") is None, (
@@ -5868,7 +5868,7 @@ def test_classify_photos_no_reclassify_skips_predictions_clear(tmp_path):
     mock_db = MagicMock()
     mock_db.get_detections.return_value = []
     mock_db.save_detections.return_value = [101]
-    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.model_runs.get_classifier_run_keys.return_value = set()
     mock_db.get_predictions_for_detection.return_value = []
 
     clf = MagicMock()
@@ -6147,7 +6147,7 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
     ], detector_model="megadetector-v6")[0]
     db.add_prediction(stale_det, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="fp-old")
-    db.record_classifier_run(stale_det, "BioCLIP", "fp-old",
+    db.model_runs.record_classifier_run(stale_det, "BioCLIP", "fp-old",
                              prediction_count=1)
 
     runner = FakeRunner()
@@ -6194,7 +6194,7 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
     # The classifier_runs row under the old fingerprint must also be gone
     # so the next non-reclassify pass actually re-runs inference for that
     # detection if it ever reappears in detection_map.
-    run_keys = db2.get_classifier_run_keys(stale_det)
+    run_keys = db2.model_runs.get_classifier_run_keys(stale_det)
     assert ("BioCLIP", "fp-old") not in run_keys, (
         "Stale fp-old classifier_runs row must be cleared alongside the "
         "stale prediction."
@@ -6344,7 +6344,7 @@ def test_classify_photos_no_reclassify_drops_pending_batch_on_cancel(tmp_path):
     mock_db = MagicMock()
     mock_db.get_detections.return_value = []
     mock_db.save_detections.return_value = [101]
-    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.model_runs.get_classifier_run_keys.return_value = set()
     mock_db.get_predictions_for_detection.return_value = []
 
     photos = [
@@ -6372,7 +6372,7 @@ def test_classify_photos_no_reclassify_drops_pending_batch_on_cancel(tmp_path):
 
     clf.classify_batch.assert_not_called()
     clf.classify_batch_with_embedding.assert_not_called()
-    mock_db.record_classifier_run.assert_not_called()
+    mock_db.model_runs.record_classifier_run.assert_not_called()
     assert raw_results == []
 
 
@@ -6402,7 +6402,7 @@ def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
     ]
 
     mock_db = MagicMock()
-    mock_db.get_classifier_run_keys.return_value = set()
+    mock_db.model_runs.get_classifier_run_keys.return_value = set()
     mock_db.get_predictions_for_detection.return_value = []
 
     photos = [{"id": 1, "filename": "a.jpg", "folder_id": 10,
@@ -6485,14 +6485,14 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
     mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
-    mock_db_instance.get_photo_embedding.return_value = None
+    mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
     mock_db_instance.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
     # The classify loop uses these to gate-check; empty returns force
     # full re-classification (which is what reclassify means anyway).
-    mock_db_instance.get_classifier_run_keys.return_value = set()
+    mock_db_instance.model_runs.get_classifier_run_keys.return_value = set()
     mock_db_instance.get_predictions_for_detection.return_value = []
     mock_db_instance.get_detections.return_value = []
 
@@ -6608,12 +6608,12 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
     mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
-    mock_db_instance.get_photo_embedding.return_value = None
+    mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
     mock_db_instance.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
-    mock_db_instance.get_classifier_run_keys.return_value = set()
+    mock_db_instance.model_runs.get_classifier_run_keys.return_value = set()
     mock_db_instance.get_predictions_for_detection.return_value = []
     mock_db_instance.get_detections.return_value = []
 
@@ -6739,7 +6739,7 @@ def test_classify_photos_reclassify_cancel_flushes_pending_batch(tmp_path):
     job = _make_job()
 
     fake_db = MagicMock()
-    fake_db.get_classifier_run_keys.return_value = set()
+    fake_db.model_runs.get_classifier_run_keys.return_value = set()
     fake_db.get_predictions_for_detection.return_value = []
 
     fake_embedding = np.ones(512, dtype=np.float32)
@@ -6858,7 +6858,7 @@ def test_classify_photos_reclassify_cancel_mid_batch_flush_preserves_cleared(tmp
     job = _make_job()
 
     fake_db = MagicMock()
-    fake_db.get_classifier_run_keys.return_value = set()
+    fake_db.model_runs.get_classifier_run_keys.return_value = set()
     fake_db.get_predictions_for_detection.return_value = []
 
     fake_embedding = np.ones(512, dtype=np.float32)
@@ -6962,7 +6962,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     """End-to-end: a reclassify run cancelled after detection must still
     classify photos that were re-detected as empty scenes (no detections
     in detection_map). Their old detections+predictions were already
-    cascaded away by the per-photo ``clear_detections`` call in
+    cascaded away by the per-photo ``detections.clear`` call in
     ``_detect_subjects``; without a full-image fallback classify pass they
     would be stranded with cleared predictions and no replacement.
 
@@ -7001,12 +7001,12 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
         {"id": 10, "path": str(tmp_path), "name": "test"},
     ]
     mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
-    mock_db_instance.get_photo_embedding.return_value = None
+    mock_db_instance.masks_features.get_embedding.return_value = None
     mock_db_instance.get_subject_types.return_value = set()
     mock_db_instance.filter_out_subject_tagged.side_effect = (
         lambda pids, _types: list(pids)
     )
-    mock_db_instance.get_classifier_run_keys.return_value = set()
+    mock_db_instance.model_runs.get_classifier_run_keys.return_value = set()
     mock_db_instance.get_predictions_for_detection.return_value = []
     # No prior full-image synthetic detection exists for photo 1 — the
     # classifier creates one for the full-image fallback path.
@@ -7079,7 +7079,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
 
     assert detect_called["n"] == 1, "_detect_subjects must have been called"
     # The empty-scene photo (id 1) had its predictions cascaded away by
-    # _detect_subjects.clear_detections; the recovery path must classify
+    # _detect_subjects detections.clear; the recovery path must classify
     # it via the full-image fallback so it doesn't end up empty.
     assert mock_db_instance.add_prediction.call_count >= 1, (
         "Post-detect cancel on reclassify with an empty-scene processed "
@@ -7510,7 +7510,7 @@ def test_all_photos_cache_satisfied_requires_every_photo_covered(tmp_path):
     # write from a crashed local job — _all_photos_cache_satisfied must
     # reject it as unsatisfied so the retry re-runs classification
     # instead of shortcutting to _finalize_cached_only.
-    db.record_classifier_run(det_id, "BioCLIP", "abc123", prediction_count=1)
+    db.model_runs.record_classifier_run(det_id, "BioCLIP", "abc123", prediction_count=1)
     db.add_prediction(
         det_id, species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint="abc123",
@@ -7552,12 +7552,12 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
     # Same classifier, DIFFERENT label fingerprints across the two runs.
     # Add matching predictions rows so the coverage query treats each
     # classifier_run as a genuine cache row rather than a torn write.
-    db.record_classifier_run(det_ids[0], "BioCLIP", "fp-a", prediction_count=1)
+    db.model_runs.record_classifier_run(det_ids[0], "BioCLIP", "fp-a", prediction_count=1)
     db.add_prediction(
         det_ids[0], species="Robin", confidence=0.9, model="BioCLIP",
         labels_fingerprint="fp-a",
     )
-    db.record_classifier_run(det_ids[1], "BioCLIP", "fp-b", prediction_count=1)
+    db.model_runs.record_classifier_run(det_ids[1], "BioCLIP", "fp-b", prediction_count=1)
     db.add_prediction(
         det_ids[1], species="Sparrow", confidence=0.9, model="BioCLIP",
         labels_fingerprint="fp-b",
@@ -7594,12 +7594,12 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
          "category": "animal"},
     ], detector_model="megadetector-v6")
     for det_id in det2:
-        db.record_classifier_run(det_id, "BioCLIP", "fp-a", prediction_count=1)
+        db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-a", prediction_count=1)
         db.add_prediction(
             det_id, species="Robin", confidence=0.9, model="BioCLIP",
             labels_fingerprint="fp-a",
         )
-    db.record_classifier_run(det2[0], "Other", "fp-x", prediction_count=1)
+    db.model_runs.record_classifier_run(det2[0], "Other", "fp-x", prediction_count=1)
     db.add_prediction(
         det2[0], species="Other bird", confidence=0.8, model="Other",
         labels_fingerprint="fp-x",
@@ -7893,7 +7893,7 @@ def test_finalize_cached_only_respects_workspace_detector_threshold(
     ], detector_model="megadetector-v6")
     db.add_prediction(det_ids[0], species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="fp-cached")
-    db.record_classifier_run(det_ids[0], "BioCLIP", "fp-cached",
+    db.model_runs.record_classifier_run(det_ids[0], "BioCLIP", "fp-cached",
                              prediction_count=1)
 
     coll_id = db.add_collection(
@@ -7961,7 +7961,7 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
         det_id, species="Western Cattle-Egret", confidence=0.9,
         model="timm-inat21", labels_fingerprint="fp-cached",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det_id, "timm-inat21", "fp-cached", prediction_count=1,
     )
     coll_id = db.add_collection(
@@ -8075,7 +8075,7 @@ def test_finalize_cached_only_includes_zero_confidence_full_image_anchor(
         det_id, species="Full-image Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-cached",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
     collection_id = db.add_collection(
@@ -8131,7 +8131,7 @@ def test_finalize_cached_only_treats_null_category_as_animal(
         detection_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-cached",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         detection_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
     db.conn.commit()
@@ -8196,7 +8196,7 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
         det_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-cached",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
     coll_id = db.add_collection(
@@ -8308,12 +8308,12 @@ def test_cached_only_path_publishes_source_when_peek_fails(
         det_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-cached",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
     # Populate the sidecar as the original run would have — this is the
     # provenance the cached-only fallback recovers from.
-    db.upsert_labels_fingerprint(
+    db.model_runs.upsert_labels_fingerprint(
         fingerprint="fp-cached",
         display_name="California, US Birds",
         sources=["/imported/california.txt"],
@@ -8390,7 +8390,7 @@ def test_describe_cached_label_source_falls_back_when_no_sidecar(
         det_id, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-orphan",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-orphan", prediction_count=1,
     )
     # Deliberately NO upsert_labels_fingerprint call — the sidecar is empty.
@@ -8442,7 +8442,7 @@ def test_describe_cached_label_source_skips_ineligible_runs(
         eligible_det, species="Robin", confidence=0.9,
         model="BioCLIP", labels_fingerprint="fp-eligible",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         eligible_det, "BioCLIP", "fp-eligible", prediction_count=1,
     )
 
@@ -8455,28 +8455,28 @@ def test_describe_cached_label_source_skips_ineligible_runs(
         ineligible_det, species="Sparrow", confidence=0.5,
         model="BioCLIP", labels_fingerprint="fp-below-threshold",
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         ineligible_det, "BioCLIP", "fp-below-threshold", prediction_count=1,
     )
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         eligible_det, "BioCLIP", "fp-torn", prediction_count=1,
     )
 
     # Populate only the sidecar for the fingerprint that should win.
-    db.upsert_labels_fingerprint(
+    db.model_runs.upsert_labels_fingerprint(
         fingerprint="fp-eligible",
         display_name="California",
         sources=["/imported/california.txt"],
         label_count=1327,
     )
     # And a decoy for the fingerprint that MUST NOT be reported.
-    db.upsert_labels_fingerprint(
+    db.model_runs.upsert_labels_fingerprint(
         fingerprint="fp-below-threshold",
         display_name="Should-not-appear",
         sources=["/imported/should-not-appear.txt"],
         label_count=42,
     )
-    db.upsert_labels_fingerprint(
+    db.model_runs.upsert_labels_fingerprint(
         fingerprint="fp-torn",
         display_name="Also-should-not-appear",
         sources=["/imported/also-should-not-appear.txt"],
@@ -8522,7 +8522,7 @@ def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
     ], detector_model="megadetector-v6")[0]
     db.add_prediction(det_id, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="fp-cached")
-    db.record_classifier_run(det_id, "BioCLIP", "fp-cached",
+    db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                              prediction_count=1)
 
     coll_id = db.add_collection(
@@ -8594,7 +8594,7 @@ def test_run_classify_job_rejects_unknown_model_id_before_cache_shortcut(
     # ``desired_classifier_model`` would fall back to None.
     db.add_prediction(det_id, species="Robin", confidence=0.9,
                       model="SomeOtherModel", labels_fingerprint="fp-x")
-    db.record_classifier_run(det_id, "SomeOtherModel", "fp-x",
+    db.model_runs.record_classifier_run(det_id, "SomeOtherModel", "fp-x",
                              prediction_count=1)
 
     coll_id = db.add_collection(
@@ -8667,7 +8667,7 @@ def test_run_classify_job_reconciles_group_metadata_on_reuse(
     for det_id in (det_a, det_b):
         db.add_prediction(det_id, species="Robin", confidence=0.9,
                           model="BioCLIP", labels_fingerprint="fp-cached")
-        db.record_classifier_run(det_id, "BioCLIP", "fp-cached",
+        db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                                  prediction_count=1)
 
     coll_id = db.add_collection(

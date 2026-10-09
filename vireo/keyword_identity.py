@@ -1264,7 +1264,7 @@ def merge_keywords(db, keyword_ids, target_id, preview_token, overrides=None):
                 if not any(keyword_match_key(r['name']) == keyword_match_key(old_name) for r in still_used):
                     db.queue_change(pid, 'keyword_remove_flat', old_name, workspace_id=ws, _commit=False)
             db.remove_pending_changes(pid, 'keyword_remove', resolved['name'], workspace_id=ws, _commit=False)
-            db.clear_equivalent_flat_removals(
+            db.pending_changes.clear_equivalent_flat_removals(
                 [{'photo_id': pid, 'change_type': 'keyword_remove_flat', 'value': resolved['name']}], _commit=False,
             )
             _queue_merge_keyword_add(db, pid, ws, target_id, resolved['name'], resolved['type'],
@@ -1400,7 +1400,7 @@ def _queue_merge_keyword_add(db, photo_id, workspace_id, keyword_id, name, keywo
                 # A failed config read must not silently transfer ownership.
                 # The surrounding merge transaction rolls back on failure.
                 settings['global'] = cfg.load_strict()
-            workspace = db.get_workspace(workspace_id)
+            workspace = db.workspaces.get(workspace_id)
             overrides = json.loads(workspace['config_overrides'] or '{}') if workspace else {}
             if not isinstance(overrides, dict):
                 overrides = {}

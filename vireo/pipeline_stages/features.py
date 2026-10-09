@@ -762,7 +762,7 @@ class _MaskPass:
                 #     don't collide, BUT both runs denormalise into
                 #     the same ``photos`` row via
                 #     ``set_active_mask_variant`` and
-                #     ``update_photo_embeddings``. Their writes can
+                #     ``masks_features.update_embeddings``. Their writes can
                 #     interleave, leaving photos.active_mask_variant
                 #     pointing at one variant while photos.dino_*
                 #     embeddings were cropped from the other's mask.
@@ -946,7 +946,7 @@ class _MaskPass:
         SAM + DINOv2 work.
         """
         entry = item.entry
-        item.existing = existing = self.thread_db.get_photo_mask(
+        item.existing = existing = self.thread_db.masks_features.get_mask(
             item.photo_id, self.sam2_variant,
         )
         if existing is None:
@@ -980,7 +980,7 @@ class _MaskPass:
         # dino_embedding_variant already match; else
         # fall through to the full recompute, which
         # writes set_active_mask_variant +
-        # update_photo_embeddings together.
+        # masks_features.update_embeddings together.
         # Subject switching (subjects.sync_primary)
         # clears both active_mask_variant AND
         # dino_subject_embedding atomically inside
@@ -1109,7 +1109,7 @@ class _MaskPass:
             ),
         )
         mask_path = item.mask_file_stage.final_path
-        thread_db.upsert_photo_mask(
+        thread_db.masks_features.upsert_mask(
             photo_id=photo_id,
             variant=self.sam2_variant,
             path=mask_path,
@@ -1142,14 +1142,14 @@ class _MaskPass:
         # set_active_mask_variant above, so they are
         # intentionally NOT passed here.
         if features:
-            thread_db.update_photo_pipeline_features(
+            thread_db.masks_features.update_pipeline_features(
                 photo_id, **features, _commit=False,
             )
         if analysis_report is not None:
-            thread_db.save_subject_raw_analysis(
+            thread_db.masks_features.save_subject_raw_analysis(
                 entry["detection_id"], analysis_report, _commit=False,
             )
-        thread_db.update_photo_embeddings(
+        thread_db.masks_features.update_embeddings(
             photo_id,
             dino_subject_embedding=subj_emb_blob,
             dino_global_embedding=global_emb_blob,

@@ -384,7 +384,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
     """
     from scanner import EMPTY_FILE_SHA256, compute_file_hash
 
-    photos = db.get_integrity_photos()
+    photos = db.audit.get_integrity_photos()
     total = len(photos)
     stats = {
         "checked": 0, "ok": 0, "baselined": 0, "modified": 0,
@@ -412,7 +412,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
         try:
             actual = compute_file_hash(path)
         except OSError:
-            db.update_photo_hash_check(photo["id"], "unreadable",
+            db.audit.update_photo_hash_check(photo["id"], "unreadable",
                                        commit=False)
             stats["checked"] += 1
             stats["unreadable"] += 1
@@ -426,13 +426,13 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
             # other zero-byte image in the archive. Mark the row "ok"
             # without writing file_hash so its NULL state survives audits.
             if actual == EMPTY_FILE_SHA256:
-                db.update_photo_hash_check(photo["id"], "ok", commit=False)
+                db.audit.update_photo_hash_check(photo["id"], "ok", commit=False)
             else:
-                db.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
+                db.audit.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
                                            commit=False)
             stats["baselined"] += 1
         elif actual == photo["file_hash"]:
-            db.update_photo_hash_check(photo["id"], "ok", commit=False)
+            db.audit.update_photo_hash_check(photo["id"], "ok", commit=False)
             stats["ok"] += 1
         else:
             try:
@@ -450,7 +450,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
                 status = "modified"
             else:
                 status = "corrupt"
-            db.update_photo_hash_check(photo["id"], status, commit=False)
+            db.audit.update_photo_hash_check(photo["id"], status, commit=False)
             stats[status] += 1
 
         if (i + 1) % 100 == 0:
@@ -466,14 +466,14 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
         stats["cancelled"] = True
     if not stats["cancelled"]:
         problems = stats["modified"] + stats["corrupt"] + stats["unreadable"]
-        db.record_audit_run("integrity", problems)
+        db.audit.record_run("integrity", problems)
         # This walk just applied the orphans check's exact predicate to
         # its exact population, so record that result too. Missing files
         # stay under the orphans check (where the UI offers the right
         # remediation) instead of inflating the integrity count, and a
         # stale clean orphans verdict can't keep the banner green after
         # this run saw a missing file.
-        db.record_audit_run("orphans", stats["missing"])
+        db.audit.record_run("orphans", stats["missing"])
 
     log.info(
         "Hash verification: %d checked, %d ok, %d baselined, %d modified, "
@@ -493,8 +493,8 @@ def check_integrity(db):
     without paying for a full re-hash.
     """
     return {
-        "flagged": db.get_integrity_flagged(),
-        "stats": db.get_integrity_stats(),
+        "flagged": db.audit.get_integrity_flagged(),
+        "stats": db.audit.get_integrity_stats(),
     }
 
 
@@ -536,9 +536,9 @@ def accept_current_hash(db, photo_ids):
         except OSError:
             file_size = None
         if new_hash == EMPTY_FILE_SHA256 and file_size == 0:
-            db.update_photo_hash_check(pid, "ok", clear_file_hash=True)
+            db.audit.update_photo_hash_check(pid, "ok", clear_file_hash=True)
         else:
-            db.update_photo_hash_check(pid, "ok", file_hash=new_hash)
+            db.audit.update_photo_hash_check(pid, "ok", file_hash=new_hash)
         accepted += 1
     log.info("Accepted current hash for %d photos", accepted)
     return accepted
@@ -567,8 +567,8 @@ def build_summary(db):
     verdict is — the green light means "verified, at these times", never
     "no evidence of problems".
     """
-    runs = db.get_audit_runs()
-    stats = db.get_integrity_stats()
+    runs = db.audit.get_runs()
+    stats = db.audit.get_integrity_stats()
     missing_folders = db.get_missing_folders()
 
     checks = {}
@@ -718,7 +718,7 @@ def confirmed_orphan_ids(db, photo_ids):
     import stat
 
     confirmed = []
-    for pid in db.filter_photo_ids_in_workspace(photo_ids):
+    for pid in db.photo_visibility.visible_photo_ids(photo_ids):
         row = db.conn.execute(
             "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
             (pid,),

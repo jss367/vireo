@@ -8,11 +8,20 @@ repository owns the SQL those steps read and write, plus the reads the
 candidates, the disk-cleanup summary). Every method is catalog-wide
 (photos are global), so it takes no workspace id.
 
+Callers reach it as ``db.duplicates`` (a fresh repository per access, see
+``Database.duplicates``); the reads and ``reopen`` have no forwarding
+wrappers on ``Database``. Resolution goes through ``Database``
+(``apply_duplicate_resolution`` and friends), not the plan and ``reject``
+methods here.
+
 Not to be confused with the top-level ``duplicates`` module, the pure
 resolver this repository feeds.
 """
 
 import os
+import sqlite3
+from collections.abc import Iterable
+from typing import Any
 
 from keyword_identity import embedded_keyword_associations_for_merge
 from sql_chunks import chunked
@@ -54,17 +63,17 @@ def _volume_offline(path):
 
 
 class DuplicatesRepository:
-    def __init__(self, conn, *, chunk_size=800):
+    def __init__(self, conn: sqlite3.Connection, *, chunk_size: int = 800) -> None:
         self.conn = conn
         self.chunk_size = chunk_size
 
-    def transaction(self):
+    def transaction(self) -> sqlite3.Connection:
         """The connection as a context manager: commit on success, roll back on error."""
         return self.conn
 
     # -- groups -------------------------------------------------------------
 
-    def is_group_member(self, photo_id):
+    def is_group_member(self, photo_id: int) -> bool:
         """Whether ``photo_id`` shares its ``file_hash`` with another photo.
 
         Counts rejected rows too, so the members of an already-resolved
@@ -78,7 +87,7 @@ class DuplicatesRepository:
         ).fetchone()
         return row is not None
 
-    def workspace_names(self, photo_ids):
+    def workspace_names(self, photo_ids: Iterable[int]) -> dict[int, list[str]]:
         """Return ``{photo_id: [workspace name, ...]}`` for the ids given.
 
         Names come back sorted; a photo no workspace shows maps to ``[]``.
@@ -100,7 +109,7 @@ class DuplicatesRepository:
                 names[r["photo_id"]].append(r["name"])
         return names
 
-    def live_ids_for_hash(self, file_hash):
+    def live_ids_for_hash(self, file_hash: str) -> list[int]:
         """Return the ids of non-rejected photos with ``file_hash``."""
         dup_rows = self.conn.execute(
             "SELECT id FROM photos WHERE file_hash = ? AND (flag IS NULL OR flag != 'rejected')",
@@ -108,7 +117,7 @@ class DuplicatesRepository:
         ).fetchall()
         return [r["id"] for r in dup_rows]
 
-    def live_paths_for_hash(self, file_hash):
+    def live_paths_for_hash(self, file_hash: str) -> list[sqlite3.Row]:
         """Rows (``filename``, ``path``) of the non-rejected photos with ``file_hash``.
 
         Inner-joins ``folders``, so a photo whose folder row is gone is absent.
@@ -119,7 +128,7 @@ class DuplicatesRepository:
             (file_hash,),
         ).fetchall()
 
-    def loser_candidate_rows(self, photo_ids):
+    def loser_candidate_rows(self, photo_ids: Iterable[int]) -> dict[int, sqlite3.Row]:
         """``{photo_id: row}`` for the named photos that exist.
 
         Each row is ``id``, ``flag``, ``file_hash``, ``filename`` and
@@ -141,7 +150,7 @@ class DuplicatesRepository:
                 rows_by_id[r["id"]] = r
         return rows_by_id
 
-    def loser_disk_summary(self):
+    def loser_disk_summary(self) -> sqlite3.Row:
         """Row (``n``, ``total_bytes``): rejected photos whose hash a kept photo shares.
 
         ``total_bytes`` sums their stored ``file_size`` (0 when there are none).
@@ -159,8 +168,49 @@ class DuplicatesRepository:
             """
         ).fetchone()
 
-    def find_groups(self, include_resolved=False):
-        """Return duplicate groups; see ``Database.find_duplicate_groups``.
+    def cleanup_rows(self) -> list[sqlite3.Row]:
+        """Current rejected copies and all their kept anchors, without disk I/O.
+
+        Uses the same eligibility as ``loser_disk_summary``, including hashes
+        with several kept copies. A single statement keeps the members and
+        their flags consistent if another request resolves a group meanwhile.
+        """
+        return self.conn.execute(
+            """
+            SELECT p.id, p.filename, p.file_hash, p.file_mtime, p.rating,
+                   p.file_size, p.flag, f.path AS folder_path
+            FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
+            WHERE p.file_hash IN (
+                SELECT r.file_hash FROM photos r
+                WHERE r.flag = 'rejected' AND r.file_hash IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM photos k WHERE k.file_hash = r.file_hash
+                      AND (k.flag IS NULL OR k.flag != 'rejected')
+                  )
+            )
+            ORDER BY p.file_hash, p.id
+            """
+        ).fetchall()
+
+    def find_groups(self, include_resolved: bool = False) -> list[dict[str, Any]]:
+        """Return duplicate groups for the duplicate-scan job.
+
+        Each group is ``{file_hash, photo_ids: [...], status}`` where
+        ``status`` is either ``'unresolved'`` (2+ non-rejected rows; user
+        action needed to pick a winner) or ``'resolved'`` (exactly one
+        non-rejected row plus one or more rejected rows sharing the hash;
+        the auto-resolver already handled it during scan, but the loser
+        files may still be on disk; these also carry ``winner_id``).
+
+        ``include_resolved=False`` (the default) returns only unresolved
+        groups, preserving the legacy contract for callers that want
+        actionable items. Pass True from the duplicates page to surface
+        already-handled pairs so the user can clean up loser files from
+        disk — those pairs are otherwise invisible.
+
+        ``photo_ids`` includes both the kept and the rejected rows for
+        resolved groups; downstream code disambiguates by re-querying
+        ``flag`` per row.
 
         Finds the shared hashes on the covering ``file_hash`` index first and
         reads ``flag`` only for their rows: a ``GROUP BY`` over every photo
@@ -215,12 +265,14 @@ class DuplicatesRepository:
                 })
         return unresolved + resolved
 
-    def reopen(self, file_hash):
+    def reopen(self, file_hash: str) -> int:
         """Un-reject the rows with ``file_hash`` that the duplicate resolver
-        rejected; return the count.
+        rejected (in its own transaction); return the count.
 
-        Rows the user rejected by hand (no ``duplicate_rejections`` row)
-        stay rejected.
+        Used by the duplicate scan when the kept file has gone missing on
+        disk but a rejected sibling still exists, so the next proposal pass
+        can promote the survivor. Rows the user rejected by hand (no
+        ``duplicate_rejections`` row) stay rejected.
         """
         with self.conn:
             cur = self.conn.execute(
@@ -300,7 +352,7 @@ class DuplicatesRepository:
         # row wins by path/mtime and its file was actually deleted while
         # the volume was down, ``apply_duplicate_resolution`` would reject
         # the only reachable copy and stamp a ``duplicate_rejections`` row
-        # that ``reopen_duplicate_group`` would then un-reject only after
+        # that ``reopen`` would then un-reject only after
         # the volume returns and the scan re-runs. Defer instead and let
         # the interactive duplicate scan surface the group; that scan
         # treats offline as "state unknown" for the user to resolve.

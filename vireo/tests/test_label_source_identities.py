@@ -51,7 +51,7 @@ def legacy_list(tmp_path, monkeypatch, db):
     }))
     labels = load_merged_labels([{"labels_file": str(path)}])
     fingerprint = compute_fingerprint(labels)
-    db.upsert_labels_fingerprint(fingerprint, path.name, [str(path)], len(labels))
+    db.model_runs.upsert_labels_fingerprint(fingerprint, path.name, [str(path)], len(labels))
     return {"path": path, "fingerprint": fingerprint}
 
 
@@ -242,7 +242,7 @@ def test_a_list_classified_before_merging_folded_case_variants_is_matched(db, tm
     path.write_text("Mallard\nRedhead\nredhead\n", encoding="utf-8")
     as_read = compute_fingerprint(read_label_file(str(path)))
     assert as_read != compute_fingerprint(load_merged_labels([{"labels_file": str(path)}]))
-    db.upsert_labels_fingerprint(as_read, path.name, [str(path)], 3)
+    db.model_runs.upsert_labels_fingerprint(as_read, path.name, [str(path)], 3)
     det = _detection(db, tmp_path, "duck.jpg")
     db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=as_read)
 
@@ -451,7 +451,7 @@ def test_failed_pending_list_defers_legacy_consensus_until_retry(db, tmp_path, l
         "name": "Europe", "labels_file": str(path), "place_id": 1, "taxon_groups": ["birds"],
     }))
     fingerprint = compute_fingerprint(load_merged_labels([{"labels_file": str(path)}]))
-    db.upsert_labels_fingerprint(fingerprint, path.name, [str(path)], 1)
+    db.model_runs.upsert_labels_fingerprint(fingerprint, path.name, [str(path)], 1)
     old = _detection(db, tmp_path, "old.jpg")
     db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
     current = _detection(db, tmp_path, "current.jpg")

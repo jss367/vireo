@@ -20,6 +20,7 @@ jobs:
       python: ${{ steps.filter.outputs.python }}
       website: ${{ steps.filter.outputs.website }}
       build: ${{ steps.filter.outputs.build }}
+      native: ${{ steps.filter.outputs.native }}
       full: ${{ steps.filter.outputs.full }}
 
     steps:
@@ -60,6 +61,7 @@ jobs:
             // can alter every test; ``test-main.yml`` publishes the map.
             const python = full || touchesTestWorkflow || paths.some((path) =>
               path.startsWith("vireo/") ||
+              path.startsWith("native/detail/") ||
               path.startsWith("tests/") ||
               path.startsWith(".github/actions/") ||
               path === ".github/workflows/pr-agent.yml" ||
@@ -83,9 +85,21 @@ jobs:
               path === ".github/workflows/build-release.yml"
             );
 
+            const native = full || touchesTestWorkflow || paths.some((path) =>
+              path.startsWith("native/detail/") ||
+              path.startsWith("vireo/data/native-detail/") ||
+              ["vireo/detail.py", "vireo/detail_backend.py", "vireo/float_image.py",
+               "vireo/image_edits.py", "vireo/web/media.py",
+               "vireo/tests/test_native_detail.py", "vireo/tests/test_detail.py",
+               "vireo/tests/test_preview_workers.py", "scripts/build_sidecar.py",
+               "scripts/smoke_native_detail.py", "pyproject.toml", "MANIFEST.in",
+               ".github/workflows/build-release.yml"].includes(path)
+            );
+
             core.setOutput("python", String(python));
             core.setOutput("website", String(website));
             core.setOutput("build", String(build));
+            core.setOutput("native", String(native));
             core.setOutput("full", String(full));
 
             await core.summary
@@ -93,6 +107,7 @@ jobs:
               .addList([
                 `Python tests: ${python ? (full ? "run (full suite, ci-full-suite label)" : "run (impact-selected subset)") : "skip"}`,
                 `Website build: ${website ? "run" : "skip"}`,
+                `Native photo filters: ${native ? "run" : "skip"}`,
                 `Build-only paths changed: ${build ? "yes" : "no"}`,
               ])
               .write();
@@ -231,7 +246,7 @@ jobs:
   # require, independent of which jobs run above. This job collapses every
   # required validation into one stable ``test`` check.
   test:
-    needs: [unit, lint, frontend, e2e-smoke, rust, performance]
+    needs: [unit, lint, frontend, e2e-smoke, rust, native-detail, performance]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -246,6 +261,7 @@ jobs:
             'frontend=${{ needs.frontend.result }}' \
             'e2e-smoke=${{ needs.e2e-smoke.result }}' \
             'rust=${{ needs.rust.result }}' \
+            'native-detail=${{ needs.native-detail.result }}' \
             'performance=${{ needs.performance.result }}'; do
             echo "$check"
             if [ "${check#*=}" != "success" ]; then failures=1; fi
@@ -387,6 +403,50 @@ jobs:
       - name: Run Rust tests
         if: needs.changes.outputs.build == 'true'
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  native-detail:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    needs: changes
+    timeout-minutes: 20
+    steps:
+      - name: Skip native detail checks
+        if: needs.changes.outputs.native != 'true'
+        run: echo "No native filters or Python application files changed."
+      - uses: actions/checkout@v5
+        if: needs.changes.outputs.native == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        if: needs.changes.outputs.native == 'true'
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+        if: needs.changes.outputs.native == 'true'
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.native == 'true'
+        with:
+          workspaces: native/detail
+      - name: Build native filters
+        if: needs.changes.outputs.native == 'true'
+        run: pip install -e ".[dev]" "pyinstaller>=6.15"
+      - name: Require the native extension and check Rust
+        if: needs.changes.outputs.native == 'true'
+        run: |
+          python -c "from vireo._native_detail import Filters; Filters(2)"
+          cargo fmt --manifest-path native/detail/Cargo.toml --all -- --check
+          cargo clippy --manifest-path native/detail/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Verify fidelity, CPU allocation, and preview supervision
+        if: needs.changes.outputs.native == 'true'
+        run: python -m pytest -q vireo/tests/test_native_detail.py vireo/tests/test_detail.py vireo/tests/test_preview_workers.py
+      - name: Verify frozen native-filter loading
+        if: needs.changes.outputs.native == 'true'
+        run: python scripts/smoke_native_detail.py
 
   performance:
     runs-on: ubuntu-latest

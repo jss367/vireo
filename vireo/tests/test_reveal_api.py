@@ -3,6 +3,8 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _expected_full_path(db, pid):
     """Resolve the on-disk path the endpoint will build for a given photo id."""
@@ -322,3 +324,46 @@ def test_reveal_folder_outside_active_workspace_returns_404(app_and_db):
     with app.test_client() as c:
         resp = c.post("/api/files/reveal", json={"folder_id": other_fid})
         assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_reveal_duplicate_outside_workspace(app_and_db, rejected):
+    """Both unresolved and rejected copies shown in Duplicates can be revealed."""
+    app, db = app_and_db
+    default_ws = db.active_workspace_id
+    fid = db.add_folder('/photos/duplicates')
+    db.add_photo(folder_id=fid, filename='kept.jpg', extension='.jpg',
+                 file_size=10, file_mtime=1.0, file_hash='REVEAL_DUPLICATE')
+    db.set_active_workspace(db.create_workspace("Other"))
+    other_fid = db.add_folder('/other/duplicates')
+    pid = db.add_photo(folder_id=other_fid, filename='copy.jpg', extension='.jpg',
+                       file_size=10, file_mtime=1.0, file_hash='REVEAL_DUPLICATE')
+    db.photo_review.set_flag(pid, 'rejected' if rejected else 'none')
+    db.set_active_workspace(default_ws)
+
+    with app.test_client() as c, \
+         patch("web.system.sys.platform", "darwin"), \
+         patch("web.system.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0)
+        assert c.post("/api/files/reveal", json={"photo_id": pid}).status_code == 404
+        run.assert_not_called()
+        resp = c.post("/api/files/reveal", json={"photo_id": pid, "scope": "duplicates"})
+        assert resp.status_code == 200
+        assert resp.get_json()["ok"] is True
+        assert run.call_args.args[0] == ["open", "-R", "--", os.path.join('/other/duplicates', 'copy.jpg')]
+
+
+def test_reveal_duplicate_scope_rejects_nonmember(app_and_db):
+    """The duplicate scope cannot reveal arbitrary photos by guessing IDs."""
+    app, db = app_and_db
+    default_ws = db.active_workspace_id
+    db.set_active_workspace(db.create_workspace("Other"))
+    fid = db.add_folder('/other/private')
+    pid = db.add_photo(folder_id=fid, filename='hidden.jpg', extension='.jpg',
+                       file_size=10, file_mtime=1.0, file_hash='UNIQUE_REVEAL')
+    db.set_active_workspace(default_ws)
+    with app.test_client() as c, patch("web.system.subprocess.run") as run:
+        for photo_id in (pid, 999999):
+            resp = c.post("/api/files/reveal", json={"photo_id": photo_id, "scope": "duplicates"})
+            assert resp.status_code == 404
+        run.assert_not_called()

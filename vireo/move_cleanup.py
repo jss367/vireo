@@ -106,7 +106,7 @@ def _folder_owned_elsewhere(db, folder):
         from move import _path_equal_or_descends
     if folder["id"] is not None and any(
         workspace["id"] != db.active_workspace_id
-        for workspace in db.get_folder_workspaces(folder["id"])
+        for workspace in db.workspace_folders.list_workspaces_for_folder(folder["id"])
     ):
         return True
     # The database accessor above uses stored path strings. Also cover physical
@@ -116,7 +116,7 @@ def _folder_owned_elsewhere(db, folder):
         "JOIN folders f ON f.id = wf.folder_id "
         "WHERE wf.is_root = 1 AND wf.workspace_id IS NOT ?", (db.active_workspace_id,),
     ):
-        if folder["id"] in db._removed_workspace_folder_ids(root["workspace_id"]):
+        if folder["id"] in db.workspace_folders.removed_ids(root["workspace_id"]):
             continue
         if _path_equal_or_descends(folder["path"], root["path"], case_insensitive_root=None):
             return True

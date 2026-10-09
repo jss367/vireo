@@ -39,7 +39,7 @@ def _add_photo_with_detection(db, folder_id, filename, conf=0.9,
 
 
 def _mark_sam_done(db, photo_id, path, variant="sam2-small"):
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         photo_id, variant, path,
         detector_model="megadetector-v6",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -213,10 +213,10 @@ def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
         folder_id=folder_id, filename="empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.record_detector_run(pid_empty, "megadetector-v6", box_count=0)
+    db.model_runs.record_detector_run(pid_empty, "megadetector-v6", box_count=0)
 
     pid_weak, _ = _add_photo_with_detection(db, folder_id, "weak.jpg", conf=0.05)
-    db.record_detector_run(pid_weak, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(pid_weak, "megadetector-v6", box_count=1)
 
     assert db.count_full_image_fallback_photos() == 1
     assert db.count_full_image_classify_pending_pairs("BioCLIP-2", "fp1") == 1
@@ -229,7 +229,7 @@ def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
     )[0]
     assert db.count_full_image_classify_pending_pairs("BioCLIP-2", "fp1") == 1
 
-    db.record_classifier_run(full_det_id, "BioCLIP-2", "fp1", prediction_count=1)
+    db.model_runs.record_classifier_run(full_det_id, "BioCLIP-2", "fp1", prediction_count=1)
     # ``count_classifier_runs`` (via ``get_classifier_run_cache_hits``)
     # requires a real prediction alongside the run row so it matches what
     # the classify runtime actually cache-serves; a bare
@@ -261,17 +261,17 @@ def test_full_image_fallback_counts_noise_only_boxes_at_workspace_floor(
         folder_id=folder_id, filename="empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.record_detector_run(pid_empty, "megadetector-v6", box_count=0)
+    db.model_runs.record_detector_run(pid_empty, "megadetector-v6", box_count=0)
 
     pid_noise, _ = _add_photo_with_detection(
         db, folder_id, "noise.jpg", conf=0.05,
     )
-    db.record_detector_run(pid_noise, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(pid_noise, "megadetector-v6", box_count=1)
 
     pid_real, _ = _add_photo_with_detection(
         db, folder_id, "real.jpg", conf=0.9,
     )
-    db.record_detector_run(pid_real, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(pid_real, "megadetector-v6", box_count=1)
 
     # Default min_conf=0 preserves the pre-noise-fallback semantics: only
     # the truly empty run qualifies.
@@ -290,7 +290,7 @@ def test_full_image_fallback_counts_reject_torn_detector_run(tmp_path):
         folder_id=folder_id, filename="torn.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.record_detector_run(photo_id, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=1)
 
     assert db.count_full_image_fallback_photos(min_conf=0.2) == 0
     assert db.count_full_image_classify_pending_pairs(
@@ -310,7 +310,7 @@ def test_classify_plan_excludes_stale_runtime_noise_fallback(
     photo_id, _ = _add_photo_with_detection(
         db, folder_id, "stale-noise.jpg", conf=0.05,
     )
-    db.record_detector_run(
+    db.model_runs.record_detector_run(
         photo_id, "megadetector-v6", box_count=1,
         runtime_fingerprint="old-runtime",
     )
@@ -349,10 +349,10 @@ def test_count_classify_pending_excludes_recorded_runs(tmp_path):
     # Both pending against (BioCLIP-2, fp1)
     assert db.count_classify_pending_pairs("BioCLIP-2", "fp1") == 2
 
-    db.record_classifier_run(did_a, "BioCLIP-2", "fp1", prediction_count=1)
+    db.model_runs.record_classifier_run(did_a, "BioCLIP-2", "fp1", prediction_count=1)
     assert db.count_classify_pending_pairs("BioCLIP-2", "fp1") == 1
 
-    db.record_classifier_run(did_b, "BioCLIP-2", "fp1", prediction_count=1)
+    db.model_runs.record_classifier_run(did_b, "BioCLIP-2", "fp1", prediction_count=1)
     assert db.count_classify_pending_pairs("BioCLIP-2", "fp1") == 0
 
     # A different (model, fp) must NOT see those rows as done — adding a
@@ -374,8 +374,8 @@ def test_count_classify_stale_zero_when_current_run_present(tmp_path):
     from labels_fingerprint import TOL_SENTINEL
     db, folder_id = _make_db(tmp_path)
     _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
-    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
     assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 0
 
 
@@ -385,7 +385,7 @@ def test_count_classify_stale_counts_old_only_runs(tmp_path):
     from labels_fingerprint import TOL_SENTINEL
     db, folder_id = _make_db(tmp_path)
     _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
-    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
     assert db.count_classify_stale("BioCLIP-2", TOL_SENTINEL) == 1
 
 
@@ -411,8 +411,8 @@ def test_primary_classify_counts_ignore_secondary_detections(tmp_path):
         ],
         detector_model="megadetector-v6",
     )
-    db.record_classifier_run(det_ids[0], "BioCLIP-2", "fp1", prediction_count=1)
-    db.record_classifier_run(det_ids[1], "BioCLIP-2", "fp_old", prediction_count=1)
+    db.model_runs.record_classifier_run(det_ids[0], "BioCLIP-2", "fp1", prediction_count=1)
+    db.model_runs.record_classifier_run(det_ids[1], "BioCLIP-2", "fp_old", prediction_count=1)
 
     assert db.count_real_detections_in_scope()["total_dets"] == 2
     assert db.count_primary_detections_in_scope()["total_dets"] == 1
@@ -435,7 +435,7 @@ def test_primary_classify_counts_ignore_confident_non_animal_boxes(
           "confidence": 0.95, "category": "person"}],
         detector_model="megadetector-v6",
     )
-    db.record_detector_run(photo_id, "megadetector-v6", box_count=1)
+    db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=1)
 
     assert db.count_primary_detections_in_scope()["total_dets"] == 0
     assert db.count_primary_classify_pending_pairs("BioCLIP-2", "fp1") == 0
@@ -484,7 +484,7 @@ def test_count_photos_pending_masks_is_variant_aware(tmp_path):
     p1, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
     p2, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
     for pid in (p1, p2):
-        db.upsert_photo_mask(
+        db.masks_features.upsert_mask(
             pid, "sam2-large", f"/m/{pid}.large.png",
             detector_model="megadetector-v6",
             prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -502,7 +502,7 @@ def test_count_photos_pending_masks_selected_variant_requires_cache_row(tmp_path
     p_done, _ = _add_photo_with_detection(db, folder_id, "done.jpg")
     p_legacy, _ = _add_photo_with_detection(db, folder_id, "legacy.jpg")
 
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         p_done, "sam2-small", "/m/done.small.png",
         detector_model="megadetector-v6",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -551,7 +551,7 @@ def test_extract_plan_warns_when_other_sam_variant_has_coverage(tmp_path):
     p1, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
     p2, _ = _add_photo_with_detection(db, folder_id, "b.jpg")
     for pid in (p1, p2):
-        db.upsert_photo_mask(
+        db.masks_features.upsert_mask(
             pid, "sam2-large", f"/m/{pid}.large.png",
             detector_model="megadetector-v6",
             prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -777,7 +777,7 @@ def test_count_eye_keypoint_eligible_ignores_stale_masks(tmp_path):
     # change or a subject-choice override) after an earlier extraction:
     # the photos row keeps pointing at the old variant, and only the
     # count query's prompt join catches it.
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         pid, "sam2-small", "/m/a.png",
         detector_model="megadetector-v6",
         prompt_x=0.9, prompt_y=0.9, prompt_w=0.05, prompt_h=0.05,
@@ -1027,7 +1027,7 @@ def test_classify_plan_done_prior_when_all_pairs_recorded(tmp_path, monkeypatch)
     # ~/.vireo/labels_active.json must not bleed into this test.
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
     classify = plan["stages"]["Classify"]
@@ -1060,7 +1060,7 @@ def test_classify_plan_timm_intrinsic_uses_runtime_fingerprint(
     # Label files do not apply to timm models; keep the environment out of it.
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
-    db.record_classifier_run(
+    db.model_runs.record_classifier_run(
         did, "iNat21 (EVA-02 Large)", TOL_SENTINEL, prediction_count=1,
     )
 
@@ -1107,7 +1107,7 @@ def test_classify_plan_counts_all_eligible_detections(tmp_path, monkeypatch, mod
     monkeypatch.setattr(models_mod, "get_active_model", lambda: models_mod.get_models()[0])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
-    db.record_classifier_run(det_ids[0], "BioCLIP-2", TOL_SENTINEL, 1)
+    db.model_runs.record_classifier_run(det_ids[0], "BioCLIP-2", TOL_SENTINEL, 1)
 
     plan = compute_plan(db, _params(model_ids=model_ids), str(tmp_path / "test.db"))
     classify = plan["stages"]["Classify"]
@@ -1139,7 +1139,7 @@ def test_classify_plan_will_run_when_new_model_added(tmp_path, monkeypatch):
          "weights_path": _tol_weights(tmp_path, "bioclip")},
     ])
     # Only m1 has been run — the new m2 has zero coverage.
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
     plan = compute_plan(
         db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
@@ -1164,7 +1164,7 @@ def test_classify_plan_reclassify_bypasses_cache(tmp_path, monkeypatch, raw_subj
          "model_type": "bioclip", "downloaded": True,
          "weights_path": _tol_weights(tmp_path)},
     ])
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
     plan = compute_plan(
         db,
@@ -1196,7 +1196,7 @@ def test_classify_plan_exposes_pending_and_eligible_done_prior(tmp_path, monkeyp
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
     plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
     detail = plan["stages"]["Classify"]["detail"]
@@ -1226,7 +1226,7 @@ def test_classify_plan_exposes_pending_and_eligible_will_run(tmp_path, monkeypat
     ])
     monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
     plan = compute_plan(
         db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
@@ -1250,7 +1250,7 @@ def test_classify_plan_exposes_pending_and_eligible_reclassify(tmp_path, monkeyp
          "model_type": "bioclip", "downloaded": True,
          "weights_path": _tol_weights(tmp_path)},
     ])
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
     plan = compute_plan(
         db,
@@ -1288,7 +1288,7 @@ def test_classify_plan_counts_full_image_fallback_pending(tmp_path, monkeypatch)
         folder_id=folder_id, filename="empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.record_detector_run(pid, "megadetector-v6", box_count=0)
+    db.model_runs.record_detector_run(pid, "megadetector-v6", box_count=0)
 
     import labels as labels_mod
     import models as models_mod
@@ -1319,14 +1319,14 @@ def test_classify_plan_done_prior_for_full_image_fallback(tmp_path, monkeypatch)
         folder_id=folder_id, filename="empty.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    db.record_detector_run(pid, "megadetector-v6", box_count=0)
+    db.model_runs.record_detector_run(pid, "megadetector-v6", box_count=0)
     full_det_id = db.save_detections(
         pid,
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
           "confidence": 0, "category": "animal"}],
         detector_model="full-image",
     )[0]
-    db.record_classifier_run(full_det_id, "BioCLIP-2", TOL_SENTINEL, 1)
+    db.model_runs.record_classifier_run(full_det_id, "BioCLIP-2", TOL_SENTINEL, 1)
 
     import labels as labels_mod
     import models as models_mod
@@ -1372,7 +1372,7 @@ def test_classify_plan_tracks_contextual_weak_crop_instead_of_fallback(
               "confidence": confidence, "category": "animal"}],
             detector_model="megadetector-v6",
         )[0]
-        db.record_detector_run(photo_id, "megadetector-v6", box_count=1)
+        db.model_runs.record_detector_run(photo_id, "megadetector-v6", box_count=1)
         detection_ids.append(detection_id)
 
     import labels as labels_mod
@@ -1394,7 +1394,7 @@ def test_classify_plan_tracks_contextual_weak_crop_instead_of_fallback(
     assert classify["detail"]["pending"] == 3
 
     for detection_id in detection_ids:
-        db.record_classifier_run(
+        db.model_runs.record_classifier_run(
             detection_id, "BioCLIP-2", TOL_SENTINEL, prediction_count=1,
         )
 
@@ -1631,7 +1631,7 @@ def test_classify_plan_exposes_pending_and_eligible_mixed_blocked_and_done(
     monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
     # m1 is fully cached under the TOL fallback. m2 is blocked (no labels,
     # not a TOL-supported model_str).
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=3)
 
     plan = compute_plan(
         db, _params(model_ids=["m1", "m2"]), str(tmp_path / "test.db"),
@@ -1663,7 +1663,7 @@ def test_classify_plan_emits_fingerprint_outdated_when_stale(
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
-    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
 
     import labels as labels_mod
     import models as models_mod
@@ -1691,7 +1691,7 @@ def test_classify_plan_no_outdated_flag_when_current(
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
 
     import labels as labels_mod
     import models as models_mod
@@ -1717,7 +1717,7 @@ def test_classify_plan_reclassify_suppresses_outdated(
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     _, did = _add_photo_with_detection(db, folder_id, "a.jpg")
-    db.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", "fp_old", prediction_count=1)
 
     import models as models_mod
     monkeypatch.setattr(models_mod, "get_models", lambda: [
@@ -1773,7 +1773,7 @@ def test_count_photos_missing_preview_basic(tmp_path):
         folder_id=folder_id, filename="b.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    db.preview_cache_insert(pid_a, 1920, 100)
+    db.caches.preview_insert(pid_a, 1920, 100)
     assert db.count_photos_missing_preview(1920) == {
         "eligible": 2, "pending": 1,
     }
@@ -1788,7 +1788,7 @@ def test_count_photos_missing_preview_size_specific(tmp_path):
         folder_id=folder_id, filename="a.jpg", extension=".jpg",
         file_size=1, file_mtime=1.0,
     )
-    db.preview_cache_insert(pid, 1280, 100)
+    db.caches.preview_insert(pid, 1280, 100)
     assert db.count_photos_missing_preview(1920) == {
         "eligible": 1, "pending": 1,
     }
@@ -1827,8 +1827,8 @@ def test_count_photos_missing_thumb_or_preview_union(tmp_path):
     )
     db.conn.commit()
     # a and c have a 1920px preview cached; b and d do not.
-    db.preview_cache_insert(pid_thumb_only_missing, 1920, 100)
-    db.preview_cache_insert(pid_both_done, 1920, 100)
+    db.caches.preview_insert(pid_thumb_only_missing, 1920, 100)
+    db.caches.preview_insert(pid_both_done, 1920, 100)
 
     # max(thumb_pending=2, preview_pending=2) = 2 — but the real union is
     # {a, b, d} = 3 photos the next run will touch.
@@ -1859,7 +1859,7 @@ def test_previews_plan_pending_uses_union_not_max(tmp_path):
         (pid_preview_only_missing,),
     )
     db.conn.commit()
-    db.preview_cache_insert(pid_thumb_only_missing, 1920, 100)
+    db.caches.preview_insert(pid_thumb_only_missing, 1920, 100)
 
     plan = compute_plan(
         db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
@@ -1890,8 +1890,8 @@ def test_previews_plan_done_prior_when_all_cached(tmp_path):
         (pid_a, pid_b),
     )
     db.conn.commit()
-    db.preview_cache_insert(pid_a, 1920, 100)
-    db.preview_cache_insert(pid_b, 1920, 100)
+    db.caches.preview_insert(pid_a, 1920, 100)
+    db.caches.preview_insert(pid_b, 1920, 100)
     plan = compute_plan(
         db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
     )
@@ -1921,7 +1921,7 @@ def test_previews_plan_will_run_with_pending_counts(tmp_path):
         "UPDATE photos SET thumb_path='done.jpg' WHERE id=?", (pid_done,),
     )
     db.conn.commit()
-    db.preview_cache_insert(pid_done, 1920, 100)
+    db.caches.preview_insert(pid_done, 1920, 100)
     plan = compute_plan(
         db, _params(preview_max_size=1920), str(tmp_path / "test.db"),
     )
@@ -1992,7 +1992,7 @@ def test_previews_plan_size_change_invalidates_done_prior(tmp_path):
         "UPDATE photos SET thumb_path='a.jpg' WHERE id=?", (pid,),
     )
     db.conn.commit()
-    db.preview_cache_insert(pid, 1280, 100)
+    db.caches.preview_insert(pid, 1280, 100)
     # 1280 selected → done-prior.
     plan_1280 = compute_plan(
         db, _params(preview_max_size=1280), str(tmp_path / "test.db"),
@@ -2054,7 +2054,7 @@ def test_extract_plan_done_prior_when_all_masks_present(tmp_path):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     pid, _ = _add_photo_with_detection(db, folder_id, "a.jpg")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         pid, "sam2-small", "/m/a.png",
         detector_model="megadetector-v6",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -2070,7 +2070,7 @@ def test_extract_plan_will_run_when_some_photos_missing_masks(tmp_path):
     from pipeline_plan import compute_plan
     db, folder_id = _make_db(tmp_path)
     pid_done, _ = _add_photo_with_detection(db, folder_id, "done.jpg")
-    db.upsert_photo_mask(
+    db.masks_features.upsert_mask(
         pid_done, "sam2-small", "/m/done.png",
         detector_model="megadetector-v6",
         prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
@@ -2578,7 +2578,7 @@ def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
     _mark_sam_done(db, pid, "/m/a.png")
     from labels_fingerprint import TOL_SENTINEL
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
 
     cache_path = os.path.join(
         str(tmp_path), f"pipeline_results_ws{db._active_workspace_id}.json",
@@ -2593,7 +2593,7 @@ def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path
     import config as cfg
     from pipeline import compute_group_fingerprint
     effective = db.get_effective_config(cfg.load())
-    db.set_workspace_group_state(
+    db.workspaces.set_group_state(
         db._active_workspace_id,
         fingerprint=compute_group_fingerprint(effective),
         when_ts=1714579200,
@@ -2648,7 +2648,7 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
     _mark_sam_done(db, pid, "/m/a.png")
     from labels_fingerprint import TOL_SENTINEL
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
 
     cache_path = os.path.join(
         str(tmp_path), f"pipeline_results_ws{db._active_workspace_id}.json",
@@ -2657,7 +2657,7 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
         f.write('{"photos": []}')
 
     # Stamp a deliberately mismatched fingerprint.
-    db.set_workspace_group_state(
+    db.workspaces.set_group_state(
         db._active_workspace_id,
         fingerprint="old-fingerprint-from-prior-settings",
         when_ts=1714579200,
@@ -2699,7 +2699,7 @@ def test_regroup_plan_will_run_when_eye_detect_override_differs_from_workspace(
     pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
     _mark_sam_done(db, pid, "/m/a.png")
     from labels_fingerprint import TOL_SENTINEL
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
 
     cache_path = os.path.join(
         str(tmp_path), f"pipeline_results_ws{db._active_workspace_id}.json",
@@ -2712,7 +2712,7 @@ def test_regroup_plan_will_run_when_eye_detect_override_differs_from_workspace(
     import config as cfg
     from pipeline import compute_group_fingerprint
     effective = db.get_effective_config(cfg.load())
-    db.set_workspace_group_state(
+    db.workspaces.set_group_state(
         db._active_workspace_id,
         fingerprint=compute_group_fingerprint(effective),
         when_ts=1714579200,
@@ -2771,7 +2771,7 @@ def test_regroup_plan_will_run_when_cache_exists_but_fingerprint_invalidated(
     db.conn.execute("UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,))
     db.conn.commit()
     from labels_fingerprint import TOL_SENTINEL
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
 
     # Cache file from a prior partial regroup write.
     cache_path = os.path.join(
@@ -2835,7 +2835,7 @@ def test_extract_plan_restores_normal_quality_only_in_selected_scope(tmp_path):
 
     db, folder_id = _make_db(tmp_path)
     photo_id, _ = _add_photo_with_detection(db, folder_id, "bird.jpg")
-    db.update_photo_pipeline_features(photo_id, quality_input_recipe="linear-raw-subject-v1")
+    db.masks_features.update_pipeline_features(photo_id, quality_input_recipe="linear-raw-subject-v1")
     params = PipelinePlanParams()
     config = {"sam2_variant": "sam2-small"}
     plan = _extract_plan(db, params, [photo_id], config)
@@ -2865,7 +2865,7 @@ def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
 
 
 def _plan_process_id(db, name):
-    return next(p["id"] for p in db.get_saved_processes() if p["name"] == name)
+    return next(p["id"] for p in db.processes.list_all() if p["name"] == name)
 
 
 def test_api_pipeline_plan_identify_flags_show_species_review(
@@ -3175,7 +3175,7 @@ def test_import_plan_all_new_files_flips_classify_to_will_run(tmp_path, monkeypa
     # Existing scope: one detection, already classified — would be
     # "done-prior" without imports.
     _, did = _add_photo_with_detection(db, folder_id, "existing.jpg")
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
 
     new_paths = ["/cards/A/IMG_001.NEF", "/cards/A/IMG_002.NEF"]
     plan = compute_plan(
@@ -3262,7 +3262,7 @@ def test_import_plan_does_not_leak_active_workspace_state(tmp_path):
     db, folder_id = _make_db(tmp_path)
     # Fully-classified detection + masked photo in the active workspace.
     pid, did = _add_photo_with_detection(db, folder_id, "old.jpg")
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
     _mark_sam_done(db, pid, "/m/old.png")
 
     # Without source_paths → plan is whole-workspace (the old buggy
@@ -3694,7 +3694,7 @@ def test_import_plan_empty_source_paths_is_no_op(tmp_path, monkeypatch):
     # one fully-classified, fully-masked photo. Without our fix this
     # would render as "done-prior" for Classify and Extract.
     pid, did = _add_photo_with_detection(db, folder_id, "old.jpg")
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
     db.conn.execute("UPDATE photos SET mask_path='/m/old.png' WHERE id=?", (pid,))
     db.conn.commit()
 
@@ -3730,7 +3730,7 @@ def test_compute_plan_distinguishes_none_from_empty_source_paths(tmp_path, monke
     db, folder_id = _make_db(tmp_path)
     _stub_models(monkeypatch)
     pid, did = _add_photo_with_detection(db, folder_id, "old.jpg")
-    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+    db.model_runs.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
     _mark_sam_done(db, pid, "/m/old.png")
 
     # source_paths=None → whole-workspace fallback (Extract sees the
@@ -4080,16 +4080,16 @@ def test_normal_plan_counts_raw_recipe_as_pending(tmp_path, monkeypatch, fallbac
         db, folder, "bird.jpg", detector_model="full-image" if fallback else "megadetector-v6",
     )
     if fallback:
-        db.record_detector_run(photo, "megadetector-v6", 0)
+        db.model_runs.record_detector_run(photo, "megadetector-v6", 0)
     monkeypatch.setattr(models_mod, "get_models", lambda: [
         {"id": "m1", "name": "BioCLIP-2", "model_str": "hf-hub:imageomics/bioclip-2",
          "model_type": "bioclip", "downloaded": True, "weights_path": _tol_weights(tmp_path)},
     ])
-    db.record_classifier_run(detection, "BioCLIP-2", TOL_SENTINEL, 1, input_recipe=RECIPE)
+    db.model_runs.record_classifier_run(detection, "BioCLIP-2", TOL_SENTINEL, 1, input_recipe=RECIPE)
     stage = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))["stages"]["Classify"]
     assert stage["state"] == "will-run"
     assert stage["detail"]["pending"] == 1
-    db.record_classifier_run(detection, "BioCLIP-2", TOL_SENTINEL, 1)
+    db.model_runs.record_classifier_run(detection, "BioCLIP-2", TOL_SENTINEL, 1)
     stage = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))["stages"]["Classify"]
     assert stage["detail"]["pending"] == 0
     db.close()
@@ -4105,10 +4105,10 @@ def test_plan_counts_use_runtime_category_defaults(tmp_path, category, expected)
         assert count([pid], min_conf=0.2) == {"photos_with_dets": expected, "total_dets": expected}
     for pending in (db.count_classify_pending_pairs, db.count_primary_classify_pending_pairs):
         assert pending("Model", "current", [pid], min_conf=0.2) == expected
-    db.record_classifier_run(did, "Model", "old", prediction_count=1)
+    db.model_runs.record_classifier_run(did, "Model", "old", prediction_count=1)
     for stale in (db.count_classify_stale, db.count_primary_classify_stale):
         assert stale("Model", "current", [pid], min_conf=0.2) == expected
-    db.record_classifier_run(did, "Model", "current", prediction_count=1)
+    db.model_runs.record_classifier_run(did, "Model", "current", prediction_count=1)
     for pending in (db.count_classify_pending_pairs, db.count_primary_classify_pending_pairs):
         assert pending("Model", "current", [pid], min_conf=0.2) == 0
     db.close()

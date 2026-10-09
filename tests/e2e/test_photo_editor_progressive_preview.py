@@ -4,6 +4,7 @@ import io
 import json
 import math
 import statistics
+import time
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -32,6 +33,13 @@ def open_photo(page, live_server, photo_id):
 
 def query(url):
     return parse_qs(urlparse(url).query)
+
+
+def _wait_for_held_requests(page, held, count):
+    deadline = time.monotonic() + 5
+    while len(held) < count and time.monotonic() < deadline:
+        page.wait_for_timeout(10)
+    assert len(held) == count
 
 
 def fill(route):
@@ -131,13 +139,16 @@ def test_stalled_preview_releases_slot_for_latest_edit(page, live_server, previe
     page.route('**/edit-preview?*', lambda route: held.append(route))
     page.evaluate("EDITOR_PREVIEW_TIMEOUT = 1200; setAdjustment('exposure', 0.5)")
     page.wait_for_function('editorPreviewQueue.active !== null')
+    # An active Image does not mean Chromium has dispatched its request yet.
+    # Observe the route before a newer edit can detach that image.
+    _wait_for_held_requests(page, held, 1)
     page.evaluate('() => { window.obsoletePreviewCallback = editorPreviewQueue.active.image.onload; }')
     if latest_exposure != 0.5:
         page.evaluate("value => setAdjustment('exposure', value)", latest_exposure)
     page.wait_for_function('''value => editorPreviewQueue.active && editorPreviewQueue.active.size > 1024 &&
       JSON.parse(new URL(editorPreviewQueue.active.url, location.href).searchParams.get('recipe'))
         .adjustments.exposure === value''', arg=latest_exposure)
-    assert len(held) == (2 if latest_exposure == 0.5 else 3)
+    _wait_for_held_requests(page, held, 2 if latest_exposure == 0.5 else 3)
     assert page.locator('#editorImg').get_attribute('src') == original
     expect(page.locator('#previewStatus')).to_contain_text('Refining preview')
     page.evaluate('window.obsoletePreviewCallback()')

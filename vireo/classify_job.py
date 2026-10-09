@@ -335,7 +335,7 @@ def _reuse_saved_label_embeddings(db, model_str, model_dir, labels, cancel_check
     by_file = {s["labels_file"]: s for s in saved if s.get("labels_file")}
     groups = [[path] for path in by_file]
     if db is not None:
-        groups.extend(row["sources"] for row in db.get_labels_fingerprints() if row.get("sources"))
+        groups.extend(row["sources"] for row in db.model_runs.get_labels_fingerprints() if row.get("sources"))
     checked = set()
     for sources in groups:
         if cancel_check and cancel_check():
@@ -363,7 +363,7 @@ def _record_labels_fingerprint(
 ):
     """Populate the labels_fingerprints sidecar. Cosmetic — powers UX lookups."""
     display = ", ".join(os.path.basename(s) for s in (sources or [])) or None
-    db.upsert_labels_fingerprint(
+    db.model_runs.upsert_labels_fingerprint(
         fingerprint=fingerprint,
         display_name=display,
         sources=sources,
@@ -471,7 +471,7 @@ def _classify_detection_gated(db, detection_id, classifier_model,
     non-reclassify pass — the cache would claim "done" with no rows to show.
     """
     if not reclassify:
-        existing = db.get_classifier_run_keys(detection_id)
+        existing = db.model_runs.get_classifier_run_keys(detection_id)
         if (classifier_model, labels_fingerprint) in existing:
             return []
     predictions = _run_classifier_on_detection(
@@ -480,7 +480,7 @@ def _classify_detection_gated(db, detection_id, classifier_model,
         classify_fn=classify_fn,
     )
     if predictions:
-        db.record_classifier_run(
+        db.model_runs.record_classifier_run(
             detection_id, classifier_model, labels_fingerprint,
             prediction_count=len(predictions),
         )
@@ -882,7 +882,7 @@ def _describe_cached_label_source(
             return "Reused cached predictions (label source unavailable)"
 
         sidecar = None
-        for entry in db.get_labels_fingerprints() or []:
+        for entry in db.model_runs.get_labels_fingerprints() or []:
             if entry.get("fingerprint") == found_fp:
                 sidecar = entry
                 break
@@ -1434,7 +1434,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     except ResourceWaitCancelled as exc:
         # Cooperative cancellation during a MegaDetector inference-lease
         # wait — the reclassify Stop path. Must propagate: the caller
-        # already called ``clear_detections(photo["id"])`` for this
+        # already called ``db.detections.clear(photo["id"])`` for this
         # photo on the reclassify path (classify_job.py:1073), so if
         # this cancel were swallowed under the broad ``RuntimeError``
         # arm below, the classify recovery would then rebuild
@@ -1526,7 +1526,7 @@ def _analyze_subjects(photos, folders, db, reclassify, det_conf_threshold,
         # ``processed_ids`` only tracks photos whose detection loop reached
         # ``processed_ids.add(...)`` — i.e. detection ran to completion or
         # produced an empty scene. In a reclassify batch, ``_detect_subjects``
-        # calls ``clear_detections(photo["id"])`` *before* calling us, so a
+        # calls ``db.detections.clear(photo["id"])`` *before* calling us, so a
         # photo whose ``detect_animals()`` returned None (decode failure) or
         # raised a swallowed error is now absent from ``processed_ids`` AND
         # has no detections in the DB, yet its old mask, DINO embedding,
@@ -1606,11 +1606,11 @@ class _DetectSubjectsRun:
             except (OSError, ValueError):
                 detector_runtime = None
         self.already_detected_ids = (
-            self.db.get_detector_run_photo_ids(
+            self.db.model_runs.get_detector_run_photo_ids(
                 "megadetector-v6", runtime_fingerprint=detector_runtime,
             )
             if not reclassify and detector_runtime is not None
-            else self.db.get_detector_run_photo_ids("megadetector-v6")
+            else self.db.model_runs.get_detector_run_photo_ids("megadetector-v6")
             if not reclassify
             else set()
         )
@@ -1671,7 +1671,7 @@ class _DetectSubjectsRun:
         detector_runtime = megadetector_runtime_fingerprint(weights_path)
         job["_detector_runtime_fingerprint"] = detector_runtime
         if not self.reclassify:
-            self.already_detected_ids = self.db.get_detector_run_photo_ids(
+            self.already_detected_ids = self.db.model_runs.get_detector_run_photo_ids(
                 "megadetector-v6", runtime_fingerprint=detector_runtime,
             )
         return True
@@ -1758,7 +1758,7 @@ class _DetectSubjectsRun:
             and photo["id"] in self.already_detected_ids
         )
 
-        # No reclassify pre-clear. ``clear_detections`` is global: its
+        # No reclassify pre-clear. ``detections.clear`` is global: its
         # cascade took every classifier model's predictions and every
         # workspace's review state with it, before this run had written
         # anything to replace them, so a Stop anywhere after this point
@@ -2138,7 +2138,7 @@ def _record_match_scores(db, raw_results, model_name, labels_fingerprint):
             continue
         seen.add(det_id)
         try:
-            db.record_classifier_match_score(
+            db.model_runs.record_classifier_match_score(
                 det_id,
                 model_name,
                 labels_fingerprint,
@@ -2416,8 +2416,8 @@ class _ClassifyPhotosPass:
             except (OSError, ValueError):
                 expected_runtime = None
         if expected_runtime is None:
-            return self.db.get_classifier_run_keys(detection_id)
-        return self.db.get_classifier_run_keys(
+            return self.db.model_runs.get_classifier_run_keys(detection_id)
+        return self.db.model_runs.get_classifier_run_keys(
             detection_id, runtime_fingerprint=expected_runtime,
         )
 
@@ -2429,12 +2429,12 @@ class _ClassifyPhotosPass:
             # _flush_batch). Fall back to the photo-level entry only when
             # this photo has a single qualifying detection so legacy data
             # still refines correctly.
-            emb_blob = self.db.get_photo_embedding(
+            emb_blob = self.db.masks_features.get_embedding(
                 photo["id"], self.model_name,
                 variant=f"det:{detection_id}",
             )
             if not emb_blob and photo_level_fallback:
-                emb_blob = self.db.get_photo_embedding(
+                emb_blob = self.db.masks_features.get_embedding(
                     photo["id"], self.model_name,
                 )
             if emb_blob:
@@ -2500,7 +2500,7 @@ class _ClassifyPhotosPass:
         # Run key without cached rows: if a measured match-score summary
         # exists for the same triple the run legitimately produced zero
         # candidates — honor that outcome instead of re-running.
-        if self.db.has_classifier_match_score(
+        if self.db.model_runs.has_classifier_match_score(
             detection_id, self.model_name, self.fp,
         ):
             self.skipped_existing += 1
@@ -2514,7 +2514,7 @@ class _ClassifyPhotosPass:
     def classify_photo(self, i, photo):
         """Clear, report progress for and classify or queue one photo."""
         # Per-photo reclassify predictions purge. Lives here (rather than
-        # alongside ``clear_detections`` in the detection loop) so that:
+        # alongside ``detections.clear`` in the detection loop) so that:
         #   1. A mid-classify cancel leaves the unprocessed tail with its
         #      old predictions intact — without this gate they'd already
         #      be cleared and the cancel would strand them with new
@@ -2565,7 +2565,7 @@ class _ClassifyPhotosPass:
             # its predictions, classifier_runs and match-score rows in
             # one transaction, and the call is a no-op when nothing
             # was there.
-            self.db.clear_detections(photo["id"], detector_model="full-image")
+            self.db.detections.clear(photo["id"], detector_model="full-image")
             return
 
         folder_path = self.folders.get(photo["folder_id"], "")
@@ -2883,7 +2883,7 @@ def _record_batch_classifier_runs(
         n = counts.get(did, 0)
         if n <= 0:
             continue
-        db.record_classifier_run(
+        db.model_runs.record_classifier_run(
             did, model_name, labels_fingerprint,
             prediction_count=n,
             runtime_fingerprint="incomplete",
@@ -4797,7 +4797,7 @@ class _ClassifyJobRun:
                 existing_run is None
                 or existing_run["runtime_fingerprint"] != full_runtime
             ):
-                thread_db.record_detector_run(
+                thread_db.model_runs.record_detector_run(
                     photo_id, "full-image", box_count=1,
                     runtime_fingerprint=full_runtime,
                     input_fingerprint=full_input,

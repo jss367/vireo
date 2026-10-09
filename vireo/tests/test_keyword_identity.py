@@ -1821,7 +1821,7 @@ def test_manual_merge_sidecar_sync_keeps_unrelated_tags(catalog, tmp_path):
     db.tag_photo(photos[1], target)
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
-    changes = [r['id'] for r in db.get_pending_changes() if r['photo_id'] == photos[0]]
+    changes = [r['id'] for r in db.pending_changes.list_all() if r['photo_id'] == photos[0]]
     result = sync_to_xmp(db, change_ids=changes)
     assert result['failed'] == 0
     assert result['synced'] == 1
@@ -1853,7 +1853,7 @@ def test_manual_merge_same_name_hierarchy_survives_sync_and_rescan(catalog, tmp_
     merge_keywords(db, [source, target], target, preview['preview_token'])
     for after_sync in (False, True):
         if after_sync:
-            changes = [r['id'] for r in db.get_pending_changes() if r['photo_id'] == photos[0]]
+            changes = [r['id'] for r in db.pending_changes.list_all() if r['photo_id'] == photos[0]]
             assert sync_to_xmp(db, change_ids=changes)['failed'] == 0
         _import_keywords_for_photo(db, photos[0], sidecar)
         sync_from_xmp(db, [photos[0]])
@@ -2005,7 +2005,7 @@ def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog,
     preview = preview_keyword_merge(db, [source, target], target)
     merge_keywords(db, [source, target], target, preview['preview_token'])
     def sync_photo():
-        changes = [r['id'] for r in db.get_pending_changes() if r['photo_id'] == photos[0]]
+        changes = [r['id'] for r in db.pending_changes.list_all() if r['photo_id'] == photos[0]]
         assert sync_to_xmp(db, change_ids=changes)['failed'] == 0
     if not remove_before_sync:
         sync_photo()
@@ -2066,7 +2066,7 @@ def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_d
         _import_keywords_for_photo(db, photo, sidecar)
         sync_from_xmp(db, [photo])
         assert not db.get_photo_keywords(photo)
-    pending = [dict(r) for r in db.get_pending_changes() if r['photo_id'] == photo]
+    pending = [dict(r) for r in db.pending_changes.list_all() if r['photo_id'] == photo]
     preview = client.get('/api/sync/preview').get_json()
     preview_photo = next(p for p in preview['photos'] if p['photo_id'] == photo)
     merge_change = next(c for c in preview_photo['changes'] if c['type'] == 'keyword_merge')
@@ -2109,7 +2109,7 @@ def test_cancel_unrelated_homonym_add_preserves_existing_hierarchy(app_and_db, t
     write_sidecar(sidecar, {'Robin'}, {'People|Robin'})
     assert client.post(f'/api/photos/{photo}/keywords', json={'keyword_id': target}).status_code == 200
     assert client.delete(f'/api/photos/{photo}/keywords/{target}').status_code == 200
-    assert not [r for r in db.get_pending_changes() if r['photo_id'] == photo]
+    assert not [r for r in db.pending_changes.list_all() if r['photo_id'] == photo]
     sync_to_xmp(db)
     assert read_keywords(sidecar) == {'Robin'}
     assert set(read_hierarchical_keywords(sidecar)) == {'People|Robin'}
@@ -2135,11 +2135,11 @@ def test_chained_merges_sync_together_when_only_latest_add_is_selected(catalog, 
     for source, target in zip(ids, ids[1:], strict=False):
         preview = preview_keyword_merge(db, [source, target], target)
         merge_keywords(db, [source, target], target, preview['preview_token'])
-    additions = [r['id'] for r in db.get_pending_changes() if r['change_type'] == 'keyword_add']
+    additions = [r['id'] for r in db.pending_changes.list_all() if r['change_type'] == 'keyword_add']
     assert sync_to_xmp(db, change_ids=additions)['failed'] == 0
     assert read_keywords(sidecar) == {'Third'}
     assert set(read_hierarchical_keywords(sidecar)) == {'Third parent|Third'}
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 @pytest.mark.parametrize('reader', ['scan', 'sync', 'catalog'])
@@ -2451,7 +2451,7 @@ def test_location_merge_rename_preserves_sidecar_ownership(
     monkeypatch.setattr(cfg, 'load_strict', lambda: settings)
     enabled = global_enabled if workspace_override is None else workspace_override
     if workspace_override is not None:
-        db.update_workspace(db._ws_id(), config_overrides={
+        db.workspaces.update(db._ws_id(), config_overrides={
             'write_location_keywords_to_xmp': workspace_override,
         })
     folder = tmp_path / 'photos'
@@ -2483,7 +2483,7 @@ def test_location_merge_rename_preserves_sidecar_ownership(
         assert read_keywords(str(path)) == ({'New Lake'} if existing_manual_term or not enabled else set())
         if enabled:
             assert not read_hierarchical_keywords(str(path))
-    assert not db.get_pending_changes()
+    assert not db.pending_changes.list_all()
 
 
 @pytest.mark.parametrize('tag_source', [False, True])

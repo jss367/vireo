@@ -1,0 +1,46 @@
+.page-find-panel {
+  position: fixed;
+  top: 54px;
+  right: 18px;
+  z-index: 100001;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100vw - 36px);
+  padding: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+.page-find-panel[hidden] { display: none; }
+.page-find-panel input {
+  width: 220px;
+  min-width: 0;
+  padding: 5px 8px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+}
+.page-find-panel button {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.page-find-panel :focus-visible { outline: 2px solid var(--accent); }
+#pageFindStatus { white-space: nowrap; font-size: 12px; }
+.page-find-mark {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: inherit;
+}
+.page-find-mark.active { background: var(--accent); color: var(--accent-text); }
+/* SVG text needs a tspan rather than an HTML mark. */
+tspan.page-find-mark { fill: var(--accent); }
+tspan.page-find-mark.active { text-decoration: underline; }

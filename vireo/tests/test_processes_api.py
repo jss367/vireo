@@ -157,7 +157,7 @@ def test_workspace_default_rejects_unknown_id(app_and_db):
 def test_workspace_default_accepts_valid_id(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_saved_processes()[0]["id"]
+    pid = db.processes.list_all()[0]["id"]
     resp = client.patch("/api/settings/workspace", json={
         "key": "pipeline.default_process_id", "value": pid,
     })
@@ -181,7 +181,7 @@ def test_global_default_rejects_unknown_id(app_and_db):
 def test_global_default_accepts_valid_id(app_and_db):
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_saved_processes()[0]["id"]
+    pid = db.processes.list_all()[0]["id"]
     resp = client.patch("/api/settings/global", json={
         "key": "pipeline.default_process_id", "value": pid,
     })
@@ -213,7 +213,7 @@ def test_settings_import_accepts_valid_default_process_id(app_and_db):
 
     import config as cfg
     app, db = app_and_db
-    pid = db.get_saved_processes()[0]["id"]
+    pid = db.processes.list_all()[0]["id"]
     client = app.test_client()
     resp = client.post("/api/settings/import", json={
         "json": _json.dumps({"pipeline": {"default_process_id": pid}}),
@@ -253,7 +253,7 @@ def test_api_config_rejects_unknown_default_process_id(app_and_db):
 def test_api_config_accepts_valid_default_process_id(app_and_db):
     import config as cfg
     app, db = app_and_db
-    pid = db.get_saved_processes()[0]["id"]
+    pid = db.processes.list_all()[0]["id"]
     client = app.test_client()
     resp = client.post("/api/config", json={
         "pipeline": {"default_process_id": pid},
@@ -317,11 +317,11 @@ def test_settings_schema_injects_process_picker(app_and_db):
     schema = client.get("/api/settings/schema").get_json()["schema"]
     spec = schema["pipeline.default_process_id"]
     assert spec["type"] == "enum"
-    ids = {p["id"] for p in db.get_saved_processes()}
+    ids = {p["id"] for p in db.processes.list_all()}
     assert set(spec["enum"]) == ids
     assert all(isinstance(x, int) for x in spec["enum"])
     identify = next(
-        p for p in db.get_saved_processes() if p["name"] == "Identify birds")
+        p for p in db.processes.list_all() if p["name"] == "Identify birds")
     assert spec["enum_labels"][str(identify["id"])] == "Identify birds"
 
 
@@ -337,7 +337,7 @@ def test_settings_schema_enum_matches_effective_default_by_strict_equality(
     client = app.test_client()
 
     pid = next(
-        p["id"] for p in db.get_saved_processes()
+        p["id"] for p in db.processes.list_all()
         if p["name"] == "Identify birds"
     )
     resp = client.patch("/api/settings/workspace", json={
