@@ -57,6 +57,41 @@ def test_folder_scope_includes_subfolders(scoped_app):
         assert resp.get_json()["photo_ids"] == [ids["p_child"]]
 
 
+def test_folder_scope_includes_legacy_descendants_by_path(tmp_path):
+    """A legacy folder with parent_id=NULL whose path sits under the
+    selected root must be included — mirroring the folder resolution
+    /api/pipeline/plan and /api/jobs/pipeline use, so the filter catches
+    the same photos a scoped Process run would see. Without the
+    path-based fallback the "N not in saved review" banner would
+    understate the scope."""
+    import config as cfg
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    root = tmp_path / "photos"
+    legacy = root / "orphan"
+    os.makedirs(legacy)
+    root_id = db.add_folder(str(root), name="photos")
+    # Legacy descendant: path sits under the root but parent_id stays NULL.
+    legacy_id = db.add_folder(
+        str(legacy), name="orphan", parent_id=None, workspace_root=False,
+    )
+    p_root = db.add_photo(root_id, "a.jpg", ".jpg", 1000, 1.0)
+    p_legacy = db.add_photo(legacy_id, "b.jpg", ".jpg", 1000, 1.0)
+    db.close()
+
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+    app = create_app(db_path, thumb_dir)
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        resp = c.get(f"/api/pipeline/scope-photos?folder_id={root_id}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert sorted(data["photo_ids"]) == sorted([p_root, p_legacy])
+
+
 def test_collection_scope_returns_collection_photos(scoped_app):
     app, ids = scoped_app
     with app.test_client() as c:

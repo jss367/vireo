@@ -337,6 +337,56 @@ function refreshLatestScopeSnapshotIfCurrent() {
   if (!pipelineResults) return;
   cachedPipelineResults = cloneReviewData(pipelineResults);
   cachedResultsCacheInfo = cloneReviewData(resultsCacheInfo);
+  maybeRefreshCollectionScopeMembership();
+}
+
+// A smart collection whose rules key on mutable fields (rating, flag,
+// keyword, species) drifts as the user edits in filter mode: the Set
+// captured once by loadReviewScopeResults is only consulted on render, so
+// a photo that no longer matches stays visible and still counts toward the
+// "N of T not in saved review" banner. Re-fetch membership from the
+// server after each mutation (debounced to a single trailing request per
+// burst of edits) so the filter stays honest. Folders are skipped —
+// folder membership doesn't change from this view.
+var _reviewScopeMembershipRefreshTimer = null;
+var _reviewScopeMembershipRefreshSeq = 0;
+
+function maybeRefreshCollectionScopeMembership() {
+  if (reviewScopeMode !== 'collection' || reviewScopeRegrouped) return;
+  if (!reviewScopeCollectionId) return;
+  var selectionId = reviewScopeCollectionId;
+  if (_reviewScopeMembershipRefreshTimer) {
+    clearTimeout(_reviewScopeMembershipRefreshTimer);
+  }
+  _reviewScopeMembershipRefreshTimer = setTimeout(function() {
+    _reviewScopeMembershipRefreshTimer = null;
+    if (reviewScopeMode !== 'collection' || reviewScopeRegrouped) return;
+    if (reviewScopeCollectionId !== selectionId) return;
+    var seq = ++_reviewScopeMembershipRefreshSeq;
+    safeFetch(
+      '/api/pipeline/scope-photos?collection_id=' + encodeURIComponent(selectionId),
+      {}, { toast: false }
+    ).then(function(data) {
+      if (seq !== _reviewScopeMembershipRefreshSeq) return;
+      if (!data || !Array.isArray(data.photo_ids)) return;
+      if (reviewScopeMode !== 'collection' || reviewScopeRegrouped) return;
+      if (reviewScopeCollectionId !== selectionId) return;
+      var newIds = new Set(data.photo_ids);
+      var current = reviewScopePhotoIds;
+      var unchanged = !!current && current.size === newIds.size;
+      if (unchanged) {
+        current.forEach(function(id) {
+          if (!newIds.has(id)) unchanged = false;
+        });
+      }
+      if (unchanged) return;
+      reviewScopePhotoIds = newIds;
+      reviewScopeTotal = newIds.size;
+      renderResults();
+      updateReviewScopeStatusFromResults(pipelineResults);
+      renderCacheScopeBanner(resultsCacheInfo);
+    }).catch(function() { /* leave the stale set; the next mutation retries */ });
+  }, 250);
 }
 
 function showSavedReview() {

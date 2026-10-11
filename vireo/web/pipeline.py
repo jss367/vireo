@@ -865,9 +865,22 @@ def create_pipeline_blueprint(
                 folder_id = int(raw_folder)
             except ValueError:
                 return json_error("folder_id must be an integer", 400)
-            if folder_id not in {f["id"] for f in db.get_folder_tree()}:
+            if not db.get_workspace_visible_folder_ids([folder_id]):
                 return json_error("Folder not found in this workspace", 404)
-            photo_ids = db.get_photo_ids(folder_id=folder_id)
+            # Mirror /api/pipeline/plan and /api/jobs/pipeline folder
+            # resolution so the filter includes the same photos a scoped
+            # Process run would see. ``get_photo_ids`` walks parent_id only,
+            # so legacy folders with parent_id=NULL under the selected root
+            # would be silently omitted and the "N not in saved review"
+            # banner would understate the scope.
+            subtree_ids = set(db.get_folder_subtree_ids(folder_id))
+            subtree_ids.update(db.get_workspace_visible_folder_ids(
+                db._folder_subtree_ids_by_path(folder_id),
+            ))
+            photo_ids = [
+                r["id"]
+                for r in db.get_workspace_photos_in_folders(list(subtree_ids))
+            ]
         else:
             collection_id = coerce_collection_id(raw_collection)
             if collection_id is None or collection_id is False:
