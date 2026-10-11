@@ -16,7 +16,7 @@ hooks, and binds events after every definition is available.
 | `tuning.js` | Scoring/grouping controls, defaults, reflow, and regrouping |
 | `inspection.js` | Photo lookup and the inspection overlay |
 | `flags.js` | Photo/group flags and coordination of in-flight writes |
-| `scope.js` | Cached/scoped results, collection scope, and read-only guards |
+| `scope.js` | Saved review, folder/collection filters, regrouped views, and read-only guards |
 | `loading.js` | Initialization, empty states, readiness, and Browse handoff |
 | `species-editor.js` | Species menus, search, confirmation, and history hooks |
 | `group-session.js` | Group Review state, opening, seeding, closing, and detaching |
@@ -39,6 +39,11 @@ files. The template lists each script explicitly; adding a file requires adding
 its script tag before boot. Keep requests, DOM listeners, and shared hook
 registration in setup functions called from boot, preserving their order there.
 
+Folder and Collection scopes filter the saved review in place:
+`pipelineResults` stays the whole saved review and `renderResults` hides
+photos outside `reviewScopePhotoIds`, so edits keep their encounter indices.
+Whole workspace scope and the Regroup button replace `pipelineResults` with a
+regroup-live result; `isScopedReviewView()` makes those views read-only.
 Scope changes in `scope.js` protect writes across the page; Group Review's
 session checks protect asynchronous seeding and apply. Flag writes in `flags.js`
 coordinate direct and group edits. Keep these guards intact when changing
