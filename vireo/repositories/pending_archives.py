@@ -22,7 +22,7 @@ from collections.abc import Callable
 
 class PendingArchiveRepository:
     def __init__(self, conn: sqlite3.Connection,
-                 workspace_id_fn: Callable[[], int] | None = None) -> None:
+                 workspace_id_fn: Callable[[], int]) -> None:
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn
 

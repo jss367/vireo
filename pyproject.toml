@@ -52,6 +52,7 @@ dev = [
     "hypothesis>=6.100",
     "psutil>=7.0",
     "ruff>=0.15.8",
+    "basedpyright==1.40.2",
     "pre-commit>=3.5",
 ]
 
@@ -167,3 +168,12 @@ ignore = [
 "vireo/tests/test_culling.py" = ["E702", "E731"]
 "vireo/tests/test_detector.py" = ["F401"]
 "vireo/tests/test_dinov2.py" = ["B007"]
+
+[tool.basedpyright]
+# Type checking starts on the service and repository layers and widens one
+# directory at a time. Modules import each other as top-level names
+# (``import config``), so ``vireo`` is on the search path.
+include = ["vireo/services", "vireo/repositories"]
+extraPaths = ["vireo"]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"

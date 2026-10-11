@@ -63,7 +63,8 @@ caller owns the transaction, and no method here commits unless the
 """
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from keyword_identity import identity_sql
 from keyword_normalization import keyword_match_key, normalize_keyword_display
@@ -85,6 +86,20 @@ FACADE_METHODS = (
 
 
 class KeywordRepository:
+    # Bound ``Database`` methods that ``__init__`` installs from
+    # ``FACADE_METHODS``, declared so the type checker sees them.
+    rename_photo_preferences_species: Callable[..., Any]
+    rename_species_highlights_species: Callable[..., Any]
+    species_case_convention: Callable[..., Any]
+    _apply_case_convention: Callable[..., Any]
+    _merge_duplicate_keywords_pass: Callable[..., Any]
+    resolve_species_display_name: Callable[..., Any]
+    detect_keyword_case_convention: Callable[..., Any]
+    _lookup_taxon_id_for_keyword: Callable[..., Any]
+    _add_source_species_keyword: Callable[..., Any]
+    _rename_keyword_dependents: Callable[..., Any]
+    _resolve_species_by_lineage: Callable[..., Any]
+
     def __init__(
         self,
         conn,

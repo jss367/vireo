@@ -71,6 +71,8 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Callable
+from typing import Any
 
 from keyword_identity import free_sibling_name, keywords_claim_different_taxa
 from keyword_normalization import keyword_match_key, normalize_keyword_display
@@ -965,6 +967,26 @@ def _reparent_child(
 
 
 class KeywordProvenanceRepository:
+    # Bound ``Database`` methods that ``__init__`` installs from
+    # ``FACADE_METHODS``, declared so the type checker sees them.
+    tag_photo: Callable[..., Any]
+    _merge_keyword_into: Callable[..., Any]
+    get_meta: Callable[..., Any]
+    set_meta: Callable[..., Any]
+    queue_change: Callable[..., Any]
+    _restore_misclassified_location_ancestor: Callable[..., Any]
+    _upsert_location_parent_chain: Callable[..., Any]
+    _edit_prediction_ids: Callable[..., Any]
+    _reparent_disambiguated: Callable[..., Any]
+    rename_photo_preferences_species: Callable[..., Any]
+    rename_species_highlights_species: Callable[..., Any]
+    add_keyword: Callable[..., Any]
+    get_effective_config: Callable[..., Any]
+    get_photos_with_equivalent_species: Callable[..., Any]
+    update_prediction_status: Callable[..., Any]
+    remove_pending_changes: Callable[..., Any]
+    _species_root_name_for_taxon: Callable[..., Any]
+
     def __init__(
         self,
         conn,

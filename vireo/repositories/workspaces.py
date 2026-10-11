@@ -29,7 +29,7 @@ class WorkspaceRepository:
     def __init__(
         self,
         conn: sqlite3.Connection,
-        workspace_id_fn: Callable[[], int] | None,
+        workspace_id_fn: Callable[[], int],
         *,
         allowed_nav_ids: Iterable[str],
         default_tabs: Sequence[str],

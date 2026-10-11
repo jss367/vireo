@@ -22,7 +22,7 @@ import time
 
 
 class LocationRepository:
-    def __init__(self, conn, workspace_id_fn=None, *, chunk_size=800,
+    def __init__(self, conn, workspace_id_fn, *, chunk_size=800,
                  photo_date_asc_order=None):
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn

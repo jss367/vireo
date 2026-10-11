@@ -388,6 +388,9 @@ class PendingStagePath(str):
     whose job it is and what state it is in.
     """
 
+    workspace_id: int | None
+    status: str | None
+
     def __new__(cls, path: str, *, workspace_id=None, status=None):
         obj = super().__new__(cls, path)
         obj.workspace_id = workspace_id
