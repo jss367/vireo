@@ -20,7 +20,7 @@ from typing import Any
 
 class AuditRepository:
     def __init__(self, conn: sqlite3.Connection,
-                 workspace_id_fn: Callable[[], int] | None, *,
+                 workspace_id_fn: Callable[[], int], *,
                  chunk_size: int = 800) -> None:
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn

@@ -22,7 +22,7 @@ class PhotoVisibilityRepository:
     def __init__(
         self,
         conn: sqlite3.Connection,
-        workspace_id_fn: Callable[[], int] | None = None,
+        workspace_id_fn: Callable[[], int],
         *,
         chunk_size: int = 800,
     ) -> None:

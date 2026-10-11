@@ -63,6 +63,7 @@ jobs:
               path.startsWith("vireo/") ||
               path.startsWith("native/detail/") ||
               path.startsWith("tests/") ||
+              path.startsWith(".basedpyright/") ||
               path.startsWith(".github/actions/") ||
               path === ".github/workflows/pr-agent.yml" ||
               path === ".github/workflows/test-main.yml" ||
@@ -246,7 +247,7 @@ jobs:
   # require, independent of which jobs run above. This job collapses every
   # required validation into one stable ``test`` check.
   test:
-    needs: [unit, lint, frontend, e2e-smoke, rust, native-detail, performance]
+    needs: [unit, lint, typecheck, frontend, e2e-smoke, rust, native-detail, performance]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -258,6 +259,7 @@ jobs:
           for check in \
             'unit=${{ needs.unit.result }}' \
             'lint=${{ needs.lint.result }}' \
+            'typecheck=${{ needs.typecheck.result }}' \
             'frontend=${{ needs.frontend.result }}' \
             'e2e-smoke=${{ needs.e2e-smoke.result }}' \
             'rust=${{ needs.rust.result }}' \
@@ -315,6 +317,40 @@ jobs:
       - name: Run ruff check
         if: needs.changes.outputs.python == 'true'
         run: ruff check vireo/ tests/
+
+  typecheck:
+    runs-on: ubuntu-latest
+    needs: changes
+    timeout-minutes: 10
+
+    steps:
+      - name: Skip type check
+        if: needs.changes.outputs.python != 'true'
+        run: echo "No Python application, script, or test files changed."
+
+      - uses: actions/checkout@v5
+        if: needs.changes.outputs.python == 'true'
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        if: needs.changes.outputs.python == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      # The runtime dependencies resolve third-party imports. Installing them
+      # directly skips building the package and its Rust extension.
+      - name: Install runtime dependencies and basedpyright
+        if: needs.changes.outputs.python == 'true'
+        run: |
+          deps=$(python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']))")
+          echo "$deps" | xargs pip install "basedpyright==1.40.2"
+
+      # Fails only on errors missing from .basedpyright/baseline.json.
+      - name: Run basedpyright
+        if: needs.changes.outputs.python == 'true'
+        run: basedpyright
 
   e2e-smoke:
     strategy:

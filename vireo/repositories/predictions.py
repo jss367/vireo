@@ -67,6 +67,9 @@ caller owns the transaction, and no method here commits unless the
 """
 
 
+from collections.abc import Callable
+from typing import Any
+
 from keyword_normalization import normalize_keyword_display
 
 # ``Database`` methods the moved bodies call through the façade.
@@ -81,6 +84,15 @@ FACADE_METHODS = (
 
 
 class PredictionRepository:
+    # Bound ``Database`` methods that ``__init__`` installs from
+    # ``FACADE_METHODS``, declared so the type checker sees them.
+    get_effective_config: Callable[..., Any]
+    _build_query_from_rules: Callable[..., Any]
+    _relax_negated_prediction_leaves: Callable[..., Any]
+    _filter_prediction_rows_by_rules: Callable[..., Any]
+    _top_prediction_confidence_params: Callable[..., Any]
+    accept_prediction: Callable[..., Any]
+
     def __init__(
         self,
         conn,

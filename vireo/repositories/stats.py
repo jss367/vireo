@@ -26,7 +26,7 @@ from keyword_identity import identity_sql
 
 class StatsRepository:
     def __init__(self, conn: sqlite3.Connection,
-                 workspace_id_fn: Callable[[], int] | None, *,
+                 workspace_id_fn: Callable[[], int], *,
                  coverage_photo_columns: Sequence[tuple[str, str]]) -> None:
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn
