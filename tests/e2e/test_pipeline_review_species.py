@@ -1862,27 +1862,24 @@ def test_pipeline_review_explains_partial_cache(live_server, page):
     expect(banner).to_contain_text("selected folders")
 
 
-def test_pipeline_review_scope_control_loads_workspace_and_collection(live_server, page):
+def test_pipeline_review_folder_and_collection_scopes_filter_saved_review(live_server, page):
+    """Folder and Collection scopes narrow the saved review without
+    regrouping it, keep it editable, and say how many scoped photos the
+    review does not cover."""
     all_ids = live_server["data"]["photos"]
-    cached_ids = all_ids[1:3]
-    collection_ids = [all_ids[0]]
+    park, yard = live_server["data"]["folders"]
+    # robin2 (all_ids[4], in "yard") is left out of the saved review.
+    cached_ids = all_ids[:4]
     _write_predictionless_pipeline_cache(live_server, cached_ids)
-
-    payloads = []
+    collection_id = live_server["db"].add_collection(
+        "First hawk", json.dumps([{"field": "photo_ids", "value": [all_ids[0]]}]),
+    )
+    regroup_payloads = []
     flag_payloads = []
 
-    page.route(
-        "**/api/collections",
-        lambda route: route.fulfill(
-            json=[{"id": 123, "name": "Selected Birds", "photo_count": 1}]
-        ),
-    )
-
     def regroup_live(route):
-        body = route.request.post_data_json
-        payloads.append(body)
-        ids = collection_ids if body.get("collection_id") == 123 else all_ids
-        route.fulfill(json=_review_result_for_ids(live_server, ids))
+        regroup_payloads.append(route.request.post_data_json)
+        route.fulfill(json=_review_result_for_ids(live_server, [all_ids[0]]))
 
     page.route("**/api/pipeline/regroup-live", regroup_live)
     page.route(
@@ -1894,24 +1891,60 @@ def test_pipeline_review_scope_control_loads_workspace_and_collection(live_serve
     )
 
     page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator("#statTotalPhotos")).to_have_text("4")
 
-    page.locator("[data-testid='pipeline-review-scope']").select_option("workspace")
-    expect(page.locator("#statTotalPhotos")).to_have_text(str(len(all_ids)))
-    assert payloads[-1]["save_cache"] is False
-    assert "collection_id" not in payloads[-1]
-
-    page.locator("[data-testid='pipeline-review-scope']").select_option("collection")
-    page.locator("[data-testid='pipeline-review-collection']").select_option("123")
+    scope = page.locator("[data-testid='pipeline-review-scope']")
+    scope.select_option("folder")
+    page.locator("[data-testid='pipeline-review-folder']").select_option(str(yard))
     expect(page.locator("#statTotalPhotos")).to_have_text("1")
-    assert payloads[-1]["collection_id"] == 123
-    assert payloads[-1]["save_cache"] is False
-
-    page.evaluate(
-        "(photoId) => window.setFlagFor(photoId, 'flagged')",
-        collection_ids[0],
+    expect(page.locator("#reviewScopeStatus")).to_have_text("1 of 2 reviewed")
+    expect(page.locator(".photo-card[data-photo-id]")).to_have_count(1)
+    expect(page.locator(".encounter-scope-partial").first).to_have_text(
+        "1 of 4 photos in scope"
     )
+    banner = page.locator("[data-testid='pipeline-review-cache-scope']")
+    expect(banner).to_contain_text(
+        "1 of 2 photos in this folder is not in the saved review"
+    )
+    assert regroup_payloads == []
+
+    # Filtering keeps the saved review editable.
+    with page.expect_request("**/api/photos/*/flag"):
+        page.evaluate("(photoId) => window.setFlagFor(photoId, 'flagged')", all_ids[3])
+
+    scope.select_option("collection")
+    page.locator("[data-testid='pipeline-review-collection']").select_option(
+        str(collection_id)
+    )
+    expect(page.locator("#statTotalPhotos")).to_have_text("1")
+    expect(page.locator("#reviewScopeStatus")).to_have_text("1 photo")
+    expect(banner).to_be_hidden()
+    assert regroup_payloads == []
+
+    # Regroup reruns grouping on just the collection, view-only.
+    regroup = page.locator("[data-testid='pipeline-review-scope-regroup']")
+    regroup.click()
+    expect(regroup).to_have_text("Show saved grouping")
+    expect(page.locator("#reviewScopeStatus")).to_have_text("1 photo, regrouped")
+    assert regroup_payloads[-1]["collection_id"] == collection_id
+    assert regroup_payloads[-1]["save_cache"] is False
+    flags_before = len(flag_payloads)
+    page.evaluate("(photoId) => window.setFlagFor(photoId, 'flagged')", all_ids[0])
     page.wait_for_timeout(100)
-    assert flag_payloads == []
+    assert len(flag_payloads) == flags_before
+
+    regroup.click()
+    expect(regroup).to_have_text("Regroup")
+    expect(page.locator("#reviewScopeStatus")).to_have_text("1 photo")
+
+    scope.select_option("workspace")
+    expect(regroup).to_be_hidden()
+    assert regroup_payloads[-1]["save_cache"] is False
+    assert "collection_id" not in regroup_payloads[-1]
+    assert "photo_ids" not in regroup_payloads[-1]
+
+    scope.select_option("cache")
+    expect(page.locator("#statTotalPhotos")).to_have_text("4")
 
 
 def test_pipeline_review_sidebar_collapses_and_persists(live_server, page):

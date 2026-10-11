@@ -468,11 +468,12 @@ function isBurstConfirmed(enc, burst) {
 }
 
 // Photo IDs the user currently sees inside this encounter's body. When
-// "Hide confirmed" is off, this is every photo in the encounter. When on,
-// photos belonging to confirmed bursts (or a confirmed no-burst encounter)
-// are excluded so encounter-level actions only touch what's on screen.
+// "Hide confirmed" is off, this is every in-scope photo in the encounter.
+// When on, photos belonging to confirmed bursts (or a confirmed no-burst
+// encounter) are excluded so encounter-level actions only touch what's on
+// screen.
 function visibleEncounterPhotoIds(enc) {
-  var ids = (enc && enc.photo_ids) || [];
+  var ids = ((enc && enc.photo_ids) || []).filter(photoInReviewScope);
   if (!hideConfirmed) return ids.slice();
   if (enc.bursts && enc.bursts.length > 0) {
     var hidden = new Set();

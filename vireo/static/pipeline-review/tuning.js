@@ -95,8 +95,8 @@ function doReflow() {
   }
   // Tag this request with the scope request sequence so a scope switch (or
   // a newer slider request) invalidates its response. Without this, a tune
-  // fired in Workspace/Collection scope that resolves after the user
-  // switches back to Latest review would replace the cached view with
+  // fired in a regrouped scope that resolves after the user
+  // switches back to the saved review would replace the cached view with
   // stale scoped data (and scopedCacheInfoFor would recompute against the
   // now-current scope).
   var seq = ++reviewScopeRequestSeq;

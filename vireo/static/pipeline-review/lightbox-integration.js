@@ -41,10 +41,7 @@ function pipelineReviewLightboxOptions() {
     readOnly: readOnly,
     readOnlyMessage: groupApplying
       ? 'Group Review is applying changes. Wait for it to finish.'
-      : (scoped
-        ? (reviewScopeMode === 'collection' ? 'Collection' : 'Workspace') +
-          ' scope is view-only. Switch to Latest review to make changes.'
-        : undefined),
+      : (scoped ? scopedViewReadOnlyMessage() : undefined),
   };
 }
 

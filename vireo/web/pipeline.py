@@ -847,6 +847,40 @@ def create_pipeline_blueprint(
         results["source"] = "browse-selection"
         return jsonify(results)
 
+    @blueprint.route("/api/pipeline/scope-photos")
+    def api_pipeline_scope_photos():
+        """Return the photo IDs in a folder subtree or collection.
+
+        Pipeline Review filters the saved review to these IDs, so narrowing
+        the view keeps the saved grouping, rankings and edits instead of
+        regrouping the subset.
+        """
+        db = get_db()
+        raw_folder = request.args.get("folder_id")
+        raw_collection = request.args.get("collection_id")
+        if (raw_folder is None) == (raw_collection is None):
+            return json_error("Pass exactly one of folder_id or collection_id", 400)
+        if raw_folder is not None:
+            try:
+                folder_id = int(raw_folder)
+            except ValueError:
+                return json_error("folder_id must be an integer", 400)
+            if folder_id not in {f["id"] for f in db.get_folder_tree()}:
+                return json_error("Folder not found in this workspace", 404)
+            photo_ids = db.get_photo_ids(folder_id=folder_id)
+        else:
+            collection_id = coerce_collection_id(raw_collection)
+            if collection_id is None or collection_id is False:
+                return json_error("collection_id must be an integer", 400)
+            err = reject_visual_collection(db, collection_id, json_error=json_error)
+            if err is not None:
+                return err
+            try:
+                photo_ids = db.get_photo_ids(collection_id=collection_id)
+            except ValueError:
+                return json_error("Collection not found in this workspace", 404)
+        return jsonify({"photo_ids": photo_ids, "count": len(photo_ids)})
+
     def attach_live_pipeline_decisions(db, results):
         """Overlay saved photo decisions without trusting cached browser metadata."""
         photo_ids = [p["id"] for p in results.get("photos", [])]

@@ -1986,7 +1986,7 @@ def test_read_only_scope_blocks_collection_and_keyword_writes(live_server, page)
     ):
         item = menu.locator(".vireo-ctx-item", has_text=label)
         expect(item).to_have_class(re.compile(r"\bvireo-ctx-disabled\b"))
-        expect(item).to_have_attribute("title", "Switch to Latest review to make changes")
+        expect(item).to_have_attribute("title", "Switch Scope to All reviewed photos to make changes")
     assert "Add to Highlights" not in menu.inner_text()
     assert "Set Representative" not in menu.inner_text()
     page.keyboard.press("Escape")

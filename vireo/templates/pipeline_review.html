@@ -273,6 +273,20 @@
   cursor: not-allowed;
 }
 .scope-filter-wrap select:focus { border-color: var(--accent); }
+.scope-filter-wrap button {
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.scope-filter-wrap button:hover { border-color: var(--accent); }
+.scope-filter-wrap button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .scope-status {
   min-width: 70px;
   color: var(--text-dim);
@@ -1851,13 +1865,19 @@ input[type="range"]::-moz-range-thumb {
       <div class="scope-filter-wrap" title="Choose which photos are included in this review view">
         <label for="reviewScopeSelect">Scope:</label>
         <select id="reviewScopeSelect" onchange="onReviewScopeModeChange(this.value)" data-testid="pipeline-review-scope">
-          <option value="cache">Latest review</option>
-          <option value="workspace">Workspace</option>
-          <option value="collection">Collection</option>
+          <option value="cache" title="Every photo in the saved review">All reviewed photos</option>
+          <option value="folder" title="The saved review, limited to one folder and its subfolders">Folder</option>
+          <option value="collection" title="The saved review, limited to one collection">Collection</option>
+          <option value="workspace" title="Regroup every workspace photo without saving. View-only.">Whole workspace (regrouped)</option>
+        </select>
+        <select id="reviewScopeFolderSelect" onchange="onReviewScopeFolderChange(this.value)" style="display:none;max-width:220px;" data-testid="pipeline-review-folder">
+          <option value="">Select folder...</option>
         </select>
         <select id="reviewScopeCollectionSelect" onchange="onReviewScopeCollectionChange(this.value)" style="display:none;max-width:180px;" data-testid="pipeline-review-collection">
           <option value="">Select collection...</option>
         </select>
+        <button type="button" id="reviewScopeRegroupBtn" onclick="toggleReviewScopeRegroup()" style="display:none;" aria-pressed="false" data-testid="pipeline-review-scope-regroup"
+          title="Rerun grouping and scoring on only these photos. View-only: the saved review is unchanged.">Regroup</button>
         <span class="scope-status" id="reviewScopeStatus"></span>
       </div>
       <div class="encounter-sort-wrap" title="Order encounters are listed in">

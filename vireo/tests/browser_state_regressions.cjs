@@ -51,7 +51,7 @@ async function main() {
 
   const sent = [];
   const burst = vm.createContext({
-    reviewScopeMode: 'cache', pipelineResults: {source: 'browse-selection'},
+    reviewScopeMode: 'cache', reviewScopeRegrouped: false, pipelineResults: {source: 'browse-selection'},
     safeFetch: async (url, opts) => { sent.push([url, JSON.parse(opts.body)]); return {ok: false}; },
     notifyReadOnlyScopedView() {},
   });

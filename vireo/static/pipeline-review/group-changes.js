@@ -153,7 +153,7 @@ function grmUpdateApplyLabel() {
   btn.textContent = parts.length ? parts.join(' · ') + ' & Close' : 'Apply and close';
   btn.title = grmApplyTitle(diff, checks, checks.species ? tagCount : 0);
 
-  // In Workspace/Collection scope the current pipelineResults are a *view*
+  // In a regrouped scope the current pipelineResults are a *view*
   // over a different photo set — committing them would overwrite the
   // workspace's saved review cache with just this scoped subset (both via
   // the client save-cache POST and the server-side cache rewrite inside
@@ -163,7 +163,7 @@ function grmUpdateApplyLabel() {
     btn.style.opacity = '0.5';
     btn.style.cursor = 'not-allowed';
     btn.textContent = 'Read-only in scope view';
-    btn.title = 'Switch Scope to "Latest review" to save picks, rejects, or species confirmations.';
+    btn.title = scopedViewEditHint() + ' (picks, rejects, and species confirmations).';
   }
 }
 

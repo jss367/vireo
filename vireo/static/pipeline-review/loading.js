@@ -102,7 +102,7 @@ function computeReviewNow() {
     restorePipelineReviewViewState();
     applyReviewResults(data, resultsCacheInfo);
     openRequestedGroupReviewFromUrl();
-    loadReviewScopeCollections();
+    loadReviewScopeOptions();
   }).catch(function() {
     // safeFetch toasts the error; re-enable the button so the user can retry.
     if (btn) { btn.disabled = false; btn.textContent = 'Compute results now'; }
@@ -149,7 +149,7 @@ function loadPipelinePageInit() {
     restorePipelineReviewViewState();
     applyReviewResults(data.results, resultsCacheInfo);
     openRequestedGroupReviewFromUrl();
-    loadReviewScopeCollections();
+    loadReviewScopeOptions();
   }).catch(function(error) {
     var empty = document.getElementById('emptyState');
     if (empty) {

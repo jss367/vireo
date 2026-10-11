@@ -8,7 +8,7 @@ function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) 
   var one = photoIds.length === 1;
   var singleHint = one ? undefined : 'Select a single photo';
   var scopedWriteHint = isScopedReviewView()
-    ? 'Switch to Latest review to make changes'
+    ? scopedViewEditHint()
     : undefined;
   var tauriNavigationBlocked = !!(
     inGroupReview &&

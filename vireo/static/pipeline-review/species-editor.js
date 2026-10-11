@@ -291,7 +291,7 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   closeAllDropdowns();
 
   // /api/encounters/species reloads and rewrites the saved cache on the
-  // server, so calling it from a Workspace/Collection scope view would
+  // server, so calling it from a regrouped scope view would
   // overwrite the persisted review with only the scoped photo set. Block
   // it here — the inline species chip/dropdown buttons that call us have
   // no scope awareness of their own.
@@ -441,7 +441,7 @@ function registerPipelineReviewHistoryHooks() {
       var results = data.results;
       cachedPipelineResults = cloneReviewData(results);
       cachedResultsCacheInfo = cloneReviewData(data.results_cache_info);
-      if (reviewScopeMode === 'cache') applyReviewResults(results, data.results_cache_info);
+      if (!isScopedReviewView()) applyReviewResults(results, data.results_cache_info);
       else loadReviewScopeResults();
     };
 }
