@@ -112,6 +112,12 @@ function bindPipelineReviewPhotoEvents() {
 
       renderResults();
       updateSummaryBar(refreshLocalSummaryCounts());
+      // updateSummaryBar does not redraw the scope status line or the
+      // "not in the saved review" banner, and a Folder scope has no
+      // membership refresh that would, so redraw both after trimming the
+      // deleted id from reviewScopePhotoIds above.
+      updateReviewScopeStatusFromResults(pipelineResults);
+      renderCacheScopeBanner(resultsCacheInfo);
       refreshLatestScopeSnapshotIfCurrent();
       if (groupOverlay && groupOverlay.classList.contains('open')) {
         if (grmState.items.length) grmRenderKeepingCurrentSelection(grmState.items);

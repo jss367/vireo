@@ -276,8 +276,21 @@ async function staleMembershipRefreshIsDropped() {
   assert.deepEqual(Array.from(run(ctx, 'reviewScopePhotoIds')), [IN_SCOPE]);
 }
 
+async function deletedPhotoLeavesTheFolderScope() {
+  // Folder membership is never re-fetched from this page, so a photo deleted
+  // from the lightbox must leave the scope set and its total locally.
+  const {ctx, element, listeners} = makePage();
+  run(ctx, `reviewScopePhotoIds = new Set([${IN_SCOPE}, 99]); reviewScopeTotal = 2;`);
+  ctx.bindPipelineReviewPhotoEvents();
+  listeners['lightbox:photodeleted']({detail: {photoId: IN_SCOPE}});
+  assert.deepEqual(Array.from(run(ctx, 'reviewScopePhotoIds')), [99]);
+  assert.equal(run(ctx, 'reviewScopeTotal'), 1);
+  assert.equal(element('reviewScopeStatus').textContent, '0 of 1 reviewed');
+}
+
 (async () => {
   await hiddenPhotoIsNeverAWriteTarget();
+  await deletedPhotoLeavesTheFolderScope();
   await inScopePhotosStayWritable();
   await groupReviewStillEditsTheWholeBurst();
   await allReviewedPhotosIsUnfiltered();
