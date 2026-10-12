@@ -25,6 +25,17 @@ function bindPipelineReviewPhotoEvents() {
           window._vireoNativeMenuPhotoIdsOverride = null;
         }
       }
+      // Folder/Collection scope caches the scope's photo ids on the client.
+      // Collection mode has a debounced /api/pipeline/scope-photos refresh,
+      // but folder mode has no server-side resync path, so the deleted id
+      // would stay in reviewScopePhotoIds/reviewScopeTotal and leave the
+      // "N of T photos not in saved review" banner and the scope status
+      // ("N of T reviewed") reporting the deleted photo as unreviewed. Drop
+      // it locally for both modes so the banner stays honest; collection
+      // mode's own refresh will reconfirm against the server.
+      if (reviewScopePhotoIds && reviewScopePhotoIds.delete(photoId)) {
+        reviewScopeTotal = Math.max((reviewScopeTotal || 0) - 1, 0);
+      }
       if (inspectPhotoId === photoId) closeInspect();
 
       pipelineResults.photos = (pipelineResults.photos || []).filter(function(photo) {
@@ -101,6 +112,12 @@ function bindPipelineReviewPhotoEvents() {
 
       renderResults();
       updateSummaryBar(refreshLocalSummaryCounts());
+      // updateSummaryBar does not redraw the scope status line or the
+      // "not in the saved review" banner, and a Folder scope has no
+      // membership refresh that would, so redraw both after trimming the
+      // deleted id from reviewScopePhotoIds above.
+      updateReviewScopeStatusFromResults(pipelineResults);
+      renderCacheScopeBanner(resultsCacheInfo);
       refreshLatestScopeSnapshotIfCurrent();
       if (groupOverlay && groupOverlay.classList.contains('open')) {
         if (grmState.items.length) grmRenderKeepingCurrentSelection(grmState.items);

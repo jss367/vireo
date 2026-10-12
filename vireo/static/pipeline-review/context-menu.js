@@ -3,12 +3,49 @@
 
 var pipelineReviewContextPhotoIds = [];
 
+// A right-click sets pipelineReviewContextPhotoIds, and the shared native
+// Photo menu resolves it through getActiveSelection() for keyboard-driven
+// actions. If the user dismisses the menu and switches to a Folder/Collection
+// scope that no longer contains that photo, filter mode stays writable, and
+// the next action would silently edit a hidden out-of-scope photo. Scope
+// changes clear the stale selection so the next action starts from a known
+// in-scope target.
+function clearPipelineReviewContextSelection() {
+  pipelineReviewContextPhotoIds = [];
+  if (window._vireoNativeMenuPhotoIdsOverride) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+  }
+}
+
+// A membership refresh under a smart-collection scope can drop the
+// right-clicked photo (e.g. a rating edit pushes it above the collection's
+// rating cap). Drop remembered ids the scope guard no longer allows; keep the
+// still-in-scope ones so a multi-photo override keeps the parts that are
+// still visible. getActiveSelection() filters on read as well; this keeps the
+// stored state honest for anything that inspects it directly.
+function filterPipelineReviewContextSelectionToScope() {
+  if (pipelineReviewContextPhotoIds && pipelineReviewContextPhotoIds.length) {
+    pipelineReviewContextPhotoIds = photoIdsInReviewScope(pipelineReviewContextPhotoIds);
+  }
+  var override = window._vireoNativeMenuPhotoIdsOverride;
+  if (override && override.length) {
+    var filteredOverride = photoIdsInReviewScope(override);
+    if (filteredOverride.length !== override.length) {
+      window._vireoNativeMenuPhotoIdsOverride = filteredOverride.length
+        ? filteredOverride
+        : null;
+    }
+  }
+}
+
 function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) {
-  photoIds = pipelineReviewUniquePhotoIds(photoIds);
+  // Scope guard: the menu's actions close over these ids, so drop any the
+  // Folder/Collection scope hides (Group Review members stay allowed).
+  photoIds = photoIdsInReviewScope(pipelineReviewUniquePhotoIds(photoIds));
   var one = photoIds.length === 1;
   var singleHint = one ? undefined : 'Select a single photo';
   var scopedWriteHint = isScopedReviewView()
-    ? 'Switch to Latest review to make changes'
+    ? scopedViewEditHint()
     : undefined;
   var tauriNavigationBlocked = !!(
     inGroupReview &&

@@ -118,6 +118,7 @@ GET          /api/pipeline/extract-readiness
 GET          /api/pipeline/page-init
 GET          /api/pipeline/photo/<int:photo_id>
 GET          /api/pipeline/results
+GET          /api/pipeline/scope-photos
 GET          /api/pipeline/slots
 GET          /api/places/reverse-geocode
 GET          /api/predictions

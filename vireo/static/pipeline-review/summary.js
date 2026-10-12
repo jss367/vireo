@@ -60,6 +60,13 @@ function renderAlgorithmTrace() {
     if (pid == null) {
       return '<div class="trace-pair-photo"><span class="name">' + escapeHtml(label) + '</span></div>';
     }
+    // Under a Folder/Collection filter, render a pair photo outside the
+    // scope without a link; openInspect() would refuse it anyway.
+    if (!isPhotoActionableInReviewScope(pid)) {
+      return '<div class="trace-pair-photo" title="' + escapeHtml(p.filename || label) + '">'
+        + '<span class="name">' + escapeHtml(label) + '</span>'
+        + '</div>';
+    }
     return '<div class="trace-pair-photo" onclick="openInspect(' + pid + ')" title="' + escapeHtml(p.filename || label) + '">'
       + '<span class="name">' + escapeHtml(label) + '</span>'
       + '</div>';
@@ -262,6 +269,49 @@ function refreshLocalSummaryCounts() {
   return summary;
 }
 
+// Summary counts restricted to a Folder/Collection scope. Encounters and
+// bursts count when any of their photos is in scope, matching what renders.
+function scopedSummaryCounts(results, scopeIds) {
+  var summary = Object.assign({}, results.summary || {});
+  var photos = (results.photos || []).filter(function(p) { return scopeIds.has(p.id); });
+  function anyInScope(ids) {
+    return (ids || []).some(function(pid) { return scopeIds.has(pid); });
+  }
+  summary.total_photos = photos.length;
+  summary.encounter_count = 0;
+  summary.burst_count = 0;
+  summary.confirmed_count = 0;
+  summary.unconfirmed_count = 0;
+  (results.encounters || []).forEach(function(enc) {
+    if (!anyInScope(enc.photo_ids)) return;
+    summary.encounter_count++;
+    var bursts = enc.bursts || [];
+    if (bursts.length > 0) {
+      bursts.forEach(function(burst) {
+        if (!anyInScope(burst.photo_ids || burst)) return;
+        summary.burst_count++;
+        if (isBurstConfirmed(enc, burst)) summary.confirmed_count++;
+        else summary.unconfirmed_count++;
+      });
+    } else if (enc.species_confirmed) {
+      summary.confirmed_count++;
+    } else {
+      summary.unconfirmed_count++;
+    }
+  });
+  summary.keep_count = 0;
+  summary.review_count = 0;
+  summary.reject_count = 0;
+  summary.rarity_protected = 0;
+  photos.forEach(function(p) {
+    if (p.label === 'KEEP') summary.keep_count++;
+    else if (p.label === 'REVIEW') summary.review_count++;
+    else if (p.label === 'REJECT') summary.reject_count++;
+    if (p.rarity_protected) summary.rarity_protected++;
+  });
+  return summary;
+}
+
 function getConfirmationUnitName(summary) {
   var confirmed = Number(summary.confirmed_count || 0);
   var unconfirmed = Number(summary.unconfirmed_count || 0);
@@ -289,6 +339,8 @@ function updateSummaryBar(summary) {
   if (pipelineResults && (summary.confirmed_count == null || summary.unconfirmed_count == null)) {
     summary = refreshLocalSummaryCounts() || summary;
   }
+  var scopeIds = activeReviewScopeFilter();
+  if (scopeIds && pipelineResults) summary = scopedSummaryCounts(pipelineResults, scopeIds);
   var confirmed = Number(summary.confirmed_count || 0);
   var unconfirmed = Number(summary.unconfirmed_count || 0);
   var confirmationTotal = confirmed + unconfirmed;

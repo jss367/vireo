@@ -449,7 +449,20 @@ function lightboxDelete() {
     } else {
       var nextIdx = Math.min(idx, _lightboxPhotoList.length - 1);
       var next = _lightboxPhotoList[nextIdx];
-      openLightbox(next.id, next.filename, _lightboxPhotoList);
+      // Re-evaluate the owning page's read-only decision for the next photo,
+      // mirroring lightboxNav. The deleted photo was editable (_lbReadOnly ===
+      // false), so without this hook openLightbox would inherit that and leave
+      // Delete, Adjust, and Crop enabled when the next photo is out of scope
+      // (Find Similar lists mix in-scope and out-of-scope results).
+      var navOptions = {};
+      if (typeof window.getLightboxOpenOptions === 'function') {
+        var opened = window.getLightboxOpenOptions(next.id);
+        if (opened && Object.prototype.hasOwnProperty.call(opened, 'readOnly')) {
+          navOptions.readOnly = opened.readOnly;
+          navOptions.readOnlyMessage = opened.readOnlyMessage;
+        }
+      }
+      openLightbox(next.id, next.filename, _lightboxPhotoList, navOptions);
     }
 
     try {

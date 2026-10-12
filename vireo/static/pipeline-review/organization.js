@@ -68,8 +68,11 @@ async function addToCollection(photoIds) {
     notifyReadOnlyScopedView();
     return false;
   }
-  var ids = pipelineReviewUniquePhotoIds(photoIds || getActiveSelection());
-  if (!ids.length) return;
+  var ids = photoIdsInReviewScope(pipelineReviewUniquePhotoIds(photoIds || getActiveSelection()));
+  if (!ids.length) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+    return false;
+  }
   // Native menu dispatch pins its selection only long enough for this action
   // to capture it. The dialog owns `ids` from here on; leaving the override
   // active would make unrelated native commands target this stale selection.
@@ -155,7 +158,9 @@ function confirmPipelineCollection() {
     notifyReadOnlyScopedView();
     return Promise.resolve(false);
   }
-  var ids = pipelineReviewCollectionPhotoIds.slice();
+  // Re-check the scope at submit: a membership refresh can drop a photo
+  // while the dialog is open.
+  var ids = photoIdsInReviewScope(pipelineReviewCollectionPhotoIds);
   var newName = document.getElementById('pipelineCollectionNewName').value.trim();
   var collectionId = pipelineReviewSelectedCollectionId;
   var collectionName = '';
@@ -198,6 +203,13 @@ function confirmPipelineCollection() {
     hidePipelineCollectionModal(true);
     showToast('Added ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's') +
       ' to "' + collectionName + '"', 'success');
+    // photoIdsInReviewScope keeps burst members of an open Group Review in
+    // scope even when they're outside the active folder/collection filter,
+    // so a static collection write here can add a photo that is still out
+    // of scope under the saved review. Without this snapshot + membership
+    // refresh, the newly-added photo stays filtered out after Group Review
+    // closes, and the "N not in saved review" totals stay stale.
+    refreshLatestScopeSnapshotIfCurrent();
     return true;
   })().finally(function() {
     pipelineReviewCollectionSubmitPromise = null;
@@ -213,8 +225,11 @@ function batchAddKeyword(photoIds) {
     notifyReadOnlyScopedView();
     return false;
   }
-  var ids = pipelineReviewUniquePhotoIds(photoIds || getActiveSelection());
-  if (!ids.length) return;
+  var ids = photoIdsInReviewScope(pipelineReviewUniquePhotoIds(photoIds || getActiveSelection()));
+  if (!ids.length) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+    return false;
+  }
   pipelineReviewKeywordPhotoIds = ids;
   window._vireoNativeMenuPhotoIdsOverride = null;
   document.getElementById('pipelineKeywordTitle').textContent =
@@ -253,7 +268,7 @@ function confirmPipelineKeyword() {
     notifyReadOnlyScopedView();
     return Promise.resolve(false);
   }
-  var ids = pipelineReviewKeywordPhotoIds.slice();
+  var ids = photoIdsInReviewScope(pipelineReviewKeywordPhotoIds);
   var name = document.getElementById('pipelineKeywordInput').value.trim();
   if (!ids.length || !name) return Promise.resolve(false);
   setPipelineKeywordSubmitting(true);
@@ -265,6 +280,11 @@ function confirmPipelineKeyword() {
       hidePipelineKeywordModal(true);
       showToast('Added "' + name + '" to ' + ids.length + ' photo' +
         (ids.length === 1 ? '' : 's'), 'success');
+      // A smart collection scope keyed on `keyword` must re-check membership
+      // after this write; without the refresh, a photo that now matches a
+      // `keyword not_contains` rule stays visible until the scope is
+      // reselected or the page reloads.
+      refreshLatestScopeSnapshotIfCurrent();
       return true;
     }).catch(function() {
       return false;

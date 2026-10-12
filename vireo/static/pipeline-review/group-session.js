@@ -6,6 +6,31 @@ async function detachBurst(encIdx, burstIdx) {
     notifyReadOnlyScopedView();
     return;
   }
+  // Folder/Collection filter mode leaves pipelineResults as the full saved
+  // review and only hides out-of-scope cards; a whole-burst detach would
+  // still rewrite the saved grouping for the hidden photos. Refuse when the
+  // burst spans the scope boundary. Per-photo detach stays unaffected
+  // because its button is only rendered next to in-scope cards.
+  var scopeIds = activeReviewScopeFilter();
+  if (scopeIds) {
+    var enc = pipelineResults && pipelineResults.encounters && pipelineResults.encounters[encIdx];
+    var burst = enc && enc.bursts && enc.bursts[burstIdx];
+    var burstIds = burst ? (burst.photo_ids || burst || []) : [];
+    var outside = 0;
+    for (var i = 0; i < burstIds.length; i++) {
+      if (!scopeIds.has(burstIds[i])) outside++;
+    }
+    if (outside) {
+      var noun = reviewScopeMode === 'folder' ? 'folder' : 'collection';
+      showToast(
+        'This burst has ' + outside + ' photo' + (outside === 1 ? '' : 's')
+          + ' outside the ' + noun + ' and would be rewritten too. '
+          + 'Switch Scope to All reviewed photos to detach it.',
+        'warning'
+      );
+      return;
+    }
+  }
 
   var resp = await safeFetch('/api/pipeline/detach-burst', {
     method: 'POST',
@@ -28,6 +53,7 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
     notifyReadOnlyScopedView();
     return;
   }
+  if (!isPhotoActionableInReviewScope(photoId)) return;
 
   var resp = await safeFetch('/api/pipeline/detach-photo', {
     method: 'POST',
@@ -358,7 +384,13 @@ function refreshPipelineReviewLightboxReadOnlyState() {
   var lightbox = document.getElementById('lightboxOverlay');
   if (!lightbox || !lightbox.classList.contains('active') ||
       typeof window.setLightboxReadOnlyMode !== 'function') return;
-  var options = pipelineReviewLightboxOptions();
+  // Pass the lightbox's current photo so a collection-membership refresh
+  // that drops the open photo re-evaluates out-of-scope for it, not just
+  // the always-false default from a missing photoId.
+  var currentPhotoId = (typeof vireoLightboxSession !== 'undefined' && vireoLightboxSession)
+    ? vireoLightboxSession.requestedPhotoId()
+    : null;
+  var options = pipelineReviewLightboxOptions(currentPhotoId);
   window.setLightboxReadOnlyMode(options.readOnly, options.readOnlyMessage);
 }
 

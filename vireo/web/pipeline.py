@@ -847,6 +847,67 @@ def create_pipeline_blueprint(
         results["source"] = "browse-selection"
         return jsonify(results)
 
+    @blueprint.route("/api/pipeline/scope-photos")
+    def api_pipeline_scope_photos():
+        """Return the photo IDs in a folder subtree or collection.
+
+        Pipeline Review filters the saved review to these IDs, so narrowing
+        the view keeps the saved grouping, rankings and edits instead of
+        regrouping the subset.
+        """
+        db = get_db()
+        raw_folder = request.args.get("folder_id")
+        raw_collection = request.args.get("collection_id")
+        if (raw_folder is None) == (raw_collection is None):
+            return json_error("Pass exactly one of folder_id or collection_id", 400)
+        if raw_folder is not None:
+            try:
+                folder_id = int(raw_folder)
+            except ValueError:
+                return json_error("folder_id must be an integer", 400)
+            # Reject values outside SQLite's signed 64-bit range before any
+            # query binds them, matching ``folder_ids_error``: a huge integer
+            # like ``9223372036854775808`` passes ``int()`` but raises
+            # ``OverflowError`` at parameter binding, escaping as a 500.
+            if folder_id < _SQLITE_INT_MIN or folder_id > _SQLITE_INT_MAX:
+                return json_error(
+                    "folder_id is outside SQLite's signed 64-bit integer range",
+                    400,
+                )
+            if not db.get_workspace_visible_folder_ids([folder_id]):
+                return json_error("Folder not found in this workspace", 404)
+            # Mirror /api/pipeline/plan and /api/jobs/pipeline folder
+            # resolution so the filter includes the same photos a scoped
+            # Process run would see. ``get_photo_ids`` walks parent_id only,
+            # so legacy folders with parent_id=NULL under the selected root
+            # would be silently omitted and the "N not in saved review"
+            # banner would understate the scope.
+            subtree_ids = set(db.get_folder_subtree_ids(folder_id))
+            subtree_ids.update(db.get_workspace_visible_folder_ids(
+                db._folder_subtree_ids_by_path(folder_id),
+            ))
+            photo_ids = [
+                r["id"]
+                for r in db.get_workspace_photos_in_folders(list(subtree_ids))
+            ]
+        else:
+            collection_id = coerce_collection_id(raw_collection)
+            if collection_id is None or collection_id is False:
+                return json_error("collection_id must be an integer", 400)
+            if collection_id < _SQLITE_INT_MIN or collection_id > _SQLITE_INT_MAX:
+                return json_error(
+                    "collection_id is outside SQLite's signed 64-bit integer range",
+                    400,
+                )
+            err = reject_visual_collection(db, collection_id, json_error=json_error)
+            if err is not None:
+                return err
+            try:
+                photo_ids = db.get_photo_ids(collection_id=collection_id)
+            except ValueError:
+                return json_error("Collection not found in this workspace", 404)
+        return jsonify({"photo_ids": photo_ids, "count": len(photo_ids)})
+
     def attach_live_pipeline_decisions(db, results):
         """Overlay saved photo decisions without trusting cached browser metadata."""
         photo_ids = [p["id"] for p in results.get("photos", [])]

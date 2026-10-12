@@ -24,7 +24,27 @@ var cachedResultsCacheInfo = null;
 var reviewScopeMode = 'cache';
 var reviewScopeCollectionId = null;
 var reviewScopeCollections = [];
+var reviewScopeFolderId = null;
+var reviewScopeFolders = [];
+// Folder and Collection scopes filter the saved review to these photo IDs
+// (null shows every photo). pipelineResults stays the full saved review, so
+// edits and saves keep working while the scope is narrowed.
+var reviewScopePhotoIds = null;
+// Photos in the chosen folder/collection, including ones the saved review
+// does not cover, so the page can say how many were never reviewed.
+var reviewScopeTotal = null;
+// True when the user asked to regroup the folder/collection on its own.
+// That view comes from regroup-live and is view-only like Workspace scope.
+var reviewScopeRegrouped = false;
 var reviewScopeRequestSeq = 0;
+// Separate counter for the Folder/Collection scope-photos membership load so
+// that reflow/regroup-live slider requests (which must still be cancelled by
+// a scope change through reviewScopeRequestSeq) don't invalidate an in-flight
+// membership response. If the two shared a counter, a slider moved while
+// scope membership was loading would drop the valid membership result and
+// then render the tuning response against the empty pre-fetch scope set,
+// leaving the filtered view at zero photos until the user reselected scope.
+var reviewScopeMembershipSeq = 0;
 var showPhotoLabels = false;
 // Survives re-renders so confirming/filtering doesn't re-expand collapsed
 // encounters. Keyed by the encounter's full sorted photo_id set so that

@@ -43,6 +43,10 @@ function renderResults() {
   var photoMap = {};
   pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
   var speciesConflictEvidence = buildSpeciesConflictEvidence(photoMap);
+  // Folder/Collection scope: photos outside it are hidden like any other
+  // filter, while pipelineResults keeps the whole saved review.
+  var scopeIds = activeReviewScopeFilter();
+  function inScope(pid) { return !scopeIds || scopeIds.has(pid); }
 
   // Build the photo set for encounters matching the species/filename search.
   var speciesVisibleIds = null;
@@ -51,7 +55,7 @@ function renderResults() {
     speciesVisibleIds = new Set();
     speciesVisibleEncounters = new Set();
     pipelineResults.encounters.forEach(function(enc, ei) {
-      if (encounterMatchesSearch(enc, photoMap)) {
+      if (encounterMatchesSearch(enc, photoMap, inScope)) {
         speciesVisibleEncounters.add(ei);
         (enc.photo_ids || []).forEach(function(pid) { speciesVisibleIds.add(pid); });
       }
@@ -91,6 +95,7 @@ function renderResults() {
   // Update filter counts (respecting search and both hide toggles)
   var counts = {all: 0, KEEP: 0, REVIEW: 0, REJECT: 0, SPECIES_CONFLICT: 0};
   pipelineResults.photos.forEach(function(p) {
+    if (!inScope(p.id)) return;
     if (speciesVisibleIds && !speciesVisibleIds.has(p.id)) return;
     if (confirmedHiddenIds && confirmedHiddenIds.has(p.id)) return;
     if (withoutSuggestionHiddenIds && withoutSuggestionHiddenIds.has(p.id)) return;
@@ -132,6 +137,7 @@ function renderResults() {
     var visibleEncIds = encPhotoIds.filter(function(pid) {
       var p = photoMap[pid];
       if (!p) return false;
+      if (!inScope(pid)) return false;
       if (confirmedHiddenIds && confirmedHiddenIds.has(pid)) return false;
       return photoMatchesPipelineFilter(p, speciesConflictEvidence[pid]);
     });
@@ -142,9 +148,15 @@ function renderResults() {
 
     var encKey = encounterKey(enc);
     var isCollapsed = encKey != null && collapsedEncounters.has(encKey);
+    function burstInScope(burst) {
+      return !scopeIds || (burst.photo_ids || burst || []).some(inScope);
+    }
     var visibleBurstCount = enc.bursts && enc.bursts.length
-      ? enc.bursts.filter(function(burst) { return !hideConfirmed || !isBurstConfirmed(enc, burst); }).length
+      ? enc.bursts.filter(function(burst) {
+        return (!hideConfirmed || !isBurstConfirmed(enc, burst)) && burstInScope(burst);
+      }).length
       : visibleEncIds.length;
+    var encMeta = encounterScopeMeta(enc, scopeIds, burstInScope);
     // Until an offscreen card is first laid out, estimate its height from the
     // visible rows and thumbnail size. The browser remembers its real height.
     var estimatedHeight = isCollapsed ? '48px'
@@ -155,11 +167,10 @@ function renderResults() {
     html += '<span class="encounter-chevron' + (isCollapsed ? ' collapsed' : '') + '" id="encChev' + ei + '" onclick="toggleEncounter(' + ei + ')">&#9660;</span>';
     html += renderSpeciesWidget(enc, ei, 'encounter', null);
     html += '<span class="encounter-meta" onclick="toggleEncounter(' + ei + ')" style="cursor:pointer;flex:1;">';
-    html += '<span>' + enc.photo_count + ' photos</span>';
-    if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
+    html += encMeta;
     if (timeRange) html += '<span>' + escapeHtml(timeRange) + '</span>';
     html += missingTimestampBadge(enc);
-    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
+    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds, inScope);
     html += '</span>';
     html += renderGroupRejectButton('encounter', ei, null, visibleEncIds, photoMap);
     html += '</div>';
@@ -168,6 +179,7 @@ function renderResults() {
     if (enc.bursts && enc.bursts.length > 0) {
       enc.bursts.forEach(function(burst, bi) {
         if (hideConfirmed && isBurstConfirmed(enc, burst)) return;
+        if (!burstInScope(burst)) return;
         var burstIds = burst.photo_ids || burst;
         // Narrow the burst's Reject/Clear target to photos that actually
         // render — the active label / species-conflict filter can hide
@@ -175,6 +187,7 @@ function renderResults() {
         var visibleBurstIds = burstIds.filter(function(pid) {
           var p = photoMap[pid];
           if (!p) return false;
+          if (!inScope(pid)) return false;
           return photoMatchesPipelineFilter(p, speciesConflictEvidence[pid]);
         });
         pipelineReviewVisibleTargets['burst:' + ei + ':' + bi] = visibleBurstIds;
@@ -190,13 +203,14 @@ function renderResults() {
         if (!burst.species_override && enc.bursts.length > 1) {
           html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ',\'top\')">&#9998;</span>';
         }
-        html += renderBurstSpeciesConflict(enc, ei, burst, bi, speciesConflictEvidence);
+        html += renderBurstSpeciesConflict(enc, ei, burst, bi, speciesConflictEvidence, inScope);
         html += renderGroupRejectButton('burst', ei, bi, visibleBurstIds, photoMap);
         html += '<button class="detach-btn" onclick="detachBurst(' + ei + ',' + bi + ')" title="Detach burst">&times;</button>';
         html += '</div>';
         burstIds.forEach(function(pid) {
           var p = photoMap[pid];
           if (!p) return;
+          if (!inScope(pid)) return;
           if (!photoMatchesPipelineFilter(p, speciesConflictEvidence[pid])) return;
           html += renderPhotoCard(p, ei, bi, speciesConflictEvidence[pid]);
         });
@@ -207,6 +221,7 @@ function renderResults() {
       encPhotoIds.forEach(function(pid) {
         var p = photoMap[pid];
         if (!p) return;
+        if (!inScope(pid)) return;
         if (!photoMatchesPipelineFilter(p, speciesConflictEvidence[pid])) return;
         html += renderPhotoCard(p, null, null, speciesConflictEvidence[pid]);
       });
@@ -217,11 +232,10 @@ function renderResults() {
     html += '<div class="encounter-header encounter-footer">';
     html += renderSpeciesWidget(enc, ei, 'encounter', null, 'bot');
     html += '<span class="encounter-meta" style="flex:1;">';
-    html += '<span>' + enc.photo_count + ' photos</span>';
-    if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
+    html += encMeta;
     if (timeRange) html += '<span>' + escapeHtml(timeRange) + '</span>';
     html += missingTimestampBadge(enc);
-    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
+    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds, inScope);
     html += '</span></div>';
 
     html += '</div></div>';
@@ -246,6 +260,30 @@ function renderResults() {
     // Re-apply focus highlight (DOM was rebuilt) and refresh trace panel.
     setFocusedEncounter(_focusedEncounterIdx);
   }
+}
+
+// Photo and burst counts for an encounter header. Under a Folder/Collection
+// scope an encounter can be partly outside it; say so, since species
+// confirmation still applies to the whole encounter or burst.
+function encounterScopeMeta(enc, scopeIds, burstInScope) {
+  var photoTotal = enc.photo_count;
+  var burstTotal = enc.burst_count;
+  var photosShown = scopeIds
+    ? (enc.photo_ids || []).filter(function(pid) { return scopeIds.has(pid); }).length
+    : photoTotal;
+  if (!scopeIds || photosShown >= photoTotal) {
+    return '<span>' + photoTotal + ' photos</span>'
+      + (burstTotal ? '<span>' + burstTotal + ' bursts</span>' : '');
+  }
+  var burstsShown = (enc.bursts || []).filter(burstInScope).length;
+  var outside = photoTotal - photosShown;
+  var title = outside + ' photo' + (outside === 1 ? ' in this encounter is' : 's in this encounter are')
+    + ' outside the current scope and hidden. Species confirmation applies to the whole '
+    + (burstTotal ? 'encounter or burst' : 'encounter') + ', including hidden photos.';
+  var html = '<span class="encounter-scope-partial" title="' + escapeAttr(title) + '">'
+    + photosShown + ' of ' + photoTotal + ' photos in scope</span>';
+  if (burstTotal) html += '<span>' + burstsShown + ' of ' + burstTotal + ' bursts</span>';
+  return html;
 }
 
 function renderPhotoCard(p, encIdx, burstIdx, speciesConflict) {

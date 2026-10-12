@@ -123,9 +123,13 @@ function setPipelineReviewGroupFlag(target, flag) {
     notifyReadOnlyScopedView();
     return Promise.resolve();
   }
+  // The rendered target is already scope-narrowed, but the fallbacks in
+  // groupFlagTarget() (no render yet) read the raw encounter/burst list.
   var ids = Array.from(new Set((target.photoIds || []).map(function(pid) {
     return parseInt(pid, 10);
-  }).filter(function(pid) { return !!pid && !!findPhotoInResults(pid); })));
+  }).filter(function(pid) {
+    return !!pid && !!findPhotoInResults(pid) && isPhotoActionableInReviewScope(pid);
+  })));
   if (!ids.length) return Promise.resolve();
 
   // Block bulk actions whose photos overlap an in-flight bulk action — e.g.,
@@ -312,6 +316,11 @@ function setPipelineReviewFlag(photoId, flag) {
       return Promise.resolve({provisional: true});
     }
   }
+  // Scope guard. Runs after the Group Review routing above, which stages
+  // flags for every member of the open burst, including ones outside the
+  // scope. The shared lightbox treats false as a failed write and restores
+  // its confirmed chip.
+  if (!isPhotoActionableInReviewScope(photoId)) return Promise.resolve(false);
   // A group action snapshots live flags before writing its batch. Allowing a
   // per-photo pick/reject for one of those same IDs before the batch finishes
   // would let the batch overwrite the newer choice, while its Undo would

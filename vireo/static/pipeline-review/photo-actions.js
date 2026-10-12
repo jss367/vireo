@@ -4,16 +4,20 @@
 // Expose the last explicit Process Review selection to the shared native
 // Photo menu. The burst modal owns a real multi-selection; the main results
 // grid is single-select and remembers the card most recently right-clicked.
+// The non-Group-Review sources pass through the scope guard, so a photo a
+// Folder/Collection scope hides never comes back as the native menu's target.
 function getActiveSelection() {
   if (window._vireoNativeMenuPhotoIdsOverride && window._vireoNativeMenuPhotoIdsOverride.length) {
-    return pipelineReviewUniquePhotoIds(window._vireoNativeMenuPhotoIdsOverride);
+    return photoIdsInReviewScope(
+      pipelineReviewUniquePhotoIds(window._vireoNativeMenuPhotoIdsOverride)
+    );
   }
   var overlay = document.getElementById('grmOverlay');
   if (overlay && overlay.classList.contains('open') && grmState) {
     return pipelineReviewUniquePhotoIds(_grmActionTargetIds());
   }
-  if (inspectPhotoId) return [inspectPhotoId];
-  return pipelineReviewContextPhotoIds.slice();
+  if (inspectPhotoId) return photoIdsInReviewScope([inspectPhotoId]);
+  return photoIdsInReviewScope(pipelineReviewContextPhotoIds.slice());
 }
 
 async function setPipelineReviewRating(photoIds, rating) {
@@ -25,7 +29,7 @@ async function setPipelineReviewRating(photoIds, rating) {
     showToast('Group Review is applying changes — wait for it to finish', 'warning');
     return false;
   }
-  var ids = pipelineReviewUniquePhotoIds(photoIds);
+  var ids = photoIdsInReviewScope(pipelineReviewUniquePhotoIds(photoIds));
   if (!ids.length) return false;
   try {
     await safeFetch('/api/batch/rating', {
@@ -97,6 +101,7 @@ async function setWildlifeExcludedFor(photoId, excluded) {
     showToast('Group Review is applying changes — wait for it to finish', 'warning');
     return false;
   }
+  if (!isPhotoActionableInReviewScope(photoId)) return false;
   try {
     await safeFetch('/api/photos/' + photoId + '/wildlife_excluded', {
       method: 'POST',
@@ -106,6 +111,12 @@ async function setWildlifeExcludedFor(photoId, excluded) {
   } catch (e) { return false; }
   var photo = findPhotoInResults(photoId);
   if (photo) photo.wildlife_excluded = excluded ? 1 : 0;
+  // A smart collection whose rules key on wildlife_excluded (either
+  // directly or through a wildlife_excluded sub-clause) needs its
+  // membership re-checked after this write, same as every other
+  // mutation site. Without this, the dropped photo stays visible under a
+  // collection scope until it is reselected or the page reloads.
+  refreshLatestScopeSnapshotIfCurrent();
   return true;
 }
 
@@ -114,6 +125,7 @@ function openPipelinePhotoEditor(photoId) {
     notifyReadOnlyScopedView();
     return false;
   }
+  if (!isPhotoActionableInReviewScope(photoId)) return false;
   if (window.vireoEditNav) {
     var list = pipelineReviewVisiblePhotoList(photoId);
     window.vireoEditNav.setList(list, photoId);

@@ -51,13 +51,363 @@ async function main() {
 
   const sent = [];
   const burst = vm.createContext({
-    reviewScopeMode: 'cache', pipelineResults: {source: 'browse-selection'},
+    reviewScopeMode: 'cache', reviewScopeRegrouped: false, pipelineResults: {source: 'browse-selection'},
     safeFetch: async (url, opts) => { sent.push([url, JSON.parse(opts.body)]); return {ok: false}; },
     notifyReadOnlyScopedView() {},
   });
   for (const name of ['isScopedReviewView', 'detachBurst']) vm.runInContext(fn(review, name), burst);
   await burst.detachBurst(0, 0);
   assert.equal(sent.length, 0);
+
+
+  // A scope change clears the right-click context selection so the next
+  // native-menu keyboard action doesn't resolve to a photo now hidden by
+  // the newly selected Folder/Collection scope.
+  const scopeChange = vm.createContext({
+    window: {_vireoNativeMenuPhotoIdsOverride: [10]},
+    pipelineReviewContextPhotoIds: [10],
+    reviewScopeMode: 'cache',
+    reviewScopeFolderId: null, reviewScopeCollectionId: null,
+    reviewScopeRegrouped: false, reviewScopeRequestSeq: 0,
+    reviewScopeMembershipSeq: 0,
+    reviewScopePhotoIds: null, reviewScopeTotal: null,
+    pipelineResults: null, resultsCacheInfo: null,
+    cachedPipelineResults: null, cachedResultsCacheInfo: null,
+    refreshLatestScopeSnapshotIfCurrent() {},
+    updateReviewScopeControls() {},
+    setReviewScopeStatus() {},
+    showSavedReview() {},
+    applyReviewResults() {},
+    loadRegroupedScopeResults() {},
+    reviewScopeSelectionId: () => 'f1',
+    safeFetch: () => new Promise(() => {}),
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'loadReviewScopeResults',
+    'onReviewScopeFolderChange',
+  ]) vm.runInContext(fn(review, name), scopeChange);
+  scopeChange.onReviewScopeFolderChange('f1');
+  assert.equal(scopeChange.pipelineReviewContextPhotoIds.length, 0);
+  assert.equal(scopeChange.window._vireoNativeMenuPhotoIdsOverride, null);
+
+
+  // A smart-collection membership refresh that drops the right-clicked
+  // photo must scope-filter the stale native-menu selection. Filter mode
+  // stays writable (isScopedReviewView() is false), so leaving the dropped
+  // id in pipelineReviewContextPhotoIds would let the next keyboard action
+  // mutate a now-hidden photo. A multi-id override keeps the still-in-scope
+  // ids and drops only the ones that fell out.
+  const membershipDrop = vm.createContext({
+    window: {_vireoNativeMenuPhotoIdsOverride: [10, 20]},
+    pipelineReviewContextPhotoIds: [10],
+    reviewScopeMode: 'collection',
+    reviewScopeCollectionId: 'c1',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([10, 20]),
+    reviewScopeTotal: 2,
+    reviewScopeMembershipSeq: 0,
+    _reviewScopeMembershipRefreshTimer: null,
+    _reviewScopeMembershipRefreshSeq: 0,
+    reviewScopeMembershipSeq: 0,
+    pipelineResults: {summary: {}},
+    resultsCacheInfo: null,
+    renderResults() {},
+    updateSummaryBar() {},
+    updateReviewScopeStatusFromResults() {},
+    renderCacheScopeBanner() {},
+    setTimeout: (fn) => { fn(); return 0; },
+    clearTimeout() {},
+    safeFetch: async () => ({photo_ids: [20]}),
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'filterPipelineReviewContextSelectionToScope',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'photoIdsInReviewScope', 'reconcileReviewScopeTargets',
+    'maybeRefreshCollectionScopeMembership',
+  ]) vm.runInContext(fn(review, name), membershipDrop);
+  membershipDrop.maybeRefreshCollectionScopeMembership();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(membershipDrop.pipelineReviewContextPhotoIds, []);
+  assert.deepEqual(membershipDrop.window._vireoNativeMenuPhotoIdsOverride, [20]);
+
+
+  // A smart-collection membership refresh that drops the currently inspected
+  // photo must close the legacy inspector. getActiveSelection() prioritizes
+  // inspectPhotoId and the inspector's P/X shortcut writes against it, so
+  // leaving the inspector open on a photo that just left the collection
+  // would let the next keyboard action mutate a now-hidden target.
+  let inspectorClosed = 0;
+  const inspectorDrop = vm.createContext({
+    window: {},
+    pipelineReviewContextPhotoIds: [],
+    reviewScopeMode: 'collection',
+    reviewScopeCollectionId: 'c1',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([10, 20]),
+    reviewScopeTotal: 2,
+    reviewScopeMembershipSeq: 0,
+    _reviewScopeMembershipRefreshTimer: null,
+    _reviewScopeMembershipRefreshSeq: 0,
+    reviewScopeMembershipSeq: 0,
+    inspectPhotoId: 10,
+    pipelineResults: {summary: {}},
+    resultsCacheInfo: null,
+    renderResults() {},
+    updateSummaryBar() {},
+    updateReviewScopeStatusFromResults() {},
+    renderCacheScopeBanner() {},
+    setTimeout: (fn) => { fn(); return 0; },
+    clearTimeout() {},
+    safeFetch: async () => ({photo_ids: [20]}),
+    closeInspect() { inspectorClosed++; inspectorDropHolder.inspectPhotoId = null; },
+    openInspect(id) { inspectorDropHolder.openInspectCalls.push(id); },
+    openInspectCalls: [],
+  });
+  const inspectorDropHolder = inspectorDrop;
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'filterPipelineReviewContextSelectionToScope',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'photoIdsInReviewScope', 'reconcileReviewScopeTargets',
+    'maybeRefreshCollectionScopeMembership',
+  ]) vm.runInContext(fn(review, name), inspectorDrop);
+  inspectorDrop.maybeRefreshCollectionScopeMembership();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(inspectorClosed, 1,
+    'inspector must close when its photo leaves the collection');
+  assert.equal(inspectorDrop.inspectPhotoId, null);
+  assert.deepEqual(inspectorDrop.openInspectCalls, [],
+    'inspector must not reopen on a dropped inspected photo');
+
+  // A stale membership refresh response — one that was in flight when a
+  // switch to cache/workspace and back to the same collection bumped
+  // reviewScopeMembershipSeq without touching _reviewScopeMembershipRefreshSeq
+  // — must not overwrite the freshly-loaded membership from the scope's own
+  // fetch. Capturing reviewScopeMembershipSeq at refresh start and rejecting
+  // on change is what guards this: without it the stale response's local
+  // seq, mode and collection-id checks would still pass.
+  let resolveStale;
+  const staleRace = vm.createContext({
+    window: {},
+    pipelineReviewContextPhotoIds: [],
+    reviewScopeMode: 'collection',
+    reviewScopeCollectionId: 'c1',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([10, 20]),
+    reviewScopeTotal: 2,
+    reviewScopeMembershipSeq: 7,
+    _reviewScopeMembershipRefreshTimer: null,
+    _reviewScopeMembershipRefreshSeq: 0,
+    inspectPhotoId: null,
+    pipelineResults: {summary: {}},
+    resultsCacheInfo: null,
+    renderResults() { throw new Error('render must not run for a stale response'); },
+    updateSummaryBar() { throw new Error('summary must not refresh for a stale response'); },
+    updateReviewScopeStatusFromResults() {},
+    renderCacheScopeBanner() {},
+    setTimeout: (fn) => { fn(); return 0; },
+    clearTimeout() {},
+    safeFetch: () => new Promise(resolve => { resolveStale = resolve; }),
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'filterPipelineReviewContextSelectionToScope',
+    'maybeRefreshCollectionScopeMembership',
+  ]) vm.runInContext(fn(review, name), staleRace);
+  staleRace.maybeRefreshCollectionScopeMembership();
+  // Simulate the user switching scope away and back to the same collection
+  // while the refresh fetch is in flight — loadReviewScopeResults bumps
+  // reviewScopeMembershipSeq but not _reviewScopeMembershipRefreshSeq.
+  staleRace.reviewScopeMembershipSeq++;
+  resolveStale({photo_ids: [99]});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(Array.from(staleRace.reviewScopePhotoIds), [10, 20],
+    'stale membership response must not overwrite the fresh scope-load set');
+  assert.equal(staleRace.reviewScopeTotal, 2);
+
+
+  // A membership refresh that keeps the inspected photo in scope must not
+  // close the inspector. The user has not changed scope and the photo is
+  // still visible, so dismissing the open panel would be a regression.
+  // When another member of the inspected encounter is dropped, the panel
+  // must be rebuilt so its filmstrip's scope filter re-runs
+  // and the hidden photo's clickable thumbnail disappears.
+  let keepClosed = 0;
+  const keepOpened = [];
+  const inspectorKeep = vm.createContext({
+    window: {},
+    pipelineReviewContextPhotoIds: [],
+    reviewScopeMode: 'collection',
+    reviewScopeCollectionId: 'c1',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([10, 20]),
+    reviewScopeTotal: 2,
+    reviewScopeMembershipSeq: 0,
+    _reviewScopeMembershipRefreshTimer: null,
+    _reviewScopeMembershipRefreshSeq: 0,
+    reviewScopeMembershipSeq: 0,
+    inspectPhotoId: 10,
+    pipelineResults: {summary: {}},
+    resultsCacheInfo: null,
+    renderResults() {},
+    updateSummaryBar() {},
+    updateReviewScopeStatusFromResults() {},
+    renderCacheScopeBanner() {},
+    setTimeout: (fn) => { fn(); return 0; },
+    clearTimeout() {},
+    safeFetch: async () => ({photo_ids: [10]}),
+    closeInspect() { keepClosed++; },
+    openInspect(id) { keepOpened.push(id); },
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'filterPipelineReviewContextSelectionToScope',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'photoIdsInReviewScope', 'reconcileReviewScopeTargets',
+    'maybeRefreshCollectionScopeMembership',
+  ]) vm.runInContext(fn(review, name), inspectorKeep);
+  inspectorKeep.maybeRefreshCollectionScopeMembership();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(keepClosed, 0,
+    'inspector must stay open when its photo remains in the collection');
+  assert.equal(inspectorKeep.inspectPhotoId, 10);
+  assert.deepEqual(keepOpened, [10],
+    'inspector must rebuild its panel so the filmstrip drops out-of-scope photos');
+
+
+  // renderAlgorithmTrace must suppress openInspect links on pair photos
+  // outside the scope. openInspect routes a flat encounter member to the
+  // legacy inspector, and its P/X shortcut writes a flag against
+  // inspectPhotoId with no scoped-view read-only guard. An in-scope pair
+  // photo stays clickable.
+  const traceCtx = vm.createContext({
+    window: {},
+    pipelineResults: {
+      photos: [
+        {id: 1, filename: 'a.jpg'},
+        {id: 2, filename: 'b.jpg'},
+        {id: 3, filename: 'c.jpg'},
+      ],
+      encounters: [{
+        photo_ids: [1, 2, 3],
+        photo_count: 3,
+        burst_count: 0,
+        trace: [{decision: 'kept', dt_seconds: 1, score: 0.5}, {decision: 'cut_time', dt_seconds: 10, score: 0.1}],
+      }],
+    },
+    reviewScopeMode: 'folder',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([1, 3]),
+    _focusedEncounterIdx: 0,
+    document: {getElementById: (id) => {
+      if (id === 'algorithmTrace') return {set innerHTML(v) { tracePanelHtml = v; }};
+      if (id === 'traceFocusLabel') return {textContent: ''};
+      return null;
+    }},
+    escapeHtml: s => String(s), escapeAttr: s => String(s),
+  });
+  let tracePanelHtml = '';
+  for (const name of [
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'renderAlgorithmTrace',
+  ]) vm.runInContext(fn(review, name), traceCtx);
+  traceCtx.renderAlgorithmTrace();
+  assert(tracePanelHtml.includes('openInspect(1)'), 'photo 1 is in scope and must be clickable');
+  assert(tracePanelHtml.includes('openInspect(3)'), 'photo 3 is in scope and must be clickable');
+  assert(!tracePanelHtml.includes('openInspect(2)'),
+    'out-of-scope photo 2 must not render an openInspect link in the trace');
+
+
+  // The legacy inspector's filmstrip must drop out-of-scope photos: clicking
+  // a hidden thumbnail would navigate inspectPhotoId to an out-of-scope
+  // photo, and the P/X shortcut writes a flag against it with no scoped
+  // read-only guard. Only the in-scope encounter members should render.
+  const filmstripCtx = vm.createContext({
+    window: {},
+    inspectPhotoId: null,
+    pipelineResults: {
+      photos: [{id: 1}, {id: 2}, {id: 3}],
+      encounters: [{photo_ids: [1, 2, 3], photo_count: 3, burst_count: 0, species: ['Owl']}],
+    },
+    reviewScopeMode: 'folder',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([1, 3]),
+    minConfidence: 50,
+    document: {
+      getElementById: (id) => {
+        if (id === 'inspectPanel') return {innerHTML: ''};
+        if (id === 'inspectOverlay') return {classList: {add() {}, remove() {}, contains: () => false}};
+        return null;
+      },
+      removeEventListener() {}, addEventListener() {},
+    },
+    escapeHtml: s => String(s), escapeAttr: s => String(s),
+    hasQualityScore: () => false,
+    buildSpeciesPredictionsHtml: () => '',
+    buildBurstConsensus: () => null,
+    findBurstForPhoto: () => null,
+    closeInspect() {}, openGroupReview() {},
+    inspectKeyHandler() {},
+  });
+  for (const name of [
+    'findPhotoInResults', 'findEncounterForPhoto',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'photoIdsInReviewScope', 'openInspect',
+  ]) vm.runInContext(fn(review, name), filmstripCtx);
+  // Capture the panel's rendered HTML by swapping getElementById to catch
+  // the write.
+  let panelHtml = '';
+  filmstripCtx.document.getElementById = (id) => {
+    if (id === 'inspectPanel') return {set innerHTML(v) { panelHtml = v; }};
+    if (id === 'inspectOverlay') return {classList: {add() {}, remove() {}, contains: () => false}};
+    return null;
+  };
+  filmstripCtx.openInspect(1);
+  const filmstrip = panelHtml.match(/<div class="context-filmstrip">[^]*?<\/div>/);
+  assert(filmstrip, 'filmstrip markup rendered');
+  assert(filmstrip[0].includes('openInspect(1)'));
+  assert(filmstrip[0].includes('openInspect(3)'));
+  assert(!filmstrip[0].includes('openInspect(2)'),
+    'out-of-scope photo 2 must not appear in the filmstrip');
+
+
+  // A scope-photos membership load must not be invalidated by a slider
+  // move that bumps reviewScopeRequestSeq. Otherwise the tuning response
+  // renders through the pre-fetch empty scope set and the view stays at
+  // zero photos until the user reselects the scope.
+  let resolveScope;
+  const raceCtx = vm.createContext({
+    window: {},
+    pipelineReviewContextPhotoIds: [],
+    reviewScopeMode: 'folder',
+    reviewScopeFolderId: 'f1', reviewScopeCollectionId: null,
+    reviewScopeRegrouped: false, reviewScopeRequestSeq: 0,
+    reviewScopeMembershipSeq: 0,
+    reviewScopePhotoIds: null, reviewScopeTotal: null,
+    pipelineResults: {source: 'cache'}, resultsCacheInfo: null,
+    cachedPipelineResults: null, cachedResultsCacheInfo: null,
+    refreshLatestScopeSnapshotIfCurrent() {},
+    updateReviewScopeControls() {},
+    setReviewScopeStatus() {},
+    showSavedReview() {},
+    applyReviewResults() {},
+    loadRegroupedScopeResults() {},
+    reviewScopeSelectionId: () => 'f1',
+    safeFetch: () => new Promise(resolve => { resolveScope = resolve; }),
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'loadReviewScopeResults',
+  ]) vm.runInContext(fn(review, name), raceCtx);
+  raceCtx.loadReviewScopeResults();
+  // Slider move bumps the request seq while the membership fetch is in flight.
+  raceCtx.reviewScopeRequestSeq++;
+  resolveScope({photo_ids: [1, 2, 3]});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(raceCtx.reviewScopeTotal, 3);
+  assert.deepEqual(Array.from(raceCtx.reviewScopePhotoIds), [1, 2, 3]);
 }
 main().catch(err => { console.error(err); process.exitCode = 1; });
 

@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from urllib.parse import urlsplit
 
 from playwright.sync_api import expect
 
@@ -1862,27 +1863,24 @@ def test_pipeline_review_explains_partial_cache(live_server, page):
     expect(banner).to_contain_text("selected folders")
 
 
-def test_pipeline_review_scope_control_loads_workspace_and_collection(live_server, page):
+def test_pipeline_review_folder_and_collection_scopes_filter_saved_review(live_server, page):
+    """Folder and Collection scopes narrow the saved review without
+    regrouping it, keep it editable, and say how many scoped photos the
+    review does not cover."""
     all_ids = live_server["data"]["photos"]
-    cached_ids = all_ids[1:3]
-    collection_ids = [all_ids[0]]
+    park, yard = live_server["data"]["folders"]
+    # robin2 (all_ids[4], in "yard") is left out of the saved review.
+    cached_ids = all_ids[:4]
     _write_predictionless_pipeline_cache(live_server, cached_ids)
-
-    payloads = []
+    collection_id = live_server["db"].add_collection(
+        "First hawk", json.dumps([{"field": "photo_ids", "value": [all_ids[0]]}]),
+    )
+    regroup_payloads = []
     flag_payloads = []
 
-    page.route(
-        "**/api/collections",
-        lambda route: route.fulfill(
-            json=[{"id": 123, "name": "Selected Birds", "photo_count": 1}]
-        ),
-    )
-
     def regroup_live(route):
-        body = route.request.post_data_json
-        payloads.append(body)
-        ids = collection_ids if body.get("collection_id") == 123 else all_ids
-        route.fulfill(json=_review_result_for_ids(live_server, ids))
+        regroup_payloads.append(route.request.post_data_json)
+        route.fulfill(json=_review_result_for_ids(live_server, [all_ids[0]]))
 
     page.route("**/api/pipeline/regroup-live", regroup_live)
     page.route(
@@ -1894,24 +1892,166 @@ def test_pipeline_review_scope_control_loads_workspace_and_collection(live_serve
     )
 
     page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator("#statTotalPhotos")).to_have_text("4")
 
-    page.locator("[data-testid='pipeline-review-scope']").select_option("workspace")
-    expect(page.locator("#statTotalPhotos")).to_have_text(str(len(all_ids)))
-    assert payloads[-1]["save_cache"] is False
-    assert "collection_id" not in payloads[-1]
-
-    page.locator("[data-testid='pipeline-review-scope']").select_option("collection")
-    page.locator("[data-testid='pipeline-review-collection']").select_option("123")
+    scope = page.locator("[data-testid='pipeline-review-scope']")
+    scope.select_option("folder")
+    page.locator("[data-testid='pipeline-review-folder']").select_option(str(yard))
     expect(page.locator("#statTotalPhotos")).to_have_text("1")
-    assert payloads[-1]["collection_id"] == 123
-    assert payloads[-1]["save_cache"] is False
-
-    page.evaluate(
-        "(photoId) => window.setFlagFor(photoId, 'flagged')",
-        collection_ids[0],
+    expect(page.locator("#reviewScopeStatus")).to_have_text("1 of 2 reviewed")
+    expect(page.locator(".photo-card[data-photo-id]")).to_have_count(1)
+    expect(page.locator(".encounter-scope-partial").first).to_have_text(
+        "1 of 4 photos in scope"
     )
+    banner = page.locator("[data-testid='pipeline-review-cache-scope']")
+    expect(banner).to_contain_text(
+        "1 of 2 photos in this folder is not in the saved review"
+    )
+    assert regroup_payloads == []
+
+    # Filtering keeps the saved review editable.
+    with page.expect_request("**/api/photos/*/flag"):
+        page.evaluate("(photoId) => window.setFlagFor(photoId, 'flagged')", all_ids[3])
+
+    scope.select_option("collection")
+    page.locator("[data-testid='pipeline-review-collection']").select_option(
+        str(collection_id)
+    )
+    expect(page.locator("#statTotalPhotos")).to_have_text("1")
+    expect(page.locator("#reviewScopeStatus")).to_have_text("1 photo")
+    expect(banner).to_be_hidden()
+    assert regroup_payloads == []
+
+    # Regroup reruns grouping on just the collection, view-only.
+    regroup = page.locator("[data-testid='pipeline-review-scope-regroup']")
+    regroup.click()
+    expect(regroup).to_have_text("Show saved grouping")
+    expect(page.locator("#reviewScopeStatus")).to_have_text("1 photo, regrouped")
+    assert regroup_payloads[-1]["collection_id"] == collection_id
+    assert regroup_payloads[-1]["save_cache"] is False
+    flags_before = len(flag_payloads)
+    page.evaluate("(photoId) => window.setFlagFor(photoId, 'flagged')", all_ids[0])
     page.wait_for_timeout(100)
-    assert flag_payloads == []
+    assert len(flag_payloads) == flags_before
+
+    regroup.click()
+    expect(regroup).to_have_text("Regroup")
+    expect(page.locator("#reviewScopeStatus")).to_have_text("1 photo")
+
+    scope.select_option("workspace")
+    expect(regroup).to_be_hidden()
+    assert regroup_payloads[-1]["save_cache"] is False
+    assert "collection_id" not in regroup_payloads[-1]
+    assert "photo_ids" not in regroup_payloads[-1]
+
+    scope.select_option("cache")
+    expect(page.locator("#statTotalPhotos")).to_have_text("4")
+
+
+def test_pipeline_review_scope_guard_blocks_writes_to_hidden_photos(live_server, page):
+    """A photo a Folder scope hides cannot become a write target through any
+    entry point: the right-click selection the native Photo menu reads, the
+    legacy inspector and its P/X shortcuts, trace links, the lightbox, or the
+    page's flag/rating/wildlife writers. In-scope photos stay writable."""
+    all_ids = live_server["data"]["photos"]
+    _park, yard = live_server["data"]["folders"]
+    cached_ids = all_ids[:4]
+    hidden, visible = all_ids[0], all_ids[3]  # park / yard
+    _write_predictionless_pipeline_cache(live_server, cached_ids)
+    # A flat encounter (no bursts) with a trace, so photo clicks open the
+    # legacy inspector and the trace panel renders pair-photo links.
+    db = live_server["db"]
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path) as f:
+        cache = json.load(f)
+    enc = cache["encounters"][0]
+    enc["bursts"] = []
+    enc["burst_count"] = 0
+    enc["trace"] = [
+        {"decision": "kept", "dt_seconds": 60, "score": 0.9}
+        for _ in range(len(cached_ids) - 1)
+    ]
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+    writes = []
+    page.on(
+        "request",
+        lambda request: writes.append(
+            (urlsplit(request.url).path, request.post_data or "")
+        ) if request.method != "GET" and "/api/" in request.url else None,
+    )
+
+    def hidden_writes():
+        pattern = re.compile(rf"(?<!\d){hidden}(?!\d)")
+        return [w for w in writes if pattern.search(w[0]) or pattern.search(w[1])]
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator(".photo-card[data-photo-id]")).to_have_count(4)
+
+    # Right-click the photo, dismiss the menu, then pick a folder that hides it.
+    page.locator(f".photo-card[data-photo-id='{hidden}'] img").click(button="right")
+    page.keyboard.press("Escape")
+    page.locator("[data-testid='pipeline-review-scope']").select_option("folder")
+    page.locator("[data-testid='pipeline-review-folder']").select_option(str(yard))
+    expect(page.locator(".photo-card[data-photo-id]")).to_have_count(1)
+    expect(page.locator(f".photo-card[data-photo-id='{hidden}']")).to_have_count(0)
+
+    # Trace links for the hidden photo are not clickable.
+    page.evaluate("() => setFocusedEncounter(0)")
+    expect(page.locator(".trace-pair-photo[onclick]").first).to_be_attached()
+    assert page.locator(f".trace-pair-photo[onclick='openInspect({hidden})']").count() == 0
+
+    result = page.evaluate(
+        """async (hidden) => {
+          const out = {};
+          // Native Photo menu commands resolve through getActiveSelection().
+          out.afterScopeChange = getActiveSelection();
+          pipelineReviewContextPhotoIds = [hidden];
+          out.staleContext = getActiveSelection();
+          await window.handleNativeMenuCommand('photo_flag_pick');
+          await window.handleNativeMenuCommand('photo_rate_3');
+          await window.handleNativeMenuCommand('review_exclude_wildlife');
+          pipelineReviewContextPhotoIds = [];
+          // Card click, filmstrip and trace links all call openInspect().
+          openInspect(hidden);
+          out.inspected = inspectPhotoId;
+          out.inspectorOpen = document.getElementById('inspectOverlay')
+            .classList.contains('open');
+          // The shared lightbox and native menu call these page writers.
+          out.flag = await window.setFlagFor(hidden, 'rejected');
+          out.rating = await setRatingFor(hidden, 2);
+          out.wildlife = await window.setWildlifeExcludedFor(hidden, true);
+          out.lightbox = openPipelineLightbox(hidden);
+          out.lightboxReadOnly = window.getLightboxOpenOptions(hidden).readOnly;
+          return out;
+        }""",
+        hidden,
+    )
+    assert result["afterScopeChange"] == []
+    assert result["staleContext"] == []
+    assert result["inspected"] is None
+    assert result["inspectorOpen"] is False
+    assert result["flag"] is False
+    assert result["rating"] is False
+    assert result["wildlife"] is False
+    assert result["lightbox"] is False
+    assert result["lightboxReadOnly"] is True
+
+    # The inspector's P/X shortcuts, left pointing at the hidden photo.
+    page.locator(f".photo-card[data-photo-id='{visible}'] img").click()
+    expect(page.locator("#inspectOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    page.evaluate("(hidden) => { inspectPhotoId = hidden; }", hidden)
+    page.keyboard.press("x")
+    page.evaluate("() => closeInspect()")
+
+    # The in-scope photo is still writable, and its write is the only one.
+    with page.expect_request(f"**/api/photos/{visible}/flag"):
+        page.evaluate("(pid) => window.setFlagFor(pid, 'flagged')", visible)
+    assert hidden_writes() == []
 
 
 def test_pipeline_review_sidebar_collapses_and_persists(live_server, page):
