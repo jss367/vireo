@@ -329,3 +329,41 @@ def test_pending_cleanup_reconciles_newly_matching_cards_and_bulk_retry(live_ser
     expect(page.locator(".dup-group[data-hash='mixed']")).to_have_count(0)
     expect(page.locator(".dup-group[data-hash='other']")).to_have_count(0)
     expect(page.locator(".dup-group[data-hash='excluded'] .group-check")).not_to_be_checked()
+
+
+def test_category_switch_preserves_bulk_folder_trash_retry(live_server, page):
+    _show_patterns(live_server, page)
+    resolve_requests, pending = [], []
+
+    def resolve(route):
+        resolve_requests.append(route.request.post_data_json)
+        route.fulfill(content_type="application/json", body=json.dumps({
+            "resolved": [{"file_hash": "same1", "loser_ids": [4]},
+                         {"file_hash": "same2", "loser_ids": [6]}], "skipped": [],
+        }))
+
+    page.route("**/api/duplicates/bulk-resolve", resolve)
+    page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
+    page.on("dialog", lambda dialog: dialog.accept())
+    _category(page, "same-name-across-folders").click()
+    page.locator(".bucket-card input[data-delete-toggle]").check()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        page.locator(".bucket-card .keep-btn:not(.reveal-btn)").first.click()
+    _category(page, "numbered-across-folders").click()
+    pending[0].fulfill(content_type="application/json", body=json.dumps({
+        "trashed": 1, "skipped": [], "failed": [{"id": 6, "error": "temporarily unavailable"}],
+    }))
+    retry = page.locator(".bucket-card [data-retry-trash]")
+    expect(retry).to_be_visible()
+    expect(retry).to_have_text("Retry 1 file to Trash")
+    _category(page, "all").click()
+    expect(retry).to_be_visible()
+    expect(page.locator(".dup-group[data-hash='same1']")).to_have_count(0)
+    expect(page.locator(".dup-group[data-hash='same2']")).to_have_count(0)
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        retry.click()
+    assert [route.request.post_data_json for route in pending] == [{"photo_ids": [4, 6]}, {"photo_ids": [6]}]
+    assert resolve_requests == [{"file_hashes": ["same1", "same2"], "keep_folder": "/a"}]
+    pending[1].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
+    expect(page.locator(".bucket-card")).to_have_count(0)
+    expect(page.locator(".dup-group[data-hash='numberedAcross']")).to_be_visible()
