@@ -726,6 +726,7 @@
       document.getElementById('results').innerHTML =
         '<div class="no-results">No duplicate groups match the active filters (' +
         hiddenByFilter + ' hidden). Clear or pause filters to see them.</div>';
+      updateApplyCount();
       return;
     }
 
@@ -760,6 +761,7 @@
           ? '<div class="no-results">Duplicate review is complete. Pending cleanup is shown above.</div>'
           : '<div class="no-results">No duplicates found. Your library is clean.</div>';
       }
+      updateApplyCount();
       return;
     }
 
@@ -877,12 +879,7 @@
     document.getElementById('results').innerHTML = html;
     refreshDuplicateTrashControls();
 
-    if (unresolvedGroupCount > 0) {
-      document.getElementById('applyBar').style.display = '';
-      updateApplyCount();
-    } else {
-      document.getElementById('applyBar').style.display = 'none';
-    }
+    updateApplyCount();
   }
 
   function renderGroupWarning(group) {
@@ -1240,85 +1237,6 @@
     return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
   }
 
-  function getCheckedGroups() {
-    var checked = [];
-    document.querySelectorAll('.group-check').forEach(function(cb) {
-      if (cb.checked) {
-        var gi = parseInt(cb.getAttribute('data-gi'), 10);
-        if (!isNaN(gi) && _proposals[gi]) checked.push(_proposals[gi]);
-      }
-    });
-    return checked;
-  }
-
-  function updateApplyCount() {
-    rememberDuplicateSelections();
-    var checked = getCheckedGroups();
-    var loserCount = 0;
-    checked.forEach(function(g) { loserCount += (g.losers || []).length; });
-    var btn = document.getElementById('applyBtn');
-    btn.textContent = 'Reject ' + loserCount + ' extra ' + (loserCount === 1 ? 'copy' : 'copies');
-    btn.disabled = loserCount === 0;
-  }
-
-  async function applyRejections() {
-    var checked = getCheckedGroups();
-    if (checked.length === 0) return;
-    var hashes = checked.map(function(g) { return g.file_hash; }).filter(Boolean);
-    if (hashes.length === 0) return;
-
-    var btn = document.getElementById('applyBtn');
-    var status = document.getElementById('applyStatus');
-    btn.disabled = true;
-    status.textContent = 'Applying...';
-
-    try {
-      var data = await safeFetch('/api/duplicates/apply', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ hashes: hashes }),
-      });
-      var n = data.rejected_count || 0;
-      var deferred = (data.deferred_hashes || []).filter(Boolean);
-      // Groups the resolver refused because a candidate was on an
-      // offline volume stay on the page — their state is unknown, not
-      // resolved. Prune only the hashes we asked about that were NOT
-      // deferred so the rest of the scan cache stays consistent.
-      var deferredSet = new Set(deferred);
-      var resolvedHashes = new Set();
-      hashes.forEach(function(h) {
-        if (!deferredSet.has(h)) resolvedHashes.add(h);
-      });
-      var deferredToast = deferred.length > 0
-        ? ' (' + deferred.length + ' deferred — volume offline)'
-        : '';
-      var toastKind = deferred.length > 0 && n === 0 ? 'info' : 'success';
-      showToast(
-        'Rejected ' + n + ' duplicate' + (n === 1 ? '' : 's') + deferredToast,
-        toastKind,
-      );
-      pruneResolvedHashesFromScan(resolvedHashes);
-      if (!_lastScanResult || !_lastScanResult.proposals.length) {
-        clearResults();
-      } else {
-        renderResults(_lastScanResult);
-        var status = document.getElementById('applyStatus');
-        if (status) {
-          status.textContent = deferred.length
-            ? deferred.length + ' group' + (deferred.length === 1 ? '' : 's') +
-              ' deferred (reconnect the volume and try again)'
-            : '';
-        }
-        updateApplyCount();
-      }
-    } catch (e) {
-      showToast(e.message || 'Apply failed', 'error');
-      status.textContent = '';
-      btn.disabled = false;
-      // safeFetch already shows a toast on failure.
-    }
-  }
-
   function clearResults() {
     cancelDuplicateLoad();
     clearDuplicateTrashProgress();
@@ -1334,7 +1252,8 @@
     document.getElementById('results').innerHTML = '';
     document.getElementById('summary').style.display = 'none';
     document.getElementById('applyBar').style.display = 'none';
-    document.getElementById('applyStatus').textContent = '';
+    if (!_duplicateApplyInProgress) _duplicateApplyMessage = '';
+    updateApplyCount();
     hideRestoredBanner();
     setEmptyVisible(true);
   }

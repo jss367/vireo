@@ -3,6 +3,8 @@
 
 var _duplicateCategory = 'all';
 var _excludedDuplicateHashes = new Set();
+var _duplicateApplyInProgress = false;
+var _duplicateApplyMessage = '';
 
 function rememberDuplicateSelections() {
   document.querySelectorAll('.group-check').forEach(function(cb) {
@@ -168,4 +170,86 @@ function forgetCleanedDuplicateCopies(photoIds) {
   if (bar) bar.outerHTML = renderSummaryBar(_lastScanResult,
     visible.filter(function(p) { return p.status !== 'resolved'; }),
     visible.filter(function(p) { return p.status === 'resolved'; }));
+}
+
+function getCheckedGroups() {
+  var checked = [];
+  document.querySelectorAll('.group-check').forEach(function(cb) {
+    if (cb.checked) {
+      var gi = parseInt(cb.getAttribute('data-gi'), 10);
+      if (!isNaN(gi) && _proposals[gi]) checked.push(_proposals[gi]);
+    }
+  });
+  return checked;
+}
+
+function updateApplyCount() {
+  rememberDuplicateSelections();
+  var checked = getCheckedGroups();
+  var loserCount = 0;
+  checked.forEach(function(g) { loserCount += (g.losers || []).length; });
+  var btn = document.getElementById('applyBtn');
+  btn.textContent = _duplicateApplyInProgress ? 'Applying...' :
+    'Reject ' + loserCount + ' extra ' + (loserCount === 1 ? 'copy' : 'copies');
+  btn.disabled = _duplicateApplyInProgress || loserCount === 0;
+  document.getElementById('applyStatus').textContent = _duplicateApplyMessage;
+  document.getElementById('applyBar').style.display =
+    document.querySelector('.group-check') || _duplicateApplyInProgress || _duplicateApplyMessage ? '' : 'none';
+}
+
+async function applyRejections() {
+  if (_duplicateApplyInProgress) return;
+  var checked = getCheckedGroups();
+  if (checked.length === 0) return;
+  var hashes = checked.map(function(g) { return g.file_hash; }).filter(Boolean);
+  if (hashes.length === 0) return;
+
+  _duplicateApplyInProgress = true;
+  _duplicateApplyMessage = 'Applying your earlier selection...';
+  updateApplyCount();
+
+  try {
+    var data = await safeFetch('/api/duplicates/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ hashes: hashes }),
+    });
+    var n = data.rejected_count || 0;
+    var deferred = (data.deferred_hashes || []).filter(Boolean);
+    // Groups the resolver refused because a candidate was on an
+    // offline volume stay on the page — their state is unknown, not
+    // resolved. Prune only the hashes we asked about that were NOT
+    // deferred so the rest of the scan cache stays consistent.
+    var deferredSet = new Set(deferred);
+    var resolvedHashes = new Set();
+    hashes.forEach(function(h) {
+      if (!deferredSet.has(h)) resolvedHashes.add(h);
+    });
+    var deferredToast = deferred.length > 0
+      ? ' (' + deferred.length + ' deferred — volume offline)'
+      : '';
+    var toastKind = deferred.length > 0 && n === 0 ? 'info' : 'success';
+    showToast(
+      'Rejected ' + n + ' duplicate' + (n === 1 ? '' : 's') + deferredToast,
+      toastKind,
+    );
+    _duplicateApplyMessage = deferred.length
+      ? deferred.length + ' group' + (deferred.length === 1 ? '' : 's') +
+        ' deferred (reconnect the volume and try again)'
+      : '';
+    pruneResolvedHashesFromScan(resolvedHashes);
+    if (_scanInProgress) return;
+    if (!_lastScanResult || !_lastScanResult.proposals.length) {
+      clearResults();
+    } else {
+      renderResults(_lastScanResult);
+    }
+  } catch (e) {
+    showToast(e.message || 'Apply failed', 'error');
+    _duplicateApplyMessage = 'Reject failed for your earlier selection: ' + (e.message || 'request failed');
+    // safeFetch already shows a toast on failure.
+  } finally {
+    _duplicateApplyInProgress = false;
+    updateApplyCount();
+  }
 }

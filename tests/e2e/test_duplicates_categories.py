@@ -49,6 +49,44 @@ def _category(page, category):
     return page.locator(f'[data-duplicate-category="{category}"]')
 
 
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_pending_reject_survives_category_renders(live_server, page, outcome):
+    _show_patterns(live_server, page)
+    pending = []
+    page.route("**/api/duplicates/apply", lambda route: pending.append(route))
+    _category(page, "same-name-across-folders").click()
+    with page.expect_request("**/api/duplicates/apply"):
+        page.locator("#applyBtn").click()
+    assert pending[0].request.post_data_json == {"hashes": ["same1", "same2"]}
+    # Both unresolved and resolved-only views must retain the operation.
+    for category in ["numbered-across-folders", "numbered-same-folder"]:
+        _category(page, category).click()
+        expect(page.locator("#applyBtn")).to_be_disabled()
+        expect(page.locator("#applyStatus")).to_contain_text("Applying")
+        page.evaluate("applyRejections()")
+        assert len(pending) == 1
+    _category(page, "numbered-across-folders").click()
+    if outcome == "success":
+        pending[0].fulfill(content_type="application/json", body='{"rejected_count": 2}')
+    else:
+        pending[0].fulfill(status=500, content_type="application/json",
+                           body='{"error": "Synthetic Reject failure"}')
+        expect(page.locator("#applyStatus")).to_contain_text("Synthetic Reject failure")
+    expect(page.locator("#applyBtn")).to_be_enabled()
+    _category(page, "all").click()
+    expect(page.locator(".dup-group[data-hash='same1']")).to_have_count(
+        0 if outcome == "success" else 1)
+    if outcome == "failure":
+        expect(page.locator("#applyStatus")).to_contain_text("Synthetic Reject failure")
+    _category(page, "numbered-across-folders").click()
+    with page.expect_request("**/api/duplicates/apply"):
+        page.locator("#applyBtn").click()
+    assert pending[1].request.post_data_json == {"hashes": ["numberedAcross"]}
+    pending[1].fulfill(content_type="application/json", body='{"rejected_count": 1}')
+    expect(page.locator(".dup-group[data-hash='numberedAcross']")).to_have_count(0)
+    expect(page.locator("#applyStatus")).to_have_text("")
+
+
 def test_category_summary_counts_and_filters_both_sections(live_server, page):
     _show_patterns(live_server, page)
     expect(_category(page, "all")).to_contain_text("7 groups · 7 extra copies · 5.9 KB")
