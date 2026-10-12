@@ -363,11 +363,19 @@ function maybeRefreshCollectionScopeMembership() {
     if (reviewScopeMode !== 'collection' || reviewScopeRegrouped) return;
     if (reviewScopeCollectionId !== selectionId) return;
     var seq = ++_reviewScopeMembershipRefreshSeq;
+    // Also tag the scope-load generation. A switch to cache/workspace and
+    // back to the same collection bumps reviewScopeMembershipSeq (through
+    // loadReviewScopeResults) without touching _reviewScopeMembershipRefreshSeq,
+    // so without this capture a stale refresh response could still pass the
+    // local-seq, mode, and collection-id checks and overwrite the freshly
+    // loaded membership from the scope's own fetch.
+    var scopeSeq = reviewScopeMembershipSeq;
     safeFetch(
       '/api/pipeline/scope-photos?collection_id=' + encodeURIComponent(selectionId),
       {}, { toast: false }
     ).then(function(data) {
       if (seq !== _reviewScopeMembershipRefreshSeq) return;
+      if (scopeSeq !== reviewScopeMembershipSeq) return;
       if (!data || !Array.isArray(data.photo_ids)) return;
       if (reviewScopeMode !== 'collection' || reviewScopeRegrouped) return;
       if (reviewScopeCollectionId !== selectionId) return;

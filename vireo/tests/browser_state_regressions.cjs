@@ -106,6 +106,7 @@ async function main() {
     reviewScopeRegrouped: false,
     reviewScopePhotoIds: new Set([10, 20]),
     reviewScopeTotal: 2,
+    reviewScopeMembershipSeq: 0,
     _reviewScopeMembershipRefreshTimer: null,
     _reviewScopeMembershipRefreshSeq: 0,
     pipelineResults: {summary: {}},
@@ -143,6 +144,7 @@ async function main() {
     reviewScopeRegrouped: false,
     reviewScopePhotoIds: new Set([10, 20]),
     reviewScopeTotal: 2,
+    reviewScopeMembershipSeq: 0,
     _reviewScopeMembershipRefreshTimer: null,
     _reviewScopeMembershipRefreshSeq: 0,
     inspectPhotoId: 10,
@@ -173,6 +175,53 @@ async function main() {
   assert.deepEqual(inspectorDrop.openInspectCalls, [],
     'inspector must not reopen on a dropped inspected photo');
 
+  // A stale membership refresh response — one that was in flight when a
+  // switch to cache/workspace and back to the same collection bumped
+  // reviewScopeMembershipSeq without touching _reviewScopeMembershipRefreshSeq
+  // — must not overwrite the freshly-loaded membership from the scope's own
+  // fetch. Capturing reviewScopeMembershipSeq at refresh start and rejecting
+  // on change is what guards this: without it the stale response's local
+  // seq, mode and collection-id checks would still pass.
+  let resolveStale;
+  const staleRace = vm.createContext({
+    window: {},
+    pipelineReviewContextPhotoIds: [],
+    reviewScopeMode: 'collection',
+    reviewScopeCollectionId: 'c1',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([10, 20]),
+    reviewScopeTotal: 2,
+    reviewScopeMembershipSeq: 7,
+    _reviewScopeMembershipRefreshTimer: null,
+    _reviewScopeMembershipRefreshSeq: 0,
+    inspectPhotoId: null,
+    pipelineResults: {summary: {}},
+    resultsCacheInfo: null,
+    renderResults() { throw new Error('render must not run for a stale response'); },
+    updateSummaryBar() { throw new Error('summary must not refresh for a stale response'); },
+    updateReviewScopeStatusFromResults() {},
+    renderCacheScopeBanner() {},
+    setTimeout: (fn) => { fn(); return 0; },
+    clearTimeout() {},
+    safeFetch: () => new Promise(resolve => { resolveStale = resolve; }),
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'filterPipelineReviewContextSelectionToScope',
+    'maybeRefreshCollectionScopeMembership',
+  ]) vm.runInContext(fn(review, name), staleRace);
+  staleRace.maybeRefreshCollectionScopeMembership();
+  // Simulate the user switching scope away and back to the same collection
+  // while the refresh fetch is in flight — loadReviewScopeResults bumps
+  // reviewScopeMembershipSeq but not _reviewScopeMembershipRefreshSeq.
+  staleRace.reviewScopeMembershipSeq++;
+  resolveStale({photo_ids: [99]});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(Array.from(staleRace.reviewScopePhotoIds), [10, 20],
+    'stale membership response must not overwrite the fresh scope-load set');
+  assert.equal(staleRace.reviewScopeTotal, 2);
+
+
   // A membership refresh that keeps the inspected photo in scope must not
   // close the inspector. The user has not changed scope and the photo is
   // still visible, so dismissing the open panel would be a regression.
@@ -189,6 +238,7 @@ async function main() {
     reviewScopeRegrouped: false,
     reviewScopePhotoIds: new Set([10, 20]),
     reviewScopeTotal: 2,
+    reviewScopeMembershipSeq: 0,
     _reviewScopeMembershipRefreshTimer: null,
     _reviewScopeMembershipRefreshSeq: 0,
     inspectPhotoId: 10,
