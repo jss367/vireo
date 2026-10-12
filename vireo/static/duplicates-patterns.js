@@ -86,6 +86,7 @@ function renderSummaryBar(result, unresolved, resolved) {
 
 function forgetCleanedDuplicateCopies(photoIds) {
   if (!_lastScanResult) return;
+  rememberDuplicateSelections();
   var emptyHashes = new Set();
   var changedGroups = [];
   (_lastScanResult.proposals || []).forEach(function(p) {
@@ -98,6 +99,30 @@ function forgetCleanedDuplicateCopies(photoIds) {
   pruneResolvedHashesFromScan(emptyHashes);
   var cards = new Map();
   document.querySelectorAll('.dup-group').forEach(function(card) { cards.set(card.getAttribute('data-hash'), card); });
+  // A pending cleanup may finish after a category switch. Its surviving
+  // copies can enter the current category without having a rendered card.
+  // Rebuild that view before offering any bulk action, retaining retry text.
+  if (changedGroups.some(function(change) {
+    var p = change.proposal;
+    return p.losers.length && groupMatchesFilter(p) && !cards.has(p.file_hash);
+  })) {
+    var statuses = new Map();
+    document.querySelectorAll('.dup-card[data-photo-id] [data-trash-status]').forEach(function(status) {
+      var card = status.closest('.dup-card');
+      var button = card.querySelector('.trash-btn');
+      statuses.set(card.getAttribute('data-photo-id'), {text: status.textContent, disabled: button && button.disabled});
+    });
+    renderResults(_lastScanResult);
+    document.querySelectorAll('.dup-card[data-photo-id] [data-trash-status]').forEach(function(status) {
+      var card = status.closest('.dup-card');
+      var saved = statuses.get(card.getAttribute('data-photo-id'));
+      if (!saved) return;
+      status.textContent = saved.text;
+      var button = card.querySelector('.trash-btn');
+      if (button) button.disabled = saved.disabled;
+    });
+    return;
+  }
   changedGroups.forEach(function(change) {
     var p = change.proposal;
     var card = cards.get(p.file_hash);
