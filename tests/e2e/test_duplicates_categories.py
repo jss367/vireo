@@ -208,3 +208,62 @@ def test_partial_cleanup_moves_remaining_actions_to_updated_category(live_server
     expect(page.locator(".dup-group[data-hash='same1'] .category-badge")).to_have_text("Same name across folders")
     expect(page.locator(".dup-card[data-photo-id='4'] .trash-btn")).to_be_visible()
     expect(page.locator("#trashAllBtn")).to_contain_text("Move 1 extra copy")
+
+
+def test_inflight_cleanup_renders_group_entering_selected_category(live_server, page):
+    _show_patterns(live_server, page)
+    page.evaluate("""() => {
+      var group = _proposals.find(p => p.file_hash === 'same1');
+      group.status = 'resolved';
+      group.losers.push({id: 20, filename: 'DSC_1127-2.NEF',
+        path: '/a/DSC_1127-2.NEF', file_size: 1000, exists: true});
+      renderResults(_lastScanResult);
+    }""")
+    pending = []
+    page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
+    _category(page, "numbered-across-folders").click()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        page.locator(".dup-card[data-photo-id='20'] .trash-btn").click()
+    _category(page, "same-name-across-folders").click()
+    expect(page.locator(".dup-group[data-hash='same1']")).to_have_count(0)
+    pending[0].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
+    expect(page.locator(".dup-group[data-hash='same1'] .category-badge")).to_have_text("Same name across folders")
+    expect(page.locator(".dup-card[data-photo-id='4'] .trash-btn")).to_be_visible()
+    expect(page.locator("#trashAllBtn")).to_contain_text("Move 1 extra copy")
+    expect(page.locator(".dup-card[data-photo-id='20']")).to_have_count(0)
+
+
+def test_inflight_batch_cleanup_keeps_progress_and_retry_after_category_switch(live_server, page):
+    _show_patterns(live_server, page)
+    page.evaluate("""() => {
+      var group = _proposals.find(p => p.file_hash === 'same1');
+      group.status = 'resolved';
+      group.losers.push({id: 20, filename: 'DSC_1127-2.NEF',
+        path: '/a/DSC_1127-2.NEF', file_size: 1000, exists: true});
+      renderResults(_lastScanResult);
+    }""")
+    pending = []
+    page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
+    page.on("dialog", lambda dialog: dialog.accept())
+    _category(page, "numbered-across-folders").click()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        page.locator("#trashAllBtn").click()
+    expect(page.locator("#trashAllProgress")).to_contain_text("Moving files")
+    _category(page, "same-name-across-folders").click()
+    expect(page.locator("#trashAllProgress")).to_be_visible()
+    pending[0].fulfill(content_type="application/json", body=json.dumps({
+        "trashed": 1, "skipped": [], "failed": [{"id": 4, "error": "temporarily unavailable"}],
+    }))
+    expect(page.locator(".dup-group[data-hash='same1']")).to_be_visible()
+    expect(page.locator(".dup-card[data-photo-id='4'] [data-trash-status]")).to_contain_text("temporarily unavailable")
+    expect(page.locator("#trashAllProgress")).to_contain_text("Cleanup finished with problems")
+    expect(page.locator("#trashAllProgress")).to_contain_text("1 moved")
+    expect(page.locator("#trashAllProgress")).to_contain_text("1 failed")
+    expect(page.locator("#trashAllBtn")).to_have_text("Move 1 extra copy to Trash")
+    expect(page.locator("#trashAllBtn")).to_be_enabled()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        page.locator("#trashAllBtn").click()
+    assert [route.request.post_data_json for route in pending] == [{"photo_ids": [4, 20]}, {"photo_ids": [4]}]
+    pending[1].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
+    expect(page.locator("#trashAllProgress")).to_contain_text("Cleanup complete")
+    expect(page.locator("#trashAllBtn")).to_have_count(0)

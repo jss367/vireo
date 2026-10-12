@@ -86,6 +86,13 @@ function renderSummaryBar(result, unresolved, resolved) {
 
 function forgetCleanedDuplicateCopies(photoIds) {
   if (!_lastScanResult) return;
+  photoIds.forEach(function(id) {
+    var card = document.querySelector('.dup-card[data-photo-id="' + id + '"]');
+    if (!card) return;
+    card.classList.add('trashed');
+    var status = card.querySelector('[data-trash-status]');
+    if (status) status.textContent = 'Cleaned up';
+  });
   var emptyHashes = new Set();
   var changedGroups = [];
   (_lastScanResult.proposals || []).forEach(function(p) {
@@ -98,6 +105,15 @@ function forgetCleanedDuplicateCopies(photoIds) {
   pruneResolvedHashesFromScan(emptyHashes);
   var cards = new Map();
   document.querySelectorAll('.dup-group').forEach(function(card) { cards.set(card.getAttribute('data-hash'), card); });
+  if (changedGroups.some(function(change) {
+    var p = change.proposal;
+    return p.losers.length && groupMatchesFilter(p) && !cards.has(p.file_hash);
+  })) {
+    // A request can finish after a category switch. Render groups that have
+    // just entered the selected category, including its cleanup controls.
+    renderResults(_lastScanResult);
+    return;
+  }
   changedGroups.forEach(function(change) {
     var p = change.proposal;
     var card = cards.get(p.file_hash);
