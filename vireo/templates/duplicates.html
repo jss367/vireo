@@ -995,7 +995,7 @@
         'Keep ' + escapeHtml(label) + ' for all ' + bucket.group_count +
         '</button>';
     });
-    html += bucketRevealButton(bi);
+    html += bucketRevealButton(bi, null, folders);
     html += '<label class="delete-toggle">' +
       '<input type="checkbox" data-bi="' + bi + '" data-delete-toggle> ' +
       'Also move extras to Trash</label>';

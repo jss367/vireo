@@ -732,3 +732,65 @@ def test_reveal_and_pinned_cleanup_use_only_rendered_bucket_folders(live_server,
     pinned.locator(".reveal-btn").click()
     expect(pinned.locator(".reveal-btn")).to_be_enabled()
     assert reveals == [{"paths": ["/a", "/b"]}, {"paths": ["/a", "/b"]}]
+
+
+@pytest.mark.parametrize("filter_kind", ["category", "library"])
+def test_ordinary_bucket_reveal_uses_visible_folders(live_server, page, filter_kind):
+    _show_patterns(live_server, page)
+    page.evaluate("""() => {
+      function photo(id, path, exists = true) {
+        return {id, path, filename: path.split('/').pop(), file_size: 1000, exists};
+      }
+      renderResults({proposals: [
+        {file_hash: 'same1', status: 'unresolved', winner: photo(1, '/a/owl.jpg'),
+          losers: [photo(2, '/b/owl.jpg'), photo(3, '/c/owl.jpg', false)]},
+        {file_hash: 'same2', status: 'unresolved', winner: photo(11, '/a/hawk.jpg'),
+          losers: [photo(12, '/b/hawk.jpg'), photo(13, '/c/hawk.jpg', false)]},
+        {file_hash: 'renamed', status: 'unresolved', winner: photo(21, '/a/finch.jpg'),
+          losers: [photo(22, '/b/export.jpg'), photo(23, '/c/other.jpg')]}
+      ], buckets: [{folders: ['/a', '/b', '/c'], group_count: 3,
+        file_hashes: ['same1', 'same2', 'renamed'], total_size: 6000,
+        example_filenames: ['owl.jpg', 'hawk.jpg', 'finch.jpg']}]});
+    }""")
+    if filter_kind == "category":
+        _category(page, "same-name-across-folders").click()
+    else:
+        page.evaluate("_filterMatchedIds = new Set([1, 11]); renderResults(_lastScanResult)")
+    expect(page.locator(".bucket-card .bucket-headline code")).to_have_text(["/a", "/b"])
+    requests, pending = [], []
+
+    def reveal(route):
+        requests.append(route.request.post_data_json)
+        pending.append(route)
+
+    page.route("**/api/folders/reveal", reveal)
+    button = page.locator(".bucket-card .reveal-btn")
+    with page.expect_request("**/api/folders/reveal"):
+        button.click()
+    expect(button).to_be_disabled()
+    assert requests == [{"paths": ["/a", "/b"]}], requests
+    page.evaluate("renderResults(_lastScanResult)")
+    expect(button).to_be_disabled()
+    expect(button).to_contain_text("Opening")
+    page.evaluate("revealBucketFolders(0, document.querySelector('.bucket-card .reveal-btn'))")
+    assert len(requests) == 1
+    pending[0].fulfill(content_type="application/json", body=json.dumps({
+        "revealed": ["/a", "/b"], "failed": [], "skipped": [],
+    }))
+    expect(button).to_be_enabled()
+    expect(button).to_have_text("Reveal")
+    # Pin the filtered view before a later scan reuses its bucket index.
+    page.evaluate("""() => {
+      pinDuplicateBucketOperation(document.querySelector('.bucket-card'), 0);
+      renderResults({proposals: [], buckets: [{folders: ['/new/c', '/new/d'],
+        group_count: 1, file_hashes: ['newscan'], total_size: 1000, example_filenames: []}]});
+    }""")
+    pinned = page.locator("#duplicateBucketOperationList .reveal-btn")
+    with page.expect_request("**/api/folders/reveal"):
+        pinned.click()
+    expect(pinned).to_be_disabled()
+    assert requests == [{"paths": ["/a", "/b"]}] * 2, requests
+    pending[1].fulfill(content_type="application/json", body=json.dumps({
+        "revealed": ["/a", "/b"], "failed": [], "skipped": [],
+    }))
+    expect(pinned).to_be_enabled()
