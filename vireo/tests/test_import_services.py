@@ -1,5 +1,6 @@
 """Import jobs can be admitted and completed without an HTTP context."""
 
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -9,6 +10,210 @@ from PIL import Image
 from repositories.processes import ProcessesRepository
 from services.imports import ImportFailure, ImportService
 from wait import wait_for_job_via_runner
+
+
+def _interrupted_in_place(db, config, *, job_id="interrupted", status="failed"):
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, config, result, workspace_id, started_at) "
+        "VALUES (?, 'import-in-place', ?, ?, ?, ?, '2026-10-09T12:00:00')",
+        (job_id, status, json.dumps(config), json.dumps({"interrupted": True}), db.active_workspace_id),
+    )
+    db.commit()
+    return job_id
+
+
+def test_restart_in_place_reuses_catalog_and_restores_settings(import_service, tmp_path):
+    import scanner
+
+    service, db, runner = import_service
+    source = tmp_path / "photos"
+    source.mkdir()
+    Image.new("RGB", (32, 32), "red").save(source / "saved.jpg")
+    scanner.scan(str(source), db, incremental=True)
+    saved_id = db.conn.execute("SELECT id FROM photos WHERE filename='saved.jpg'").fetchone()[0]
+    Image.new("RGB", (32, 32), "blue").save(source / "remaining.jpg")
+    nested = source / "excluded"
+    nested.mkdir()
+    Image.new("RGB", (32, 32)).save(nested / "excluded.jpg")
+    workspace_count = len(db.workspaces.list_all())
+    parent_id = _interrupted_in_place(db, {
+        "sources": [str(source)], "recursive": False, "tags": ["Birding"],
+        "location_from_gps": False, "after_import": None,
+        "created_workspace": {"id": db.active_workspace_id, "name": "Original"},
+    })
+
+    response = service.restart_in_place(db, parent_id)
+    assert isinstance(response, dict), response
+    job = wait_for_job_via_runner(runner, response["job_id"], wait_for_history=True)
+    assert job["status"] == "completed", job
+    assert job["workspace_id"] == db.active_workspace_id
+    assert job["config"]["restarted_from"] == parent_id
+    assert job["config"]["recursive"] is False
+    assert len(db.workspaces.list_all()) == workspace_count
+    rows = db.conn.execute("SELECT id, filename FROM photos").fetchall()
+    assert {row["filename"] for row in rows} == {"saved.jpg", "remaining.jpg"}
+    assert next(row["id"] for row in rows if row["filename"] == "saved.jpg") == saved_id
+    assert set(job["result"]["photo_ids"]) == {row["id"] for row in rows}
+    assert job["result"]["tagging"]["tagged_photos"] == 2
+    assert {photo["id"] for photo in db.get_collection_photos(
+        job["result"]["collection_id"], per_page=100,
+    )} == {row["id"] for row in rows}
+
+    # The parent's button must never launch the same work twice, even
+    # after its child finished. A failed child would offer its own restart.
+    failure = service.restart_in_place(db, parent_id)
+    assert failure.status == 409
+    assert failure.details == {"restart_job_id": job["id"]}
+
+
+def test_restart_snapshot_finishes_processing_for_already_cataloged_files(import_service, tmp_path):
+    import scanner
+
+    service, db, runner = import_service
+    source = tmp_path / "photos"
+    source.mkdir()
+    selected = source / "selected.jpg"
+    Image.new("RGB", (32, 32), "red").save(selected)
+    db.add_folder(str(source), name="photos")
+    snapshot_id = db.workspaces.create_new_images_snapshot([str(selected)])
+    scanner.scan(str(source), db, incremental=True)
+    Image.new("RGB", (32, 32), "blue").save(source / "unselected.jpg")
+    process_id = db.processes.create("After import")
+    frozen_process = db.resolve_process(process_id)
+    parent_id = _interrupted_in_place(db, {
+        "sources": [str(source)], "source_snapshot_id": snapshot_id,
+        "after_import": process_id, "after_import_snapshot": frozen_process,
+        "tags": ["Birding"],
+    })
+    db.update_saved_process(process_id, skip_classify=True)
+    service.enqueue_process_job.return_value = ("processing", None, None)
+
+    response = service.restart_in_place(db, parent_id)
+    assert isinstance(response, dict), response
+    job = wait_for_job_via_runner(runner, response["job_id"], wait_for_history=True)
+    assert job["status"] == "completed", job
+    assert job["result"]["imported"] == 0
+    assert job["result"]["already_cataloged"] == 1
+    assert job["result"]["process_job_id"] == "processing"
+    assert job["result"]["tagging"]["tagged_photos"] == 1
+    assert {row[0] for row in db.conn.execute("SELECT filename FROM photos")} == {"selected.jpg"}
+    service.enqueue_process_job.assert_called_once()
+    assert service.enqueue_process_job.call_args.kwargs["expanded"] == frozen_process
+
+
+@pytest.mark.parametrize("never_started", [False, True])
+def test_restart_in_place_does_not_duplicate_processing(import_service, tmp_path, never_started):
+    service, db, runner = import_service
+    source = tmp_path / "photos"
+    source.mkdir()
+    Image.new("RGB", (32, 32)).save(source / "bird.jpg")
+    process_id = db.processes.create("After import")
+    parent_id = _interrupted_in_place(db, {
+        "sources": [str(source)], "after_import": process_id,
+        "after_import_owner": "earlier-import", "skip_after_import": True,
+    })
+    db.conn.execute(
+        "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
+        "VALUES ('prior-processing', 'pipeline', 'failed', ?, ?, ?)",
+        (json.dumps({"chained_from": "earlier-import"}), json.dumps({"never_started": never_started}),
+         db.active_workspace_id),
+    )
+    db.commit()
+    service.enqueue_process_job.return_value = ("new-processing", None, None)
+    response = service.restart_in_place(db, parent_id)
+    assert isinstance(response, dict), response
+    job = wait_for_job_via_runner(runner, response["job_id"], wait_for_history=True)
+    assert job["status"] == "completed", job
+    if never_started:
+        service.enqueue_process_job.assert_called_once()
+        assert job["result"]["process_job_id"] == "new-processing"
+    else:
+        service.enqueue_process_job.assert_not_called()
+        assert "already started" in job["result"]["after_import_skipped"]
+        assert "collection_id" not in job["result"]
+
+
+def test_restart_in_place_serializes_two_tabs_before_child_is_persisted(
+    import_service, tmp_path, monkeypatch,
+):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from services.import_in_place import _InPlaceImportJob
+    from testing.waits import synchronization_timeout
+
+    service, db, runner = import_service
+    source = tmp_path / "photos"
+    source.mkdir()
+    parent_id = _interrupted_in_place(db, {"sources": [str(source)], "after_import": None})
+    entered = threading.Event()
+    release = threading.Event()
+    barrier = threading.Barrier(2)
+
+    def blocked_work(_self, _job):
+        entered.set()
+        assert release.wait(synchronization_timeout(5))
+        return {"ok": True}
+
+    monkeypatch.setattr(_InPlaceImportJob, "work", blocked_work)
+    monkeypatch.setattr(runner, "_record_job_started", lambda _job: None)
+    monkeypatch.setattr(runner, "_ensure_checkpoint_thread", lambda: None)
+    workspace_id = db.active_workspace_id
+
+    def restart():
+        with Database(service.db_path) as request_db:
+            request_db.set_active_workspace(workspace_id)
+            barrier.wait(timeout=synchronization_timeout(5))
+            return service.restart_in_place(request_db, parent_id)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(restart) for _ in range(2)]
+            responses = [future.result(timeout=synchronization_timeout(10)) for future in futures]
+        assert entered.wait(synchronization_timeout(5))
+        launched = [response for response in responses if isinstance(response, dict)]
+        refused = [response for response in responses if isinstance(response, ImportFailure)]
+        assert len(launched) == len(refused) == 1
+        assert refused[0].details == {"restart_job_id": launched[0]["job_id"]}
+    finally:
+        release.set()
+    wait_for_job_via_runner(runner, launched[0]["job_id"], wait_for_history=True)
+
+
+@pytest.mark.parametrize("status", ["running", "queued", "completed"])
+def test_restart_in_place_rejects_nonrestartable_jobs(import_service, tmp_path, status):
+    service, db, runner = import_service
+    parent_id = _interrupted_in_place(db, {"sources": [str(tmp_path)]}, status=status)
+    assert service.restart_in_place(db, parent_id).status == 409
+    assert runner.list_jobs() == []
+
+
+def test_restart_in_place_revalidates_sources_and_workspace(import_service, tmp_path):
+    service, db, runner = import_service
+    parent_id = _interrupted_in_place(db, {
+        "sources": [str(tmp_path / "missing")], "after_import": None,
+    }, status="cancelled")
+    assert "source directory not found" in service.restart_in_place(db, parent_id).message
+    original_ws = db.active_workspace_id
+    db.set_active_workspace(db.create_workspace("Other"))
+    failure = service.restart_in_place(db, parent_id)
+    assert failure.status == 409
+    assert "original workspace" in failure.message
+    db.set_active_workspace(original_ws)
+    assert service.restart_in_place(db, "missing").status == 404
+    assert runner.list_jobs() == []
+
+
+@pytest.mark.parametrize("config", [None, "not json", "[]"])
+def test_restart_in_place_missing_saved_settings(import_service, config):
+    service, db, runner = import_service
+    parent_id = _interrupted_in_place(db, {})
+    db.conn.execute("UPDATE job_history SET config=? WHERE id=?", (config, parent_id))
+    db.commit()
+    failure = service.restart_in_place(db, parent_id)
+    assert failure.status == 409
+    assert "settings are no longer available" in failure.message
+    assert runner.list_jobs() == []
 
 
 @pytest.mark.parametrize("path_style", ["windows", "posix"])

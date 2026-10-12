@@ -1084,6 +1084,10 @@ def create_imports_blueprint(
         body = request.get_json(silent=True) or {}
         return import_response(imports.import_in_place(get_db(), body))
 
+    @blueprint.post("/api/jobs/import-in-place/<job_id>/restart")
+    def api_job_import_in_place_restart(job_id):
+        return import_response(imports.restart_in_place(get_db(), job_id))
+
     @blueprint.post("/api/jobs/import-photos")
     def api_job_import_photos():
         body = request.get_json(silent=True) or {}

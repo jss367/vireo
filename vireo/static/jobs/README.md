@@ -12,7 +12,7 @@ scripts after the shared navbar scripts. They share page globals: the inline
 | `format.js` | Escaping, elapsed time and "ago" text, status icons, live-status checks, progress percentages, `jobConfig`, and `plural` |
 | `move-route.js` | The move-folder route: From/To paths, and the capture-date folder note built from the plan or the finished result |
 | `source-cleanup.js` | Original-folder cleanup after a date-organized move (`sourceCleanupReviews`), and the confirm checkbox listener |
-| `import-retry.js` | Import Retry and Resume: in-flight retries, `importResumeTakeover` (mirrors `import_resume_takeover` in `services/imports.py`), hints, and the retry request body |
+| `import-retry.js` | Import Retry, Resume and Restart: in-place restart eligibility and takeover, archive retry gates, `importResumeTakeover` (mirrors `import_resume_takeover` in `services/imports.py`), hints, and the retry request body |
 | `job-card.js` | The job card: header controls (pause/resume/cancel), meta, the retry/resume row, pause and interrupted banners, and finished results |
 | `steps.js` | A job's step tree: progress bars, throughput and ETA, current file, errors, repair lists, and file leaves |
 | `polling.js` | `fetchJobs()` (`/api/jobs`) and `fetchHistory()` (`/api/jobs/history`) |
@@ -57,3 +57,9 @@ Keep these request-ordering rules intact when changing this code:
 - Retry/Resume import is gated twice: at render (`hasActiveRetryFor`,
   `importResumeTakeover`) and again on click, because a poll can land between
   render and click. The server enforces the same takeover rule with a 409.
+- Restart import replays a failed or cancelled in-place import's saved scope
+  and settings in its original workspace. It rescans rather than resuming at
+  the old progress counter. `inPlaceRestarts` keeps pending requests disabled
+  across redraws; a later run's `config.restarted_from` replaces the button
+  with a link. The server serializes admission and rejects duplicate restarts,
+  including requests from another tab, with the existing child's job id.

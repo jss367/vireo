@@ -65,6 +65,14 @@ class JobHistoryRepository:
             (parent_id,),
         ).fetchone()
 
+    def in_place_restart(self, parent_id: str) -> sqlite3.Row | None:
+        """Find the run that took over an in-place import, including live runs."""
+        return self.conn.execute(
+            "SELECT id FROM job_history WHERE type = 'import-in-place' "
+            "AND json_valid(config) AND json_extract(config, '$.restarted_from') = ? LIMIT 1",
+            (parent_id,),
+        ).fetchone()
+
     def chained_job_row(self, parent_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT 1 FROM job_history "

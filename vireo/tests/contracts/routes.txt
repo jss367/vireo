@@ -299,6 +299,7 @@ POST         /api/jobs/fetch-labels
 POST         /api/jobs/import
 POST         /api/jobs/import-full
 POST         /api/jobs/import-in-place
+POST         /api/jobs/import-in-place/<job_id>/restart
 POST         /api/jobs/import-photos
 POST         /api/jobs/ingest
 POST         /api/jobs/move-folder
