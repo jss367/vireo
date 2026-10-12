@@ -865,6 +865,15 @@ def create_pipeline_blueprint(
                 folder_id = int(raw_folder)
             except ValueError:
                 return json_error("folder_id must be an integer", 400)
+            # Reject values outside SQLite's signed 64-bit range before any
+            # query binds them, matching ``folder_ids_error``: a huge integer
+            # like ``9223372036854775808`` passes ``int()`` but raises
+            # ``OverflowError`` at parameter binding, escaping as a 500.
+            if folder_id < _SQLITE_INT_MIN or folder_id > _SQLITE_INT_MAX:
+                return json_error(
+                    "folder_id is outside SQLite's signed 64-bit integer range",
+                    400,
+                )
             if not db.get_workspace_visible_folder_ids([folder_id]):
                 return json_error("Folder not found in this workspace", 404)
             # Mirror /api/pipeline/plan and /api/jobs/pipeline folder
@@ -885,6 +894,11 @@ def create_pipeline_blueprint(
             collection_id = coerce_collection_id(raw_collection)
             if collection_id is None or collection_id is False:
                 return json_error("collection_id must be an integer", 400)
+            if collection_id < _SQLITE_INT_MIN or collection_id > _SQLITE_INT_MAX:
+                return json_error(
+                    "collection_id is outside SQLite's signed 64-bit integer range",
+                    400,
+                )
             err = reject_visual_collection(db, collection_id, json_error=json_error)
             if err is not None:
                 return err

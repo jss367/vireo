@@ -119,6 +119,13 @@ def test_visual_collection_is_rejected(scoped_app):
     ("collection_id=abc", 400),
     ("folder_id=99999", 404),
     ("collection_id=99999", 404),
+    # Values just outside SQLite's signed 64-bit range: ``int()`` accepts
+    # them but binding to sqlite3 raises ``OverflowError``, which would
+    # escape as a 500 without the range guard.
+    ("folder_id=9223372036854775808", 400),
+    ("folder_id=-9223372036854775809", 400),
+    ("collection_id=9223372036854775808", 400),
+    ("collection_id=-9223372036854775809", 400),
 ])
 def test_scope_photos_rejects_bad_requests(scoped_app, query, status):
     app, _ = scoped_app
