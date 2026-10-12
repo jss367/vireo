@@ -482,7 +482,8 @@ def test_latest_bulk_outcome_survives_category_render(live_server, page, outcome
     expect(button).to_be_enabled()
     with page.expect_request("**/api/duplicates/delete-loser-files"):
         button.click()
-    assert [r.request.post_data_json for r in pending] == [{"photo_ids": [2]}] * 3
+    expect(button).to_be_disabled()
+    assert [r.request.post_data_json for r in pending] == [{"photo_ids": [2]}] * 3, [r.request.post_data_json for r in pending]
     pending[2].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
     expect(button).to_be_disabled()
 
