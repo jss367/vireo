@@ -255,14 +255,20 @@ function summarizeSpeciesConflicts(photoIds, evidence) {
   };
 }
 
-function renderEncounterSpeciesConflict(enc, evidence, hiddenIds) {
+function renderEncounterSpeciesConflict(enc, evidence, hiddenIds, inScope) {
   // Match the set of photos that renderResults() will actually draw for this
   // encounter: when hide-confirmed is on, confirmed bursts are skipped, so a
   // conflict living only in a confirmed burst shouldn't be tallied here (the
-  // SPECIES_CONFLICT count already filters the same way).
+  // SPECIES_CONFLICT count already filters the same way). Under a
+  // Folder/Collection scope filter, also skip out-of-scope photos so the
+  // badge never summarizes hidden evidence; `inScope` defaults to always-true
+  // so unscoped callers are unaffected.
   var ids = enc.photo_ids || [];
   if (hiddenIds && hiddenIds.size) {
     ids = ids.filter(function(pid) { return !hiddenIds.has(pid); });
+  }
+  if (typeof inScope === 'function') {
+    ids = ids.filter(inScope);
   }
   var summary = summarizeSpeciesConflicts(ids, evidence);
   if (!summary) return '';
@@ -283,8 +289,16 @@ function renderEncounterSpeciesConflict(enc, evidence, hiddenIds) {
     ' species conflict' + (summary.issueCount === 1 ? '' : 's') + '</span>';
 }
 
-function renderBurstSpeciesConflict(enc, encIdx, burst, burstIdx, evidence) {
+function renderBurstSpeciesConflict(enc, encIdx, burst, burstIdx, evidence, inScope) {
+  // Under a Folder/Collection scope filter, hidden out-of-scope photos
+  // could otherwise drive the dominant count and the Split burst action,
+  // producing a badge and a split offer the user can't justify from the
+  // visible cards. `inScope` defaults to always-true so unscoped callers
+  // are unaffected.
   var ids = burst.photo_ids || burst || [];
+  if (typeof inScope === 'function') {
+    ids = ids.filter(inScope);
+  }
   var summary = summarizeSpeciesConflicts(ids, evidence);
   // A burst marker should mean the burst itself has a consistent conflict,
   // not merely that one unusual frame inside a long burst needs photo review.

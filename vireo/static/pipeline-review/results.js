@@ -170,7 +170,7 @@ function renderResults() {
     html += encMeta;
     if (timeRange) html += '<span>' + escapeHtml(timeRange) + '</span>';
     html += missingTimestampBadge(enc);
-    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
+    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds, inScope);
     html += '</span>';
     html += renderGroupRejectButton('encounter', ei, null, visibleEncIds, photoMap);
     html += '</div>';
@@ -203,7 +203,7 @@ function renderResults() {
         if (!burst.species_override && enc.bursts.length > 1) {
           html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ',\'top\')">&#9998;</span>';
         }
-        html += renderBurstSpeciesConflict(enc, ei, burst, bi, speciesConflictEvidence);
+        html += renderBurstSpeciesConflict(enc, ei, burst, bi, speciesConflictEvidence, inScope);
         html += renderGroupRejectButton('burst', ei, bi, visibleBurstIds, photoMap);
         html += '<button class="detach-btn" onclick="detachBurst(' + ei + ',' + bi + ')" title="Detach burst">&times;</button>';
         html += '</div>';
@@ -235,7 +235,7 @@ function renderResults() {
     html += encMeta;
     if (timeRange) html += '<span>' + escapeHtml(timeRange) + '</span>';
     html += missingTimestampBadge(enc);
-    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
+    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds, inScope);
     html += '</span></div>';
 
     html += '</div></div>';

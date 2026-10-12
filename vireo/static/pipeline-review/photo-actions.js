@@ -106,6 +106,12 @@ async function setWildlifeExcludedFor(photoId, excluded) {
   } catch (e) { return false; }
   var photo = findPhotoInResults(photoId);
   if (photo) photo.wildlife_excluded = excluded ? 1 : 0;
+  // A smart collection whose rules key on wildlife_excluded (either
+  // directly or through a wildlife_excluded sub-clause) needs its
+  // membership re-checked after this write, same as every other
+  // mutation site. Without this, the dropped photo stays visible under a
+  // collection scope until it is reselected or the page reloads.
+  refreshLatestScopeSnapshotIfCurrent();
   return true;
 }
 
