@@ -141,6 +141,11 @@
   // palette beats a no-op shortcut.
   const origOpen = window.openCommandPalette;
   window.openCommandPalette = function() {
+    // Short-circuit before the tab-state refresh when a managed dialog is
+    // active: origOpen's own hasActive() guard already refuses to reveal
+    // the inert overlay, so skip the useless /api/workspace/tabs round
+    // trip and parallel the F1/openHelpModal no-op from help.js.
+    if (window.VireoDialog && window.VireoDialog.hasActive && window.VireoDialog.hasActive()) return;
     selectedIndex = 0;
     const open = () => origOpen();
     refreshFromTabsState().then(open, open);

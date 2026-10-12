@@ -1787,6 +1787,22 @@ body.sidebar-resizing {
 .modal-btn-primary { background: var(--accent); color: var(--bg-primary); }
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-preview { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+.batch-coll-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.batch-coll-item[aria-pressed="true"] { background: var(--bg-tertiary); }
+#collectionModal :focus-visible,
+#batchKeywordModal :focus-visible,
+#batchCollectionModal :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .export-var-pill {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -1872,7 +1888,7 @@ body.sidebar-resizing {
       <div class="sidebar-title">Collections</div>
       <div id="collectionList"></div>
       <div style="margin-top:6px;">
-        <button onclick="showCollectionModal()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;">+ New Collection</button>
+        <button onclick="showCollectionModal(null, this)" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;">+ New Collection</button>
       </div>
     </div>
   </aside>
@@ -1972,8 +1988,8 @@ body.sidebar-resizing {
       <button onclick="batchSetFlag('flagged')" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
       <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <span style="width:1px;height:20px;background:var(--border-primary);"></span>
-      <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
-      <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
+      <button onclick="batchAddKeyword(this)" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
+      <button onclick="addToCollection(this)" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <span style="width:1px;height:20px;background:var(--border-primary);"></span>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
       <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
@@ -2114,7 +2130,7 @@ body.sidebar-resizing {
         <span id="loadPreviousPhotosText"></span>
         <button id="loadPreviousPhotosButton" onclick="loadPreviousPhotos()" style="margin-left:10px;padding:5px 12px;border:1px solid var(--border-subtle);border-radius:3px;background:var(--bg-tertiary);color:var(--text-primary);font-size:12px;font-weight:600;cursor:pointer;">Browse from beginning</button>
       </div>
-      <div class="grid" id="grid"></div>
+      <div class="grid" id="grid" tabindex="-1"></div>
       <div class="scroll-sentinel" id="scrollSentinel"></div>
       <div class="empty-state" id="emptyState" style="display:none;">No photos match the current filters.</div>
       <div class="empty-state" id="welcomeState" style="display:none;">
@@ -2307,10 +2323,10 @@ body.sidebar-resizing {
 </div>
 
 <!-- Collection Modal -->
-<div class="modal-overlay" id="collectionModal">
+<div class="modal-overlay" id="collectionModal" role="dialog" aria-modal="true" aria-labelledby="collectionModalTitle">
   <div class="modal">
     <h3 id="collectionModalTitle">New Smart Collection</h3>
-    <input class="modal-input" id="collectionName" placeholder="Collection name">
+    <input class="modal-input" id="collectionName" aria-label="Collection name" placeholder="Collection name">
     <div id="ruleRows"></div>
     <button onclick="addRuleRow()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Rule</button>
     <button onclick="addRuleGroup()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Group</button>
@@ -2323,11 +2339,11 @@ body.sidebar-resizing {
 </div>
 
 <!-- Batch Keyword Modal -->
-<div class="modal-overlay" id="batchKeywordModal">
+<div class="modal-overlay" id="batchKeywordModal" role="dialog" aria-modal="true" aria-labelledby="batchKeywordTitle">
   <div class="modal">
     <h3 id="batchKeywordTitle">Add Keyword</h3>
     <div class="keyword-autocomplete">
-      <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name"
+      <input class="modal-input" id="batchKeywordInput" aria-label="Keyword name" placeholder="Keyword name"
              autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
       <div class="keyword-suggestion-list" id="batchKeywordSuggestions" role="listbox"></div>
     </div>
@@ -2339,11 +2355,11 @@ body.sidebar-resizing {
 </div>
 
 <!-- Batch Add-to-Collection Modal -->
-<div class="modal-overlay" id="batchCollectionModal">
+<div class="modal-overlay" id="batchCollectionModal" role="dialog" aria-modal="true" aria-labelledby="batchCollectionTitle">
   <div class="modal">
     <h3 id="batchCollectionTitle">Add to Collection</h3>
     <div id="batchCollectionList" style="margin-bottom:12px;max-height:200px;overflow-y:auto;"></div>
-    <input class="modal-input" id="batchCollectionNewName" placeholder="Or type a name to create new collection" onkeydown="if(event.key==='Enter')confirmBatchCollection()">
+    <input class="modal-input" id="batchCollectionNewName" aria-label="New collection name" placeholder="Or type a name to create new collection" onkeydown="if(event.key==='Enter')confirmBatchCollection()">
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
@@ -2407,6 +2423,7 @@ body.sidebar-resizing {
 
 
 <script src="/static/vireo-work-locally.js"></script>
+<script src="/static/vireo-dialog.js"></script>
 <script src="/static/vireo-folder-browser.js"></script>
 <script src="/static/vireo-export-presets.js"></script>
 <script src="/static/vireo-export-collisions.js"></script>

@@ -3,6 +3,10 @@
    browse/*.js files in dependency order. */
 
 /* ---------- Collection Modal ---------- */
+var collectionDialog = VireoDialog.create(document.getElementById('collectionModal'), {
+  initialFocus: document.getElementById('collectionName'),
+  onDismiss: hideCollectionModal,
+});
 var collectionEditorRoot = {mode: 'all', rules: []};
 var collectionEditingId = null;
 // Cached dropdown sources for the rule editor. Filled on first modal open
@@ -170,7 +174,7 @@ async function loadCollectionEditorSources() {
   }
 }
 
-async function showCollectionModal(collection) {
+async function showCollectionModal(collection, returnFocus) {
   // Cancel any pending/in-flight preview from a previous session before
   // resetting state — otherwise a stale response can land on the DOM and
   // briefly show the previous rule set's count in the freshly opened modal.
@@ -189,7 +193,7 @@ async function showCollectionModal(collection) {
   // changing one fires updateRule(idx, ...) against an undefined row and
   // throws.
   renderRules();
-  document.getElementById('collectionModal').classList.add('open');
+  collectionDialog.open(returnFocus);
   await loadCollectionEditorSources();
   // Backfill any extension/folder rules added during the await: they got
   // value '' from defaultValueForRule because the source lists were empty.
@@ -220,7 +224,7 @@ async function showCollectionModal(collection) {
 function hideCollectionModal() {
   resetPreviewState();
   collectionEditingId = null;
-  document.getElementById('collectionModal').classList.remove('open');
+  collectionDialog.close();
 }
 
 function getRuleContainer(path) {
@@ -584,14 +588,14 @@ function serializeCollectionRules() {
   return coerceRuleForSave(collectionEditorRoot);
 }
 
-async function editCollection(cid) {
+async function editCollection(cid, returnFocus) {
   var collection = collectionsById[cid];
   if (!collection) {
     var list = await safeFetch('/api/collections', {}, {toast: false});
     renderCollectionList(list || []);
     collection = collectionsById[cid];
   }
-  if (collection) showCollectionModal(collection);
+  if (collection) showCollectionModal(collection, returnFocus);
 }
 
 async function saveCollection() {
@@ -600,21 +604,116 @@ async function saveCollection() {
   var rules = serializeCollectionRules();
 
   try {
-    var url = collectionEditingId ? '/api/collections/' + collectionEditingId : '/api/collections';
+    // Capture before hideCollectionModal() clears collectionEditingId so the
+    // post-refresh focus restore below can find the replacement row.
+    var editedId = collectionEditingId;
+    var url = editedId ? '/api/collections/' + editedId : '/api/collections';
     // This modal only edits rules — the preview and controls never surface
     // the stored visual clause. When editing an existing visual collection,
     // leaving visual_json in place would silently apply a hidden visual
     // prompt on reopen that the user just previewed without (Codex review
     // r3623087112). Clear it so the saved collection matches the preview.
     var body = {name: name, rules: rules};
-    if (collectionEditingId) body.visual = null;
+    if (editedId) body.visual = null;
     await safeFetch(url, {
-      method: collectionEditingId ? 'PUT' : 'POST',
+      method: editedId ? 'PUT' : 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
     hideCollectionModal();
-    loadCollections();
+    // Codex P2: hideCollectionModal() restores focus to the pre-refresh
+    // context-menu row, but renderCollectionList() replaces every row via
+    // innerHTML on the next loadCollections() resolution, detaching the
+    // focused opener and dropping activeElement to body. Await the refresh
+    // and focus the replacement row for the same collection id, but only
+    // when the row-restore has actually been orphaned — so a user who
+    // moved focus to another visible control while the refresh was pending
+    // keeps their choice. loadCollectionCounts() only mutates text inside
+    // existing rows (no innerHTML replacement), so it stays fire-and-forget.
+    var refresh = loadCollections();
     loadCollectionCounts();
+    if (editedId != null) {
+      // Codex P2: track user-initiated focus moves after hideCollectionModal
+      // restored focus to the opener. If the user navigates to another
+      // control (including another collection row that then gets detached
+      // by a superseding render) before the eventual render fires, don't
+      // clobber their choice — the row detachment silently moves
+      // activeElement to body (no focusin event), which the orphaned
+      // predicate below would otherwise mistake for the opener itself
+      // being detached and jerk focus back to the edited row.
+      var restoredOpener = document.activeElement;
+      var userMovedFocus = false;
+      var onFocusIn = function(e) {
+        if (e.target !== restoredOpener) userMovedFocus = true;
+      };
+      document.addEventListener('focusin', onFocusIn, true);
+      var removeFocusListener = function() {
+        document.removeEventListener('focusin', onFocusIn, true);
+      };
+      await refresh;
+      // Codex P2: if another loadCollections() (e.g. a concurrent folder-
+      // health refresh) is still pending when this one resolves,
+      // reconcileCollectionLoadRenders() defers our render until the newer
+      // generation settles — so the pre-save row stays connected past this
+      // await and the orphaned check below reads false. The later
+      // superseding render then detaches the row with no remaining
+      // restoration path. Watch #collectionList for child-list mutations
+      // and recheck orphaning after each render until the pre-save row is
+      // orphaned and the replacement row for editedId has been drawn.
+      var tryRestoreCollectionRowFocus = function() {
+        if (userMovedFocus) return true;
+        var active = document.activeElement;
+        var orphaned = !active || active === document.body ||
+            !(active instanceof HTMLElement) || !active.isConnected;
+        if (!orphaned) return false;
+        var replacement = document.querySelector(
+          '#collectionList .tree-item[data-collection-id="' + editedId + '"]');
+        if (replacement && typeof replacement.focus === 'function') {
+          replacement.focus({preventScroll: true});
+          return true;
+        }
+        return false;
+      };
+      if (tryRestoreCollectionRowFocus()) {
+        removeFocusListener();
+      } else {
+        var list = document.getElementById('collectionList');
+        if (list && typeof MutationObserver === 'function') {
+          var observer;
+          var ticker;
+          var tornDown = false;
+          var teardown = function() {
+            if (tornDown) return;
+            tornDown = true;
+            if (observer) observer.disconnect();
+            if (ticker) clearInterval(ticker);
+            removeFocusListener();
+          };
+          observer = new MutationObserver(function() {
+            if (tryRestoreCollectionRowFocus()) teardown();
+          });
+          observer.observe(list, {childList: true});
+          // Codex P2: anchor observer lifetime to load-state settlement
+          // rather than a fixed 5s wall-clock. Stay alive while any
+          // superseding collectionLoadGen render is still pending
+          // (reconcileCollectionLoadRenders() hasn't advanced the
+          // decision gen to the latest requested gen yet); disconnect
+          // once all have settled. A 30s hard cap guards against a
+          // pathologically never-settling load holding the observer
+          // past page interaction.
+          var hardCapAt = Date.now() + 30000;
+          ticker = setInterval(function() {
+            var pending = (
+              typeof collectionLoadGen === 'number' &&
+              typeof collectionRenderDecisionGen === 'number' &&
+              collectionLoadGen > collectionRenderDecisionGen
+            );
+            if (!pending || Date.now() > hardCapAt) teardown();
+          }, 500);
+        } else {
+          removeFocusListener();
+        }
+      }
+    }
   } catch(e) {}
 }

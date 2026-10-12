@@ -2,6 +2,15 @@
    Classic script sharing page globals; browse.html loads the
    browse/*.js files in dependency order. */
 
+var batchKeywordDialog = VireoDialog.create(document.getElementById('batchKeywordModal'), {
+  initialFocus: document.getElementById('batchKeywordInput'),
+  onDismiss: hideBatchKeywordModal,
+});
+var batchCollectionDialog = VireoDialog.create(document.getElementById('batchCollectionModal'), {
+  initialFocus: document.getElementById('batchCollectionNewName'),
+  onDismiss: hideBatchCollectionModal,
+});
+
 /* ---------- iNaturalist ---------- */
 async function loadInatStatus(photoIds) {
   if (photoIds.length === 0) return;
@@ -316,17 +325,16 @@ async function batchSetColorLabel(color, photoIds) {
   showUndoToast();
 }
 
-function batchAddKeyword() {
+function batchAddKeyword(returnFocus) {
   document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + getActiveSelection().length + ' photos';
   document.getElementById('batchKeywordInput').value = '';
   getKeywordAutocompleteState('batchKeywordInput').selectedKeyword = null;
   hideKeywordSuggestions('batchKeywordInput');
-  document.getElementById('batchKeywordModal').classList.add('open');
-  setTimeout(function() { document.getElementById('batchKeywordInput').focus(); }, 50);
+  batchKeywordDialog.open(returnFocus);
 }
 
 function hideBatchKeywordModal() {
-  document.getElementById('batchKeywordModal').classList.remove('open');
+  batchKeywordDialog.close();
   hideKeywordSuggestions('batchKeywordInput');
   window._vireoNativeMenuPhotoIdsOverride = null;
 }
@@ -485,6 +493,12 @@ async function batchDelete() {
 
 var _batchCollections = [];
 var _batchCollectionSelectedId = null;
+// Codex P2: generation counter for addToCollection(). Each invocation
+// captures the next value before awaiting /api/collections and bails
+// after the await when a newer invocation has superseded it, so a stale
+// response can't dismiss overlays the user has since opened or reopen
+// the dialog on top of them.
+var _addToCollectionInvocation = 0;
 
 function collectionAcceptsManualPhotos(collection) {
   if (typeof collection.can_add_photos === 'boolean') {
@@ -515,13 +529,17 @@ function collectionAcceptsManualPhotos(collection) {
   }
 }
 
-async function addToCollection() {
+async function addToCollection(returnFocus) {
+  // WebKit does not focus buttons on pointer clicks. The template passes the
+  // opener explicitly; native-menu/shortcut calls retain the current focus.
+  returnFocus = returnFocus || document.activeElement;
   var activeIds = getActiveSelection();
   if (activeIds.length === 0) {
     window._vireoNativeMenuPhotoIdsOverride = null;
     return;
   }
 
+  var myInvocation = ++_addToCollectionInvocation;
   var collections;
   try {
     collections = await safeFetch('/api/collections', {}, { toast: false });
@@ -529,6 +547,12 @@ async function addToCollection() {
     window._vireoNativeMenuPhotoIdsOverride = null;
     return;
   }
+  // Codex P2: if the user re-triggered Add while this request was pending,
+  // the newer invocation will update state and open the dialog on its own
+  // response. This stale continuation must not run the overlay dismissals
+  // below (which could close a lightbox the user has since opened) or
+  // reopen the dialog on top of them.
+  if (myInvocation !== _addToCollectionInvocation) return;
 
   collections = collections.filter(collectionAcceptsManualPhotos);
   _batchCollections = collections;
@@ -537,27 +561,55 @@ async function addToCollection() {
 
   var listHtml = '';
   collections.forEach(function(c) {
-    listHtml += '<div class="batch-coll-item" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')" style="padding:6px 10px;cursor:pointer;border-radius:4px;font-size:13px;color:var(--text-primary);">' + escapeHtml(c.name) + '</div>';
+    listHtml += '<button type="button" class="batch-coll-item" aria-pressed="false" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')">' + escapeHtml(c.name) + '</button>';
   });
   if (collections.length === 0) {
     listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No manual collections yet</div>';
   }
   document.getElementById('batchCollectionList').innerHTML = listHtml;
   document.getElementById('batchCollectionNewName').value = '';
-  document.getElementById('batchCollectionModal').classList.add('open');
-  setTimeout(function() { document.getElementById('batchCollectionNewName').focus(); }, 50);
+  // Codex P2: while the /api/collections request was in flight, the help
+  // overlay (F1 / ? icon), the Report Issue overlay (⚠ nav icon), the
+  // command palette (Ctrl/Cmd+K), and the shared lightbox (grid dblclick)
+  // all saw no managed dialog on the stack via hasActive() and could have
+  // opened — F1 via openHelpModal's own guard, Ctrl/Cmd+K via
+  // openCommandPalette's, and openReportModal/openLightbox have no
+  // managed-dialog guard at all. Opening the dialog now would mark every
+  // sibling along the dialog's branch inert via updateBackground() but
+  // leave each visible at its higher z-index (help: 10000, report: 10000,
+  // palette: above the dialog's 500, lightbox overlay: 9999) covering the
+  // dialog; Escape would then dismiss the dialog instead of the covering
+  // overlay, and closing the dialog would restore focus behind a
+  // still-open sibling. Dismiss each before the dialog takes the top of
+  // the stack so no opener-guarded sibling races the open path. The
+  // lightbox is only closed when actually open (window._lbEscToken is the
+  // same signal closeLightbox() uses internally for wasOpen), since
+  // closeLightbox() resets viewport/decode state unconditionally.
+  if (typeof window.closeHelpModal === 'function') {
+    window.closeHelpModal();
+  }
+  if (typeof window.closeReportModal === 'function') {
+    window.closeReportModal();
+  }
+  if (typeof window.closeCommandPalette === 'function') {
+    window.closeCommandPalette();
+  }
+  if (window._lbEscToken && typeof window.closeLightbox === 'function') {
+    window.closeLightbox();
+  }
+  batchCollectionDialog.open(returnFocus);
 }
 
 function pickBatchCollection(id) {
   _batchCollectionSelectedId = id;
   document.getElementById('batchCollectionNewName').value = '';
   document.querySelectorAll('.batch-coll-item').forEach(function(el) {
-    el.style.background = parseInt(el.dataset.id) === id ? 'var(--bg-tertiary)' : '';
+    el.setAttribute('aria-pressed', String(parseInt(el.dataset.id) === id));
   });
 }
 
 function hideBatchCollectionModal() {
-  document.getElementById('batchCollectionModal').classList.remove('open');
+  batchCollectionDialog.close();
   window._vireoNativeMenuPhotoIdsOverride = null;
 }
 
@@ -602,6 +654,24 @@ async function confirmBatchCollection() {
   showToast('Added ' + ids.length + ' photos to "' + collectionName + '"', 'success');
   loadCollections();
   clearSelection();
+  // hideBatchCollectionModal() restored focus to the + Collection button, but
+  // clearSelection() then hides the batch bar with display:none, so the opener
+  // is now an invisible focus target. Move focus to the grid — the stable
+  // page control the user came from — so the next Tab starts somewhere real.
+  // Codex P2: the add-photos request between the dialog close and here is
+  // async, so the user may have moved focus to another stable control while
+  // it was pending. Only move focus when it is actually on something the
+  // batch-bar hide just invalidated — the hidden batch bar or document.body
+  // (where browsers park focus when its target is removed/hidden). Any
+  // other visible control is the user's active choice and we leave it.
+  var active = document.activeElement;
+  var batchBar = document.getElementById('batchBar');
+  var focusLost = !active || active === document.body ||
+      (batchBar && batchBar.contains(active));
+  if (focusLost) {
+    var grid = document.getElementById('grid');
+    if (grid) grid.focus({preventScroll: true});
+  }
 }
 
 function reviewLocationsForCollection(collectionId, mode) {

@@ -134,15 +134,16 @@ gate requires the frontend job to pass. The individual commands are
 
 ESLint checks first-party JavaScript under `vireo/static`, excluding vendor and
 minified files. Classic scripts still share page globals and expose inline-handler
-functions, so `no-undef` and `no-unused-vars` are enabled only for the three Browse
+functions, so `no-undef` and `no-unused-vars` are enabled only for the encapsulated
 controllers listed in `eslint.config.mjs`. Other recommended correctness rules
 apply across the static scripts; intentionally empty catch blocks are allowed.
 Inline template scripts continue to use the existing rendered-script parsing and
 browser tests.
 
 TypeScript checks those controllers' JavaScript with `checkJs`, strict types,
-DOM types, and no output files. `types/frontend.d.ts` describes their public state,
-selection data, and legacy action dependencies. It checks implementation and
+DOM types, and no output files. `types/frontend.d.ts` describes Browse state,
+selection data, and legacy action dependencies; `types/dialogs.d.ts` describes the
+shared dialog lifecycle. It checks implementation and
 call contracts; it does not validate server responses at runtime or check the
 implementation of legacy actions outside the selected files.
 

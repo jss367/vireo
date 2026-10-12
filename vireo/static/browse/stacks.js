@@ -175,9 +175,12 @@ function renderBrowseStackMember(p, coverId) {
   var thumbUrl = window.vireoThumbnailUrl
     ? window.vireoThumbnailUrl(p)
     : '/thumbnails/' + p.id + '.jpg';
+  // tabindex="-1" matches .grid-card: the stack member stays out of Tab
+  // order but is a valid programmatic focus target so a batch dialog
+  // launched from this card can restore focus to it on Cancel or Escape.
   return '<div class="browse-stack-member' + selectedClass + '" '
     + 'data-id="' + p.id + '" data-filename="' + escapeAttr(p.filename) + '"'
-    + cardColorLabelAttr(p.id) + ' '
+    + cardColorLabelAttr(p.id) + ' tabindex="-1" '
     + 'onclick="selectBrowseStackMember(event,' + p.id + ',' + coverId + ')" '
     + 'ondblclick="openBrowseStackMember(event,' + p.id + ',' + coverId + ')">'
     + '<div class="grid-card-img-wrap">'

@@ -181,7 +181,14 @@ function openPhotoEditor(photoId) {
   window.location.href = '/edit/' + photoId;
 }
 
-function buildPhotoContextMenu(photoIds, contextPhotoId) {
+function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
+  // Capture the opener now: closeContextMenu removes the clicked menu item
+  // before invoking its onClick, so document.activeElement would be body
+  // (right-click) or an unrelated prior control by the time a batch dialog
+  // read it. The caller passes the right-clicked grid card or the batch-bar
+  // More button; both carry tabindex="-1" so the batch dialog's close path
+  // can .focus() them on Escape or Cancel.
+  var opener = returnFocus || null;
   var one = photoIds.length === 1;
   var hint = one ? undefined : 'Select a single photo';
   // A right-click identifies an unambiguous copy source even when that image
@@ -294,8 +301,8 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
     { label: 'Copy Path',
       onClick: function() { copyPhotoPaths(photoIds); } },
     { separator: true },
-    { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(); } },
-    { label: 'Add to Collection\u2026', onClick: function() { addToCollection(); } },
+    { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(opener); } },
+    { label: 'Add to Collection\u2026', onClick: function() { addToCollection(opener); } },
   ]).concat(window.buildSpeciesHighlightMenuItems(photoIds, {
     showFetchFallback: true,
   })).concat(window.buildSpeciesRepresentativeMenuItems(photoIds, {
@@ -320,13 +327,17 @@ function buildPhotoContextMenu(photoIds, contextPhotoId) {
 
 // The More button on the batch bar opens the same menu as right-click on a
 // card, anchored under the button. openContextMenu only reads clientX/Y and
-// clamps to the viewport, so a synthetic event object is enough.
+// clamps to the viewport, so a synthetic event object is enough. The More
+// button is a <button>, so pass it as the return-focus target: batch dialogs
+// launched from Add Keyword / Add to Collection restore focus to it on
+// Escape or Cancel instead of falling back to document.body (WebKit does
+// not necessarily focus a button on pointer click).
 function openBatchMoreMenu(btn) {
   var ids = getActiveSelection();
   if (!ids.length) return;
   var r = btn.getBoundingClientRect();
   openContextMenu({ clientX: r.left, clientY: r.bottom + 4 },
-                  buildPhotoContextMenu(ids));
+                  buildPhotoContextMenu(ids, null, btn));
 }
 
 // Document-level delegation: grids re-render on sort/filter/scroll, so
@@ -402,7 +413,12 @@ document.addEventListener('contextmenu', function(e) {
   refreshCardSelectionVisuals();
   noteFocusedCardVisibility();
   updateBatchBar();
-  openContextMenu(e, buildPhotoContextMenu(ids, pid));
+  // The right-clicked card is the opener for any batch dialog launched from
+  // this menu (Add Keyword, Add to Collection). It carries tabindex="-1" so
+  // VireoDialog's close path can .focus() it when the dialog is dismissed —
+  // without this, the dialog restores focus to document.body because the
+  // non-focusable menu item is gone by the time the callback runs.
+  openContextMenu(e, buildPhotoContextMenu(ids, pid, card));
 });
 
 /* ---------- Folder tree context menu ---------- */
@@ -809,9 +825,15 @@ document.addEventListener('contextmenu', function(e) {
       });
     }
   }
+  // The context menu removes the clicked item before invoking its callback,
+  // and the collection row is tabindex=-1 (not in Tab order) but focusable
+  // programmatically, so capture the row now and pass it as the return
+  // target. Without this the editor restores focus to document.body on
+  // Escape or Cancel.
+  var editReturnFocus = ti;
   var editActions = [
     { label: 'Edit Rules',
-      onClick: function() { editCollection(cid); } },
+      onClick: function() { editCollection(cid, editReturnFocus); } },
     { label: 'Rename',
       onClick: function() { renameCollection(cid, name); } },
     { label: 'Duplicate',

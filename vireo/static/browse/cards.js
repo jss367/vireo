@@ -229,6 +229,7 @@ function renderPhotoCard(p, idx) {
     return '<div class="grid-card offline" data-id="' + p.id +
       '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) +
       '"' + cardColorLabelAttr(p.id) +
+      ' tabindex="-1"' +
       ' aria-disabled="true" title="This photo\'s folder is offline. Reconnect or relocate the folder to edit it.">' +
       '<div class="grid-card-img-wrap">' +
         '<div class="offline-photo-placeholder">' +
@@ -278,7 +279,11 @@ function renderPhotoCard(p, idx) {
   }
 
   var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
-  return '<div class="grid-card' + stackClass + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '"' + cardColorLabelAttr(p.id) + ' onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
+  // tabindex="-1" keeps the card out of Tab order (clicks already select
+  // through onclick) while making it a valid programmatic focus target so
+  // the context menu's return-focus target can land back on the card that
+  // launched it; batch dialogs opened from this card use that path.
+  return '<div class="grid-card' + stackClass + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '"' + cardColorLabelAttr(p.id) + ' tabindex="-1" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
     '<div class="grid-card-img-wrap">' +
       '<img data-thumbnail-src="' + escapeAttr(thumbUrl) + '" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
       renderBrowseStackBadge(p) +

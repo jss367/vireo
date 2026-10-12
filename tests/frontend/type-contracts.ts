@@ -20,4 +20,16 @@ function verifyFrontendContracts() {
   acceptSelectionPrediction('0', true);
   // @ts-expect-error A button argument must be a DOM button.
   showSelectionPredictionPhotos(0, {});
+
+  const dialog = window.VireoDialog.create(document.createElement('div'), {
+    initialFocus: document.createElement('input'),
+  });
+  dialog.open(document.createElement('button'));
+  dialog.close();
+  // @ts-expect-error A dialog must have an HTML element as its container.
+  window.VireoDialog.create(document);
+  // @ts-expect-error Dismissal cleanup is a callback.
+  window.VireoDialog.create(document.createElement('div'), {onDismiss: 'close'});
+  // @ts-expect-error Focus returns to an element, not a selector string.
+  dialog.open('#opener');
 }

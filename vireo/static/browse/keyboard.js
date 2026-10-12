@@ -37,6 +37,7 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
       if (openModal.id === 'batchKeywordModal') hideBatchKeywordModal();
       else if (openModal.id === 'batchCollectionModal') hideBatchCollectionModal();
+      else if (openModal.id === 'collectionModal') hideCollectionModal();
       else if (openModal.id === 'exportOverlay') closeExportModal();
       else if (openModal.id === 'panoramaOverlay') closePanoramaModal();
       else openModal.classList.remove('open');
