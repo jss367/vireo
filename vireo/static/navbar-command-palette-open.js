@@ -1,4 +1,13 @@
 window.openCommandPalette = function() {
+  // A managed VireoDialog on the stack has made this overlay's branch inert
+  // via updateBackground(), so revealing #commandPalette would present a
+  // visible but inoperable palette whose input and results cannot receive
+  // focus; the dialog's focus containment would also pull focus back out of
+  // the palette, and the first Escape is owned by the dialog's Keymap
+  // handler. Treat Ctrl/Cmd+K (and the ⌘K hint click) as a no-op in that
+  // state so the user keeps interacting with the dialog; dismissing the
+  // dialog clears the inert state and the palette opens normally afterward.
+  if (window.VireoDialog && window.VireoDialog.hasActive && window.VireoDialog.hasActive()) return;
   const overlay = document.getElementById('commandPalette');
   if (!overlay) return;
   overlay.removeAttribute('hidden');

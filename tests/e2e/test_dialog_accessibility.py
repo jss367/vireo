@@ -393,6 +393,37 @@ def test_f1_help_is_noop_while_a_managed_dialog_is_open(live_server, page):
     expect(page.locator("#helpModal")).to_have_class("help-overlay active")
 
 
+def test_cmd_k_command_palette_is_noop_while_a_managed_dialog_is_open(live_server, page):
+    # updateBackground() inerts every body-level sibling along the active
+    # dialog's branch, including #commandPalette. Codex P2: pressing
+    # Ctrl/Cmd+K while a managed dialog is open used to reveal the palette
+    # after its asynchronous tab-state refresh and focus its input, but the
+    # inert attribute made every control unfocusable and the dialog's focus
+    # containment pulled focus back out; the first Escape was consumed by
+    # the dialog's Keymap handler, leaving the palette visible until a
+    # second Escape. openCommandPalette (and its tab-refresh wrapper) must
+    # be a no-op while VireoDialog.hasActive() is true, mirroring the help
+    # overlay guard; dismissing the dialog clears the inert state and the
+    # palette opens normally afterwards.
+    open_browse(page, live_server)
+    opener = page.get_by_role("button", name="+ New Collection", exact=True)
+    opener.click()
+    dialog = page.get_by_role("dialog", name="New Smart Collection", exact=True)
+    expect(dialog).to_be_visible()
+    page.keyboard.press("ControlOrMeta+K")
+    # The palette stays hidden; the dialog is still the top overlay.
+    expect(page.locator("#commandPalette")).to_be_hidden()
+    expect(dialog).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    # With no managed dialog on the stack, Ctrl/Cmd+K opens the palette as
+    # usual. openCommandPalette refreshes tab state asynchronously before
+    # revealing #commandPalette, so wait for the overlay to lose [hidden].
+    page.keyboard.press("ControlOrMeta+K")
+    page.wait_for_selector("#commandPalette:not([hidden])", timeout=3000)
+    expect(page.locator("#cmdPaletteInput")).to_be_focused()
+
+
 def test_context_menu_add_keyword_restores_focus_to_right_clicked_card(live_server, page):
     # buildPhotoContextMenu's Add Keyword item used to call batchAddKeyword()
     # without a return-focus argument. closeContextMenu removes the clicked
