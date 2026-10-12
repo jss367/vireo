@@ -255,8 +255,9 @@ function clearSpeciesFilter() {
   renderResults();
 }
 
-function encounterMatchesSearch(enc, photoMap) {
+function encounterMatchesSearch(enc, photoMap, inScope) {
   if (!speciesFilter) return true;
+  if (typeof inScope !== 'function') inScope = function() { return true; };
   var threshold = minConfidence / 100;
   var fields = [];
 
@@ -385,6 +386,9 @@ function encounterMatchesSearch(enc, photoMap) {
   // Filename search remains encounter-level: finding one photo keeps its
   // whole encounter visible so the surrounding burst context is not lost.
   // Under Hide confirmed, restrict to photos in bursts that will render.
+  // Under a Folder/Collection scope filter, restrict to in-scope photos too —
+  // otherwise matching the filename of a hidden out-of-scope photo would
+  // surface the encounter and show unrelated in-scope cards.
   var filenamePids;
   if (bursts.length > 0) {
     filenamePids = [];
@@ -400,6 +404,7 @@ function encounterMatchesSearch(enc, photoMap) {
     filenamePids = enc.photo_ids || [];
   }
   filenamePids.forEach(function(pid) {
+    if (!inScope(pid)) return;
     var photo = photoMap && photoMap[pid];
     if (photo) fields.push(photo.filename);
   });

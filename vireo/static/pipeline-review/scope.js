@@ -383,6 +383,11 @@ function maybeRefreshCollectionScopeMembership() {
       reviewScopePhotoIds = newIds;
       reviewScopeTotal = newIds.size;
       renderResults();
+      // statTotalPhotos, encounter/burst totals and confirmation counts are
+      // scope-filtered through scopedSummaryCounts, so a membership change
+      // must redraw the summary bar too. Without this they continue showing
+      // pre-edit totals even after the dropped photo correctly disappears.
+      if (pipelineResults) updateSummaryBar(pipelineResults.summary);
       updateReviewScopeStatusFromResults(pipelineResults);
       renderCacheScopeBanner(resultsCacheInfo);
     }).catch(function() { /* leave the stale set; the next mutation retries */ });

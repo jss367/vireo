@@ -265,6 +265,11 @@ function confirmPipelineKeyword() {
       hidePipelineKeywordModal(true);
       showToast('Added "' + name + '" to ' + ids.length + ' photo' +
         (ids.length === 1 ? '' : 's'), 'success');
+      // A smart collection scope keyed on `keyword` must re-check membership
+      // after this write; without the refresh, a photo that now matches a
+      // `keyword not_contains` rule stays visible until the scope is
+      // reselected or the page reloads.
+      refreshLatestScopeSnapshotIfCurrent();
       return true;
     }).catch(function() {
       return false;

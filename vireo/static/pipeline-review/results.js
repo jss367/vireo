@@ -55,7 +55,7 @@ function renderResults() {
     speciesVisibleIds = new Set();
     speciesVisibleEncounters = new Set();
     pipelineResults.encounters.forEach(function(enc, ei) {
-      if (encounterMatchesSearch(enc, photoMap)) {
+      if (encounterMatchesSearch(enc, photoMap, inScope)) {
         speciesVisibleEncounters.add(ei);
         (enc.photo_ids || []).forEach(function(pid) { speciesVisibleIds.add(pid); });
       }
