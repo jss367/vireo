@@ -262,15 +262,24 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
   var fields = [];
 
   // When Hide confirmed is on, the render loop below skips confirmed bursts
-  // (and their photos). Search must scope its burst-level fields — per-burst
+  // (and their photos). Under a Folder/Collection scope filter, the same
+  // render loop also skips bursts with no in-scope photos (see renderResults's
+  // `burstInScope`). Search must scope its burst-level fields — per-burst
   // confirmed overrides, per-burst predictions, and per-photo filenames — to
   // only the bursts that will actually render. Otherwise a query matching a
-  // hidden confirmed burst's species or filename surfaces the encounter and
-  // shows only the unrelated unconfirmed burst's content.
+  // hidden burst's species or filename surfaces the encounter and shows only
+  // the unrelated visible burst's content.
   var bursts = enc.bursts || [];
-  function burstVisible(burst) {
-    return !hideConfirmed || !isBurstConfirmed(enc, burst);
+  function burstInScope(burst) {
+    return (burst && burst.photo_ids || burst || []).some(inScope);
   }
+  function burstVisible(burst) {
+    if (hideConfirmed && isBurstConfirmed(enc, burst)) return false;
+    if (!burstInScope(burst)) return false;
+    return true;
+  }
+  var visibleBursts = bursts.filter(burstVisible);
+  var anyBurstHidden = bursts.length > 0 && visibleBursts.length !== bursts.length;
 
   // Manually assigned encounter label. The encounter widget still renders
   // (even when some bursts hide), so it stays searchable — unless every burst
@@ -280,9 +289,8 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
   // per-burst confirmed override; if that override is on a hidden burst the
   // label must not surface the encounter.
   var confirmedLabelHasVisibleBurst = true;
-  if (hideConfirmed && enc.confirmed_species && bursts.length > 0) {
-    confirmedLabelHasVisibleBurst = bursts.some(function(b) {
-      if (!burstVisible(b)) return false;
+  if (anyBurstHidden && enc.confirmed_species) {
+    confirmedLabelHasVisibleBurst = visibleBursts.some(function(b) {
       if (b && b.species_override && b.species_override.confirmed === true) {
         return b.species_override.species === enc.confirmed_species;
       }
@@ -298,8 +306,7 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
 
   // Confirmed per-burst overrides — manual labels that always bypass the
   // slider, but only from bursts that will render.
-  bursts.forEach(function(burst) {
-    if (!burstVisible(burst)) return;
+  visibleBursts.forEach(function(burst) {
     if (burst.species_override && burst.species_override.confirmed === true) {
       fields.push(burst.species_override.species);
     }
@@ -313,11 +320,11 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
   // user raised the threshold.
   //
   // The encounter-level aggregate is rolled up from every photo in the
-  // encounter, so under Hide confirmed it can carry a species contributed
-  // only by a hidden confirmed burst. Restrict aggregate species to those
-  // that at least one visible burst also predicts, so searching a species
-  // whose only evidence is inside a hidden burst can't surface an unrelated
-  // visible burst.
+  // encounter, so under Hide confirmed OR a Folder/Collection scope filter it
+  // can carry a species contributed only by a hidden burst. Restrict aggregate
+  // species to those that at least one visible burst also predicts, so
+  // searching a species whose only evidence is inside a hidden burst can't
+  // surface an unrelated visible burst.
   // Support means: a visible burst has evidence the search should follow. A
   // confirmed burst override qualifies (manual label always counts), and so
   // does a burst-level prediction whose confidence meets the slider — matching
@@ -328,8 +335,8 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
   // Legacy raw bursts store `bursts` as arrays of photo IDs with no
   // per-burst prediction data. Gating the encounter aggregate against a
   // visible-burst set built from that shape would drop every
-  // encounter-level prediction whenever Hide confirmed is on — even
-  // though nothing is actually hidden. The strict gate is only sound
+  // encounter-level prediction whenever a burst is hidden — even though
+  // nothing is actually hidden-with-evidence. The strict gate is only sound
   // when we can fully account for what every visible burst contributes
   // to the aggregate, so require every VISIBLE burst to carry per-burst
   // predictions before enabling it. Otherwise (all-raw, or a mix where
@@ -337,13 +344,12 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
   // flow leaves the source burst as a raw array while appending a new
   // object burst) at least one visible burst is opaque and could be the
   // source of an aggregate species we would otherwise drop.
-  var visibleBursts = bursts.filter(burstVisible);
   var visibleBurstsAllCarryPredictions = visibleBursts.length > 0
     && visibleBursts.every(function(burst) {
       return burst && Array.isArray(burst.species_predictions);
     });
   var visibleBurstSpecies = null;
-  if (hideConfirmed && visibleBurstsAllCarryPredictions) {
+  if (anyBurstHidden && visibleBurstsAllCarryPredictions) {
     visibleBurstSpecies = new Set();
     visibleBursts.forEach(function(burst) {
       if (burst && burst.species_override && burst.species_override.confirmed === true
@@ -374,8 +380,7 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
       fields.push(sp.species);
     }
   });
-  bursts.forEach(function(burst) {
-    if (!burstVisible(burst)) return;
+  visibleBursts.forEach(function(burst) {
     (burst.species_predictions || []).forEach(function(sp) {
       if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
         fields.push(sp.species);
@@ -385,15 +390,14 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
 
   // Filename search remains encounter-level: finding one photo keeps its
   // whole encounter visible so the surrounding burst context is not lost.
-  // Under Hide confirmed, restrict to photos in bursts that will render.
-  // Under a Folder/Collection scope filter, restrict to in-scope photos too —
-  // otherwise matching the filename of a hidden out-of-scope photo would
-  // surface the encounter and show unrelated in-scope cards.
+  // Under Hide confirmed or a Folder/Collection scope filter, restrict to
+  // photos in bursts that will render, and then to in-scope photos within
+  // those bursts — otherwise matching the filename of a hidden photo would
+  // surface the encounter and show unrelated visible cards.
   var filenamePids;
   if (bursts.length > 0) {
     filenamePids = [];
-    bursts.forEach(function(burst) {
-      if (!burstVisible(burst)) return;
+    visibleBursts.forEach(function(burst) {
       (burst.photo_ids || burst || []).forEach(function(pid) {
         filenamePids.push(pid);
       });

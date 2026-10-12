@@ -60,6 +60,22 @@ function makePage() {
     navigator: {clipboard: {writeText: async () => {}}},
     escapeHtml: s => String(s == null ? '' : s),
     escapeAttr: s => String(s == null ? '' : s),
+    // Minimal stand-in for the real helper in vireo-utils.js (which the
+    // template loads from the shared navbar). Pipeline Review's search path
+    // only needs case-insensitive substring matching against a token list.
+    VireoTextSearch: {
+      matchesFields(fields, query) {
+        if (!query) return true;
+        const parts = String(query).trim().split(/\s+/).filter(Boolean);
+        const values = (Array.isArray(fields) ? fields : [fields])
+          .filter(v => v != null)
+          .map(v => String(v).toLowerCase());
+        return parts.every(token =>
+          values.some(value => value.indexOf(String(token).toLowerCase()) !== -1));
+      },
+      readOptions: () => ({matchCase: false, wholeWord: false}),
+      toggle() {}, renderOptions() {},
+    },
     showToast: (msg, kind) => toasts.push([msg, kind]),
     openLightbox: (...args) => lightboxOpens.push(args),
     safeFetch: async (url, opts) => {
@@ -288,6 +304,107 @@ async function deletedPhotoLeavesTheFolderScope() {
   assert.equal(element('reviewScopeStatus').textContent, '0 of 1 reviewed');
 }
 
+function speciesSearchHidesEncountersWithOnlyOutOfScopeEvidence() {
+  // encounterMatchesSearch must not surface an encounter whose only species
+  // evidence lives in an entirely out-of-scope burst. A query matching a
+  // species predicted only by hidden bursts would otherwise draw the
+  // encounter and show its unrelated in-scope burst's content.
+  const {ctx} = makePage();
+  run(ctx, `
+    hideConfirmed = false;
+    minConfidence = 40;
+    speciesFilter = 'Mute Swan';
+    speciesFilterText = 'Mute Swan';
+    speciesFilterSearchOptions = {wordMode: false, caseSensitive: false};
+    reviewScopePhotoIds = new Set([1, 2]);
+  `);
+  const photos = {
+    1: {id: 1, filename: 'in1.jpg'}, 2: {id: 2, filename: 'in2.jpg'},
+    10: {id: 10, filename: 'out1.jpg'}, 11: {id: 11, filename: 'out2.jpg'},
+  };
+  const enc = {
+    photo_ids: [1, 2, 10, 11],
+    species_predictions: [{species: 'Mute Swan',
+                           models: [{model_id: 'm', confidence: 0.9}]}],
+    bursts: [
+      {photo_ids: [1, 2], species_predictions: []},
+      {photo_ids: [10, 11],
+       species_predictions: [{species: 'Mute Swan',
+                              models: [{model_id: 'm', confidence: 0.9}]}]},
+    ],
+  };
+  function inScope(pid) { return pid === 1 || pid === 2; }
+  assert.equal(ctx.encounterMatchesSearch(enc, photos, inScope), false,
+    'search must not match when every supporting burst is out of scope');
+
+  // In-scope burst that also predicts Mute Swan: the match should surface.
+  const encWithInScopeEvidence = {
+    photo_ids: [1, 2, 10, 11],
+    species_predictions: [{species: 'Mute Swan',
+                           models: [{model_id: 'm', confidence: 0.9}]}],
+    bursts: [
+      {photo_ids: [1, 2],
+       species_predictions: [{species: 'Mute Swan',
+                              models: [{model_id: 'm', confidence: 0.9}]}]},
+      {photo_ids: [10, 11], species_predictions: []},
+    ],
+  };
+  assert.equal(ctx.encounterMatchesSearch(encWithInScopeEvidence, photos, inScope), true,
+    'search must match when the in-scope burst backs the species');
+
+  // Filename of an out-of-scope photo must not surface the encounter either.
+  run(ctx, "speciesFilter = 'out1.jpg'; speciesFilterText = 'out1.jpg';");
+  assert.equal(ctx.encounterMatchesSearch(enc, photos, inScope), false,
+    'filename search must not match a hidden out-of-scope photo');
+
+  // Burst-level confirmed overrides on a hidden burst must not match either.
+  run(ctx, "speciesFilter = 'Great Egret'; speciesFilterText = 'Great Egret';");
+  const encWithHiddenOverride = {
+    photo_ids: [1, 2, 10, 11],
+    bursts: [
+      {photo_ids: [1, 2], species_predictions: []},
+      {photo_ids: [10, 11],
+       species_predictions: [],
+       species_override: {species: 'Great Egret', confirmed: true}},
+    ],
+  };
+  assert.equal(ctx.encounterMatchesSearch(encWithHiddenOverride, photos, inScope), false,
+    'a confirmed burst override on a hidden burst must not surface the encounter');
+}
+
+function speciesSearchIsUnchangedWhenNoScopeIsActive() {
+  // The inScope default is always-true, so an unscoped caller sees identical
+  // behavior: an encounter whose only Mute Swan evidence lives in one burst
+  // still matches when no scope filter is active.
+  const {ctx} = makePage();
+  run(ctx, `
+    hideConfirmed = false;
+    minConfidence = 40;
+    speciesFilter = 'Mute Swan';
+    speciesFilterText = 'Mute Swan';
+    speciesFilterSearchOptions = {wordMode: false, caseSensitive: false};
+    reviewScopePhotoIds = null;
+    reviewScopeMode = 'cache';
+  `);
+  const photos = {
+    1: {id: 1, filename: 'a.jpg'}, 2: {id: 2, filename: 'b.jpg'},
+    10: {id: 10, filename: 'c.jpg'}, 11: {id: 11, filename: 'd.jpg'},
+  };
+  const enc = {
+    photo_ids: [1, 2, 10, 11],
+    species_predictions: [{species: 'Mute Swan',
+                           models: [{model_id: 'm', confidence: 0.9}]}],
+    bursts: [
+      {photo_ids: [1, 2], species_predictions: []},
+      {photo_ids: [10, 11],
+       species_predictions: [{species: 'Mute Swan',
+                              models: [{model_id: 'm', confidence: 0.9}]}]},
+    ],
+  };
+  assert.equal(ctx.encounterMatchesSearch(enc, photos), true,
+    'unscoped callers must see the pre-fix behavior');
+}
+
 (async () => {
   await hiddenPhotoIsNeverAWriteTarget();
   await deletedPhotoLeavesTheFolderScope();
@@ -296,4 +413,6 @@ async function deletedPhotoLeavesTheFolderScope() {
   await allReviewedPhotosIsUnfiltered();
   await membershipRefreshDropsTheInspectedPhoto();
   await staleMembershipRefreshIsDropped();
+  speciesSearchHidesEncountersWithOnlyOutOfScopeEvidence();
+  speciesSearchIsUnchangedWhenNoScopeIsActive();
 })().catch(err => { console.error(err); process.exitCode = 1; });
