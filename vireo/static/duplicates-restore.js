@@ -12,6 +12,7 @@ function cancelDuplicateLoad() {
 
 async function tryRestoreLastScan(forceCleanup) {
   if (_scanInProgress) return;
+  clearDuplicateTrashProgress();
   var epoch = ++_duplicateLoadEpoch;
   function current() { return epoch === _duplicateLoadEpoch && !_scanInProgress; }
   document.getElementById('initialLoading').style.display = '';
