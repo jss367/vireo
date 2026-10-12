@@ -31,7 +31,7 @@ async function trashAllLoserFiles() {
     (p.losers || []).forEach(function(l) {
       // Skip ones already trashed in this session.
       var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
-      if (card && card.classList.contains('trashed')) return;
+      if (!card || card.classList.contains('trashed')) return;
       if (l.id != null) ids.push(l.id);
     });
   });

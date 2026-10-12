@@ -267,3 +267,65 @@ def test_inflight_batch_cleanup_keeps_progress_and_retry_after_category_switch(l
     pending[1].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
     expect(page.locator("#trashAllProgress")).to_contain_text("Cleanup complete")
     expect(page.locator("#trashAllBtn")).to_have_count(0)
+
+
+def test_pending_cleanup_reconciles_newly_matching_cards_and_bulk_retry(live_server, page):
+    _show_patterns(live_server, page)
+    page.evaluate("""() => {
+      function photo(id, path) {
+        return {id, path, filename: path.split('/').pop(), file_size: 1000, exists: true};
+      }
+      renderResults({proposals: [
+        {file_hash: 'mixed', status: 'resolved', winner: photo(1, '/a/owl.jpg'),
+          losers: [photo(2, '/a/owl-2.jpg'), photo(3, '/b/owl-3.jpg')]},
+        {file_hash: 'other', status: 'resolved', winner: photo(11, '/c/hawk.jpg'),
+          losers: [photo(12, '/c/hawk-2.jpg')]},
+        {file_hash: 'excluded', status: 'unresolved', winner: photo(21, '/a/finch.jpg'),
+          losers: [photo(22, '/b/finch.jpg')]}
+      ], buckets: []});
+    }""")
+    _category(page, "same-name-across-folders").click()
+    page.locator(".group-check").uncheck()
+    requests, pending, confirmations = [], [], []
+
+    def trash(route):
+        requests.append(route.request.post_data_json)
+        if len(requests) == 1:
+            pending.append(route)
+        else:
+            response = {"trashed": 1, "skipped": [], "failed": []}
+            if len(requests) == 2:
+                response["failed"] = [{"id": 2, "error": "Synthetic locked file"}]
+            route.fulfill(content_type="application/json", body=json.dumps(response))
+
+    page.route("**/api/duplicates/delete-loser-files", trash)
+    page.on("dialog", lambda dialog: (confirmations.append(dialog.message), dialog.accept()))
+    _category(page, "numbered-across-folders").click()
+    page.locator(".dup-card[data-photo-id='3'] .trash-btn").click()
+    assert requests == [{"photo_ids": [3]}]
+    _category(page, "numbered-same-folder").click()
+    expect(page.locator(".dup-group[data-hash='mixed']")).to_have_count(0)
+    expect(page.locator("#trashAllBtn")).to_contain_text("Move 1 extra copy")
+    pending[0].fulfill(content_type="application/json", body=json.dumps(
+        {"trashed": 1, "skipped": [], "failed": []},
+    ))
+    expect(page.locator(".dup-group[data-hash='mixed']")).to_have_count(1)
+    expect(page.locator(".dup-card[data-photo-id='3']")).to_have_count(0)
+    expect(page.locator("#trashAllBtn")).to_contain_text("Move 2 extra copies")
+    assert page.locator(".dup-card.loser").evaluate_all(
+        "cards => cards.map(c => Number(c.dataset.photoId))"
+    ) == [2, 12]
+    page.locator("#trashAllBtn").click()
+    expect(page.locator(".dup-card[data-photo-id='2'] [data-trash-status]")).to_contain_text(
+        "Failed: Synthetic locked file",
+    )
+    expect(page.locator("#trashAllBtn")).to_contain_text("Move 1 extra copy")
+    page.locator("#trashAllBtn").click()
+    expect(page.locator("#trashAllBtn")).to_have_count(0)
+    assert requests == [{"photo_ids": [3]}, {"photo_ids": [2, 12]}, {"photo_ids": [2]}]
+    assert confirmations[0].startswith("Move 2 files to Trash")
+    assert confirmations[1].startswith("Move 1 file to Trash")
+    _category(page, "all").click()
+    expect(page.locator(".dup-group[data-hash='mixed']")).to_have_count(0)
+    expect(page.locator(".dup-group[data-hash='other']")).to_have_count(0)
+    expect(page.locator(".dup-group[data-hash='excluded'] .group-check")).not_to_be_checked()
