@@ -765,6 +765,7 @@ def test_ordinary_bucket_reveal_uses_visible_folders(live_server, page, filter_k
 
     page.route("**/api/folders/reveal", reveal)
     button = page.locator(".bucket-card .reveal-btn")
+    original_label = button.inner_text()
     with page.expect_request("**/api/folders/reveal"):
         button.click()
     expect(button).to_be_disabled()
@@ -778,7 +779,7 @@ def test_ordinary_bucket_reveal_uses_visible_folders(live_server, page, filter_k
         "revealed": ["/a", "/b"], "failed": [], "skipped": [],
     }))
     expect(button).to_be_enabled()
-    expect(button).to_have_text("Reveal")
+    expect(button).to_have_text(original_label)
     # Pin the filtered view before a later scan reuses its bucket index.
     page.evaluate("""() => {
       pinDuplicateBucketOperation(document.querySelector('.bucket-card'), 0);
