@@ -7,7 +7,7 @@
     "tauri": "tauri",
     "lint:frontend": "eslint vireo/static",
     "typecheck:frontend": "tsc --project tsconfig.frontend.json",
-    "test:frontend-checks": "node --test tests/frontend/checks.test.mjs",
+    "test:frontend-checks": "node --test tests/frontend/checks.test.mjs tests/frontend/duplicates-categories.test.mjs",
     "check:frontend": "npm run lint:frontend && npm run typecheck:frontend && npm run test:frontend-checks"
   },
   "devDependencies": {
