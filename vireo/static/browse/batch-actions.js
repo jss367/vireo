@@ -555,14 +555,20 @@ async function addToCollection(returnFocus) {
   }
   document.getElementById('batchCollectionList').innerHTML = listHtml;
   document.getElementById('batchCollectionNewName').value = '';
-  // Codex P2: while the /api/collections request was in flight, Ctrl/Cmd+K's
-  // hasActive() guard saw no managed dialog on the stack and could have
-  // opened the command palette. Opening the dialog now would mark its branch
-  // inert via updateBackground() but leave the (higher z-index) palette
-  // visible-but-inert covering the dialog, Escape would then dismiss the
-  // dialog instead of the palette, and closing the dialog would restore
-  // focus behind the still-open palette. Dismiss it before the dialog takes
-  // the top of the stack so no opener-guarded sibling races the open path.
+  // Codex P2: while the /api/collections request was in flight, both the
+  // help overlay (F1 / ? icon) and the command palette (Ctrl/Cmd+K) saw no
+  // managed dialog on the stack via hasActive() and could have opened — F1
+  // via openHelpModal's own guard, Ctrl/Cmd+K via openCommandPalette's.
+  // Opening the dialog now would mark either overlay's branch inert via
+  // updateBackground() but leave it visible at its higher z-index (help:
+  // 10000, palette: above the dialog's 500) covering the dialog; Escape
+  // would then dismiss the dialog instead of the covering overlay, and
+  // closing the dialog would restore focus behind a still-open sibling.
+  // Dismiss both before the dialog takes the top of the stack so no
+  // opener-guarded sibling races the open path.
+  if (typeof window.closeHelpModal === 'function') {
+    window.closeHelpModal();
+  }
   if (typeof window.closeCommandPalette === 'function') {
     window.closeCommandPalette();
   }

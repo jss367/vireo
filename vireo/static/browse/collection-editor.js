@@ -604,21 +604,46 @@ async function saveCollection() {
   var rules = serializeCollectionRules();
 
   try {
-    var url = collectionEditingId ? '/api/collections/' + collectionEditingId : '/api/collections';
+    // Capture before hideCollectionModal() clears collectionEditingId so the
+    // post-refresh focus restore below can find the replacement row.
+    var editedId = collectionEditingId;
+    var url = editedId ? '/api/collections/' + editedId : '/api/collections';
     // This modal only edits rules — the preview and controls never surface
     // the stored visual clause. When editing an existing visual collection,
     // leaving visual_json in place would silently apply a hidden visual
     // prompt on reopen that the user just previewed without (Codex review
     // r3623087112). Clear it so the saved collection matches the preview.
     var body = {name: name, rules: rules};
-    if (collectionEditingId) body.visual = null;
+    if (editedId) body.visual = null;
     await safeFetch(url, {
-      method: collectionEditingId ? 'PUT' : 'POST',
+      method: editedId ? 'PUT' : 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
     hideCollectionModal();
-    loadCollections();
+    // Codex P2: hideCollectionModal() restores focus to the pre-refresh
+    // context-menu row, but renderCollectionList() replaces every row via
+    // innerHTML on the next loadCollections() resolution, detaching the
+    // focused opener and dropping activeElement to body. Await the refresh
+    // and focus the replacement row for the same collection id, but only
+    // when the row-restore has actually been orphaned — so a user who
+    // moved focus to another visible control while the refresh was pending
+    // keeps their choice. loadCollectionCounts() only mutates text inside
+    // existing rows (no innerHTML replacement), so it stays fire-and-forget.
+    var refresh = loadCollections();
     loadCollectionCounts();
+    if (editedId != null) {
+      await refresh;
+      var active = document.activeElement;
+      var orphaned = !active || active === document.body ||
+          !(active instanceof HTMLElement) || !active.isConnected;
+      if (orphaned) {
+        var replacement = document.querySelector(
+          '#collectionList .tree-item[data-collection-id="' + editedId + '"]');
+        if (replacement && typeof replacement.focus === 'function') {
+          replacement.focus({preventScroll: true});
+        }
+      }
+    }
   } catch(e) {}
 }

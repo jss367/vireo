@@ -512,3 +512,140 @@ def test_batch_more_add_to_collection_restores_focus_to_more_button(live_server,
     page.keyboard.press("Escape")
     expect(dialog).to_be_hidden()
     expect(more).to_be_focused()
+
+
+def test_add_to_collection_dismisses_help_opened_during_pending_fetch(live_server, page):
+    # Codex P2: addToCollection awaits /api/collections before calling
+    # batchCollectionDialog.open(), so during that window F1's hasActive()
+    # guard sees no managed dialog and openHelpModal reveals #helpModal.
+    # Once the fetch resolves and the dialog becomes the top of the stack,
+    # updateBackground() marks the help overlay inert but it stays visible
+    # at its higher z-index (10000 vs. the dialog's 500) covering the
+    # dialog; Escape would then be consumed by the dialog's Keymap handler,
+    # leaving help visible until a second Escape. addToCollection must
+    # dismiss the help overlay before opening the dialog, mirroring the
+    # command-palette dismissal below, so the dialog is the only visible
+    # overlay once the fetch resolves.
+    live_server["db"].add_collection("Pick target", "[]")
+    open_browse(page, live_server)
+    page.evaluate("""() => {
+      const savedSafeFetch = window.safeFetch;
+      window._collectionsFetchSignalled = false;
+      window._releaseCollectionsFetch = false;
+      window.safeFetch = async function(url, opts, options) {
+        if (typeof url === 'string' && url === '/api/collections'
+            && (!opts || !opts.method || opts.method === 'GET')) {
+          window._collectionsFetchSignalled = true;
+          while (!window._releaseCollectionsFetch) {
+            await new Promise(r => setTimeout(r, 20));
+          }
+        }
+        return savedSafeFetch(url, opts, options);
+      };
+    }""")
+    opener = page.locator("#batchBar").get_by_role("button", name="+ Collection", exact=True)
+    opener.click()
+    page.wait_for_function("window._collectionsFetchSignalled === true")
+    # The dialog has not opened yet, so hasActive() is false and F1 opens
+    # the help overlay.
+    page.keyboard.press("F1")
+    expect(page.locator("#helpModal")).to_have_class("help-overlay active")
+    # Release the stalled fetch. addToCollection must close the help overlay
+    # before opening the dialog so no opener-guarded sibling is left
+    # visible-but-inert when the dialog becomes the top overlay.
+    page.evaluate("window._releaseCollectionsFetch = true")
+    dialog = page.get_by_role("dialog", name="Add 1 photo(s) to collection", exact=True)
+    expect(dialog).to_be_visible()
+    expect(page.locator("#helpModal")).not_to_have_class("help-overlay active")
+    # One Escape closes the dialog cleanly; focus returns to the opener.
+    page.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    expect(page.locator("#helpModal")).not_to_have_class("help-overlay active")
+    expect(opener).to_be_focused()
+
+
+def test_save_collection_refocuses_replacement_row_after_refresh(live_server, page):
+    # Codex P2: hideCollectionModal() restores focus to the pre-refresh row
+    # (the context-menu opener), but saveCollection() then calls
+    # loadCollections() → renderCollectionList(), which replaces every row
+    # via innerHTML; the focused opener is detached and activeElement
+    # collapses to body. After the refresh completes, focus must land on
+    # the replacement row that renders for the same collection id so
+    # keyboard users don't lose their place after every successful edit.
+    collection_id = live_server["db"].add_collection("Edit focus target", "[]")
+    open_browse(page, live_server)
+    row = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
+    )
+    row.click(button="right")
+    page.get_by_text("Edit Rules", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Edit Smart Collection", exact=True)
+    name = dialog.get_by_role("textbox", name="Collection name", exact=True)
+    expect(name).to_have_value("Edit focus target")
+    name.fill("Edit focus target renamed")
+    dialog.get_by_role("button", name="Update", exact=True).click()
+    expect(dialog).to_be_hidden()
+    # The server-side rename replaces every row, so the pre-refresh node is
+    # detached. Wait for the new row to render and assert focus lands there.
+    replacement = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
+    )
+    expect(replacement.get_by_text("Edit focus target renamed", exact=True)).to_be_visible()
+    expect(replacement).to_be_focused()
+
+
+def test_save_collection_preserves_focus_moved_during_pending_refresh(live_server, page):
+    # Companion to the row-refocus test: when the user has moved focus to
+    # another stable, visible control while saveCollection()'s refresh is
+    # pending, the row refocus must not steal that choice back. It only
+    # runs when activeElement has been orphaned to body or a detached node.
+    collection_id = live_server["db"].add_collection("Keep user focus", "[]")
+    open_browse(page, live_server)
+    page.evaluate("""() => {
+      const savedSafeFetch = window.safeFetch;
+      window._listFetchSignalled = false;
+      window._releaseListFetch = false;
+      window.safeFetch = async function(url, opts, options) {
+        if (typeof url === 'string' && url === '/api/collections'
+            && (!opts || !opts.method || opts.method === 'GET')) {
+          window._listFetchSignalled = true;
+          while (!window._releaseListFetch) {
+            await new Promise(r => setTimeout(r, 20));
+          }
+        }
+        return savedSafeFetch(url, opts, options);
+      };
+    }""")
+    row = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
+    )
+    row.click(button="right")
+    page.get_by_text("Edit Rules", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Edit Smart Collection", exact=True)
+    name = dialog.get_by_role("textbox", name="Collection name", exact=True)
+    expect(name).to_have_value("Keep user focus")
+    name.fill("Keep user focus renamed")
+    dialog.get_by_role("button", name="Update", exact=True).click()
+    expect(dialog).to_be_hidden()
+    page.wait_for_function("window._listFetchSignalled === true")
+    # The user moves focus to another visible control while the refresh is
+    # pending. A standalone anchor is injected so the assertion does not
+    # depend on the live browse chrome staying stable.
+    page.evaluate("""() => {
+      const anchor = document.createElement('button');
+      anchor.id = 'userChosenAnchor';
+      anchor.type = 'button';
+      anchor.textContent = 'User moved here';
+      document.body.appendChild(anchor);
+      anchor.focus({preventScroll: true});
+    }""")
+    expect(page.locator("#userChosenAnchor")).to_be_focused()
+    # Release the stalled refresh. The row-refocus guard must leave the
+    # user's choice alone because activeElement is still a connected,
+    # visible control.
+    page.evaluate("window._releaseListFetch = true")
+    replacement = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
+    )
+    expect(replacement.get_by_text("Keep user focus renamed", exact=True)).to_be_visible()
+    expect(page.locator("#userChosenAnchor")).to_be_focused()
