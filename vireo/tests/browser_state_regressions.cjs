@@ -109,6 +109,7 @@ async function main() {
     reviewScopeMembershipSeq: 0,
     _reviewScopeMembershipRefreshTimer: null,
     _reviewScopeMembershipRefreshSeq: 0,
+    reviewScopeMembershipSeq: 0,
     pipelineResults: {summary: {}},
     resultsCacheInfo: null,
     renderResults() {},
@@ -122,6 +123,8 @@ async function main() {
   for (const name of [
     'clearPipelineReviewContextSelection',
     'filterPipelineReviewContextSelectionToScope',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'photoIdsInReviewScope', 'reconcileReviewScopeTargets',
     'maybeRefreshCollectionScopeMembership',
   ]) vm.runInContext(fn(review, name), membershipDrop);
   membershipDrop.maybeRefreshCollectionScopeMembership();
@@ -147,6 +150,7 @@ async function main() {
     reviewScopeMembershipSeq: 0,
     _reviewScopeMembershipRefreshTimer: null,
     _reviewScopeMembershipRefreshSeq: 0,
+    reviewScopeMembershipSeq: 0,
     inspectPhotoId: 10,
     pipelineResults: {summary: {}},
     resultsCacheInfo: null,
@@ -165,6 +169,8 @@ async function main() {
   for (const name of [
     'clearPipelineReviewContextSelection',
     'filterPipelineReviewContextSelectionToScope',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'photoIdsInReviewScope', 'reconcileReviewScopeTargets',
     'maybeRefreshCollectionScopeMembership',
   ]) vm.runInContext(fn(review, name), inspectorDrop);
   inspectorDrop.maybeRefreshCollectionScopeMembership();
@@ -226,7 +232,7 @@ async function main() {
   // close the inspector. The user has not changed scope and the photo is
   // still visible, so dismissing the open panel would be a regression.
   // When another member of the inspected encounter is dropped, the panel
-  // must be rebuilt so its filmstrip's photoInReviewScope filter re-runs
+  // must be rebuilt so its filmstrip's scope filter re-runs
   // and the hidden photo's clickable thumbnail disappears.
   let keepClosed = 0;
   const keepOpened = [];
@@ -241,6 +247,7 @@ async function main() {
     reviewScopeMembershipSeq: 0,
     _reviewScopeMembershipRefreshTimer: null,
     _reviewScopeMembershipRefreshSeq: 0,
+    reviewScopeMembershipSeq: 0,
     inspectPhotoId: 10,
     pipelineResults: {summary: {}},
     resultsCacheInfo: null,
@@ -257,6 +264,8 @@ async function main() {
   for (const name of [
     'clearPipelineReviewContextSelection',
     'filterPipelineReviewContextSelectionToScope',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'photoIdsInReviewScope', 'reconcileReviewScopeTargets',
     'maybeRefreshCollectionScopeMembership',
   ]) vm.runInContext(fn(review, name), inspectorKeep);
   inspectorKeep.maybeRefreshCollectionScopeMembership();
@@ -301,8 +310,8 @@ async function main() {
   });
   let tracePanelHtml = '';
   for (const name of [
-    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInReviewScope',
-    'renderAlgorithmTrace',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'renderAlgorithmTrace',
   ]) vm.runInContext(fn(review, name), traceCtx);
   traceCtx.renderAlgorithmTrace();
   assert(tracePanelHtml.includes('openInspect(1)'), 'photo 1 is in scope and must be clickable');
@@ -344,8 +353,8 @@ async function main() {
   });
   for (const name of [
     'findPhotoInResults', 'findEncounterForPhoto',
-    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInReviewScope',
-    'openInspect',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInOpenGroupReview',
+    'isPhotoActionableInReviewScope', 'photoIdsInReviewScope', 'openInspect',
   ]) vm.runInContext(fn(review, name), filmstripCtx);
   // Capture the panel's rendered HTML by swapping getElementById to catch
   // the write.

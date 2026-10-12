@@ -95,6 +95,59 @@ function photoInReviewScope(photoId) {
   return !ids || ids.has(photoId);
 }
 
+// -- Scope write guard --
+//
+// Folder and Collection scopes hide photos but leave the saved review
+// editable, so every path that turns a photo ID into a write target must
+// agree on which IDs are fair game. These two helpers are that single rule;
+// callers use them at the shared choke points instead of re-checking scope:
+// opening the inspector (openInspect) or lightbox (openPipelineLightbox), the
+// native Photo menu selection (getActiveSelection), the context-menu builder,
+// and the writers themselves (setPipelineReviewFlag, setPipelineReviewRating,
+// setPipelineReviewGroupFlag, setWildlifeExcludedFor, addToCollection,
+// batchAddKeyword, openPipelinePhotoEditor, detachPhoto). Out-of-scope IDs
+// are dropped silently. Scope changes and membership refreshes reconcile
+// remembered targets through reconcileReviewScopeTargets().
+//
+// Group Review is the deliberate exception: it shows and edits the whole
+// burst, including members outside the scope, so the members of the open
+// Group Review session stay actionable. Nothing else changes when no filter
+// is active (All reviewed photos, regrouped views, browse selection).
+function photoInOpenGroupReview(photoId) {
+  if (typeof grmState === 'undefined' || !grmState || !Array.isArray(grmState.items)) {
+    return false;
+  }
+  var overlay = document.getElementById('grmOverlay');
+  if (!overlay || !overlay.classList.contains('open')) return false;
+  return grmState.items.some(function(p) { return p && p.id === photoId; });
+}
+
+function isPhotoActionableInReviewScope(photoId) {
+  var ids = activeReviewScopeFilter();
+  if (!ids) return true;
+  var pid = parseInt(photoId, 10);
+  if (!pid) return false;
+  return ids.has(pid) || photoInOpenGroupReview(pid);
+}
+
+function photoIdsInReviewScope(photoIds) {
+  return (photoIds || []).filter(isPhotoActionableInReviewScope);
+}
+
+// Drop remembered write targets that the current scope no longer allows: the
+// right-click selection, the native menu's pinned selection, and the legacy
+// inspector. When the inspected photo stays in scope, rebuild the inspector
+// so its encounter filmstrip drops thumbnails for photos that just left.
+function reconcileReviewScopeTargets() {
+  filterPipelineReviewContextSelectionToScope();
+  if (typeof inspectPhotoId === 'undefined' || inspectPhotoId == null) return;
+  if (!isPhotoActionableInReviewScope(inspectPhotoId)) {
+    closeInspect();
+  } else {
+    openInspect(inspectPhotoId);
+  }
+}
+
 function countReviewedPhotosInScope(ids) {
   if (!pipelineResults || !ids) return 0;
   return (pipelineResults.photos || []).filter(function(p) {
@@ -390,30 +443,10 @@ function maybeRefreshCollectionScopeMembership() {
       if (unchanged) return;
       reviewScopePhotoIds = newIds;
       reviewScopeTotal = newIds.size;
-      // The right-click selection and the native-menu override were captured
-      // before this refresh. A dropped photo stays writable (filter mode
-      // isn't a scoped-view read-only state), so a stale selection would let
-      // the next menu action mutate the now-hidden target. Scope-filter them
-      // down to ids still in the collection before the next render.
-      filterPipelineReviewContextSelectionToScope(newIds);
-      // The legacy inspector keeps its own inspectPhotoId that
-      // getActiveSelection() prioritizes and its P/X shortcut writes
-      // against. If the dropped photo is the one being inspected, close
-      // the inspector so a stale id can't be mutated after its card has
-      // disappeared from the grid. If the inspected photo is retained
-      // but another encounter member just left scope, the open panel's
-      // filmstrip HTML still shows the dropped photo's thumbnail with an
-      // openInspect() link; clicking it would set inspectPhotoId to the
-      // hidden photo and let the P/X shortcut mutate it. Rebuild the
-      // panel against the refreshed scope so the filmstrip's
-      // photoInReviewScope filter re-runs.
-      if (typeof inspectPhotoId !== 'undefined' && inspectPhotoId != null) {
-        if (!newIds.has(inspectPhotoId)) {
-          closeInspect();
-        } else {
-          openInspect(inspectPhotoId);
-        }
-      }
+      // A dropped photo stays writable in filter mode, so the remembered
+      // right-click selection, the native menu's pinned selection, and the
+      // legacy inspector must be re-checked against the new membership.
+      reconcileReviewScopeTargets();
       renderResults();
       // statTotalPhotos, encounter/burst totals and confirmation counts are
       // scope-filtered through scopedSummaryCounts, so a membership change
@@ -512,6 +545,7 @@ function loadReviewScopeResults() {
     if (memSeq !== reviewScopeMembershipSeq || !data || !Array.isArray(data.photo_ids)) return;
     reviewScopePhotoIds = new Set(data.photo_ids);
     reviewScopeTotal = data.photo_ids.length;
+    reconcileReviewScopeTargets();
     applyReviewResults(pipelineResults, resultsCacheInfo);
   })
   .catch(function(e) {

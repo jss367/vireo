@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from urllib.parse import urlsplit
 
 from playwright.sync_api import expect
 
@@ -1945,6 +1946,112 @@ def test_pipeline_review_folder_and_collection_scopes_filter_saved_review(live_s
 
     scope.select_option("cache")
     expect(page.locator("#statTotalPhotos")).to_have_text("4")
+
+
+def test_pipeline_review_scope_guard_blocks_writes_to_hidden_photos(live_server, page):
+    """A photo a Folder scope hides cannot become a write target through any
+    entry point: the right-click selection the native Photo menu reads, the
+    legacy inspector and its P/X shortcuts, trace links, the lightbox, or the
+    page's flag/rating/wildlife writers. In-scope photos stay writable."""
+    all_ids = live_server["data"]["photos"]
+    _park, yard = live_server["data"]["folders"]
+    cached_ids = all_ids[:4]
+    hidden, visible = all_ids[0], all_ids[3]  # park / yard
+    _write_predictionless_pipeline_cache(live_server, cached_ids)
+    # A flat encounter (no bursts) with a trace, so photo clicks open the
+    # legacy inspector and the trace panel renders pair-photo links.
+    db = live_server["db"]
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path) as f:
+        cache = json.load(f)
+    enc = cache["encounters"][0]
+    enc["bursts"] = []
+    enc["burst_count"] = 0
+    enc["trace"] = [
+        {"decision": "kept", "dt_seconds": 60, "score": 0.9}
+        for _ in range(len(cached_ids) - 1)
+    ]
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+    writes = []
+    page.on(
+        "request",
+        lambda request: writes.append(
+            (urlsplit(request.url).path, request.post_data or "")
+        ) if request.method != "GET" and "/api/" in request.url else None,
+    )
+
+    def hidden_writes():
+        pattern = re.compile(rf"(?<!\d){hidden}(?!\d)")
+        return [w for w in writes if pattern.search(w[0]) or pattern.search(w[1])]
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator(".photo-card[data-photo-id]")).to_have_count(4)
+
+    # Right-click the photo, dismiss the menu, then pick a folder that hides it.
+    page.locator(f".photo-card[data-photo-id='{hidden}'] img").click(button="right")
+    page.keyboard.press("Escape")
+    page.locator("[data-testid='pipeline-review-scope']").select_option("folder")
+    page.locator("[data-testid='pipeline-review-folder']").select_option(str(yard))
+    expect(page.locator(".photo-card[data-photo-id]")).to_have_count(1)
+    expect(page.locator(f".photo-card[data-photo-id='{hidden}']")).to_have_count(0)
+
+    # Trace links for the hidden photo are not clickable.
+    page.evaluate("() => setFocusedEncounter(0)")
+    expect(page.locator(".trace-pair-photo[onclick]").first).to_be_attached()
+    assert page.locator(f".trace-pair-photo[onclick='openInspect({hidden})']").count() == 0
+
+    result = page.evaluate(
+        """async (hidden) => {
+          const out = {};
+          // Native Photo menu commands resolve through getActiveSelection().
+          out.afterScopeChange = getActiveSelection();
+          pipelineReviewContextPhotoIds = [hidden];
+          out.staleContext = getActiveSelection();
+          await window.handleNativeMenuCommand('photo_flag_pick');
+          await window.handleNativeMenuCommand('photo_rate_3');
+          await window.handleNativeMenuCommand('review_exclude_wildlife');
+          pipelineReviewContextPhotoIds = [];
+          // Card click, filmstrip and trace links all call openInspect().
+          openInspect(hidden);
+          out.inspected = inspectPhotoId;
+          out.inspectorOpen = document.getElementById('inspectOverlay')
+            .classList.contains('open');
+          // The shared lightbox and native menu call these page writers.
+          out.flag = await window.setFlagFor(hidden, 'rejected');
+          out.rating = await setRatingFor(hidden, 2);
+          out.wildlife = await window.setWildlifeExcludedFor(hidden, true);
+          out.lightbox = openPipelineLightbox(hidden);
+          out.lightboxReadOnly = window.getLightboxOpenOptions(hidden).readOnly;
+          return out;
+        }""",
+        hidden,
+    )
+    assert result["afterScopeChange"] == []
+    assert result["staleContext"] == []
+    assert result["inspected"] is None
+    assert result["inspectorOpen"] is False
+    assert result["flag"] is False
+    assert result["rating"] is False
+    assert result["wildlife"] is False
+    assert result["lightbox"] is False
+    assert result["lightboxReadOnly"] is True
+
+    # The inspector's P/X shortcuts, left pointing at the hidden photo.
+    page.locator(f".photo-card[data-photo-id='{visible}'] img").click()
+    expect(page.locator("#inspectOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    page.evaluate("(hidden) => { inspectPhotoId = hidden; }", hidden)
+    page.keyboard.press("x")
+    page.evaluate("() => closeInspect()")
+
+    # The in-scope photo is still writable, and its write is the only one.
+    with page.expect_request(f"**/api/photos/{visible}/flag"):
+        page.evaluate("(pid) => window.setFlagFor(pid, 'flagged')", visible)
+    assert hidden_writes() == []
 
 
 def test_pipeline_review_sidebar_collapses_and_persists(live_server, page):

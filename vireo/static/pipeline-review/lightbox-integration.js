@@ -29,20 +29,27 @@ function pipelineReviewVisiblePhotoList(photoId) {
   return list;
 }
 
-function pipelineReviewLightboxOptions() {
+// photoId is passed by callers that open the lightbox on a photo that may not
+// be on screen (Find Similar). Under a Folder/Collection scope a photo the
+// scope hides opens read-only, matching the scope guard on the writers.
+function pipelineReviewLightboxOptions(photoId) {
   var groupOverlay = document.getElementById('grmOverlay');
   var groupApplying = !!(
     groupOverlay && groupOverlay.classList.contains('open') &&
     grmState && grmState.applying
   );
   var scoped = isScopedReviewView();
-  var readOnly = scoped || groupApplying;
-  return {
-    readOnly: readOnly,
-    readOnlyMessage: groupApplying
-      ? 'Group Review is applying changes. Wait for it to finish.'
-      : (scoped ? scopedViewReadOnlyMessage() : undefined),
-  };
+  var outOfScope = !scoped && photoId != null && !isPhotoActionableInReviewScope(photoId);
+  var readOnly = scoped || groupApplying || outOfScope;
+  var readOnlyMessage;
+  if (groupApplying) readOnlyMessage = 'Group Review is applying changes. Wait for it to finish.';
+  else if (scoped) readOnlyMessage = scopedViewReadOnlyMessage();
+  else if (outOfScope) {
+    readOnlyMessage = 'This photo is outside the selected '
+      + (reviewScopeMode === 'folder' ? 'folder' : 'collection')
+      + '. Switch Scope to All reviewed photos to edit it.';
+  }
+  return {readOnly: readOnly, readOnlyMessage: readOnlyMessage};
 }
 
 function openPipelineLightbox(photoId) {
@@ -52,10 +59,11 @@ function openPipelineLightbox(photoId) {
     showToast('Group Review is applying changes — wait for it to finish', 'warning');
     return false;
   }
+  if (!isPhotoActionableInReviewScope(photoId)) return false;
   var photo = findPhotoInResults(photoId);
   if (!photo || typeof openLightbox !== 'function') return false;
   var list = pipelineReviewVisiblePhotoList(photoId);
-  openLightbox(photoId, photo.filename || '', list, pipelineReviewLightboxOptions());
+  openLightbox(photoId, photo.filename || '', list, pipelineReviewLightboxOptions(photoId));
   return true;
 }
 

@@ -60,12 +60,9 @@ function renderAlgorithmTrace() {
     if (pid == null) {
       return '<div class="trace-pair-photo"><span class="name">' + escapeHtml(label) + '</span></div>';
     }
-    // Under a Folder/Collection filter, suppress the openInspect link for a
-    // pair photo outside the scope: openInspect routes a flat encounter
-    // member to the legacy inspector, and its P/X shortcut writes a flag
-    // against inspectPhotoId with no scoped-view read-only guard. The
-    // whole-burst Group Review opened from an in-scope card is unaffected.
-    if (!photoInReviewScope(pid)) {
+    // Under a Folder/Collection filter, render a pair photo outside the
+    // scope without a link; openInspect() would refuse it anyway.
+    if (!isPhotoActionableInReviewScope(pid)) {
       return '<div class="trace-pair-photo" title="' + escapeHtml(p.filename || label) + '">'
         + '<span class="name">' + escapeHtml(label) + '</span>'
         + '</div>';

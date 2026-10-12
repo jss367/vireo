@@ -26,7 +26,12 @@ function pipelineReviewBareKey(e, key) {
   return !e.ctrlKey && !e.metaKey && !e.altKey && e.key && e.key.toLowerCase() === key;
 }
 
+// Every inspector entry point (photo cards, species-conflict badges, the
+// filmstrip, algorithm-trace links) goes through here, so the scope guard
+// keeps a photo the Folder/Collection scope hides from becoming
+// inspectPhotoId, which getActiveSelection() and the P/X shortcuts target.
 function openInspect(photoId) {
+  if (!isPhotoActionableInReviewScope(photoId)) return;
   var photo = findPhotoInResults(photoId);
   if (!photo) return;
 
@@ -110,14 +115,11 @@ function openInspect(photoId) {
     html += '</div>';
   }
 
-  // Encounter context filmstrip. Under a Folder/Collection scope, drop
-  // thumbnails for photos outside the scope: clicking one would navigate the
-  // inspector onto a hidden photo, and the inspector's P/X shortcuts write a
-  // flag against inspectPhotoId with no scoped-view read-only guard (filter
-  // mode stays writable by design).
+  // Encounter context filmstrip. Under a Folder/Collection scope, omit
+  // thumbnails for photos outside it; openInspect() would refuse them anyway.
   if (enc) {
     var speciesName = enc.confirmed_species || (enc.species ? (enc.species[0] || 'Unknown') : 'Unknown');
-    var filmstripIds = (enc.photo_ids || []).filter(photoInReviewScope);
+    var filmstripIds = photoIdsInReviewScope(enc.photo_ids || []);
     html += '<div class="context-label">Encounter: ' + escapeHtml(speciesName) + ' (' + enc.photo_count + ' photos, ' + (enc.burst_count||0) + ' bursts)</div>';
     html += '<div class="context-filmstrip">';
     filmstripIds.forEach(function(pid) {

@@ -24,6 +24,17 @@ def test_selection_and_review_state(node):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_pipeline_review_scope_guard(node):
+    """No Pipeline Review entry point can write to a photo a Folder or
+    Collection scope hides."""
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [node, str(Path(__file__).with_name("pipeline_review_scope_guard.cjs"))],
+        cwd=root, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_lightbox_session_lifecycle(node):
     root = Path(__file__).resolve().parents[2]
     result = subprocess.run(

@@ -53,6 +53,7 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
     notifyReadOnlyScopedView();
     return;
   }
+  if (!isPhotoActionableInReviewScope(photoId)) return;
 
   var resp = await safeFetch('/api/pipeline/detach-photo', {
     method: 'POST',

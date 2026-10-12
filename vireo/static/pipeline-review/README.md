@@ -42,6 +42,20 @@ registration in setup functions called from boot, preserving their order there.
 Folder and Collection scopes filter the saved review in place:
 `pipelineResults` stays the whole saved review and `renderResults` hides
 photos outside `reviewScopePhotoIds`, so edits keep their encounter indices.
+Because that view stays editable, a hidden photo must never become a write
+target. `isPhotoActionableInReviewScope()` / `photoIdsInReviewScope()` in
+`scope.js` are the one rule for that, applied at the shared choke points:
+`openInspect`, `openPipelineLightbox`, `getActiveSelection`, the context-menu
+builder, and the writers (`setPipelineReviewFlag`, `setPipelineReviewRating`,
+`setPipelineReviewGroupFlag`, `setWildlifeExcludedFor`, the collection and
+keyword dialogs, `openPipelinePhotoEditor`, `detachPhoto`). Route any new
+entry point that acts on a photo ID through them rather than re-checking
+scope in the caller; `reconcileReviewScopeTargets()` re-applies the rule to
+remembered targets after a scope load or membership refresh. Members of the
+open Group Review session are exempt, because Group Review deliberately edits
+the whole burst. `vireo/tests/pipeline_review_scope_guard.cjs` drives every
+entry point with a hidden photo's ID.
+
 Whole workspace scope and the Regroup button replace `pipelineResults` with a
 regroup-live result; `isScopedReviewView()` makes those views read-only.
 Scope changes in `scope.js` protect writes across the page; Group Review's

@@ -68,8 +68,11 @@ async function addToCollection(photoIds) {
     notifyReadOnlyScopedView();
     return false;
   }
-  var ids = pipelineReviewUniquePhotoIds(photoIds || getActiveSelection());
-  if (!ids.length) return;
+  var ids = photoIdsInReviewScope(pipelineReviewUniquePhotoIds(photoIds || getActiveSelection()));
+  if (!ids.length) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+    return false;
+  }
   // Native menu dispatch pins its selection only long enough for this action
   // to capture it. The dialog owns `ids` from here on; leaving the override
   // active would make unrelated native commands target this stale selection.
@@ -155,7 +158,9 @@ function confirmPipelineCollection() {
     notifyReadOnlyScopedView();
     return Promise.resolve(false);
   }
-  var ids = pipelineReviewCollectionPhotoIds.slice();
+  // Re-check the scope at submit: a membership refresh can drop a photo
+  // while the dialog is open.
+  var ids = photoIdsInReviewScope(pipelineReviewCollectionPhotoIds);
   var newName = document.getElementById('pipelineCollectionNewName').value.trim();
   var collectionId = pipelineReviewSelectedCollectionId;
   var collectionName = '';
@@ -213,8 +218,11 @@ function batchAddKeyword(photoIds) {
     notifyReadOnlyScopedView();
     return false;
   }
-  var ids = pipelineReviewUniquePhotoIds(photoIds || getActiveSelection());
-  if (!ids.length) return;
+  var ids = photoIdsInReviewScope(pipelineReviewUniquePhotoIds(photoIds || getActiveSelection()));
+  if (!ids.length) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+    return false;
+  }
   pipelineReviewKeywordPhotoIds = ids;
   window._vireoNativeMenuPhotoIdsOverride = null;
   document.getElementById('pipelineKeywordTitle').textContent =
@@ -253,7 +261,7 @@ function confirmPipelineKeyword() {
     notifyReadOnlyScopedView();
     return Promise.resolve(false);
   }
-  var ids = pipelineReviewKeywordPhotoIds.slice();
+  var ids = photoIdsInReviewScope(pipelineReviewKeywordPhotoIds);
   var name = document.getElementById('pipelineKeywordInput').value.trim();
   if (!ids.length || !name) return Promise.resolve(false);
   setPipelineKeywordSubmitting(true);
