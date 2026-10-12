@@ -564,6 +564,59 @@ def test_add_to_collection_dismisses_help_opened_during_pending_fetch(live_serve
     expect(opener).to_be_focused()
 
 
+def test_add_to_collection_dismisses_report_opened_during_pending_fetch(live_server, page):
+    # Codex P2: addToCollection awaits /api/collections before calling
+    # batchCollectionDialog.open(), so during that window the navbar's
+    # Report Issue icon (⚠) still fires openReportModal — openReportModal
+    # has no managed-dialog guard. Once the fetch resolves and the dialog
+    # becomes the top of the stack, updateBackground() marks the report
+    # overlay inert but it stays visible at z-index 10000 (vs. the
+    # dialog's 500) covering the dialog; Escape would then be consumed by
+    # the dialog's Keymap handler, leaving the report form visible until
+    # a second Escape. addToCollection must dismiss the report overlay
+    # before opening the dialog, mirroring the help/palette/lightbox
+    # dismissals, so the dialog is the only visible overlay once the
+    # fetch resolves.
+    live_server["db"].add_collection("Pick target", "[]")
+    open_browse(page, live_server)
+    page.evaluate("""() => {
+      const savedSafeFetch = window.safeFetch;
+      window._collectionsFetchSignalled = false;
+      window._releaseCollectionsFetch = false;
+      window.safeFetch = async function(url, opts, options) {
+        if (typeof url === 'string' && url === '/api/collections'
+            && (!opts || !opts.method || opts.method === 'GET')) {
+          window._collectionsFetchSignalled = true;
+          while (!window._releaseCollectionsFetch) {
+            await new Promise(r => setTimeout(r, 20));
+          }
+        }
+        return savedSafeFetch(url, opts, options);
+      };
+    }""")
+    opener = page.locator("#batchBar").get_by_role("button", name="+ Collection", exact=True)
+    opener.click()
+    page.wait_for_function("window._collectionsFetchSignalled === true")
+    # The dialog has not opened yet, so hasActive() is false and the
+    # navbar's Report Issue click reveals the report overlay. The icon's
+    # focus handoff doesn't matter here, so trigger openReportModal
+    # directly to keep the assertion independent of pointer timing.
+    page.evaluate("openReportModal()")
+    expect(page.locator("#reportModal")).to_have_class("report-overlay active")
+    # Release the stalled fetch. addToCollection must close the report
+    # overlay before opening the dialog so no opener-guarded sibling is
+    # left visible-but-inert when the dialog becomes the top overlay.
+    page.evaluate("window._releaseCollectionsFetch = true")
+    dialog = page.get_by_role("dialog", name="Add 1 photo(s) to collection", exact=True)
+    expect(dialog).to_be_visible()
+    expect(page.locator("#reportModal")).not_to_have_class("report-overlay active")
+    # One Escape closes the dialog cleanly; focus returns to the opener.
+    page.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    expect(page.locator("#reportModal")).not_to_have_class("report-overlay active")
+    expect(opener).to_be_focused()
+
+
 def test_save_collection_refocuses_replacement_row_after_refresh(live_server, page):
     # Codex P2: hideCollectionModal() restores focus to the pre-refresh row
     # (the context-menu opener), but saveCollection() then calls

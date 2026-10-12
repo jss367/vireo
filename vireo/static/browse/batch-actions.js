@@ -569,23 +569,27 @@ async function addToCollection(returnFocus) {
   document.getElementById('batchCollectionList').innerHTML = listHtml;
   document.getElementById('batchCollectionNewName').value = '';
   // Codex P2: while the /api/collections request was in flight, the help
-  // overlay (F1 / ? icon), the command palette (Ctrl/Cmd+K), and the
-  // shared lightbox (grid dblclick) all saw no managed dialog on the
-  // stack via hasActive() and could have opened — F1 via openHelpModal's
-  // own guard, Ctrl/Cmd+K via openCommandPalette's, and openLightbox has
-  // no managed-dialog guard at all. Opening the dialog now would mark
-  // every sibling along the dialog's branch inert via updateBackground()
-  // but leave each visible at its higher z-index (help: 10000, palette:
-  // above the dialog's 500, lightbox overlay: 9999) covering the dialog;
-  // Escape would then dismiss the dialog instead of the covering overlay,
-  // and closing the dialog would restore focus behind a still-open
-  // sibling. Dismiss each before the dialog takes the top of the stack
-  // so no opener-guarded sibling races the open path. The lightbox is
-  // only closed when actually open (window._lbEscToken is the same
-  // signal closeLightbox() uses internally for wasOpen), since
+  // overlay (F1 / ? icon), the Report Issue overlay (⚠ nav icon), the
+  // command palette (Ctrl/Cmd+K), and the shared lightbox (grid dblclick)
+  // all saw no managed dialog on the stack via hasActive() and could have
+  // opened — F1 via openHelpModal's own guard, Ctrl/Cmd+K via
+  // openCommandPalette's, and openReportModal/openLightbox have no
+  // managed-dialog guard at all. Opening the dialog now would mark every
+  // sibling along the dialog's branch inert via updateBackground() but
+  // leave each visible at its higher z-index (help: 10000, report: 10000,
+  // palette: above the dialog's 500, lightbox overlay: 9999) covering the
+  // dialog; Escape would then dismiss the dialog instead of the covering
+  // overlay, and closing the dialog would restore focus behind a
+  // still-open sibling. Dismiss each before the dialog takes the top of
+  // the stack so no opener-guarded sibling races the open path. The
+  // lightbox is only closed when actually open (window._lbEscToken is the
+  // same signal closeLightbox() uses internally for wasOpen), since
   // closeLightbox() resets viewport/decode state unconditionally.
   if (typeof window.closeHelpModal === 'function') {
     window.closeHelpModal();
+  }
+  if (typeof window.closeReportModal === 'function') {
+    window.closeReportModal();
   }
   if (typeof window.closeCommandPalette === 'function') {
     window.closeCommandPalette();
