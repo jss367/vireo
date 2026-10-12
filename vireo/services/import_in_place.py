@@ -161,7 +161,19 @@ def enqueue_import_in_place(
     after_import = None
     if explicit_after_import:
         after_import = body.get("after_import")
-        err = service._validate_after_import(after_import, db)
+        # A restart carrying a frozen ``after_import_snapshot`` captured at
+        # the parent import's enqueue time waives the "process still exists"
+        # check: the snapshot substitutes for ``db.resolve_process`` in
+        # ``_admit_in_place_job``, so a Settings delete between the failed
+        # run and the restart no longer strands the recovery (same pattern
+        # as the archive-import recovery-retry path in ``import_photos.py``).
+        has_frozen_snapshot = (
+            restart_config is not None
+            and restart_config.get("after_import_snapshot") is not None
+        )
+        err = service._validate_after_import(
+            after_import, db, allow_missing=has_frozen_snapshot,
+        )
         if err is not None:
             return err
 
@@ -216,14 +228,18 @@ def _admit_in_place_job(
         if err is not None:
             return err
 
-    after_import_snapshot, err = _after_import_process_snapshot(
-        db, after_import,
-    )
-    if err is not None:
-        return err
-
     if restart_config and "after_import_snapshot" in restart_config:
+        # Use the frozen snapshot captured when the parent import was
+        # enqueued; skip ``_after_import_process_snapshot`` so a saved
+        # process deleted between the failed run and this restart cannot
+        # strand the recovery.
         after_import_snapshot = restart_config["after_import_snapshot"]
+    else:
+        after_import_snapshot, err = _after_import_process_snapshot(
+            db, after_import,
+        )
+        if err is not None:
+            return err
 
     runner = service.get_runner()
     thumb_cache_dir = service.config["THUMB_CACHE_DIR"]

@@ -29,7 +29,7 @@ function bindDetailPaneActions() {
         headers: {'Content-Type': 'application/json'},
         body: '{}',
       }).then(function(response) {
-        return response.json().then(function(data) {
+        return response.json().catch(function() { return {}; }).then(function(data) {
           if (!response.ok && !data.restart_job_id) {
             throw new Error(data.error || 'Import failed to restart');
           }

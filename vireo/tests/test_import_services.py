@@ -101,6 +101,33 @@ def test_restart_snapshot_finishes_processing_for_already_cataloged_files(import
     assert service.enqueue_process_job.call_args.kwargs["expanded"] == frozen_process
 
 
+def test_restart_in_place_uses_frozen_snapshot_when_saved_process_deleted(
+    import_service, tmp_path,
+):
+    """A Settings delete between the failed run and the restart must not strand
+    recovery when the parent captured a frozen ``after_import_snapshot``.
+    """
+    service, db, runner = import_service
+    source = tmp_path / "photos"
+    source.mkdir()
+    Image.new("RGB", (32, 32)).save(source / "bird.jpg")
+    process_id = db.processes.create("After import")
+    frozen_process = db.resolve_process(process_id)
+    parent_id = _interrupted_in_place(db, {
+        "sources": [str(source)], "after_import": process_id,
+        "after_import_snapshot": frozen_process,
+    })
+    assert db.delete_saved_process(process_id) is True
+    service.enqueue_process_job.return_value = ("processing", None, None)
+
+    response = service.restart_in_place(db, parent_id)
+    assert isinstance(response, dict), response
+    job = wait_for_job_via_runner(runner, response["job_id"], wait_for_history=True)
+    assert job["status"] == "completed", job
+    service.enqueue_process_job.assert_called_once()
+    assert service.enqueue_process_job.call_args.kwargs["expanded"] == frozen_process
+
+
 @pytest.mark.parametrize("never_started", [False, True])
 def test_restart_in_place_does_not_duplicate_processing(import_service, tmp_path, never_started):
     service, db, runner = import_service
