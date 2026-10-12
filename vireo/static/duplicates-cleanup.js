@@ -69,6 +69,8 @@ async function trashOneLoserFile(photoId) {
 }
 
 function pinDuplicateBucketOperation(card, bi) {
+  var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+  card.setAttribute('data-reveal-paths', JSON.stringify((bucket && bucket.folders || []).slice()));
   _duplicateBucketOperations.set(card, {snapshot: _lastScanResult, index: bi});
   document.getElementById('duplicateBucketOperationList').appendChild(card);
   document.getElementById('duplicateBucketOperations').hidden = false;
@@ -133,6 +135,8 @@ async function trashAllLoserFiles() {
 
   var btn = document.getElementById('trashAllBtn');
   var progressEl = document.getElementById('trashAllProgress');
+  var operation = {};
+  var operationError = null;
   _duplicateTrashActive = true;
   if (btn) { btn.disabled = true; btn.textContent = 'Moving to Trash...'; }
 
@@ -142,7 +146,7 @@ async function trashAllLoserFiles() {
   // request on an ID it already owns.
   ids.forEach(function(id) {
     _duplicateFileTrashState.set(
-      id, {pending: true, terminal: false, message: 'Moving to Trash...'});
+      id, {pending: true, terminal: false, message: 'Moving to Trash...', operation: operation});
     updateDuplicateFileTrashCard(id);
   });
 
@@ -150,7 +154,7 @@ async function trashAllLoserFiles() {
     var data = await trashLoserFilesInBatches(
       ids,
       function(progress) { updateTrashProgress(progressEl, progress); },
-      applyTrashBatchToCards
+      function(data, batch) { applyTrashBatchToCards(data, batch, operation); }
     );
     var trashed = data.trashed || 0;
     var failed = (data.failed || []).length;
@@ -162,28 +166,32 @@ async function trashAllLoserFiles() {
     showToast(msg, failed ? 'error' : 'success');
 
   } catch (e) {
+    operationError = e;
     var completed = e.trashSummary ? e.trashSummary.completed : 0;
     showToast('Trash cleanup paused after ' + completed + ' of ' + ids.length +
               ' files: ' + (e.message || 'request failed') +
               '. Use the button to retry the remaining files.', 'error');
   } finally {
-    // Release the pending claim set above. applyTrashBatchToCards already
-    // deleted entries for successes and rewrote them for skips/failures;
-    // this handles whole-batch failures that never reached that callback,
-    // and leaves the latest message visible across category re-renders.
+    // A failed early batch can be retried while later batches run. Only
+    // release/update claims still owned by this bulk operation, preserving
+    // any newer single-file retry's pending flag and controls.
     ids.forEach(function(id) {
       var state = _duplicateFileTrashState.get(id);
-      if (state && state.pending) {
+      if (!state || state.operation !== operation) return;
+      if (state.pending) {
         state.pending = false;
-        updateDuplicateFileTrashCard(id);
+        state.message = operationError
+          ? 'Failed: ' + (operationError.message || 'request failed')
+          : 'No file was moved. Try again.';
       }
+      updateDuplicateFileTrashCard(id);
     });
     _duplicateTrashActive = false;
     refreshTrashAllButton(document.getElementById('trashAllBtn'));
   }
 }
 
-function applyTrashBatchToCards(data, requestedIds) {
+function applyTrashBatchToCards(data, requestedIds, operation) {
   // "file already missing" still deletes the orphan DB row, so it is a
   // terminal completion even though no file needed to be moved.
   var terminalSkips = new Set(['file already missing']);
@@ -215,8 +223,9 @@ function applyTrashBatchToCards(data, requestedIds) {
     // outcome rather than an earlier single-file attempt's message.
     _duplicateFileTrashState.set(s.id, {
       pending: false, terminal: false,
-      message: 'Skipped: ' + (s.reason || ''),
+      message: 'Skipped: ' + (s.reason || ''), operation: operation,
     });
+    updateDuplicateFileTrashCard(s.id);
   });
   (data.failed || []).forEach(function(f) {
     var card = document.querySelector('.dup-card[data-photo-id="' + f.id + '"]');
@@ -226,8 +235,9 @@ function applyTrashBatchToCards(data, requestedIds) {
     }
     _duplicateFileTrashState.set(f.id, {
       pending: false, terminal: false,
-      message: 'Failed: ' + (f.error || ''),
+      message: 'Failed: ' + (f.error || ''), operation: operation,
     });
+    updateDuplicateFileTrashCard(f.id);
   });
 }
 
@@ -247,7 +257,7 @@ function showBucketTrashRetry(card, remainingIds, resolvedHashes) {
     '<button class="keep-btn" data-retry-trash onclick="retryBucketTrash(this)">' +
       'Retry ' + n + ' file' + (n === 1 ? '' : 's') + ' to Trash' +
     '</button>' +
-    bucketRevealButton(Number(bi));
+    bucketRevealButton(Number(bi), card);
 }
 
 async function retryBucketTrash(btn) {
@@ -469,5 +479,39 @@ async function bulkResolveByFolder(bi, keepFolder) {
     showToast('Bulk resolve failed: ' + (e.message || 'error'), 'error');
     unpinDuplicateBucketOperation(card);
     if (!_scanInProgress && _lastScanResult) renderResults(_lastScanResult);
+  }
+}
+
+function refreshTrashAllButton(btn) {
+  if (!btn) {
+    var toggle = document.getElementById('resolvedToggle');
+    var actions = toggle && toggle.closest('.section-header').querySelector('.section-actions');
+    if (!actions) return;
+    btn = document.createElement('button');
+    btn.id = 'trashAllBtn';
+    btn.className = 'btn-secondary';
+    btn.onclick = trashAllLoserFiles;
+    actions.appendChild(btn);
+  }
+  var remaining = 0;
+  _proposals.forEach(function(p) {
+    if (p.status !== 'resolved' || isBulkTrashProtected(p)) return;
+    // Only count losers from groups that survived the active filter.
+    // The bulk button label mirrors the render loop's filtered count
+    // (see ``bulkTrashableLoserCount``); walking the unfiltered list
+    // here would let the label drift to reflect hidden groups and
+    // trick the user into thinking the action still has work to do.
+    if (!groupMatchesFilter(p)) return;
+    (p.losers || []).forEach(function(l) {
+      var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
+      if (card && !card.classList.contains('trashed') && !duplicateFileTrashIsPending(l.id)) remaining++;
+    });
+  });
+  if (remaining > 0) {
+    btn.disabled = _duplicateTrashActive;
+    btn.textContent = 'Move ' + remaining + ' extra ' +
+                      (remaining === 1 ? 'copy' : 'copies') + ' to Trash';
+  } else {
+    btn.remove();
   }
 }
