@@ -408,3 +408,100 @@ def test_single_file_trash_state_survives_category_renders(live_server, page, ou
     expect(page.locator(".dup-card[data-photo-id='2']")).to_have_class("dup-card loser trashed")
     expect(status).to_have_text("Moved to Trash")
     expect(button).to_be_disabled()
+
+
+def test_bulk_trash_owns_per_file_controls_across_category_renders(live_server, page):
+    _show_patterns(live_server, page)
+    pending = []
+    page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
+    page.on("dialog", lambda dialog: dialog.accept())
+    _category(page, "numbered-same-folder").click()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        page.locator("#trashAllBtn").click()
+    button = page.locator(".dup-card[data-photo-id='2'] .trash-btn")
+    expect(button).to_be_disabled()
+    _category(page, "all").click()
+    _category(page, "numbered-same-folder").click()
+    expect(button).to_be_disabled()
+    page.evaluate("trashOneLoserFile(2)")
+    assert len(pending) == 1
+    pending[0].fulfill(content_type="application/json", body=json.dumps({
+        "trashed": 0, "skipped": [], "failed": [{"id": 2, "error": "batch file is locked"}],
+    }))
+    expect(button).to_be_enabled()
+    expect(page.locator("#trashAllBtn")).to_have_text("Move 1 extra copy to Trash")
+    _category(page, "all").click()
+    _category(page, "numbered-same-folder").click()
+    expect(page.locator(".dup-card[data-photo-id='2'] [data-trash-status]")).to_have_text("Failed: batch file is locked")
+
+
+@pytest.mark.parametrize("outcome", ["failed", "skipped", "network"])
+def test_bulk_outcome_replaces_previous_single_file_failure(live_server, page, outcome):
+    _show_patterns(live_server, page)
+    pending = []
+    page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
+    page.on("dialog", lambda dialog: dialog.accept())
+    _category(page, "numbered-same-folder").click()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        page.locator(".dup-card[data-photo-id='2'] .trash-btn").click()
+    pending[0].fulfill(content_type="application/json", body=json.dumps({
+        "trashed": 0, "skipped": [], "failed": [{"id": 2, "error": "old single-file error"}],
+    }))
+    status = page.locator(".dup-card[data-photo-id='2'] [data-trash-status]")
+    expect(status).to_have_text("Failed: old single-file error")
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        page.locator("#trashAllBtn").click()
+    if outcome == "network":
+        pending[1].abort("connectionfailed")
+        message = "Failed"
+    else:
+        payload = {"trashed": 0, "skipped": [], "failed": []}
+        payload[outcome] = [{"id": 2, "reason": "new offline reason"} if outcome == "skipped"
+                            else {"id": 2, "error": "new batch error"}]
+        pending[1].fulfill(content_type="application/json", body=json.dumps(payload))
+        message = "Skipped: new offline reason" if outcome == "skipped" else "Failed: new batch error"
+    expect(status).not_to_contain_text("old single-file error")
+    expect(page.locator("#trashAllBtn")).to_be_enabled()
+    _category(page, "same-name-across-folders").click()
+    _category(page, "numbered-same-folder").click()
+    expect(status).to_contain_text(message)
+    expect(status).not_to_contain_text("old single-file error")
+
+
+
+def test_finishing_batch_does_not_release_a_newer_single_file_retry(live_server, page):
+    _show_patterns(live_server, page)
+    page.evaluate("""() => {
+      function photo(id, name) {
+        return {id, filename: name, path: '/a/' + name, file_size: 1000, exists: true};
+      }
+      var proposals = [];
+      for (var i = 0; i < 26; i++) {
+        proposals.push({file_hash: 'batch' + i, status: 'resolved',
+          winner: photo(100 + i * 2, 'bird-' + i + '.jpg'),
+          losers: [photo(101 + i * 2, 'bird-' + i + '-2.jpg')]});
+      }
+      renderResults({proposals, buckets: []});
+    }""")
+    pending = []
+    page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
+    page.on("dialog", lambda dialog: dialog.accept())
+    _category(page, "numbered-same-folder").click()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        page.locator("#trashAllBtn").click()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        pending[0].fulfill(content_type="application/json", body=json.dumps({
+            "trashed": 24, "skipped": [], "failed": [{"id": 101, "error": "retry first file"}],
+        }))
+    button = page.locator(".dup-card[data-photo-id='101'] .trash-btn")
+    expect(button).to_be_enabled()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        button.click()
+    pending[1].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
+    expect(page.locator("#trashAllProgress")).to_contain_text("Cleanup finished with problems")
+    expect(button).to_be_disabled()
+    expect(page.locator(".dup-card[data-photo-id='101'] [data-trash-status]")).to_contain_text("Moving to Trash")
+    page.evaluate("trashOneLoserFile(101)")
+    assert len(pending) == 3
+    pending[2].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
+    expect(page.locator(".dup-card[data-photo-id='101']")).to_have_class("dup-card loser trashed")
