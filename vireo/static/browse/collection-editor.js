@@ -633,6 +633,23 @@ async function saveCollection() {
     var refresh = loadCollections();
     loadCollectionCounts();
     if (editedId != null) {
+      // Codex P2: track user-initiated focus moves after hideCollectionModal
+      // restored focus to the opener. If the user navigates to another
+      // control (including another collection row that then gets detached
+      // by a superseding render) before the eventual render fires, don't
+      // clobber their choice — the row detachment silently moves
+      // activeElement to body (no focusin event), which the orphaned
+      // predicate below would otherwise mistake for the opener itself
+      // being detached and jerk focus back to the edited row.
+      var restoredOpener = document.activeElement;
+      var userMovedFocus = false;
+      var onFocusIn = function(e) {
+        if (e.target !== restoredOpener) userMovedFocus = true;
+      };
+      document.addEventListener('focusin', onFocusIn, true);
+      var removeFocusListener = function() {
+        document.removeEventListener('focusin', onFocusIn, true);
+      };
       await refresh;
       // Codex P2: if another loadCollections() (e.g. a concurrent folder-
       // health refresh) is still pending when this one resolves,
@@ -644,6 +661,7 @@ async function saveCollection() {
       // and recheck orphaning after each render until the pre-save row is
       // orphaned and the replacement row for editedId has been drawn.
       var tryRestoreCollectionRowFocus = function() {
+        if (userMovedFocus) return true;
         var active = document.activeElement;
         var orphaned = !active || active === document.body ||
             !(active instanceof HTMLElement) || !active.isConnected;
@@ -656,18 +674,44 @@ async function saveCollection() {
         }
         return false;
       };
-      if (!tryRestoreCollectionRowFocus()) {
+      if (tryRestoreCollectionRowFocus()) {
+        removeFocusListener();
+      } else {
         var list = document.getElementById('collectionList');
         if (list && typeof MutationObserver === 'function') {
-          var observer = new MutationObserver(function() {
-            if (tryRestoreCollectionRowFocus()) observer.disconnect();
+          var observer;
+          var ticker;
+          var tornDown = false;
+          var teardown = function() {
+            if (tornDown) return;
+            tornDown = true;
+            if (observer) observer.disconnect();
+            if (ticker) clearInterval(ticker);
+            removeFocusListener();
+          };
+          observer = new MutationObserver(function() {
+            if (tryRestoreCollectionRowFocus()) teardown();
           });
           observer.observe(list, {childList: true});
-          // Guard against holding the observer indefinitely if no newer
-          // render ever arrives (the pending fetch fails, or the user
-          // navigates away). The next explicit list refresh will rerun
-          // this flow from its own save.
-          setTimeout(function() { observer.disconnect(); }, 5000);
+          // Codex P2: anchor observer lifetime to load-state settlement
+          // rather than a fixed 5s wall-clock. Stay alive while any
+          // superseding collectionLoadGen render is still pending
+          // (reconcileCollectionLoadRenders() hasn't advanced the
+          // decision gen to the latest requested gen yet); disconnect
+          // once all have settled. A 30s hard cap guards against a
+          // pathologically never-settling load holding the observer
+          // past page interaction.
+          var hardCapAt = Date.now() + 30000;
+          ticker = setInterval(function() {
+            var pending = (
+              typeof collectionLoadGen === 'number' &&
+              typeof collectionRenderDecisionGen === 'number' &&
+              collectionLoadGen > collectionRenderDecisionGen
+            );
+            if (!pending || Date.now() > hardCapAt) teardown();
+          }, 500);
+        } else {
+          removeFocusListener();
         }
       }
     }

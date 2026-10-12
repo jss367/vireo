@@ -773,3 +773,118 @@ def test_save_collection_restores_focus_after_superseding_render(live_server, pa
     )
     expect(replacement.get_by_text("Supersede target renamed", exact=True)).to_be_visible()
     expect(replacement).to_be_focused()
+
+
+def test_save_collection_preserves_focus_moved_to_sibling_row_during_pending_refresh(live_server, page):
+    # Codex P2: when the user tabs to another collection row inside
+    # #collectionList while a superseding loadCollections() is pending,
+    # the subsequent innerHTML render detaches that sibling row too and
+    # drops activeElement to body. The row-refocus must not misread the
+    # body-focus as the opener being orphaned and jerk focus back to the
+    # edited row — a focusin tracker captures the user's intervening move.
+    first_id = live_server["db"].add_collection("Sibling source", "[]")
+    second_id = live_server["db"].add_collection("Sibling target", "[]")
+    open_browse(page, live_server)
+    page.evaluate("""() => {
+      const savedSafeFetch = window.safeFetch;
+      window._supersedingGetReleased = false;
+      window._supersedingGetSignalled = false;
+      window._savesFetchSeen = 0;
+      window.safeFetch = async function(url, opts, options) {
+        if (typeof url === 'string' && url === '/api/collections'
+            && (!opts || !opts.method || opts.method === 'GET')) {
+          window._savesFetchSeen += 1;
+          if (window._savesFetchSeen === 2) {
+            window._supersedingGetSignalled = true;
+            while (!window._supersedingGetReleased) {
+              await new Promise(r => setTimeout(r, 20));
+            }
+          }
+        }
+        return savedSafeFetch(url, opts, options);
+      };
+    }""")
+    row = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{first_id}"]'
+    )
+    row.click(button="right")
+    page.get_by_text("Edit Rules", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Edit Smart Collection", exact=True)
+    name = dialog.get_by_role("textbox", name="Collection name", exact=True)
+    expect(name).to_have_value("Sibling source")
+    name.fill("Sibling source renamed")
+    page.evaluate("loadCollections()")
+    dialog.get_by_role("button", name="Update", exact=True).click()
+    expect(dialog).to_be_hidden()
+    # Before releasing the superseding render, the user tabs to the
+    # sibling row inside #collectionList.
+    page.evaluate(f"""() => {{
+      const sibling = document.querySelector(
+        '#collectionList .tree-item[data-collection-id="{second_id}"]');
+      sibling.focus({{preventScroll: true}});
+    }}""")
+    sibling = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{second_id}"]'
+    )
+    expect(sibling).to_be_focused()
+    page.wait_for_function("window._supersedingGetSignalled === true")
+    page.evaluate("window._supersedingGetReleased = true")
+    replacement_first = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{first_id}"]'
+    )
+    expect(replacement_first.get_by_text("Sibling source renamed", exact=True)).to_be_visible()
+    # The edited row should NOT grab focus back from the user's sibling
+    # choice. activeElement went to body when the sibling row was
+    # detached, but the focusin tracker remembers the user's intentional
+    # move, so the restore guard leaves it alone.
+    expect(replacement_first).not_to_be_focused()
+
+
+def test_save_collection_restores_focus_after_slow_superseding_render(live_server, page):
+    # Codex P2: a superseding /api/collections GET that takes longer than
+    # the previous fixed 5s observer timeout must still trigger focus
+    # restoration. The observer's lifetime is anchored to
+    # collectionLoadGen > collectionRenderDecisionGen (not wall-clock),
+    # so it survives slow fetches up to a 30s hard safety cap.
+    collection_id = live_server["db"].add_collection("Slow supersede", "[]")
+    open_browse(page, live_server)
+    page.evaluate("""() => {
+      const savedSafeFetch = window.safeFetch;
+      window._supersedingGetReleased = false;
+      window._supersedingGetSignalled = false;
+      window._savesFetchSeen = 0;
+      window.safeFetch = async function(url, opts, options) {
+        if (typeof url === 'string' && url === '/api/collections'
+            && (!opts || !opts.method || opts.method === 'GET')) {
+          window._savesFetchSeen += 1;
+          if (window._savesFetchSeen === 2) {
+            window._supersedingGetSignalled = true;
+            while (!window._supersedingGetReleased) {
+              await new Promise(r => setTimeout(r, 20));
+            }
+          }
+        }
+        return savedSafeFetch(url, opts, options);
+      };
+    }""")
+    row = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
+    )
+    row.click(button="right")
+    page.get_by_text("Edit Rules", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Edit Smart Collection", exact=True)
+    name = dialog.get_by_role("textbox", name="Collection name", exact=True)
+    expect(name).to_have_value("Slow supersede")
+    name.fill("Slow supersede renamed")
+    page.evaluate("loadCollections()")
+    dialog.get_by_role("button", name="Update", exact=True).click()
+    expect(dialog).to_be_hidden()
+    page.wait_for_function("window._supersedingGetSignalled === true")
+    # Hold the superseding GET pending past the old 5s cap, then release.
+    page.wait_for_timeout(6000)
+    page.evaluate("window._supersedingGetReleased = true")
+    replacement = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
+    )
+    expect(replacement.get_by_text("Slow supersede renamed", exact=True)).to_be_visible()
+    expect(replacement).to_be_focused()
