@@ -294,11 +294,15 @@ function renderBurstSpeciesConflict(enc, encIdx, burst, burstIdx, evidence, inSc
   // could otherwise drive the dominant count and the Split burst action,
   // producing a badge and a split offer the user can't justify from the
   // visible cards. `inScope` defaults to always-true so unscoped callers
-  // are unaffected.
-  var ids = burst.photo_ids || burst || [];
+  // are unaffected. A burst that spans the scope boundary gets no Split
+  // button: detachBurst() refuses it because the hidden photos would be
+  // rewritten too.
+  var burstIds = burst.photo_ids || burst || [];
+  var ids = burstIds;
   if (typeof inScope === 'function') {
     ids = ids.filter(inScope);
   }
+  var splitAllowed = ids.length === burstIds.length;
   var summary = summarizeSpeciesConflicts(ids, evidence);
   // A burst marker should mean the burst itself has a consistent conflict,
   // not merely that one unusual frame inside a long burst needs photo review.
@@ -311,7 +315,7 @@ function renderBurstSpeciesConflict(enc, encIdx, burst, burstIdx, evidence, inSc
   html += '<span class="species-conflict-badge burst-species-conflict ' + summary.severity +
     '" title="' + escapeAttr(title) + '">&#9888; ' + summary.dominantCount +
     ' suggest ' + escapeHtml(summary.dominantSpecies) + '</span>';
-  if (enc.bursts && enc.bursts.length > 1) {
+  if (splitAllowed && enc.bursts && enc.bursts.length > 1) {
     html += '<button class="burst-conflict-split" onclick="event.stopPropagation();detachBurst(' +
       encIdx + ',' + burstIdx + ')" title="Move this burst into its own encounter">Split burst</button>';
   }

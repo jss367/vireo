@@ -2,6 +2,9 @@
 filter the saved review to a folder or collection."""
 import json
 import os
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 from app import create_app
@@ -131,3 +134,41 @@ def test_folder_outside_active_workspace_is_not_found(scoped_app):
         c.post(f"/api/workspaces/{ws['id']}/activate")
         resp = c.get(f"/api/pipeline/scope-photos?folder_id={ids['root_id']}")
         assert resp.status_code == 404
+
+
+def _render_burst_conflict(scope_ids):
+    """Run the review page's burst conflict renderer over a two-burst
+    encounter whose second burst has two conflicting frames and one
+    agreeing frame (photo 13). ``scope_ids`` of None means unscoped."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to execute the review renderer")
+    source = (Path(__file__).parents[1]
+              / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
+    script = (
+        "function escapeHtml(s) { return String(s); }\n"
+        "function escapeAttr(s) { return String(s); }\n"
+        + source
+        + "\nvar enc = {bursts: [{photo_ids: [10]}, {photo_ids: [11, 12, 13]}]};\n"
+        "var grebe = {severity: 'strong', alternativeSpecies: 'Little Grebe'};\n"
+        "var evidence = {11: grebe, 12: grebe, 13: {severity: null}};\n"
+        "var scope = " + json.dumps(scope_ids) + ";\n"
+        "var inScope = scope ? function(pid) { return scope.indexOf(pid) >= 0; } : undefined;\n"
+        "process.stdout.write(renderBurstSpeciesConflict(enc, 0, enc.bursts[1], 1, evidence, inScope));"
+    )
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True,
+                            check=True, timeout=15)
+    return result.stdout
+
+
+def test_burst_split_is_offered_only_when_the_whole_burst_is_in_scope():
+    """detachBurst refuses a burst that spans the Folder/Collection scope, so
+    the conflict badge must not offer a Split it cannot perform."""
+    for scope_ids in (None, [10, 11, 12, 13]):
+        html = _render_burst_conflict(scope_ids)
+        assert "2 suggest Little Grebe" in html
+        assert "burst-conflict-split" in html
+
+    partial = _render_burst_conflict([11, 12])
+    assert "2 suggest Little Grebe" in partial
+    assert "burst-conflict-split" not in partial
