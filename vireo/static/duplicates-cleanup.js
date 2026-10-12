@@ -3,6 +3,70 @@
 
 var _duplicateTrashActive = false;
 var _duplicateBucketOperations = new Map();
+var _duplicateFileTrashState = new Map();
+
+function duplicateFileTrashIsPending(photoId) {
+  var state = _duplicateFileTrashState.get(photoId);
+  return !!(state && state.pending);
+}
+
+function updateDuplicateFileTrashCard(photoId) {
+  var state = _duplicateFileTrashState.get(photoId);
+  var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
+  if (!state || !card) return;
+  var button = card.querySelector('.trash-btn');
+  if (!button) return;
+  button.disabled = state.pending || state.terminal;
+  var status = card.querySelector('[data-trash-status]');
+  if (status) status.textContent = state.message;
+}
+
+async function trashOneLoserFile(photoId) {
+  if (duplicateFileTrashIsPending(photoId)) return;
+  var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
+  if (!card || !card.querySelector('.trash-btn')) return;
+  var state = {pending: true, terminal: false, message: 'Moving to Trash...'};
+  _duplicateFileTrashState.set(photoId, state);
+  updateDuplicateFileTrashCard(photoId);
+  refreshTrashAllButton(document.getElementById('trashAllBtn'));
+  try {
+    var data = await safeFetch('/api/duplicates/delete-loser-files', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId]}),
+    });
+    if (data.trashed === 1) {
+      state.terminal = true;
+      state.message = 'Moved to Trash';
+      forgetCleanedDuplicateCopies(new Set([photoId]));
+      showToast('Moved 1 file to Trash', 'success');
+    } else if ((data.skipped || []).length) {
+      var reason = data.skipped[0].reason || 'skipped';
+      if (reason === 'file already missing') {
+        state.terminal = true;
+        state.message = 'Cleaned up (file was already gone)';
+        forgetCleanedDuplicateCopies(new Set([photoId]));
+      } else {
+        state.message = 'Skipped: ' + reason;
+      }
+    } else if ((data.failed || []).length) {
+      var error = data.failed[0].error || 'failed';
+      state.message = 'Failed: ' + error;
+      showToast('Trash failed: ' + error, 'error');
+    } else {
+      state.message = 'No file was moved. Try again.';
+    }
+  } catch (error) {
+    state.message = 'Failed: ' + (error.message || 'request failed');
+  } finally {
+    state.pending = false;
+    // Rebuild retry controls after non-terminal outcomes. Each card reads its
+    // state by photo ID rather than retaining a node detached by a filter.
+    if (!state.terminal && !_scanInProgress && _lastScanResult) renderResults(_lastScanResult);
+    updateDuplicateFileTrashCard(photoId);
+    refreshTrashAllButton(document.getElementById('trashAllBtn'));
+    if (state.terminal) _duplicateFileTrashState.delete(photoId);
+  }
+}
 
 function pinDuplicateBucketOperation(card, bi) {
   _duplicateBucketOperations.set(card, {snapshot: _lastScanResult, index: bi});
@@ -50,7 +114,7 @@ async function trashAllLoserFiles() {
     (p.losers || []).forEach(function(l) {
       // Skip ones already trashed in this session.
       var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
-      if (!card || card.classList.contains('trashed')) return;
+      if (!card || card.classList.contains('trashed') || duplicateFileTrashIsPending(l.id)) return;
       if (l.id != null) ids.push(l.id);
     });
   });

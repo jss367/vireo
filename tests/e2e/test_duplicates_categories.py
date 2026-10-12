@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -367,3 +368,43 @@ def test_category_switch_preserves_bulk_folder_trash_retry(live_server, page):
     pending[1].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
     expect(page.locator(".bucket-card")).to_have_count(0)
     expect(page.locator(".dup-group[data-hash='numberedAcross']")).to_be_visible()
+
+
+@pytest.mark.parametrize("outcome", ["failed", "skipped", "network"])
+def test_single_file_trash_state_survives_category_renders(live_server, page, outcome):
+    _show_patterns(live_server, page)
+    pending = []
+    page.route("**/api/duplicates/delete-loser-files", lambda route: pending.append(route))
+    _category(page, "numbered-same-folder").click()
+    button = page.locator(".dup-card[data-photo-id='2'] .trash-btn")
+    status = page.locator(".dup-card[data-photo-id='2'] [data-trash-status]")
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        button.click()
+    _category(page, "all").click()
+    expect(page.locator("#trashAllBtn")).to_have_text("Move 3 extra copies to Trash")
+    _category(page, "numbered-same-folder").click()
+    expect(button).to_be_disabled()
+    expect(status).to_contain_text("Moving to Trash")
+    page.evaluate("trashOneLoserFile(2)")
+    assert len(pending) == 1
+    if outcome == "network":
+        pending[0].abort("connectionfailed")
+    else:
+        payload = {"trashed": 0, "skipped": [], "failed": []}
+        payload[outcome] = [{"id": 2, "reason": "loser volume offline"} if outcome == "skipped"
+                            else {"id": 2, "error": "locked file"}]
+        pending[0].fulfill(content_type="application/json", body=json.dumps(payload))
+    message = "Skipped: loser volume offline" if outcome == "skipped" else "Failed"
+    expect(status).to_contain_text(message)
+    expect(button).to_be_enabled()
+    _category(page, "same-name-across-folders").click()
+    _category(page, "numbered-same-folder").click()
+    expect(status).to_contain_text(message)
+    expect(button).to_be_enabled()
+    with page.expect_request("**/api/duplicates/delete-loser-files"):
+        button.click()
+    assert [route.request.post_data_json for route in pending] == [{"photo_ids": [2]}, {"photo_ids": [2]}]
+    pending[1].fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}')
+    expect(page.locator(".dup-card[data-photo-id='2']")).to_have_class("dup-card loser trashed")
+    expect(status).to_have_text("Moved to Trash")
+    expect(button).to_be_disabled()

@@ -45,9 +45,10 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   if (meta.length) html += '<div class="meta">' + meta.join(' \u00b7 ') + '</div>';
   if (reason) html += '<div class="reason">' + escapeHtml(reason) + '</div>';
   if (isResolvedLoser && photo.id != null && !missing && !winnerMissingProtect) {
+    var trashState = _duplicateFileTrashState.get(photo.id);
     html += '<button type="button" class="trash-btn" onclick="trashOneLoserFile(' +
-            photo.id + ')">Move file to Trash</button>';
-    html += '<div class="trash-status" data-trash-status></div>';
+            photo.id + ')"' + (trashState && trashState.pending ? ' disabled' : '') + '>Move file to Trash</button>';
+    html += '<div class="trash-status" data-trash-status>' + escapeHtml(trashState ? trashState.message : '') + '</div>';
   } else if (isResolvedLoser && !missing && winnerMissingProtect) {
     // The kept-file is gone (or its volume is unreachable and we can't
     // tell), so this loser file may be the only remaining copy. Suppress
