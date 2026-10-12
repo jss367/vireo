@@ -14,8 +14,9 @@ function bucketRevealKey(bi, button) {
   return JSON.stringify(bucketRevealFolders(bi, button).sort());
 }
 
-function bucketRevealButton(bi, card) {
-  var pending = _pendingBucketReveals.has(bucketRevealKey(bi, card));
+function bucketRevealButton(bi, card, folders) {
+  var key = folders ? JSON.stringify(folders.slice().sort()) : bucketRevealKey(bi, card);
+  var pending = _pendingBucketReveals.has(key);
   var label = pending
     ? 'Opening ' + (window.VIREO_FILE_MANAGER_NAME || 'file manager') + '\u2026'
     : window.VIREO_REVEAL_LABEL;
