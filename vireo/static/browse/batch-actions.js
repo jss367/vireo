@@ -2,6 +2,15 @@
    Classic script sharing page globals; browse.html loads the
    browse/*.js files in dependency order. */
 
+var batchKeywordDialog = VireoDialog.create(document.getElementById('batchKeywordModal'), {
+  initialFocus: document.getElementById('batchKeywordInput'),
+  onDismiss: hideBatchKeywordModal,
+});
+var batchCollectionDialog = VireoDialog.create(document.getElementById('batchCollectionModal'), {
+  initialFocus: document.getElementById('batchCollectionNewName'),
+  onDismiss: hideBatchCollectionModal,
+});
+
 /* ---------- iNaturalist ---------- */
 async function loadInatStatus(photoIds) {
   if (photoIds.length === 0) return;
@@ -316,17 +325,16 @@ async function batchSetColorLabel(color, photoIds) {
   showUndoToast();
 }
 
-function batchAddKeyword() {
+function batchAddKeyword(returnFocus) {
   document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + getActiveSelection().length + ' photos';
   document.getElementById('batchKeywordInput').value = '';
   getKeywordAutocompleteState('batchKeywordInput').selectedKeyword = null;
   hideKeywordSuggestions('batchKeywordInput');
-  document.getElementById('batchKeywordModal').classList.add('open');
-  setTimeout(function() { document.getElementById('batchKeywordInput').focus(); }, 50);
+  batchKeywordDialog.open(returnFocus);
 }
 
 function hideBatchKeywordModal() {
-  document.getElementById('batchKeywordModal').classList.remove('open');
+  batchKeywordDialog.close();
   hideKeywordSuggestions('batchKeywordInput');
   window._vireoNativeMenuPhotoIdsOverride = null;
 }
@@ -515,7 +523,10 @@ function collectionAcceptsManualPhotos(collection) {
   }
 }
 
-async function addToCollection() {
+async function addToCollection(returnFocus) {
+  // WebKit does not focus buttons on pointer clicks. The template passes the
+  // opener explicitly; native-menu/shortcut calls retain the current focus.
+  returnFocus = returnFocus || document.activeElement;
   var activeIds = getActiveSelection();
   if (activeIds.length === 0) {
     window._vireoNativeMenuPhotoIdsOverride = null;
@@ -537,27 +548,26 @@ async function addToCollection() {
 
   var listHtml = '';
   collections.forEach(function(c) {
-    listHtml += '<div class="batch-coll-item" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')" style="padding:6px 10px;cursor:pointer;border-radius:4px;font-size:13px;color:var(--text-primary);">' + escapeHtml(c.name) + '</div>';
+    listHtml += '<button type="button" class="batch-coll-item" aria-pressed="false" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')">' + escapeHtml(c.name) + '</button>';
   });
   if (collections.length === 0) {
     listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No manual collections yet</div>';
   }
   document.getElementById('batchCollectionList').innerHTML = listHtml;
   document.getElementById('batchCollectionNewName').value = '';
-  document.getElementById('batchCollectionModal').classList.add('open');
-  setTimeout(function() { document.getElementById('batchCollectionNewName').focus(); }, 50);
+  batchCollectionDialog.open(returnFocus);
 }
 
 function pickBatchCollection(id) {
   _batchCollectionSelectedId = id;
   document.getElementById('batchCollectionNewName').value = '';
   document.querySelectorAll('.batch-coll-item').forEach(function(el) {
-    el.style.background = parseInt(el.dataset.id) === id ? 'var(--bg-tertiary)' : '';
+    el.setAttribute('aria-pressed', String(parseInt(el.dataset.id) === id));
   });
 }
 
 function hideBatchCollectionModal() {
-  document.getElementById('batchCollectionModal').classList.remove('open');
+  batchCollectionDialog.close();
   window._vireoNativeMenuPhotoIdsOverride = null;
 }
 

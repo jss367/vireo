@@ -356,7 +356,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            browser: chromium
+          - os: windows-latest
+            browser: chromium
+          - os: macos-latest
+            browser: webkit
     runs-on: ${{ matrix.os }}
     needs: changes
     timeout-minutes: 20
@@ -377,7 +383,7 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install Vireo and Chromium
+      - name: Install Vireo and browser
         shell: bash
         if: needs.changes.outputs.python == 'true'
         run: |
@@ -387,13 +393,13 @@ jobs:
             # Chrome apt source can have inconsistent metadata during updates.
             sudo rm -f /etc/apt/sources.list.d/google-chrome*.list \
               /etc/apt/sources.list.d/google-chrome*.sources
-            python -m playwright install --with-deps chromium
+            python -m playwright install --with-deps ${{ matrix.browser }}
           else
-            python -m playwright install chromium
+            python -m playwright install ${{ matrix.browser }}
           fi
 
       - name: Run critical browser journeys
-        if: needs.changes.outputs.python == 'true'
+        if: needs.changes.outputs.python == 'true' && matrix.browser == 'chromium'
         run: >-
           python -m pytest -o addopts='' -q
           tests/e2e/test_navigation.py::test_navbar_links_navigate_to_import
@@ -403,6 +409,14 @@ jobs:
           tests/e2e/test_browse_lightbox.py::test_browse_lightbox_arrows_navigate
           tests/e2e/test_settings.py::test_settings_system_info_renders
           tests/e2e/test_browser_security.py::test_browser_transport_authenticates_internal_mutations
+          tests/e2e/test_dialog_accessibility.py
+
+      - name: Verify Mac dialog keyboard navigation
+        if: needs.changes.outputs.python == 'true' && matrix.browser == 'webkit'
+        run: >-
+          python -m pytest -o addopts='' -q
+          tests/e2e/test_dialog_accessibility.py --browser webkit
+          --reruns 2 --reruns-delay 1
 
   rust:
     strategy:

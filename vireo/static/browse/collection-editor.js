@@ -3,6 +3,10 @@
    browse/*.js files in dependency order. */
 
 /* ---------- Collection Modal ---------- */
+var collectionDialog = VireoDialog.create(document.getElementById('collectionModal'), {
+  initialFocus: document.getElementById('collectionName'),
+  onDismiss: hideCollectionModal,
+});
 var collectionEditorRoot = {mode: 'all', rules: []};
 var collectionEditingId = null;
 // Cached dropdown sources for the rule editor. Filled on first modal open
@@ -170,7 +174,7 @@ async function loadCollectionEditorSources() {
   }
 }
 
-async function showCollectionModal(collection) {
+async function showCollectionModal(collection, returnFocus) {
   // Cancel any pending/in-flight preview from a previous session before
   // resetting state — otherwise a stale response can land on the DOM and
   // briefly show the previous rule set's count in the freshly opened modal.
@@ -189,7 +193,7 @@ async function showCollectionModal(collection) {
   // changing one fires updateRule(idx, ...) against an undefined row and
   // throws.
   renderRules();
-  document.getElementById('collectionModal').classList.add('open');
+  collectionDialog.open(returnFocus);
   await loadCollectionEditorSources();
   // Backfill any extension/folder rules added during the await: they got
   // value '' from defaultValueForRule because the source lists were empty.
@@ -220,7 +224,7 @@ async function showCollectionModal(collection) {
 function hideCollectionModal() {
   resetPreviewState();
   collectionEditingId = null;
-  document.getElementById('collectionModal').classList.remove('open');
+  collectionDialog.close();
 }
 
 function getRuleContainer(path) {

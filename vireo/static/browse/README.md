@@ -52,3 +52,27 @@ Rebinding is safe and does not install a second listener.
 changes; `prediction-panels.js` renders prediction controls and performs their
 actions. Existing grid selection and single-photo detail state still live in
 `state.js`; these are separate from the batch panel's row snapshots.
+
+## Dialog focus and keyboard lifecycle
+
+Collection editing, batch keyword entry, and batch collection selection use
+`VireoDialog.create(overlay, {initialFocus, onDismiss})` from
+`/static/vireo-dialog.js`, loaded after `keymap.js` and before the page controllers.
+The templates provide `role="dialog"`, `aria-modal`, and a title via
+`aria-labelledby`. The controller moves focus inside on `open()`, recomputes
+the Tab order as controls change, makes the background inert, and restores the
+opener on `close()`. It preserves pre-existing inert state and uses Keymap's
+shared Escape stack and scroll locks, including when managed dialogs stack.
+
+Each owner's `onDismiss` calls its normal hide/cleanup function, which calls
+`close()`. Save, Cancel, Escape, and other close paths must use that same function;
+removing the `open` class directly would leave focus/inert/scroll state behind.
+`open(returnFocus)` accepts an explicit opener for actions that fetch data before
+opening and for pointer clicks (WebKit may not focus the clicked button). Focus is
+synchronous, so no delayed callback can steal it after closing.
+Existing batch collection choices are native buttons with `aria-pressed` state.
+
+The lifecycle follows the [W3C modal dialog pattern](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/).
+Real-DOM and Browse integration regressions live in
+`tests/e2e/test_dialog_accessibility.py` and run in the Linux/Windows Chromium and
+Mac WebKit PR browser gate.

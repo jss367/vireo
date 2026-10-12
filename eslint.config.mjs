@@ -1,10 +1,11 @@
 import js from '@eslint/js';
 import globals from 'globals';
 
-const checkedBrowseControllers = [
+const checkedControllers = [
   'vireo/static/browse/panel-requests.js',
   'vireo/static/browse/selection-panel-state.js',
   'vireo/static/browse/selection-panel-events.js',
+  'vireo/static/vireo-dialog.js',
 ];
 
 export default [
@@ -26,7 +27,7 @@ export default [
     },
   },
   {
-    files: checkedBrowseControllers,
+    files: checkedControllers,
     rules: {
       'no-undef': 'error',
       'no-unused-vars': 'error',

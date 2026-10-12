@@ -11,6 +11,8 @@
   },
   "files": [
     "types/frontend.d.ts",
+    "types/dialogs.d.ts",
+    "vireo/static/vireo-dialog.js",
     "vireo/static/browse/panel-requests.js",
     "vireo/static/browse/selection-panel-state.js",
     "vireo/static/browse/selection-panel-events.js",
