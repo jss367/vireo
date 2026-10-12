@@ -1,13 +1,21 @@
 // Duplicates page: feedback for revealing a bucket's folders.
 var _pendingBucketReveals = new Set();
 
-function bucketRevealKey(bi) {
+function bucketRevealFolders(bi, button) {
+  var card = button && button.closest('.bucket-card');
+  if (card && card.hasAttribute('data-reveal-paths')) {
+    return JSON.parse(card.getAttribute('data-reveal-paths'));
+  }
   var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
-  return JSON.stringify((bucket && bucket.folders || []).slice().sort());
+  return (bucket && bucket.folders || []).slice();
 }
 
-function bucketRevealButton(bi) {
-  var pending = _pendingBucketReveals.has(bucketRevealKey(bi));
+function bucketRevealKey(bi, button) {
+  return JSON.stringify(bucketRevealFolders(bi, button).sort());
+}
+
+function bucketRevealButton(bi, card) {
+  var pending = _pendingBucketReveals.has(bucketRevealKey(bi, card));
   var label = pending
     ? 'Opening ' + (window.VIREO_FILE_MANAGER_NAME || 'file manager') + '\u2026'
     : window.VIREO_REVEAL_LABEL;
@@ -20,7 +28,7 @@ function bucketRevealButton(bi) {
 
 function refreshBucketRevealButtons(completedKey) {
   document.querySelectorAll('[data-reveal-bucket]').forEach(function(button) {
-    var key = bucketRevealKey(Number(button.dataset.revealBucket));
+    var key = bucketRevealKey(Number(button.dataset.revealBucket), button);
     if (completedKey !== undefined && key !== completedKey) return;
     var pending = _pendingBucketReveals.has(key);
     var card = button.closest('.bucket-card');
@@ -31,9 +39,9 @@ function refreshBucketRevealButtons(completedKey) {
   });
 }
 async function revealBucketFolders(bi, button) {
-  var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
-  if (!bucket || !bucket.folders || bucket.folders.length === 0) return;
-  var key = bucketRevealKey(bi);
+  var folders = bucketRevealFolders(bi, button);
+  if (!folders.length) return;
+  var key = bucketRevealKey(bi, button);
   if (_pendingBucketReveals.has(key) || (button && button.disabled)) return;
   _pendingBucketReveals.add(key);
   var manager = window.VIREO_FILE_MANAGER_NAME || 'file manager';
@@ -45,7 +53,7 @@ async function revealBucketFolders(bi, button) {
     var data = await safeFetch('/api/folders/reveal', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ paths: bucket.folders }),
+      body: JSON.stringify({ paths: folders }),
     }, {toast: false});
     var revealed = (data.revealed || []).length;
     var problems = (data.failed || []).concat(data.skipped || []);

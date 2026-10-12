@@ -109,6 +109,8 @@ async function trashOneLoserFile(photoId) {
 }
 
 function pinDuplicateBucketOperation(card, bi) {
+  var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+  card.setAttribute('data-reveal-paths', JSON.stringify((bucket && bucket.folders || []).slice()));
   _duplicateBucketOperations.set(card, {snapshot: _lastScanResult, index: bi});
   document.getElementById('duplicateBucketOperationList').appendChild(card);
   document.getElementById('duplicateBucketOperations').hidden = false;
@@ -218,7 +220,7 @@ function showBucketTrashRetry(card, remainingIds, resolvedHashes) {
     '<button class="keep-btn" data-retry-trash onclick="retryBucketTrash(this)">' +
       'Retry ' + n + ' file' + (n === 1 ? '' : 's') + ' to Trash' +
     '</button>' +
-    bucketRevealButton(Number(bi));
+    bucketRevealButton(Number(bi), card);
 }
 
 async function retryBucketTrash(btn) {
