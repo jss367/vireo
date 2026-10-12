@@ -135,11 +135,21 @@ function photoIdsInReviewScope(photoIds) {
 }
 
 // Drop remembered write targets that the current scope no longer allows: the
-// right-click selection, the native menu's pinned selection, and the legacy
-// inspector. When the inspected photo stays in scope, rebuild the inspector
-// so its encounter filmstrip drops thumbnails for photos that just left.
+// right-click selection, the native menu's pinned selection, the legacy
+// inspector, and the active lightbox. When the inspected photo stays in
+// scope, rebuild the inspector so its encounter filmstrip drops thumbnails
+// for photos that just left. The lightbox gets its read-only state refreshed
+// against its current photo so a photo that just left scope stops accepting
+// destructive controls (lightboxDelete and adjustments guard on _lbReadOnly
+// only).
 function reconcileReviewScopeTargets() {
   filterPipelineReviewContextSelectionToScope();
+  // refreshPipelineReviewLightboxReadOnlyState lives in group-session.js and
+  // is defined by the time any user action can reach us, but the regression
+  // harness extracts scope.js functions one at a time, so guard the call.
+  if (typeof refreshPipelineReviewLightboxReadOnlyState === 'function') {
+    refreshPipelineReviewLightboxReadOnlyState();
+  }
   if (typeof inspectPhotoId === 'undefined' || inspectPhotoId == null) return;
   if (!isPhotoActionableInReviewScope(inspectPhotoId)) {
     closeInspect();

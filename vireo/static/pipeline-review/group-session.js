@@ -384,7 +384,13 @@ function refreshPipelineReviewLightboxReadOnlyState() {
   var lightbox = document.getElementById('lightboxOverlay');
   if (!lightbox || !lightbox.classList.contains('active') ||
       typeof window.setLightboxReadOnlyMode !== 'function') return;
-  var options = pipelineReviewLightboxOptions();
+  // Pass the lightbox's current photo so a collection-membership refresh
+  // that drops the open photo re-evaluates out-of-scope for it, not just
+  // the always-false default from a missing photoId.
+  var currentPhotoId = (typeof vireoLightboxSession !== 'undefined' && vireoLightboxSession)
+    ? vireoLightboxSession.requestedPhotoId()
+    : null;
+  var options = pipelineReviewLightboxOptions(currentPhotoId);
   window.setLightboxReadOnlyMode(options.readOnly, options.readOnlyMessage);
 }
 

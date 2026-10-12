@@ -610,11 +610,26 @@ function lightboxNav(delta) {
   var eyeTrackAnchor = vireoLightboxViewport.captureEyeAnchor();
   var next = _lightboxPhotoList[newIdx];
   vireoLightboxSession.noteDirection(delta);
-  openLightbox(next.id, next.filename, _lightboxPhotoList, {
+  var navOptions = {
     fallbackViewportState: currentViewportState,
     preserveOneToOne: vireoLightboxViewport.isOneToOne(),
     eyeTrackAnchor: eyeTrackAnchor
-  });
+  };
+  // Re-evaluate the owning page's read-only decision for the new photo. The
+  // list may mix in-scope and out-of-scope photos (Find Similar in Pipeline
+  // Review), and openLightbox otherwise inherits the previous photo's
+  // _lbReadOnly, which would leave destructive controls enabled when arrowing
+  // from an in-scope result to an out-of-scope one (or stuck read-only in the
+  // other direction). Group Review's open-burst exception is preserved by
+  // isPhotoActionableInReviewScope().
+  if (typeof window.getLightboxOpenOptions === 'function') {
+    var opened = window.getLightboxOpenOptions(next.id);
+    if (opened && Object.prototype.hasOwnProperty.call(opened, 'readOnly')) {
+      navOptions.readOnly = opened.readOnly;
+      navOptions.readOnlyMessage = opened.readOnlyMessage;
+    }
+  }
+  openLightbox(next.id, next.filename, _lightboxPhotoList, navOptions);
 }
 
 function requestLightboxFullscreen() {

@@ -44,10 +44,16 @@ function makePage() {
   const listeners = {};
   const toasts = [];
   const lightboxOpens = [];
+  const lightboxReadOnlyCalls = [];
+  const lightboxSession = {_photoId: null, requestedPhotoId() { return this._photoId; }};
   const location = {href: '/pipeline/review'};
+  const windowStub = {location, setLightboxReadOnlyMode: (readOnly, message) => {
+    lightboxReadOnlyCalls.push({readOnly: readOnly, message: message});
+  }};
   const ctx = vm.createContext({
     console, setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
-    window: {location},
+    window: windowStub,
+    vireoLightboxSession: lightboxSession,
     location,
     document: {
       getElementById: element,
@@ -126,7 +132,8 @@ function makePage() {
     reviewScopePhotoIds = new Set([${IN_SCOPE}]);
     reviewScopeTotal = 1;
   `, ctx);
-  return {ctx, requests, toasts, lightboxOpens, element, location, listeners};
+  return {ctx, requests, toasts, lightboxOpens, lightboxReadOnlyCalls,
+          lightboxSession, element, location, listeners};
 }
 
 function run(ctx, code) { return vm.runInContext(code, ctx); }
@@ -292,6 +299,47 @@ async function staleMembershipRefreshIsDropped() {
   assert.deepEqual(Array.from(run(ctx, 'reviewScopePhotoIds')), [IN_SCOPE]);
 }
 
+async function membershipRefreshReconcilesTheOpenLightbox() {
+  // A photo rated in the lightbox can leave a smart collection; the lightbox
+  // itself keeps the (now hidden) photo on screen. reconcileReviewScopeTargets
+  // must refresh _lbReadOnly against the current lightbox photo so shared
+  // actions that guard only on it (lightboxDelete, adjustments) stop writing.
+  const {ctx, element, lightboxReadOnlyCalls, lightboxSession} = makePage();
+  run(ctx, `reviewScopeMode = 'collection'; reviewScopeCollectionId = 'c1';
+            reviewScopePhotoIds = new Set([${IN_SCOPE}, ${HIDDEN}]);`);
+  element('lightboxOverlay').classList.add('active');
+  lightboxSession._photoId = HIDDEN;
+  ctx.safeFetch = async () => ({photo_ids: [IN_SCOPE]});
+  ctx.maybeRefreshCollectionScopeMembership();
+  await settle();
+  const last = lightboxReadOnlyCalls[lightboxReadOnlyCalls.length - 1];
+  assert(last && last.readOnly === true,
+    'lightbox must flip to read-only when its current photo leaves the scope');
+  assert(/outside the selected collection/i.test(last.message || ''),
+    'read-only message must explain the scope mismatch, got: ' + last.message);
+}
+
+function arrowNavigationUsesPerPhotoReadOnly() {
+  // The lightbox's arrow-navigation re-evaluates window.getLightboxOpenOptions
+  // for each new photo (not just the first one Find Similar opens). Verify
+  // that pipeline-review installs that hook and that it computes readOnly
+  // per-photo, since the lightbox-level test lives in e2e.
+  const {ctx} = makePage();
+  // boot.js registers the hook; the harness skips boot.js so register inline.
+  run(ctx, 'window.getLightboxOpenOptions = pipelineReviewLightboxOptions;');
+  run(ctx, `reviewScopeMode = 'folder'; reviewScopeFolderId = 'f1';
+            reviewScopePhotoIds = new Set([${IN_SCOPE}]); reviewScopeRegrouped = false;`);
+  const inScopeOpts = ctx.window.getLightboxOpenOptions(IN_SCOPE);
+  assert.equal(inScopeOpts.readOnly, false,
+    'in-scope photo must open editable');
+  const hiddenOpts = ctx.window.getLightboxOpenOptions(HIDDEN);
+  assert.equal(hiddenOpts.readOnly, true,
+    'out-of-scope photo must open read-only on arrow navigation too');
+  assert(/outside the selected folder/i.test(hiddenOpts.readOnlyMessage || ''),
+    'out-of-scope read-only message must name the folder scope, got: '
+      + hiddenOpts.readOnlyMessage);
+}
+
 async function deletedPhotoLeavesTheFolderScope() {
   // Folder membership is never re-fetched from this page, so a photo deleted
   // from the lightbox must leave the scope set and its total locally.
@@ -412,6 +460,8 @@ function speciesSearchIsUnchangedWhenNoScopeIsActive() {
   await groupReviewStillEditsTheWholeBurst();
   await allReviewedPhotosIsUnfiltered();
   await membershipRefreshDropsTheInspectedPhoto();
+  await membershipRefreshReconcilesTheOpenLightbox();
+  arrowNavigationUsesPerPhotoReadOnly();
   await staleMembershipRefreshIsDropped();
   speciesSearchHidesEncountersWithOnlyOutOfScopeEvidence();
   speciesSearchIsUnchangedWhenNoScopeIsActive();
