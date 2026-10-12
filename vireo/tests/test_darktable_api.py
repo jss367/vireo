@@ -63,8 +63,9 @@ def _poll_job(client, job_id):
 
 def test_develop_job_poll_waits_past_old_observation_limit(monkeypatch):
     """A delayed fake worker must reach failed before rollup assertions run."""
-    import wait as job_wait
     from types import SimpleNamespace
+
+    import wait as job_wait
 
     clock = [0.0]
     monkeypatch.setattr(job_wait.time, "monotonic", lambda: clock[0])
@@ -93,8 +94,9 @@ def test_develop_job_poll_waits_past_old_observation_limit(monkeypatch):
 
 def test_develop_job_poll_reports_timeout_instead_of_returning_running(monkeypatch):
     """An actually stuck fake worker retains a bounded, diagnostic failure."""
-    import wait as job_wait
     from types import SimpleNamespace
+
+    import wait as job_wait
 
     clock = [0.0]
     monkeypatch.setattr(job_wait.time, "monotonic", lambda: clock[0])
