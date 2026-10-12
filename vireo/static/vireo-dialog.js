@@ -141,5 +141,14 @@
     return {open: open, close: close};
   }
 
-  global.VireoDialog = {create: create};
+  // Overlays that have not yet migrated to this lifecycle (help, report issue,
+  // the lightbox) still open as plain siblings of the active dialog's branch.
+  // updateBackground() therefore marks them inert while a dialog is on the
+  // stack, which would present an inert help/report overlay whose controls
+  // cannot receive focus. Owners of those overlays guard their keyboard
+  // shortcuts with hasActive() and treat the press as a no-op until the
+  // managed dialog is dismissed.
+  function hasActive() { return stack.length > 0; }
+
+  global.VireoDialog = {create: create, hasActive: hasActive};
 })(window);

@@ -93,6 +93,13 @@
 
   // Open / close
   window.openHelpModal = function() {
+    // A managed VireoDialog on the stack has made this overlay's branch inert
+    // via updateBackground(), so showing the help modal would present a
+    // panel whose search input and controls cannot be focused. Treat the F1
+    // or icon press as a no-op until the dialog is dismissed; opening help
+    // afterwards keeps the inert overlay in the background until the user
+    // closes the managed dialog, which already clears the inert state.
+    if (window.VireoDialog && window.VireoDialog.hasActive && window.VireoDialog.hasActive()) return;
     // Push an Esc handler onto the central Keymap stack so the help modal
     // participates in the one-Esc-per-overlay model. Defensive: if keymap.js
     // failed to load, opening still works — Esc just won't close the modal.

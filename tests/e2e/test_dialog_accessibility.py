@@ -276,3 +276,63 @@ def test_confirm_batch_collection_moves_focus_to_grid_not_hidden_opener(live_ser
     # longer visible and would be an invalid focus target.
     expect(page.locator("#batchBar")).to_be_hidden()
     expect(page.locator("#grid")).to_be_focused()
+
+
+def test_f1_help_is_noop_while_a_managed_dialog_is_open(live_server, page):
+    # updateBackground() inerts every body-level sibling along the active
+    # dialog's branch, including #helpModal. Codex P2: opening help on top
+    # of a managed dialog would present an inert overlay whose search input
+    # and controls cannot receive focus. F1 (and the help icon) must be a
+    # no-op in that state so the user keeps interacting with the dialog
+    # until they dismiss it; help opens normally afterward.
+    open_browse(page, live_server)
+    opener = page.get_by_role("button", name="+ New Collection", exact=True)
+    opener.click()
+    dialog = page.get_by_role("dialog", name="New Smart Collection", exact=True)
+    expect(dialog).to_be_visible()
+    page.keyboard.press("F1")
+    # Help stays closed; the dialog is still the top overlay and keeps focus.
+    expect(page.locator("#helpModal")).not_to_have_class("help-overlay active")
+    expect(dialog).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    # With no managed dialog on the stack, F1 opens help as usual.
+    page.keyboard.press("F1")
+    expect(page.locator("#helpModal")).to_have_class("help-overlay active")
+
+
+def test_context_menu_add_keyword_restores_focus_to_right_clicked_card(live_server, page):
+    # buildPhotoContextMenu's Add Keyword item used to call batchAddKeyword()
+    # without a return-focus argument. closeContextMenu removes the clicked
+    # (non-focusable) menu item before firing the callback, so
+    # document.activeElement collapses to body and the batch keyword dialog
+    # cannot restore focus to the card that launched it. Codex P2: capture
+    # the right-clicked card and pass it through so Escape/Cancel return to
+    # that card (now tabindex=-1, so .focus() lands).
+    open_browse(page, live_server)
+    card = page.locator(".grid-card").first
+    card.click(button="right")
+    page.get_by_text("Add Keyword…", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Add keyword to 1 photos", exact=True)
+    expect(dialog).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    expect(card).to_be_focused()
+
+
+def test_batch_more_add_to_collection_restores_focus_to_more_button(live_server, page):
+    # The batch-bar More button opens the same menu as a card right-click.
+    # Codex P2: openBatchMoreMenu passes the button itself as the return
+    # target so Add to Collection → Cancel/Escape lands back on More instead
+    # of document.body (WebKit does not necessarily focus a button on
+    # pointer click, and closeContextMenu has removed the menu item by the
+    # time the callback runs).
+    open_browse(page, live_server)
+    more = page.locator("#batchMoreBtn")
+    more.click()
+    page.get_by_text("Add to Collection…", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Add 1 photo(s) to collection", exact=True)
+    expect(dialog).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    expect(more).to_be_focused()
