@@ -110,12 +110,17 @@ function openInspect(photoId) {
     html += '</div>';
   }
 
-  // Encounter context filmstrip
+  // Encounter context filmstrip. Under a Folder/Collection scope, drop
+  // thumbnails for photos outside the scope: clicking one would navigate the
+  // inspector onto a hidden photo, and the inspector's P/X shortcuts write a
+  // flag against inspectPhotoId with no scoped-view read-only guard (filter
+  // mode stays writable by design).
   if (enc) {
     var speciesName = enc.confirmed_species || (enc.species ? (enc.species[0] || 'Unknown') : 'Unknown');
+    var filmstripIds = (enc.photo_ids || []).filter(photoInReviewScope);
     html += '<div class="context-label">Encounter: ' + escapeHtml(speciesName) + ' (' + enc.photo_count + ' photos, ' + (enc.burst_count||0) + ' bursts)</div>';
     html += '<div class="context-filmstrip">';
-    (enc.photo_ids || []).forEach(function(pid) {
+    filmstripIds.forEach(function(pid) {
       var isCurrent = pid === photoId ? ' current' : '';
       var contextPhoto = findPhotoInResults(pid) || pid;
       var contextThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(contextPhoto) : '/thumbnails/' + pid + '.jpg';

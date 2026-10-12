@@ -382,6 +382,12 @@ function maybeRefreshCollectionScopeMembership() {
       if (unchanged) return;
       reviewScopePhotoIds = newIds;
       reviewScopeTotal = newIds.size;
+      // The right-click selection and the native-menu override were captured
+      // before this refresh. A dropped photo stays writable (filter mode
+      // isn't a scoped-view read-only state), so a stale selection would let
+      // the next menu action mutate the now-hidden target. Scope-filter them
+      // down to ids still in the collection before the next render.
+      filterPipelineReviewContextSelectionToScope(newIds);
       renderResults();
       // statTotalPhotos, encounter/burst totals and confirmation counts are
       // scope-filtered through scopedSummaryCounts, so a membership change

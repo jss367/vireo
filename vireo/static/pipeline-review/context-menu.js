@@ -17,6 +17,36 @@ function clearPipelineReviewContextSelection() {
   }
 }
 
+// A membership refresh under a smart-collection scope can drop the
+// right-clicked photo (e.g. a rating edit pushes it above the collection's
+// rating cap). The card disappears from the grid, but the right-click
+// selection remembered here still points at it, so the next keyboard-driven
+// native Photo menu action would silently mutate the now-hidden target.
+// Drop any ids that fell out of scope; leave the still-in-scope ones so a
+// multi-photo override from Browse keeps the parts that are still visible.
+function filterPipelineReviewContextSelectionToScope(scopeIds) {
+  if (!scopeIds) return;
+  if (pipelineReviewContextPhotoIds && pipelineReviewContextPhotoIds.length) {
+    var filtered = pipelineReviewContextPhotoIds.filter(function(id) {
+      return scopeIds.has(id);
+    });
+    if (filtered.length !== pipelineReviewContextPhotoIds.length) {
+      pipelineReviewContextPhotoIds = filtered;
+    }
+  }
+  var override = window._vireoNativeMenuPhotoIdsOverride;
+  if (override && override.length) {
+    var filteredOverride = override.filter(function(id) {
+      return scopeIds.has(id);
+    });
+    if (filteredOverride.length !== override.length) {
+      window._vireoNativeMenuPhotoIdsOverride = filteredOverride.length
+        ? filteredOverride
+        : null;
+    }
+  }
+}
+
 function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) {
   photoIds = pipelineReviewUniquePhotoIds(photoIds);
   var one = photoIds.length === 1;

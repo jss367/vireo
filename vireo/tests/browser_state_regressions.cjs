@@ -92,6 +92,96 @@ async function main() {
   assert.equal(scopeChange.window._vireoNativeMenuPhotoIdsOverride, null);
 
 
+  // A smart-collection membership refresh that drops the right-clicked
+  // photo must scope-filter the stale native-menu selection. Filter mode
+  // stays writable (isScopedReviewView() is false), so leaving the dropped
+  // id in pipelineReviewContextPhotoIds would let the next keyboard action
+  // mutate a now-hidden photo. A multi-id override keeps the still-in-scope
+  // ids and drops only the ones that fell out.
+  const membershipDrop = vm.createContext({
+    window: {_vireoNativeMenuPhotoIdsOverride: [10, 20]},
+    pipelineReviewContextPhotoIds: [10],
+    reviewScopeMode: 'collection',
+    reviewScopeCollectionId: 'c1',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([10, 20]),
+    reviewScopeTotal: 2,
+    _reviewScopeMembershipRefreshTimer: null,
+    _reviewScopeMembershipRefreshSeq: 0,
+    pipelineResults: {summary: {}},
+    resultsCacheInfo: null,
+    renderResults() {},
+    updateSummaryBar() {},
+    updateReviewScopeStatusFromResults() {},
+    renderCacheScopeBanner() {},
+    setTimeout: (fn) => { fn(); return 0; },
+    clearTimeout() {},
+    safeFetch: async () => ({photo_ids: [20]}),
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'filterPipelineReviewContextSelectionToScope',
+    'maybeRefreshCollectionScopeMembership',
+  ]) vm.runInContext(fn(review, name), membershipDrop);
+  membershipDrop.maybeRefreshCollectionScopeMembership();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(membershipDrop.pipelineReviewContextPhotoIds, []);
+  assert.deepEqual(membershipDrop.window._vireoNativeMenuPhotoIdsOverride, [20]);
+
+
+  // The legacy inspector's filmstrip must drop out-of-scope photos: clicking
+  // a hidden thumbnail would navigate inspectPhotoId to an out-of-scope
+  // photo, and the P/X shortcut writes a flag against it with no scoped
+  // read-only guard. Only the in-scope encounter members should render.
+  const filmstripCtx = vm.createContext({
+    window: {},
+    inspectPhotoId: null,
+    pipelineResults: {
+      photos: [{id: 1}, {id: 2}, {id: 3}],
+      encounters: [{photo_ids: [1, 2, 3], photo_count: 3, burst_count: 0, species: ['Owl']}],
+    },
+    reviewScopeMode: 'folder',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([1, 3]),
+    minConfidence: 50,
+    document: {
+      getElementById: (id) => {
+        if (id === 'inspectPanel') return {innerHTML: ''};
+        if (id === 'inspectOverlay') return {classList: {add() {}, remove() {}, contains: () => false}};
+        return null;
+      },
+      removeEventListener() {}, addEventListener() {},
+    },
+    escapeHtml: s => String(s), escapeAttr: s => String(s),
+    hasQualityScore: () => false,
+    buildSpeciesPredictionsHtml: () => '',
+    buildBurstConsensus: () => null,
+    findBurstForPhoto: () => null,
+    closeInspect() {}, openGroupReview() {},
+    inspectKeyHandler() {},
+  });
+  for (const name of [
+    'findPhotoInResults', 'findEncounterForPhoto',
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInReviewScope',
+    'openInspect',
+  ]) vm.runInContext(fn(review, name), filmstripCtx);
+  // Capture the panel's rendered HTML by swapping getElementById to catch
+  // the write.
+  let panelHtml = '';
+  filmstripCtx.document.getElementById = (id) => {
+    if (id === 'inspectPanel') return {set innerHTML(v) { panelHtml = v; }};
+    if (id === 'inspectOverlay') return {classList: {add() {}, remove() {}, contains: () => false}};
+    return null;
+  };
+  filmstripCtx.openInspect(1);
+  const filmstrip = panelHtml.match(/<div class="context-filmstrip">[^]*?<\/div>/);
+  assert(filmstrip, 'filmstrip markup rendered');
+  assert(filmstrip[0].includes('openInspect(1)'));
+  assert(filmstrip[0].includes('openInspect(3)'));
+  assert(!filmstrip[0].includes('openInspect(2)'),
+    'out-of-scope photo 2 must not appear in the filmstrip');
+
+
   // A scope-photos membership load must not be invalidated by a slider
   // move that bumps reviewScopeRequestSeq. Otherwise the tuning response
   // renders through the pre-fetch empty scope set and the view stays at
