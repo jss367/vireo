@@ -433,6 +433,10 @@ function loadReviewScopeResults() {
   // the user switches back to the saved review could pass its .then() guard
   // and replace the cached view with stale scoped results.
   var seq = ++reviewScopeRequestSeq;
+  // Also invalidate any inflight scope-photos membership load from the
+  // previous selection, so a change to workspace/cache/regrouped (which
+  // doesn't fire a new membership fetch) still drops the stale response.
+  ++reviewScopeMembershipSeq;
   if (reviewScopeMode === 'cache') {
     reviewScopePhotoIds = null;
     reviewScopeTotal = null;
@@ -466,15 +470,20 @@ function loadReviewScopeResults() {
   showSavedReview();
   setReviewScopeStatus('Loading...');
   var param = reviewScopeMode === 'folder' ? 'folder_id' : 'collection_id';
+  // Membership gets its own sequence so a slider move (which bumps
+  // reviewScopeRequestSeq) does not drop a valid membership response. We
+  // still check reviewScopeRequestSeq below so a scope change in flight
+  // through onReviewScope*Change (which also bumps membership seq) is caught.
+  var memSeq = ++reviewScopeMembershipSeq;
   safeFetch('/api/pipeline/scope-photos?' + param + '=' + encodeURIComponent(selectionId), {}, { toast: false })
   .then(function(data) {
-    if (seq !== reviewScopeRequestSeq || !data || !Array.isArray(data.photo_ids)) return;
+    if (memSeq !== reviewScopeMembershipSeq || !data || !Array.isArray(data.photo_ids)) return;
     reviewScopePhotoIds = new Set(data.photo_ids);
     reviewScopeTotal = data.photo_ids.length;
     applyReviewResults(pipelineResults, resultsCacheInfo);
   })
   .catch(function(e) {
-    if (seq !== reviewScopeRequestSeq) return;
+    if (memSeq !== reviewScopeMembershipSeq) return;
     setReviewScopeStatus((e && e.message) || 'Could not load', true);
   });
 }
@@ -486,6 +495,7 @@ function onReviewScopeModeChange(mode) {
   // changes so refreshLatestScopeSnapshotIfCurrent still sees the outgoing
   // mode.
   refreshLatestScopeSnapshotIfCurrent();
+  clearPipelineReviewContextSelection();
   reviewScopeMode = mode;
   reviewScopeRegrouped = false;
   updateReviewScopeControls();
@@ -494,6 +504,7 @@ function onReviewScopeModeChange(mode) {
 
 function onReviewScopeFolderChange(value) {
   refreshLatestScopeSnapshotIfCurrent();
+  clearPipelineReviewContextSelection();
   reviewScopeFolderId = value || null;
   reviewScopeRegrouped = false;
   updateReviewScopeControls();
@@ -502,6 +513,7 @@ function onReviewScopeFolderChange(value) {
 
 function onReviewScopeCollectionChange(value) {
   refreshLatestScopeSnapshotIfCurrent();
+  clearPipelineReviewContextSelection();
   reviewScopeCollectionId = value || null;
   reviewScopeRegrouped = false;
   updateReviewScopeControls();
@@ -510,6 +522,7 @@ function onReviewScopeCollectionChange(value) {
 
 function toggleReviewScopeRegroup() {
   if (!isReviewScopeFilterMode() || !reviewScopeSelectionId()) return;
+  clearPipelineReviewContextSelection();
   if (reviewScopeRegrouped) {
     reviewScopeRegrouped = false;
     updateReviewScopeControls();

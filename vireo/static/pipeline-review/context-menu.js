@@ -3,6 +3,20 @@
 
 var pipelineReviewContextPhotoIds = [];
 
+// A right-click sets pipelineReviewContextPhotoIds, and the shared native
+// Photo menu resolves it through getActiveSelection() for keyboard-driven
+// actions. If the user dismisses the menu and switches to a Folder/Collection
+// scope that no longer contains that photo, filter mode stays writable, and
+// the next action would silently edit a hidden out-of-scope photo. Scope
+// changes clear the stale selection so the next action starts from a known
+// in-scope target.
+function clearPipelineReviewContextSelection() {
+  pipelineReviewContextPhotoIds = [];
+  if (window._vireoNativeMenuPhotoIdsOverride) {
+    window._vireoNativeMenuPhotoIdsOverride = null;
+  }
+}
+
 function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) {
   photoIds = pipelineReviewUniquePhotoIds(photoIds);
   var one = photoIds.length === 1;

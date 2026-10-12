@@ -37,6 +37,14 @@ var reviewScopeTotal = null;
 // That view comes from regroup-live and is view-only like Workspace scope.
 var reviewScopeRegrouped = false;
 var reviewScopeRequestSeq = 0;
+// Separate counter for the Folder/Collection scope-photos membership load so
+// that reflow/regroup-live slider requests (which must still be cancelled by
+// a scope change through reviewScopeRequestSeq) don't invalidate an in-flight
+// membership response. If the two shared a counter, a slider moved while
+// scope membership was loading would drop the valid membership result and
+// then render the tuning response against the empty pre-fetch scope set,
+// leaving the filtered view at zero photos until the user reselected scope.
+var reviewScopeMembershipSeq = 0;
 var showPhotoLabels = false;
 // Survives re-renders so confirming/filtering doesn't re-expand collapsed
 // encounters. Keyed by the encounter's full sorted photo_id set so that

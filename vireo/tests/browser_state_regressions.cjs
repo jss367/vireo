@@ -58,6 +58,75 @@ async function main() {
   for (const name of ['isScopedReviewView', 'detachBurst']) vm.runInContext(fn(review, name), burst);
   await burst.detachBurst(0, 0);
   assert.equal(sent.length, 0);
+
+
+  // A scope change clears the right-click context selection so the next
+  // native-menu keyboard action doesn't resolve to a photo now hidden by
+  // the newly selected Folder/Collection scope.
+  const scopeChange = vm.createContext({
+    window: {_vireoNativeMenuPhotoIdsOverride: [10]},
+    pipelineReviewContextPhotoIds: [10],
+    reviewScopeMode: 'cache',
+    reviewScopeFolderId: null, reviewScopeCollectionId: null,
+    reviewScopeRegrouped: false, reviewScopeRequestSeq: 0,
+    reviewScopeMembershipSeq: 0,
+    reviewScopePhotoIds: null, reviewScopeTotal: null,
+    pipelineResults: null, resultsCacheInfo: null,
+    cachedPipelineResults: null, cachedResultsCacheInfo: null,
+    refreshLatestScopeSnapshotIfCurrent() {},
+    updateReviewScopeControls() {},
+    setReviewScopeStatus() {},
+    showSavedReview() {},
+    applyReviewResults() {},
+    loadRegroupedScopeResults() {},
+    reviewScopeSelectionId: () => 'f1',
+    safeFetch: () => new Promise(() => {}),
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'loadReviewScopeResults',
+    'onReviewScopeFolderChange',
+  ]) vm.runInContext(fn(review, name), scopeChange);
+  scopeChange.onReviewScopeFolderChange('f1');
+  assert.equal(scopeChange.pipelineReviewContextPhotoIds.length, 0);
+  assert.equal(scopeChange.window._vireoNativeMenuPhotoIdsOverride, null);
+
+
+  // A scope-photos membership load must not be invalidated by a slider
+  // move that bumps reviewScopeRequestSeq. Otherwise the tuning response
+  // renders through the pre-fetch empty scope set and the view stays at
+  // zero photos until the user reselects the scope.
+  let resolveScope;
+  const raceCtx = vm.createContext({
+    window: {},
+    pipelineReviewContextPhotoIds: [],
+    reviewScopeMode: 'folder',
+    reviewScopeFolderId: 'f1', reviewScopeCollectionId: null,
+    reviewScopeRegrouped: false, reviewScopeRequestSeq: 0,
+    reviewScopeMembershipSeq: 0,
+    reviewScopePhotoIds: null, reviewScopeTotal: null,
+    pipelineResults: {source: 'cache'}, resultsCacheInfo: null,
+    cachedPipelineResults: null, cachedResultsCacheInfo: null,
+    refreshLatestScopeSnapshotIfCurrent() {},
+    updateReviewScopeControls() {},
+    setReviewScopeStatus() {},
+    showSavedReview() {},
+    applyReviewResults() {},
+    loadRegroupedScopeResults() {},
+    reviewScopeSelectionId: () => 'f1',
+    safeFetch: () => new Promise(resolve => { resolveScope = resolve; }),
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'loadReviewScopeResults',
+  ]) vm.runInContext(fn(review, name), raceCtx);
+  raceCtx.loadReviewScopeResults();
+  // Slider move bumps the request seq while the membership fetch is in flight.
+  raceCtx.reviewScopeRequestSeq++;
+  resolveScope({photo_ids: [1, 2, 3]});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(raceCtx.reviewScopeTotal, 3);
+  assert.deepEqual(Array.from(raceCtx.reviewScopePhotoIds), [1, 2, 3]);
 }
 main().catch(err => { console.error(err); process.exitCode = 1; });
 
