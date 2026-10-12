@@ -1,6 +1,24 @@
 // Import Retry and Resume: in-flight retries, takeovers, and the retry body.
 // Classic page script; load boot.js after all definitions.
 
+function canRestartInPlace(job) {
+  if (!job || job.type !== 'import-in-place' ||
+      ['failed', 'cancelled'].indexOf(job.status) < 0) return false;
+  var cfg = jobConfig(job);
+  return cfg.source_snapshot_id != null ||
+    (Array.isArray(cfg.sources) && cfg.sources.length > 0);
+}
+
+function inPlaceRestartJobId(job) {
+  var local = inPlaceRestarts[job.id];
+  if (local && local.jobId) return local.jobId;
+  var child = activeJobs.concat(historyJobs).find(function(candidate) {
+    return candidate.type === 'import-in-place' &&
+      jobConfig(candidate).restarted_from === job.id;
+  });
+  return child ? child.id : null;
+}
+
 // A retry job carries its parent's id in ``config.parent_import_job_id``
 // and the original failed import's id in ``config.root_import_job_id``
 // (see api_job_import_photos). Suppresses the Retry button on the

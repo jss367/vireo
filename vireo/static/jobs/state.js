@@ -15,6 +15,8 @@ var LEAF_MAX = 20;
 // (every 2s poll) keep showing the optimistic "Cancelling…" state
 // instead of reverting to a fresh "Cancel" button.
 var cancellingJobIds = {};
+// Preserve pending restart controls across polling redraws.
+var inPlaceRestarts = {};
 var collapsedSteps = {};
 var activeWsId = null;
 var workspaceNames = {};

@@ -8,6 +8,7 @@ of the job keeps its progress, scan scope and outcomes on an
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -29,7 +30,69 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def enqueue_import_in_place(service: ImportService, db: Database, body: dict) -> dict | ImportFailure:
+def restart_import_in_place(service: ImportService, db: Database, job_id: str) -> dict | ImportFailure:
+    """Replay saved settings once; later attempts continue from the child run.
+
+    Serialize validation and registration, including filesystem preflight,
+    without holding the runner's lock while inspecting sources.
+    """
+    with service.in_place_restart_lock:
+        parent = db.job_history.get(job_id)
+        if parent is None:
+            return ImportFailure("Import job not found", 404)
+        if parent["type"] != "import-in-place":
+            return ImportFailure("Only in-place imports can be restarted here")
+        live = service.get_runner().get(job_id)
+        status = live["status"] if live else parent["status"]
+        if status not in ("failed", "cancelled"):
+            return ImportFailure("Only failed or cancelled imports can be restarted", 409)
+        if parent["workspace_id"] != db.active_workspace_id:
+            return ImportFailure("Switch to the import's original workspace to restart it", 409)
+        if db.workspaces.get(parent["workspace_id"]) is None:
+            return ImportFailure("The import's original workspace is no longer available", 409)
+        child = next((job for job in service.get_runner().list_jobs()
+                      if job.get("type") == "import-in-place"
+                      and (job.get("config") or {}).get("restarted_from") == job_id), None)
+        child = child or db.job_history.in_place_restart(job_id)
+        if child is not None:
+            return ImportFailure(
+                "This import was already restarted; continue from the later run", 409,
+                {"restart_job_id": child["id"]},
+            )
+        try:
+            config = json.loads(parent["config"])
+        except (TypeError, ValueError):
+            config = None
+        if not isinstance(config, dict):
+            return ImportFailure("The original import settings are no longer available", 409)
+        body = {key: config[key] for key in (
+            "recursive", "after_import", "tags", "location_from_gps", "allow_missing_exiftool",
+        ) if key in config}
+        # Snapshot admission accepts the snapshot id OR explicit roots,
+        # never both. Replaying roots would broaden a frozen file selection.
+        if config.get("source_snapshot_id") is not None:
+            body["source_snapshot_id"] = config["source_snapshot_id"]
+        else:
+            body["sources"] = config.get("sources")
+        # A queued processing job swept as never-started after a crash is
+        # still owed. Recheck the actual handoff rather than inheriting a
+        # permanent skip flag from the previous attempt.
+        owner = job_id
+        if db.job_history.chained_job_row(owner) is None:
+            owner = config.get("after_import_owner") or job_id
+        restart_config = {
+            "restarted_from": job_id,
+            "after_import_owner": owner,
+            "skip_after_import": db.job_history.chained_job_row(owner) is not None,
+        }
+        if "after_import_snapshot" in config:
+            restart_config["after_import_snapshot"] = config["after_import_snapshot"]
+        return enqueue_import_in_place(service, db, body, restart_config=restart_config)
+
+
+def enqueue_import_in_place(
+    service: ImportService, db: Database, body: dict, *, restart_config=None,
+) -> dict | ImportFailure:
     """Import existing folders or a new-images snapshot without copying.
 
     This is the in-place companion to ``/api/jobs/import-photos``: scan
@@ -98,7 +161,19 @@ def enqueue_import_in_place(service: ImportService, db: Database, body: dict) ->
     after_import = None
     if explicit_after_import:
         after_import = body.get("after_import")
-        err = service._validate_after_import(after_import, db)
+        # A restart carrying a frozen ``after_import_snapshot`` captured at
+        # the parent import's enqueue time waives the "process still exists"
+        # check: the snapshot substitutes for ``db.resolve_process`` in
+        # ``_admit_in_place_job``, so a Settings delete between the failed
+        # run and the restart no longer strands the recovery (same pattern
+        # as the archive-import recovery-retry path in ``import_photos.py``).
+        has_frozen_snapshot = (
+            restart_config is not None
+            and restart_config.get("after_import_snapshot") is not None
+        )
+        err = service._validate_after_import(
+            after_import, db, allow_missing=has_frozen_snapshot,
+        )
         if err is not None:
             return err
 
@@ -128,6 +203,7 @@ def enqueue_import_in_place(service: ImportService, db: Database, body: dict) ->
             import_tags=import_tags,
             location_from_gps=location_from_gps,
             conflict_paths=_conflict_paths,
+            restart_config=restart_config,
         )
 
     return service._admit_into_import_workspace(
@@ -140,6 +216,7 @@ def _admit_in_place_job(
     explicit_after_import, after_import, sources, snapshot_paths,
     snapshot_paths_by_root, source_snapshot_id, recursive, import_tags,
     location_from_gps, conflict_paths,
+    restart_config=None,
 ):
     """The admission steps after the workspace switch; returns a job id or
     an ``ImportFailure``. ``runner.start`` must stay the last step."""
@@ -151,11 +228,18 @@ def _admit_in_place_job(
         if err is not None:
             return err
 
-    after_import_snapshot, err = _after_import_process_snapshot(
-        db, after_import,
-    )
-    if err is not None:
-        return err
+    if restart_config and "after_import_snapshot" in restart_config:
+        # Use the frozen snapshot captured when the parent import was
+        # enqueued; skip ``_after_import_process_snapshot`` so a saved
+        # process deleted between the failed run and this restart cannot
+        # strand the recovery.
+        after_import_snapshot = restart_config["after_import_snapshot"]
+    else:
+        after_import_snapshot, err = _after_import_process_snapshot(
+            db, after_import,
+        )
+        if err is not None:
+            return err
 
     runner = service.get_runner()
     thumb_cache_dir = service.config["THUMB_CACHE_DIR"]
@@ -184,6 +268,8 @@ def _admit_in_place_job(
         snapshot_import_lock=snapshot_import_lock,
     )
     job_config = import_job.job_config(body, created_workspace)
+    if restart_config:
+        job_config.update(restart_config)
     # Snapshot-backed imports serialize on ``snapshot_import_lock`` for
     # the entire worker call. Pausing inside that critical section would
     # sleep while holding the shared lock, so a queued second import for
@@ -424,6 +510,7 @@ class _InPlaceImportJob:
             "destination": None,
             "recursive": self.recursive,
             "after_import": self.after_import,
+            "after_import_snapshot": self.after_import_snapshot,
             "tags": self.import_tags,
             "location_from_gps": self.location_from_gps,
             "allow_missing_exiftool": bool(
@@ -450,6 +537,10 @@ class _InPlaceImportJob:
         service = self.service
         after_import = self.after_import
         photo_ids = result.get("photo_ids") or []
+        job_config = job.get("config") or {}
+        if job_config.get("skip_after_import"):
+            result["after_import_skipped"] = "processing already started by an earlier import"
+            return
 
         # A frozen snapshot can still yield existing IDs through the
         # scanner callback when it is replayed. Those IDs make tagging
@@ -460,6 +551,7 @@ class _InPlaceImportJob:
             result.get("ok")
             and result.get("source_snapshot_id") is not None
             and result.get("imported") == 0
+            and not job_config.get("restarted_from")
         ):
             result["after_import_skipped"] = (
                 "import-only" if after_import is None else "no new photos"

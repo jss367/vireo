@@ -92,6 +92,23 @@ function renderJobCard(job, options) {
   html += renderMoveRoute(job);
   html += renderSourceCleanup(job);
 
+  if (canRestartInPlace(job)) {
+    var restartedJobId = inPlaceRestartJobId(job);
+    var restarting = inPlaceRestarts[job.id] && inPlaceRestarts[job.id].pending;
+    html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';
+    if (restartedJobId) {
+      html += 'Already restarted. <button class="btn-retry" data-show-job="' +
+        escapeAttr(restartedJobId) + '">Show restarted import</button>';
+    } else {
+      html += '<button class="btn-retry" data-restart-in-place="' + escapeAttr(job.id) + '"' +
+        (restarting ? ' disabled aria-disabled="true"' : '') + '>' +
+        (restarting ? 'Restarting…' : 'Restart import') + '</button>';
+      html += '<span style="margin-left:8px;">Rescans the original selection in the same workspace, ' +
+        'reusing unchanged catalog records. Progress starts over.</span>';
+    }
+    html += '</div>';
+  }
+
   var failedImportCount = job.result && Number(job.result.failed || 0);
   // Once a later resume or retry took over, the server refuses both
   // Resume and Retry on this row (409), so neither is offered; say where

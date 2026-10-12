@@ -409,11 +409,17 @@ class ImportService:
         # observe prior catalog admissions instead of claiming them again.
         self.snapshot_import_locks = {}
         self.snapshot_import_locks_guard = threading.Lock()
+        self.in_place_restart_lock = threading.Lock()
 
     def import_in_place(self, db: Database, body: dict) -> dict | ImportFailure:
         from services.import_in_place import enqueue_import_in_place
 
         return enqueue_import_in_place(self, db, body)
+
+    def restart_in_place(self, db: Database, job_id: str) -> dict | ImportFailure:
+        from services.import_in_place import restart_import_in_place
+
+        return restart_import_in_place(self, db, job_id)
 
     def import_photos(self, db: Database, body: dict) -> dict | ImportFailure:
         from services.import_photos import enqueue_import_photos

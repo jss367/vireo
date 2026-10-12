@@ -17,6 +17,47 @@ function bindDetailPaneActions() {
       selectJob(showJobId, inActive ? 'active' : 'history');
       return;
     }
+    var restartInPlaceBtn = e.target.closest('[data-restart-in-place]');
+    if (restartInPlaceBtn) {
+      var restartId = restartInPlaceBtn.getAttribute('data-restart-in-place');
+      if (inPlaceRestarts[restartId]) return;
+      inPlaceRestarts[restartId] = {pending: true};
+      restartInPlaceBtn.disabled = true;
+      restartInPlaceBtn.textContent = 'Restarting…';
+      fetch('/api/jobs/import-in-place/' + encodeURIComponent(restartId) + '/restart', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: '{}',
+      }).then(function(response) {
+        return response.json().catch(function() { return {}; }).then(function(data) {
+          if (!response.ok && !data.restart_job_id) {
+            throw new Error(data.error || 'Import failed to restart');
+          }
+          return {jobId: data.job_id || data.restart_job_id, alreadyRestarted: !response.ok};
+        });
+      }).then(function(data) {
+        inPlaceRestarts[restartId] = {jobId: data.jobId};
+        if (typeof showToast === 'function') {
+          showToast(data.alreadyRestarted ? 'This import was already restarted. Showing the later run.' :
+            'Import restarted. Rescanning the original selection; unchanged catalog records are reused.', 'info');
+        }
+        selectedJobId = data.jobId;
+        selectedSource = 'active';
+        currentView = data.jobId;
+        fetchJobs();
+      }).catch(function(error) {
+        delete inPlaceRestarts[restartId];
+        restartInPlaceBtn.disabled = false;
+        restartInPlaceBtn.textContent = 'Restart import';
+        if (selectedJobId === restartId) {
+          var originalImport = activeJobs.concat(historyJobs).find(function(job) { return job.id === restartId; });
+          if (originalImport) renderHistoryDetail(originalImport);
+        }
+        if (typeof showToast === 'function') showToast(error.message, 'error');
+        fetchHistory();
+      });
+      return;
+    }
     var retryImportBtn = e.target.closest('[data-retry-import-job]');
     if (retryImportBtn) {
       var retryJobId = retryImportBtn.getAttribute('data-retry-import-job');
