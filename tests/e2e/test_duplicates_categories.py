@@ -118,7 +118,10 @@ def test_category_limits_reject_and_trash_actions(live_server, page):
     expect(_category(page, "all")).to_contain_text("6 groups · 6 extra copies")
     _category(page, "numbered-across-folders").click()
     page.locator("#applyBtn").click()
-    expect(page.locator("#summary")).to_be_hidden()
+    expect(page.locator(".dup-group[data-hash='numberedAcross']")).to_have_count(0)
+    expect(_category(page, "all")).to_contain_text("5 groups · 5 extra copies")
+    expect(page.locator(".dup-group[data-hash='same1']")).to_be_visible()
+    expect(page.locator("#applyStatus")).to_have_text("")
     assert requests == [{"photo_ids": [2]}, {"hashes": ["numberedAcross"]}]
 
 
@@ -136,3 +139,72 @@ def test_category_counts_respect_library_filters_and_protected_groups(live_serve
     expect(page.locator("#trashAllBtn")).to_have_count(0)
     expect(page.locator(".trash-btn")).to_have_count(0)
     expect(page.locator(".dup-group .group-warning")).to_contain_text("kept file")
+
+
+def test_category_switch_preserves_exclusions_and_remaining_results(live_server, page):
+    _show_patterns(live_server, page)
+    requests = []
+    page.route("**/api/duplicates/apply", lambda route: (
+        requests.append(route.request.post_data_json),
+        route.fulfill(content_type="application/json", body='{"rejected_count": 1}'),
+    ))
+    _category(page, "same-name-across-folders").click()
+    excluded = page.locator(".dup-group[data-hash='same1'] .group-check")
+    excluded.uncheck()
+    _category(page, "numbered-across-folders").click()
+    _category(page, "same-name-across-folders").click()
+    expect(excluded).not_to_be_checked()
+    expect(page.locator("#applyBtn")).to_have_text("Reject 1 extra copy")
+    page.locator("#applyBtn").click()
+    expect(page.locator(".dup-group[data-hash='same2']")).to_have_count(0)
+    expect(excluded).not_to_be_checked()
+    expect(page.locator("#applyBtn")).to_be_disabled()
+    assert requests == [{"hashes": ["same2"]}]
+    expect(_category(page, "all")).to_contain_text("6 groups · 6 extra copies")
+    _category(page, "all").click()
+    expect(page.locator(".dup-group[data-hash='numberedAcross']")).to_be_visible()
+    expect(excluded).not_to_be_checked()
+
+
+def test_scoped_rejection_preserves_deferred_and_unsubmitted_groups(live_server, page):
+    _show_patterns(live_server, page)
+    page.route("**/api/duplicates/apply", lambda route: route.fulfill(
+        content_type="application/json",
+        body='{"rejected_count": 1, "deferred_hashes": ["same2"]}',
+    ))
+    _category(page, "same-name-across-folders").click()
+    page.locator("#applyBtn").click()
+    expect(page.locator(".dup-group[data-hash='same1']")).to_have_count(0)
+    expect(page.locator(".dup-group[data-hash='same2'] .group-check")).to_be_checked()
+    expect(page.locator("#applyStatus")).to_contain_text("1 group deferred")
+    expect(_category(page, "all")).to_contain_text("6 groups · 6 extra copies")
+    _category(page, "numbered-across-folders").click()
+    expect(page.locator(".dup-group[data-hash='numberedAcross']")).to_be_visible()
+
+
+def test_partial_cleanup_moves_remaining_actions_to_updated_category(live_server, page):
+    _show_patterns(live_server, page)
+    page.evaluate("""() => {
+      var group = _proposals.find(p => p.file_hash === 'same1');
+      group.status = 'resolved';
+      group.losers.push({id: 20, filename: 'DSC_1127-2.NEF',
+        path: '/a/DSC_1127-2.NEF', file_size: 1000, exists: true});
+      renderResults(_lastScanResult);
+    }""")
+    requests = []
+    page.route("**/api/duplicates/delete-loser-files", lambda route: (
+        requests.append(route.request.post_data_json),
+        route.fulfill(content_type="application/json", body='{"trashed": 1, "skipped": [], "failed": []}'),
+    ))
+    _category(page, "numbered-across-folders").click()
+    page.locator(".dup-card[data-photo-id='20'] .trash-btn").click()
+    expect(page.locator(".cleanup-category-note")).to_contain_text("1 extra copy cleaned up")
+    expect(page.locator(".cleanup-category-note")).to_contain_text("Same name across folders")
+    expect(page.locator(".dup-group[data-hash='same1']")).to_have_count(0)
+    expect(page.locator("#trashAllBtn")).to_have_count(0)
+    expect(page.locator(".trash-btn")).to_have_count(0)
+    assert requests == [{"photo_ids": [20]}]
+    page.locator(".cleanup-category-note button").click()
+    expect(page.locator(".dup-group[data-hash='same1'] .category-badge")).to_have_text("Same name across folders")
+    expect(page.locator(".dup-card[data-photo-id='4'] .trash-btn")).to_be_visible()
+    expect(page.locator("#trashAllBtn")).to_contain_text("Move 1 extra copy")
