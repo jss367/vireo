@@ -392,9 +392,19 @@ function maybeRefreshCollectionScopeMembership() {
       // getActiveSelection() prioritizes and its P/X shortcut writes
       // against. If the dropped photo is the one being inspected, close
       // the inspector so a stale id can't be mutated after its card has
-      // disappeared from the grid.
-      if (typeof inspectPhotoId !== 'undefined' && inspectPhotoId != null && !newIds.has(inspectPhotoId)) {
-        closeInspect();
+      // disappeared from the grid. If the inspected photo is retained
+      // but another encounter member just left scope, the open panel's
+      // filmstrip HTML still shows the dropped photo's thumbnail with an
+      // openInspect() link; clicking it would set inspectPhotoId to the
+      // hidden photo and let the P/X shortcut mutate it. Rebuild the
+      // panel against the refreshed scope so the filmstrip's
+      // photoInReviewScope filter re-runs.
+      if (typeof inspectPhotoId !== 'undefined' && inspectPhotoId != null) {
+        if (!newIds.has(inspectPhotoId)) {
+          closeInspect();
+        } else {
+          openInspect(inspectPhotoId);
+        }
       }
       renderResults();
       // statTotalPhotos, encounter/burst totals and confirmation counts are

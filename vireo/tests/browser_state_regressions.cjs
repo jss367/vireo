@@ -156,6 +156,8 @@ async function main() {
     clearTimeout() {},
     safeFetch: async () => ({photo_ids: [20]}),
     closeInspect() { inspectorClosed++; inspectorDropHolder.inspectPhotoId = null; },
+    openInspect(id) { inspectorDropHolder.openInspectCalls.push(id); },
+    openInspectCalls: [],
   });
   const inspectorDropHolder = inspectorDrop;
   for (const name of [
@@ -168,11 +170,17 @@ async function main() {
   assert.equal(inspectorClosed, 1,
     'inspector must close when its photo leaves the collection');
   assert.equal(inspectorDrop.inspectPhotoId, null);
+  assert.deepEqual(inspectorDrop.openInspectCalls, [],
+    'inspector must not reopen on a dropped inspected photo');
 
   // A membership refresh that keeps the inspected photo in scope must not
   // close the inspector. The user has not changed scope and the photo is
   // still visible, so dismissing the open panel would be a regression.
+  // When another member of the inspected encounter is dropped, the panel
+  // must be rebuilt so its filmstrip's photoInReviewScope filter re-runs
+  // and the hidden photo's clickable thumbnail disappears.
   let keepClosed = 0;
+  const keepOpened = [];
   const inspectorKeep = vm.createContext({
     window: {},
     pipelineReviewContextPhotoIds: [],
@@ -194,6 +202,7 @@ async function main() {
     clearTimeout() {},
     safeFetch: async () => ({photo_ids: [10]}),
     closeInspect() { keepClosed++; },
+    openInspect(id) { keepOpened.push(id); },
   });
   for (const name of [
     'clearPipelineReviewContextSelection',
@@ -205,6 +214,8 @@ async function main() {
   assert.equal(keepClosed, 0,
     'inspector must stay open when its photo remains in the collection');
   assert.equal(inspectorKeep.inspectPhotoId, 10);
+  assert.deepEqual(keepOpened, [10],
+    'inspector must rebuild its panel so the filmstrip drops out-of-scope photos');
 
 
   // renderAlgorithmTrace must suppress openInspect links on pair photos
