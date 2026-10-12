@@ -136,6 +136,16 @@ async function trashAllLoserFiles() {
   _duplicateTrashActive = true;
   if (btn) { btn.disabled = true; btn.textContent = 'Moving to Trash...'; }
 
+  // Claim per-file state for every bulk ID so individual Trash buttons stay
+  // disabled for the duration — a filter/category render in flight would
+  // otherwise recreate them enabled, and a click would race the bulk
+  // request on an ID it already owns.
+  ids.forEach(function(id) {
+    _duplicateFileTrashState.set(
+      id, {pending: true, terminal: false, message: 'Moving to Trash...'});
+    updateDuplicateFileTrashCard(id);
+  });
+
   try {
     var data = await trashLoserFilesInBatches(
       ids,
@@ -157,9 +167,68 @@ async function trashAllLoserFiles() {
               ' files: ' + (e.message || 'request failed') +
               '. Use the button to retry the remaining files.', 'error');
   } finally {
+    // Release the pending claim set above. applyTrashBatchToCards already
+    // deleted entries for successes and rewrote them for skips/failures;
+    // this handles whole-batch failures that never reached that callback,
+    // and leaves the latest message visible across category re-renders.
+    ids.forEach(function(id) {
+      var state = _duplicateFileTrashState.get(id);
+      if (state && state.pending) {
+        state.pending = false;
+        updateDuplicateFileTrashCard(id);
+      }
+    });
     _duplicateTrashActive = false;
     refreshTrashAllButton(document.getElementById('trashAllBtn'));
   }
+}
+
+function applyTrashBatchToCards(data, requestedIds) {
+  // "file already missing" still deletes the orphan DB row, so it is a
+  // terminal completion even though no file needed to be moved.
+  var terminalSkips = new Set(['file already missing']);
+  var completedSet = new Set(requestedIds);
+  (data.skipped || []).forEach(function(s) {
+    if (!terminalSkips.has(s.reason)) completedSet.delete(s.id);
+  });
+  (data.failed || []).forEach(function(f) { completedSet.delete(f.id); });
+  completedSet.forEach(function(pid) {
+    var card = document.querySelector('.dup-card[data-photo-id="' + pid + '"]');
+    if (card) {
+      card.classList.add('trashed');
+      var status = card.querySelector('[data-trash-status]');
+      if (status) status.textContent = 'Cleaned up';
+    }
+    // Drop any cached per-file state so a later re-render cannot repaint
+    // a stale earlier message onto a now-cleaned copy.
+    _duplicateFileTrashState.delete(pid);
+  });
+  forgetCleanedDuplicateCopies(completedSet);
+  (data.skipped || []).forEach(function(s) {
+    if (terminalSkips.has(s.reason)) return;
+    var card = document.querySelector('.dup-card[data-photo-id="' + s.id + '"]');
+    if (card) {
+      var status = card.querySelector('[data-trash-status]');
+      if (status) status.textContent = 'Skipped: ' + (s.reason || '');
+    }
+    // Reconcile the cached state so a category switch repaints this
+    // outcome rather than an earlier single-file attempt's message.
+    _duplicateFileTrashState.set(s.id, {
+      pending: false, terminal: false,
+      message: 'Skipped: ' + (s.reason || ''),
+    });
+  });
+  (data.failed || []).forEach(function(f) {
+    var card = document.querySelector('.dup-card[data-photo-id="' + f.id + '"]');
+    if (card) {
+      var status = card.querySelector('[data-trash-status]');
+      if (status) status.textContent = 'Failed: ' + (f.error || '');
+    }
+    _duplicateFileTrashState.set(f.id, {
+      pending: false, terminal: false,
+      message: 'Failed: ' + (f.error || ''),
+    });
+  });
 }
 
 function showBucketTrashRetry(card, remainingIds, resolvedHashes) {

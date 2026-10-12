@@ -1283,41 +1283,6 @@
     return summary;
   }
 
-  function applyTrashBatchToCards(data, requestedIds) {
-    // "file already missing" still deletes the orphan DB row, so it is a
-    // terminal completion even though no file needed to be moved.
-    var terminalSkips = new Set(['file already missing']);
-    var completedSet = new Set(requestedIds);
-    (data.skipped || []).forEach(function(s) {
-      if (!terminalSkips.has(s.reason)) completedSet.delete(s.id);
-    });
-    (data.failed || []).forEach(function(f) { completedSet.delete(f.id); });
-    completedSet.forEach(function(pid) {
-      var card = document.querySelector('.dup-card[data-photo-id="' + pid + '"]');
-      if (card) {
-        card.classList.add('trashed');
-        var status = card.querySelector('[data-trash-status]');
-        if (status) status.textContent = 'Cleaned up';
-      }
-    });
-    forgetCleanedDuplicateCopies(completedSet);
-    (data.skipped || []).forEach(function(s) {
-      if (terminalSkips.has(s.reason)) return;
-      var card = document.querySelector('.dup-card[data-photo-id="' + s.id + '"]');
-      if (card) {
-        var status = card.querySelector('[data-trash-status]');
-        if (status) status.textContent = 'Skipped: ' + (s.reason || '');
-      }
-    });
-    (data.failed || []).forEach(function(f) {
-      var card = document.querySelector('.dup-card[data-photo-id="' + f.id + '"]');
-      if (card) {
-        var status = card.querySelector('[data-trash-status]');
-        if (status) status.textContent = 'Failed: ' + (f.error || '');
-      }
-    });
-  }
-
   function refreshTrashAllButton(btn) {
     if (!btn) return;
     var remaining = 0;
