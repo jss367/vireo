@@ -1,9 +1,10 @@
 """Structural guard for the ``photo_keywords.source`` provenance contract.
 
-``retire_builtin_wildlife_genre()`` deletes keyword associations it reads as
-generated. The only thing standing between a hand-added keyword and that
-delete is ``photo_keywords.source = 'manual'``, so the contract cannot rest on
-every future author remembering to stamp it.
+A retirement pass deletes keyword associations it reads as generated (the
+one-shot Wildlife genre retirement, since removed, was the first). The only
+thing standing between a hand-added keyword and that delete is
+``photo_keywords.source = 'manual'``, so the contract cannot rest on every
+future author remembering to stamp it.
 
 Three mechanisms enforce it, and this module pins all three:
 
@@ -73,15 +74,14 @@ PROVENANCE_FOLD_SYMBOLS = {
 # row onto one that may already exist). Each is a convergence point: two
 # claims about the same (photo, keyword) meet and one survives.
 #
-# ``Database.tag_photo``, ``_merge_keyword_into``, ``link_keyword_to_place``
-# and ``retire_builtin_wildlife_genre`` are one-line wrappers; their writes
-# live in ``KeywordProvenanceRepository`` under the names keyed here.
+# ``Database.tag_photo``, ``_merge_keyword_into`` and ``link_keyword_to_place``
+# are one-line wrappers; their writes live in ``KeywordProvenanceRepository``
+# under the names keyed here.
 _PROVENANCE_MODULE = "repositories/keyword_provenance.py"
 PROVENANCE_CONVERGENCE_POINTS = {
     (_PROVENANCE_MODULE, "tag"): "re-tag folds against the row already there",
     (_PROVENANCE_MODULE, "merge_keyword_into"): "keyword merge repoints rows onto dst",
     (_PROVENANCE_MODULE, "link_keyword_to_place"): "place link repoints rows onto canonical",
-    (_PROVENANCE_MODULE, "retire_builtin_wildlife_genre"): "latches sidecar verdict to the top",
     ("scanner.py", "_transfer_companion_keywords"): "pairing copies companion keywords",
     ("repositories/folders.py", "merge_into_existing"): "folder merge carries loser's keywords onto the survivor",
     ("repositories/moves_merge.py", "_carry_embedded_keyword_associations"): "staged merge preserves embedded association stamps",
@@ -200,7 +200,7 @@ def test_only_sidecar_readers_decline_manual_provenance():
     assert neutral == set(PROVENANCE_NEUTRAL_WRITERS), (
         "Provenance-neutral tagging is limited to the sidecar readers. A "
         "writer that leaves source NULL produces associations that "
-        "retire_builtin_wildlife_genre() reads as generated and deletes. If "
+        "a retirement pass reads as generated and deletes. If "
         "the new site really cannot know authorship, add it to "
         "PROVENANCE_NEUTRAL_WRITERS with a reason; otherwise let it take the "
         "manual default.\n"

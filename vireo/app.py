@@ -1633,11 +1633,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # on photos; species marking no longer materializes a Wildlife keyword.
     import threading
 
-    # Tests and one-shot tools can invoke the pass deterministically without
-    # enabling production timers. Production schedules it only after every
-    # route has been registered, immediately before create_app returns.
-    app._retire_wildlife_genre = startup.retire_wildlife_genre
-
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         threading.Thread(target=startup.mark_species, daemon=True).start()
 
@@ -2117,16 +2112,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # when the view it aliases is, so the two surfaces can't drift.
         if endpoint_name in _reservation_exempt_endpoints:
             _reservation_exempt_endpoints.add(v1_endpoint)
-
-    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
-        # Give the main thread enough time to return from create_app and bind
-        # the HTTP listener before this potentially multi-minute XMP scan
-        # starts competing for filesystem and interpreter time.
-        _wildlife_retirement_timer = threading.Timer(
-            1.0, startup.retire_wildlife_genre,
-        )
-        _wildlife_retirement_timer.daemon = True
-        _wildlife_retirement_timer.start()
 
     return app
 

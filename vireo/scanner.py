@@ -476,39 +476,6 @@ def _import_keyword_lists(db, photo_id, flat_keywords, hier_keywords):
         db.tag_photo(photo_id, kid, source=KEYWORD_SOURCE_UNKNOWN)
         existing_keys.add(key)
 
-    # A background Wildlife retirement pass may have completed its final
-    # population check after this scanner read the sidecar but before the
-    # imported taxonomy association committed. Re-arm the one-shot marker
-    # whenever this import makes an existing non-manual Wildlife genre
-    # eligible. If the migration still holds its final writer lock, this
-    # write runs afterward; if it has not checked yet, its own locked query
-    # sees the candidate. Either ordering guarantees a later retry.
-    newly_eligible_wildlife = db.conn.execute(
-        """SELECT 1
-           FROM photo_keywords wildlife_pk
-           JOIN keywords wildlife_k
-             ON wildlife_k.id = wildlife_pk.keyword_id
-           WHERE wildlife_pk.photo_id = ?
-             AND wildlife_k.name = 'Wildlife' COLLATE NOCASE
-             AND wildlife_k.type = 'genre'
-             AND wildlife_k.parent_id IS NULL
-             AND (wildlife_pk.source IS NULL
-                  OR wildlife_pk.source <> 'manual')
-             AND EXISTS (
-                 SELECT 1
-                 FROM photo_keywords species_pk
-                 JOIN keywords species_k
-                   ON species_k.id = species_pk.keyword_id
-                 WHERE species_pk.photo_id = wildlife_pk.photo_id
-                   AND (species_k.type = 'taxonomy'
-                        OR species_k.is_species = 1)
-             )
-           LIMIT 1""",
-        (photo_id,),
-    ).fetchone()
-    if newly_eligible_wildlife is not None:
-        db.set_meta(db._RETIRED_WILDLIFE_GENRE_KEY, "0")
-
 
 EMBEDDED_KEYWORDS_BACKFILL_KEY = "embedded_keywords_backfill_v1"
 

@@ -1104,7 +1104,6 @@ def test_prune_keeps_newest_and_undone_and_other_workspaces(db, pids, max_histor
     ws = db._active_workspace_id
     other = db.create_workspace("Other")
     db.set_active_workspace(ws)
-    db.set_meta(Database._RETIRED_WILDLIFE_GENRE_KEY, "1")
     old1 = _raw_edit(db, "rating", "1", created_at="2024-01-01 00:00:00")
     old2 = _raw_edit(db, "rating", "2", created_at="2024-01-02 00:00:00")
     undone = _raw_edit(db, "rating", "3", undone=1, created_at="2024-01-01 00:00:00")
@@ -1122,40 +1121,10 @@ def test_prune_keeps_newest_and_undone_and_other_workspaces(db, pids, max_histor
 
 
 def test_prune_defaults_to_1000_when_unset(db, max_history):
-    db.set_meta(Database._RETIRED_WILDLIFE_GENRE_KEY, "1")
     max_history["value"] = 0
     ids = [_raw_edit(db, "rating", str(i)) for i in range(3)]
     db._prune_edit_history()
     assert [r["id"] for r in _history_rows(db)] == ids
-
-
-def test_prune_protects_wildlife_discard_until_retired(db, pids, max_history):
-    max_history["value"] = 1
-    db.set_meta(Database._RETIRED_WILDLIFE_GENRE_KEY, "0")
-    protected = _raw_edit(db, "discard", None, created_at="2024-01-01 00:00:00",
-                          items=[(pids[0], "keyword_add:WILDLIFE", None)])
-    plain_discard = _raw_edit(db, "discard", None,
-                              created_at="2024-01-01 00:00:01",
-                              items=[(pids[0], "keyword_add:Hawk", None)])
-    rating_wild = _raw_edit(db, "rating", None, created_at="2024-01-01 00:00:02",
-                            items=[(pids[0], "keyword_add:Wildlife", None)])
-    newest = _raw_edit(db, "rating", "1", created_at="2024-01-02 00:00:00")
-
-    db._prune_edit_history()
-    remaining = {r["id"] for r in _history_rows(db)}
-    assert remaining == {protected, newest}
-    assert plain_discard not in remaining and rating_wild not in remaining
-
-    db.set_meta(Database._RETIRED_WILDLIFE_GENRE_KEY, "1")
-    db._prune_edit_history()
-    assert {r["id"] for r in _history_rows(db)} == {newest}
-
-
-def test_prune_routes_through_get_meta(db, max_history, monkeypatch):
-    keys = []
-    monkeypatch.setattr(db, "get_meta", lambda key: keys.append(key) or "1")
-    db._prune_edit_history()
-    assert keys == [Database._RETIRED_WILDLIFE_GENRE_KEY]
 
 
 def test_prune_requires_active_workspace(db, max_history):
@@ -1165,7 +1134,6 @@ def test_prune_requires_active_workspace(db, max_history):
 
 
 def test_record_edit_prunes_after_commit(db, pids, max_history):
-    db.set_meta(Database._RETIRED_WILDLIFE_GENRE_KEY, "1")
     max_history["value"] = 1
     _raw_edit(db, "rating", "1", created_at="2020-01-01 00:00:00")
     newest = _rating_edit(db, pids[0], 0, 1)

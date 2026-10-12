@@ -1406,8 +1406,7 @@ def test_species_curation_repository_never_touches_keyword_writers():
 
     source = inspect.getsource(module)
     for writer in ("tag_photo", "untag_photo", "_merge_keyword_into",
-                   "link_keyword_to_place", "retire_builtin_wildlife_genre",
-                   "photo_keywords ("):
+                   "link_keyword_to_place", "photo_keywords ("):
         assert writer not in source
 
 
