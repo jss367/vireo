@@ -693,18 +693,18 @@ def test_add_to_collection_dismisses_lightbox_opened_during_pending_fetch(live_s
       const id = parseInt(card.dataset.id, 10);
       openLightbox(id, card.dataset.filename || '', availableBrowsePhotos());
     }""")
-    expect(page.locator("#lightboxOverlay")).to_have_class("active")
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
     # Release the stalled fetch. addToCollection must close the lightbox
     # before opening the dialog so no opener-guarded sibling is left
     # visible-but-inert when the dialog becomes the top overlay.
     page.evaluate("window._releaseCollectionsFetch = true")
     dialog = page.get_by_role("dialog", name="Add 1 photo(s) to collection", exact=True)
     expect(dialog).to_be_visible()
-    expect(page.locator("#lightboxOverlay")).not_to_have_class("active")
+    expect(page.locator("#lightboxOverlay")).not_to_have_class("lightbox-overlay active")
     # One Escape closes the dialog cleanly; focus returns to the opener.
     page.keyboard.press("Escape")
     expect(dialog).to_be_hidden()
-    expect(page.locator("#lightboxOverlay")).not_to_have_class("active")
+    expect(page.locator("#lightboxOverlay")).not_to_have_class("lightbox-overlay active")
     expect(opener).to_be_focused()
 
 
