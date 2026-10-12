@@ -555,6 +555,17 @@ async function addToCollection(returnFocus) {
   }
   document.getElementById('batchCollectionList').innerHTML = listHtml;
   document.getElementById('batchCollectionNewName').value = '';
+  // Codex P2: while the /api/collections request was in flight, Ctrl/Cmd+K's
+  // hasActive() guard saw no managed dialog on the stack and could have
+  // opened the command palette. Opening the dialog now would mark its branch
+  // inert via updateBackground() but leave the (higher z-index) palette
+  // visible-but-inert covering the dialog, Escape would then dismiss the
+  // dialog instead of the palette, and closing the dialog would restore
+  // focus behind the still-open palette. Dismiss it before the dialog takes
+  // the top of the stack so no opener-guarded sibling races the open path.
+  if (typeof window.closeCommandPalette === 'function') {
+    window.closeCommandPalette();
+  }
   batchCollectionDialog.open(returnFocus);
 }
 
