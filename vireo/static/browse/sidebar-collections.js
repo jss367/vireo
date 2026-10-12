@@ -43,7 +43,10 @@ function renderCollectionList(collections) {
     var visualMark = c.visual_json
       ? '<span class="collection-visual-mark" title="Includes a visual search clause">\u2726</span>'
       : '';
-    html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '"' + titleAttr + ' onclick="filterByCollection(' + c.id + ')">' +
+    // tabindex="-1" keeps the row out of Tab order (clicks already select
+    // it) while letting the context menu's Edit Rules return focus here on
+    // Escape/Cancel — a plain <div> cannot receive programmatic focus.
+    html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" tabindex="-1"' + titleAttr + ' onclick="filterByCollection(' + c.id + ')">' +
       '<span class="collection-name">' + escapeHtml(c.name) + '</span>' + visualMark +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
       resolveBtn +

@@ -612,6 +612,12 @@ async function confirmBatchCollection() {
   showToast('Added ' + ids.length + ' photos to "' + collectionName + '"', 'success');
   loadCollections();
   clearSelection();
+  // hideBatchCollectionModal() restored focus to the + Collection button, but
+  // clearSelection() then hides the batch bar with display:none, so the opener
+  // is now an invisible focus target. Move focus to the grid — the stable
+  // page control the user came from — so the next Tab starts somewhere real.
+  var grid = document.getElementById('grid');
+  if (grid) grid.focus({preventScroll: true});
 }
 
 function reviewLocationsForCollection(collectionId, mode) {

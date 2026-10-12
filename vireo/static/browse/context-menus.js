@@ -809,9 +809,15 @@ document.addEventListener('contextmenu', function(e) {
       });
     }
   }
+  // The context menu removes the clicked item before invoking its callback,
+  // and the collection row is tabindex=-1 (not in Tab order) but focusable
+  // programmatically, so capture the row now and pass it as the return
+  // target. Without this the editor restores focus to document.body on
+  // Escape or Cancel.
+  var editReturnFocus = ti;
   var editActions = [
     { label: 'Edit Rules',
-      onClick: function() { editCollection(cid); } },
+      onClick: function() { editCollection(cid, editReturnFocus); } },
     { label: 'Rename',
       onClick: function() { renameCollection(cid, name); } },
     { label: 'Duplicate',

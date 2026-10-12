@@ -236,3 +236,43 @@ def test_edit_collection_escape_clears_edit_state(live_server, page):
     page.keyboard.press("Escape")
     expect(opener).to_be_focused()
     assert page.evaluate("collectionEditingId") is None
+
+
+def test_edit_rules_context_menu_restores_focus_to_collection_row(live_server, page):
+    # The context menu removes the clicked item before firing its onClick, and
+    # the collection row is tabindex=-1 (not in Tab order). Codex P2: without
+    # a captured return target the editor falls back to document.body, so Esc
+    # cannot restore focus to the row that launched it.
+    collection_id = live_server["db"].add_collection("Right-click target", "[]")
+    open_browse(page, live_server)
+    row = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
+    )
+    row.click(button="right")
+    page.get_by_text("Edit Rules", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Edit Smart Collection", exact=True)
+    expect(dialog.get_by_role("textbox", name="Collection name")).to_have_value("Right-click target")
+    page.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    expect(row).to_be_focused()
+
+
+def test_confirm_batch_collection_moves_focus_to_grid_not_hidden_opener(live_server, page):
+    # confirmBatchCollection calls clearSelection() after the dialog closes;
+    # that hides the batch bar with display:none, leaving the + Collection
+    # opener an invisible focus target. Codex P2: focus must land on a stable
+    # page control instead.
+    collection_id = live_server["db"].add_collection("Pick target", "[]")
+    open_browse(page, live_server)
+    opener = page.locator("#batchBar").get_by_role("button", name="+ Collection", exact=True)
+    opener.click()
+    dialog = page.get_by_role("dialog", name="Add 1 photo(s) to collection", exact=True)
+    choice = dialog.get_by_role("button", name="Pick target", exact=True)
+    choice.click()
+    assert page.evaluate("_batchCollectionSelectedId") == collection_id
+    dialog.get_by_role("button", name="Add", exact=True).click()
+    expect(dialog).to_be_hidden()
+    # The batch bar hides once the selection is cleared, so the opener is no
+    # longer visible and would be an invalid focus target.
+    expect(page.locator("#batchBar")).to_be_hidden()
+    expect(page.locator("#grid")).to_be_focused()

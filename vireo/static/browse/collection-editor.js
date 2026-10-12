@@ -588,14 +588,14 @@ function serializeCollectionRules() {
   return coerceRuleForSave(collectionEditorRoot);
 }
 
-async function editCollection(cid) {
+async function editCollection(cid, returnFocus) {
   var collection = collectionsById[cid];
   if (!collection) {
     var list = await safeFetch('/api/collections', {}, {toast: false});
     renderCollectionList(list || []);
     collection = collectionsById[cid];
   }
-  if (collection) showCollectionModal(collection);
+  if (collection) showCollectionModal(collection, returnFocus);
 }
 
 async function saveCollection() {
