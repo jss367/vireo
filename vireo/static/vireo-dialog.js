@@ -74,7 +74,19 @@
       // Own every Tab step: WebKit's default keyboard preference can skip
       // buttons and move focus into browser chrome even with an inert page.
       event.preventDefault();
-      (elements[next] || overlay).focus({preventScroll: true});
+      const target = elements[next] || overlay;
+      target.focus({preventScroll: true});
+      // Codex P2: a dialog's own scrollable list (e.g. the batch
+      // Add-to-Collection chooser's max-height:200px overflow-y:auto area)
+      // would otherwise hide the newly focused button when Tab lands below
+      // the fold, since preventScroll suppresses the browser's default
+      // focus-scroll. block/inline 'nearest' only scrolls the nearest
+      // scrollable ancestor that already needs to scroll to show the
+      // element, so visible controls are untouched and the page-level
+      // scroll (already locked while a dialog is open) is unaffected.
+      if (typeof target.scrollIntoView === 'function') {
+        target.scrollIntoView({block: 'nearest', inline: 'nearest'});
+      }
     }
 
     /** @param {FocusEvent} event */

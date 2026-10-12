@@ -616,8 +616,20 @@ async function confirmBatchCollection() {
   // clearSelection() then hides the batch bar with display:none, so the opener
   // is now an invisible focus target. Move focus to the grid — the stable
   // page control the user came from — so the next Tab starts somewhere real.
-  var grid = document.getElementById('grid');
-  if (grid) grid.focus({preventScroll: true});
+  // Codex P2: the add-photos request between the dialog close and here is
+  // async, so the user may have moved focus to another stable control while
+  // it was pending. Only move focus when it is actually on something the
+  // batch-bar hide just invalidated — the hidden batch bar or document.body
+  // (where browsers park focus when its target is removed/hidden). Any
+  // other visible control is the user's active choice and we leave it.
+  var active = document.activeElement;
+  var batchBar = document.getElementById('batchBar');
+  var focusLost = !active || active === document.body ||
+      (batchBar && batchBar.contains(active));
+  if (focusLost) {
+    var grid = document.getElementById('grid');
+    if (grid) grid.focus({preventScroll: true});
+  }
 }
 
 function reviewLocationsForCollection(collectionId, mode) {

@@ -58,6 +58,41 @@ def test_shared_dialog_contains_tab_and_recomputes_changed_controls(page):
     expect(page.locator("#firstInput")).to_be_focused()
 
 
+def test_shared_dialog_tab_scrolls_focused_control_into_view_inside_dialog(page):
+    # Codex P2: a dialog's own scrollable list (e.g. the batch
+    # Add-to-Collection chooser's max-height:200px overflow-y:auto area)
+    # would otherwise hide the newly focused button when Tab lands below
+    # the fold, since the Tab-trap focus() call used preventScroll: true.
+    # scrollIntoView('nearest') on the newly focused element must now scroll
+    # the dialog's own list, without disturbing already-visible controls.
+    mount_dialogs(page)
+    page.evaluate("""() => {
+      const dialog = document.getElementById('first');
+      const list = document.createElement('div');
+      list.id = 'tallList';
+      list.style.maxHeight = '80px';
+      list.style.overflowY = 'auto';
+      for (let i = 0; i < 20; i++) {
+        const b = document.createElement('button');
+        b.id = 'row' + i;
+        b.textContent = 'Row ' + i;
+        b.style.display = 'block';
+        b.style.height = '32px';
+        list.appendChild(b);
+      }
+      dialog.appendChild(list);
+      list.scrollTop = 0;
+    }""")
+    expect(page.locator("#firstInput")).to_be_focused()
+    # Tab path: firstInput -> firstLast -> row0 -> row1 -> ... -> row8 is
+    # well below the 80px fold, so if the Tab-trap did not scroll it the
+    # user would lose the focus indicator inside the dialog.
+    for _ in range(10):
+        page.keyboard.press("Tab")
+    expect(page.locator("#row8")).to_be_focused()
+    assert page.evaluate("document.getElementById('tallList').scrollTop") > 0
+
+
 def test_shared_dialog_inerts_background_and_restores_existing_state(page):
     mount_dialogs(page)
     assert page.evaluate("document.getElementById('background').inert")
@@ -276,6 +311,63 @@ def test_confirm_batch_collection_moves_focus_to_grid_not_hidden_opener(live_ser
     # longer visible and would be an invalid focus target.
     expect(page.locator("#batchBar")).to_be_hidden()
     expect(page.locator("#grid")).to_be_focused()
+
+
+def test_confirm_batch_collection_preserves_focus_moved_during_pending_add(live_server, page):
+    # Codex P2: confirmBatchCollection awaits the add-photos request between
+    # dialog close and the grid fallback. If the user moved focus to another
+    # stable control while that request was pending, the fallback used to
+    # steal focus unconditionally. It must now only run when focus landed in
+    # the batch bar (invalidated by display:none) or on document.body.
+    live_server["db"].add_collection("Pick target", "[]")
+    open_browse(page, live_server)
+    # Install a JS-level fetch interceptor that stalls the add-photos
+    # response until we flip _releasePending. page.route would block the
+    # sync Playwright worker (sleep inside the handler stalls the main
+    # loop), so stall inside JS instead. Replace window.safeFetch directly:
+    # vireo-api.js captures the native fetch and the browser wrapper in
+    # closure before exposing them, so patching Vireo.api.fetch/window.fetch
+    # does not reach what batch-actions.js actually calls (safeFetch →
+    # Vireo.api.json → closed-over browserFetch).
+    page.evaluate("""() => {
+      const savedSafeFetch = window.safeFetch;
+      window._pendingSignalled = false;
+      window._releasePending = false;
+      window.safeFetch = async function(url, opts, options) {
+        if (typeof url === 'string' && url.indexOf('/add-photos') !== -1) {
+          window._pendingSignalled = true;
+          while (!window._releasePending) {
+            await new Promise(r => setTimeout(r, 20));
+          }
+        }
+        return savedSafeFetch(url, opts, options);
+      };
+    }""")
+    page.locator("#batchBar").get_by_role("button", name="+ Collection", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Add 1 photo(s) to collection", exact=True)
+    dialog.get_by_role("button", name="Pick target", exact=True).click()
+    dialog.get_by_role("button", name="Add", exact=True).click()
+    expect(dialog).to_be_hidden()
+    page.wait_for_function("window._pendingSignalled === true")
+    # The user moves focus to another stable, visible control that lives
+    # outside #batchBar while the request is pending. A standalone test
+    # anchor is injected so the assertion does not depend on the live
+    # browse chrome staying stable.
+    page.evaluate("""() => {
+      const anchor = document.createElement('button');
+      anchor.id = 'userChosenAnchor';
+      anchor.type = 'button';
+      anchor.textContent = 'User moved here';
+      document.body.appendChild(anchor);
+      anchor.focus({preventScroll: true});
+    }""")
+    expect(page.locator("#userChosenAnchor")).to_be_focused()
+    # Release the stalled request. confirmBatchCollection resolves, runs
+    # clearSelection(), and reaches the focus fallback.
+    page.evaluate("window._releasePending = true")
+    page.wait_for_function("window.getActiveSelection && getActiveSelection().length === 0")
+    # Focus must stay on the user's deliberate choice, not snap to #grid.
+    expect(page.locator("#userChosenAnchor")).to_be_focused()
 
 
 def test_f1_help_is_noop_while_a_managed_dialog_is_open(live_server, page):
