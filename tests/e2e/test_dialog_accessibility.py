@@ -649,3 +649,127 @@ def test_save_collection_preserves_focus_moved_during_pending_refresh(live_serve
     )
     expect(replacement.get_by_text("Keep user focus renamed", exact=True)).to_be_visible()
     expect(page.locator("#userChosenAnchor")).to_be_focused()
+
+
+def test_add_to_collection_dismisses_lightbox_opened_during_pending_fetch(live_server, page):
+    # Codex P2: addToCollection awaits /api/collections before calling
+    # batchCollectionDialog.open(), so during that window a grid dblclick
+    # can still reveal the shared lightbox — openLightbox has no managed-
+    # dialog guard. Once the fetch resolves and the dialog becomes the top
+    # of the stack, updateBackground() marks the lightbox overlay inert
+    # but it stays visible at z-index 9999 (vs. the dialog's 500) covering
+    # the dialog; Escape would then be consumed by the dialog's Keymap
+    # handler, leaving the lightbox visible until a second Escape.
+    # addToCollection must dismiss the lightbox before opening the dialog
+    # so the dialog is the only visible overlay once the fetch resolves.
+    live_server["db"].add_collection("Pick target", "[]")
+    open_browse(page, live_server)
+    # Stall /api/collections at the safeFetch layer until released,
+    # mirroring the pending-help and pending-palette helpers above.
+    page.evaluate("""() => {
+      const savedSafeFetch = window.safeFetch;
+      window._collectionsFetchSignalled = false;
+      window._releaseCollectionsFetch = false;
+      window.safeFetch = async function(url, opts, options) {
+        if (typeof url === 'string' && url === '/api/collections'
+            && (!opts || !opts.method || opts.method === 'GET')) {
+          window._collectionsFetchSignalled = true;
+          while (!window._releaseCollectionsFetch) {
+            await new Promise(r => setTimeout(r, 20));
+          }
+        }
+        return savedSafeFetch(url, opts, options);
+      };
+    }""")
+    opener = page.locator("#batchBar").get_by_role("button", name="+ Collection", exact=True)
+    opener.click()
+    page.wait_for_function("window._collectionsFetchSignalled === true")
+    # The dialog has not opened yet, so hasActive() is false and a grid
+    # dblclick reveals the shared lightbox. Trigger openLightbox directly
+    # with a known photo id — a page dblclick would also work, but the
+    # scripted call keeps the assertion independent of pointer timing.
+    page.evaluate("""() => {
+      const card = document.querySelector('.grid-card');
+      const id = parseInt(card.dataset.id, 10);
+      openLightbox(id, card.dataset.filename || '', availableBrowsePhotos());
+    }""")
+    expect(page.locator("#lightboxOverlay")).to_have_class("active")
+    # Release the stalled fetch. addToCollection must close the lightbox
+    # before opening the dialog so no opener-guarded sibling is left
+    # visible-but-inert when the dialog becomes the top overlay.
+    page.evaluate("window._releaseCollectionsFetch = true")
+    dialog = page.get_by_role("dialog", name="Add 1 photo(s) to collection", exact=True)
+    expect(dialog).to_be_visible()
+    expect(page.locator("#lightboxOverlay")).not_to_have_class("active")
+    # One Escape closes the dialog cleanly; focus returns to the opener.
+    page.keyboard.press("Escape")
+    expect(dialog).to_be_hidden()
+    expect(page.locator("#lightboxOverlay")).not_to_have_class("active")
+    expect(opener).to_be_focused()
+
+
+def test_save_collection_restores_focus_after_superseding_render(live_server, page):
+    # Codex P2: if another loadCollections() (e.g. a concurrent folder-
+    # health refresh) is still pending when saveCollection()'s own refresh
+    # resolves, reconcileCollectionLoadRenders() defers rendering until
+    # the newer generation settles — the pre-save row stays connected
+    # past the await, orphaned reads false, and the later superseding
+    # render replaces the list and drops focus to body with no restore
+    # path. The row-refocus must watch for subsequent child-list mutations
+    # on #collectionList and run again once the newer render arrives.
+    collection_id = live_server["db"].add_collection("Supersede target", "[]")
+    open_browse(page, live_server)
+    # Install a safeFetch wrapper that lets the first /api/collections GET
+    # (the one saveCollection will fire) run normally, but holds a second
+    # concurrent GET pending until released — simulating a folder-health
+    # refresh that started slightly later and resolves after our save's
+    # own refresh. The initial browse-load GET runs before this wrapper
+    # is installed, so it is not affected.
+    page.evaluate("""() => {
+      const savedSafeFetch = window.safeFetch;
+      window._supersedingGetReleased = false;
+      window._supersedingGetSignalled = false;
+      window._savesFetchSeen = 0;
+      window.safeFetch = async function(url, opts, options) {
+        if (typeof url === 'string' && url === '/api/collections'
+            && (!opts || !opts.method || opts.method === 'GET')) {
+          window._savesFetchSeen += 1;
+          if (window._savesFetchSeen === 2) {
+            window._supersedingGetSignalled = true;
+            while (!window._supersedingGetReleased) {
+              await new Promise(r => setTimeout(r, 20));
+            }
+          }
+        }
+        return savedSafeFetch(url, opts, options);
+      };
+    }""")
+    row = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
+    )
+    row.click(button="right")
+    page.get_by_text("Edit Rules", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Edit Smart Collection", exact=True)
+    name = dialog.get_by_role("textbox", name="Collection name", exact=True)
+    expect(name).to_have_value("Supersede target")
+    name.fill("Supersede target renamed")
+    # Kick off a concurrent loadCollections() that will bump the gen
+    # counter past saveCollection's own gen. This matches the folder-
+    # health refresh race the Codex finding describes.
+    page.evaluate("loadCollections()")
+    dialog.get_by_role("button", name="Update", exact=True).click()
+    expect(dialog).to_be_hidden()
+    # Wait until the second (superseding) GET is signalled stalled; by
+    # then saveCollection's own refresh has resolved and its await has
+    # fallen through, but reconcileCollectionLoadRenders is still waiting
+    # on the pending newer gen, so the pre-save row stays rendered.
+    page.wait_for_function("window._supersedingGetSignalled === true")
+    # Release the superseding GET. Its render replaces the row list and
+    # detaches the pre-save opener; the MutationObserver installed by
+    # saveCollection must catch that render and refocus the replacement.
+    page.evaluate("window._supersedingGetReleased = true")
+    replacement = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{collection_id}"]'
+    )
+    expect(replacement.get_by_text("Supersede target renamed", exact=True)).to_be_visible()
+    expect(replacement).to_be_focused()

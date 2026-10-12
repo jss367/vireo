@@ -634,14 +634,40 @@ async function saveCollection() {
     loadCollectionCounts();
     if (editedId != null) {
       await refresh;
-      var active = document.activeElement;
-      var orphaned = !active || active === document.body ||
-          !(active instanceof HTMLElement) || !active.isConnected;
-      if (orphaned) {
+      // Codex P2: if another loadCollections() (e.g. a concurrent folder-
+      // health refresh) is still pending when this one resolves,
+      // reconcileCollectionLoadRenders() defers our render until the newer
+      // generation settles — so the pre-save row stays connected past this
+      // await and the orphaned check below reads false. The later
+      // superseding render then detaches the row with no remaining
+      // restoration path. Watch #collectionList for child-list mutations
+      // and recheck orphaning after each render until the pre-save row is
+      // orphaned and the replacement row for editedId has been drawn.
+      var tryRestoreCollectionRowFocus = function() {
+        var active = document.activeElement;
+        var orphaned = !active || active === document.body ||
+            !(active instanceof HTMLElement) || !active.isConnected;
+        if (!orphaned) return false;
         var replacement = document.querySelector(
           '#collectionList .tree-item[data-collection-id="' + editedId + '"]');
         if (replacement && typeof replacement.focus === 'function') {
           replacement.focus({preventScroll: true});
+          return true;
+        }
+        return false;
+      };
+      if (!tryRestoreCollectionRowFocus()) {
+        var list = document.getElementById('collectionList');
+        if (list && typeof MutationObserver === 'function') {
+          var observer = new MutationObserver(function() {
+            if (tryRestoreCollectionRowFocus()) observer.disconnect();
+          });
+          observer.observe(list, {childList: true});
+          // Guard against holding the observer indefinitely if no newer
+          // render ever arrives (the pending fetch fails, or the user
+          // navigates away). The next explicit list refresh will rerun
+          // this flow from its own save.
+          setTimeout(function() { observer.disconnect(); }, 5000);
         }
       }
     }
