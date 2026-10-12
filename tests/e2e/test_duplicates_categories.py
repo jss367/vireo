@@ -674,3 +674,61 @@ def test_bulk_finalizer_preserves_newer_single_retry_claim(live_server, page):
         {"photo_ids": [2]}, {"photo_ids": [2]},
     ]
     expect(button).to_be_disabled()
+
+
+
+def test_reveal_and_pinned_cleanup_use_only_rendered_bucket_folders(live_server, page):
+    _show_patterns(live_server, page)
+    page.evaluate("""() => {
+      function photo(id, path, exists) {
+        return {id, path, filename: path.split('/').pop(), file_size: 1000, exists};
+      }
+      var proposals = [0, 1].map(i => ({file_hash: 'visible' + i, status: 'unresolved',
+        winner: photo(201 + i * 3, '/a/owl' + i + '.jpg', true),
+        losers: [photo(202 + i * 3, '/b/owl' + i + '.jpg', true),
+                 photo(203 + i * 3, '/c/owl' + i + '.jpg', false)]}));
+      proposals.push({file_hash: 'hidden', status: 'unresolved',
+        winner: photo(207, '/a/bird.jpg', true),
+        losers: [photo(208, '/b/bird-2.jpg', true), photo(209, '/c/bird-3.jpg', true)]});
+      renderResults({proposals, buckets: [{folders: ['/a', '/b', '/c'], group_count: 3,
+        file_hashes: ['visible0', 'visible1', 'hidden'], total_size: 6000,
+        example_filenames: ['owl0.jpg', 'owl1.jpg', 'bird.jpg']}]});
+    }""")
+    reveals = []
+
+    def reveal(route):
+        reveals.append(route.request.post_data_json)
+        route.fulfill(content_type="application/json", body=json.dumps({
+            "revealed": ["/a", "/b"], "skipped": [], "failed": [],
+        }))
+
+    page.route("**/api/folders/reveal", reveal)
+    page.route("**/api/duplicates/bulk-resolve", lambda route: route.fulfill(
+        content_type="application/json", body=json.dumps({
+            "resolved": [{"file_hash": "visible0", "loser_ids": [202, 203]},
+                         {"file_hash": "visible1", "loser_ids": [205, 206]}], "skipped": [],
+        }),
+    ))
+    page.route("**/api/duplicates/delete-loser-files", lambda route: route.fulfill(
+        content_type="application/json", body=json.dumps({
+            "trashed": 1, "failed": [{"id": 202, "error": "Synthetic lock"}],
+            "skipped": [{"id": 203, "reason": "file already missing"},
+                        {"id": 206, "reason": "file already missing"}],
+        }),
+    ))
+    page.on("dialog", lambda dialog: dialog.accept())
+    _category(page, "same-name-across-folders").click()
+    bucket = page.locator(".bucket-card")
+    expect(bucket).to_contain_text("/a")
+    expect(bucket).to_contain_text("/b")
+    expect(bucket).not_to_contain_text("/c")
+    bucket.locator(".reveal-btn").click()
+    expect(bucket.locator(".reveal-btn")).to_be_enabled()
+    assert reveals == [{"paths": ["/a", "/b"]}]
+    bucket.locator("[data-delete-toggle]").check()
+    bucket.locator(".keep-btn:not(.reveal-btn)").first.click()
+    pinned = page.locator("#duplicateBucketOperationList .bucket-card")
+    expect(pinned.locator("[data-retry-trash]")).to_be_visible()
+    pinned.locator(".reveal-btn").click()
+    expect(pinned.locator(".reveal-btn")).to_be_enabled()
+    assert reveals == [{"paths": ["/a", "/b"]}, {"paths": ["/a", "/b"]}]

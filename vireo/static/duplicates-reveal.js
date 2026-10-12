@@ -6,7 +6,7 @@ function bucketRevealFolders(bi, button) {
   if (card && card.hasAttribute('data-reveal-paths')) {
     return JSON.parse(card.getAttribute('data-reveal-paths'));
   }
-  var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+  var bucket = visibleBucket((_lastScanResult && _lastScanResult.buckets || [])[bi]);
   return (bucket && bucket.folders || []).slice();
 }
 

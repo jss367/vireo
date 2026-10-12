@@ -976,7 +976,7 @@
     }).join(' &middot; ');
     var examples = (bucket.example_filenames || []).map(escapeHtml).join(', ');
     var sizeStr = formatBytes(bucket.total_size || 0);
-    var html = '<div class="bucket-card" data-bi="' + bi + '">';
+    var html = '<div class="bucket-card" data-bi="' + bi + '" data-reveal-paths="' + escapeHtml(JSON.stringify(folders)) + '">';
     html += '<div class="bucket-headline">' +
       '<span class="count">' + bucket.group_count + '</span> ' +
       'duplicate group' + (bucket.group_count === 1 ? '' : 's') +

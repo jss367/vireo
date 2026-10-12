@@ -110,7 +110,10 @@ async function trashOneLoserFile(photoId) {
 
 function pinDuplicateBucketOperation(card, bi) {
   var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
-  card.setAttribute('data-reveal-paths', JSON.stringify((bucket && bucket.folders || []).slice()));
+  if (!card.hasAttribute('data-reveal-paths')) {
+    var visible = visibleBucket(bucket);
+    card.setAttribute('data-reveal-paths', JSON.stringify((visible && visible.folders || []).slice()));
+  }
   _duplicateBucketOperations.set(card, {snapshot: _lastScanResult, index: bi});
   document.getElementById('duplicateBucketOperationList').appendChild(card);
   document.getElementById('duplicateBucketOperations').hidden = false;
