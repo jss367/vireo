@@ -493,6 +493,12 @@ async function batchDelete() {
 
 var _batchCollections = [];
 var _batchCollectionSelectedId = null;
+// Codex P2: generation counter for addToCollection(). Each invocation
+// captures the next value before awaiting /api/collections and bails
+// after the await when a newer invocation has superseded it, so a stale
+// response can't dismiss overlays the user has since opened or reopen
+// the dialog on top of them.
+var _addToCollectionInvocation = 0;
 
 function collectionAcceptsManualPhotos(collection) {
   if (typeof collection.can_add_photos === 'boolean') {
@@ -533,6 +539,7 @@ async function addToCollection(returnFocus) {
     return;
   }
 
+  var myInvocation = ++_addToCollectionInvocation;
   var collections;
   try {
     collections = await safeFetch('/api/collections', {}, { toast: false });
@@ -540,6 +547,12 @@ async function addToCollection(returnFocus) {
     window._vireoNativeMenuPhotoIdsOverride = null;
     return;
   }
+  // Codex P2: if the user re-triggered Add while this request was pending,
+  // the newer invocation will update state and open the dialog on its own
+  // response. This stale continuation must not run the overlay dismissals
+  // below (which could close a lightbox the user has since opened) or
+  // reopen the dialog on top of them.
+  if (myInvocation !== _addToCollectionInvocation) return;
 
   collections = collections.filter(collectionAcceptsManualPhotos);
   _batchCollections = collections;
