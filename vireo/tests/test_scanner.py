@@ -876,46 +876,6 @@ def test_scan_imports_xmp_keywords(tmp_path):
     assert 'Birds' in kw_names
 
 
-def test_xmp_import_rearms_wildlife_retirement_for_new_species(tmp_path):
-    """A scanner import that creates eligibility must clear the marker."""
-    from db import Database
-    from scanner import _import_keywords_for_photo
-    from xmp import write_sidecar
-
-    root = str(tmp_path / "photos")
-    os.makedirs(root)
-    xmp_path = os.path.join(root, "bird.xmp")
-    write_sidecar(
-        xmp_path,
-        flat_keywords={"House Sparrow"},
-        hierarchical_keywords=set(),
-    )
-
-    db = Database(str(tmp_path / "test.db"))
-    folder_id = db.add_folder(root, name="photos")
-    photo_id = db.add_photo(
-        folder_id=folder_id,
-        filename="bird.jpg",
-        extension=".jpg",
-        file_size=100,
-        file_mtime=1.0,
-    )
-    wildlife_id = db.conn.execute(
-        "INSERT INTO keywords (name, type) VALUES ('Wildlife', 'genre')"
-    ).lastrowid
-    species_id = db.add_keyword("House Sparrow", is_species=True)
-    db.tag_photo(photo_id, wildlife_id, source="generated")
-    db.set_meta(Database._RETIRED_WILDLIFE_GENRE_KEY, "1")
-
-    _import_keywords_for_photo(db, photo_id, xmp_path)
-
-    assert db.conn.execute(
-        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-        (photo_id, species_id),
-    ).fetchone() is not None
-    assert db.get_meta(Database._RETIRED_WILDLIFE_GENRE_KEY) == "0"
-
-
 def test_scan_skips_empty_normalized_keywords(tmp_path):
     """A sidecar with a lone quote must not abort the scan.
 

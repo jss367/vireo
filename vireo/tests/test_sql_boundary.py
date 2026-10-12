@@ -69,7 +69,7 @@ CONN_USE_LIMITS = {
     "pipeline_stages/scanning.py": 2,
     "preview_cache.py": 5,
     "render_source.py": 2,
-    "scanner.py": 97,
+    "scanner.py": 96,
     "schema.py": 1,
     "site_export.py": 3,
     "species_identity.py": 5,

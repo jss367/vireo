@@ -3,7 +3,7 @@
 ``create_app`` runs a handful of self-healing passes around startup: the
 ordered catalog repairs (``run_catalog_repairs``), the background thread that
 imports keywords embedded in already-scanned files and then marks species,
-the catalog-wide Wildlife genre retirement, the thumb_path, label-identity
+the thumb_path, label-identity
 and EXIF search backfill jobs, and the teardown that stops the job runner
 and closes the startup database. ``StartupTasks`` owns them because they
 share per-app state (the app, its database path and the startup connection).
@@ -99,36 +99,6 @@ class StartupTasks:
             time.time() - started_at,
         )
         return pruned
-
-    def retire_wildlife_genre(self):
-        """Run the catalog-wide XMP migration outside startup readiness.
-
-        Large upgraded catalogs can require tens of thousands of sidecar
-        reads here. Keeping that work on create_app's calling thread prevents
-        the HTTP listener from binding and makes the desktop launcher report
-        a false startup failure when its readiness deadline expires.
-        """
-        retirement_db = None
-        started_at = time.time()
-        try:
-            retirement_db = Database(self._db_path)
-            retired = retirement_db.retire_builtin_wildlife_genre()
-            if retired:
-                log.info(
-                    "Retired the built-in Wildlife genre from %d photo(s)",
-                    retired,
-                )
-            log.info(
-                "Wildlife genre retirement finished in %.2fs",
-                time.time() - started_at,
-            )
-            return retired
-        except Exception:
-            log.exception("Wildlife genre retirement failed")
-            return 0
-        finally:
-            if retirement_db is not None:
-                retirement_db.close()
 
     def mark_species_keywords(self, db, log_label):
         """Load taxonomy and type keywords that name a species."""

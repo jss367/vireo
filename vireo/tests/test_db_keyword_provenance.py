@@ -3,8 +3,7 @@
 These are the ``photo_keywords`` writers that create or converge an
 association, plus the flows that call them mid-transaction: ``tag_photo``,
 ``_merge_keyword_into``, ``link_keyword_to_place``,
-``retire_builtin_wildlife_genre``, ``_upsert_one_keyword`` and
-``accept_prediction``.
+``_upsert_one_keyword`` and ``accept_prediction``.
 
 The tests go through the public ``Database`` façade only, so they hold
 whether the SQL lives in ``db.py`` or in a repository. They pin the
@@ -558,137 +557,6 @@ def test_link_keyword_to_place_returns_keyword_reused_in_its_own_chain(db, lib):
     ).fetchone()[0] is None
 
 
-# -- retire_builtin_wildlife_genre ----------------------------------------------------------
-
-
-def _wildlife(db, lib, *, photo=None, source="generated"):
-    """A generated Wildlife genre on a photo that also carries a species."""
-    pid = photo if photo is not None else lib["p"][0]
-    wildlife = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre' "
-        "AND parent_id IS NULL"
-    ).fetchone()
-    wildlife = wildlife[0] if wildlife else _raw_kw(db, "Wildlife", kw_type="genre")
-    species = db.add_keyword("House Sparrow", is_species=True)
-    db.tag_photo(pid, species)
-    _raw_tag(db, pid, wildlife, source)
-    db.conn.commit()
-    db.set_meta(Database._RETIRED_WILDLIFE_GENRE_KEY, "0")
-    return wildlife
-
-
-def test_retire_wildlife_marker_short_circuits_through_the_facade(db, lib, monkeypatch):
-    wildlife = _wildlife(db, lib)
-    reads = []
-    real = db.get_meta
-    monkeypatch.setattr(db, "get_meta", lambda key: reads.append(key) or "1")
-    assert db.retire_builtin_wildlife_genre() == 0
-    assert reads == [Database._RETIRED_WILDLIFE_GENRE_KEY]
-    assert _source(db, lib["p"][0], wildlife) == "generated"
-    monkeypatch.setattr(db, "get_meta", real)
-    assert db.retire_builtin_wildlife_genre(force=True) == 1
-    assert _source(db, lib["p"][0], wildlife) == "<absent>"
-
-
-def test_retire_wildlife_without_rows_sets_marker_through_the_facade(db, lib, monkeypatch):
-    calls = _spy(monkeypatch, db, "set_meta")
-    assert db.retire_builtin_wildlife_genre(force=True) == 0
-    assert calls == [((Database._RETIRED_WILDLIFE_GENRE_KEY, "1"), {})]
-    assert not db.conn.in_transaction
-    assert _visible(
-        db, "SELECT value FROM db_meta WHERE key = ?",
-        (Database._RETIRED_WILDLIFE_GENRE_KEY,),
-    ) == [("1",)]
-
-
-def test_retire_wildlife_commits_and_queues_through_the_facade(db, lib, monkeypatch):
-    p0 = lib["p"][0]
-    wildlife = _wildlife(db, lib)
-    queued = _spy(monkeypatch, db, "queue_change")
-    marks = _spy(monkeypatch, db, "set_meta")
-    assert db.retire_builtin_wildlife_genre() == 1
-    assert not db.conn.in_transaction
-    assert queued == [(
-        (p0, "keyword_remove_flat", "Wildlife"),
-        {"workspace_id": lib["ws"], "_commit": False},
-    )]
-    assert marks == [((Database._RETIRED_WILDLIFE_GENRE_KEY, "1"), {"_commit": False})]
-    assert _visible(
-        db, "SELECT COUNT(*) FROM photo_keywords WHERE keyword_id = ?", (wildlife,),
-    ) == [(0,)]
-    assert _visible(
-        db, "SELECT change_type, value FROM pending_changes WHERE photo_id = ?", (p0,),
-    ) == [("keyword_remove_flat", "Wildlife")]
-
-
-@pytest.mark.parametrize("active", [True, False])
-def test_retire_wildlife_unlinked_photo_queues_to_fallback_workspace(
-    db, lib, tmp_path, monkeypatch, active,
-):
-    other = tmp_path / "unlinked"
-    other.mkdir()
-    fid = db.add_folder(str(other), name="unlinked", link_to_workspace=False)
-    pid = db.add_photo(fid, "u.jpg", ".jpg", 1, 1.0)
-    _wildlife(db, lib, photo=pid)
-    second = db.create_workspace("Second")
-    db.set_active_workspace(second)
-    first_ws = db.conn.execute("SELECT MIN(id) FROM workspaces").fetchone()[0]
-    expected = second if active else first_ws
-    if not active:
-        db._active_workspace_id = None
-    queued = _spy(monkeypatch, db, "queue_change")
-    assert db.retire_builtin_wildlife_genre() == 1
-    assert [c[1]["workspace_id"] for c in queued] == [expected]
-
-
-def test_retire_wildlife_rolls_back_chunk_but_keeps_latch(db, lib, monkeypatch):
-    p0, p1 = lib["p"][:2]
-    wildlife = _wildlife(db, lib, photo=p0)
-    _wildlife(db, lib, photo=p1)
-    # p1's association has authorship evidence (an unsynced add), so the
-    # latch stamps it manual and commits before any retirement is tried.
-    db.queue_change(p1, "keyword_add", "Wildlife", workspace_id=lib["ws"])
-
-    def boom(*args, **kwargs):
-        db.conn.execute("INSERT INTO db_meta (key, value) VALUES ('probe', '1')")
-        raise RuntimeError("queue failed")
-
-    monkeypatch.setattr(db, "queue_change", boom)
-    with pytest.raises(RuntimeError, match="queue failed"):
-        db.retire_builtin_wildlife_genre()
-    assert not db.conn.in_transaction
-    assert _visible(db, "SELECT value FROM db_meta WHERE key = 'probe'") == []
-    assert _visible(
-        db, "SELECT photo_id, source FROM photo_keywords WHERE keyword_id = ? "
-        "ORDER BY photo_id", (wildlife,),
-    ) == [(p0, "generated"), (p1, "manual")]
-    assert db.get_meta(Database._RETIRED_WILDLIFE_GENRE_KEY) == "0"
-
-
-def test_retire_wildlife_latches_legacy_association_without_sidecar(db, lib):
-    p0 = lib["p"][0]
-    wildlife = _wildlife(db, lib, source=None)
-    assert db.retire_builtin_wildlife_genre() == 0
-    assert not db.conn.in_transaction
-    assert _visible(
-        db, "SELECT source FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-        (p0, wildlife),
-    ) == [("manual",)]
-
-
-def test_retire_wildlife_logs_corrupt_sidecar_through_db_logger(db, lib, caplog):
-    p0 = lib["p"][0]
-    wildlife = _wildlife(db, lib)
-    (lib["root"] / "p0.xmp").write_text("<not-xml")
-    with caplog.at_level("WARNING", logger="db"):
-        assert db.retire_builtin_wildlife_genre() == 0
-    assert any(
-        r.name == "db" and "Corrupt sidecar" in r.getMessage() for r in caplog.records
-    )
-    assert _source(db, p0, wildlife) == "generated"
-    assert db.get_meta(Database._RETIRED_WILDLIFE_GENRE_KEY) == "0"
-
-
 # -- accept_prediction ----------------------------------------------------------------------
 
 
@@ -917,7 +785,6 @@ _DELEGATING_PROVENANCE_METHODS = (
     "tag_photo",
     "_merge_keyword_into",
     "link_keyword_to_place",
-    "retire_builtin_wildlife_genre",
     "_upsert_one_keyword",
     "accept_prediction",
 )
@@ -1161,7 +1028,6 @@ def test_keyword_provenance_repository_injects_the_db_fold(db):
     assert repo.KEYWORD_SOURCE_CONFLICT_SQL is db_module.KEYWORD_SOURCE_CONFLICT_SQL
     assert repo.KEYWORD_SOURCE_MANUAL == db_module.KEYWORD_SOURCE_MANUAL
     assert repo._chunks is db_module._chunks
-    assert repo.log is db_module.log
 
 
 def test_keyword_provenance_repository_never_hands_itself_out_as_the_database():
@@ -1187,7 +1053,6 @@ def test_keyword_provenance_facade_signatures_unchanged():
         "tag_photo": "(self, photo_id, keyword_id, source='manual', _commit=True)",
         "_merge_keyword_into": "(self, src_id, dst_id, *, pending_source_only=False)",
         "link_keyword_to_place": "(self, keyword_id, details)",
-        "retire_builtin_wildlife_genre": "(self, force=False)",
         "_upsert_one_keyword": (
             "(self, name, parent_id, place_id=None, latitude=None, longitude=None, "
             "reuse_location_component=False)"

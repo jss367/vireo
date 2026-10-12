@@ -133,29 +133,16 @@ def _sync_preview_flag_label(value):
     }.get(value, str(value))
 
 
-def _discard_history_items(db, changes):
-    """Build durable discard history without conflating keyword homonyms."""
-    items = []
-    for change in changes:
-        discarded_keyword_id = ""
-        if change["change_type"] == "keyword_add":
-            associations = db.get_photo_keyword_associations_by_name(
-                change["photo_id"], change["value"],
-            )
-            evidenced = [
-                row for row in associations
-                if row["source"] == "manual" or row["has_exact_history"]
-            ]
-            if len(associations) == 1:
-                discarded_keyword_id = str(associations[0]["keyword_id"])
-            elif len(evidenced) == 1:
-                discarded_keyword_id = str(evidenced[0]["keyword_id"])
-        items.append({
+def _discard_history_items(changes):
+    """History items recording which pending changes a discard dropped."""
+    return [
+        {
             "photo_id": change["photo_id"],
             "old_value": f'{change["change_type"]}:{change["value"]}',
-            "new_value": discarded_keyword_id,
-        })
-    return items
+            "new_value": "",
+        }
+        for change in changes
+    ]
 
 
 def _sync_preview_location_gps_presentation(
@@ -1242,7 +1229,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                 changes = db.pending_changes.delete_workspace(ws_id)
                 db.pending_changes.clear_equivalent_flat_removals(changes, _commit=False)
                 if changes:
-                    items = _discard_history_items(db, changes)
+                    items = _discard_history_items(changes)
                     db.record_edit(
                         "discard",
                         f"Discarded {len(changes)} pending changes",
@@ -1282,7 +1269,7 @@ def create_sync_blueprint(get_db, json_error, get_runner):
                 change_ids, clear_equivalent_flat_removals=True, _commit=False,
             )
             if changes:
-                items = _discard_history_items(db, changes)
+                items = _discard_history_items(changes)
                 db.record_edit(
                     'discard', f'Discarded {len(changes)} pending changes',
                     '', items, is_batch=len(changes) > 1, _commit=False,

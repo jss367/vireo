@@ -10684,73 +10684,6 @@ def test_batch_keyword_route_chunks_large_existing_keyword_lookup(app_and_db):
     assert resp.get_json()["updated"] == len(ids)
 
 
-def test_create_app_defers_builtin_wildlife_retirement(tmp_path, monkeypatch):
-    """A catalog-wide sidecar scan must not block HTTP app construction."""
-    from db import Database
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    import config as cfg
-    import models
-    from app import create_app
-
-    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
-    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
-    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
-
-    db_path = str(tmp_path / "test.db")
-    thumb_dir = str(tmp_path / "thumbs")
-    os.makedirs(thumb_dir)
-
-    db = Database(db_path)
-    ws_id = db.ensure_default_workspace()
-    db.set_active_workspace(ws_id)
-    folder_id = db.add_folder("/photos", name="photos")
-    db.add_workspace_folder(ws_id, folder_id)
-    photo_id = db.add_photo(
-        folder_id=folder_id, filename="a.jpg", extension=".jpg",
-        file_size=100, file_mtime=1.0,
-    )
-    wildlife_id = db.conn.execute(
-        "INSERT INTO keywords (name, type) VALUES ('Wildlife', 'genre')"
-    ).lastrowid
-    species_id = db.add_keyword("House Sparrow", is_species=True)
-    db.tag_photo(photo_id, species_id)
-    db.conn.execute(
-        "INSERT INTO photo_keywords (photo_id, keyword_id, source) VALUES (?, ?, ?)",
-        (photo_id, wildlife_id, "generated"),
-    )
-    db.conn.execute(
-        "DELETE FROM db_meta WHERE key = ?",
-        (Database._RETIRED_WILDLIFE_GENRE_KEY,),
-    )
-    db.conn.commit()
-    db.close()
-
-    app = create_app(
-        db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test",
-    )
-    assert app is not None
-
-    db2 = Database(db_path, initialize_schema=False)
-    assert db2.get_meta(Database._RETIRED_WILDLIFE_GENRE_KEY) is None
-    assert db2.conn.execute(
-        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-        (photo_id, wildlife_id),
-    ).fetchone() is not None
-    db2.close()
-
-    assert app._retire_wildlife_genre() == 1
-
-    db2 = Database(db_path, initialize_schema=False)
-    assert db2.get_meta(Database._RETIRED_WILDLIFE_GENRE_KEY) == "1"
-    assert db2.conn.execute(
-        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
-        (photo_id, wildlife_id),
-    ).fetchone() is None
-    db2.close()
-    app._cleanup_app_resources()
-
-
 def test_add_keyword_route_does_not_clobber_existing_individual_type(app_and_db):
     """Regression: POST /api/photos/<id>/keywords with type='taxonomy' for a
     keyword that already exists as 'individual' must not silently rewrite
@@ -17484,39 +17417,6 @@ def test_sync_discard_reports_true_count(app_and_db):
     assert resp.status_code == 200
     assert resp.get_json()["discarded"] == 1
     assert db.pending_changes.list_all() == []
-
-
-def test_sync_discard_records_exact_same_name_keyword(app_and_db):
-    """Discard history identifies a manual association among homonyms."""
-    app, db = app_and_db
-    client = app.test_client()
-    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
-    generated_id = db.conn.execute(
-        "INSERT INTO keywords (name, type) VALUES ('Wildlife', 'genre')"
-    ).lastrowid
-    manual_id = db.conn.execute(
-        "INSERT INTO keywords (name, type) VALUES ('Wildlife', 'individual')"
-    ).lastrowid
-    # Only the individual is user-authored; the genre is the generated row.
-    db.tag_photo(pid, generated_id, source=None)
-    db.tag_photo(pid, manual_id, source="manual")
-    db.queue_change(pid, "keyword_add", "Wildlife")
-    change_id = db.pending_changes.list_all()[0]["id"]
-
-    resp = client.post(
-        "/api/sync/discard", json={"change_ids": [change_id]},
-    )
-
-    assert resp.status_code == 200
-    item = db.conn.execute(
-        """SELECT item.old_value, item.new_value
-           FROM edit_history_items item
-           JOIN edit_history edit ON edit.id = item.edit_id
-           WHERE edit.action_type = 'discard'
-           ORDER BY item.id DESC LIMIT 1"""
-    ).fetchone()
-    assert item["old_value"] == "keyword_add:Wildlife"
-    assert item["new_value"] == str(manual_id)
 
 
 def test_sync_discard_chunks_large_change_sets(app_and_db):

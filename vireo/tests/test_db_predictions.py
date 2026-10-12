@@ -1053,7 +1053,7 @@ def test_prediction_repository_never_references_keyword_writers():
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             names.add(node.value)
     assert not names & {"tag_photo", "untag_photo", "_merge_keyword_into",
-                        "retire_builtin_wildlife_genre", "link_keyword_to_place"}
+                        "link_keyword_to_place"}
 
 
 def test_prediction_repository_routes_facade_calls_through_database(db):

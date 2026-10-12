@@ -81,8 +81,9 @@ KEYWORD_SOURCE_UNKNOWN = None
 # companion pairing copies a companion's keywords onto the primary, and every
 # ``tag_photo`` re-tag lands on a row that may already exist. Each of those is
 # a place where a hand-added keyword can quietly decay into an unattributed
-# row that ``retire_builtin_wildlife_genre()`` then reads as generated and
-# deletes. ``COALESCE(new, old)`` is not the rule — it is only accidentally
+# row that a retirement pass reads as generated and deletes (the one-shot
+# Wildlife genre retirement, since removed, worked that way).
+# ``COALESCE(new, old)`` is not the rule — it is only accidentally
 # equal to it while the column is set-or-NULL, and it downgrades 'manual' to
 # 'accept' the moment a third value exists.
 #
@@ -165,7 +166,6 @@ KEYWORD_SOURCE_CONFLICT_SQL = (
 
 _SQLITE_PARAM_CHUNK_SIZE = 800
 _MISSING_PHOTOS_PROGRESS_INTERVAL = 200
-_WILDLIFE_RETIREMENT_WRITE_CHUNK_SIZE = 100
 
 
 class IncompatibleDatabaseError(RuntimeError):
@@ -1860,63 +1860,6 @@ class Database:
         meant something specific.
         """
         return self._keyword_repository().ensure_default_genres()
-
-    _RETIRED_WILDLIFE_GENRE_KEY = "retired_builtin_wildlife_genre_v1"
-
-    def retire_builtin_wildlife_genre(self, force=False):
-        """Detach the retired built-in ``Wildlife`` genre from photos.
-
-        Older Vireo versions attached a top-level, ``type='genre'`` Wildlife
-        keyword whenever a photo received its first taxonomy keyword. That
-        duplicated the taxonomy fact and exposed a misleading independent
-        removal action. Wildlife-processing eligibility now lives solely in
-        ``photos.wildlife_excluded``.
-
-        Associations are retired only from photos that also carry a taxonomy
-        or legacy-species keyword, which is the shape the old automatic rule
-        produced. A Wildlife genre on a photo without species metadata may be
-        user-authored and is preserved. For retired associations a flat-only
-        sidecar removal is queued. Flat-only is important: a user may have a
-        real hierarchy such as ``Wildlife|Birds|House Sparrow``; retiring the
-        generated flat term must not delete that hierarchy.
-
-        Provenance is *latched*, not re-derived on every pass. Each run first
-        stamps ``photo_keywords.source = 'manual'`` on any Wildlife
-        association carrying authorship evidence — a not-yet-synced pending
-        add, a retained ``keyword_add`` edit, a ``discard`` record for a
-        manual add (``/api/sync/discard`` deliberately leaves no sidecar), or
-        a flat ``Wildlife`` term in a readable XMP sidecar — commits that, and
-        only then considers deletions. The latch matters because every one of
-        those signals is transient (``pending_changes`` clears on sync,
-        ``edit_history`` is pruned to ``max_edit_history``) while this
-        migration legitimately re-runs across sessions: an offline sidecar
-        defers the completion marker, and ``force=True`` re-runs it outright.
-        Re-deriving authorship from an eroding record means the same
-        association can read as manual on one startup and generated on the
-        next; a column on the association cannot be pruned, so the first
-        run's verdict is the last word. Associations created from here on are
-        stamped at write time by ``tag_photo(..., source='manual')``, so the
-        evidence hunt only ever applies to pre-existing rows.
-
-        When a same-name top-level keyword of another type (e.g. an
-        ``individual`` ``Wildlife`` alongside the generated ``genre`` row) or
-        a preserved duplicate genre row still survives on the photo, the flat
-        XMP subject represents that survivor too, so the removal is skipped to
-        avoid silently stripping the user-authored tag from the sidecar; the
-        generated DB association is still detached. The keyword row is
-        retained so edit history, manual associations, and user-created
-        children remain valid.
-
-        When a photo's sidecar was previously imported (``xmp_mtime`` is
-        set) but is currently unavailable (for example, its NAS is offline),
-        the association is preserved conservatively AND the run leaves the
-        catalog-wide completion marker unset so a subsequent startup — once
-        the volume returns — re-inspects that photo. Otherwise the marker
-        would freeze the migration in a partially-processed state and any
-        genuinely generated Wildlife association on the deferred photos
-        would persist forever.
-        """
-        return self._keyword_provenance_repository().retire_builtin_wildlife_genre(force=force)
 
     def _species_curation_repository(self):
         """Build the species-curation repository on this connection.
@@ -5219,7 +5162,7 @@ class Database:
 
         It holds the ``photo_keywords`` writers that create or converge an
         association (``tag_photo``, ``_merge_keyword_into``,
-        ``link_keyword_to_place``, ``retire_builtin_wildlife_genre``) and the
+        ``link_keyword_to_place``) and the
         flows that call them mid-transaction (``_upsert_one_keyword``,
         ``accept_prediction``). The active
         workspace is resolved lazily (``Database._ws_id`` is passed as a
@@ -5227,8 +5170,8 @@ class Database:
         methods' calls to each other -- is handed over bound, under its
         ``Database`` name, so monkeypatches keep reaching the moved code; the
         class attributes and ``db`` module names the bodies read (``_chunks``,
-        ``log``, the provenance fold and ``KEYWORD_SOURCE_MANUAL``, the
-        retirement chunk size) are read here, at call time.
+        the provenance fold and ``KEYWORD_SOURCE_MANUAL``) are read here, at
+        call time.
         """
         from repositories.keyword_provenance import KeywordProvenanceRepository
 
@@ -5236,14 +5179,9 @@ class Database:
             self.conn,
             self._ws_id,
             chunks=_chunks,
-            log=log,
             keyword_source_manual=KEYWORD_SOURCE_MANUAL,
             keyword_source_conflict_sql=KEYWORD_SOURCE_CONFLICT_SQL,
             keyword_source_max_sql=keyword_source_max_sql,
-            wildlife_retirement_write_chunk_size=(
-                _WILDLIFE_RETIREMENT_WRITE_CHUNK_SIZE
-            ),
-            retired_wildlife_genre_key=self._RETIRED_WILDLIFE_GENRE_KEY,
             decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
             facade=self,
         )
@@ -6202,11 +6140,6 @@ class Database:
     def get_photo_ids_with_keyword(self, keyword_id, photo_ids):
         """The set of ``photo_ids`` that carry ``keyword_id``."""
         return self._keyword_repository().photo_ids_tagged_with(keyword_id, photo_ids)
-
-    def get_photo_keyword_associations_by_name(self, photo_id, name):
-        """Rows (``keyword_id``, ``source``, ``has_exact_history``) of a photo's
-        keywords named ``name``, matched case-insensitively."""
-        return self._keyword_repository().photo_associations_by_name(photo_id, name)
 
     def get_keyword_parent_rows(self):
         """Every keyword's ``id``, ``name`` and ``parent_id``."""
@@ -9341,10 +9274,7 @@ class Database:
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""
         import config as cfg
         max_entries = cfg.get('max_edit_history') or 1000
-        preserve_wildlife_discard = (
-            self.get_meta(self._RETIRED_WILDLIFE_GENRE_KEY) != "1"
-        )
-        self._edit_history_repository().prune(max_entries, preserve_wildlife_discard)
+        self._edit_history_repository().prune(max_entries)
 
     # -- Collections --
 

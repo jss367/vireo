@@ -656,36 +656,20 @@ class EditHistoryRepository:
 
     # -- pruning --------------------------------------------------------------
 
-    def prune(self, max_entries: int, preserve_wildlife_discard: bool) -> None:
+    def prune(self, max_entries: int) -> None:
         """Delete this workspace's oldest done entries beyond ``max_entries``.
 
-        Undone entries awaiting redo are never pruned. While
-        ``preserve_wildlife_discard`` is true, a discarded Wildlife keyword
-        add is kept too; see ``Database._prune_edit_history``.
+        Undone entries awaiting redo are never pruned.
         """
         ws = self.workspace_id
-        protected_clause = ""
-        if preserve_wildlife_discard:
-            # A discarded manual keyword add deliberately leaves no pending
-            # change or sidecar term. Until Wildlife retirement completes,
-            # its discard item is therefore the only durable authorship
-            # evidence and must not disappear under a small history limit.
-            protected_clause = """
-              AND NOT EXISTS (
-                  SELECT 1 FROM edit_history_items protected_item
-                  WHERE protected_item.edit_id = edit_history.id
-                    AND edit_history.action_type = 'discard'
-                    AND protected_item.old_value = 'keyword_add:Wildlife' COLLATE NOCASE
-              )"""
         self.conn.execute(
-            f"""DELETE FROM edit_history
+            """DELETE FROM edit_history
                 WHERE workspace_id = ? AND undone = 0
                   AND id NOT IN (
                       SELECT id FROM edit_history
                       WHERE workspace_id = ? AND undone = 0
                       ORDER BY created_at DESC, id DESC LIMIT ?
-                  )
-                  {protected_clause}""",
+                  )""",
             (ws, ws, max_entries),
         )
         self.conn.commit()
