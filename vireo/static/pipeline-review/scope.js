@@ -604,6 +604,12 @@ function toggleReviewScopeRegroup() {
     updateReviewScopeControls();
     ++reviewScopeRequestSeq;
     showSavedReview();
+    // maybeRefreshCollectionScopeMembership early-exits while regrouped, so a
+    // mutation that queued the debounced membership refresh during filter
+    // mode had its trailing timer bail out when we entered the regrouped
+    // view. Retry here so returning to the saved review doesn't restore the
+    // cached review with stale reviewScopePhotoIds (folder mode no-ops).
+    maybeRefreshCollectionScopeMembership();
     return;
   }
   if (!reviewScopePhotoIds || !reviewScopeTotal) return;

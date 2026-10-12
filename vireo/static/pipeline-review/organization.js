@@ -203,6 +203,13 @@ function confirmPipelineCollection() {
     hidePipelineCollectionModal(true);
     showToast('Added ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's') +
       ' to "' + collectionName + '"', 'success');
+    // photoIdsInReviewScope keeps burst members of an open Group Review in
+    // scope even when they're outside the active folder/collection filter,
+    // so a static collection write here can add a photo that is still out
+    // of scope under the saved review. Without this snapshot + membership
+    // refresh, the newly-added photo stays filtered out after Group Review
+    // closes, and the "N not in saved review" totals stay stale.
+    refreshLatestScopeSnapshotIfCurrent();
     return true;
   })().finally(function() {
     pipelineReviewCollectionSubmitPromise = null;
