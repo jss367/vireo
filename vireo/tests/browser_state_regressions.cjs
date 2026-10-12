@@ -129,6 +129,127 @@ async function main() {
   assert.deepEqual(membershipDrop.window._vireoNativeMenuPhotoIdsOverride, [20]);
 
 
+  // A smart-collection membership refresh that drops the currently inspected
+  // photo must close the legacy inspector. getActiveSelection() prioritizes
+  // inspectPhotoId and the inspector's P/X shortcut writes against it, so
+  // leaving the inspector open on a photo that just left the collection
+  // would let the next keyboard action mutate a now-hidden target.
+  let inspectorClosed = 0;
+  const inspectorDrop = vm.createContext({
+    window: {},
+    pipelineReviewContextPhotoIds: [],
+    reviewScopeMode: 'collection',
+    reviewScopeCollectionId: 'c1',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([10, 20]),
+    reviewScopeTotal: 2,
+    _reviewScopeMembershipRefreshTimer: null,
+    _reviewScopeMembershipRefreshSeq: 0,
+    inspectPhotoId: 10,
+    pipelineResults: {summary: {}},
+    resultsCacheInfo: null,
+    renderResults() {},
+    updateSummaryBar() {},
+    updateReviewScopeStatusFromResults() {},
+    renderCacheScopeBanner() {},
+    setTimeout: (fn) => { fn(); return 0; },
+    clearTimeout() {},
+    safeFetch: async () => ({photo_ids: [20]}),
+    closeInspect() { inspectorClosed++; inspectorDropHolder.inspectPhotoId = null; },
+  });
+  const inspectorDropHolder = inspectorDrop;
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'filterPipelineReviewContextSelectionToScope',
+    'maybeRefreshCollectionScopeMembership',
+  ]) vm.runInContext(fn(review, name), inspectorDrop);
+  inspectorDrop.maybeRefreshCollectionScopeMembership();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(inspectorClosed, 1,
+    'inspector must close when its photo leaves the collection');
+  assert.equal(inspectorDrop.inspectPhotoId, null);
+
+  // A membership refresh that keeps the inspected photo in scope must not
+  // close the inspector. The user has not changed scope and the photo is
+  // still visible, so dismissing the open panel would be a regression.
+  let keepClosed = 0;
+  const inspectorKeep = vm.createContext({
+    window: {},
+    pipelineReviewContextPhotoIds: [],
+    reviewScopeMode: 'collection',
+    reviewScopeCollectionId: 'c1',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([10, 20]),
+    reviewScopeTotal: 2,
+    _reviewScopeMembershipRefreshTimer: null,
+    _reviewScopeMembershipRefreshSeq: 0,
+    inspectPhotoId: 10,
+    pipelineResults: {summary: {}},
+    resultsCacheInfo: null,
+    renderResults() {},
+    updateSummaryBar() {},
+    updateReviewScopeStatusFromResults() {},
+    renderCacheScopeBanner() {},
+    setTimeout: (fn) => { fn(); return 0; },
+    clearTimeout() {},
+    safeFetch: async () => ({photo_ids: [10]}),
+    closeInspect() { keepClosed++; },
+  });
+  for (const name of [
+    'clearPipelineReviewContextSelection',
+    'filterPipelineReviewContextSelectionToScope',
+    'maybeRefreshCollectionScopeMembership',
+  ]) vm.runInContext(fn(review, name), inspectorKeep);
+  inspectorKeep.maybeRefreshCollectionScopeMembership();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(keepClosed, 0,
+    'inspector must stay open when its photo remains in the collection');
+  assert.equal(inspectorKeep.inspectPhotoId, 10);
+
+
+  // renderAlgorithmTrace must suppress openInspect links on pair photos
+  // outside the scope. openInspect routes a flat encounter member to the
+  // legacy inspector, and its P/X shortcut writes a flag against
+  // inspectPhotoId with no scoped-view read-only guard. An in-scope pair
+  // photo stays clickable.
+  const traceCtx = vm.createContext({
+    window: {},
+    pipelineResults: {
+      photos: [
+        {id: 1, filename: 'a.jpg'},
+        {id: 2, filename: 'b.jpg'},
+        {id: 3, filename: 'c.jpg'},
+      ],
+      encounters: [{
+        photo_ids: [1, 2, 3],
+        photo_count: 3,
+        burst_count: 0,
+        trace: [{decision: 'kept', dt_seconds: 1, score: 0.5}, {decision: 'cut_time', dt_seconds: 10, score: 0.1}],
+      }],
+    },
+    reviewScopeMode: 'folder',
+    reviewScopeRegrouped: false,
+    reviewScopePhotoIds: new Set([1, 3]),
+    _focusedEncounterIdx: 0,
+    document: {getElementById: (id) => {
+      if (id === 'algorithmTrace') return {set innerHTML(v) { tracePanelHtml = v; }};
+      if (id === 'traceFocusLabel') return {textContent: ''};
+      return null;
+    }},
+    escapeHtml: s => String(s), escapeAttr: s => String(s),
+  });
+  let tracePanelHtml = '';
+  for (const name of [
+    'isReviewScopeFilterMode', 'activeReviewScopeFilter', 'photoInReviewScope',
+    'renderAlgorithmTrace',
+  ]) vm.runInContext(fn(review, name), traceCtx);
+  traceCtx.renderAlgorithmTrace();
+  assert(tracePanelHtml.includes('openInspect(1)'), 'photo 1 is in scope and must be clickable');
+  assert(tracePanelHtml.includes('openInspect(3)'), 'photo 3 is in scope and must be clickable');
+  assert(!tracePanelHtml.includes('openInspect(2)'),
+    'out-of-scope photo 2 must not render an openInspect link in the trace');
+
+
   // The legacy inspector's filmstrip must drop out-of-scope photos: clicking
   // a hidden thumbnail would navigate inspectPhotoId to an out-of-scope
   // photo, and the P/X shortcut writes a flag against it with no scoped

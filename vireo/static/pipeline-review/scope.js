@@ -388,6 +388,14 @@ function maybeRefreshCollectionScopeMembership() {
       // the next menu action mutate the now-hidden target. Scope-filter them
       // down to ids still in the collection before the next render.
       filterPipelineReviewContextSelectionToScope(newIds);
+      // The legacy inspector keeps its own inspectPhotoId that
+      // getActiveSelection() prioritizes and its P/X shortcut writes
+      // against. If the dropped photo is the one being inspected, close
+      // the inspector so a stale id can't be mutated after its card has
+      // disappeared from the grid.
+      if (typeof inspectPhotoId !== 'undefined' && inspectPhotoId != null && !newIds.has(inspectPhotoId)) {
+        closeInspect();
+      }
       renderResults();
       // statTotalPhotos, encounter/burst totals and confirmation counts are
       // scope-filtered through scopedSummaryCounts, so a membership change
