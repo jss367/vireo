@@ -167,6 +167,7 @@
 </div>
 
 <script src="/static/vireo-work-locally.js"></script>
+<script src="/static/workspace-deletion.js"></script>
 <script>
 
 /* ---------- Subject Types ---------- */
@@ -483,16 +484,6 @@ async function activateWorkspace(wsId) {
     });
     if (window.vireoEditNav) window.vireoEditNav.clearWorkspaceScopedCursors();
     window.location.href = data.restore_path || window.location.pathname;
-  } catch(e) {}
-}
-
-async function deleteWorkspaceConfirm(wsId, name) {
-  if (!confirm('Delete workspace "' + name + '"? This will remove all its predictions, collections, and pending changes. Photos and keywords are not affected.')) {
-    return;
-  }
-  try {
-    await safeFetch('/api/workspaces/' + wsId, { method: 'DELETE' });
-    loadWorkspaces();
   } catch(e) {}
 }
 

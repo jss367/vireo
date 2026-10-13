@@ -1029,6 +1029,9 @@ def test_startup_does_not_generate_working_copies(tmp_path, monkeypatch):
         def start(self):
             callbacks.append(self.callback)
 
+        def cancel(self):
+            pass  # Deferred callbacks never create a real timer thread.
+
     # Exercise production startup wiring without real timer delays or the
     # unrelated perpetual folder-health thread.
     real_start = threading.Thread.start
@@ -1045,7 +1048,9 @@ def test_startup_does_not_generate_working_copies(tmp_path, monkeypatch):
     )
     try:
         assert callbacks, "startup timers must be enabled for this regression"
-        for callback in callbacks:
+        # Run the first generation only: periodic storage maintenance
+        # schedules another callback, not more startup working-copy work.
+        for callback in list(callbacks):
             callback()
         assert app._job_runner.shutdown(timeout=30)
         assert not any(

@@ -104,6 +104,15 @@ def _add_prediction_history_instances(conn):
     )""")
 
 
+def _add_grouping_payload_bytes(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(edit_history_payloads)")}
+    if "bytes" not in columns:
+        conn.execute("ALTER TABLE edit_history_payloads ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0")
+        # Read historical blobs once during upgrade. Subsequent usage and
+        # budget checks read only compact integer metadata.
+        conn.execute("UPDATE edit_history_payloads SET bytes=LENGTH(CAST(payload AS BLOB))")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -115,6 +124,7 @@ MIGRATIONS = (
     ),
     Migration(15, "durable_paired_preview_cache", _add_paired_preview_cache),
     Migration(16, "prediction_history_instances", _add_prediction_history_instances),
+    Migration(17, "grouping_payload_bytes", _add_grouping_payload_bytes),
 )
 
 

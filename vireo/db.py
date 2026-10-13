@@ -1223,13 +1223,16 @@ class Database:
 
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
-        workspace_id = self._workspace_repository().create(
-            name, config_overrides, ui_state
+        from services.result_files import highest_workspace_id
+        id_floor = (
+            highest_workspace_id(os.path.dirname(self._db_path))
+            if self._db_path != ":memory:" else 0
         )
-        # SQLite INTEGER PRIMARY KEY (without AUTOINCREMENT) can reuse a deleted
-        # rowid, so a freshly created workspace may collide with the stale cache
-        # entry of a prior workspace that shared this id. Clear any lingering
-        # entry so the new workspace starts clean.
+        workspace_id = self._workspace_repository().create(
+            name, config_overrides, ui_state, id_floor=id_floor,
+        )
+        # Invalidate any cached reader state even though IDs now advance
+        # monotonically past both catalog rows and legacy result files.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
         return workspace_id
 
@@ -1469,11 +1472,16 @@ class Database:
     def delete_workspace(self, workspace_id):
         """Delete a workspace and all its scoped data (cascade)."""
         self._workspace_repository().delete(workspace_id)
+        cleanup_errors = []
+        if self._db_path != ":memory:":
+            from services.result_files import delete_workspace_results
+            cleanup_errors = delete_workspace_results(os.path.dirname(self._db_path), workspace_id)
         # Drop any cached new-images payload for this workspace. Without this,
         # if the deleted id is later reused by SQLite for a new workspace,
         # ``get_new_images_for_workspace`` could serve the prior workspace's
         # data until TTL expiry.
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+        return cleanup_errors
 
     def _folder_subtree_ids_by_path(self, folder_id):
         """Return folder_id plus known descendants, using paths as fallback.
@@ -4668,22 +4676,19 @@ class Database:
     EDIT_PRESET_NAME_MAX = 80
 
     def prune_pipeline_cache_for_ids(self, ids):
-        """Remove ``ids`` from the workspace's pipeline review cache file.
+        """Remove globally deleted ``ids`` from every workspace's results.
 
         Split out from ``delete_photos`` so chunked callers can defer it to
         after their outer transaction commits — pruning the on-disk cache
         is not transactional, so running it per-chunk would leave the cache
         permanently stripped of rows that a later rollback restores.
         """
-        if not ids or self._db_path == ":memory:" or not self._active_workspace_id:
+        if not ids or self._db_path == ":memory:":
             return
         try:
-            from pipeline import prune_results
-            prune_results(
-                os.path.dirname(self._db_path),
-                self._active_workspace_id,
-                ids,
-            )
+            from services.result_files import prune_photo_results
+            prune_photo_results(os.path.dirname(self._db_path), ids,
+                                [workspace["id"] for workspace in self.workspaces.list_all()])
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                 raise
@@ -9311,7 +9316,9 @@ class Database:
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""
         import config as cfg
         max_entries = cfg.get('max_edit_history') or 1000
-        self._edit_history_repository().prune(max_entries)
+        return self._edit_history_repository().prune(
+            max_entries, max_payload_bytes=max(0, int(cfg.get('grouping_history_max_mb'))) * 1024**2,
+        )
 
     # -- Collections --
 
@@ -10494,3 +10501,9 @@ class Database:
         set, and ``set_state`` works by id in any workspace.
         """
         return self._pending_archive_repository()
+
+    @property
+    def storage(self):
+        """Global managed-storage inspection; never retains an active scope."""
+        from repositories.storage import StorageRepository
+        return StorageRepository(self.conn)

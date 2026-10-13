@@ -398,9 +398,11 @@ class JobRunner:
             db.conn.execute(
                 "ALTER TABLE job_history ADD COLUMN workspace_id INTEGER"
             )
-        db.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id)"
-        )
+        # A catalog-independent download may finish after its workspace was
+        # deleted. Its final INSERT OR REPLACE must not resurrect history
+        # for an owner that no longer exists. NULL is global maintenance.
+        from repositories.job_history import JobHistoryRepository
+        JobHistoryRepository.ensure_workspace_ownership(db.conn)
         # Migration: add tree column
         try:
             db.conn.execute("SELECT tree FROM job_history LIMIT 0")
@@ -1691,32 +1693,31 @@ class JobRunner:
                     params,
                 )
                 ws_id = job.get("workspace_id")
-                if ws_id is not None:
-                    # Keep separate 100-row terminal histories for discovery
-                    # probes and other jobs, so periodic checks cannot evict
-                    # the user's pipeline/import history. Non-terminal rows
-                    # stay outside both quotas. Excluding these rows is
-                    # load-bearing: a queued pipeline waiting behind a
-                    # busy slot can sit in the table for a long time;
-                    # if its row got pruned by an unrelated job
-                    # completing, the next promotion attempt would see
-                    # rowcount==0 on its conditional UPDATE and treat
-                    # that as a cancel, silently dropping the run.
-                    for discovery in (False, True):
-                        conn.execute(
-                            """DELETE FROM job_history
-                           WHERE workspace_id = ?
+                # Keep separate 100-row terminal histories for discovery
+                # probes and other jobs, so periodic checks cannot evict
+                # the user's pipeline/import history. Non-terminal rows
+                # stay outside both quotas. Excluding these rows is
+                # load-bearing: a queued pipeline waiting behind a
+                # busy slot can sit in the table for a long time;
+                # if its row got pruned by an unrelated job
+                # completing, the next promotion attempt would see
+                # rowcount==0 on its conditional UPDATE and treat
+                # that as a cancel, silently dropping the run.
+                for discovery in (False, True):
+                    conn.execute(
+                        """DELETE FROM job_history
+                       WHERE workspace_id IS ?
+                         AND status IN ('completed', 'failed', 'cancelled')
+                         AND (type IN ('new_images_walk', 'missing_originals_scan')) = ?
+                         AND id NOT IN (
+                           SELECT id FROM job_history
+                           WHERE workspace_id IS ?
                              AND status IN ('completed', 'failed', 'cancelled')
                              AND (type IN ('new_images_walk', 'missing_originals_scan')) = ?
-                             AND id NOT IN (
-                               SELECT id FROM job_history
-                               WHERE workspace_id = ?
-                                 AND status IN ('completed', 'failed', 'cancelled')
-                                 AND (type IN ('new_images_walk', 'missing_originals_scan')) = ?
-                               ORDER BY started_at DESC LIMIT 100
-                           )""",
-                            (ws_id, discovery, ws_id, discovery),
-                        )
+                           ORDER BY started_at DESC LIMIT 100
+                       )""",
+                        (ws_id, discovery, ws_id, discovery),
+                    )
                 conn.commit()
                 return
             except sqlite3.OperationalError:

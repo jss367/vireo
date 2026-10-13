@@ -1123,33 +1123,34 @@ def test_delete_photos_sql_order(db, lib, monkeypatch, tmp_path):
 
 
 def test_prune_pipeline_cache_for_ids(db, monkeypatch):
-    import pipeline
+    from services import result_files
 
     calls = []
-    monkeypatch.setattr(pipeline, "prune_results", lambda *a: calls.append(a))
+    monkeypatch.setattr(result_files, "prune_photo_results", lambda *a: calls.append(a))
     db.prune_pipeline_cache_for_ids([])
     assert calls == []
     db.prune_pipeline_cache_for_ids([1, 2])
     import os
-    assert calls == [(os.path.dirname(db._db_path), db._active_workspace_id, [1, 2])]
+    workspace_ids = [workspace["id"] for workspace in db.workspaces.list_all()]
+    assert calls == [(os.path.dirname(db._db_path), [1, 2], workspace_ids)]
     db.set_active_workspace(None)
     db.prune_pipeline_cache_for_ids([3])
-    assert len(calls) == 1
+    assert calls[-1] == (os.path.dirname(db._db_path), [3], workspace_ids)
 
 
 def test_prune_pipeline_cache_for_ids_swallows_errors_but_not_interrupts(db, monkeypatch):
-    import pipeline
+    from services import result_files
 
     def boom(*a):
         raise OSError("disk")
 
-    monkeypatch.setattr(pipeline, "prune_results", boom)
+    monkeypatch.setattr(result_files, "prune_photo_results", boom)
     db.prune_pipeline_cache_for_ids([1])
 
     def interrupt(*a):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(pipeline, "prune_results", interrupt)
+    monkeypatch.setattr(result_files, "prune_photo_results", interrupt)
     with pytest.raises(KeyboardInterrupt):
         db.prune_pipeline_cache_for_ids([1])
 

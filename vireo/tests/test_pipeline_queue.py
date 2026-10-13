@@ -95,7 +95,8 @@ def test_enqueue_pipeline_persists_queued_row(tmp_path):
     BEFORE the worker thread runs to completion, and must be visible
     cross-connection (different sqlite handle).
     """
-    runner, _ = _make_runner_with_db(tmp_path)
+    runner, db = _make_runner_with_db(tmp_path)
+    workspace_id = db.create_workspace("Queued pipeline")
     # Fill every slot with blocking pipelines so the next enqueue
     # lands in 'queued'. Without this the trivial lambda would run
     # to completion before the assertion fires and the status would
@@ -104,7 +105,7 @@ def test_enqueue_pipeline_persists_queued_row(tmp_path):
     job_id = runner.enqueue_pipeline(
         work_fn=lambda job: None,
         config={"sources": ["/a"]},
-        workspace_id=42,
+        workspace_id=workspace_id,
     )
 
     # Open a fresh Database against the same file to verify the row is
@@ -124,7 +125,7 @@ def test_enqueue_pipeline_persists_queued_row(tmp_path):
     assert row is not None, "enqueue did not persist a job_history row"
     assert row["type"] == "pipeline"
     assert row["status"] == "queued"
-    assert row["workspace_id"] == 42
+    assert row["workspace_id"] == workspace_id
 
     blocker.set()
     for fid in filler_ids:
@@ -592,6 +593,7 @@ def test_promoting_pipeline_remains_visible_and_cancellable(tmp_path):
 def test_cancel_promoting_queued_pipeline_retries_next_candidate(tmp_path):
     """Cancelling a promoting queued job must not strand later queued work."""
     runner, db = _make_runner_with_db(tmp_path)
+    assert db.create_workspace("Next pipeline") == 2
     cancelled_id = "pipeline-1700000000001"
     next_id = "pipeline-1700000000002"
     next_started = threading.Event()

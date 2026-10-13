@@ -705,28 +705,69 @@ class EditHistoryRepository:
 
     # -- pruning --------------------------------------------------------------
 
-    def prune(self, max_entries: int) -> None:
+    def prune(self, max_entries: int, *, max_payload_bytes: int | None = None) -> dict[str, int]:
         """Delete this workspace's oldest done entries beyond ``max_entries``.
 
         Undone entries awaiting redo are never pruned.
         """
         ws = self.workspace_id
-        self.conn.execute(
-            """DELETE FROM edit_history
-                WHERE workspace_id = ? AND undone = 0
-                  AND id NOT IN (
-                      SELECT id FROM edit_history
-                      WHERE workspace_id = ? AND undone = 0
-                      ORDER BY created_at DESC, id DESC LIMIT ?
-                  )""",
-            (ws, ws, max_entries),
-        )
-        self.conn.commit()
+        owns_transaction = not self.conn.in_transaction
+        if owns_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("SAVEPOINT retained_history_prune")
+        try:
+            def totals():
+                return self.conn.execute(
+                    """SELECT COUNT(*), COALESCE(SUM(p.bytes), 0)
+                       FROM edit_history_payloads p JOIN edit_history h ON h.id=p.edit_id
+                       WHERE h.workspace_id=?""", (ws,),
+                ).fetchone()
+
+            before = totals()
+            self.conn.execute(
+                """DELETE FROM edit_history
+                    WHERE workspace_id = ? AND undone = 0
+                      AND id NOT IN (
+                          SELECT id FROM edit_history
+                          WHERE workspace_id = ? AND undone = 0
+                          ORDER BY created_at DESC, id DESC LIMIT ?
+                      )""",
+                (ws, ws, max_entries),
+            )
+            if max_payload_bytes is not None:
+                rows = self.conn.execute(
+                    """SELECT p.edit_id, p.bytes
+                       FROM edit_history_payloads p JOIN edit_history h ON h.id=p.edit_id
+                       WHERE h.workspace_id=? AND h.undone=0
+                       ORDER BY h.created_at DESC, h.id DESC""", (ws,)
+                ).fetchall()
+                retained = 0
+                for row in rows:
+                    # Grouping undo is a chain. Once a newer link is
+                    # retired, no older grouping snapshot can be replayed
+                    # against the current structure, even if it would fit.
+                    retained += row["bytes"]
+                    if retained > max_payload_bytes:
+                        # Preserve any photo edits carried by the grouping edit.
+                        self.retire_stale_grouping_entry(row["edit_id"])
+            after = totals()
+        except BaseException:
+            self.conn.execute("ROLLBACK TO retained_history_prune")
+            self.conn.execute("RELEASE retained_history_prune")
+            if owns_transaction:
+                self.conn.rollback()
+            raise
+        else:
+            self.conn.execute("RELEASE retained_history_prune")
+            if owns_transaction:
+                self.conn.commit()
+        return {"grouping_snapshots_retired": before[0] - after[0],
+                "grouping_snapshot_bytes_removed": before[1] - after[1]}
 
     def store_grouping_payload(self, edit_id: int, payload: str) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO edit_history_payloads (edit_id, payload) VALUES (?, ?)",
-            (edit_id, payload),
+            "INSERT OR REPLACE INTO edit_history_payloads (edit_id, payload, bytes) VALUES (?, ?, ?)",
+            (edit_id, payload, len(payload) if payload.isascii() else len(payload.encode("utf-8"))),
         )
 
     def convert_to_grouping(self, edit_id: int, value: str) -> None:

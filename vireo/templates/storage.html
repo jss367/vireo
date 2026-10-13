@@ -72,6 +72,14 @@ body { padding-bottom: 36px; }
   border-radius: 4px; padding: 6px 16px; font-size: 12px; cursor: pointer;
 }
 .btn-secondary:hover, .btn-manage:hover { color: var(--text-secondary); border-color: var(--border-secondary); }
+.retained-settings label { font-size: 13px; color: var(--text-primary); }
+.retained-settings input { width: 110px; background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; padding: 5px 8px; font-size: 13px; text-align: right; }
+#retainedStorageStatus { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+.storage-retained-item { padding: 10px 0; border-bottom: 1px solid var(--border-primary); font-size: 12px; }
+.storage-retained-item summary { cursor: pointer; font-size: 13px; color: var(--text-primary); }
+.storage-retained-item code { display: block; overflow-wrap: anywhere; margin: 10px 0; color: var(--text-dim); }
+.storage-retained-item button { margin: 6px 8px 6px 0; }
+.storage-retained-files { max-height: 240px; overflow: auto; color: var(--text-dim); }
 .btn-manage {
   color: var(--accent); border-color: var(--accent); padding: 2px 8px;
   font-size: 10px; margin-top: 8px;
@@ -245,7 +253,39 @@ dialog.modal-overlay::backdrop { background: transparent; }
     </div>
     <div id="matrixContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
+
+<div class="section retained-settings">
+  <div class="section-title">Retained generated files and grouping history</div>
+  <p class="storage-legend">Generated-file sizes below are already included in Vireo storage above. This shared limit covers full-resolution renders, upload renders, and imported computation results. Files can regenerate from available sources; imported results may need reimporting. External editor files can contain unique edits and are preserved. Original photos, exports, recovery staging, offline copies, and editing masks are retained.</p>
+  <div class="setting-row">
+    <label for="retainedCacheLimit">Generated files shared limit (MB)</label>
+    <input id="retainedCacheLimit" type="number" min="0" max="1048576" step="1" required aria-describedby="retainedPolicyNote">
+  </div>
+  <div class="setting-row">
+    <label for="retainedCacheAge">Generated files age limit (days)</label>
+    <input id="retainedCacheAge" type="number" min="0" max="3650" step="1" required aria-describedby="retainedPolicyNote">
+  </div>
+  <div class="setting-row">
+    <label for="groupingHistoryLimit">Grouping undo per workspace (MB)</label>
+    <input id="groupingHistoryLimit" type="number" min="0" max="1048576" step="1" required aria-describedby="retainedPolicyNote">
+  </div>
+  <p id="retainedPolicyNote" class="storage-legend">Maintenance runs hourly and after applying limits. Automatic render cleanup requires independent catalog sources to be fully readable and unchanged; offline or unverifiable sources are retained, even above the limit. Newly written files have a one-hour grace period. Age uses the latest filesystem access, write or change timestamp; 0 disables age expiry. Size 0 removes eligible generated files past the grace period; protected files remain. Grouping history retires the oldest completed snapshots first, preserving photo edits and snapshots awaiting redo. Removing snapshots makes space reusable inside the catalog; the database file may stay the same size.</p>
+  <button class="btn-secondary" onclick="saveRetainedStoragePolicy(this)">Apply retention limits</button>
+  <p id="retainedStorageStatus" role="status" aria-live="polite"></p>
+  <div id="retainedStorageItems">Loading retained storage…</div>
 </div>
+</div>
+
+<dialog id="retainedActionModal" class="modal-overlay" aria-labelledby="retainedActionTitle">
+  <div class="modal">
+    <div class="modal-header"><h3 id="retainedActionTitle">Manage retained storage</h3></div>
+    <div class="modal-body"><p id="retainedActionDescription"></p></div>
+    <div class="modal-footer">
+      <button id="retainedActionCancel" class="btn-secondary">Cancel</button>
+      <button id="retainedActionConfirm" class="btn-primary">Continue</button>
+    </div>
+  </div>
+</dialog>
 
 <dialog class="modal-overlay" id="workingCopyLimitModal"
         aria-labelledby="workingCopyLimitModalTitle"
@@ -313,6 +353,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
 </div>
 
 <script src="/static/vireo-release-originals.js"></script>
+<script src="/static/storage-retained.js"></script>
 <script>
 function storageEscapeHtml(s) {
   return String(s == null ? '' : s)
@@ -765,7 +806,7 @@ async function refreshStoragePage() {
   if (btn) btn.disabled = true;
   await Promise.all([
     loadStoragePanel(), loadPreviewCacheStatus(), loadDetectionCacheStats(),
-    loadEmbeddingMatrix(), loadEmbeddingCache(),
+    loadEmbeddingMatrix(), loadEmbeddingCache(), loadRetainedStorage(),
   ]);
   document.getElementById('storageUpdatedAt').textContent =
     'Updated ' + new Date().toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit'});

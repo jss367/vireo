@@ -864,7 +864,11 @@ def _make_db_with_ids(tmp_path, ids, workspace_id=1, link_folder=True):
     """
     from db import Database
 
-    db = Database(str(tmp_path / "test.db"))
+    # Cache snapshots can predate the catalog in these tests. Keep them
+    # outside its directory: orphan workspace IDs are now reserved on open.
+    catalog = tmp_path / "catalog"
+    catalog.mkdir(exist_ok=True)
+    db = Database(str(catalog / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
     if not link_folder:
         db.remove_workspace_folder(workspace_id, fid)
@@ -3977,4 +3981,3 @@ def test_full_image_rescue_respects_current_top_k(tmp_path, monkeypatch, detecto
         assert limited['species_top5'][0][0] == 'Common Yellowthroat'
     finally:
         db.close()
-

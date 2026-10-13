@@ -53,10 +53,11 @@ class PhotoDeletion:
         try:
             # Imported lazily: a broken ``preview_cache`` import (e.g. a moved
             # packaged executable) must be logged, not fail the delete.
-            from preview_cache import cleanup_cached_files_for_deleted_photos
+            from preview_cache import catalog_masks_directory, cleanup_cached_files_for_deleted_photos
             cleanup_cached_files_for_deleted_photos(
                 self._config["THUMB_CACHE_DIR"], files,
                 progress_callback=progress_callback,
+                masks_dir=catalog_masks_directory(self._config["DB_PATH"]),
             )
         except BaseException as exc:
             reraise_fatal_cleanup_error(exc)

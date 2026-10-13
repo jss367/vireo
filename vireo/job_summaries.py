@@ -155,6 +155,23 @@ def _error_details(result: dict, key: str = "errors") -> list[str]:
 # --- Per-type describers -------------------------------------------------
 
 
+def _retained_cache(result: dict, config: dict) -> tuple[str, list[str]]:
+    if config.get("cache_type") == "grouping-history":
+        return (result.get("summary") or "Grouping history cleanup completed", [])
+    deleted = _int(result, "deleted")
+    summary = f"Removed {_n(deleted, 'generated file')}; freed {_human_bytes(_int(result, 'freed_bytes'))}"
+    details = [f"Generated files remaining: {_human_bytes(_int(result, 'remaining_bytes'))}"]
+    if retired := _int(result, "grouping_snapshots_retired"):
+        summary += f"; retired {_n(retired, 'grouping undo snapshot')}"
+        details.append(f"Snapshot data removed from catalog: {_human_bytes(_int(result, 'grouping_snapshot_bytes_removed'))}. Database space is reusable.")
+    if kept := _int(result, "kept_unverified_sources"):
+        summary += f"; kept {_n(kept, 'generated file')} with unverified sources"
+        details.append(f"Kept {_n(kept, 'generated file')}: independent sources could not be verified as readable and unchanged.")
+    if errors := _int(result, "errors_total"):
+        summary += f"; {_n(errors, 'cleanup error')} (see Jobs for details)"
+    return summary, details + _error_details(result)
+
+
 def _batch_delete(result: dict, config: dict) -> tuple[str, list[str]]:
     deleted = _int(result, "deleted")
     trashed = _int(result, "trashed")
@@ -823,6 +840,8 @@ def _pipeline(result: dict, config: dict) -> tuple[str, list[str]]:
 
 
 _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
+    "retained-cache-cleanup": _retained_cache,
+    "retained-cache-maintenance": _retained_cache,
     "pipeline": _pipeline,
     "batch-delete": _batch_delete,
     "thumbnails": _thumbnails,

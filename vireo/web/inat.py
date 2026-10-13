@@ -34,6 +34,7 @@ from render_source import (
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
+from services.retained_cache import guarded_reader
 from species_identity import SpeciesResolver, resolved_prediction_taxonomy
 from web.background_jobs import make_background_job
 from web.request_args import MAX_SELECTION_PHOTOS
@@ -669,6 +670,7 @@ def create_inat_blueprint(
         return out_path, None
 
     @blueprint.route("/api/inat/submit", methods=["POST"])
+    @guarded_reader("inat-uploads")
     def api_inat_submit():
         """Submit a single observation to iNaturalist."""
         import config as cfg
@@ -786,6 +788,7 @@ def create_inat_blueprint(
         return jsonify({"observation_id": obs_id, "observation_url": obs_url})
 
     @blueprint.route("/api/inat/submit-batch", methods=["POST"])
+    @guarded_reader("inat-uploads")
     def api_inat_submit_batch():
         """Submit multiple observations to iNaturalist."""
         import config as cfg

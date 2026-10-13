@@ -1674,6 +1674,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._log_broadcaster.install()
 
     app._cleanup_app_resources = startup.cleanup_app_resources
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        startup.schedule_retained_cache_maintenance()
 
     # Live progress of the most recent new-images walk, keyed by
     # (db_path, workspace_id). Written by the walk's progress callback and
@@ -1854,7 +1856,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
     )
     app.register_blueprint(
-        create_storage_blueprint(_get_db, json_error, db_path, app.config)
+        create_storage_blueprint(_get_db, json_error, db_path, app.config,
+                                 get_runner=lambda: app._job_runner)
     )
     app.register_blueprint(
         create_workspace_blueprint(

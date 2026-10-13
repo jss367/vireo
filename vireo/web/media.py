@@ -77,6 +77,7 @@ from render_source import (
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
+from services.retained_cache import reader_guard
 from web.responses import photo_not_found_error
 from working_copy_cache import (
     evict_if_over_quota as evict_working_copy_cache_if_over_quota,
@@ -560,8 +561,9 @@ class _OriginalPhotoRequest:
         paired_original_cache = _paired_original_path(
             self.vireo_dir, self.photo_id, pair_source, paired_original_state,
         )
-        if _fresh_paired_artifact(paired_original_cache):
-            return send_file(paired_original_cache, mimetype="image/jpeg")
+        with reader_guard("full-resolution"):
+            if _fresh_paired_artifact(paired_original_cache):
+                return send_file(paired_original_cache, mimetype="image/jpeg")
 
         def _render_paired_original():
             return self._render_paired_original(
@@ -630,10 +632,11 @@ class _OriginalPhotoRequest:
         # decoding the same source. Best-effort: a full or read-only
         # disk must never turn a successful producer into a 500.
         try:
-            _sweep_stale_paired_previews(
-                _paired_original_dir(self.vireo_dir),
-            )
-            atomic_write_bytes(data, paired_original_cache)
+            with reader_guard("full-resolution"):
+                _sweep_stale_paired_previews(
+                    _paired_original_dir(self.vireo_dir),
+                )
+                atomic_write_bytes(data, paired_original_cache)
         except Exception:
             log.warning(
                 "Failed to publish paired original cache %s",
@@ -1118,15 +1121,16 @@ class _OriginalPhotoRequest:
         os.close(fd)
         try:
             img.save(tmp_path, format="JPEG", quality=quality)
-            with self._preparation_publication():
+            with self._preparation_publication(), reader_guard("full-resolution"):
                 replace_file(tmp_path, cache_path)
                 _peg_render_mtime_to_source(cache_path, self.photo)
+                response = send_file(cache_path, mimetype="image/jpeg")
         except Exception:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
             raise
         img.close()
-        return send_file(cache_path, mimetype="image/jpeg")
+        return response
 
     # -- Unedited originals ----------------------------------------------
 
@@ -1182,8 +1186,9 @@ class _OriginalPhotoRequest:
             self.display_cache_path = os.path.join(
                 self.vireo_dir, "originals", f"{self.photo_id}.display.jpg",
             )
-            if self._display_cache_is_current():
-                return send_file(self.display_cache_path, mimetype="image/jpeg")
+            with reader_guard("full-resolution"):
+                if self._display_cache_is_current():
+                    return send_file(self.display_cache_path, mimetype="image/jpeg")
 
         if (
             self.primary_is_raw
@@ -1839,7 +1844,7 @@ class _OriginalPhotoRequest:
         os.close(fd)
         try:
             img.save(tmp_path, format="JPEG", quality=self.quality)
-            with self._preparation_publication():
+            with self._preparation_publication(), reader_guard("full-resolution"):
                 replace_file(tmp_path, cache_path)
                 if self.primary_is_raw:
                     # The unedited RAW display cache-hit check compares
@@ -1853,13 +1858,14 @@ class _OriginalPhotoRequest:
                     )
                 else:
                     _peg_render_mtime_to_source(cache_path, self.photo)
+                response = send_file(cache_path, mimetype="image/jpeg")
         except Exception:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
             raise
         finally:
             img.close()
-        return send_file(cache_path, mimetype="image/jpeg")
+        return response
 
 
 def _send_cached_thumbnail(directory, fname):
@@ -4034,11 +4040,12 @@ def create_media_blueprint(
             return original.serve_paired_raw(pair_source, pair_source_path)
 
         original.collect_file_state()
-        prepared_render = _prepared_full_resolution_render(
-            vireo_dir, photo, recipe, original.file_state,
-        )
-        if prepared_render:
-            return send_file(prepared_render, mimetype="image/jpeg")
+        with reader_guard("full-resolution"):
+            prepared_render = _prepared_full_resolution_render(
+                vireo_dir, photo, recipe, original.file_state,
+            )
+            if prepared_render:
+                return send_file(prepared_render, mimetype="image/jpeg")
 
         # Paired-source requests returned above using their source/edit-signed
         # transient artifact.

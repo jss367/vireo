@@ -255,6 +255,8 @@
       "POST /api/storage/masks/delete-inactive",
       "POST /api/storage/masks/delete-stale",
       "POST /api/storage/masks/delete-variant",
+      "POST /api/storage/retained/clear",
+      "POST /api/storage/retention",
       "POST /api/system/install-exiftool",
       "POST /api/workspaces/active/local-folders/discard",
       "POST /api/workspaces/active/local-folders/stage",
