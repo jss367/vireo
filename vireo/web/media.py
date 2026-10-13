@@ -632,10 +632,11 @@ class _OriginalPhotoRequest:
         # decoding the same source. Best-effort: a full or read-only
         # disk must never turn a successful producer into a 500.
         try:
-            _sweep_stale_paired_previews(
-                _paired_original_dir(self.vireo_dir),
-            )
-            atomic_write_bytes(data, paired_original_cache)
+            with reader_guard("full-resolution"):
+                _sweep_stale_paired_previews(
+                    _paired_original_dir(self.vireo_dir),
+                )
+                atomic_write_bytes(data, paired_original_cache)
         except Exception:
             log.warning(
                 "Failed to publish paired original cache %s",

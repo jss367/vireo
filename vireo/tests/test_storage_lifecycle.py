@@ -302,6 +302,54 @@ def test_prepared_render_reader_is_pinned_until_response_opens(app_and_db, tmp_p
     assert not render.exists()
 
 
+def test_paired_render_publication_waits_until_eviction_finishes(app_and_db, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import image_loader
+    from PIL import Image
+    from testing.waits import synchronization_timeout
+    from web import media
+
+    app, _db = app_and_db
+    config = _cache_config(tmp_path)
+    root = Path(config["THUMB_CACHE_DIR"]).parent
+    path = Path(media._paired_original_path(str(root), 1, "raw", "state"))
+    _payload(path, b"old rendition")
+    before_unlink, resume, started = threading.Event(), threading.Event(), threading.Event()
+    responses, results = [], []
+    unlink = os.unlink
+    def pause_unlink(target, *args, **kwargs):
+        if str(target) == str(path):
+            before_unlink.set()
+            assert resume.wait(synchronization_timeout(5))
+        return unlink(target, *args, **kwargs)
+    monkeypatch.setattr(retained_cache.os, "unlink", pause_unlink)
+    monkeypatch.setattr(image_loader, "load_image", lambda *_args, **_kwargs: Image.new("RGB", (8, 8)))
+    def clear():
+        results.append(retained_cache.cleanup(config, [], family="full-resolution", clear=True))
+    def publish():
+        started.set()
+        with app.app_context():
+            render = SimpleNamespace(vireo_dir=str(root), photo_id=1, recipe=None)
+            response = media._OriginalPhotoRequest._render_paired_original(render, "raw", "synthetic-source", str(path))
+            responses.append(response.get_data())
+    cleaner, publisher = threading.Thread(target=clear), threading.Thread(target=publish)
+    cleaner.start()
+    try:
+        assert before_unlink.wait(synchronization_timeout(5))
+        publisher.start()
+        assert started.wait(synchronization_timeout(5))
+        publisher.join(0.05)
+        assert publisher.is_alive()
+    finally:
+        resume.set()
+        cleaner.join(synchronization_timeout(5))
+        if publisher.ident:
+            publisher.join(synchronization_timeout(5))
+    assert results[0]["deleted"] == 1
+    assert len(responses) == 1 and path.read_bytes() == responses[0]
+
+
 @pytest.mark.parametrize("change", [None, "offline", "changed"])
 def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, change):
     import hashlib
