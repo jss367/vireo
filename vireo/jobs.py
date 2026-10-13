@@ -1808,6 +1808,16 @@ class JobRunner:
         snap["progress"] = dict(job.get("progress") or {})
         snap["steps"] = [dict(s) for s in (job.get("steps") or [])]
         snap["errors"] = list(job.get("errors") or [])
+        # Freeze the top-level ``result`` mapping too. Some workers mutate
+        # ``job["result"]`` in place (e.g. the release-local-originals loop
+        # bumps ``failed`` / ``errors_total`` without holding ``_lock``), so
+        # a checkpoint that leaves ``snap["result"]`` as the live dict can
+        # dump the result at one state in ``_write_checkpoints`` and then
+        # read ``_error_total`` at a later state — the row's ``error_count``
+        # column then disagrees with the ``errors_total`` the serialized
+        # result reports, and the startup-sweep +1 compounds the mismatch.
+        if isinstance(snap.get("result"), dict):
+            snap["result"] = dict(snap["result"])
         if job.get("status") in ("running", "pausing", "paused"):
             timing = get_resource_ledger().owner_timing(job["id"])
             snap["resource_wait_seconds"] = timing["wait_seconds"]

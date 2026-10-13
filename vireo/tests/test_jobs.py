@@ -920,6 +920,55 @@ def test_checkpoint_persists_errors_total_not_capped_errors_length(tmp_path):
     assert final["error_count"] == 200
 
 
+def test_snapshot_job_freezes_result_against_worker_mutation():
+    """``_snapshot_job`` must return a snapshot whose ``result`` is a
+    distinct top-level mapping from the live job's: a worker that keeps
+    mutating ``job["result"]`` in place (e.g. the release-local-originals
+    loop bumping ``failed`` / ``errors_total`` without holding ``_lock``)
+    would otherwise let ``_write_checkpoints`` dump the result at one
+    state and read ``_error_total`` from it at a later state. The row's
+    ``error_count`` column would then disagree with ``errors_total`` in
+    the serialized result, and the startup-sweep +1 compounds the
+    mismatch on an interrupted row.
+    """
+    from jobs import JobRunner
+
+    live_result = {
+        "failed": 50,
+        "errors": [f"file_{i}.jpg: boom" for i in range(50)],
+        "errors_total": 50,
+        "ok": False,
+    }
+    job = {
+        "id": "release-1",
+        "type": "release-local-originals",
+        "status": "running",
+        "progress": {"current": 50, "total": 200},
+        "steps": [],
+        "errors": [f"file_{i}.jpg: boom" for i in range(50)],
+        "result": live_result,
+    }
+
+    snap = JobRunner._snapshot_job(job)
+
+    # The snapshot's result must be a distinct dict so later worker
+    # mutations cannot bleed into subsequent reads by callers (checkpoint
+    # writer, Jobs API).
+    assert snap["result"] is not live_result
+    snap_result_before = dict(snap["result"])
+
+    # Simulate the worker racing another failure into the live dict
+    # between the snapshot and whatever the caller does next.
+    live_result["failed"] = 200
+    live_result["errors_total"] = 200
+
+    assert snap["result"] == snap_result_before
+    assert snap["result"]["errors_total"] == 50
+    # ``_error_total`` reading from the snapshot must agree with the
+    # ``errors_total`` the same snapshot's result would serialize.
+    assert JobRunner._error_total(snap) == snap["result"]["errors_total"] == 50
+
+
 def test_failed_job_history_preserves_structured_result(tmp_path):
     """When a work function stashes a structured result on job['result']
     before raising, _persist_job must preserve that structure in history
