@@ -334,4 +334,16 @@ function updateStartGate() {
         ? 'Start import (' + checked.toLocaleString() + ' file'
           + (checked === 1 ? '' : 's') + ')'
         : 'Start import');
+  const summary = document.getElementById('importActionSummary');
+  if (summary) {
+    // Use the same current selection and lifecycle gate as the action.
+    // A stale or unfinished preview must not promise a copy count.
+    summary.textContent = reason
+      || (copyMode && importPreviewCapturedSignature !== null
+          ? checked.toLocaleString() + ' file' + (checked === 1 ? '' : 's')
+            + ' selected · ' + checked.toLocaleString() + ' to copy'
+          : problem ? problem.message
+            : copyMode ? 'All matching files will be copied'
+              : 'Originals will stay in place');
+  }
 }

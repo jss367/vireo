@@ -18053,7 +18053,7 @@ def test_import_page_after_move_eligibility_requires_existing_root(
 def test_import_page_surfaces_destination_errors_and_recovery_actions(
     app_and_db,
 ):
-    """Import validation belongs beside the field and before the preview,
+    """Import validation belongs beside the field and the persistent action,
     while failed copy runs offer a preconfigured recovery action."""
     app, _ = app_and_db
     html = _page_with_scripts(app.test_client(), '/import')
@@ -18064,7 +18064,10 @@ def test_import_page_surfaces_destination_errors_and_recovery_actions(
     assert "Local or mounted path" in html
     assert "updateStartAvailability" in html
     assert "importFormProblem" in html
-    assert html.index('id="importError"') < html.index('id="importPreviewGrid"')
+    assert (html.index('id="importPreviewGrid"')
+            < html.index('class="import-action-bar"')
+            < html.index('id="importError"')
+            < html.index('id="btnStart"'))
     assert 'id="retryImportRow"' in html
     assert "retryFailedImport" in html
     assert "Already imported files will be skipped" in html
