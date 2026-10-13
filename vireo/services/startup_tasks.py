@@ -55,7 +55,7 @@ class StartupTasks:
             if self._retained_cache_stopped.is_set():
                 return
             try:
-                self._app._job_runner.start(
+                self._app._job_runner.start_singleton(
                     "retained-cache-maintenance", self._maintain_retained_caches,
                     workspace_id=None, singleton_key="retained-cache-maintenance",
                 )

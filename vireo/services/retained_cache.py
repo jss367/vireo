@@ -226,7 +226,7 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
         if family and key != family:
             continue
         resolved = os.path.normcase(os.path.realpath(root))
-        if any(_within(path, resolved) for path in source_folders):
+        if any(_within(path, resolved) or _within(resolved, path) for path in source_folders):
             add_error(f"Skipped {root}: a catalog photo folder uses this directory.")
             continue
         if os.path.islink(root):

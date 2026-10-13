@@ -473,6 +473,18 @@ def test_retained_cleanup_rejects_photo_folders_and_symlinks(tmp_path):
     assert source.exists() and other.exists()
 
 
+@pytest.mark.parametrize("relation", ["parent", "same", "child"])
+def test_retained_cleanup_rejects_photo_folder_overlap_in_both_directions(tmp_path, relation):
+    config = _cache_config(tmp_path)
+    root = Path(config["THUMB_CACHE_DIR"]).parent / "originals"
+    original = _payload(root / "1.jpg", b"catalog original")
+    folder = root.parent if relation == "parent" else root / "child" if relation == "child" else root
+    result = retained_cache.cleanup(config, [str(folder)], family="full-resolution", clear=True)
+    assert result["deleted"] == 0 and not result["ok"]
+    assert original.read_bytes() == b"catalog original"
+    assert result["errors_total"] == 1
+
+
 def test_failed_unlink_remains_counted(tmp_path, monkeypatch):
     config = _cache_config(tmp_path)
     path = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / "1.jpg")
@@ -592,6 +604,47 @@ def test_maintenance_keeps_workspace_created_during_the_pass(app_and_db, tmp_pat
     StartupTasks(app, db._db_path, db)._maintain_retained_caches({"id": "test"})
     assert created[0].exists()
     assert not orphan.exists()
+
+
+def test_scheduled_maintenance_launches_and_joins_real_singleton_job(app_and_db, monkeypatch):
+    from services import startup_tasks
+    from testing.waits import synchronization_timeout
+
+    app, db = app_and_db
+    timers = []
+    class DeferredTimer:
+        def __init__(self, delay, callback):
+            self.delay, self.callback = delay, callback
+        def start(self):
+            timers.append(self)
+        def cancel(self):
+            pass
+    monkeypatch.setattr(startup_tasks.threading, "Timer", DeferredTimer)
+    tasks = startup_tasks.StartupTasks(app, db._db_path, db)
+    started, resume = threading.Event(), threading.Event()
+    def work(_job):
+        started.set()
+        assert resume.wait(synchronization_timeout(5))
+        return {"ok": True}
+    monkeypatch.setattr(tasks, "_maintain_retained_caches", work)
+    try:
+        tasks.schedule_retained_cache_maintenance()
+        assert timers[0].delay == 10
+        timers[0].callback()
+        assert started.wait(synchronization_timeout(5))
+        assert timers[1].delay == 3600
+        timers[1].callback()
+        jobs = [job for job in app._job_runner.list_jobs() if job["type"] == "retained-cache-maintenance"]
+        assert len(jobs) == 1 and jobs[0]["workspace_id"] is None
+        assert len(timers) == 3
+        tasks._retained_cache_stopped.set()
+        timers[2].callback()
+        assert len(timers) == 3
+    finally:
+        tasks._retained_cache_stopped.set()
+        resume.set()
+    job = wait_for_job_via_client(app.test_client(), jobs[0]["id"], wait_for_history=True)
+    assert job["status"] == "completed"
 
 
 def test_storage_clear_runs_in_job_and_preserves_computation_trust(app_and_db, tmp_path):
