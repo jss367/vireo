@@ -120,6 +120,7 @@ function renderJobCard(job, options) {
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">Checking recovery options…</div>';
   }
   var recoveryOptions = job.import_recovery_options || {};
+  var recoveryBlocksRetry = recoveryOptions.error && (!importNotStarted || !recoveryOptions.retryable);
   if (!isLive && !job.import_resume_pending && recoveryOptions.error) {
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">' + esc(recoveryOptions.error);
     if (recoveryOptions.taken_over_by_job_id) {
@@ -130,7 +131,7 @@ function renderJobCard(job, options) {
     }
     html += '</div>';
   }
-  if (!isLive && !job.import_resume_pending && !recoveryOptions.error &&
+  if (!isLive && !job.import_resume_pending && !recoveryBlocksRetry &&
       (failedImportCount > 0 || importNotStarted || resumableImport || resumeTakeover.by) &&
       importRetryBody(job)) {
     var retryInFlight = hasActiveRetryFor(job.id);
@@ -156,12 +157,17 @@ function renderJobCard(job, options) {
     } else if (importNotStarted) {
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '">Retry import</button>';
-      if (canRetryImportDirectToNas(job, historyJobs)) {
+      var directAllowed = recoveryOptions.direct_to_nas_allowed === true &&
+        !job.import_direct_pending && canRetryImportDirectToNas(job, historyJobs);
+      if (directAllowed) {
         html += '<button class="btn-retry" data-retry-import-job="' +
           escapeAttr(job.id) + '" data-retry-direct-to-nas style="margin-left:8px;">Retry directly to NAS</button>';
       }
       html += '<span style="margin-left:8px;">Fix the error above, then retry with the same selection and settings.</span>';
-      if (canRetryImportDirectToNas(job, historyJobs)) {
+      if (job.import_direct_pending) {
+        html += '<span style="margin-left:8px;">Checking NAS retry option…</span>';
+      }
+      if (directAllowed) {
         html += '<span style="margin-left:8px;">Direct to NAS skips local temporary storage and processes photos in the archive.</span>';
       }
     } else {

@@ -2,9 +2,11 @@
 // Classic page script; load boot.js after all definitions.
 
 function refreshHistoryImportRecovery(job) {
-  if (job.import_resume_pending) return;
-  if (job.type !== 'import' || job.status !== 'failed' || !job.result ||
-      !job.result.interrupted || !Array.isArray(job.result.photo_ids)) return;
+  if (job.import_resume_pending || job.import_direct_pending) return;
+  if (job.type !== 'import' || job.status !== 'failed' || !job.result) return;
+  var interrupted = job.result.interrupted && Array.isArray(job.result.photo_ids);
+  var directCandidate = canRetryImportDirectToNas(job, historyJobs);
+  if (!interrupted && !directCandidate) return;
   var cfg = jobConfig(job);
   var ids = importChainProcessJobIds(cfg, job.result, historyJobs, job.id);
   var missing = ids.some(function(id) {
@@ -12,14 +14,19 @@ function refreshHistoryImportRecovery(job) {
   });
   // No receipt can mean the checkpoint preceded the processing handoff.
   // The server also searches pipelines by chained_from in that crash window.
-  if (!missing && ids.length) return;
-  job.import_resume_pending = true;
+  if (!directCandidate && !missing && ids.length) return;
+  job.import_resume_pending = !!interrupted;
+  job.import_direct_pending = directCandidate;
   function applyOptions(options) {
     // A subsequent history refresh or selection must not receive stale eligibility.
+    if (historyJobs.indexOf(job) < 0) return;
     if (!options || typeof options.resume_allowed !== 'boolean' ||
-        historyJobs.indexOf(job) < 0) return;
+        typeof options.direct_to_nas_allowed !== 'boolean') {
+      throw new Error('Invalid import recovery options');
+    }
     job.import_resume_allowed = options.resume_allowed;
     job.import_resume_pending = false;
+    job.import_direct_pending = false;
     job.import_recovery_options = options;
     if (selectedSource === 'history' && selectedJobId === job.id) renderHistoryDetail(job);
     else if (currentView === 'history') renderHistoryOverview();

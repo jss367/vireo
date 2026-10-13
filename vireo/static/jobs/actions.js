@@ -76,7 +76,8 @@ function bindDetailPaneActions() {
         return job.id === retryJobId;
       });
       if (retryJob && (retryJob.import_resume_pending ||
-          (retryJob.import_recovery_options && retryJob.import_recovery_options.error))) {
+          (retryJob.import_recovery_options && retryJob.import_recovery_options.error &&
+           (!importFailedBeforeStart(retryJob.result) || !retryJob.import_recovery_options.retryable)))) {
         if (typeof showToast === 'function') showToast(
           retryJob.import_resume_pending ? 'Checking recovery options…' : retryJob.import_recovery_options.error,
           'info');
@@ -130,10 +131,25 @@ function bindDetailPaneActions() {
       pendingImportRetries[retryJobId] = true;
       var retryButtons = document.getElementById('jobDetailPane').querySelectorAll('[data-retry-import-job]');
       retryButtons.forEach(function(button) { button.disabled = true; });
-      fetch('/api/jobs/import-photos', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(retryBody),
+      var eligibility = Promise.resolve();
+      if (directToNas) {
+        eligibility = fetch('/api/import/' + encodeURIComponent(retryJobId) + '/recovery-options', {cache: 'no-store'})
+          .then(function(response) {
+            return response.json().then(function(options) {
+              var current = historyJobs.find(function(job) { return job.id === retryJobId; });
+              if (current) current.import_recovery_options = options;
+              if (!response.ok || options.direct_to_nas_allowed !== true) {
+                throw new Error(options.error || 'Direct-to-NAS retry is no longer available. Retry with the original settings.');
+              }
+            });
+          });
+      }
+      eligibility.then(function() {
+        return fetch('/api/jobs/import-photos', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(retryBody),
+        });
       }).then(function(response) {
         return response.json().catch(function() { return {}; }).then(function(data) {
           if (!response.ok) {

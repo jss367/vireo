@@ -75,6 +75,9 @@ Keep these request-ordering rules intact when changing this code:
   later polls recheck eligibility without caching the HTTP response.
   Failed eligibility requests show an explanation and Check again action;
   they never enable an unverified import retry.
+  Pre-copy local imports also check direct-NAS eligibility before showing
+  that option and recheck it on click; the original retry remains available
+  during this read-only NAS check.
 - Saved processing provenance retains groups: every group must have a
   surviving pipeline, while IDs within a legacy inferred group are
   alternatives. Server recovery preserves these groups before preparation
