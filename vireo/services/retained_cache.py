@@ -49,6 +49,17 @@ def guarded_reader(family):
     return decorate
 
 
+class SourceVerifier:
+    """Separate expensive source verification from the final guarded probe."""
+
+    def __init__(self, verify, recheck):
+        self._verify = verify
+        self.recheck = recheck
+
+    def __call__(self, path):
+        return self._verify(path)
+
+
 def source_verifier(db, config, checkpoint=lambda: None):
     """Fail closed unless independent catalog sources can be read in full."""
     generated = os.path.dirname(config["THUMB_CACHE_DIR"])
@@ -56,8 +67,10 @@ def source_verifier(db, config, checkpoint=lambda: None):
         "offline", "working", "previews", "staging", "local-folders", "local-workspaces",
     )], config["THUMB_CACHE_DIR"]]
     excluded = [os.path.normcase(os.path.realpath(path)) for path in excluded]
+    verified = {}
 
     def verify(path):
+        verified.pop(path, None)
         match = re.match(r"([0-9]+)[._]", os.path.basename(path))
         if not match:
             return False
@@ -70,6 +83,7 @@ def source_verifier(db, config, checkpoint=lambda: None):
         names = [source["filename"]]
         if source["companion_path"]:
             names.append(source["companion_path"])
+        checked = []
         try:
             for index, name in enumerate(names):
                 original = os.path.join(source["folder_path"], name)
@@ -92,10 +106,34 @@ def source_verifier(db, config, checkpoint=lambda: None):
                         return False
                 if _identity(before) != _identity(os.stat(original)):
                     return False
+                checked.append((original, before))
+            if db.storage.retained_source(photo_id) != source:
+                return False
+            verified[path] = (photo_id, source, checked)
+            return True
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def recheck(path):
+        proof = verified.pop(path, None)
+        if not proof:
+            return False
+        photo_id, source, checked = proof
+        try:
+            for original, expected in checked:
+                checkpoint()
+                resolved = os.path.normcase(os.path.realpath(original))
+                if any(_within(resolved, root) for root in excluded):
+                    return False
+                with open(original, "rb") as handle:
+                    if (_identity(os.fstat(handle.fileno())) != _identity(expected)
+                            or not handle.read(1)
+                            or _identity(os.stat(original)) != _identity(expected)):
+                        return False
             return db.storage.retained_source(photo_id) == source
         except (OSError, ValueError, TypeError):
             return False
-    return verify
+    return SourceVerifier(verify, recheck)
 
 
 def roots(config):
@@ -224,6 +262,14 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
                 # between the walk and unlink.
                 if not _within(os.path.normcase(os.path.realpath(path)), approved_root):
                     continue
+                if not clear and key != "computation":
+                    # Uploads can hold this guard while consuming a file.
+                    # Availability or identity may have changed since the
+                    # full source read, so probe again after any lock wait.
+                    recheck = getattr(source_is_readable, "recheck", source_is_readable)
+                    if recheck is None or not recheck(path):
+                        kept_unverified += 1
+                        continue
                 os.unlink(path)
             removed += 1
             freed += expected.st_size

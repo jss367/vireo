@@ -302,6 +302,50 @@ def test_prepared_render_reader_is_pinned_until_response_opens(app_and_db, tmp_p
     assert not render.exists()
 
 
+@pytest.mark.parametrize("change", [None, "offline", "changed"])
+def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, change):
+    import hashlib
+
+    from testing.waits import synchronization_timeout
+
+    config = _cache_config(tmp_path)
+    source = _payload(tmp_path / "source" / "bird.jpg")
+    info = source.stat()
+    folder = db.add_folder(str(source.parent))
+    photo = db.add_photo(folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
+    db.commit()
+    render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "inat-uploads" / f"{photo}.jpg")
+    verified, results = threading.Event(), []
+
+    def maintain():
+        from db import Database
+        with Database(db._db_path) as connection:
+            probe = retained_cache.source_verifier(connection, config)
+            class ObservedProbe:
+                recheck = staticmethod(probe.recheck)
+                def __call__(self, path):
+                    result = probe(path)
+                    verified.set()
+                    return result
+            results.append(retained_cache.cleanup(
+                config, [], now=time.time() + 365 * 86400, source_is_readable=ObservedProbe(),
+            ))
+
+    with retained_cache.reader_guard("inat-uploads"):
+        worker = threading.Thread(target=maintain)
+        worker.start()
+        assert verified.wait(synchronization_timeout(5))
+        if change == "offline":
+            source.unlink()
+        elif change == "changed":
+            source.write_bytes(b"modified while an upload was using its handoff")
+    worker.join(synchronization_timeout(5))
+    assert not worker.is_alive()
+    assert render.exists() is (change is not None)
+    assert results[0]["kept_unverified_sources"] == (1 if change else 0)
+
+
 def test_retained_cleanup_rejects_photo_folders_and_symlinks(tmp_path):
     config = _cache_config(tmp_path)
     root = Path(config["THUMB_CACHE_DIR"]).parent
