@@ -5442,6 +5442,44 @@ def test_managed_import_retry_reuses_staging_and_freezes_destination(app_and_db,
         wait_for_job_via_client(client, job_id)
 
 
+@pytest.mark.parametrize("pipeline_status,pipeline_result,resumable", [
+    ("failed", {"never_started": True}, True),
+    ("cancelled", None, True),
+    ("completed", {"ok": True}, False),
+])
+def test_recovery_options_reads_pipeline_outside_history_window(
+    app_and_db, pipeline_status, pipeline_result, resumable,
+):
+    app, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) "
+        "VALUES ('old-pipeline','pipeline',?,'2020-01-01','{}',?,?)",
+        (pipeline_status, json.dumps(pipeline_result) if pipeline_result is not None else None,
+         db.active_workspace_id),
+    )
+    db.conn.execute(
+        "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) "
+        "VALUES ('interrupted-import','import','failed','2026-10-13',?,?,?)",
+        (json.dumps({"sources": ["/card"], "destination": "/archive", "chain_already_ran": True,
+                     "chain_process_job_ids": ["old-pipeline"]}),
+         json.dumps({"interrupted": True, "photo_ids": [1], "tags_applied": True}),
+         db.active_workspace_id),
+    )
+    db.conn.executemany(
+        "INSERT INTO job_history (id,type,status,started_at,workspace_id) "
+        "VALUES (?,'thumbnail','completed','2025-01-01',?)",
+        [(f"filler-{i}", db.active_workspace_id) for i in range(100)],
+    )
+    db.commit()
+    with app.test_client() as client:
+        history = client.get("/api/jobs/history?limit=100").get_json()
+        assert "interrupted-import" in {row["id"] for row in history}
+        assert "old-pipeline" not in {row["id"] for row in history}
+        options = client.get("/api/import/interrupted-import/recovery-options")
+        assert options.status_code == 200, options.get_json()
+        assert options.get_json()["resume_allowed"] is resumable
+
+
 def test_managed_import_checks_temporary_disk_space(app_and_db, tmp_path, monkeypatch):
     import local_processing
 

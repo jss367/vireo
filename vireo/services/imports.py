@@ -507,7 +507,10 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
         "descendants_started": any(
             not _import_failed_before_start(entry["result"]) for entry in descendants
         ),
-        "chain_process_job_ids": sorted(chain_process_job_ids),
+        # Legacy alternatives are evidence of one paid handoff, not separate
+        # obligations. Persist only surviving evidence so a subsequent retry
+        # cannot reinterpret an unstarted alternative as required processing.
+        "chain_process_job_ids": sorted(chain_process_job_ids - never_started_processes),
     }
 
 
@@ -547,19 +550,20 @@ class ImportService:
         return enqueue_import_photos(self, db, body)
 
     def recovery_options(self, db, job_id):
-        """Current direct-NAS eligibility without hashes or job admission."""
+        """Current import recovery eligibility without hashes or job admission."""
         from services.import_photos import _competing_retry_failure
 
         snapshot = {}
-        config, *_, failure = self._validate_parent_import_job(
+        config, _, _, _, parent_resume, failure = self._validate_parent_import_job(
             job_id, db.active_workspace_id, db, relocate_landings=False, snapshot_out=snapshot,
         )
         if failure is not None:
             return failure
         allowed = bool(snapshot.get("direct_nas_retry_allowed"))
-        if _competing_retry_failure(self.get_runner(), {
+        competing = bool(_competing_retry_failure(self.get_runner(), {
             "root_import_job_id": (config or {}).get("root_import_job_id") or job_id,
-        }):
+        }))
+        if competing:
             allowed = False
         staging = (config or {}).get("managed_staging") or {}
         path = staging.get("destination")
@@ -573,7 +577,12 @@ class ImportService:
                             allowed = False
             except OSError:
                 allowed = False
-        return {"direct_to_nas_allowed": allowed}
+        result = snapshot.get("parent_result") or {}
+        return {
+            "direct_to_nas_allowed": allowed,
+            "resume_allowed": bool(parent_resume is not None and result.get("interrupted")
+                                   and isinstance(result.get("photo_ids"), list) and not competing),
+        }
 
     def _gps_location_chunks(self, values, size=800):
         values = list(values)

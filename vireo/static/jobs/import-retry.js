@@ -56,6 +56,7 @@ function isResumableImport(job, rows) {
       result && result.interrupted && Array.isArray(result.photo_ids))) {
     return false;
   }
+  if (typeof job.import_resume_allowed === 'boolean') return job.import_resume_allowed;
   // An import whose chain ran AND whose tag pass was marked applied
   // finished everything but the final write; resuming would collect
   // and process its photos twice. A ``chained`` mark on a row whose

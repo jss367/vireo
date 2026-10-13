@@ -107,7 +107,17 @@ def _scenarios():
     mixed_descendant, pipelines = _mixed_pipeline_scenario(recorded=True)
     mixed_descendant.update(id="child", started_at="2026-09-01T13:00:00")
     mixed_descendant["config"].update(parent_import_job_id=PARENT_ID, root_import_job_id=PARENT_ID)
+    legacy_parent, legacy_rows = _mixed_pipeline_scenario(recorded=False)
+    legacy_parent["result"]["tags_applied"] = False
+    takeover = import_resume_takeover(legacy_parent["id"], legacy_parent["result"], legacy_rows, legacy_parent["config"])
+    recovery = ImportService._interrupted_parent_resume(legacy_parent["config"], legacy_parent["result"], takeover)
+    persisted = _parent(tags_applied=False, chained=False)
+    persisted["config"].update(
+        chain_already_ran=recovery["chain_already_ran"],
+        chain_process_job_ids=recovery["chain_process_job_ids"],
+    )
     return {
+        "legacy surviving payment remains paid after persistence": (persisted, [row for row in legacy_rows if row["type"] == "pipeline"]),
         "mixed descendant recorded pipelines leave processing owed": (
             _parent(tags_applied=True),
             [mixed_descendant, *[row for row in pipelines if row["type"] == "pipeline"]],
@@ -388,6 +398,7 @@ def _server(parent, rows):
 
 # (by, kind, offers Resume, offers Retry)
 EXPECTED = {
+    "legacy surviving payment remains paid after persistence": (None, None, True, False),
     "mixed descendant recorded pipelines leave processing owed": ("child", "resume", False, False),
     "mixed recorded pipelines leave processing owed": (None, None, True, False),
     "mixed ancestor recorded pipelines leave processing owed": (None, None, True, False),
@@ -474,6 +485,20 @@ def test_before_start_failure_preserves_owed_local_recovery(inherited):
     assert resume["untagged_ids"] == [123]
     assert not resume["tags_applied"]
     assert not resume["chain_already_ran"]
+
+
+def test_legacy_alternative_pipeline_payment_survives_resume_persistence():
+    parent, rows = _mixed_pipeline_scenario(recorded=False)
+    parent["result"]["tags_applied"] = False
+    takeover = import_resume_takeover(parent["id"], parent["result"], rows, parent["config"])
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert resume["chain_already_ran"] is True
+    assert resume["chain_process_job_ids"] == ["second-process"]
+    next_config = {**parent["config"], "chain_already_ran": resume["chain_already_ran"],
+                   "chain_process_job_ids": resume["chain_process_job_ids"]}
+    next_result = {"import_not_started": True, "ok": False}
+    retried = import_resume_takeover("failed-resume", next_result, rows, next_config)
+    assert retried["chained"] is True
 
 
 def test_a_resume_that_paid_the_tags_leaves_only_the_chain_owed():

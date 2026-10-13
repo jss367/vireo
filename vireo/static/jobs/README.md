@@ -67,6 +67,10 @@ Keep these request-ordering rules intact when changing this code:
 - Retry/Resume import is gated twice: at render (`hasActiveRetryFor`,
   `importResumeTakeover`) and again on click, because a poll can land between
   render and click. The server enforces the same takeover rule with a 409.
+- When inherited processing evidence is outside the 100-row history window,
+  polling asks the recovery-options endpoint for authoritative Resume
+  eligibility. Responses apply only to the same history-row object, and
+  later polls recheck eligibility without caching the HTTP response.
 - Restart import replays a failed or cancelled in-place import's saved scope
   and settings in its original workspace. It rescans rather than resuming at
   the old progress counter. `inPlaceRestarts` keeps pending requests disabled

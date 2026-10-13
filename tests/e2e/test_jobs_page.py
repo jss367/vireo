@@ -291,6 +291,32 @@ def _serve_jobs_page(live_server, page, job, *, history=False):
         ).click()
 
 
+@pytest.mark.parametrize("resumable", [True, False])
+def test_import_resume_checks_pipeline_outside_history_window(live_server, page, resumable):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", result={
+        "interrupted": True, "photo_ids": [1], "tags_applied": True,
+    }, config={
+        "sources": ["/card"], "destination": "/archive", "chain_already_ran": True,
+        "chain_process_job_ids": ["old-pipeline"],
+    })
+    requests = []
+
+    def options(route):
+        requests.append(route.request.url)
+        route.fulfill(json={"direct_to_nas_allowed": False, "resume_allowed": resumable})
+
+    page.route("**/api/import/*/recovery-options", options)
+    _serve_jobs_page(live_server, page, job, history=True)
+    page.wait_for_function("historyJobs[0].import_resume_allowed !== undefined")
+    assert requests
+    resume = page.get_by_role("button", name="Resume import", exact=True)
+    if resumable:
+        expect(resume).to_be_visible()
+    else:
+        expect(resume).to_have_count(0)
+
+
 def test_move_folder_job_shows_source_and_destination(live_server, page):
     """History entries predating the plan snapshot keep the generic note."""
     job = _move_folder_job(live_server, {"folder_template": "%Y/%Y-%m-%d"})
