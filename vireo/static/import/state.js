@@ -39,6 +39,9 @@ let importTags = [];
 // checkbox state safe to re-derive on every render.
 let importDeselected = new Set();
 let importPreviewedPaths = [];
+// Current preview's verified interrupted-import leftovers. They remain
+// selectable for adoption, but require no transfer.
+let importRecoveredPaths = new Set();
 let importSelectionAnchor = null;
 let importDayGroups = new Map();
 let importCollapsedDays = new Set();

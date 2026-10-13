@@ -339,11 +339,11 @@ function updateStartGate() {
     // Use the same current selection and lifecycle gate as the action.
     // A stale or unfinished preview must not promise a copy count.
     summary.textContent = reason
-      || (copyMode && importPreviewCapturedSignature !== null
+      || (problem ? problem.message
+          : copyMode && importPreviewCapturedSignature !== null
           ? checked.toLocaleString() + ' file' + (checked === 1 ? '' : 's')
-            + ' selected · ' + checked.toLocaleString() + ' to copy'
-          : problem ? problem.message
-            : copyMode ? 'All matching files will be copied'
+            + ' selected · ' + importCopyCount().toLocaleString() + ' to copy'
+          : copyMode ? 'All matching files will be copied'
               : 'Originals will stay in place');
   }
 }

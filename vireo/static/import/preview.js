@@ -341,6 +341,7 @@ async function previewImport(opts) {
       if (requestSeq !== importPreviewSeq) return;
       if (importPreviewSignatureChanged(requestSignature)) return;
       const recCountNoDedup = recoveredPathsNoDedup.length;
+      importRecoveredPaths = new Set(recoveredPathsNoDedup);
       importDupStreamPending = false;
       renderImportPreviewGrid(files, [], null);
       updateImportSelectionUI();
@@ -472,6 +473,7 @@ async function previewImport(opts) {
     // collision would have been advanced past on the server and
     // reappeared in the "to copy" count.
     const recCount = recoveredPaths.length;
+    importRecoveredPaths = new Set(recoveredPaths);
     summary.textContent = files.length + ' files found · ' + dupCount +
       ' already in your library (will be skipped) · ' +
       (recCount ? recCount +
