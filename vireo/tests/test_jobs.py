@@ -1,4 +1,5 @@
 # vireo/tests/test_jobs.py
+import inspect
 import logging
 import os
 import sys
@@ -967,6 +968,81 @@ def test_snapshot_job_freezes_result_against_worker_mutation():
     # ``_error_total`` reading from the snapshot must agree with the
     # ``errors_total`` the same snapshot's result would serialize.
     assert JobRunner._error_total(snap) == snap["result"]["errors_total"] == 50
+
+
+def test_snapshot_job_freezes_nested_result_sample_lists():
+    """``_snapshot_job`` must also freeze the per-photo sample lists nested
+    inside ``result`` (``errors``, ``kept_reasons``). Workers that append to
+    them without holding ``_lock`` — the release-local-originals loop during
+    the first 50 failures, before the ``errors_total`` cap branch kicks in —
+    would otherwise let ``json.dumps(snap["result"])`` serialize a longer
+    sample than ``snap["errors"]`` (the top-level copy taken a few lines up
+    in the same method), so the checkpoint row's ``error_count`` column
+    could under-report what the serialized ``result`` carries. ``_error_total``
+    and the serialized result must therefore read a single immutable
+    snapshot of the sample.
+    """
+    from jobs import JobRunner
+
+    live_errors = ["file_0.jpg: boom"]
+    live_kept = ["file_1.jpg: source busy"]
+    live_result = {
+        "failed": 1,
+        "kept": 1,
+        "errors": live_errors,
+        "kept_reasons": live_kept,
+        "ok": False,
+    }
+    job = {
+        "id": "release-nested",
+        "type": "release-local-originals",
+        "status": "running",
+        "progress": {"current": 2, "total": 100},
+        "steps": [],
+        "errors": ["file_0.jpg: boom"],
+        "result": live_result,
+    }
+
+    snap = JobRunner._snapshot_job(job)
+
+    # Simulate the worker appending more sample entries after the snapshot.
+    live_errors.append("file_2.jpg: boom")
+    live_kept.append("file_3.jpg: source busy")
+
+    assert snap["result"]["errors"] == ["file_0.jpg: boom"]
+    assert snap["result"]["kept_reasons"] == ["file_1.jpg: source busy"]
+    assert snap["result"]["errors"] is not live_errors
+    assert snap["result"]["kept_reasons"] is not live_kept
+
+
+def test_release_appends_job_errors_before_result_errors():
+    """The release-local-originals worker must append to ``job["errors"]``
+    before ``result["errors"]`` during the first 50 failures (before the
+    ``errors_total`` cap branch kicks in). ``_error_total(snap)`` reads from
+    ``snap["errors"]`` while ``_write_checkpoints`` serializes
+    ``snap["result"]``, so appending to the job-level list first keeps a
+    snapshot caught between the two appends from under-reporting the
+    serialized result's error count.
+    """
+    import re
+
+    from web import job_launchers
+
+    source = inspect.getsource(job_launchers)
+    # The two appends must appear in a specific order inside the per-photo
+    # failure branch; both tokens must be present and the ``job["errors"]``
+    # append must come first.
+    pattern = (
+        r"len\(result\[\"errors\"\]\) < _MAX_ERROR_REASONS\s*:\s*\n"
+        r"(?:[^\n]*\n)*?"
+        r"\s*job\[\"errors\"\]\.append\(reason\)\s*\n"
+        r"\s*result\[\"errors\"\]\.append\(reason\)"
+    )
+    assert re.search(pattern, source), (
+        "release-local-originals worker must append to job['errors'] "
+        "before result['errors']; see _snapshot_job's error-count "
+        "contract."
+    )
 
 
 def test_failed_job_history_preserves_structured_result(tmp_path):

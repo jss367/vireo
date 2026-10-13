@@ -1313,8 +1313,21 @@ def create_job_launchers_blueprint(
                                 result["kept_reasons"].append(reason)
                         else:
                             if len(result["errors"]) < _MAX_ERROR_REASONS:
-                                result["errors"].append(reason)
+                                # Append to ``job["errors"]`` first so a
+                                # snapshot caught between the two appends
+                                # sees ``snap["errors"]`` at least as long
+                                # as ``snap["result"]["errors"]``.
+                                # ``_error_total(snap)`` reads from
+                                # ``snap["errors"]`` while
+                                # ``_write_checkpoints`` serializes
+                                # ``snap["result"]``, so appending to the
+                                # job-level list first keeps the
+                                # ``error_count`` column from under-reporting
+                                # the serialized result's error details
+                                # before the ``errors_total`` cap branch
+                                # kicks in.
                                 job["errors"].append(reason)
+                                result["errors"].append(reason)
                             elif result["failed"] > _MAX_ERROR_REASONS:
                                 # Live checkpoints snapshot ``result`` and
                                 # persist ``_error_total`` — publish the

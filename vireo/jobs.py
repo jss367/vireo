@@ -1816,8 +1816,19 @@ class JobRunner:
         # read ``_error_total`` at a later state — the row's ``error_count``
         # column then disagrees with the ``errors_total`` the serialized
         # result reports, and the startup-sweep +1 compounds the mismatch.
+        # Also freeze the nested per-photo sample lists (``errors`` and
+        # ``kept_reasons``): workers that append to them during the first 50
+        # failures would otherwise let ``json.dumps(snap["result"])``
+        # iterate a live, mid-append list, and the serialized sample size
+        # could race ahead of the top-level ``snap["errors"]`` copy taken a
+        # few lines up — the two counts the checkpoint row cross-references
+        # must come from one immutable snapshot.
         if isinstance(snap.get("result"), dict):
             snap["result"] = dict(snap["result"])
+            for key in ("errors", "kept_reasons"):
+                value = snap["result"].get(key)
+                if isinstance(value, list):
+                    snap["result"][key] = list(value)
         if job.get("status") in ("running", "pausing", "paused"):
             timing = get_resource_ledger().owner_timing(job["id"])
             snap["resource_wait_seconds"] = timing["wait_seconds"]
