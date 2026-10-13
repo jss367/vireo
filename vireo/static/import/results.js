@@ -6,6 +6,7 @@ function renderResult(res, status) {
   const retryRow = document.getElementById('retryImportRow');
   const retryButton = document.getElementById('btnRetryImport');
   const directRetryButton = document.getElementById('btnRetryImportDirectToNas');
+  directRetryButton.textContent = 'Retry directly to NAS';
   directRetryButton.style.display = 'none';
   directRetryButton.disabled = false;
   const retryHint = document.getElementById('retryImportHint');

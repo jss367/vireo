@@ -5455,6 +5455,7 @@ def test_managed_import_checks_temporary_disk_space(app_and_db, tmp_path, monkey
     assert not (tmp_path / "staging").exists()
     assert "Not enough free space" in str(job["errors"])
     assert job["result"]["import_not_started"] is True
+    wait_for_job_via_client(client, job["id"], wait_for_history=True)
     history = client.get("/api/jobs/history").get_json()
     assert next(row for row in history if row["id"] == job["id"])["result"]["import_not_started"] is True
 
@@ -5462,8 +5463,9 @@ def test_managed_import_checks_temporary_disk_space(app_and_db, tmp_path, monkey
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("direct_to_nas", [False, True])
 @pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("selection", [False, True])
 def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
-    app_and_db, tmp_path, monkeypatch, stub_move, legacy, direct_to_nas, deferred,
+    app_and_db, tmp_path, monkeypatch, stub_move, legacy, direct_to_nas, deferred, selection,
 ):
     import local_processing
     import pipeline_job
@@ -5473,6 +5475,7 @@ def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", lambda *a, **kw: {"ok": True})
     client = app.test_client()
     card = _import_card(tmp_path, names=("selected.jpg", "excluded.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(Path(card) / "excluded.jpg")
     body = {
         "sources": [card], "destination": str(tmp_path / "NAS" / "trip"),
         "local_processing": True, "after_import": _process_id(db, "Cull-ready"),
@@ -5480,6 +5483,9 @@ def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
         "include_paths": [str(tmp_path / "import-card" / "selected.jpg")],
         "previewed_count": 2, "checked_count": 1,
     }
+    if not selection:
+        for key in ("include_paths", "previewed_count", "checked_count"):
+            body.pop(key)
     response = client.post("/api/jobs/import-photos", json=body)
     parent = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
     if legacy:
@@ -5505,13 +5511,14 @@ def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
     assert response.status_code == 200, response.get_json()
     retried = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert retried["status"] == "completed", retried
-    assert retried["result"]["copied"] == 1
+    assert retried["result"]["copied"] == (1 if selection else 2)
     if direct_to_nas:
         assert retried["config"]["managed_staging"] is None
         assert not (tmp_path / "staging").exists()
-        assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == 1
+        assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == (1 if selection else 2)
         assert len(list((tmp_path / "import-card").rglob("*.jpg"))) == 2
-        assert not list((tmp_path / "NAS").rglob("excluded.jpg"))
+        if selection:
+            assert not list((tmp_path / "NAS").rglob("excluded.jpg"))
     else:
         assert retried["config"]["managed_staging"] == parent["config"]["managed_staging"]
     processed = wait_for_job_via_client(client, retried["result"]["process_job_id"])
@@ -5563,6 +5570,39 @@ def test_direct_nas_retry_refuses_existing_local_import_work(
     assert response.status_code == 400, response.get_json()
     if remaining_work == "staged_file":
         assert (staging / "keep.jpg").read_bytes() == b"already imported"
+    assert not (tmp_path / "NAS").exists()
+
+
+@pytest.mark.parametrize("change", ["omit", "replace", "preview_count", "checked_count", "recursive", "file_types"])
+def test_direct_nas_retry_rejects_changed_selection(app_and_db, tmp_path, monkeypatch, change):
+    import local_processing
+
+    app, db = app_and_db
+    monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": False})
+    client = app.test_client()
+    card = _import_card(tmp_path, names=("selected.jpg", "excluded.jpg"))
+    body = {"sources": [card], "destination": str(tmp_path / "NAS"),
+            "local_processing": True, "after_import": _process_id(db, "Cull-ready"),
+            "include_paths": [str(Path(card) / "selected.jpg")], "previewed_count": 2, "checked_count": 1}
+    response = client.post("/api/jobs/import-photos", json=body)
+    parent = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    body.update(parent_import_job_id=parent["id"], local_processing=False, retry_direct_to_nas=True)
+    if change == "omit":
+        for key in ("include_paths", "previewed_count", "checked_count"):
+            body.pop(key)
+    elif change == "replace":
+        body["include_paths"] = [str(Path(card) / "excluded.jpg")]
+    elif change == "preview_count":
+        body["previewed_count"] = 3
+    elif change == "checked_count":
+        body["checked_count"] = 0
+    elif change == "recursive":
+        body["recursive"] = False
+    else:
+        body["file_types"] = "jpg"
+    rejected = client.post("/api/jobs/import-photos", json=body)
+    assert rejected.status_code == 400, rejected.get_json()
+    assert "original file selection" in rejected.get_json()["error"]
     assert not (tmp_path / "NAS").exists()
 
 

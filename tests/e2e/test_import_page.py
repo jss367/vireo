@@ -2031,6 +2031,20 @@ def test_import_failure_before_copy_result_offers_retry(live_server, page, resul
     assert captured[1]["retry_direct_to_nas"] is True
 
 
+def test_direct_retry_label_resets_for_next_import_result(live_server, page):
+    page.route("**/api/jobs/import-photos", lambda route: route.fulfill(json={"job_id": "direct-retry"}))
+    page.goto(f"{live_server['url']}/import")
+    job = {"id": "failed-import", "type": "import", "status": "failed",
+           "config": {"sources": ["/card"], "destination": "/nas", "local_processing": True},
+           "result": {"import_not_started": True, "error": "No space"}}
+    page.evaluate("job => { watchJob = () => {}; lastFinishedImportJob = job; renderResult(job.result, job.status); }", job)
+    page.locator("#btnRetryImportDirectToNas").click()
+    expect(page.locator("#resultCard")).to_be_hidden()
+    page.evaluate("job => { activeJobId = null; importStartPending = false; lastFinishedImportJob = job; renderResult(job.result, job.status); }", job)
+    expect(page.locator("#btnRetryImportDirectToNas")).to_have_text("Retry directly to NAS")
+    expect(page.locator("#btnRetryImportDirectToNas")).to_be_enabled()
+
+
 def test_failed_import_result_offers_preconfigured_retry(live_server, page):
     """A mixed import can retry from its result without rebuilding the form;
     the parent's duplicate-skip setting is preserved, and the parent's

@@ -66,7 +66,7 @@ function bindDetailPaneActions() {
       });
       var retryBody = importRetryBody(retryJob);
       var directToNas = retryImportBtn.hasAttribute('data-retry-direct-to-nas');
-      if (directToNas) retryBody = directNasImportRetryBody(retryJob, retryBody);
+      if (directToNas) retryBody = directNasImportRetryBody(retryJob, retryBody, historyJobs);
       if (!retryBody) {
         if (typeof showToast === 'function') {
           showToast('The original import settings are no longer available.', 'error');
@@ -139,6 +139,10 @@ function bindDetailPaneActions() {
         retryButtons.forEach(function(button) { button.disabled = false; });
         retryImportBtn.disabled = false;
         retryImportBtn.textContent = retryOriginalLabel;
+        if (selectedJobId === retryJobId) {
+          var failedRetryParent = historyJobs.find(function(job) { return job.id === retryJobId; });
+          if (failedRetryParent) renderHistoryDetail(failedRetryParent);
+        }
         if (typeof showToast === 'function') showToast(error.message, 'error');
       });
       return;

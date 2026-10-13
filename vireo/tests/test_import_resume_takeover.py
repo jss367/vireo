@@ -368,6 +368,28 @@ def test_takeover_rule(name):
     ) == EXPECTED[name]
 
 
+@pytest.mark.parametrize("inherited", [False, True])
+def test_before_start_failure_preserves_owed_local_recovery(inherited):
+    parent = _parent()
+    parent["result"] = {"import_not_started": True, "ok": False}
+    landing = {"/local/photo.jpg": [12, 34, "hash-photo"]}
+    if inherited:
+        parent["config"].update(recover_landed_files=landing, untagged_photo_ids=[123])
+        rows = []
+    else:
+        rows = [_row("child", "2026-09-01T11:00:00", {
+            "cancelled": True, "photo_ids": [123], "landed_files": landing,
+            "tags_applied": False, "chained": False,
+        }, status="cancelled")]
+    takeover = import_resume_takeover(parent["id"], parent["result"], rows, parent["config"])
+    assert takeover["by"] is None
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert resume["landed_files"] == landing
+    assert resume["untagged_ids"] == [123]
+    assert not resume["tags_applied"]
+    assert not resume["chain_already_ran"]
+
+
 def test_a_resume_that_paid_the_tags_leaves_only_the_chain_owed():
     """A resume cancelled after its tag pass applied the parent's tags, so
     resuming the parent again replays the chain but not the tags (which

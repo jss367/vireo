@@ -46,6 +46,15 @@ def test_import_failure_before_copy_offers_retry(live_server, page, result):
     assert captured[1]["include_paths"] == job["config"]["include_paths"]
     assert captured[1]["destination"] == job["config"]["destination"]
 
+    # A cancelled descendant's files still need regular local recovery.
+    child = {**job, "id": "cancelled-retry", "status": "cancelled", "config": {
+        **job["config"], "parent_import_job_id": job["id"],
+    }, "result": {"cancelled": True, "photo_ids": [123], "tags_applied": False,
+                   "chained": False, "landed_files": {"/local/photo.jpg": [1, 2, "hash"]}}}
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, child])
+    expect(button).to_be_visible()
+    expect(direct).to_have_count(0)
+
     # A completed child owns the recovery; the old row points to it.
     child = {**job, "id": "finished-retry", "status": "completed",
              "started_at": "2026-08-16T22:00:00", "config": {
@@ -55,6 +64,27 @@ def test_import_failure_before_copy_offers_retry(live_server, page, result):
     expect(button).to_have_count(0)
     expect(direct).to_have_count(0)
     expect(page.get_by_role("button", name="Show that import")).to_be_visible()
+
+
+def test_failed_import_retry_recovers_after_pending_redraw(live_server, page):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", progress={},
+               config={"sources": ["/card"], "destination": "/nas", "local_processing": True},
+               result={"import_not_started": True, "error": "No space"})
+    pending = []
+    page.route("**/api/jobs/import-photos", lambda route: pending.append(route))
+    _serve_jobs_page(live_server, page, job, history=True)
+    page.get_by_role("button", name="Retry import", exact=True).click()
+    page.evaluate("job => renderHistoryDetail(job)", job)
+    expect(page.get_by_role("button", name="Retry in progress…", exact=True)).to_be_disabled()
+    pending[0].fulfill(status=400, json={"error": "Still no space"})
+    expect(page.get_by_role("button", name="Retry import", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Retry directly to NAS", exact=True)).to_be_enabled()
+    page.get_by_role("button", name="Retry directly to NAS", exact=True).click()
+    page.evaluate("job => renderHistoryDetail(job)", job)
+    pending[1].fulfill(status=400, json={"error": "NAS offline"})
+    expect(page.get_by_role("button", name="Retry import", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Retry directly to NAS", exact=True)).to_be_enabled()
 
 
 def test_completed_move_source_cleanup_requires_review_and_opt_in(live_server, page):

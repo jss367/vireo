@@ -863,10 +863,20 @@ class _ImportPhotosRequest:
         self.managed_staging = None
         parent_staging = (parent_config or {}).get("managed_staging")
         if self.retry_direct_to_nas:
-            if (local_processing or self.defer_nas_transfer or self.after_process_move
+            if (parent_config is None or local_processing or self.defer_nas_transfer or self.after_process_move
                     or not parent_staging
                     or not self.parent_takeover_snapshot.get("direct_nas_retry_allowed")):
                 return ImportFailure("Retry directly to NAS is available only before any photos were imported locally")
+            parent_paths = parent_config.get("include_paths")
+            if (
+                self.include_paths != (set(parent_paths) if parent_paths is not None else None)
+                or self.previewed_count != parent_config.get("previewed_count")
+                or self.checked_count != parent_config.get("checked_count")
+                or set(self.sources) != set(parent_config.get("sources") or [])
+                or self.recursive != parent_config.get("recursive", True)
+                or self.file_types != parent_config.get("file_types", "both")
+            ):
+                return ImportFailure("Retry directly to NAS must preserve the original file selection")
             from import_staging import check_staged_mount, plan_staged_import
             from pipeline_job import _load_known_mount_roots
             try:

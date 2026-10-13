@@ -1356,15 +1356,22 @@ class ImportService:
     @staticmethod
     def _interrupted_parent_resume(parent_config, parent_result, takeover=None):
         """Remaining work/scope inherited from an interrupted parent or a
-        failed-files parent whose descendants landed additional photos.
+        retryable failed parent with inherited or descendant recovery work.
 
         ``takeover`` (from ``import_resume_takeover``) supplies the
         parent's post-import marks merged with its descendants', so work
         an earlier resume already did is not replayed.
         """
         if not parent_result.get("interrupted") and not (
-            _has_failed_files(parent_result)
-            and takeover and takeover.get("descendant_landed_files")
+            _has_retryable_import_failure(parent_result)
+            and (
+                parent_config.get("recover_landed_files")
+                or parent_config.get("untagged_photo_ids")
+                or (takeover and (
+                    takeover.get("descendant_landed_files")
+                    or takeover.get("unpaid_tag_photo_ids")
+                ))
+            )
         ):
             return None
         if takeover is None:
