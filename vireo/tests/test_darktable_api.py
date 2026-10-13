@@ -5,6 +5,7 @@ import time
 
 import pytest
 from testing.waits import synchronization_timeout
+from wait import wait_for_job_via_client
 
 
 def test_api_darktable_status(app_and_db):
@@ -55,16 +56,57 @@ def test_api_config_saves_darktable_settings(app_and_db):
     assert cfg["dng_converter_bin"] == "/Applications/Adobe DNG Converter.app/Contents/MacOS/Adobe DNG Converter"
 
 
-def _poll_job(client, job_id, timeout_iters=50):
-    """Poll /api/jobs/<id> until it reaches a terminal state or times out."""
-    data = None
-    for _ in range(timeout_iters):
-        resp = client.get(f'/api/jobs/{job_id}')
-        data = resp.get_json()
-        if data['status'] in ('completed', 'failed', 'cancelled'):
-            return data
-        time.sleep(0.05)
-    return data
+def _poll_job(client, job_id):
+    """Wait for a terminal status with the shared bounded synchronization policy."""
+    return wait_for_job_via_client(client, job_id)
+
+
+def test_develop_job_poll_waits_past_old_observation_limit(monkeypatch):
+    """A delayed fake worker must reach failed before rollup assertions run."""
+    from types import SimpleNamespace
+
+    import wait as job_wait
+
+    clock = [0.0]
+    monkeypatch.setattr(job_wait.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(job_wait.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    observations = []
+    terminal = {
+        "status": "failed",
+        "result": {"developed": 1, "errors": 1, "total": 2},
+        "errors": ["fake failure on second photo"],
+    }
+
+    def get(path):
+        assert path == "/api/jobs/authored-job"
+        observations.append(path)
+        data = terminal if len(observations) > 60 else {
+            "status": "running", "progress": {"current": 0}, "result": None,
+        }
+        return SimpleNamespace(get_json=lambda: data)
+
+    result = _poll_job(SimpleNamespace(get=get), "authored-job")
+    assert len(observations) == 61
+    assert result["status"] == "failed"
+    assert result["result"] == {"developed": 1, "errors": 1, "total": 2}
+    assert result["errors"] == ["fake failure on second photo"]
+
+
+def test_develop_job_poll_reports_timeout_instead_of_returning_running(monkeypatch):
+    """An actually stuck fake worker retains a bounded, diagnostic failure."""
+    from types import SimpleNamespace
+
+    import wait as job_wait
+
+    clock = [0.0]
+    monkeypatch.setattr(job_wait.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(job_wait.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(job_wait, "synchronization_timeout", lambda _: 0.1)
+    running = {"status": "running", "progress": {"current": 0}, "result": None}
+    client = SimpleNamespace(get=lambda _: SimpleNamespace(get_json=lambda: running))
+    with pytest.raises(pytest.fail.Exception, match="job authored-job.*last=.*running"):
+        _poll_job(client, "authored-job")
+    assert clock[0] == 0.1
 
 
 def test_api_job_develop_all_failures_marks_job_failed(app_and_db, tmp_path, monkeypatch):
