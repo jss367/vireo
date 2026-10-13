@@ -119,7 +119,16 @@ function renderJobCard(job, options) {
   if (!isLive && job.import_resume_pending) {
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">Checking recovery options…</div>';
   }
-  if (!isLive && (failedImportCount > 0 || importNotStarted || resumableImport || resumeTakeover.by) &&
+  var recoveryOptions = job.import_recovery_options || {};
+  if (!isLive && !job.import_resume_pending && recoveryOptions.error) {
+    html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">' + esc(recoveryOptions.error);
+    if (recoveryOptions.taken_over_by_job_id) {
+      html += ' <button class="btn-retry" data-show-job="' + escapeAttr(recoveryOptions.taken_over_by_job_id) + '">Show that import</button>';
+    }
+    html += '</div>';
+  }
+  if (!isLive && !job.import_resume_pending && !recoveryOptions.error &&
+      (failedImportCount > 0 || importNotStarted || resumableImport || resumeTakeover.by) &&
       importRetryBody(job)) {
     var retryInFlight = hasActiveRetryFor(job.id);
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';

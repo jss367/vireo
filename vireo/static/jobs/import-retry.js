@@ -121,11 +121,41 @@ function importChainProcessJobIds(config, result, rows, jobId, inferLegacy) {
   }
 }
 
-function importChainInvalidated(config, result, rows, jobId, neverStarted) {
+function importChainProcessJobGroups(config, result, rows, jobId) {
   var recorded = importChainProcessJobIds(config, result, rows, jobId, false);
-  if (recorded.length) return recorded.some(function(id) { return neverStarted.has(id); });
-  var candidates = importChainProcessJobIds(config, result, rows, jobId);
-  return candidates.length > 0 && candidates.every(function(id) { return neverStarted.has(id); });
+  if (!recorded.length) {
+    var candidates = importChainProcessJobIds(config, result, rows, jobId);
+    return candidates.length ? [candidates] : [];
+  }
+  var byId = new Map((rows || []).filter(function(row) {
+    return row.type === 'import';
+  }).map(function(row) { return [row.id, row]; }));
+  var seen = new Set();
+  while (true) {
+    if (result.process_job_id) return [[result.process_job_id]];
+    if ((config.chain_process_job_ids || []).length) {
+      var groups = config.chain_process_job_groups;
+      if (Array.isArray(groups) && groups.length && groups.every(function(group) {
+        return Array.isArray(group) && group.length && group.every(function(id) { return typeof id === 'string'; });
+      })) {
+        var covered = new Set(groups.flat());
+        if (covered.size === new Set(recorded).size && recorded.every(function(id) { return covered.has(id); })) return groups;
+      }
+      return recorded.map(function(id) { return [id]; });
+    }
+    var parentId = config.parent_import_job_id;
+    if (!parentId || seen.has(parentId) || !byId.has(parentId)) return recorded.map(function(id) { return [id]; });
+    seen.add(parentId);
+    var row = byId.get(parentId);
+    config = jobConfig(row);
+    result = row.result || {};
+  }
+}
+
+function importChainInvalidated(config, result, rows, jobId, neverStarted) {
+  return importChainProcessJobGroups(config, result, rows, jobId).some(function(group) {
+    return group.every(function(id) { return neverStarted.has(id); });
+  });
 }
 
 function pipelineNeverStarted(row) {

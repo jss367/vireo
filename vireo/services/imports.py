@@ -224,13 +224,36 @@ def _chain_process_job_ids(config, result, rows, job_id=None, *, infer_legacy=Tr
         config, result = _json_dict(row.get("config")), _json_dict(row.get("result"))
 
 
-def _chain_invalidated(config, result, rows, job_id, never_started):
-    """Every recorded pipeline is owed; legacy candidates only identify payment."""
+def _chain_process_job_groups(config, result, rows, job_id=None):
+    """Each group is owed; any surviving legacy alternative pays its group."""
     recorded = _chain_process_job_ids(config, result, rows, job_id, infer_legacy=False)
-    if recorded:
-        return any(pid in never_started for pid in recorded)
-    candidates = _chain_process_job_ids(config, result, rows, job_id)
-    return bool(candidates) and all(pid in never_started for pid in candidates)
+    if not recorded:
+        candidates = _chain_process_job_ids(config, result, rows, job_id)
+        return [candidates] if candidates else []
+    by_id = {row.get("id"): row for row in rows or [] if row.get("type") == "import"}
+    seen = set()
+    while True:
+        if result.get("process_job_id"):
+            return [[result["process_job_id"]]]
+        if config.get("chain_process_job_ids"):
+            groups = config.get("chain_process_job_groups")
+            if (isinstance(groups, list) and groups
+                    and all(isinstance(group, list) and group
+                            and all(isinstance(pid, str) for pid in group) for group in groups)
+                    and {pid for group in groups for pid in group} == set(recorded)):
+                return groups
+            return [[pid] for pid in recorded]
+        parent_id = config.get("parent_import_job_id")
+        if not parent_id or parent_id in seen or parent_id not in by_id:
+            return [[pid] for pid in recorded]
+        seen.add(parent_id)
+        row = by_id[parent_id]
+        config, result = _json_dict(row.get("config")), _json_dict(row.get("result"))
+
+
+def _chain_invalidated(config, result, rows, job_id, never_started):
+    groups = _chain_process_job_groups(config, result, rows, job_id)
+    return any(all(pid in never_started for pid in group) for group in groups)
 
 
 def _pipeline_never_started(row):
@@ -455,10 +478,12 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
     if all_scope and parent_result.get("after_import_skipped") == "no new photos":
         parent_chained = False
     chained = parent_chained or any(e["chained"] for e in descendants)
-    chain_process_job_ids = set(parent_chain_ids if parent_chained else [])
+    chain_process_job_groups = list(_chain_process_job_groups(parent_config, parent_result, rows, parent_id)) if parent_chained else []
     for e in descendants:
         if e["chained"]:
-            chain_process_job_ids.update(e["chain_process_job_ids"])
+            chain_process_job_groups.extend(_chain_process_job_groups(e["config"], e["result"], rows, e["id"]))
+    chain_process_job_groups = [list(group) for group in sorted({tuple(sorted(set(group))) for group in chain_process_job_groups})]
+    chain_process_job_ids = {pid for group in chain_process_job_groups for pid in group}
     # A Retry of a parent that was not interrupted replays no tags, so only
     # processing is owed there.
     tags_paid = (tags_applied or not parent_interrupted) and not unpaid_scope
@@ -507,10 +532,8 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
         "descendants_started": any(
             not _import_failed_before_start(entry["result"]) for entry in descendants
         ),
-        # Legacy alternatives are evidence of one paid handoff, not separate
-        # obligations. Persist only surviving evidence so a subsequent retry
-        # cannot reinterpret an unstarted alternative as required processing.
-        "chain_process_job_ids": sorted(chain_process_job_ids - never_started_processes),
+        "chain_process_job_ids": sorted(chain_process_job_ids),
+        "chain_process_job_groups": chain_process_job_groups,
     }
 
 
@@ -1588,6 +1611,7 @@ class ImportService:
             # replay the owed tag pass.
             "chain_already_ran": chain_already_ran,
             "chain_process_job_ids": takeover.get("chain_process_job_ids", []),
+            "chain_process_job_groups": takeover.get("chain_process_job_groups", []),
             # The parent's own landings, minus photos it only carried (a
             # retry with duplicate skipping off adopts those into its
             # photo_ids, but their own import already tagged them), plus

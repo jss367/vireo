@@ -318,6 +318,31 @@ def test_import_resume_checks_pipeline_outside_history_window(live_server, page,
         expect(resume).to_have_count(0)
 
 
+@pytest.mark.parametrize("taken_over", [False, True])
+@pytest.mark.parametrize("response_status", [200, 409])
+def test_interrupted_failed_files_wait_for_recovery_and_show_conflict(live_server, page, taken_over, response_status):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", result={
+        "interrupted": True, "photo_ids": [1], "failed": 2,
+    }, config={"sources": ["/card"], "destination": "/archive"})
+    pending = []
+    page.route("**/api/import/*/recovery-options", lambda route: pending.append(route))
+    _serve_jobs_page(live_server, page, job, history=True)
+    pane = page.locator("#jobDetailPane")
+    expect(pane).to_contain_text("Checking recovery options…")
+    expect(pane.locator("[data-retry-import-job]")).to_have_count(0)
+    assert pending
+    options = {"direct_to_nas_allowed": False, "resume_allowed": False,
+               "error": "This import already started processing its photos."}
+    if taken_over:
+        options.update(taken_over_by_job_id="later-import", takeover="done")
+    pending[0].fulfill(status=response_status, json=options)
+    expect(pane).not_to_contain_text("Checking recovery options…")
+    expect(pane).to_contain_text(options["error"])
+    expect(pane.locator("[data-retry-import-job]")).to_have_count(0)
+    expect(pane.locator('[data-show-job="later-import"]')).to_have_count(1 if taken_over else 0)
+
+
 def test_move_folder_job_shows_source_and_destination(live_server, page):
     """History entries predating the plan snapshot keep the generic note."""
     job = _move_folder_job(live_server, {"folder_template": "%Y/%Y-%m-%d"})

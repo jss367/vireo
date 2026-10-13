@@ -115,8 +115,20 @@ def _scenarios():
     persisted["config"].update(
         chain_already_ran=recovery["chain_already_ran"],
         chain_process_job_ids=recovery["chain_process_job_ids"],
+        chain_process_job_groups=recovery["chain_process_job_groups"],
     )
+    grouped_paid = _parent(tags_applied=True, chained=False)
+    grouped_paid["config"].update(chain_already_ran=True, chain_process_job_ids=["process", "second-process"],
+                                  chain_process_job_groups=[["process", "second-process"]])
+    grouped_rows = [row for row in legacy_rows if row["type"] == "pipeline"]
+    grouped_unpaid = json.loads(json.dumps(grouped_rows))
+    grouped_unpaid[-1]["result"] = {"never_started": True}
+    required = json.loads(json.dumps(grouped_paid))
+    required["config"]["chain_process_job_groups"] = [["process"], ["second-process"]]
     return {
+        "persisted alternatives preserve surviving paid pipeline": (grouped_paid, grouped_rows),
+        "persisted alternatives all cancelled owe processing": (grouped_paid, grouped_unpaid),
+        "persisted separate groups retain each obligation": (required, grouped_rows),
         "legacy surviving payment remains paid after persistence": (persisted, [row for row in legacy_rows if row["type"] == "pipeline"]),
         "mixed descendant recorded pipelines leave processing owed": (
             _parent(tags_applied=True),
@@ -398,6 +410,9 @@ def _server(parent, rows):
 
 # (by, kind, offers Resume, offers Retry)
 EXPECTED = {
+    "persisted alternatives preserve surviving paid pipeline": (None, None, False, False),
+    "persisted alternatives all cancelled owe processing": (None, None, True, False),
+    "persisted separate groups retain each obligation": (None, None, True, False),
     "legacy surviving payment remains paid after persistence": (None, None, True, False),
     "mixed descendant recorded pipelines leave processing owed": ("child", "resume", False, False),
     "mixed recorded pipelines leave processing owed": (None, None, True, False),
@@ -493,12 +508,34 @@ def test_legacy_alternative_pipeline_payment_survives_resume_persistence():
     takeover = import_resume_takeover(parent["id"], parent["result"], rows, parent["config"])
     resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
     assert resume["chain_already_ran"] is True
-    assert resume["chain_process_job_ids"] == ["second-process"]
+    assert resume["chain_process_job_ids"] == ["process", "second-process"]
+    assert resume["chain_process_job_groups"] == [["process", "second-process"]]
     next_config = {**parent["config"], "chain_already_ran": resume["chain_already_ran"],
-                   "chain_process_job_ids": resume["chain_process_job_ids"]}
+                   "chain_process_job_ids": resume["chain_process_job_ids"],
+                   "chain_process_job_groups": resume["chain_process_job_groups"]}
     next_result = {"import_not_started": True, "ok": False}
     retried = import_resume_takeover("failed-resume", next_result, rows, next_config)
     assert retried["chained"] is True
+
+
+@pytest.mark.parametrize("cancel_all", [False, True])
+def test_persisted_legacy_group_survives_later_pipeline_cancellation(cancel_all):
+    parent, rows = _mixed_pipeline_scenario(recorded=False, all_ran=True)
+    parent["result"]["tags_applied"] = False
+    pipeline = next(row for row in rows if row["id"] == "process")
+    pipeline.update(status="queued", result={})
+    takeover = import_resume_takeover(parent["id"], parent["result"], rows, parent["config"])
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert resume["chain_already_ran"] is True
+    assert resume["chain_process_job_groups"] == [["process", "second-process"]]
+    pipeline.update(status="cancelled", result={"never_started": True})
+    if cancel_all:
+        next(row for row in rows if row["id"] == "second-process")["result"] = {"never_started": True}
+    config = {**parent["config"], "chain_already_ran": True,
+              "chain_process_job_ids": resume["chain_process_job_ids"],
+              "chain_process_job_groups": resume["chain_process_job_groups"]}
+    retried = import_resume_takeover("failed-resume", {"import_not_started": True, "ok": False}, rows, config)
+    assert retried["chained"] is not cancel_all
 
 
 def test_a_resume_that_paid_the_tags_leaves_only_the_chain_owed():

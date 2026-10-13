@@ -15,8 +15,11 @@ function refreshHistoryImportRecovery(job) {
   job.import_resume_pending = true;
   fetch('/api/import/' + encodeURIComponent(job.id) + '/recovery-options', {cache: 'no-store'})
     .then(function(response) {
-      if (!response.ok) return null;
-      return response.json();
+      return response.json().then(function(options) {
+        if (response.ok) return options;
+        return Object.assign({}, options, {resume_allowed: false, direct_to_nas_allowed: false,
+          error: options.error || 'Could not check import recovery options.'});
+      });
     })
     .then(function(options) {
       // A subsequent history refresh or selection must not receive stale eligibility.
@@ -24,6 +27,7 @@ function refreshHistoryImportRecovery(job) {
           historyJobs.indexOf(job) < 0) return;
       job.import_resume_allowed = options.resume_allowed;
       job.import_resume_pending = false;
+      job.import_recovery_options = options;
       if (selectedSource === 'history' && selectedJobId === job.id) renderHistoryDetail(job);
       else if (currentView === 'history') renderHistoryOverview();
     })

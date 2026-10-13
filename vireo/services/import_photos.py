@@ -1065,6 +1065,7 @@ class _ImportPhotosRequest:
             # already-paid chain; keep its inherited evidence in the config.
             "chain_already_ran": bool(parent_resume and parent_resume["chain_already_ran"]),
             "chain_process_job_ids": parent_resume.get("chain_process_job_ids", []) if parent_resume else [],
+            "chain_process_job_groups": parent_resume.get("chain_process_job_groups", []) if parent_resume else [],
             # Fingerprint sidecar to carry_photo_ids so a retry-of-retry
             # can still verify the inherited scope by stable identity
             # even after the grandparent's job has aged out of history.

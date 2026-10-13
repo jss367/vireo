@@ -12494,9 +12494,12 @@ def test_retry_of_a_failed_import_goes_through_a_retry_that_failed_too(
         wait_for_job_via_client(client, resp.get_json()["job_id"])
 
 
-@pytest.mark.parametrize("chain_paid,never_started,cancelled", [(False, False, False), (True, False, False), (True, True, False), (True, False, True)])
+@pytest.mark.parametrize("chain_paid,never_started,cancelled,alternative", [
+    (False, False, False, False), (True, False, False, False),
+    (True, True, False, False), (True, False, True, False), (True, False, True, True),
+])
 def test_resume_preparation_failure_preserves_paid_chain_on_retry(
-    app_and_db, tmp_path, monkeypatch, chain_paid, never_started, cancelled,
+    app_and_db, tmp_path, monkeypatch, chain_paid, never_started, cancelled, alternative,
 ):
     import pipeline_job
     from services.import_photos import _ImportPhotosJob
@@ -12532,11 +12535,20 @@ def test_resume_preparation_failure_preserves_paid_chain_on_retry(
     assert failed["result"]["import_not_started"] is True
     assert failed["config"]["chain_already_ran"] is chain_paid
     assert failed["config"]["chain_process_job_ids"] == (["original-process"] if chain_paid else [])
+    assert failed["config"]["chain_process_job_groups"] == ([["original-process"]] if chain_paid else [])
     assert failed["result"]["source_snapshots"] == original["result"]["source_snapshots"]
     monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", prepare)
     if never_started or cancelled:
         # Reproduce rows saved before pipeline provenance was recorded.
-        failed["config"].pop("chain_process_job_ids")
+        if alternative:
+            failed["config"]["chain_process_job_ids"] = ["original-process", "alternative-process"]
+            failed["config"]["chain_process_job_groups"] = [["original-process", "alternative-process"]]
+            db.conn.execute(
+                "INSERT INTO job_history (id,type,status,config,result,workspace_id) "
+                "VALUES ('alternative-process','pipeline','completed','{}','{}',?)", (db.active_workspace_id,),
+            )
+        else:
+            failed["config"].pop("chain_process_job_ids")
         db.conn.execute("UPDATE job_history SET config=? WHERE id=?", (
             json.dumps(failed["config"]), failed["id"],
         ))
@@ -12559,11 +12571,13 @@ def test_resume_preparation_failure_preserves_paid_chain_on_retry(
     assert response.status_code == 200, response.get_json()
     retried = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert retried["status"] == "completed", retried
-    still_paid = chain_paid and not never_started and not cancelled
+    still_paid = chain_paid and (alternative or (not never_started and not cancelled))
     assert retried["config"]["chain_already_ran"] is still_paid
     assert len(chain_calls) == (0 if still_paid else 1)
     if still_paid:
         assert retried["result"]["after_import_skipped"] == "chain already ran on the interrupted parent"
+        if alternative:
+            assert retried["config"]["chain_process_job_groups"] == [["alternative-process", "original-process"]]
     assert set(retried["config"]["carry_photo_ids"]) == set(photo_ids)
     if retried["result"].get("process_job_id"):
         wait_for_job_via_client(client, retried["result"]["process_job_id"])

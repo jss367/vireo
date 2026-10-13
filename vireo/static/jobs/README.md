@@ -73,6 +73,10 @@ Keep these request-ordering rules intact when changing this code:
   checkpoint, since the pipeline may already record the handoff. Responses
   apply only to the same history-row object, and
   later polls recheck eligibility without caching the HTTP response.
+- Saved processing provenance retains groups: every group must have a
+  surviving pipeline, while IDs within a legacy inferred group are
+  alternatives. Server recovery preserves these groups before preparation
+  so a later cancellation cannot change an alternative into an obligation.
 - Restart import replays a failed or cancelled in-place import's saved scope
   and settings in its original workspace. It rescans rather than resuming at
   the old progress counter. `inPlaceRestarts` keeps pending requests disabled

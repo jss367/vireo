@@ -64,6 +64,13 @@ function bindDetailPaneActions() {
       var retryJob = activeJobs.concat(historyJobs).find(function(job) {
         return job.id === retryJobId;
       });
+      if (retryJob && (retryJob.import_resume_pending ||
+          (retryJob.import_recovery_options && retryJob.import_recovery_options.error))) {
+        if (typeof showToast === 'function') showToast(
+          retryJob.import_resume_pending ? 'Checking recovery options…' : retryJob.import_recovery_options.error,
+          'info');
+        return;
+      }
       var retryBody = importRetryBody(retryJob);
       var directToNas = retryImportBtn.hasAttribute('data-retry-direct-to-nas');
       if (directToNas) retryBody = directNasImportRetryBody(retryJob, retryBody, historyJobs);
