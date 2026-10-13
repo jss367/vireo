@@ -425,6 +425,20 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     let reveal_label = "Show in File Manager";
 
     // -- Photo menu --
+    let rating_menu = SubmenuBuilder::new(app, "Rating")
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_0, "Rate 0").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_1, "Rate 1").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_2, "Rate 2").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_3, "Rate 3").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_4, "Rate 4").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_5, "Rate 5").build(app)?)
+        .build()?;
+    let flag_menu = SubmenuBuilder::new(app, "Flag")
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_FLAG_PICK, "Flag as Pick").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_FLAG_REJECT, "Reject Photo").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::PHOTO_FLAG_CLEAR, "Clear Flag").build(app)?)
+        .build()?;
+
     let photo_menu = SubmenuBuilder::new(app, "Photo")
         .item(&MenuItemBuilder::with_id(ids::PHOTO_OPEN_LIGHTBOX, "Open in Lightbox").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::PHOTO_OPEN_BROWSE, "Open in Browse").build(app)?)
@@ -453,16 +467,8 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .build(app)?,
         )
         .separator()
-        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_0, "Rate 0").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_1, "Rate 1").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_2, "Rate 2").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_3, "Rate 3").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_4, "Rate 4").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::PHOTO_RATE_5, "Rate 5").build(app)?)
-        .separator()
-        .item(&MenuItemBuilder::with_id(ids::PHOTO_FLAG_PICK, "Flag as Pick").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::PHOTO_FLAG_REJECT, "Reject Photo").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::PHOTO_FLAG_CLEAR, "Clear Flag").build(app)?)
+        .item(&rating_menu)
+        .item(&flag_menu)
         .separator()
         .item(&MenuItemBuilder::with_id(ids::PHOTO_DELETE, "Delete Selected").build(app)?)
         .build()?;
