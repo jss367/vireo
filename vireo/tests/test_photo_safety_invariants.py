@@ -814,6 +814,25 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         self._record_successful_deletions(chosen, result, permanent_hashes)
         event(f"delete {mode}: ok={result.get('ok')}")
 
+    @precondition(lambda self: bool(self._visible_photo_ids()))
+    @rule(data=st.data())
+    def prepare_and_release_local_original(self, data):
+        """A completed cache/release cycle preserves originals and visibility."""
+        from offline_cache import cache_photo_original, release_photo_original
+
+        pid = data.draw(st.sampled_from(self._visible_photo_ids()))
+        photo = self.db.get_photo(pid)
+        folder = self.db.get_folder(photo["folder_id"])
+        # Keep generated cache files under the thumbnail root, which the
+        # disk-copy invariant excludes; source files remain in its snapshot.
+        cache_root = os.path.join(self.thumbs, "managed")
+        cached = cache_photo_original(self.db, photo, cache_root, {folder["id"]: folder["path"]})
+        if cached["status"] in {"cached", "skipped"}:
+            outcome = release_photo_original(self.db, pid, cache_root)
+            assert outcome["status"] == "released", outcome
+            assert self.db.caches.offline_original_get(pid) is None
+        event(f"prepare and release: {cached['status']}")
+
     def _record_successful_deletions(self, chosen, result, permanent_hashes):
         if not result.get("ok"):
             return

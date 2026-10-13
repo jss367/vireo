@@ -32,6 +32,26 @@ rendering; they do not cancel writes or server-side work.
 Request races are tested against the actual controllers in
 `vireo/tests/browse_panel_requests.cjs`, run by pytest's browser state tests.
 
+## Releasing local originals
+
+The photo selection menu and folder context menu offer **Release Local
+Originals…**. The folder action includes visible subfolders. Storage offers
+the same action for all cached originals across every workspace; these copies
+are shared rather than owned by one workspace.
+
+`/static/vireo-release-originals.js` owns the confirmation and job stream on
+both pages. The `release-local-originals` background job checks readable source
+files before removing managed original, companion, and XMP copies. Source
+images must match the cached size and modification time. Missing or changed
+source images retain their copies, with reasons in the job details. A newer
+source XMP is allowed; a missing source XMP retains its cached snapshot.
+Other generated assets, photo metadata, and processing results remain intact.
+
+Release and preparation share the per-photo preparation guard. Release checks
+the selected source identity again under a catalog writer transaction before
+removal, and pauses or cancels between photos. Results report released, kept,
+already released, failed, and unchecked counts plus the removed file bytes.
+
 ## Selection-panel state and actions
 
 `selection-panel-state.js` owns the keyword and prediction row snapshots in

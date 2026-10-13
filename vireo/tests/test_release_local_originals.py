@@ -1,0 +1,283 @@
+"""Releasing managed copies must never delete photos or their catalog data."""
+
+import os
+import threading
+from pathlib import Path
+
+import pytest
+from offline_cache import cache_photo_original, release_photo_original, resolve_original_path
+from testing.waits import synchronization_timeout
+from wait import wait_for_job_via_client
+
+
+def cache_fixture(fixture, *, sidecars=False):
+    app, db, pid = fixture
+    photo = db.get_photo(pid)
+    folder = db.get_folder(photo["folder_id"])
+    source = Path(folder["path"]) / photo["filename"]
+    if sidecars:
+        source.with_suffix(".xmp").write_text("source metadata")
+        companion = source.with_name("companion.jpg")
+        companion.write_bytes(b"companion image")
+        db.conn.execute("UPDATE photos SET companion_path=? WHERE id=?", (companion.name, pid))
+        db.commit()
+        photo = db.get_photo(pid)
+    base = Path(app.config["THUMB_CACHE_DIR"]).parent
+    cache_photo_original(db, photo, str(base), {folder["id"]: folder["path"]})
+    return base, source, dict(db.caches.offline_original_get(pid))
+
+
+def run_release(app, payload):
+    client = app.test_client()
+    response = client.post("/api/jobs/release-local-originals", json=payload)
+    assert response.status_code == 200, response.get_json()
+    return wait_for_job_via_client(client, response.get_json()["job_id"])
+
+
+def test_release_preserves_sources_metadata_and_generated_assets(client_with_photo):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo, sidecars=True)
+    db.photo_review.set_rating(pid, 4)
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
+    keyword = db.add_keyword("Hawk")
+    db.tag_photo(pid, keyword)
+    before = dict(db.get_photo(pid))
+    thumb = Path(app.config["THUMB_CACHE_DIR"]) / f"{pid}.jpg"
+    thumb.write_bytes(b"keep thumbnail")
+    source_bytes = source.read_bytes()
+
+    job = run_release(app, {"photo_ids": [pid, pid]})
+    assert job["status"] == "completed", job
+    assert job["result"]["released"] == 1
+    assert job["result"]["bytes"] == row["bytes"]
+    assert db.caches.offline_original_get(pid) is None
+    assert db.caches.offline_original_total_bytes() == 0
+    assert dict(db.get_photo(pid)) == before
+    assert thumb.read_bytes() == b"keep thumbnail"
+    assert source.read_bytes() == source_bytes
+    assert source.with_suffix(".xmp").read_text() == "source metadata"
+    assert source.with_name("companion.jpg").read_bytes() == b"companion image"
+    for column in ("original_path", "xmp_path", "companion_path"):
+        assert not (base / row[column]).exists()
+    resolved, offline = resolve_original_path(
+        db, db.get_photo(pid), str(base), {before["folder_id"]: str(source.parent)},
+        prefer_cached=True,
+    )
+    assert resolved == str(source)
+    assert offline is False
+    repeated = run_release(app, {"photo_ids": [pid]})
+    assert repeated["result"]["not_cached"] == 1
+    assert repeated["result"]["bytes"] == 0
+
+
+@pytest.mark.parametrize("problem", ["missing", "changed", "companion_missing", "xmp_missing"])
+def test_release_keeps_copies_when_sources_cannot_replace_them(client_with_photo, problem):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo, sidecars=True)
+    if problem == "missing":
+        source.unlink()
+    elif problem == "changed":
+        source.write_bytes(b"changed source image")
+    elif problem == "companion_missing":
+        source.with_name("companion.jpg").unlink()
+    else:
+        source.with_suffix(".xmp").unlink()
+    job = run_release(app, {"photo_ids": [pid]})
+    assert job["result"]["kept"] == 1
+    assert job["result"]["bytes"] == 0
+    assert job["result"]["kept_reasons"]
+    assert dict(db.caches.offline_original_get(pid)) == row
+    for column in ("original_path", "xmp_path", "companion_path"):
+        assert (base / row[column]).is_file()
+
+
+def test_release_accepts_newer_source_metadata(client_with_photo):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo, sidecars=True)
+    source.with_suffix(".xmp").write_text("new source edits")
+    assert run_release(app, {"photo_ids": [pid]})["result"]["released"] == 1
+    assert source.with_suffix(".xmp").read_text() == "new source edits"
+
+
+@pytest.mark.parametrize("unsafe", ["source_path", "symlink_directory", "symlink_file"])
+def test_release_never_follows_cache_paths_into_source_storage(client_with_photo, unsafe):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo)
+    cached = base / row["original_path"]
+    original_bytes = source.read_bytes()
+    if unsafe == "source_path":
+        db.conn.execute("UPDATE offline_originals SET original_path=? WHERE photo_id=?", (str(source), pid))
+        db.commit()
+    elif unsafe == "symlink_file":
+        cached.unlink()
+        cached.symlink_to(source)
+    else:
+        cached.unlink()
+        cached.parent.rmdir()
+        cached.parent.symlink_to(source.parent, target_is_directory=True)
+    outcome = release_photo_original(db, pid, str(base))
+    assert outcome["status"] == "kept"
+    assert source.read_bytes() == original_bytes
+    assert db.caches.offline_original_get(pid) is not None
+
+
+def test_release_retries_partial_file_removal_and_counts_actual_bytes(client_with_photo, monkeypatch):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo, sidecars=True)
+    real_unlink = os.unlink
+
+    def fail_original(path, *args, **kwargs):
+        if str(path) == str(base / row["original_path"]):
+            raise PermissionError("file is busy")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", fail_original)
+    job = run_release(app, {"photo_ids": [pid]})
+    assert job["status"] == "failed", job
+    assert job["result"]["failed"] == 1
+    assert job["result"]["bytes"] == row["bytes"] - source.stat().st_size
+    assert db.caches.offline_original_get(pid) is not None
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    retried = run_release(app, {"photo_ids": [pid]})
+    assert retried["result"]["released"] == 1
+    assert retried["result"]["bytes"] == source.stat().st_size
+    assert source.is_file()
+
+
+def test_release_rechecks_photo_identity_after_network_probes(client_with_photo, monkeypatch):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo)
+    begin = db.begin_immediate
+
+    def relocate_before_lock():
+        db.conn.execute("UPDATE photos SET filename='replacement.jpg' WHERE id=?", (pid,))
+        db.commit()
+        begin()
+
+    monkeypatch.setattr(db, "begin_immediate", relocate_before_lock)
+    result = release_photo_original(db, pid, str(base))
+    assert result["status"] == "kept"
+    assert (base / row["original_path"]).is_file()
+    assert source.is_file()
+
+
+def test_release_does_not_act_on_a_replaced_selection(client_with_photo):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo)
+    selected = dict(db.get_photo(pid))
+    selected["filename"] = "older-photo.jpg"
+    result = release_photo_original(db, pid, str(base), selected_photo=selected)
+    assert result["status"] == "kept"
+    assert (base / row["original_path"]).is_file()
+
+
+def test_release_keeps_copy_if_source_is_unreadable(client_with_photo, monkeypatch):
+    import offline_cache
+
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("source is not readable")
+
+    monkeypatch.setattr(offline_cache, "open", denied, raising=False)
+    result = release_photo_original(db, pid, str(base))
+    assert result["status"] == "kept"
+    assert (base / row["original_path"]).is_file()
+
+
+def test_release_cancel_keeps_unprocessed_copies(client_with_photo, monkeypatch):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo)
+    folder_id = db.get_photo(pid)["folder_id"]
+    second = source.with_name("second.jpg")
+    second.write_bytes(source.read_bytes())
+    second_id = db.add_photo(folder_id, second.name, ".jpg", file_size=second.stat().st_size, file_mtime=second.stat().st_mtime)
+    cache_photo_original(db, db.get_photo(second_id), str(base), {folder_id: str(source.parent)})
+    push = app._job_runner.push_event
+
+    def cancel_after_first(job_id, event_type, data):
+        push(job_id, event_type, data)
+        if event_type == "progress" and data.get("phase") == "Releasing local originals":
+            app._job_runner.cancel_job(job_id)
+
+    monkeypatch.setattr(app._job_runner, "push_event", cancel_after_first)
+    job = run_release(app, {"photo_ids": [pid, second_id]})
+    assert job["status"] == "cancelled", job
+    assert job["result"]["released"] == 1
+    assert job["result"]["processed"] == 1
+    assert job["result"]["bytes"] == row["bytes"]
+    assert db.caches.offline_original_get(second_id) is not None
+    assert source.is_file() and second.is_file()
+
+
+def test_release_waits_for_preparation_guard(client_with_photo):
+    from db import Database
+    from offline_cache import original_preparation_guard
+
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo)
+    entered = threading.Event()
+    finished = threading.Event()
+    results = []
+
+    def release():
+        worker = Database(db._db_path)
+        try:
+            entered.set()
+            results.append(release_photo_original(worker, pid, str(base)))
+        finally:
+            worker.close()
+            finished.set()
+
+    with original_preparation_guard(str(base), pid):
+        thread = threading.Thread(target=release)
+        thread.start()
+        assert entered.wait(synchronization_timeout(5))
+        assert not finished.is_set()
+        assert (base / row["original_path"]).is_file()
+    thread.join(synchronization_timeout(5))
+    assert finished.is_set()
+    assert results[0]["status"] == "released"
+
+
+@pytest.mark.parametrize("body", [None, [], {}, {"photo_ids": []}, {"photo_ids": [True]},
+    {"photo_ids": [1.5]}, {"photo_ids": ["1"]}, {"folder_id": True},
+    {"folder_id": "1"}, {"all_cached": False}, {"all_cached": 1},
+    {"all_cached": True, "photo_ids": [1]}])
+def test_release_rejects_invalid_scope(client_with_photo, body):
+    app, db, pid = client_with_photo
+    response = app.test_client().post("/api/jobs/release-local-originals", json=body)
+    assert response.status_code == 400
+
+
+def test_release_selection_rejects_other_workspace_photos(client_with_photo):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo)
+    other = db.create_workspace("Unrelated")
+    client = app.test_client()
+    assert client.post(f"/api/workspaces/{other}/activate").status_code == 200
+    response = client.post("/api/jobs/release-local-originals", json={"photo_ids": [pid]})
+    assert response.status_code == 403
+    response = client.post("/api/jobs/release-local-originals", json={"folder_id": db.get_photo(pid)["folder_id"]})
+    assert response.status_code == 403
+    assert (base / row["original_path"]).is_file()
+    # Storage's explicit all-cached action includes other workspaces.
+    assert run_release(app, {"all_cached": True})["result"]["released"] == 1
+
+
+def test_release_folder_includes_cached_descendants_only(client_with_photo):
+    app, db, pid = client_with_photo
+    base, source, row = cache_fixture(client_with_photo)
+    root_id = db.get_photo(pid)["folder_id"]
+    child = source.parent / "nested"
+    child.mkdir()
+    image = child / "nested.jpg"
+    image.write_bytes(source.read_bytes())
+    folder_id = db.add_folder(str(child), parent_id=root_id)
+    second_id = db.add_photo(folder_id, image.name, ".jpg", file_size=image.stat().st_size, file_mtime=image.stat().st_mtime)
+    cache_photo_original(db, db.get_photo(second_id), str(base), {folder_id: str(child)})
+    job = run_release(app, {"folder_id": root_id})
+    assert job["result"]["released"] == 2
+    assert job["result"]["total"] == 2
+    assert source.is_file() and image.is_file()

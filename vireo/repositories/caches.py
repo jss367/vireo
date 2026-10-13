@@ -240,6 +240,31 @@ class CachesRepository:
             (photo_id,),
         ).fetchone()
 
+    def offline_original_ids(
+        self, *, workspace_id: int | None = None,
+        folder_ids: Sequence[int] | None = None,
+    ) -> list[int]:
+        """Tracked originals, optionally scoped to visible photos and folders."""
+        from sql_chunks import chunked
+
+        chunks = [None] if folder_ids is None else chunked(folder_ids)
+        ids = []
+        for chunk in chunks:
+            query = "SELECT o.photo_id FROM offline_originals o JOIN photos p ON p.id=o.photo_id"
+            params = []
+            conditions = []
+            if workspace_id is not None:
+                query += " JOIN photo_workspace_visibility wf ON wf.photo_id=p.id"
+                conditions.append("wf.workspace_id=?")
+                params.append(workspace_id)
+            if chunk is not None:
+                conditions.append(f"p.folder_id IN ({','.join('?' for _ in chunk)})")
+                params.extend(chunk)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            ids.extend(row["photo_id"] for row in self.conn.execute(query, params))
+        return sorted(set(ids))
+
     def offline_original_delete(self, photo_id: int, _commit: bool = True) -> None:
         self.execute_with_retry(
             self.conn,

@@ -335,6 +335,18 @@ def _prepare_full_resolution(result: dict, config: dict) -> tuple[str, list[str]
     return summary, _error_details(result)
 
 
+def _release_local_originals(result: dict, config: dict) -> tuple[str, list[str]]:
+    summary = f"{_n(_int(result, 'released'), 'local original')} released"
+    summary += f", {_human_bytes(result.get('bytes', 0))} reclaimed"
+    for key, label in (("kept", "kept"), ("not_cached", "already released"), ("failed", "failed")):
+        if _int(result, key):
+            summary += f", {_int(result, key):,} {label}"
+    remaining = _int(result, "total") - _int(result, "processed")
+    if remaining > 0:
+        summary += f", {remaining:,} not checked"
+    return summary, _error_details(result) + list(result.get("kept_reasons") or [])
+
+
 def _verify_models(result: dict, config: dict) -> tuple[str, list[str]]:
     # The producer's ``verified`` is the number of models *checked*; the
     # ``ok`` list holds the ones that actually passed.
@@ -822,6 +834,7 @@ _DESCRIBERS: dict[str, Callable[[dict, dict], tuple[str, list[str]]]] = {
     "regroup": _regroup,
     "sharpness": _sharpness,
     "prepare-full-resolution": _prepare_full_resolution,
+    "release-local-originals": _release_local_originals,
     "verify-models": _verify_models,
     "fetch-labels": _fetch_labels,
     "label-list-species-ids": _label_list_species_ids,

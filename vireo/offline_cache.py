@@ -3,6 +3,8 @@
 import contextlib
 import os
 import shutil
+import sqlite3
+import stat
 import tempfile
 import threading
 import time
@@ -187,6 +189,102 @@ def cache_photo_original(db, photo, vireo_dir, folders):
     """Copy one photo's original and sidecar metadata into the offline cache."""
     with original_preparation_guard(vireo_dir, photo["id"]):
         return _cache_photo_original(db, photo, vireo_dir, folders)
+
+
+def release_photo_original(
+    db, photo_id, vireo_dir, *, verify_workspace=True, selected_photo=None,
+):
+    """Release only managed copies whose live sources are still accessible.
+
+    Share preparation's per-photo lock, then recheck catalog identity under a
+    writer transaction before unlinking. Network probes happen before taking
+    that transaction. Other generated assets and all catalog metadata survive.
+    """
+    freed = 0
+    with original_preparation_guard(vireo_dir, photo_id):
+        photo = db.get_photo(photo_id, verify_workspace=verify_workspace)
+        row = db.caches.offline_original_get(photo_id)
+        if photo is None or row is None:
+            return {"status": "not_cached", "bytes": 0}
+        if selected_photo is not None and not photo_source_matches(selected_photo, photo):
+            return {"status": "kept", "bytes": 0, "reason": "Photo changed since release was requested"}
+        folder = db.get_folder(photo["folder_id"])
+        if folder is None:
+            return {"status": "kept", "bytes": 0, "reason": "Source folder is unavailable"}
+        paths = []
+        base = os.path.realpath(vireo_dir)
+        try:
+            # Sidecars are snapshots, not edit targets. A newer source XMP is
+            # allowed, but a missing source sidecar must not lose its last copy.
+            sources = {
+                "originals": os.path.join(folder["path"], photo["filename"]),
+                "xmp": _xmp_source_for(folder["path"], photo["filename"]),
+                "companions": os.path.join(folder["path"], photo["companion_path"])
+                if photo["companion_path"] else None,
+            }
+            for family, column in (("xmp", "xmp_path"), ("companions", "companion_path"),
+                                   ("originals", "original_path")):
+                relative = row[column]
+                if not relative:
+                    continue
+                path = os.path.join(base, relative)
+                parent = os.path.join(base, "offline", family)
+                if (os.path.dirname(path) != parent
+                        or os.path.realpath(parent) != parent
+                        or not os.path.basename(path).startswith(f"{photo_id}.")
+                        or os.path.islink(path)):
+                    raise ValueError("Cached path is outside the managed originals cache")
+                source = sources[family]
+                source_real = os.path.normcase(os.path.realpath(source)) if source else ""
+                offline_root = os.path.normcase(os.path.join(base, "offline"))
+                # A drive-letter change on Windows is a valid independent
+                # source; commonpath would raise for that ordinary case.
+                if not source or source_real == offline_root or source_real.startswith(offline_root + os.sep):
+                    raise ValueError("Source does not have an independent original")
+                with open(source, "rb") as handle:
+                    source_stat = os.fstat(handle.fileno())
+                if not stat.S_ISREG(source_stat.st_mode):
+                    raise ValueError("Source is not a regular file")
+                if family == "originals" and (
+                    source_stat.st_size != row["source_size"]
+                    or source_stat.st_mtime != row["source_mtime"]
+                ):
+                    raise ValueError("Source original has changed since it was cached")
+                try:
+                    cached_stat = os.stat(path)
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(cached_stat.st_mode):
+                    raise ValueError("Cached path is not a regular file")
+                if family != "xmp" and (
+                    source_stat.st_size != cached_stat.st_size
+                    or source_stat.st_mtime != cached_stat.st_mtime
+                ):
+                    raise ValueError("Source and cached image no longer match")
+                paths.append((path, cached_stat.st_size))
+        except (OSError, ValueError) as exc:
+            return {"status": "kept", "bytes": 0, "reason": str(exc)}
+
+        try:
+            db.begin_immediate()
+            with db.transaction():
+                current = db.get_photo(photo_id, verify_workspace=verify_workspace)
+                cached = db.caches.offline_original_get(photo_id)
+                current_folder = db.get_folder(photo["folder_id"])
+                if (not photo_source_matches(photo, current)
+                        or current_folder is None or current_folder["path"] != folder["path"]
+                        or cached is None or dict(cached) != dict(row)):
+                    return {"status": "kept", "bytes": 0, "reason": "Photo changed during release"}
+                for path, size in paths:
+                    try:
+                        os.unlink(path)
+                    except FileNotFoundError:
+                        continue
+                    freed += size
+                db.caches.offline_original_delete(photo_id, _commit=False)
+        except (OSError, sqlite3.Error) as exc:
+            return {"status": "failed", "bytes": freed, "reason": str(exc)}
+        return {"status": "released", "bytes": freed}
 
 
 def _cache_photo_original(db, photo, vireo_dir, folders):

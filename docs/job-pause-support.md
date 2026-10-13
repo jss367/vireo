@@ -10,7 +10,7 @@ not a checkpoint that survives restarting the application.
 
 | Work | Pause boundary |
 | --- | --- |
-| Prepare full resolution, generate previews, cache originals for offline use | Between photos |
+| Prepare full resolution, generate previews, cache originals for offline use, release local originals | Between photos |
 | Generate thumbnails, develop photos, extract subject masks | Between photos |
 | Export photos, export for iNaturalist, move selected photos | Between photos and after export metadata finishes; active subprocesses finish and moved-folder counts are reconciled before a pause is confirmed |
 | Verify photo hashes | Between files, after committing the completed batch prefix |
