@@ -864,6 +864,34 @@ def test_promoted_pipeline_with_pending_cancel_skips_work_fn(tmp_path):
     assert not work_called.is_set()
 
 
+def test_shutdown_after_promotion_before_worker_start_records_never_started(tmp_path, monkeypatch):
+    """Recovery must not count a promoted but unstarted pipeline as paid work."""
+    runner, db = _make_runner_with_db(tmp_path)
+    work_called = threading.Event()
+
+    def shutdown_before_registration(job, work_fn):
+        assert runner.shutdown()
+        return False
+
+    monkeypatch.setattr(runner, "_start_worker_thread", shutdown_before_registration)
+    job_id = runner.enqueue_pipeline(
+        work_fn=lambda job: work_called.set(), config={}, workspace_id=1,
+    )
+    marker = {"cancelled": True, "never_started": True}
+    final = runner.get(job_id)
+    assert final["status"] == "cancelled"
+    assert final["result"] == marker
+    assert not work_called.is_set()
+    row = db.conn.execute(
+        "SELECT status, result, duration FROM job_history WHERE id = ?", (job_id,),
+    ).fetchone()
+    assert row["status"] == "cancelled"
+    assert json.loads(row["result"]) == marker
+    assert row["duration"] == 0.0
+    complete = [event for event in runner._events[job_id] if event["type"] == "complete"]
+    assert complete[-1]["data"]["result"] == marker
+
+
 def test_promotion_db_error_retries_queued_pipeline(tmp_path, monkeypatch):
     """A transient SQLite promotion failure must not strand queued work."""
     import sqlite3

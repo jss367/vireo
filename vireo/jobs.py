@@ -960,6 +960,7 @@ class JobRunner:
             now = datetime.now().isoformat()
             with self._lock:
                 job["status"] = "cancelled"
+                job["result"] = {"cancelled": True, "never_started": True}
                 job["finished_at"] = now
                 job["_ended_at"] = time.time()
                 self._cancelled.discard(job["id"])
@@ -967,7 +968,7 @@ class JobRunner:
                 "job_id": job["id"],
                 "job_type": job["type"],
                 "status": "cancelled",
-                "result": None,
+                "result": {"cancelled": True, "never_started": True},
                 "duration": 0.0,
                 "errors": [],
             })
