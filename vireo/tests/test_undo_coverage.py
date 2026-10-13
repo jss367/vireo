@@ -144,7 +144,7 @@ def test_every_mutating_route_has_an_explicit_undo_decision(app_and_db):
     from pathlib import Path
 
     app, _ = app_and_db
-    inventory = json.loads((Path(__file__).parent / 'contracts' / 'undo_coverage.json').read_text())
+    inventory = json.loads((Path(__file__).parent / 'contracts' / 'undo_coverage.json').read_text(encoding='utf-8'))
     listed = [route for group in inventory.values() for route in group['routes']]
     actual = {
         f'{method} {rule.rule}'
@@ -174,7 +174,7 @@ def test_recorded_action_literals_have_replay_or_explicit_exclusion():
     root = Path(__file__).parents[1]
     for directory in ('services', 'web'):
         for path in (root / directory).glob('*.py'):
-            for call in ast.walk(ast.parse(path.read_text())):
+            for call in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
                 if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
                     continue
                 if call.func.attr != 'record_edit' or not call.args:
@@ -298,3 +298,16 @@ def test_id_only_prediction_status_history_cannot_change_a_current_prediction(ap
     }])
     assert app.test_client().post('/api/undo').status_code == 200
     assert db.get_prediction_status(pred_id) == 'pending'
+
+
+
+def test_history_source_contract_reads_utf8_with_a_legacy_windows_default(monkeypatch):
+    from pathlib import Path
+
+    read_text = Path.read_text
+
+    def legacy_default(path, encoding=None, errors=None, **kwargs):
+        return read_text(path, encoding=encoding or 'cp1252', errors=errors, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', legacy_default)
+    test_recorded_action_literals_have_replay_or_explicit_exclusion()
