@@ -7,6 +7,7 @@ function clearImportPreviewGrid() {
     importThumbSchedulerCancel = null;
   }
   lastImportPreviewRender = null;
+  importRecoveredPaths.clear();
   importDayGroups = new Map();
   document.getElementById('importDaySummary').style.display = 'none';
   document.getElementById('importDayRows').replaceChildren();

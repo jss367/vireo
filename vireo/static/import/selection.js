@@ -151,11 +151,17 @@ function importCheckedCount() {
     .filter(p => !importDeselected.has(p))).size;
 }
 
+function importCopyCount() {
+  return new Set(importSelectableCardPaths(importGridCards())
+    .filter(p => !importDeselected.has(p) && !importRecoveredPaths.has(p))).size;
+}
+
 function updateImportSelectionUI() {
   refreshImportDaySummary();
   const el = document.getElementById('previewSelectedCount');
   if (el) {
-    // The CHECKED count — what will actually be copied. Never the
+    // The CHECKED count — what will be imported, including adoption of
+    // recovered files already at the destination. Never the
     // include_paths count, which is larger because it retains duplicates.
     // Both halves count unique paths, for the nested-sources reason on
     // importEligibleCount(): a file discovered twice is still one file, and

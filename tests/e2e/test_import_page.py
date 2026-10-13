@@ -3825,7 +3825,7 @@ def test_import_folder_template_examples_retire_with_their_source(
     expect(preset.locator("option[value='%Y-%m-%d']")).to_have_text("%Y-%m-%d")
 
 
-def _stub_preview(page, files, duplicates=None):
+def _stub_preview(page, files, duplicates=None, recovered=None):
     """Stub folder-preview + check-duplicates, and put the page in COPY mode.
 
     Two things here are load-bearing:
@@ -3841,7 +3841,7 @@ def _stub_preview(page, files, duplicates=None):
     page.locator("#modeCopy").check()
     page.evaluate(
         """
-        ([files, dupes]) => {
+        ([files, dupes, recovered]) => {
           const originalFetch = window.fetch.bind(window);
           window.fetch = (input, init) => {
             const t = typeof input === 'string' ? input : input.url;
@@ -3860,7 +3860,7 @@ def _stub_preview(page, files, duplicates=None):
             if (t && t.indexOf('/api/import/check-duplicates') === 0) {
               window.__dayCheckRequest = JSON.parse(init.body);
               const frame = 'data: ' + JSON.stringify({
-                duplicates: dupes, checked: files.length, total: files.length,
+                duplicates: dupes, recovered, checked: files.length, total: files.length,
                 capture_dates: window.__dayCheckRequest.include_capture_dates
                   ? Object.fromEntries(files.map(file => [file.path, file.capture_date || null])) : {},
               }) + '\\n\\n' + 'data: ' + JSON.stringify({
@@ -3877,7 +3877,7 @@ def _stub_preview(page, files, duplicates=None):
           window.pickDirectory = async () => ['/tmp/card'];
         }
         """,
-        [files, duplicates or []],
+        [files, duplicates or [], recovered or []],
     )
 
 
@@ -3905,6 +3905,82 @@ def _files(n, prefix='/tmp/card/DSC_'):
     return [{"path": f"{prefix}{i:04d}.jpg", "filename": f"DSC_{i:04d}.jpg",
              "subfolder": "card", "size": 100, "extension": ".jpg",
              "mtime": 0, "thumb_url": ""} for i in range(n)]
+
+
+@pytest.mark.parametrize("skip_duplicates", [True, False])
+def test_import_action_summary_counts_selected_transfers(live_server, page, skip_duplicates):
+    page.goto(f"{live_server['url']}/import")
+    files = _files(3)
+    duplicates = [files[2]['path']] if skip_duplicates else []
+    _stub_preview(page, files, duplicates=duplicates, recovered=[files[0]['path']])
+    _set_destination(page)
+    page.locator('#chkSkipDuplicates').set_checked(skip_duplicates)
+    _preview(page)
+    selected = 2 if skip_duplicates else 3
+    summary = page.locator('#importActionSummary')
+    expect(summary).to_have_text(f'{selected} files selected · {selected - 1} to copy')
+
+    boxes = page.locator('.import-preview-thumb .thumb-check')
+    boxes.nth(0).uncheck()
+    expect(summary).to_have_text(
+        f'{selected - 1} file' + ('s' if selected > 2 else '')
+        + f' selected · {selected - 1} to copy')
+    boxes.nth(0).check()
+    boxes.nth(1).uncheck()
+    expect(summary).to_have_text(
+        f'{selected - 1} file' + ('s' if selected > 2 else '')
+        + f' selected · {selected - 2} to copy')
+    if skip_duplicates:
+        page.locator('#chkHideDuplicates').check()
+        expect(summary).to_have_text('1 file selected · 0 to copy')
+
+    # A fresh preview owns recovery classification and resets exclusions.
+    _stub_preview(page, files, duplicates=duplicates)
+    page.locator('#btnPreview').click()
+    expect(summary).to_have_text(f'{selected} files selected · {selected} to copy')
+
+
+def test_import_action_summary_explains_form_problems_after_preview(live_server, page):
+    page.goto(f"{live_server['url']}/import")
+    _stub_preview(page, _files(3))
+    _set_destination(page)
+    _preview(page)
+    summary = page.locator('#importActionSummary')
+    expect(summary).to_have_text('3 files selected · 3 to copy')
+    page.locator('#workspaceNew').check()
+    page.locator('#newWorkspaceName').fill('')
+    expect(page.locator('#btnStart')).to_be_disabled()
+    expect(summary).to_have_text('Enter a name for the new workspace.')
+    page.locator('#newWorkspaceName').fill('Autumn photos')
+    expect(page.locator('#btnStart')).to_be_enabled()
+    expect(summary).to_have_text('3 files selected · 3 to copy')
+
+
+@pytest.mark.parametrize("width,height", [(667, 375), (390, 844)])
+def test_import_action_stays_above_jobs_with_long_error(live_server, page, width, height):
+    page.set_viewport_size({'width': width, 'height': height})
+    page.goto(f"{live_server['url']}/import")
+    _stub_preview(page, _files(12))
+    _set_destination(page)
+    _preview(page)
+    page.evaluate("toggleBottomPanel()")
+    page.evaluate("""showError(
+        'The archive could not be reached. Please reconnect and try again. '
+        + 'Additional error details. '.repeat(30), document.getElementById('btnStart'))""")
+    page.wait_for_function("""() => {
+        const footer = document.querySelector('.import-action-bar').getBoundingClientRect();
+        const panel = document.getElementById('bottomPanel').getBoundingClientRect();
+        return footer.bottom <= panel.top + 1;
+    }""")
+    button = page.locator('#btnStart').bounding_box()
+    error = page.locator('#importError').bounding_box()
+    navbar = page.locator('.navbar').bounding_box()
+    panel = page.locator('#bottomPanel').bounding_box()
+    assert button['y'] >= navbar['y'] + navbar['height']
+    assert button['y'] + button['height'] <= panel['y'] + 1
+    assert error['y'] >= navbar['y'] + navbar['height']
+    assert error['y'] + error['height'] <= panel['y'] + 1
+    assert page.locator('#importError').evaluate('(el) => el.scrollHeight > el.clientHeight')
 
 
 def _day_row(page, day):
