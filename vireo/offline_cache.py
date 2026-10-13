@@ -206,6 +206,14 @@ def release_photo_original(
         row = db.caches.offline_original_get(photo_id)
         if photo is None or row is None:
             return {"status": "not_cached", "bytes": 0}
+        # A row left by a failed cache attempt (``missing_source`` or any
+        # other non-``cached`` status) has no managed copy to release.
+        # Storage counts only ``status='cached'`` rows, so the explicit
+        # photo-selection entrypoint matches the bulk scope filter and
+        # reports these as not cached instead of inflating the released
+        # count with zero-byte "releases".
+        if row["status"] != "cached":
+            return {"status": "not_cached", "bytes": 0}
         if selected_photo is not None and not photo_source_matches(selected_photo, photo):
             return {"status": "kept", "bytes": 0, "reason": "Photo changed since release was requested"}
         folder = db.get_folder(photo["folder_id"])

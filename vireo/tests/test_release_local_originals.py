@@ -266,6 +266,37 @@ def test_release_selection_rejects_other_workspace_photos(client_with_photo):
     assert run_release(app, {"all_cached": True})["result"]["released"] == 1
 
 
+def test_release_selection_reports_pathless_missing_source_as_not_cached(
+    client_with_photo,
+):
+    """Explicit photo selection reaches ``release_photo_original`` for every
+    requested id, including photos whose ``offline_originals`` row was left
+    behind by a failed cache attempt. Such rows have ``status='missing_source'``
+    and no managed paths, so the release helper must match Storage's
+    cached-only accounting and report them as ``not_cached`` instead of
+    inflating the released count with zero-byte "releases".
+    """
+    app, db, pid = client_with_photo
+    photo = db.get_photo(pid)
+    db.caches.offline_original_upsert(
+        pid, original_path=None, xmp_path=None, companion_path=None,
+        bytes_=0, source_size=photo["file_size"],
+        source_mtime=photo["file_mtime"], cached_at=0.0,
+        status="missing_source", error="source file missing",
+    )
+    row_before = dict(db.caches.offline_original_get(pid))
+
+    job = run_release(app, {"photo_ids": [pid]})
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["released"] == 0
+    assert result["not_cached"] == 1
+    assert result["bytes"] == 0
+    # The row carries the failed-cache diagnostic; releasing nothing must not
+    # drop it, so a later probe can still show why the cache failed.
+    assert dict(db.caches.offline_original_get(pid)) == row_before
+
+
 def test_release_folder_includes_cached_descendants_only(client_with_photo):
     app, db, pid = client_with_photo
     base, source, row = cache_fixture(client_with_photo)
