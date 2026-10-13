@@ -60,7 +60,7 @@ class JobHistoryRepository:
 
     def parent_import_row(self, parent_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
-            "SELECT type, status, workspace_id, config, result "
+            "SELECT type, status, workspace_id, config, result, started_at "
             "FROM job_history WHERE id = ?",
             (parent_id,),
         ).fetchone()
@@ -78,6 +78,8 @@ class JobHistoryRepository:
             "SELECT 1 FROM job_history "
             "WHERE json_extract(config, '$.chained_from') = ? "
             "  AND COALESCE(json_extract(result, '$.never_started'), 0) = 0 "
+            "  AND NOT (type='pipeline' AND status='cancelled' AND duration IS NULL "
+            "           AND (result IS NULL OR result='null')) "
             "LIMIT 1",
             (parent_id,),
         ).fetchone()
@@ -85,7 +87,7 @@ class JobHistoryRepository:
     def pipeline_resume_rows(self, workspace_id: int | None, process_ids: Sequence[str]) -> list[sqlite3.Row]:
         placeholders = ",".join("?" for _ in process_ids)
         return self.conn.execute(
-            f"SELECT id, type, status, started_at, config, result FROM job_history "
+            f"SELECT id, type, status, started_at, duration, config, result FROM job_history "
             f"WHERE type='pipeline' AND workspace_id IS ? AND id IN ({placeholders})",
             (workspace_id, *process_ids),
         ).fetchall()

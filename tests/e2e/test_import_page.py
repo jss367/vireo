@@ -1987,6 +1987,7 @@ def test_import_remote_destination_requires_visible_folder_inside_nas(
 ])
 def test_import_failure_before_copy_result_offers_retry(live_server, page, result):
     captured = []
+    page.route("**/api/import/*/recovery-options", lambda route: route.fulfill(json={"direct_to_nas_allowed": True}))
 
     def retry(route):
         captured.append(route.request.post_data_json)
@@ -2032,6 +2033,7 @@ def test_import_failure_before_copy_result_offers_retry(live_server, page, resul
 
 
 def test_direct_retry_label_resets_for_next_import_result(live_server, page):
+    page.route("**/api/import/*/recovery-options", lambda route: route.fulfill(json={"direct_to_nas_allowed": True}))
     page.route("**/api/jobs/import-photos", lambda route: route.fulfill(json={"job_id": "direct-retry"}))
     page.goto(f"{live_server['url']}/import")
     job = {"id": "failed-import", "type": "import", "status": "failed",
@@ -2043,6 +2045,35 @@ def test_direct_retry_label_resets_for_next_import_result(live_server, page):
     page.evaluate("job => { activeJobId = null; importStartPending = false; lastFinishedImportJob = job; renderResult(job.result, job.status); }", job)
     expect(page.locator("#btnRetryImportDirectToNas")).to_have_text("Retry directly to NAS")
     expect(page.locator("#btnRetryImportDirectToNas")).to_be_enabled()
+
+
+def test_import_direct_retry_rechecks_live_recovery_eligibility(live_server, page):
+    allowed = True
+    posted = []
+    page.route("**/api/import/*/recovery-options", lambda route: route.fulfill(json={"direct_to_nas_allowed": allowed}))
+    page.route("**/api/jobs/import-photos", lambda route: (posted.append(route.request.post_data_json), route.fulfill(json={"job_id": "unexpected"})))
+    page.goto(f"{live_server['url']}/import")
+    job = {"id": "failed-import", "type": "import", "status": "failed",
+           "config": {"sources": ["/card"], "destination": "/nas", "local_processing": True},
+           "result": {"import_not_started": True, "error": "No space"}}
+    page.evaluate("job => { lastFinishedImportJob = job; renderResult(job.result, job.status); }", job)
+    direct = page.locator("#btnRetryImportDirectToNas")
+    expect(direct).to_be_visible()
+    allowed = False  # A different tab started recovery or left local work.
+    page.evaluate("window.dispatchEvent(new Event('focus'))")
+    expect(direct).to_be_hidden()
+    allowed = True
+    page.evaluate("window.dispatchEvent(new Event('focus'))")
+    expect(direct).to_be_visible()
+    allowed = False
+    direct.click()
+    expect(direct).to_be_hidden()
+    expect(page.locator("#btnRetryImport")).to_be_enabled()
+    expect(page.locator("#retryImportHint")).to_contain_text("no longer available")
+    assert posted == []
+    page.evaluate("job => renderResult(job.result, job.status)", job)
+    expect(direct).to_be_hidden()
+    page.wait_for_function("!document.querySelector('#retryImportHint').textContent.includes('Direct to NAS skips')")
 
 
 def test_failed_import_result_offers_preconfigured_retry(live_server, page):

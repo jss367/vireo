@@ -61,7 +61,7 @@ def _inherited_chain_parent(tags_applied):
     return parent
 
 
-def _inherited_pipeline_scenario(*, provenance, never_started):
+def _inherited_pipeline_scenario(*, provenance, never_started, cancelled=False):
     parent = _inherited_chain_parent(True)
     parent["config"]["parent_import_job_id"] = "ancestor"
     if provenance:
@@ -71,11 +71,32 @@ def _inherited_pipeline_scenario(*, provenance, never_started):
     }, parent=None, root=None), _row("process", "2026-09-01T09:30:00", {
         "never_started": never_started,
     }, status="failed" if never_started else "completed", job_type="pipeline", parent=None, root=None)]
+    if cancelled:
+        rows[-1].update(status="cancelled", result=None, duration=None)
+    return parent, rows
+
+
+def _sibling_pipeline_scenario(never_started):
+    parent = _inherited_chain_parent(True)
+    parent["config"]["parent_import_job_id"] = "ancestor"
+    parent["started_at"] = "2026-09-01T12:00:00"
+    rows = [_row("ancestor", "2026-09-01T09:00:00", {"chained": False}, parent=None, root=None),
+            _row("sibling", "2026-09-01T10:00:00", {"chained": True, "process_job_id": "process"}, parent="ancestor", root="ancestor"),
+            _row("process", "2026-09-01T10:30:00", {"never_started": never_started}, job_type="pipeline", parent=None, root=None),
+            parent]
     return parent, rows
 
 
 def _scenarios():
     return {
+        "empty retry cannot pay existing processing scope": (
+            _parent(tags_applied=True), [_row("empty", "2026-09-01T11:00:00", {
+                **DONE, "after_import_skipped": "no new photos",
+            })],
+        ),
+        "legacy sibling pipeline never started": _sibling_pipeline_scenario(True),
+        "legacy sibling pipeline actually ran": _sibling_pipeline_scenario(False),
+        "legacy queued pipeline cancelled": _inherited_pipeline_scenario(provenance=True, never_started=False, cancelled=True),
         "stored inherited pipeline never started": _inherited_pipeline_scenario(provenance=True, never_started=True),
         "legacy inherited pipeline never started": _inherited_pipeline_scenario(provenance=False, never_started=True),
         "inherited pipeline actually ran": _inherited_pipeline_scenario(provenance=True, never_started=False),
@@ -340,6 +361,10 @@ def _server(parent, rows):
 
 # (by, kind, offers Resume, offers Retry)
 EXPECTED = {
+    "empty retry cannot pay existing processing scope": (None, None, True, False),
+    "legacy sibling pipeline never started": (None, None, True, False),
+    "legacy sibling pipeline actually ran": (None, None, False, False),
+    "legacy queued pipeline cancelled": (None, None, True, False),
     "stored inherited pipeline never started": (None, None, True, False),
     "legacy inherited pipeline never started": (None, None, True, False),
     "inherited pipeline actually ran": (None, None, False, False),

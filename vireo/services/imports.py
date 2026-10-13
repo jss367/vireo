@@ -174,9 +174,40 @@ def _can_retry_import_direct_to_nas(config, result):
     )
 
 
-def _chain_process_job_ids(config, result, rows):
+def _chain_process_job_ids(config, result, rows, job_id=None):
     """Find the pipeline provenance of a recorded or inherited chain."""
     by_id = {row.get("id"): row for row in rows or [] if row.get("type") == "import"}
+    # Older boolean-only rows can inherit payment from a sibling of their
+    # parent, not just the parent's own pipeline. Recover the earlier subtree
+    # whose rollup supplied that boolean; later imports cannot supply it.
+    if ((config.get("chain_already_ran") or (
+            "chain_already_ran" not in config and _import_failed_before_start(result))
+            or result.get("after_import_skipped") == "chain already ran on the interrupted parent")
+            and not config.get("chain_process_job_ids")
+            and not result.get("process_job_id") and config.get("parent_import_job_id")):
+        scope_root = config["parent_import_job_id"]
+        cutoff = (by_id.get(job_id) or {}).get("started_at") or ""
+        found = {scope_root}
+        changed = True
+        while changed:
+            changed = False
+            for candidate_id, row in by_id.items():
+                if candidate_id == job_id or candidate_id in found:
+                    continue
+                if cutoff and (row.get("started_at") or "") > cutoff:
+                    continue
+                cfg = _json_dict(row.get("config"))
+                if cfg.get("parent_import_job_id") in found or cfg.get("root_import_job_id") == scope_root:
+                    found.add(candidate_id)
+                    changed = True
+        inherited: set[str] = set()
+        for pid in found:
+            if pid in by_id:
+                process_id = _json_dict(by_id[pid].get("result")).get("process_job_id")
+                if isinstance(process_id, str) and process_id:
+                    inherited.add(process_id)
+        if inherited:
+            return sorted(inherited)
     seen = set()
     while True:
         if result.get("process_job_id"):
@@ -191,6 +222,17 @@ def _chain_process_job_ids(config, result, rows):
         seen.add(parent_id)
         row = by_id[parent_id]
         config, result = _json_dict(row.get("config")), _json_dict(row.get("result"))
+
+
+def _pipeline_never_started(row):
+    if row.get("type") != "pipeline":
+        return False
+    if _json_dict(row.get("result")).get("never_started"):
+        return True
+    # Legacy queued cancellation updated only status/finished_at. Workers
+    # that actually started record a duration or retain their start clock.
+    return (row.get("status") == "cancelled" and row.get("result") in (None, "null")
+            and row.get("duration") is None and "_start_time" not in row)
 
 
 def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
@@ -244,7 +286,7 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
         }
     never_started_processes = {
         row.get("id") for row in rows or []
-        if row.get("type") == "pipeline" and _json_dict(row.get("result")).get("never_started")
+        if _pipeline_never_started(row)
     }
     children = {}
     candidates = []
@@ -309,12 +351,12 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
         # The chain step also runs, and marks, after a failed import, but
         # then skips the collection and processing: that debt moves to the
         # run's own Retry instead of being paid.
-        e["chain_process_job_ids"] = _chain_process_job_ids(e["config"], result, rows)
+        e["chain_process_job_ids"] = _chain_process_job_ids(e["config"], result, rows, e["id"])
         e["chained"] = (
             bool(e["config"].get("chain_already_ran"))
             or (chain_step and result.get("ok") is not False
                 and result.get("process_job_id") not in never_started_processes)
-        ) and not any(pid in never_started_processes for pid in e["chain_process_job_ids"])
+        ) and not (e["chain_process_job_ids"] and all(pid in never_started_processes for pid in e["chain_process_job_ids"]))
         e["resumable"] = (
             e["status"] == "failed"
             and bool(result.get("interrupted"))
@@ -379,6 +421,10 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
             paid_scope |= scope
         paid_scope |= paid_carried_scope(entry["config"], identities)
     unpaid_scope = all_scope - paid_scope
+    if all_scope:
+        for entry in descendants:
+            if entry["result"].get("after_import_skipped") == "no new photos":
+                entry["chained"] = False
     tags_applied = (bool(parent_result.get("tags_applied")) or any(
         e["tags_applied"] for e in descendants
     )) and not unpaid_scope
@@ -390,11 +436,15 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
     # that checkpoint and the terminal row can't make the resume believe
     # the chain already ran and skip processing on recovery. That is also
     # why a failed-files parent still owes processing to its Retry.
-    parent_chain_ids = _chain_process_job_ids(parent_config, parent_result, rows)
+    parent_chain_ids = _chain_process_job_ids(parent_config, parent_result, rows, parent_id)
     parent_chained = (
         bool(parent_config.get("chain_already_ran"))
         or (bool(parent_result.get("chained")) and parent_result.get("ok") is not False)
-    ) and not any(pid in never_started_processes for pid in parent_chain_ids)
+        or ("chain_already_ran" not in parent_config and _import_failed_before_start(parent_result)
+            and bool(parent_chain_ids))
+    ) and not (parent_chain_ids and all(pid in never_started_processes for pid in parent_chain_ids))
+    if all_scope and parent_result.get("after_import_skipped") == "no new photos":
+        parent_chained = False
     chained = parent_chained or any(e["chained"] for e in descendants)
     chain_process_job_ids = set(parent_chain_ids if parent_chained else [])
     for e in descendants:
@@ -486,6 +536,35 @@ class ImportService:
         from services.import_photos import enqueue_import_photos
 
         return enqueue_import_photos(self, db, body)
+
+    def recovery_options(self, db, job_id):
+        """Current direct-NAS eligibility without hashes or job admission."""
+        from services.import_photos import _competing_retry_failure
+
+        snapshot = {}
+        config, *_, failure = self._validate_parent_import_job(
+            job_id, db.active_workspace_id, db, relocate_landings=False, snapshot_out=snapshot,
+        )
+        if failure is not None:
+            return failure
+        allowed = bool(snapshot.get("direct_nas_retry_allowed"))
+        if _competing_retry_failure(self.get_runner(), {
+            "root_import_job_id": (config or {}).get("root_import_job_id") or job_id,
+        }):
+            allowed = False
+        staging = (config or {}).get("managed_staging") or {}
+        path = staging.get("destination")
+        if not isinstance(path, str) or not path:
+            allowed = False
+        elif allowed:
+            try:
+                if os.path.exists(path):
+                    with os.scandir(path) as entries:
+                        if next(entries, None) is not None:
+                            allowed = False
+            except OSError:
+                allowed = False
+        return {"direct_to_nas_allowed": allowed}
 
     def _gps_location_chunks(self, values, size=800):
         values = list(values)
@@ -1228,7 +1307,8 @@ class ImportService:
         would strand the parent's photos with no way to resume them.
         """
         for job in self.get_runner().list_jobs():
-            if (job.get("config") or {}).get("chained_from") == parent_id:
+            if ((job.get("config") or {}).get("chained_from") == parent_id
+                    and not _pipeline_never_started(job)):
                 return True
         return db.job_history.chained_job_row(parent_id) is not None
 

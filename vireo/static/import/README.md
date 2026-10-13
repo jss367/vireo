@@ -11,6 +11,8 @@ offers "Retry import", including for disk-space failures saved by older releases
 Before any local files have landed, "Retry directly to NAS" preserves the
 selection and destination while bypassing temporary originals storage; the
 selected process then runs on the archive copy.
+The direct option stays hidden until the server confirms current recovery
+eligibility, refreshes when the tab regains focus, and is checked again on click.
 
 | File | Responsibility |
 | --- | --- |

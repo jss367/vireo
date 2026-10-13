@@ -8,6 +8,7 @@ capacity opens. Tests that need a "queued" precondition use
 so they stay meaningful regardless of the current ``SLOT_CAP`` value.
 """
 
+import json
 import threading
 import time
 
@@ -477,14 +478,17 @@ def test_cancel_queued_pipeline_transitions_row_to_cancelled(tmp_path):
     cancelled_view = runner.get(second_id)
     assert cancelled_view is not None
     assert cancelled_view["status"] == "cancelled"
+    assert cancelled_view["result"]["never_started"] is True
     events = runner.get_events(second_id)
     assert events
     assert events[-1]["type"] == "complete"
     assert events[-1]["data"]["status"] == "cancelled"
+    assert events[-1]["data"]["result"]["never_started"] is True
     row = db.conn.execute(
-        "SELECT status FROM job_history WHERE id = ?", (second_id,),
+        "SELECT status, result FROM job_history WHERE id = ?", (second_id,),
     ).fetchone()
     assert row["status"] == "cancelled"
+    assert json.loads(row["result"])["never_started"] is True
 
     # Releasing the slot-fillers must NOT promote the cancelled one.
     blocker.set()

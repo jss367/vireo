@@ -63,10 +63,10 @@ function isResumableImport(job, rows) {
   // returning early via its "import failed" branch — the chain never
   // actually ran, so the row stays resumable.
   var neverStarted = new Set((rows || []).filter(function(row) {
-    return row.type === 'pipeline' && row.result && row.result.never_started;
+    return pipelineNeverStarted(row);
   }).map(function(row) { return row.id; }));
-  var chainInvalidated = importChainProcessJobIds(jobConfig(job), result, rows)
-    .some(function(id) { return neverStarted.has(id); });
+  var chainIds = importChainProcessJobIds(jobConfig(job), result, rows, job.id);
+  var chainInvalidated = chainIds.length > 0 && chainIds.every(function(id) { return neverStarted.has(id); });
   if (!chainInvalidated && (jobConfig(job).chain_already_ran || (result.chained && result.ok !== false)) && result.tags_applied) return false;
   // Chain ran but tag/GPS work is still owed (a Stop cut the pass
   // short, or an error left tags unmarked). The resume replays only
@@ -78,10 +78,34 @@ function hasFailedImportFiles(result) {
   return !!result && typeof result.failed === 'number' && result.failed > 0;
 }
 
-function importChainProcessJobIds(config, result, rows) {
+function importChainProcessJobIds(config, result, rows, jobId) {
   var byId = new Map((rows || []).filter(function(row) {
     return row.type === 'import';
   }).map(function(row) { return [row.id, row]; }));
+  if ((config.chain_already_ran || (!('chain_already_ran' in config) && importFailedBeforeStart(result)) ||
+      result.after_import_skipped === 'chain already ran on the interrupted parent') && !(config.chain_process_job_ids || []).length &&
+      !result.process_job_id && config.parent_import_job_id) {
+    var scopeRoot = config.parent_import_job_id;
+    var cutoff = (byId.get(jobId) || {}).started_at || '';
+    var found = new Set([scopeRoot]), changed = true;
+    while (changed) {
+      changed = false;
+      byId.forEach(function(row, id) {
+        if (id === jobId || found.has(id) || (cutoff && (row.started_at || '') > cutoff)) return;
+        var cfg = jobConfig(row);
+        if (found.has(cfg.parent_import_job_id) || cfg.root_import_job_id === scopeRoot) {
+          found.add(id);
+          changed = true;
+        }
+      });
+    }
+    var inherited = new Set();
+    found.forEach(function(id) {
+      var r = (byId.get(id) || {}).result || {};
+      if (r.process_job_id) inherited.add(r.process_job_id);
+    });
+    if (inherited.size) return Array.from(inherited).sort();
+  }
   var seen = new Set();
   while (true) {
     if (result.process_job_id) return [result.process_job_id];
@@ -94,6 +118,11 @@ function importChainProcessJobIds(config, result, rows) {
     config = jobConfig(row);
     result = row.result || {};
   }
+}
+
+function pipelineNeverStarted(row) {
+  return row.type === 'pipeline' && ((row.result && row.result.never_started) ||
+    (row.status === 'cancelled' && row.result == null && row.duration === null));
 }
 
 // Whether a later run took over an import's Resume (interrupted by a
@@ -119,7 +148,7 @@ function importResumeTakeover(parent, rows) {
             by: null, byStartedAt: null, kind: null, parentInterrupted: false};
   }
   var neverStartedProcesses = new Set((rows || []).filter(function(row) {
-    return row.type === 'pipeline' && row.result && row.result.never_started;
+    return pipelineNeverStarted(row);
   }).map(function(row) { return row.id; }));
   var children = {};
   var candidates = [];
@@ -175,10 +204,10 @@ function importResumeTakeover(parent, rows) {
     }
     e.tagsApplied = tags;
     // After a failed import the chain step marks but skips processing.
-    e.chainProcessJobIds = importChainProcessJobIds(e.config, r, rows);
+    e.chainProcessJobIds = importChainProcessJobIds(e.config, r, rows, e.id);
     e.chained = (!!e.config.chain_already_ran ||
       (chainStep && r.ok !== false && !neverStartedProcesses.has(r.process_job_id))) &&
-      !e.chainProcessJobIds.some(function(id) { return neverStartedProcesses.has(id); });
+      !(e.chainProcessJobIds.length && e.chainProcessJobIds.every(function(id) { return neverStartedProcesses.has(id); }));
     e.resumable = e.status === 'failed' && !!r.interrupted &&
       Array.isArray(r.photo_ids) && !(tags && e.chained);
     e.hasFailedFiles = hasFailedImportFiles(r);
@@ -243,17 +272,26 @@ function importResumeTakeover(parent, rows) {
     paidCarriedScope(e.config, own.identities).forEach(function(token) { paidScope.add(token); });
   });
   var unpaidScope = Array.from(allScope).some(function(token) { return !paidScope.has(token); });
+  if (allScope.size) {
+    descendants.forEach(function(e) {
+      if (e.result.after_import_skipped === 'no new photos') e.chained = false;
+    });
+  }
   var tagsApplied = (!!parentResult.tags_applied ||
     descendants.some(function(e) { return e.tagsApplied; })) && !unpaidScope;
   // The parent's chain step marks after a failed import too, but then
   // skips the collection and processing; apply the same ``ok`` filter
   // to the parent's own mark as to a descendant's (above). That is also
   // why a failed-files parent still owes processing to its Retry.
-  var parentChainIds = importChainProcessJobIds(parentCfg, parentResult, rows);
+  var parentChainIds = importChainProcessJobIds(parentCfg, parentResult, rows, parent.id);
   var chained = (!!parentCfg.chain_already_ran ||
-    (!!parentResult.chained && parentResult.ok !== false)) &&
-    !parentChainIds.some(function(id) { return neverStartedProcesses.has(id); }) ||
+    (!!parentResult.chained && parentResult.ok !== false) ||
+    (!('chain_already_ran' in parentCfg) && importFailedBeforeStart(parentResult) && parentChainIds.length > 0)) &&
+    !(parentChainIds.length && parentChainIds.every(function(id) { return neverStartedProcesses.has(id); })) ||
     descendants.some(function(e) { return e.chained; });
+  if (allScope.size && parentResult.after_import_skipped === 'no new photos') {
+    chained = descendants.some(function(e) { return e.chained; });
+  }
   // A Retry of a parent that was not interrupted replays no tags.
   var tagsPaid = (tagsApplied || !parentInterrupted) && !unpaidScope;
   var marked = descendants.filter(function(e) { return e.tagsApplied || e.chained; });

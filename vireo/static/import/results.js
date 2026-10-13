@@ -8,6 +8,8 @@ function renderResult(res, status) {
   const directRetryButton = document.getElementById('btnRetryImportDirectToNas');
   directRetryButton.textContent = 'Retry directly to NAS';
   directRetryButton.style.display = 'none';
+  document.getElementById('retryImportDirectHint').style.display = 'none';
+  ++importRecoveryGeneration;
   directRetryButton.disabled = false;
   const retryHint = document.getElementById('retryImportHint');
   retryRow.style.display = 'none';
@@ -158,10 +160,7 @@ function renderResult(res, status) {
     retryHint.textContent = importNotStarted
       ? 'Fix the error above, then retry with the same selection and settings.'
       : 'Uses the same source and destination; successful files are skipped.';
-    if (canRetryImportDirectToNas(lastFinishedImportJob)) {
-      directRetryButton.style.display = '';
-      retryHint.textContent += ' Direct to NAS skips local temporary storage and processes photos in the archive.';
-    }
+    refreshImportRecoveryOptions(lastFinishedImportJob);
   }
 
   renderChainInfo(res);

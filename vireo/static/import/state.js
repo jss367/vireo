@@ -73,3 +73,4 @@ let newImagesStartBlocked = false;
 let importExiftoolReady = null;
 let importExiftoolRequired = true;
 let lastFinishedImportJob = null;
+let importRecoveryGeneration = 0;

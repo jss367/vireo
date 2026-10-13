@@ -5460,6 +5460,10 @@ def test_managed_import_checks_temporary_disk_space(app_and_db, tmp_path, monkey
     wait_for_job_via_client(client, job["id"], wait_for_history=True)
     history = client.get("/api/jobs/history").get_json()
     assert next(row for row in history if row["id"] == job["id"])["result"]["import_not_started"] is True
+    options = client.get(f"/api/import/{job['id']}/recovery-options")
+    assert options.status_code == 200
+    assert options.get_json()["direct_to_nas_allowed"] is True
+    assert not (tmp_path / "staging").exists()
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -5579,6 +5583,9 @@ def test_direct_nas_retry_refuses_existing_local_import_work(
         **body, "parent_import_job_id": parent["id"],
         "local_processing": False, "retry_direct_to_nas": True,
     })
+    options = client.get(f"/api/import/{parent['id']}/recovery-options")
+    assert options.status_code == 200, options.get_json()
+    assert options.get_json()["direct_to_nas_allowed"] is False
     assert response.status_code == 400, response.get_json()
     if remaining_work == "staged_file":
         assert (staging / "keep.jpg").read_bytes() == b"already imported"
@@ -12447,9 +12454,9 @@ def test_retry_of_a_failed_import_goes_through_a_retry_that_failed_too(
         wait_for_job_via_client(client, resp.get_json()["job_id"])
 
 
-@pytest.mark.parametrize("chain_paid,never_started", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("chain_paid,never_started,cancelled", [(False, False, False), (True, False, False), (True, True, False), (True, False, True)])
 def test_resume_preparation_failure_preserves_paid_chain_on_retry(
-    app_and_db, tmp_path, monkeypatch, chain_paid, never_started,
+    app_and_db, tmp_path, monkeypatch, chain_paid, never_started, cancelled,
 ):
     import pipeline_job
     from services.import_photos import _ImportPhotosJob
@@ -12487,7 +12494,7 @@ def test_resume_preparation_failure_preserves_paid_chain_on_retry(
     assert failed["config"]["chain_process_job_ids"] == (["original-process"] if chain_paid else [])
     assert failed["result"]["source_snapshots"] == original["result"]["source_snapshots"]
     monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", prepare)
-    if never_started:
+    if never_started or cancelled:
         # Reproduce rows saved before pipeline provenance was recorded.
         failed["config"].pop("chain_process_job_ids")
         db.conn.execute("UPDATE job_history SET config=? WHERE id=?", (
@@ -12495,8 +12502,8 @@ def test_resume_preparation_failure_preserves_paid_chain_on_retry(
         ))
         with app._job_runner.admission_guard():
             app._job_runner._jobs.pop(failed["id"], None)
-        db.conn.execute("UPDATE job_history SET status='failed', result=? WHERE id='original-process'", (
-            json.dumps({"never_started": True}),
+        db.conn.execute("UPDATE job_history SET status=?, result=? WHERE id='original-process'", (
+            "cancelled" if cancelled else "failed", None if cancelled else json.dumps({"never_started": True}),
         ))
         db.commit()
     chain = _ImportPhotosJob._chain_after_import
@@ -12512,7 +12519,7 @@ def test_resume_preparation_failure_preserves_paid_chain_on_retry(
     assert response.status_code == 200, response.get_json()
     retried = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert retried["status"] == "completed", retried
-    still_paid = chain_paid and not never_started
+    still_paid = chain_paid and not never_started and not cancelled
     assert retried["config"]["chain_already_ran"] is still_paid
     assert len(chain_calls) == (0 if still_paid else 1)
     if still_paid:
