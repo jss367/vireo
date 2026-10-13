@@ -12,6 +12,7 @@ import math
 import places
 from db import KEYWORD_TYPES
 from flask import Blueprint, jsonify, request
+from services.edit_history import atomic_edit, change_photo_location
 from services.pending_changes import (
     queue_keyword_add,
     queue_keyword_remove,
@@ -138,6 +139,7 @@ def create_photo_location_keywords_blueprint(
 
     # Location keywords don't propagate to dc:subject sidecars — structured XMP (exif:GPS*, Iptc4xmpCore:Location) is a future feature.
     @blueprint.route("/api/photos/<int:photo_id>/location", methods=["POST"])
+    @atomic_edit(get_db)
     def api_set_photo_location(photo_id):
         """Attach a Google place to ``photo_id`` via the autocomplete flow.
 
@@ -164,15 +166,15 @@ def create_photo_location_keywords_blueprint(
             keyword_error = location_errors.location_keyword_edit_error(db, keyword_id)
             if keyword_error is not None:
                 return keyword_error
-            db.set_photo_location(photo_id, keyword_id)
-            queue_location_sync_if_enabled(db, photo_id)
+            item = change_photo_location(db, photo_id, keyword_id)
             location = serialize_photo_location(db, photo_id)
-            db.record_edit(
-                'location_set',
-                f"set location: {location.get('name', 'unknown') if location else 'unknown'}",
-                str(keyword_id),
-                [{'photo_id': photo_id, 'old_value': '', 'new_value': str(keyword_id)}],
-            )
+            if item is not None:
+                db.record_edit(
+                    'photo_location',
+                    f"set location: {location.get('name', 'unknown') if location else 'unknown'}",
+                    str(keyword_id),
+                    [item],
+                )
             return jsonify({"location": location})
 
         details = normalize_client_place_details(body)
@@ -197,24 +199,24 @@ def create_photo_location_keywords_blueprint(
             # build hits an existing keyword of a different type at the same
             # (name, parent_id). Mirror /api/keywords/<id>/link-place's 409.
             return location_name_conflict_response(err)
-        db.set_photo_location(photo_id, leaf_id)
-        queue_location_sync_if_enabled(db, photo_id)
-        db.record_edit(
-            'location_set',
-            f"set location: {details.get('name', 'unknown')}",
-            str(leaf_id),
-            [{'photo_id': photo_id, 'old_value': '', 'new_value': str(leaf_id)}],
-        )
+        item = change_photo_location(db, photo_id, leaf_id)
+        if item is not None:
+            db.record_edit(
+                'photo_location',
+                f"set location: {details.get('name', 'unknown')}",
+                str(leaf_id),
+                [item],
+            )
         return jsonify({"location": serialize_photo_location(db, photo_id)})
 
     @blueprint.route("/api/photos/<int:photo_id>/location/text", methods=["POST"])
+    @atomic_edit(get_db)
     def api_set_photo_location_text(photo_id):
         """Attach a free-text location keyword (no Google data) to ``photo_id``.
 
         Body: ``{"name": "the meadow behind the cabin"}``. Used when the user
         types a name and hits Enter without picking a Google suggestion, or
-        when no API key is configured. Reuses the ``location_set`` audit
-        action_type so the audit log filters consistently across both paths.
+        when no API key is configured. Uses the same complete location snapshot as the saved-place flow.
         """
         body = request.get_json(silent=True) or {}
         name = body.get("name") or ""
@@ -258,31 +260,32 @@ def create_photo_location_keywords_blueprint(
             return json_error("missing name", 400)
         if latitude is not None:
             db.fill_missing_location_coordinates(leaf_id, latitude, longitude)
-        db.set_photo_location(photo_id, leaf_id)
-        queue_location_sync_if_enabled(db, photo_id)
-        db.record_edit(
-            'location_set',
-            f"set location: {stripped}",
-            str(leaf_id),
-            [{'photo_id': photo_id, 'old_value': '', 'new_value': str(leaf_id)}],
-        )
+        item = change_photo_location(db, photo_id, leaf_id)
+        if item is not None:
+            db.record_edit(
+                'photo_location',
+                f"set location: {stripped}",
+                str(leaf_id),
+                [item],
+            )
         return jsonify({"location": serialize_photo_location(db, photo_id)})
 
     @blueprint.route("/api/photos/<int:photo_id>/location", methods=["DELETE"])
+    @atomic_edit(get_db)
     def api_clear_photo_location(photo_id):
         """Remove all ``type='location'`` keyword links for ``photo_id``."""
         db = get_db()
         edit_error = location_errors.photo_location_edit_error(db, photo_id)
         if edit_error is not None:
             return edit_error
-        db.clear_photo_location(photo_id)
-        queue_location_sync_if_enabled(db, photo_id)
-        db.record_edit(
-            'location_clear',
-            "cleared location",
-            '',
-            [{'photo_id': photo_id, 'old_value': '', 'new_value': ''}],
-        )
+        item = change_photo_location(db, photo_id)
+        if item is not None:
+            db.record_edit(
+                'photo_location',
+                "cleared location",
+                '',
+                [item],
+            )
         return jsonify({"ok": True})
 
     return blueprint

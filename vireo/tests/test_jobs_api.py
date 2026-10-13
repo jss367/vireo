@@ -8234,6 +8234,11 @@ def test_import_can_add_structured_locations_from_each_photos_gps(
     photo_id = result["photo_ids"][0]
     location = db.get_assigned_photo_location(photo_id)
     assert location["keyword_location_name"] == "Central Park"
+    assert client.post("/api/undo").status_code == 200
+    assert db.get_assigned_photo_location(photo_id) is None
+    assert client.post("/api/redo").status_code == 200
+    assert db.get_assigned_photo_location(photo_id)["keyword_location_name"] == "Central Park"
+
 
 
 @pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])

@@ -788,10 +788,7 @@ async function rejectDetailPredictions(predictionIds, photoId) {
   } catch(e) { return; }
   _reportSkippedRejects(data);
   // A reject changes no keywords, so only the prediction rows need repainting.
-  // Deliberately no showUndoToast() here: `prediction_reject` is in the DB's
-  // _NON_UNDOABLE set (no _apply_undo handler), so /api/undo/status would
-  // advertise some earlier edit as reversible and Ctrl+Z would undo THAT
-  // instead of the reject — silently reversing an unrelated action.
+  if (data.rejected) showUndoToast();
   refreshPredictionPanels();
   // A rejection can change membership in prediction-status collections
   // (e.g. "pending predictions"): refresh counts and re-evaluate the

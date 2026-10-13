@@ -141,3 +141,9 @@ document.getElementById('locationReviewSearch').addEventListener('keydown', func
 });
 
 initialize();
+
+// Keep a partly completed assignment intact until it is retried or abandoned.
+window.beforeHistoryChange = function() {
+  return !state.isAssigning && !hasPartialAssignmentProgress();
+};
+window.afterHistoryChange = function() { return refreshLocationReview(); };

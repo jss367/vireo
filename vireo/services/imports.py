@@ -662,29 +662,25 @@ class ImportService:
                             )
                             unresolved += len(group["photo_ids"])
                             continue
-                        location_items = []
-                        for photo_id in group["photo_ids"]:
-                            if cancel_requested(pause_safe=False):
-                                cancelled_during_gps = True
-                                break
-                            thread_db.set_photo_location(photo_id, leaf_id)
-                            self._queue_import_location_sync(
-                                thread_db, photo_id, workspace_id,
-                            )
-                            location_items.append({
-                                "photo_id": photo_id,
-                                "old_value": "",
-                                "new_value": str(leaf_id),
-                            })
-                        added += len(location_items)
-                        if location_items:
-                            thread_db.record_edit(
-                                "location_set",
-                                f"Added GPS location during import to "
-                                f"{len(location_items)} photos",
-                                "from_exif", location_items,
-                                is_batch=True, _commit=False,
-                            )
+                        from services.edit_history import change_photo_location
+                        with thread_db._commits_held():
+                            location_items = []
+                            for photo_id in group["photo_ids"]:
+                                if cancel_requested(pause_safe=False):
+                                    cancelled_during_gps = True
+                                    break
+                                item = change_photo_location(thread_db, photo_id, leaf_id)
+                                if item is not None:
+                                    location_items.append(item)
+                            added += len(location_items)
+                            if location_items:
+                                thread_db.record_edit(
+                                    "photo_location",
+                                    f"Added GPS location during import to "
+                                    f"{len(location_items)} photos",
+                                    "from_exif", location_items,
+                                    is_batch=True, _commit=False,
+                                )
                     thread_db.commit()
                     if cancel_requested():
                         cancelled_during_gps = True

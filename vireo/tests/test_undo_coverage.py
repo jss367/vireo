@@ -1,0 +1,213 @@
+"""Round-trip the reversible decisions that used to be audit-only."""
+
+import sqlite3
+
+import pytest
+
+
+def _location_ids(db, pid):
+    return {k['id'] for k in db.get_photo_keywords(pid) if k['type'] == 'location'}
+
+
+@pytest.mark.parametrize('route', ['saved', 'text', 'place', 'clear', 'batch-saved', 'batch-text', 'batch-place'])
+def test_location_history_restores_mixed_originals_and_provenance(app_and_db, route):
+    app, db = app_and_db
+    client = app.test_client()
+    pids = [p['id'] for p in db.get_photos()][:2]
+    old_ids = [db.get_or_create_text_location(name) for name in ['Old place', 'Other place']]
+    db.tag_photo(pids[0], old_ids[0], source=None)
+    db.tag_photo(pids[0], old_ids[1], source='accept')
+    db.save_location_gps_reviews([(pids[0], 'kept-gps')])
+    db.commit()
+    before = [db.edit_history.photo_location_state(pid) for pid in pids]
+    new_id = db.get_or_create_text_location('New place')
+    body = {'keyword_id': new_id}
+    if 'text' in route:
+        body = {'name': 'New place'}
+    if 'place' in route:
+        body = {'place_id': 'new-place', 'place': {
+            'place_id': 'new-place', 'name': 'New place',
+            'latitude': 12.0, 'longitude': 34.0, 'parents': [],
+        }}
+    if route.startswith('batch-'):
+        body['photo_ids'] = pids
+        url = '/api/batch/location' + ('/text' if 'text' in route else '')
+        response = client.post(url, json=body)
+    else:
+        url = f'/api/photos/{pids[0]}/location'
+        if route == 'clear':
+            response = client.delete(url)
+        else:
+            response = client.post(url + ('/text' if 'text' in route else ''), json=body)
+    assert response.status_code == 200, response.json
+    after = [db.edit_history.photo_location_state(pid) for pid in pids]
+    assert after != before
+    assert client.get('/api/undo/status').json['count'] == 1
+    for _ in range(2):
+        assert client.post('/api/undo').status_code == 200
+        assert [db.edit_history.photo_location_state(pid) for pid in pids] == before
+        assert client.post('/api/redo').status_code == 200
+        assert [db.edit_history.photo_location_state(pid) for pid in pids] == after
+    # Replaying must queue a corrective sidecar write, even after prior sync.
+    assert db.has_pending_location_change(pids[0])
+
+
+def test_repeating_location_assignment_and_empty_clear_do_not_create_history(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]['id']
+    url = f'/api/photos/{pid}/location'
+    assert client.delete(url).status_code == 200
+    assert client.get('/api/undo/status').json['available'] is False
+    body = {'name': 'Same place'}
+    assert client.post(url + '/text', json=body).status_code == 200
+    assert client.post(url + '/text', json=body).status_code == 200
+    assert client.get('/api/undo/status').json['count'] == 1
+    assert client.post('/api/undo').status_code == 200
+    assert not _location_ids(db, pid)
+    # A no-op clear also preserves the redo stack.
+    assert client.delete(url).status_code == 200
+    assert client.get('/api/redo/status').json['available'] is True
+
+
+def test_batch_location_history_failure_rolls_back_all_writes(app_and_db, monkeypatch):
+    app, db = app_and_db
+    client = app.test_client()
+    pids = [p['id'] for p in db.get_photos()]
+    from db import Database
+
+    def fail(self, *args, **kwargs):
+        # An independent connection must still see the original assignments.
+        with sqlite3.connect(db._db_path) as reader:
+            count = reader.execute("SELECT COUNT(*) FROM photo_keywords pk JOIN keywords k ON k.id=pk.keyword_id WHERE k.type='location'").fetchone()[0]
+            assert count == 0
+        raise RuntimeError('history failed')
+
+    monkeypatch.setattr(Database, 'record_edit', fail)
+    response = client.post('/api/batch/location/text', json={'photo_ids': pids, 'name': 'Failed place'})
+    assert response.status_code == 500
+    assert all(not _location_ids(db, pid) for pid in pids)
+    assert not db.edit_history.list_recent()
+    assert db.conn.execute("SELECT id FROM keywords WHERE name = 'Failed place'").fetchone() is None
+
+
+def _predictions(db, pid, group=None):
+    did = db.save_detections(pid, [{'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
+    db.add_prediction(did, 'Robin', .7, 'test', labels_fingerprint='other')
+    db.add_prediction(did, 'Bald Eagle', .9, 'test', group_id=group)
+    db.add_prediction(did, 'Golden Eagle', .8, 'test', status='alternative')
+    rows = db.conn.execute('SELECT id, species FROM predictions WHERE detection_id = ?', (did,)).fetchall()
+    return tuple(next(row['id'] for row in rows if row['species'] == species)
+                 for species in ('Bald Eagle', 'Golden Eagle', 'Robin'))
+
+
+@pytest.mark.parametrize('mode', ['single', 'batch', 'burst', 'reviewed'])
+def test_prediction_decisions_round_trip_exact_scopes(app_and_db, mode):
+    app, db = app_and_db
+    client = app.test_client()
+    pids = [p['id'] for p in db.get_photos()][:2]
+    group = 'burst' if mode == 'burst' else None
+    ids = [_predictions(db, pid, group) for pid in pids]
+    keywords_before = [db.get_photo_keywords(pid) for pid in pids]
+    before = {pred_id: db.get_prediction_status(pred_id) for rows in ids for pred_id in rows}
+    if mode == 'batch':
+        response = client.post('/api/predictions/batch-reject', json={'prediction_ids': [rows[0] for rows in ids]})
+    else:
+        response = client.post(f'/api/predictions/{ids[0][0]}/' + ('reviewed' if mode == 'reviewed' else 'reject'))
+    assert response.status_code == 200, response.json
+    after = {pred_id: db.get_prediction_status(pred_id) for pred_id in before}
+    assert before != after
+    assert all(after[rows[2]] == 'pending' for rows in ids)
+    if mode == 'burst':
+        assert all(after[rows[0]] == 'rejected' and after[rows[1]] == 'rejected' for rows in ids)
+    assert client.get('/api/undo/status').json['count'] == 1
+    for _ in range(2):
+        assert client.post('/api/undo').status_code == 200
+        assert {pid: db.get_prediction_status(pid) for pid in before} == before
+        assert client.post('/api/redo').status_code == 200
+        assert {pid: db.get_prediction_status(pid) for pid in before} == after
+    # Status-only undo never invents keywords.
+    assert [db.get_photo_keywords(pid) for pid in pids] == keywords_before
+
+
+def test_legacy_incomplete_audit_rows_stay_excluded(app_and_db):
+    app, db = app_and_db
+    pid = db.get_photos()[0]['id']
+    for action in ('location_set', 'location_clear', 'prediction_reject', 'prediction_reviewed'):
+        db.record_edit(action, 'Legacy edit', '', [{'photo_id': pid, 'old_value': '', 'new_value': ''}])
+    assert app.test_client().get('/api/undo/status').json['available'] is False
+
+
+def test_every_mutating_route_has_an_explicit_undo_decision(app_and_db):
+    """New write routes must be assessed instead of silently lacking history."""
+    import json
+    from pathlib import Path
+
+    app, _ = app_and_db
+    inventory = json.loads((Path(__file__).parent / 'contracts' / 'undo_coverage.json').read_text())
+    listed = [route for group in inventory.values() for route in group['routes']]
+    actual = {
+        f'{method} {rule.rule}'
+        for rule in app.url_map.iter_rules()
+        for method in rule.methods
+        if method in {'POST', 'PUT', 'PATCH', 'DELETE'}
+    }
+    assert len(listed) == len(set(listed)), 'A route has conflicting undo decisions'
+    assert set(listed) == actual, (
+        f'Assess undo coverage for new routes: {sorted(actual - set(listed))}; '
+        f'remove retired routes: {sorted(set(listed) - actual)}'
+    )
+
+
+def test_recorded_action_literals_have_replay_or_explicit_exclusion():
+    """An added history type must never advance Undo without a replay handler."""
+    import ast
+    from pathlib import Path
+
+    from db import Database
+
+    assert set(Database._UNDO_HANDLERS) == set(Database._REDO_HANDLERS)
+    supported = (
+        set(Database._EDIT_FIELD_SETTERS) | set(Database._UNDO_HANDLERS)
+        | {'pipeline_grouping', 'species_confirm_cache'} | set(Database._NON_UNDOABLE)
+    )
+    root = Path(__file__).parents[1]
+    for directory in ('services', 'web'):
+        for path in (root / directory).glob('*.py'):
+            for call in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                    continue
+                if call.func.attr != 'record_edit' or not call.args:
+                    continue
+                action = call.args[0]
+                if isinstance(action, ast.Constant) and isinstance(action.value, str):
+                    assert action.value in supported, f'{path.name}:{call.lineno}: missing replay for {action.value}'
+
+
+def test_later_location_group_conflict_preserves_successful_assignments(app_and_db):
+    """A handled place-chain conflict cannot roll back earlier groups' history."""
+    from services.edit_history import change_photo_location
+
+    _, db = app_and_db
+    pids = [p['id'] for p in db.get_photos()]
+    good = db.get_or_create_text_location('Good place')
+    country = db.get_or_create_text_location('Conflict country')
+    db.conn.execute("INSERT INTO keywords(name, type, parent_id) VALUES ('Conflict state', 'general', ?)", (country,))
+    db.commit()
+    with db._commits_held():
+        item = change_photo_location(db, pids[0], good)
+        db.record_edit('photo_location', 'Assigned good place', str(good), [item], _commit=False)
+        with pytest.raises(RuntimeError):
+            db.upsert_place_chain({
+                'place_id': 'bad-place', 'name': 'Bad place',
+                'address_components': [
+                    {'name': 'Conflict country', 'types': ['country']},
+                    {'name': 'Conflict state', 'types': ['administrative_area_level_1']},
+                ],
+            })
+    assert _location_ids(db, pids[0]) == {good}
+    assert db.edit_history.latest_undoable() is not None
+    db.undo_last_edit()
+    assert not _location_ids(db, pids[0])
+    db.redo_last_undo()
+    assert _location_ids(db, pids[0]) == {good}

@@ -57,6 +57,7 @@ PROVENANCE_NEUTRAL_WRITERS = {
 # value is computed, so this test can't read it statically — the allowlist is
 # the review gate instead.
 PROVENANCE_CARRYING_WRITERS = {
+    ("db.py", "_edit_set_photo_location"): "history restores the original location stamps",
     ("db.py", "_apply_winner_loser_merge"): "duplicate merge carries the losers' stamps",
 }
 

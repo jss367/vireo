@@ -57,6 +57,37 @@ class EditHistoryRepository:
         """Commit the connection's open transaction."""
         self.conn.commit()
 
+    def photo_location_state(self, photo_id: int) -> str:
+        """Capture all assigned places and their provenance, plus GPS review."""
+        links = [dict(row) for row in self.conn.execute(
+            "SELECT pk.keyword_id, pk.source FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location' ORDER BY pk.keyword_id",
+            (photo_id,),
+        )]
+        review = self.conn.execute(
+            "SELECT fingerprint FROM location_gps_reviews WHERE photo_id = ?",
+            (photo_id,),
+        ).fetchone()
+        return json.dumps({"links": links, "gps_review": review[0] if review else None})
+
+    def prediction_status_state(self, prediction_ids: Sequence[int]) -> str:
+        """Snapshot exact review statuses, including alternative siblings."""
+        from sql_chunks import chunked
+        statuses = {}
+        ws = self.workspace_id
+        for ids in chunked(list(dict.fromkeys(prediction_ids))):
+            placeholders = ",".join("?" for _ in ids)
+            for row in self.conn.execute(
+                "SELECT p.id, COALESCE(r.status, 'pending') AS status "
+                "FROM predictions p LEFT JOIN prediction_review r "
+                "ON r.prediction_id = p.id AND r.workspace_id = ? "
+                f"WHERE p.id IN ({placeholders}) ORDER BY p.id",
+                (ws, *ids),
+            ):
+                statuses[str(row["id"])] = row["status"]
+        return json.dumps(statuses, sort_keys=True)
+
     # -- history rows ---------------------------------------------------------
 
     def record(

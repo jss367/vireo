@@ -14,6 +14,7 @@ import math
 import places
 from db import KEYWORD_TYPES
 from flask import Blueprint, jsonify, request
+from services.edit_history import atomic_edit, change_photo_location
 from services.pending_changes import (
     queue_keyword_add,
     queue_keyword_remove,
@@ -55,6 +56,7 @@ def create_batch_blueprint(
     blueprint = Blueprint("batch", __name__)
 
     @blueprint.route("/api/batch/location/text", methods=["POST"])
+    @atomic_edit(get_db)
     def api_batch_set_photo_location_text():
         """Attach one free-text location keyword to multiple photos."""
         body = request.get_json(silent=True) or {}
@@ -120,16 +122,12 @@ def create_batch_blueprint(
 
         items = []
         for pid in photo_ids:
-            db.set_photo_location(pid, leaf_id)
-            queue_location_sync_if_enabled(db, pid, _commit=False)
-            items.append({
-                "photo_id": pid,
-                "old_value": "",
-                "new_value": str(leaf_id),
-            })
+            item = change_photo_location(db, pid, leaf_id)
+            if item is not None:
+                items.append(item)
         if items:
             db.record_edit(
-                "location_set",
+                "photo_location",
                 f"set location: {stripped} on {len(items)} photos",
                 str(leaf_id),
                 items,
@@ -145,6 +143,7 @@ def create_batch_blueprint(
         })
 
     @blueprint.route("/api/batch/location", methods=["POST"])
+    @atomic_edit(get_db)
     def api_batch_set_photo_location():
         """Attach one Google place location to multiple photos."""
         body = request.get_json(silent=True) or {}
@@ -184,19 +183,15 @@ def create_batch_blueprint(
             location_name = "unknown"
             items = []
             for pid in photo_ids:
-                db.set_photo_location(pid, keyword_id)
-                queue_location_sync_if_enabled(db, pid, _commit=False)
+                item = change_photo_location(db, pid, keyword_id)
                 loc = serialize_photo_location(db, pid)
                 if loc and location_name == "unknown":
                     location_name = loc.get("name") or "unknown"
-                items.append({
-                    "photo_id": pid,
-                    "old_value": "",
-                    "new_value": str(keyword_id),
-                })
+                if item is not None:
+                    items.append(item)
             if items:
                 db.record_edit(
-                    "location_set",
+                    "photo_location",
                     f"set location: {location_name} on {len(items)} photos",
                     str(keyword_id),
                     items,
@@ -233,16 +228,12 @@ def create_batch_blueprint(
 
         items = []
         for pid in photo_ids:
-            db.set_photo_location(pid, leaf_id)
-            queue_location_sync_if_enabled(db, pid, _commit=False)
-            items.append({
-                "photo_id": pid,
-                "old_value": "",
-                "new_value": str(leaf_id),
-            })
+            item = change_photo_location(db, pid, leaf_id)
+            if item is not None:
+                items.append(item)
         if items:
             db.record_edit(
-                "location_set",
+                "photo_location",
                 f"set location: {details.get('name', 'unknown')} on {len(items)} photos",
                 str(leaf_id),
                 items,
@@ -258,6 +249,7 @@ def create_batch_blueprint(
         })
 
     @blueprint.route("/api/batch/location/from-exif", methods=["POST"])
+    @atomic_edit(get_db)
     def api_batch_set_photo_locations_from_exif():
         """Resolve each photo's EXIF GPS to a place and optionally apply it.
 
@@ -311,18 +303,14 @@ def create_batch_blueprint(
             keyword_id_by_place_id[place_id] = leaf_id
 
             for pid in group["photo_ids"]:
-                db.set_photo_location(pid, leaf_id)
-                queue_location_sync_if_enabled(db, pid, _commit=False)
-                items.append({
-                    "photo_id": pid,
-                    "old_value": "",
-                    "new_value": str(leaf_id),
-                })
+                item = change_photo_location(db, pid, leaf_id)
+                if item is not None:
+                    items.append(item)
 
         if items:
             place_count = len(keyword_id_by_place_id)
             db.record_edit(
-                "location_set",
+                "photo_location",
                 (
                     f"resolved GPS locations for {len(items)} "
                     f"{'photo' if len(items) == 1 else 'photos'} "

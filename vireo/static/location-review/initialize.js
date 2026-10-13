@@ -61,11 +61,20 @@ async function initialize() {
       document.getElementById('locationReviewCorrectionStatus').textContent = 'To queue corrections, first enable Write assigned locations to XMP in Settings.';
     }
   }
+  await refreshLocationReview();
+}
+
+async function refreshLocationReview() {
   try {
     var preview = await safeFetch('/api/location-review/preview', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(Object.assign({}, state.source, {mode: state.mode, gap_minutes: state.gapMinutes, minimum_distance_m: state.minimumDistance, include_reviewed: state.includeKept}))
     });
     state.groups = preview.groups || [];
+    state.currentIndex = 0;
+    state.assignedGroups = 0;
+    state.skippedGroups = [];
+    state.queuedCorrections = 0;
+    state.renderToken += 1;
     state.initialGroupCount = state.groups.length;
     var scopeParts = [formatNumber(preview.reviewable) + ' photos ready for review'];
     var assigned = (preview.skipped || []).filter(function(photo) { return photo.reason === 'already_has_location'; }).length;

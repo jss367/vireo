@@ -16,6 +16,8 @@ document.addEventListener('lifelist:changed', function() {
   loadLifeList();
 });
 
+window.afterHistoryChange = function() { return loadLifeList(); };
+
 restoreLifeListViewPreferences();
 loadLifeList();
 
