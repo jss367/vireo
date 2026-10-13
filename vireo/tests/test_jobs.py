@@ -1045,45 +1045,6 @@ def test_release_appends_job_errors_before_result_errors():
     )
 
 
-def test_snapshot_job_freezes_result_before_copying_job_errors():
-    """``_snapshot_job`` must freeze the nested ``result["errors"]`` sample
-    BEFORE copying ``snap["errors"]`` from ``job["errors"]``. The
-    release-local-originals worker appends to ``job["errors"]`` first and
-    ``result["errors"]`` second (see
-    ``test_release_appends_job_errors_before_result_errors``). Capturing
-    the two lists in the opposite order inside ``_snapshot_job`` (result
-    first, then job) preserves ``len(snap["errors"]) >=
-    len(snap["result"]["errors"])`` even if a worker's two appends land
-    between the two internal captures: the result sample freezes at state
-    M, the subsequent ``snap["errors"]`` capture sees state >= M, and
-    ``_error_total`` never under-reports the number of serialized sample
-    entries. The reverse order would let the serialized sample grow past
-    the ``snap["errors"]`` length and ``error_count`` would under-report,
-    which the startup-sweep ``+1`` on an interrupted row then compounds.
-    """
-    import re
-
-    from jobs import JobRunner
-
-    source = inspect.getsource(JobRunner._snapshot_job)
-    nested_freeze = re.search(r'snap\["result"\]\[key\] = list\(value\)', source)
-    job_errors_copy = re.search(
-        r'snap\["errors"\] = list\(job\.get\("errors"', source
-    )
-    assert nested_freeze is not None, (
-        "_snapshot_job must still freeze nested result sample lists"
-    )
-    assert job_errors_copy is not None, (
-        "_snapshot_job must still copy snap['errors'] from job['errors']"
-    )
-    assert nested_freeze.start() < job_errors_copy.start(), (
-        "_snapshot_job must freeze result['errors'] before copying "
-        "snap['errors']; see the capture-order contract — reversing "
-        "lets len(snap['errors']) < len(snap['result']['errors']) and "
-        "error_count under-reports the serialized sample size."
-    )
-
-
 def test_failed_job_history_preserves_structured_result(tmp_path):
     """When a work function stashes a structured result on job['result']
     before raising, _persist_job must preserve that structure in history

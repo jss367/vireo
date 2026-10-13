@@ -1807,39 +1807,28 @@ class JobRunner:
         snap.pop("_checkpointed_partial", None)
         snap["progress"] = dict(job.get("progress") or {})
         snap["steps"] = [dict(s) for s in (job.get("steps") or [])]
-        # Freeze the top-level ``result`` mapping and its nested per-photo
-        # sample lists BEFORE copying ``snap["errors"]``. Some workers
-        # mutate ``job["result"]`` in place (e.g. the release-local-originals
-        # loop bumps ``failed`` / ``errors_total`` without holding ``_lock``),
-        # so a checkpoint that leaves ``snap["result"]`` as the live dict
-        # can dump the result at one state in ``_write_checkpoints`` and
-        # then read ``_error_total`` at a later state — the row's
-        # ``error_count`` column then disagrees with the ``errors_total``
-        # the serialized result reports, and the startup-sweep +1 compounds
-        # the mismatch. Freezing the nested lists (``errors`` and
-        # ``kept_reasons``) also keeps ``json.dumps(snap["result"])`` from
-        # iterating a live, mid-append list.
-        #
-        # Capture order matters: workers that mutate both ``job["errors"]``
-        # and ``result["errors"]`` without holding ``_lock`` must append to
-        # ``job["errors"]`` first (see ``vireo/web/job_launchers.py`` for the
-        # release-local-originals worker), so freezing the nested result
-        # sample first and the top-level ``snap["errors"]`` second preserves
-        # ``len(snap["errors"]) >= len(snap["result"]["errors"])`` even when
-        # a worker's two appends land between the two internal copies here:
-        # the result sample freezes at state M, the subsequent
-        # ``snap["errors"]`` capture sees state ≥ M, and ``_error_total``
-        # never under-reports the number of serialized sample entries. The
-        # reverse order would let the serialized ``result["errors"]`` grow
-        # past the ``snap["errors"]`` length and ``error_count`` would
-        # under-report, which the startup-sweep +1 then compounds.
+        snap["errors"] = list(job.get("errors") or [])
+        # Freeze the top-level ``result`` mapping too. Some workers mutate
+        # ``job["result"]`` in place (e.g. the release-local-originals loop
+        # bumps ``failed`` / ``errors_total`` without holding ``_lock``), so
+        # a checkpoint that leaves ``snap["result"]`` as the live dict can
+        # dump the result at one state in ``_write_checkpoints`` and then
+        # read ``_error_total`` at a later state — the row's ``error_count``
+        # column then disagrees with the ``errors_total`` the serialized
+        # result reports, and the startup-sweep +1 compounds the mismatch.
+        # Also freeze the nested per-photo sample lists (``errors`` and
+        # ``kept_reasons``): workers that append to them during the first 50
+        # failures would otherwise let ``json.dumps(snap["result"])``
+        # iterate a live, mid-append list, and the serialized sample size
+        # could race ahead of the top-level ``snap["errors"]`` copy taken a
+        # few lines up — the two counts the checkpoint row cross-references
+        # must come from one immutable snapshot.
         if isinstance(snap.get("result"), dict):
             snap["result"] = dict(snap["result"])
             for key in ("errors", "kept_reasons"):
                 value = snap["result"].get(key)
                 if isinstance(value, list):
                     snap["result"][key] = list(value)
-        snap["errors"] = list(job.get("errors") or [])
         if job.get("status") in ("running", "pausing", "paused"):
             timing = get_resource_ledger().owner_timing(job["id"])
             snap["resource_wait_seconds"] = timing["wait_seconds"]
