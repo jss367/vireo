@@ -53,6 +53,12 @@ from web.request_args import (
 
 log = logging.getLogger(__name__)
 
+# Representative reasons kept on the release job result. The Jobs page shows
+# ten items (``MAX_DETAIL_ITEMS``) and the ``kept`` count already reports the
+# total, so the rest of the list only grows the payload serialized into each
+# checkpoint, ``job_history`` row and SSE event.
+_MAX_KEPT_REASONS = 50
+
 
 def _count_lines(path):
     if not path:
@@ -1299,7 +1305,8 @@ def create_job_launchers_blueprint(
                     if status in {"kept", "failed"}:
                         reason = f'{filename}: {outcome["reason"]}'
                         if status == "kept":
-                            result["kept_reasons"].append(reason)
+                            if len(result["kept_reasons"]) < _MAX_KEPT_REASONS:
+                                result["kept_reasons"].append(reason)
                         else:
                             result["errors"].append(reason)
                             job["errors"].append(reason)

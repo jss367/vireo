@@ -297,6 +297,42 @@ def test_release_selection_reports_pathless_missing_source_as_not_cached(
     assert dict(db.caches.offline_original_get(pid)) == row_before
 
 
+def test_release_caps_kept_reasons_sample_but_keeps_total_count(
+    client_with_photo, monkeypatch,
+):
+    """A release whose source volume is unreachable adds a ``kept`` entry per
+    photo. The whole result dict is serialized into every checkpoint, into the
+    ``job_history`` row, and into the final SSE event, so an all-cached release
+    across a large catalog would re-serialize a multi-megabyte reasons list on
+    every tick. Cap the list at a bounded sample; the ``kept`` counter still
+    reports the real total.
+    """
+    import offline_cache
+    from web.job_launchers import _MAX_KEPT_REASONS
+
+    app, db, pid = client_with_photo
+    folder_id = db.get_photo(pid)["folder_id"]
+    extras = _MAX_KEPT_REASONS + 10
+    photo_ids = [pid]
+    for i in range(extras):
+        photo_ids.append(
+            db.add_photo(
+                folder_id, f"missing_{i}.jpg", ".jpg", file_size=1, file_mtime=0.0,
+            )
+        )
+
+    def pretend_kept(*args, **kwargs):
+        return {"status": "kept", "bytes": 0, "reason": "Source folder is unavailable"}
+
+    monkeypatch.setattr(offline_cache, "release_photo_original", pretend_kept)
+
+    job = run_release(app, {"photo_ids": photo_ids})
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["kept"] == len(photo_ids)
+    assert len(result["kept_reasons"]) == _MAX_KEPT_REASONS
+
+
 def test_release_folder_includes_cached_descendants_only(client_with_photo):
     app, db, pid = client_with_photo
     base, source, row = cache_fixture(client_with_photo)
