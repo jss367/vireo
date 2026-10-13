@@ -19,6 +19,9 @@ FAMILIES = {
     "computation": ("Saved computation results", None, r"[0-9a-f]{64}\.json"),
 }
 WRITE_GRACE_SECONDS = 3600
+# External applications can save unique changes into either handoff. A
+# readable original cannot prove those changes are recoverable.
+PRESERVED_FAMILIES = frozenset({"external-editor", "external-dng"})
 
 
 def roots(config):
@@ -71,6 +74,7 @@ def summary(config, *, limit=100):
                                 "modified_at": info.st_mtime})
         result.append({"type": family, "name": FAMILIES[family][0], "path": root,
                        "count": count, "size": size, "files": entries,
+                       "clearable": family not in PRESERVED_FAMILIES,
                        "truncated": count > len(entries), "errors": errors})
     return result
 
@@ -85,6 +89,8 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
     """
     if family is not None and family not in FAMILIES:
         raise ValueError("Unknown retained cache type")
+    if family in PRESERVED_FAMILIES:
+        raise ValueError("External editor files may contain unique edits. Save a separate copy before removing them manually.")
     now = time.time() if now is None else now
     max_bytes = int(config.get("retained_cache_max_mb", 10240)) * 1024**2
     age_days = int(config.get("retained_cache_max_age_days", 30))
@@ -100,6 +106,8 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
             errors.append(str(message))
 
     for key, root in selected.items():
+        if key in PRESERVED_FAMILIES:
+            continue
         if family and key != family:
             continue
         resolved = os.path.normcase(os.path.realpath(root))

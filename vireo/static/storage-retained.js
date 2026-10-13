@@ -27,7 +27,12 @@ async function loadRetainedStorage() {
       clear.textContent = 'Clear ' + cache.name.toLowerCase();
       clear.disabled = !cache.count;
       clear.onclick = function() { clearRetainedStorage(cache.type, cache.name, clear); };
-      item.appendChild(clear);
+      if (cache.clearable) item.appendChild(clear);
+      else {
+        var preserved = document.createElement('p');
+        preserved.textContent = 'Preserved: external editors can save unique changes here. Save a separate copy before removing files manually.';
+        item.appendChild(preserved);
+      }
       var open = document.createElement('button');
       open.className = 'btn-secondary';
       open.textContent = 'Open folder';
@@ -97,7 +102,7 @@ async function loadRetainedStorage() {
 async function clearRetainedStorage(type, name, button) {
   var message = type === 'grouping-history'
     ? 'Remove grouping undo and redo snapshots from every workspace? Current grouping and ordinary photo edits remain. Removed grouping history cannot be restored.'
-    : 'Clear ' + name.toLowerCase() + ' shared by every workspace? Renders and conversions regenerate from available originals. Imported computation objects must be reimported or recomputed. Original photos and exports remain.';
+    : 'Clear ' + name.toLowerCase() + ' shared by every workspace? Renders regenerate from available originals. Imported computation objects must be reimported or recomputed. Original photos, external editor files, and exports remain.';
   if (!await confirmRetainedStorage(message)) return;
   button.disabled = true;
   try {

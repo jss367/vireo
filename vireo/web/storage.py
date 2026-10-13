@@ -89,13 +89,15 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
     @blueprint.route("/api/storage/retained/clear", methods=["POST"])
     @background_job
     def api_storage_retained_clear(ctx):
-        from services.retained_cache import FAMILIES, cleanup
+        from services.retained_cache import FAMILIES, PRESERVED_FAMILIES, cleanup
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
             return json_error("Expected a JSON object")
         family = body.get("type")
         if not isinstance(family, str) or (family not in FAMILIES and family != "grouping-history"):
             return json_error("Unknown retained cache type")
+        if family in PRESERVED_FAMILIES:
+            return json_error("External editor files may contain unique edits. Save a separate copy before removing them manually.")
         if family == "grouping-history" and body.get("confirm_history_loss") is not True:
             return json_error("Confirm that grouping undo and redo snapshots will be removed")
         settings = _retained_config()

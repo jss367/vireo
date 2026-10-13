@@ -170,12 +170,26 @@ def test_automatic_retention_protects_new_renders_with_old_source_timestamps(tmp
     assert path.exists()
 
 
+def test_retention_preserves_external_editor_changes_under_age_and_quota_limits(tmp_path):
+    config = _cache_config(tmp_path)
+    root = Path(config["THUMB_CACHE_DIR"]).parent
+    edited = _payload(root / "external-edits" / "1.jpg", b"unique external edits")
+    metadata = _payload(root / "external-edits" / "1.json")
+    converted = _payload(root / "external-dng" / "1" / "bird.dng", b"edited conversion")
+    retained_cache.cleanup(config, [], now=time.time() + 365 * 86400)
+    assert edited.read_bytes() == b"unique external edits"
+    assert metadata.exists() and converted.read_bytes() == b"edited conversion"
+    for family in ("external-editor", "external-dng"):
+        with pytest.raises(ValueError, match="unique edits"):
+            retained_cache.cleanup(config, [], family=family, clear=True)
+
+
 def test_retained_cleanup_rejects_photo_folders_and_symlinks(tmp_path):
     config = _cache_config(tmp_path)
     root = Path(config["THUMB_CACHE_DIR"]).parent
     source = _payload(root / "originals" / "1.jpg")
     other = _payload(tmp_path / "source" / "2.dng")
-    link = root / "external-dng"
+    link = root / "inat-uploads"
     try:
         link.symlink_to(other.parent, target_is_directory=True)
     except OSError:
