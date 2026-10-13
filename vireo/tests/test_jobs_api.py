@@ -12436,6 +12436,7 @@ def test_resume_preparation_failure_preserves_paid_chain_on_retry(
     failed = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
     assert failed["result"]["import_not_started"] is True
     assert failed["config"]["chain_already_ran"] is chain_paid
+    assert failed["result"]["source_snapshots"] == original["result"]["source_snapshots"]
     monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", prepare)
     chain = _ImportPhotosJob._chain_after_import
     chain_calls = []
@@ -12455,6 +12456,39 @@ def test_resume_preparation_failure_preserves_paid_chain_on_retry(
     if chain_paid:
         assert retried["result"]["after_import_skipped"] == "chain already ran on the interrupted parent"
     assert set(retried["config"]["carry_photo_ids"]) == set(photo_ids)
+
+
+@pytest.mark.parametrize("source_change", ["new_file", "replacement"])
+def test_resume_preparation_failure_keeps_source_snapshot_for_next_retry(
+    app_and_db, tmp_path, monkeypatch, source_change,
+):
+    from services.import_photos import _ImportPhotosJob
+
+    app, db = app_and_db
+    client = app.test_client()
+    original_id, _ = _interrupted_tagged_import(app, db, client, tmp_path, "Recovery tags")
+    prepare = _ImportPhotosJob._prepare_import_destination
+
+    def fail_preparation(self):
+        raise ValueError("Temporary storage unavailable")
+
+    monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", fail_preparation)
+    body = _resume_body(client, original_id)
+    response = client.post("/api/jobs/import-photos", json=body)
+    assert response.status_code == 200, response.get_json()
+    failed = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    assert failed["result"]["source_snapshots"]
+    monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", prepare)
+    with app._job_runner.admission_guard():
+        app._job_runner._jobs.pop(failed["id"], None)
+    card = Path(body["sources"][0])
+    changed_path = card / ("new-file.jpg" if source_change == "new_file" else "DSC_0000.jpg")
+    Image.new("RGB", (16, 16), "blue").save(changed_path)
+    body["parent_import_job_id"] = failed["id"]
+    rejected = client.post("/api/jobs/import-photos", json=body)
+    assert rejected.status_code == 400, rejected.get_json()
+    assert "source contents have changed" in rejected.get_json()["error"]
+    assert not list((tmp_path / "arch").rglob("new-file.jpg"))
 
 
 def test_resume_replays_tags_when_chain_ran_but_tags_owed(

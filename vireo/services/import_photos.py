@@ -1177,6 +1177,7 @@ class _ImportPhotosJob:
         self.location_from_gps = request.location_from_gps
         self.carry_photo_ids = request.carry_photo_ids
         self.parent_resume = request.parent_resume
+        self.parent_source_snapshots = request.parent_source_snapshots
         self.active_ws = request.active_ws
 
     def work(self, job):
@@ -1194,6 +1195,8 @@ class _ImportPhotosJob:
             job["result"] = {
                 "ok": False, "error": str(exc), "import_not_started": True,
             }
+            if self.parent_source_snapshots:
+                job["result"]["source_snapshots"] = self.parent_source_snapshots
             raise
 
         params = ImportParams(
