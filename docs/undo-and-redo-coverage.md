@@ -23,7 +23,7 @@ The route inventory in [undo_coverage.json](../vireo/tests/contracts/undo_covera
 
 New location edits are recorded as `photo_location`, and new reject/review decisions as `prediction_status`. These separate action types leave old `location_set`, `location_clear`, `prediction_reject`, and `prediction_reviewed` audit records excluded: those rows do not contain enough before-state to reverse safely. Keyword rows and map coordinates created or filled while choosing a location remain in the saved vocabulary when an assignment is undone; reverting vocabulary metadata requires separate history.
 
-New location writes, pending sidecar work, and history recording now share a transaction. A failure while writing history rolls back the whole location batch. Reassigning an identical location or clearing an already empty assignment adds no history and preserves Redo. A history action without a replay handler now fails without advancing the cursor.
+New location writes, pending sidecar work, and history recording now share a transaction. A failure while writing history rolls back the whole location batch. Reassigning an identical location or clearing an already empty assignment adds no history and preserves Redo, while still queueing a sidecar refresh so newly supplied saved-place coordinates can sync. A history action without a replay handler now fails without advancing the cursor.
 
 Life List and Location Review now refresh after global Undo/Redo. Location Review rebuilds its queue from the current source; partly completed assignments block history changes until retried or abandoned. Browse, Review, Highlights, the editor, culling, Misses, and pipeline review already provide history refresh hooks.
 
@@ -55,7 +55,7 @@ Some currently supported setters still record an unchanged rating, flag, or labe
 | Scan/classify/develop/analyze/download/recompute jobs | Job controls can pause/cancel applicable work; completed generated results have no general before/after snapshot. Capture-time repair and metadata repair deserve separate reversible snapshots if their results are expected to support Undo. |
 | Query, preview, validation, reveal/open, workspace navigation, job pause/resume/cancel | These are queries or have direct controls. Native text-field undo and unsaved editor history take precedence over catalog keyboard shortcuts. |
 
-Undo history is workspace-scoped and bounded by `max_edit_history`. Catalog metadata and representatives can be shared between workspaces, so an older edit can encounter changes made elsewhere. Deleted vocabulary is deliberately not recreated by keyword/location replay, and prediction rows replaced by classification are skipped. These limitations need conflict-aware replay if stronger restoration guarantees are desired.
+Undo history is workspace-scoped and bounded by `max_edit_history`. Catalog metadata and representatives can be shared between workspaces, so an older edit can encounter changes made elsewhere. Deleted vocabulary is deliberately not recreated by keyword/location replay, and prediction rows replaced by classification are skipped by checking the recorded photo, detected subject, and classifier-output identity rather than trusting a reusable row ID. Earlier ID-only prediction-status snapshots cannot prove identity and do not replay. These limitations need conflict-aware replay if stronger restoration guarantees are desired.
 
 **Verification**
 

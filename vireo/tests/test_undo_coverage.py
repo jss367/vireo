@@ -243,3 +243,58 @@ def test_unchanged_text_location_with_new_coordinates_queues_sync_and_keeps_redo
     assert db.conn.execute('SELECT COUNT(*) FROM edit_history').fetchone()[0] == count
     assert client.get('/api/redo/status').json['available'] is True
     assert client.get('/api/undo/status').json['available'] is False
+
+
+@pytest.mark.parametrize('direction', ['undo', 'redo'])
+@pytest.mark.parametrize('changed', ['species', 'model', 'fingerprint', 'detection', 'photo', 'bounds', 'confidence', 'created_at'])
+def test_prediction_status_history_does_not_change_reused_id(app_and_db, direction, changed):
+    app, db = app_and_db
+    client = app.test_client()
+    pids = [p['id'] for p in db.get_photos()][:2]
+    did = db.save_detections(pids[0], [
+        {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
+    ], detector_model='test')[0]
+    db.add_prediction(did, 'Bald Eagle', .9, 'test')
+    original_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
+    original_time = db.conn.execute('SELECT created_at FROM predictions WHERE id = ?', (original_id,)).fetchone()[0]
+    assert client.post(f'/api/predictions/{original_id}/reject').status_code == 200
+    if direction == 'redo':
+        assert client.post('/api/undo').status_code == 200
+    db.clear_predictions(model='test')
+    if changed == 'detection':
+        did = db.save_detections(pids[0], [
+            {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
+        ], detector_model='replacement')[0]
+    elif changed == 'photo':
+        db.conn.execute('UPDATE detections SET photo_id = ? WHERE id = ?', (pids[1], did))
+        db.commit()
+    elif changed == 'bounds':
+        db.conn.execute('UPDATE detections SET box_x = .3 WHERE id = ?', (did,))
+        db.commit()
+    db.add_prediction(
+        did, 'Golden Eagle' if changed == 'species' else 'Bald Eagle',
+        .8 if changed == 'confidence' else .9,
+        'other-model' if changed == 'model' else 'test', status='reviewed',
+        labels_fingerprint='other' if changed == 'fingerprint' else 'legacy',
+    )
+    replacement_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
+    assert replacement_id == original_id, 'The regression must exercise SQLite ID reuse'
+    replacement_time = '2000-01-01 00:00:00' if changed == 'created_at' else original_time
+    db.conn.execute('UPDATE predictions SET created_at = ? WHERE id = ?', (replacement_time, replacement_id))
+    db.commit()
+    assert client.post('/api/' + direction).status_code == 200
+    assert db.get_prediction_status(replacement_id) == 'reviewed'
+
+
+def test_id_only_prediction_status_history_cannot_change_a_current_prediction(app_and_db):
+    import json
+
+    app, db = app_and_db
+    pid = db.get_photos()[0]['id']
+    pred_id, _, _ = _predictions(db, pid)
+    db.record_edit('prediction_status', 'Old ID-only decision', 'rejected', [{
+        'photo_id': pid, 'old_value': json.dumps({str(pred_id): 'rejected'}),
+        'new_value': json.dumps({str(pred_id): 'pending'}),
+    }])
+    assert app.test_client().post('/api/undo').status_code == 200
+    assert db.get_prediction_status(pred_id) == 'pending'

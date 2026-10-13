@@ -8906,10 +8906,20 @@ class Database:
         queue_location_sync_if_enabled(self, pid, _commit=False)
 
     def _edit_set_prediction_status(self, pid, value):
-        for pred_id, status in json.loads(value).items():
-            # Classification can replace prediction rows after a decision.
-            if self.get_prediction_status(int(pred_id)) is not None:
-                self.update_prediction_status(int(pred_id), status, _commit=False)
+        recorded = json.loads(value)
+        current = json.loads(self.edit_history.prediction_status_state(
+            [int(pred_id) for pred_id in recorded],
+        ))
+        for pred_id, state in recorded.items():
+            # Classification can reuse deleted IDs. Require the same photo,
+            # subject and classifier output before restoring its decision.
+            # Earlier ID-only snapshots cannot prove identity and stay inert.
+            if not isinstance(state, dict) or not state.get('identity'):
+                continue
+            if state['identity'].get('photo_id') != pid:
+                continue
+            if current.get(pred_id, {}).get('identity') == state['identity']:
+                self.update_prediction_status(int(pred_id), state['status'], _commit=False)
 
     # -- rating -----------------------------------------------------------
 

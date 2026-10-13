@@ -72,20 +72,28 @@ class EditHistoryRepository:
         return json.dumps({"links": links, "gps_review": review[0] if review else None})
 
     def prediction_status_state(self, prediction_ids: Sequence[int]) -> str:
-        """Snapshot exact review statuses, including alternative siblings."""
+        """Snapshot statuses and semantic identities; SQLite can reuse row IDs."""
         from sql_chunks import chunked
         statuses = {}
         ws = self.workspace_id
         for ids in chunked(list(dict.fromkeys(prediction_ids))):
             placeholders = ",".join("?" for _ in ids)
             for row in self.conn.execute(
-                "SELECT p.id, COALESCE(r.status, 'pending') AS status "
-                "FROM predictions p LEFT JOIN prediction_review r "
+                "SELECT p.id, COALESCE(r.status, 'pending') AS status, "
+                "d.photo_id, p.detection_id, p.classifier_model, "
+                "p.labels_fingerprint, p.labels_fingerprint_full, p.species, "
+                "p.source_taxon_id, p.confidence, p.created_at AS prediction_created_at, "
+                "d.detector_model, d.runtime_fingerprint, d.box_x, d.box_y, d.box_w, d.box_h, "
+                "d.created_at AS detection_created_at "
+                "FROM predictions p JOIN detections d ON d.id = p.detection_id "
+                "LEFT JOIN prediction_review r "
                 "ON r.prediction_id = p.id AND r.workspace_id = ? "
                 f"WHERE p.id IN ({placeholders}) ORDER BY p.id",
                 (ws, *ids),
             ):
-                statuses[str(row["id"])] = row["status"]
+                identity = {key: value for key, value in dict(row).items()
+                            if key not in ('id', 'status')}
+                statuses[str(row["id"])] = {"status": row["status"], "identity": identity}
         return json.dumps(statuses, sort_keys=True)
 
     # -- history rows ---------------------------------------------------------
