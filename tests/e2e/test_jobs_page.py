@@ -1,4 +1,181 @@
+import pytest
 from playwright.sync_api import expect
+
+
+@pytest.mark.parametrize("result", [
+    {"error": "Not enough free space on this computer for temporary processing. Free up space or import fewer photos."},
+    {"error": "Temporary storage is unavailable", "import_not_started": True, "ok": False},
+])
+def test_import_failure_before_copy_offers_retry(live_server, page, result):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", progress={}, result=result, config={
+        "sources": ["/Volumes/CARD/DCIM"], "destination": "/Volumes/Photos/Archive",
+        "local_processing": True, "after_import": 1,
+        "include_paths": ["/Volumes/CARD/DCIM/selected.jpg"],
+        "previewed_count": 2, "checked_count": 1, "skip_duplicates": False,
+    })
+    captured = []
+
+    def retry(route):
+        captured.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Still not enough space"})
+
+    page.route("**/api/jobs/import-photos", retry)
+    recovery_options = {"direct_to_nas_allowed": True, "resume_allowed": False}
+    page.route("**/api/import/*/recovery-options", lambda route: route.fulfill(json=recovery_options))
+    _serve_jobs_page(live_server, page, job, history=True)
+    button = page.get_by_role("button", name="Retry import", exact=True)
+    expect(button).to_be_visible()
+    expect(page.locator("#jobDetailPane")).to_contain_text(result["error"])
+    expect(page.locator("#jobDetailPane")).not_to_contain_text("Retry 0 failed")
+    button.click()
+    expect(button).to_have_text("Retry import")
+    expect(button).to_be_enabled()
+    assert len(captured) == 1
+    assert captured[0]["parent_import_job_id"] == job["id"]
+    assert captured[0]["include_paths"] == job["config"]["include_paths"]
+    assert captured[0]["local_processing"] is True
+    assert captured[0]["skip_duplicates"] is False
+    direct = page.get_by_role("button", name="Retry directly to NAS", exact=True)
+    expect(direct).to_be_visible()
+    job["import_recovery_options"] = recovery_options
+    direct.click()
+    expect(direct).to_be_enabled()
+    expect(direct).to_have_text("Retry directly to NAS")
+    assert len(captured) == 2
+    assert captured[1]["local_processing"] is False
+    assert captured[1]["defer_nas_transfer"] is False
+    assert captured[1]["retry_direct_to_nas"] is True
+    assert captured[1]["include_paths"] == job["config"]["include_paths"]
+    assert captured[1]["destination"] == job["config"]["destination"]
+
+    # A cancelled descendant's files still need regular local recovery.
+    child = {**job, "id": "cancelled-retry", "status": "cancelled", "config": {
+        **job["config"], "parent_import_job_id": job["id"],
+    }, "result": {"cancelled": True, "photo_ids": [123], "tags_applied": False,
+                   "chained": False, "landed_files": {"/local/photo.jpg": [1, 2, "hash"]}}}
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, child])
+    expect(button).to_be_visible()
+    expect(direct).to_have_count(0)
+    before_copy = {**child, "id": "before-copy-child", "status": "failed",
+                   "result": {"import_not_started": True}}
+    grandchild = {**child, "config": {**child["config"], "parent_import_job_id": before_copy["id"]}}
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, grandchild, before_copy])
+    expect(direct).to_have_count(0)
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, before_copy])
+    expect(direct).to_be_visible()
+    before_copy["result"] = {"never_started": True}
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, grandchild, before_copy])
+    expect(direct).to_have_count(0)
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, before_copy])
+    expect(direct).to_be_visible()
+
+    # A completed child owns the recovery; the old row points to it.
+    child = {**job, "id": "finished-retry", "status": "completed",
+             "started_at": "2026-08-16T22:00:00", "config": {
+                 **job["config"], "parent_import_job_id": job["id"],
+             }, "result": {"ok": True, "tags_applied": True, "chained": True}}
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, child])
+    expect(button).to_have_count(0)
+    expect(direct).to_have_count(0)
+    expect(page.get_by_role("button", name="Show that import")).to_be_visible()
+
+
+def test_failed_import_retry_recovers_after_pending_redraw(live_server, page):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", progress={},
+               config={"sources": ["/card"], "destination": "/nas", "local_processing": True},
+               result={"import_not_started": True, "error": "No space"})
+    pending = []
+    page.route("**/api/import/*/recovery-options", lambda route: route.fulfill(json={
+        "direct_to_nas_allowed": True, "resume_allowed": False,
+    }))
+    page.route("**/api/jobs/import-photos", lambda route: pending.append(route))
+    _serve_jobs_page(live_server, page, job, history=True)
+    page.get_by_role("button", name="Retry import", exact=True).click()
+    page.evaluate("() => renderHistoryDetail(historyJobs[0])")
+    expect(page.get_by_role("button", name="Retry in progress…", exact=True)).to_be_disabled()
+    pending[0].fulfill(status=400, json={"error": "Still no space"})
+    expect(page.get_by_role("button", name="Retry import", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Retry directly to NAS", exact=True)).to_be_enabled()
+    with page.expect_request("**/api/jobs/import-photos"):
+        page.get_by_role("button", name="Retry directly to NAS", exact=True).click()
+    page.evaluate("() => renderHistoryDetail(historyJobs[0])")
+    pending[1].fulfill(status=400, json={"error": "NAS offline"})
+    expect(page.get_by_role("button", name="Retry import", exact=True)).to_be_enabled()
+    expect(page.get_by_role("button", name="Retry directly to NAS", exact=True)).to_be_enabled()
+
+
+@pytest.mark.parametrize("allowed_at_render", [False, True])
+def test_direct_nas_retry_uses_live_server_eligibility(live_server, page, allowed_at_render):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", result={"import_not_started": True, "ok": False},
+               config={"sources": ["/card"], "destination": "/nas", "local_processing": True})
+    checks = []
+    posts = []
+
+    def options(route):
+        checks.append(route.request.url)
+        route.fulfill(json={"direct_to_nas_allowed": allowed_at_render and len(checks) == 1,
+                            "resume_allowed": False})
+
+    def retry(route):
+        posts.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Unexpected import request"})
+
+    page.route("**/api/import/*/recovery-options", options)
+    page.route("**/api/jobs/import-photos", retry)
+    _serve_jobs_page(live_server, page, job, history=True)
+    page.wait_for_function("historyJobs[0].import_recovery_options !== undefined")
+    direct = page.get_by_role("button", name="Retry directly to NAS", exact=True)
+    if allowed_at_render:
+        expect(direct).to_be_visible()
+        direct.click()
+    expect(direct).to_have_count(0)
+    expect(page.get_by_role("button", name="Retry import", exact=True)).to_be_enabled()
+    assert len(checks) == (2 if allowed_at_render else 1)
+    assert not posts
+
+
+@pytest.mark.parametrize("failure", ["network", "server", "invalid"])
+def test_direct_nas_click_check_recovers_after_unavailable_response(live_server, page, failure):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", result={"import_not_started": True, "ok": False},
+               config={"sources": ["/card"], "destination": "/nas", "local_processing": True})
+    checks = []
+    posts = []
+
+    def options(route):
+        checks.append(route.request.url)
+        if len(checks) == 2:
+            if failure == "network":
+                route.abort("failed")
+            elif failure == "invalid":
+                route.fulfill(json={})
+            else:
+                route.fulfill(status=503, json={"error": "Recovery check temporarily unavailable."})
+        else:
+            route.fulfill(json={"direct_to_nas_allowed": True, "resume_allowed": False})
+
+    def retry(route):
+        posts.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Unexpected import request"})
+
+    page.route("**/api/import/*/recovery-options", options)
+    page.route("**/api/jobs/import-photos", retry)
+    _serve_jobs_page(live_server, page, job, history=True)
+    direct = page.get_by_role("button", name="Retry directly to NAS", exact=True)
+    expect(direct).to_be_visible()
+    direct.click()
+    check_again = page.get_by_role("button", name="Check again", exact=True)
+    expect(check_again).to_be_visible()
+    expect(direct).to_have_count(0)
+    expect(page.get_by_role("button", name="Retry import", exact=True)).to_be_enabled()
+    check_again.click()
+    expect(direct).to_be_visible()
+    expect(check_again).to_have_count(0)
+    assert len(checks) == 3
+    assert not posts
 
 
 def test_completed_move_source_cleanup_requires_review_and_opt_in(live_server, page):
@@ -191,6 +368,97 @@ def _serve_jobs_page(live_server, page, job, *, history=False):
         page.locator(
             '.job-list-item[data-job-id="' + job["id"] + '"]'
         ).click()
+
+
+@pytest.mark.parametrize("resumable", [True, False])
+@pytest.mark.parametrize("recorded", [True, False])
+def test_import_resume_checks_pipeline_outside_history_window(live_server, page, resumable, recorded):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", result={
+        "interrupted": True, "photo_ids": [1], "tags_applied": True,
+    }, config={
+        "sources": ["/card"], "destination": "/archive", "chain_already_ran": recorded,
+        "chain_process_job_ids": ["old-pipeline"] if recorded else [],
+    })
+    requests = []
+
+    def options(route):
+        requests.append(route.request.url)
+        route.fulfill(json={"direct_to_nas_allowed": False, "resume_allowed": resumable})
+
+    page.route("**/api/import/*/recovery-options", options)
+    _serve_jobs_page(live_server, page, job, history=True)
+    page.wait_for_function("historyJobs[0].import_resume_allowed === " + str(resumable).lower())
+    assert requests
+    resume = page.get_by_role("button", name="Resume import", exact=True)
+    if resumable:
+        expect(resume).to_be_visible()
+    else:
+        expect(resume).to_have_count(0)
+
+
+@pytest.mark.parametrize("taken_over", [False, True])
+@pytest.mark.parametrize("response_status", [200, 409])
+def test_interrupted_failed_files_wait_for_recovery_and_show_conflict(live_server, page, taken_over, response_status):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", result={
+        "interrupted": True, "photo_ids": [1], "failed": 2,
+    }, config={"sources": ["/card"], "destination": "/archive"})
+    pending = []
+    page.route("**/api/import/*/recovery-options", lambda route: pending.append(route))
+    _serve_jobs_page(live_server, page, job, history=True)
+    pane = page.locator("#jobDetailPane")
+    expect(pane).to_contain_text("Checking recovery options…")
+    expect(pane.locator("[data-retry-import-job]")).to_have_count(0)
+    assert pending
+    options = {"direct_to_nas_allowed": False, "resume_allowed": False,
+               "error": "This import already started processing its photos."}
+    if taken_over:
+        options.update(taken_over_by_job_id="later-import", takeover="done")
+    pending[0].fulfill(status=response_status, json=options)
+    expect(pane).not_to_contain_text("Checking recovery options…")
+    expect(pane).to_contain_text(options["error"])
+    expect(pane.locator("[data-retry-import-job]")).to_have_count(0)
+    expect(pane.locator('[data-show-job="later-import"]')).to_have_count(1 if taken_over else 0)
+
+
+@pytest.mark.parametrize("failure", ["network", "server", "invalid"])
+def test_import_recovery_check_can_retry_after_connection_failure(live_server, page, failure):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", result={
+        "interrupted": True, "photo_ids": [1], "failed": 2,
+    }, config={"sources": ["/card"], "destination": "/archive"})
+    checks = []
+    import_requests = []
+
+    def options(route):
+        checks.append(route.request.url)
+        if len(checks) == 1:
+            if failure == "network":
+                route.abort("failed")
+            elif failure == "invalid":
+                route.fulfill(json={})
+            else:
+                route.fulfill(status=503, json={"error": "Recovery check temporarily unavailable."})
+        else:
+            route.fulfill(json={"direct_to_nas_allowed": False, "resume_allowed": True})
+
+    def retry(route):
+        import_requests.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Unexpected import request"})
+
+    page.route("**/api/import/*/recovery-options", options)
+    page.route("**/api/jobs/import-photos", retry)
+    _serve_jobs_page(live_server, page, job, history=True)
+    pane = page.locator("#jobDetailPane")
+    check_again = page.get_by_role("button", name="Check again", exact=True)
+    expect(check_again).to_be_visible()
+    expect(pane.locator("[data-retry-import-job]")).to_have_count(0)
+    check_again.click()
+    expect(page.get_by_role("button", name="Resume import", exact=True)).to_be_visible()
+    expect(check_again).to_have_count(0)
+    assert len(checks) == 2
+    assert not import_requests
 
 
 def test_move_folder_job_shows_source_and_destination(live_server, page):

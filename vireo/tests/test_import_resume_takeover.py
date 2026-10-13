@@ -55,8 +55,102 @@ FAILED_FILES = {"ok": False, "failed": 1, "photo_ids": [],
                 "tags_applied": True, "chained": True}
 
 
+def _inherited_chain_parent(tags_applied):
+    parent = _parent(tags_applied=tags_applied, chained=False, ok=False)
+    parent["config"]["chain_already_ran"] = True
+    return parent
+
+
+def _inherited_pipeline_scenario(*, provenance, never_started, cancelled=False):
+    parent = _inherited_chain_parent(True)
+    parent["config"]["parent_import_job_id"] = "ancestor"
+    if provenance:
+        parent["config"]["chain_process_job_ids"] = ["process"]
+    rows = [_row("ancestor", "2026-09-01T09:00:00", {
+        "chained": True, "process_job_id": "process",
+    }, parent=None, root=None), _row("process", "2026-09-01T09:30:00", {
+        "never_started": never_started,
+    }, status="failed" if never_started else "completed", job_type="pipeline", parent=None, root=None)]
+    if cancelled:
+        rows[-1].update(status="cancelled", result=None, duration=None)
+    return parent, rows
+
+
+def _sibling_pipeline_scenario(never_started):
+    parent = _inherited_chain_parent(True)
+    parent["config"]["parent_import_job_id"] = "ancestor"
+    parent["started_at"] = "2026-09-01T12:00:00"
+    rows = [_row("ancestor", "2026-09-01T09:00:00", {"chained": False}, parent=None, root=None),
+            _row("sibling", "2026-09-01T10:00:00", {"chained": True, "process_job_id": "process"}, parent="ancestor", root="ancestor"),
+            _row("process", "2026-09-01T10:30:00", {"never_started": never_started}, job_type="pipeline", parent=None, root=None),
+            parent]
+    return parent, rows
+
+
+def _mixed_pipeline_scenario(*, recorded, all_ran=False, inherited=False):
+    parent, rows = _sibling_pipeline_scenario(True)
+    rows[-2]["result"]["never_started"] = not all_ran
+    rows.extend([
+        _row("second-sibling", "2026-09-01T11:00:00", {
+            "chained": True, "process_job_id": "second-process",
+        }, parent="ancestor", root="ancestor"),
+        _row("second-process", "2026-09-01T11:30:00", {},
+             job_type="pipeline", parent=None, root=None),
+    ])
+    if recorded:
+        target = rows[0] if inherited else parent
+        target["config"]["chain_process_job_ids"] = ["process", "second-process"]
+    return parent, rows
+
+
 def _scenarios():
+    mixed_descendant, pipelines = _mixed_pipeline_scenario(recorded=True)
+    mixed_descendant.update(id="child", started_at="2026-09-01T13:00:00")
+    mixed_descendant["config"].update(parent_import_job_id=PARENT_ID, root_import_job_id=PARENT_ID)
+    legacy_parent, legacy_rows = _mixed_pipeline_scenario(recorded=False)
+    legacy_parent["result"]["tags_applied"] = False
+    takeover = import_resume_takeover(legacy_parent["id"], legacy_parent["result"], legacy_rows, legacy_parent["config"])
+    recovery = ImportService._interrupted_parent_resume(legacy_parent["config"], legacy_parent["result"], takeover)
+    persisted = _parent(tags_applied=False, chained=False)
+    persisted["config"].update(
+        chain_already_ran=recovery["chain_already_ran"],
+        chain_process_job_ids=recovery["chain_process_job_ids"],
+        chain_process_job_groups=recovery["chain_process_job_groups"],
+    )
+    grouped_paid = _parent(tags_applied=True, chained=False)
+    grouped_paid["config"].update(chain_already_ran=True, chain_process_job_ids=["process", "second-process"],
+                                  chain_process_job_groups=[["process", "second-process"]])
+    grouped_rows = [row for row in legacy_rows if row["type"] == "pipeline"]
+    grouped_unpaid = json.loads(json.dumps(grouped_rows))
+    grouped_unpaid[-1]["result"] = {"never_started": True}
+    required = json.loads(json.dumps(grouped_paid))
+    required["config"]["chain_process_job_groups"] = [["process"], ["second-process"]]
     return {
+        "persisted alternatives preserve surviving paid pipeline": (grouped_paid, grouped_rows),
+        "persisted alternatives all cancelled owe processing": (grouped_paid, grouped_unpaid),
+        "persisted separate groups retain each obligation": (required, grouped_rows),
+        "legacy surviving payment remains paid after persistence": (persisted, [row for row in legacy_rows if row["type"] == "pipeline"]),
+        "mixed descendant recorded pipelines leave processing owed": (
+            _parent(tags_applied=True),
+            [mixed_descendant, *[row for row in pipelines if row["type"] == "pipeline"]],
+        ),
+        "mixed recorded pipelines leave processing owed": _mixed_pipeline_scenario(recorded=True),
+        "mixed ancestor recorded pipelines leave processing owed": _mixed_pipeline_scenario(recorded=True, inherited=True),
+        "all recorded pipelines ran": _mixed_pipeline_scenario(recorded=True, all_ran=True),
+        "mixed legacy candidates retain paid evidence": _mixed_pipeline_scenario(recorded=False),
+        "empty retry cannot pay existing processing scope": (
+            _parent(tags_applied=True), [_row("empty", "2026-09-01T11:00:00", {
+                **DONE, "after_import_skipped": "no new photos",
+            })],
+        ),
+        "legacy sibling pipeline never started": _sibling_pipeline_scenario(True),
+        "legacy sibling pipeline actually ran": _sibling_pipeline_scenario(False),
+        "legacy queued pipeline cancelled": _inherited_pipeline_scenario(provenance=True, never_started=False, cancelled=True),
+        "stored inherited pipeline never started": _inherited_pipeline_scenario(provenance=True, never_started=True),
+        "legacy inherited pipeline never started": _inherited_pipeline_scenario(provenance=False, never_started=True),
+        "inherited pipeline actually ran": _inherited_pipeline_scenario(provenance=True, never_started=False),
+        "inherited chain still owes tags": (_inherited_chain_parent(False), []),
+        "inherited chain and tags are paid": (_inherited_chain_parent(True), []),
         "old tag mark does not pay newly landed tags": (
             _parent(tags_applied=True),
             [_row("d", "2026-09-01T11:00:00", {
@@ -316,6 +410,24 @@ def _server(parent, rows):
 
 # (by, kind, offers Resume, offers Retry)
 EXPECTED = {
+    "persisted alternatives preserve surviving paid pipeline": (None, None, False, False),
+    "persisted alternatives all cancelled owe processing": (None, None, True, False),
+    "persisted separate groups retain each obligation": (None, None, True, False),
+    "legacy surviving payment remains paid after persistence": (None, None, True, False),
+    "mixed descendant recorded pipelines leave processing owed": ("child", "resume", False, False),
+    "mixed recorded pipelines leave processing owed": (None, None, True, False),
+    "mixed ancestor recorded pipelines leave processing owed": (None, None, True, False),
+    "all recorded pipelines ran": (None, None, False, False),
+    "mixed legacy candidates retain paid evidence": (None, None, False, False),
+    "empty retry cannot pay existing processing scope": (None, None, True, False),
+    "legacy sibling pipeline never started": (None, None, True, False),
+    "legacy sibling pipeline actually ran": (None, None, False, False),
+    "legacy queued pipeline cancelled": (None, None, True, False),
+    "stored inherited pipeline never started": (None, None, True, False),
+    "legacy inherited pipeline never started": (None, None, True, False),
+    "inherited pipeline actually ran": (None, None, False, False),
+    "inherited chain still owes tags": (None, None, True, False),
+    "inherited chain and tags are paid": (None, None, False, False),
     "tagged sibling does not pay another sibling's new tags": (None, None, True, False),
     "old tag mark does not pay newly landed tags": (None, None, True, False),
     "tag-only descendant pays expanded scope": ("d2", "done", False, False),
@@ -366,6 +478,64 @@ def test_takeover_rule(name):
     assert (
         got["by"], got["kind"], got["offers_resume"], got["offers_retry"],
     ) == EXPECTED[name]
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_before_start_failure_preserves_owed_local_recovery(inherited):
+    parent = _parent()
+    parent["result"] = {"import_not_started": True, "ok": False}
+    landing = {"/local/photo.jpg": [12, 34, "hash-photo"]}
+    if inherited:
+        parent["config"].update(recover_landed_files=landing, untagged_photo_ids=[123])
+        rows = []
+    else:
+        rows = [_row("child", "2026-09-01T11:00:00", {
+            "cancelled": True, "photo_ids": [123], "landed_files": landing,
+            "tags_applied": False, "chained": False,
+        }, status="cancelled")]
+    takeover = import_resume_takeover(parent["id"], parent["result"], rows, parent["config"])
+    assert takeover["by"] is None
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert resume["landed_files"] == landing
+    assert resume["untagged_ids"] == [123]
+    assert not resume["tags_applied"]
+    assert not resume["chain_already_ran"]
+
+
+def test_legacy_alternative_pipeline_payment_survives_resume_persistence():
+    parent, rows = _mixed_pipeline_scenario(recorded=False)
+    parent["result"]["tags_applied"] = False
+    takeover = import_resume_takeover(parent["id"], parent["result"], rows, parent["config"])
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert resume["chain_already_ran"] is True
+    assert resume["chain_process_job_ids"] == ["process", "second-process"]
+    assert resume["chain_process_job_groups"] == [["process", "second-process"]]
+    next_config = {**parent["config"], "chain_already_ran": resume["chain_already_ran"],
+                   "chain_process_job_ids": resume["chain_process_job_ids"],
+                   "chain_process_job_groups": resume["chain_process_job_groups"]}
+    next_result = {"import_not_started": True, "ok": False}
+    retried = import_resume_takeover("failed-resume", next_result, rows, next_config)
+    assert retried["chained"] is True
+
+
+@pytest.mark.parametrize("cancel_all", [False, True])
+def test_persisted_legacy_group_survives_later_pipeline_cancellation(cancel_all):
+    parent, rows = _mixed_pipeline_scenario(recorded=False, all_ran=True)
+    parent["result"]["tags_applied"] = False
+    pipeline = next(row for row in rows if row["id"] == "process")
+    pipeline.update(status="queued", result={})
+    takeover = import_resume_takeover(parent["id"], parent["result"], rows, parent["config"])
+    resume = ImportService._interrupted_parent_resume(parent["config"], parent["result"], takeover)
+    assert resume["chain_already_ran"] is True
+    assert resume["chain_process_job_groups"] == [["process", "second-process"]]
+    pipeline.update(status="cancelled", result={"never_started": True})
+    if cancel_all:
+        next(row for row in rows if row["id"] == "second-process")["result"] = {"never_started": True}
+    config = {**parent["config"], "chain_already_ran": True,
+              "chain_process_job_ids": resume["chain_process_job_ids"],
+              "chain_process_job_groups": resume["chain_process_job_groups"]}
+    retried = import_resume_takeover("failed-resume", {"import_not_started": True, "ok": False}, rows, config)
+    assert retried["chained"] is not cancel_all
 
 
 def test_a_resume_that_paid_the_tags_leaves_only_the_chain_owed():

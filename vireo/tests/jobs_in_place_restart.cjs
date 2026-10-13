@@ -32,6 +32,7 @@ const ctx = vm.createContext({
   },
 });
 ctx.window = ctx;
+vm.runInContext(fs.readFileSync('vireo/static/import-recovery.js', 'utf8'), ctx);
 for (const file of scripts) {
   vm.runInContext(fs.readFileSync('vireo/static/jobs/' + file, 'utf8'), ctx);
 }

@@ -32,6 +32,7 @@ function inPlaceRestartJobId(job) {
 // original failed import — still blocks the original's Retry button.
 function hasActiveRetryFor(parentId) {
   if (!parentId) return false;
+  if (pendingImportRetries[parentId]) return true;
   return activeJobs.some(function(candidate) {
     if (!candidate || candidate.type !== 'import') return false;
     var status = candidate.status;
@@ -49,19 +50,25 @@ function hasActiveRetryFor(parentId) {
 // (``photo_ids``, even if empty): a resume must carry those into the
 // after-import processing, and an older interrupted row without the
 // list would silently leave them unprocessed.
-function isResumableImport(job) {
+function isResumableImport(job, rows) {
   var result = job && job.result;
   if (!(job && job.type === 'import' && job.status === 'failed' &&
       result && result.interrupted && Array.isArray(result.photo_ids))) {
     return false;
   }
+  if (job.import_resume_pending) return false;
+  if (typeof job.import_resume_allowed === 'boolean') return job.import_resume_allowed;
   // An import whose chain ran AND whose tag pass was marked applied
   // finished everything but the final write; resuming would collect
   // and process its photos twice. A ``chained`` mark on a row whose
   // import failed (``ok === false``) came from ``_chain_after_import``
   // returning early via its "import failed" branch — the chain never
   // actually ran, so the row stays resumable.
-  if (result.chained && result.ok !== false && result.tags_applied) return false;
+  var neverStarted = new Set((rows || []).filter(function(row) {
+    return pipelineNeverStarted(row);
+  }).map(function(row) { return row.id; }));
+  var chainInvalidated = importChainInvalidated(jobConfig(job), result, rows, job.id, neverStarted);
+  if (!chainInvalidated && (jobConfig(job).chain_already_ran || (result.chained && result.ok !== false)) && result.tags_applied) return false;
   // Chain ran but tag/GPS work is still owed (a Stop cut the pass
   // short, or an error left tags unmarked). The resume replays only
   // the tag pass and skips re-chaining server-side.
@@ -70,6 +77,90 @@ function isResumableImport(job) {
 
 function hasFailedImportFiles(result) {
   return !!result && typeof result.failed === 'number' && result.failed > 0;
+}
+
+function importChainProcessJobIds(config, result, rows, jobId, inferLegacy) {
+  var byId = new Map((rows || []).filter(function(row) {
+    return row.type === 'import';
+  }).map(function(row) { return [row.id, row]; }));
+  if (inferLegacy !== false && (config.chain_already_ran || (!('chain_already_ran' in config) && importFailedBeforeStart(result)) ||
+      result.after_import_skipped === 'chain already ran on the interrupted parent') && !(config.chain_process_job_ids || []).length &&
+      !result.process_job_id && config.parent_import_job_id) {
+    var scopeRoot = config.parent_import_job_id;
+    var cutoff = (byId.get(jobId) || {}).started_at || '';
+    var found = new Set([scopeRoot]), changed = true;
+    while (changed) {
+      changed = false;
+      byId.forEach(function(row, id) {
+        if (id === jobId || found.has(id) || (cutoff && (row.started_at || '') > cutoff)) return;
+        var cfg = jobConfig(row);
+        if (found.has(cfg.parent_import_job_id) || cfg.root_import_job_id === scopeRoot) {
+          found.add(id);
+          changed = true;
+        }
+      });
+    }
+    var inherited = new Set();
+    found.forEach(function(id) {
+      var r = (byId.get(id) || {}).result || {};
+      if (r.process_job_id) inherited.add(r.process_job_id);
+    });
+    if (inherited.size) return Array.from(inherited).sort();
+  }
+  var seen = new Set();
+  while (true) {
+    if (result.process_job_id) return [result.process_job_id];
+    if (result.after_import_skipped === 'import-only' || result.after_import_skipped === 'no new photos') return [];
+    if (config.chain_process_job_ids && config.chain_process_job_ids.length) return config.chain_process_job_ids.slice();
+    var parentId = config.parent_import_job_id;
+    if (!parentId || seen.has(parentId) || !byId.has(parentId)) return [];
+    seen.add(parentId);
+    var row = byId.get(parentId);
+    config = jobConfig(row);
+    result = row.result || {};
+  }
+}
+
+function importChainProcessJobGroups(config, result, rows, jobId) {
+  var recorded = importChainProcessJobIds(config, result, rows, jobId, false);
+  if (!recorded.length) {
+    var candidates = importChainProcessJobIds(config, result, rows, jobId);
+    return candidates.length ? [candidates] : [];
+  }
+  var byId = new Map((rows || []).filter(function(row) {
+    return row.type === 'import';
+  }).map(function(row) { return [row.id, row]; }));
+  var seen = new Set();
+  while (true) {
+    if (result.process_job_id) return [[result.process_job_id]];
+    if ((config.chain_process_job_ids || []).length) {
+      var groups = config.chain_process_job_groups;
+      if (Array.isArray(groups) && groups.length && groups.every(function(group) {
+        return Array.isArray(group) && group.length && group.every(function(id) { return typeof id === 'string'; });
+      })) {
+        var covered = new Set(groups.flat());
+        if (covered.size === new Set(recorded).size && recorded.every(function(id) { return covered.has(id); })) return groups;
+      }
+      return recorded.map(function(id) { return [id]; });
+    }
+    var parentId = config.parent_import_job_id;
+    if (!parentId || seen.has(parentId) || !byId.has(parentId)) return recorded.map(function(id) { return [id]; });
+    seen.add(parentId);
+    var row = byId.get(parentId);
+    config = jobConfig(row);
+    result = row.result || {};
+  }
+}
+
+function importChainInvalidated(config, result, rows, jobId, neverStarted) {
+  return importChainProcessJobGroups(config, result, rows, jobId).some(function(group) {
+    return group.every(function(id) { return neverStarted.has(id); });
+  });
+}
+
+function pipelineNeverStarted(row) {
+  return row.type === 'pipeline' && ((row.result && row.result.never_started) ||
+    (row.status === 'cancelled' && row.result == null && row.duration === null));
 }
 
 // Whether a later run took over an import's Resume (interrupted by a
@@ -89,13 +180,13 @@ function importResumeTakeover(parent, rows) {
   var parentResult = parent && parent.result;
   var parentInterrupted = !!(parentResult && parentResult.interrupted);
   if (!(parent && parent.type === 'import' && parentResult &&
-      (parentInterrupted || hasFailedImportFiles(parentResult)))) {
+      (parentInterrupted || hasFailedImportFiles(parentResult) || importFailedBeforeStart(parentResult)))) {
     return {tagsApplied: !!(parentResult && parentResult.tags_applied),
             chained: !!(parentResult && parentResult.chained),
             by: null, byStartedAt: null, kind: null, parentInterrupted: false};
   }
   var neverStartedProcesses = new Set((rows || []).filter(function(row) {
-    return row.type === 'pipeline' && row.result && row.result.never_started;
+    return pipelineNeverStarted(row);
   }).map(function(row) { return row.id; }));
   var children = {};
   var candidates = [];
@@ -103,7 +194,6 @@ function importResumeTakeover(parent, rows) {
     if (!row || row.type !== 'import' || row.id === parent.id) return;
     if (['completed', 'failed', 'cancelled'].indexOf(row.status) < 0) return;
     var result = (row.result && typeof row.result === 'object') ? row.result : {};
-    if (result.never_started) return;
     var cfg = jobConfig(row) || {};
     var entry = {id: row.id, status: row.status,
                  startedAt: row.started_at || '', result: result,
@@ -129,7 +219,8 @@ function importResumeTakeover(parent, rows) {
       }
     });
   }
-  var descendants = Object.keys(found).map(function(id) { return found[id]; });
+  var descendants = Object.keys(found).map(function(id) { return found[id]; })
+    .filter(function(e) { return !e.result.never_started; });
   descendants.forEach(function(e) {
     var r = e.result;
     var tags, chainStep;
@@ -151,7 +242,10 @@ function importResumeTakeover(parent, rows) {
     }
     e.tagsApplied = tags;
     // After a failed import the chain step marks but skips processing.
-    e.chained = chainStep && r.ok !== false && !neverStartedProcesses.has(r.process_job_id);
+    e.chainProcessJobIds = importChainProcessJobIds(e.config, r, rows, e.id);
+    e.chained = (!!e.config.chain_already_ran ||
+      (chainStep && r.ok !== false && !neverStartedProcesses.has(r.process_job_id))) &&
+      !importChainInvalidated(e.config, r, rows, e.id, neverStartedProcesses);
     e.resumable = e.status === 'failed' && !!r.interrupted &&
       Array.isArray(r.photo_ids) && !(tags && e.chained);
     e.hasFailedFiles = hasFailedImportFiles(r);
@@ -216,14 +310,26 @@ function importResumeTakeover(parent, rows) {
     paidCarriedScope(e.config, own.identities).forEach(function(token) { paidScope.add(token); });
   });
   var unpaidScope = Array.from(allScope).some(function(token) { return !paidScope.has(token); });
+  if (allScope.size) {
+    descendants.forEach(function(e) {
+      if (e.result.after_import_skipped === 'no new photos') e.chained = false;
+    });
+  }
   var tagsApplied = (!!parentResult.tags_applied ||
     descendants.some(function(e) { return e.tagsApplied; })) && !unpaidScope;
   // The parent's chain step marks after a failed import too, but then
   // skips the collection and processing; apply the same ``ok`` filter
   // to the parent's own mark as to a descendant's (above). That is also
   // why a failed-files parent still owes processing to its Retry.
-  var chained = (!!parentResult.chained && parentResult.ok !== false) ||
+  var parentChainIds = importChainProcessJobIds(parentCfg, parentResult, rows, parent.id);
+  var chained = (!!parentCfg.chain_already_ran ||
+    (!!parentResult.chained && parentResult.ok !== false) ||
+    (!('chain_already_ran' in parentCfg) && importFailedBeforeStart(parentResult) && parentChainIds.length > 0)) &&
+    !importChainInvalidated(parentCfg, parentResult, rows, parent.id, neverStartedProcesses) ||
     descendants.some(function(e) { return e.chained; });
+  if (allScope.size && parentResult.after_import_skipped === 'no new photos') {
+    chained = descendants.some(function(e) { return e.chained; });
+  }
   // A Retry of a parent that was not interrupted replays no tags.
   var tagsPaid = (tagsApplied || !parentInterrupted) && !unpaidScope;
   var marked = descendants.filter(function(e) { return e.tagsApplied || e.chained; });

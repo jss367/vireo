@@ -2,4 +2,5 @@
 // Preserve setup order: folder browser, return/mode listeners, then page init.
 const importFolderBrowser = createImportFolderBrowser();
 bindAfterImportEvents();
+bindImportRecoveryRefresh();
 initImportPage();

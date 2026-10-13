@@ -8,6 +8,7 @@ capacity opens. Tests that need a "queued" precondition use
 so they stay meaningful regardless of the current ``SLOT_CAP`` value.
 """
 
+import json
 import threading
 import time
 
@@ -477,14 +478,17 @@ def test_cancel_queued_pipeline_transitions_row_to_cancelled(tmp_path):
     cancelled_view = runner.get(second_id)
     assert cancelled_view is not None
     assert cancelled_view["status"] == "cancelled"
+    assert cancelled_view["result"]["never_started"] is True
     events = runner.get_events(second_id)
     assert events
     assert events[-1]["type"] == "complete"
     assert events[-1]["data"]["status"] == "cancelled"
+    assert events[-1]["data"]["result"]["never_started"] is True
     row = db.conn.execute(
-        "SELECT status FROM job_history WHERE id = ?", (second_id,),
+        "SELECT status, result FROM job_history WHERE id = ?", (second_id,),
     ).fetchone()
     assert row["status"] == "cancelled"
+    assert json.loads(row["result"])["never_started"] is True
 
     # Releasing the slot-fillers must NOT promote the cancelled one.
     blocker.set()
@@ -858,6 +862,34 @@ def test_promoted_pipeline_with_pending_cancel_skips_work_fn(tmp_path):
     final = wait_for_job_via_runner(runner, job_id)
     assert final["status"] == "cancelled"
     assert not work_called.is_set()
+
+
+def test_shutdown_after_promotion_before_worker_start_records_never_started(tmp_path, monkeypatch):
+    """Recovery must not count a promoted but unstarted pipeline as paid work."""
+    runner, db = _make_runner_with_db(tmp_path)
+    work_called = threading.Event()
+
+    def shutdown_before_registration(job, work_fn):
+        assert runner.shutdown()
+        return False
+
+    monkeypatch.setattr(runner, "_start_worker_thread", shutdown_before_registration)
+    job_id = runner.enqueue_pipeline(
+        work_fn=lambda job: work_called.set(), config={}, workspace_id=1,
+    )
+    marker = {"cancelled": True, "never_started": True}
+    final = runner.get(job_id)
+    assert final["status"] == "cancelled"
+    assert final["result"] == marker
+    assert not work_called.is_set()
+    row = db.conn.execute(
+        "SELECT status, result, duration FROM job_history WHERE id = ?", (job_id,),
+    ).fetchone()
+    assert row["status"] == "cancelled"
+    assert json.loads(row["result"]) == marker
+    assert row["duration"] == 0.0
+    complete = [event for event in runner._events[job_id] if event["type"] == "complete"]
+    assert complete[-1]["data"]["result"] == marker
 
 
 def test_promotion_db_error_retries_queued_pipeline(tmp_path, monkeypatch):

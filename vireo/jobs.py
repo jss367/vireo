@@ -939,7 +939,7 @@ class JobRunner:
                     work_fn = ctx["work_fn"]
                     if job_id in self._cancelled:
                         def work_fn(job):
-                            return None
+                            return {"cancelled": True, "never_started": True}
 
         if record_terminal:
             self._record_terminal_queued_pipeline(job_id, ctx, status="cancelled")
@@ -948,7 +948,7 @@ class JobRunner:
                 "complete",
                 {
                     "status": "cancelled",
-                    "result": None,
+                    "result": {"cancelled": True, "never_started": True},
                     "duration": 0.0,
                     "errors": [],
                 },
@@ -966,6 +966,7 @@ class JobRunner:
             now = datetime.now().isoformat()
             with self._lock:
                 job["status"] = "cancelled"
+                job["result"] = {"cancelled": True, "never_started": True}
                 job["finished_at"] = now
                 job["_ended_at"] = time.time()
                 self._cancelled.discard(job["id"])
@@ -973,7 +974,7 @@ class JobRunner:
                 "job_id": job["id"],
                 "job_type": job["type"],
                 "status": "cancelled",
-                "result": None,
+                "result": {"cancelled": True, "never_started": True},
                 "duration": 0.0,
                 "errors": [],
             })
@@ -1021,7 +1022,7 @@ class JobRunner:
             "started_at": ctx["started_at"],
             "finished_at": finished_at,
             "progress": {"current": 0, "total": 0, "current_file": ""},
-            "result": None,
+            "result": {"cancelled": True, "never_started": True},
             "errors": [],
             "config": ctx["config"],
             "workspace_id": ctx["workspace_id"],
@@ -2231,9 +2232,9 @@ class JobRunner:
             try:
                 cur = conn.execute(
                     "UPDATE job_history "
-                    "SET status='cancelled', finished_at=? "
+                    "SET status='cancelled', finished_at=?, result=? "
                     "WHERE id = ? AND status = 'queued'",
-                    (cancelled_at, job_id),
+                    (cancelled_at, json.dumps({"cancelled": True, "never_started": True}), job_id),
                 )
                 conn.commit()
                 cancelled = cur.rowcount == 1
@@ -2286,7 +2287,7 @@ class JobRunner:
                 "complete",
                 {
                     "status": "cancelled",
-                    "result": None,
+                    "result": {"cancelled": True, "never_started": True},
                     "duration": 0.0,
                     "errors": [],
                 },

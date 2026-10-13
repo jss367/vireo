@@ -315,6 +315,9 @@ class _ImportPhotosRequest:
         local_processing = body.get("local_processing", False)
         if not isinstance(local_processing, bool):
             return ImportFailure("local_processing must be a boolean")
+        self.retry_direct_to_nas = body.get("retry_direct_to_nas", False)
+        if not isinstance(self.retry_direct_to_nas, bool):
+            return ImportFailure("retry_direct_to_nas must be a boolean")
         defer_nas_transfer = body.get("defer_nas_transfer", False)
         if not isinstance(defer_nas_transfer, bool):
             return ImportFailure("defer_nas_transfer must be a boolean")
@@ -859,9 +862,42 @@ class _ImportPhotosRequest:
         local_processing = self.local_processing
         self.managed_staging = None
         parent_staging = (parent_config or {}).get("managed_staging")
-        if parent_config is not None and bool(parent_config.get("defer_nas_transfer")) != self.defer_nas_transfer:
+        if self.retry_direct_to_nas:
+            if (parent_config is None or local_processing or self.defer_nas_transfer or self.after_process_move
+                    or not parent_staging
+                    or not self.parent_takeover_snapshot.get("direct_nas_retry_allowed")):
+                return ImportFailure("Retry directly to NAS is available only before any photos were imported locally")
+            parent_paths = parent_config.get("include_paths")
+            if (
+                self.include_paths != (set(parent_paths) if parent_paths is not None else None)
+                or self.previewed_count != parent_config.get("previewed_count")
+                or self.checked_count != parent_config.get("checked_count")
+                or set(self.sources) != set(parent_config.get("sources") or [])
+                or self.recursive != parent_config.get("recursive", True)
+                or self.file_types != parent_config.get("file_types", "both")
+            ):
+                return ImportFailure("Retry directly to NAS must preserve the original file selection")
+            from import_staging import check_staged_mount, plan_staged_import
+            from pipeline_job import _load_known_mount_roots
+            try:
+                # Reuse the staging planner's frozen destination/transport
+                # validation without creating or copying anything locally.
+                plan_staged_import(
+                    os.path.dirname(self.service.config["THUMB_CACHE_DIR"]), self.destination,
+                    self.remote_archive_config, parent_staging, _load_known_mount_roots(self.db),
+                )
+                check_staged_mount(self.destination, parent_staging.get("mount_baseline"),
+                                   parent_staging.get("mount_identities"))
+                staging_path = parent_staging["destination"]
+                if os.path.exists(staging_path):
+                    with os.scandir(staging_path) as entries:
+                        if next(entries, None) is not None:
+                            return ImportFailure("Photos remain in local temporary storage; retry with local processing")
+            except (ValueError, OSError, RuntimeError) as exc:
+                return ImportFailure(str(exc))
+        if parent_config is not None and not self.retry_direct_to_nas and bool(parent_config.get("defer_nas_transfer")) != self.defer_nas_transfer:
             return ImportFailure("A recovery retry must preserve the original NAS transfer timing")
-        if bool(parent_staging) != local_processing and parent_config is not None:
+        if bool(parent_staging) != local_processing and parent_config is not None and not self.retry_direct_to_nas:
             return ImportFailure("A recovery retry must preserve the original local processing choice")
         if local_processing:
             if self.after_import is None:
@@ -1011,8 +1047,8 @@ class _ImportPhotosRequest:
             "workspace_id": self.active_ws,
             "created_workspace": self.created_workspace,
             "carry_photo_ids": carry_photo_ids,
-            # Resume of an interrupted parent only (see
-            # ``_validate_parent_import_job``): the paths its landings sit at,
+            # Recovery scope from ``_validate_parent_import_job``: the paths
+            # the parent's landings sit at,
             # so this run recovers rows the parent's checkpoint missed, and the
             # photos still owed the tag/GPS pass. Persisted so a resume of
             # this run, should it be interrupted too, inherits both.
@@ -1025,6 +1061,11 @@ class _ImportPhotosRequest:
             "paid_tag_photo_ids": (
                 parent_resume["paid_tag_photo_ids"] if parent_resume else []
             ),
+            # A preparation failure happens before the result can mark the
+            # already-paid chain; keep its inherited evidence in the config.
+            "chain_already_ran": bool(parent_resume and parent_resume["chain_already_ran"]),
+            "chain_process_job_ids": parent_resume.get("chain_process_job_ids", []) if parent_resume else [],
+            "chain_process_job_groups": parent_resume.get("chain_process_job_groups", []) if parent_resume else [],
             # Fingerprint sidecar to carry_photo_ids so a retry-of-retry
             # can still verify the inherited scope by stable identity
             # even after the grandparent's job has aged out of history.
@@ -1138,6 +1179,7 @@ class _ImportPhotosJob:
         self.location_from_gps = request.location_from_gps
         self.carry_photo_ids = request.carry_photo_ids
         self.parent_resume = request.parent_resume
+        self.source_snapshots = request.parent_source_snapshots
         self.active_ws = request.active_ws
 
     def work(self, job):
@@ -1146,7 +1188,18 @@ class _ImportPhotosJob:
         service = self.service
         runner = self.runner
         parent_resume = self.parent_resume
-        import_destination = self._prepare_import_destination()
+        try:
+            import_destination = self._prepare_import_destination()
+        except Exception as exc:
+            # No copying, cataloging, tagging or processing has begun. Keep
+            # that evidence on both live snapshots and persisted history so
+            # recovery does not depend on a per-file failure count.
+            job["result"] = {
+                "ok": False, "error": str(exc), "import_not_started": True,
+            }
+            if self.source_snapshots:
+                job["result"]["source_snapshots"] = self.source_snapshots
+            raise
 
         params = ImportParams(
             sources=self.sources,
@@ -1233,6 +1286,12 @@ class _ImportPhotosJob:
             from local_processing import selected_source_files, storage_plan, total_file_bytes
             import_destination = managed_staging["destination"]
             files = selected_source_files(self.sources, self.file_types, self.recursive)
+            if not self.source_snapshots:
+                from import_job import _capture_source_snapshots
+                # Match normal import discovery: snapshot every source file
+                # before applying the user's per-file selection, so retries
+                # can compare the unchanged card even after a space failure.
+                self.source_snapshots = _capture_source_snapshots(files, self.sources)
             if self.include_paths is not None:
                 files = [p for p in files if str(p) in self.include_paths]
             space = storage_plan(self.vireo_dir, total_file_bytes(files))

@@ -4,6 +4,7 @@ import re
 import sqlite3
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from page_scripts import page_with_scripts
@@ -736,8 +737,10 @@ def test_jobs_page_returns_200(app_and_db):
     # resumable as a tag-only replay. ``ok !== false`` discounts a
     # ``chained`` mark on a failed row — ``_chain_after_import`` returns
     # early via its "import failed" branch without actually enqueueing
-    # processing.
-    assert 'result.chained && result.ok !== false && result.tags_applied' in html
+    # processing. A resume whose predecessor already paid the chain
+    # (``chain_already_ran``) also counts as chained so processing is
+    # not re-enqueued.
+    assert 'chain_already_ran || (result.chained && result.ok !== false)) && result.tags_applied' in html
     # Resume must force ``skip_duplicates=true`` — a parent import
     # configured with ``skip_duplicates=false`` would otherwise carry
     # that false through ``importRetryBody`` and the collision resolver
@@ -5416,6 +5419,11 @@ def test_managed_import_retry_reuses_staging_and_freezes_destination(app_and_db,
     parent = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert parent["status"] == "failed"
     body.update(parent_import_job_id=parent["id"], carry_photo_ids=parent["result"]["photo_ids"])
+    direct = client.post("/api/jobs/import-photos", json={
+        **body, "local_processing": False, "retry_direct_to_nas": True,
+    })
+    assert direct.status_code == 400
+    assert "before any photos" in direct.get_json()["error"]
     rejected = client.post("/api/jobs/import-photos", json={**body, "destination": str(tmp_path / "another-NAS")})
     assert rejected.status_code == 400
     assert "destination has changed" in rejected.get_json()["error"]
@@ -5434,6 +5442,46 @@ def test_managed_import_retry_reuses_staging_and_freezes_destination(app_and_db,
         wait_for_job_via_client(client, job_id)
 
 
+@pytest.mark.parametrize("pipeline_status,pipeline_result,resumable", [
+    ("failed", {"never_started": True}, True),
+    ("cancelled", None, True),
+    ("completed", {"ok": True}, False),
+])
+@pytest.mark.parametrize("recorded", [True, False])
+def test_recovery_options_reads_pipeline_outside_history_window(
+    app_and_db, pipeline_status, pipeline_result, resumable, recorded,
+):
+    app, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) "
+        "VALUES ('old-pipeline','pipeline',?,'2020-01-01',?,?,?)",
+        (pipeline_status, json.dumps({"chained_from": "interrupted-import"}),
+         json.dumps(pipeline_result) if pipeline_result is not None else None,
+         db.active_workspace_id),
+    )
+    db.conn.execute(
+        "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) "
+        "VALUES ('interrupted-import','import','failed','2026-10-13',?,?,?)",
+        (json.dumps({"sources": ["/card"], "destination": "/archive", "chain_already_ran": recorded,
+                     "chain_process_job_ids": ["old-pipeline"] if recorded else []}),
+         json.dumps({"interrupted": True, "photo_ids": [1], "tags_applied": True}),
+         db.active_workspace_id),
+    )
+    db.conn.executemany(
+        "INSERT INTO job_history (id,type,status,started_at,workspace_id) "
+        "VALUES (?,'thumbnail','completed','2025-01-01',?)",
+        [(f"filler-{i}", db.active_workspace_id) for i in range(100)],
+    )
+    db.commit()
+    with app.test_client() as client:
+        history = client.get("/api/jobs/history?limit=100").get_json()
+        assert "interrupted-import" in {row["id"] for row in history}
+        assert "old-pipeline" not in {row["id"] for row in history}
+        options = client.get("/api/import/interrupted-import/recovery-options")
+        assert options.status_code == 200, options.get_json()
+        assert options.get_json()["resume_allowed"] is resumable
+
+
 def test_managed_import_checks_temporary_disk_space(app_and_db, tmp_path, monkeypatch):
     import local_processing
 
@@ -5448,6 +5496,207 @@ def test_managed_import_checks_temporary_disk_space(app_and_db, tmp_path, monkey
     assert job["status"] == "failed"
     assert not (tmp_path / "staging").exists()
     assert "Not enough free space" in str(job["errors"])
+    assert job["result"]["import_not_started"] is True
+    wait_for_job_via_client(client, job["id"], wait_for_history=True)
+    history = client.get("/api/jobs/history").get_json()
+    assert next(row for row in history if row["id"] == job["id"])["result"]["import_not_started"] is True
+    options = client.get(f"/api/import/{job['id']}/recovery-options")
+    assert options.status_code == 200
+    assert options.get_json()["direct_to_nas_allowed"] is True
+    assert not (tmp_path / "staging").exists()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("direct_to_nas", [False, True])
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("selection", [False, True])
+def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
+    app_and_db, tmp_path, monkeypatch, stub_move, legacy, direct_to_nas, deferred, selection,
+):
+    import local_processing
+    import pipeline_job
+
+    app, db = app_and_db
+    monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": False})
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", lambda *a, **kw: {"ok": True})
+    client = app.test_client()
+    card = _import_card(tmp_path, names=("selected.jpg", "excluded.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(Path(card) / "excluded.jpg")
+    body = {
+        "sources": [card], "destination": str(tmp_path / "NAS" / "trip"),
+        "local_processing": True, "after_import": _process_id(db, "Cull-ready"),
+        "defer_nas_transfer": deferred,
+        "include_paths": [str(tmp_path / "import-card" / "selected.jpg")],
+        "previewed_count": 2, "checked_count": 1,
+    }
+    if not selection:
+        for key in ("include_paths", "previewed_count", "checked_count"):
+            body.pop(key)
+    response = client.post("/api/jobs/import-photos", json=body)
+    parent = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    if legacy:
+        # Old releases kept only the error. Exercise the persisted-history
+        # validation path, after the runner prunes its in-memory row.
+        db.conn.execute("UPDATE job_history SET result=? WHERE id=?", (
+            json.dumps({"error": parent["result"]["error"]}), parent["id"],
+        ))
+        db.commit()
+        with app._job_runner.admission_guard():
+            app._job_runner._jobs.pop(parent["id"], None)
+    if not direct_to_nas:
+        monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": True})
+    body["parent_import_job_id"] = parent["id"]
+    if direct_to_nas:
+        body.update(local_processing=False, defer_nas_transfer=False, retry_direct_to_nas=True)
+        wrong_destination = client.post("/api/jobs/import-photos", json={
+            **body, "destination": str(tmp_path / "other-NAS"),
+        })
+        assert wrong_destination.status_code == 400
+        assert "destination has changed" in wrong_destination.get_json()["error"]
+    response = client.post("/api/jobs/import-photos", json=body)
+    assert response.status_code == 200, response.get_json()
+    retried = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert retried["status"] == "completed", retried
+    assert retried["result"]["copied"] == (1 if selection else 2)
+    if direct_to_nas:
+        assert retried["config"]["managed_staging"] is None
+        assert not (tmp_path / "staging").exists()
+        assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == (1 if selection else 2)
+        assert len(list((tmp_path / "import-card").rglob("*.jpg"))) == 2
+        if selection:
+            assert not list((tmp_path / "NAS").rglob("excluded.jpg"))
+    else:
+        assert retried["config"]["managed_staging"] == parent["config"]["managed_staging"]
+    processed = wait_for_job_via_client(client, retried["result"]["process_job_id"])
+    if direct_to_nas:
+        assert not processed["result"].get("move_job_ids")
+        assert not stub_move
+    for job_id in processed["result"].get("move_job_ids", []):
+        wait_for_job_via_client(client, job_id)
+    rejected = client.post("/api/jobs/import-photos", json=body)
+    assert rejected.status_code == 409, rejected.get_json()
+    assert rejected.get_json()["taken_over_by_job_id"] == retried["id"]
+
+
+@pytest.mark.parametrize("remaining_work", ["staged_file", "descendant", "grandchild", "never_started_ancestor", "inherited_scope"])
+def test_direct_nas_retry_refuses_existing_local_import_work(
+    app_and_db, tmp_path, monkeypatch, remaining_work,
+):
+    import local_processing
+
+    app, db = app_and_db
+    monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": False})
+    client = app.test_client()
+    body = {
+        "sources": [_import_card(tmp_path)], "destination": str(tmp_path / "NAS"),
+        "local_processing": True, "after_import": _process_id(db, "Cull-ready"),
+    }
+    response = client.post("/api/jobs/import-photos", json=body)
+    parent = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    if remaining_work == "staged_file":
+        staging = Path(parent["config"]["managed_staging"]["destination"])
+        staging.mkdir(parents=True)
+        (staging / "keep.jpg").write_bytes(b"already imported")
+    elif remaining_work in {"descendant", "grandchild", "never_started_ancestor"}:
+        child_parent = parent["id"]
+        if remaining_work != "descendant":
+            db.conn.execute(
+                "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
+                "VALUES ('before-copy-child', 'import', 'failed', ?, ?, ?)",
+                (json.dumps({"parent_import_job_id": parent["id"]}),
+                 json.dumps({"never_started": True} if remaining_work == "never_started_ancestor"
+                            else {"import_not_started": True}), db.active_workspace_id),
+            )
+            child_parent = "before-copy-child"
+        db.conn.execute(
+            "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
+            "VALUES ('cancelled-retry', 'import', 'cancelled', ?, ?, ?)",
+            (json.dumps({"parent_import_job_id": child_parent}),
+             json.dumps({"cancelled": True, "landed_files": {"/local/photo.jpg": [1, 2, "hash"]}}),
+             db.active_workspace_id),
+        )
+        db.commit()
+    else:
+        with app._job_runner.admission_guard():
+            app._job_runner._jobs[parent["id"]]["config"]["carry_photo_ids"] = [123]
+    response = client.post("/api/jobs/import-photos", json={
+        **body, "parent_import_job_id": parent["id"],
+        "local_processing": False, "retry_direct_to_nas": True,
+    })
+    options = client.get(f"/api/import/{parent['id']}/recovery-options")
+    assert options.status_code == 200, options.get_json()
+    assert options.get_json()["direct_to_nas_allowed"] is False
+    assert response.status_code == 400, response.get_json()
+    if remaining_work == "staged_file":
+        assert (staging / "keep.jpg").read_bytes() == b"already imported"
+    assert not (tmp_path / "NAS").exists()
+
+
+@pytest.mark.parametrize("change", ["omit", "replace", "preview_count", "checked_count", "recursive", "file_types"])
+def test_direct_nas_retry_rejects_changed_selection(app_and_db, tmp_path, monkeypatch, change):
+    import local_processing
+
+    app, db = app_and_db
+    monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": False})
+    client = app.test_client()
+    card = _import_card(tmp_path, names=("selected.jpg", "excluded.jpg"))
+    body = {"sources": [card], "destination": str(tmp_path / "NAS"),
+            "local_processing": True, "after_import": _process_id(db, "Cull-ready"),
+            "include_paths": [str(Path(card) / "selected.jpg")], "previewed_count": 2, "checked_count": 1}
+    response = client.post("/api/jobs/import-photos", json=body)
+    parent = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    body.update(parent_import_job_id=parent["id"], local_processing=False, retry_direct_to_nas=True)
+    if change == "omit":
+        for key in ("include_paths", "previewed_count", "checked_count"):
+            body.pop(key)
+    elif change == "replace":
+        body["include_paths"] = [str(Path(card) / "excluded.jpg")]
+    elif change == "preview_count":
+        body["previewed_count"] = 3
+    elif change == "checked_count":
+        body["checked_count"] = 0
+    elif change == "recursive":
+        body["recursive"] = False
+    else:
+        body["file_types"] = "jpg"
+    rejected = client.post("/api/jobs/import-photos", json=body)
+    assert rejected.status_code == 400, rejected.get_json()
+    error = rejected.get_json()["error"]
+    assert "original file selection" in error or (change == "file_types" and "source contents have changed" in error)
+    assert not (tmp_path / "NAS").exists()
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("selection", [False, True])
+@pytest.mark.parametrize("source_change", ["new_file", "replacement"])
+def test_initial_disk_space_failure_preserves_card_snapshot_for_retry(
+    app_and_db, tmp_path, monkeypatch, direct, selection, source_change,
+):
+    import local_processing
+
+    app, db = app_and_db
+    monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": False})
+    client = app.test_client()
+    card = _import_card(tmp_path, names=("selected.jpg", "excluded.jpg"))
+    body = {"sources": [card], "destination": str(tmp_path / "NAS"),
+            "local_processing": True, "after_import": _process_id(db, "Cull-ready")}
+    if selection:
+        body.update(include_paths=[str(Path(card) / "selected.jpg")], previewed_count=2, checked_count=1)
+    response = client.post("/api/jobs/import-photos", json=body)
+    failed = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    assert failed["result"]["source_snapshots"][card]["count"] == 2
+    with app._job_runner.admission_guard():
+        app._job_runner._jobs.pop(failed["id"], None)
+    changed_path = Path(card) / ("new-file.jpg" if source_change == "new_file" else "selected.jpg")
+    Image.new("RGB", (16, 16), "blue").save(changed_path)
+    body["parent_import_job_id"] = failed["id"]
+    if direct:
+        body.update(local_processing=False, retry_direct_to_nas=True)
+    rejected = client.post("/api/jobs/import-photos", json=body)
+    assert rejected.status_code == 400, rejected.get_json()
+    assert "source contents have changed" in rejected.get_json()["error"]
+    assert not (tmp_path / "staging").exists()
+    assert not (tmp_path / "NAS").exists()
 
 
 def test_managed_import_to_ssh_target_preserves_final_subpath(app_and_db, tmp_path, monkeypatch, stub_move):
@@ -12243,6 +12492,135 @@ def test_retry_of_a_failed_import_goes_through_a_retry_that_failed_too(
         })
         assert resp.status_code == 200, resp.get_json()
         wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+
+@pytest.mark.parametrize("chain_paid,never_started,cancelled,alternative", [
+    (False, False, False, False), (True, False, False, False),
+    (True, True, False, False), (True, False, True, False), (True, False, True, True),
+])
+def test_resume_preparation_failure_preserves_paid_chain_on_retry(
+    app_and_db, tmp_path, monkeypatch, chain_paid, never_started, cancelled, alternative,
+):
+    import pipeline_job
+    from services.import_photos import _ImportPhotosJob
+
+    app, db = app_and_db
+    client = app.test_client()
+    original_id, photo_ids = _interrupted_tagged_import(app, db, client, tmp_path, "Recovery tags")
+    original = next(row for row in client.get("/api/jobs/history").get_json() if row["id"] == original_id)
+    original["result"]["chained"] = chain_paid
+    original["config"]["after_import"] = _process_id(db, "Cull-ready")
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", lambda *a, **kw: {"ok": True})
+    if chain_paid:
+        original["result"]["process_job_id"] = "original-process"
+        db.conn.execute(
+            "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
+            "VALUES ('original-process', 'pipeline', 'queued', ?, '{}', ?)",
+            (json.dumps({"chained_from": original_id}), db.active_workspace_id),
+        )
+    db.conn.execute("UPDATE job_history SET result=?, config=? WHERE id=?", (
+        json.dumps(original["result"]), json.dumps(original["config"]), original_id,
+    ))
+    db.commit()
+    prepare = _ImportPhotosJob._prepare_import_destination
+
+    def fail_preparation(self):
+        raise ValueError("Temporary storage unavailable")
+
+    monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", fail_preparation)
+    body = _resume_body(client, original_id)
+    response = client.post("/api/jobs/import-photos", json=body)
+    assert response.status_code == 200, response.get_json()
+    failed = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    assert failed["result"]["import_not_started"] is True
+    assert failed["config"]["chain_already_ran"] is chain_paid
+    assert failed["config"]["chain_process_job_ids"] == (["original-process"] if chain_paid else [])
+    assert failed["config"]["chain_process_job_groups"] == ([["original-process"]] if chain_paid else [])
+    assert failed["result"]["source_snapshots"] == original["result"]["source_snapshots"]
+    monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", prepare)
+    if never_started or cancelled:
+        # Reproduce rows saved before pipeline provenance was recorded.
+        if alternative:
+            failed["config"]["chain_process_job_ids"] = ["original-process", "alternative-process"]
+            failed["config"]["chain_process_job_groups"] = [["original-process", "alternative-process"]]
+            db.conn.execute(
+                "INSERT INTO job_history (id,type,status,config,result,workspace_id) "
+                "VALUES ('alternative-process','pipeline','completed','{}','{}',?)", (db.active_workspace_id,),
+            )
+        else:
+            failed["config"].pop("chain_process_job_ids")
+        db.conn.execute("UPDATE job_history SET config=? WHERE id=?", (
+            json.dumps(failed["config"]), failed["id"],
+        ))
+        with app._job_runner.admission_guard():
+            app._job_runner._jobs.pop(failed["id"], None)
+        db.conn.execute("UPDATE job_history SET status=?, result=? WHERE id='original-process'", (
+            "cancelled" if cancelled else "failed", None if cancelled else json.dumps({"never_started": True}),
+        ))
+        db.commit()
+    chain = _ImportPhotosJob._chain_after_import
+    chain_calls = []
+
+    def record_chain(self, job, result):
+        chain_calls.append(job["id"])
+        return chain(self, job, result)
+
+    monkeypatch.setattr(_ImportPhotosJob, "_chain_after_import", record_chain)
+    body["parent_import_job_id"] = failed["id"]
+    response = client.post("/api/jobs/import-photos", json=body)
+    assert response.status_code == 200, response.get_json()
+    retried = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert retried["status"] == "completed", retried
+    still_paid = chain_paid and (alternative or (not never_started and not cancelled))
+    assert retried["config"]["chain_already_ran"] is still_paid
+    assert len(chain_calls) == (0 if still_paid else 1)
+    if still_paid:
+        assert retried["result"]["after_import_skipped"] == "chain already ran on the interrupted parent"
+        if alternative:
+            assert retried["config"]["chain_process_job_groups"] == [["alternative-process", "original-process"]]
+    assert set(retried["config"]["carry_photo_ids"]) == set(photo_ids)
+    if retried["result"].get("process_job_id"):
+        wait_for_job_via_client(client, retried["result"]["process_job_id"])
+
+
+@pytest.mark.parametrize("source_change", ["new_file", "replacement"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_resume_preparation_failure_keeps_source_snapshot_for_next_retry(
+    app_and_db, tmp_path, monkeypatch, source_change, legacy,
+):
+    from services.import_photos import _ImportPhotosJob
+
+    app, db = app_and_db
+    client = app.test_client()
+    original_id, _ = _interrupted_tagged_import(app, db, client, tmp_path, "Recovery tags")
+    prepare = _ImportPhotosJob._prepare_import_destination
+
+    def fail_preparation(self):
+        raise ValueError("Temporary storage unavailable")
+
+    monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", fail_preparation)
+    body = _resume_body(client, original_id)
+    response = client.post("/api/jobs/import-photos", json=body)
+    assert response.status_code == 200, response.get_json()
+    failed = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    assert failed["result"]["source_snapshots"]
+    monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", prepare)
+    if legacy:
+        db.conn.execute("UPDATE job_history SET result=? WHERE id=?", (
+            json.dumps({"error": "Not enough free space on this computer for temporary processing. Free up space or import fewer photos."}),
+            failed["id"],
+        ))
+        db.commit()
+    with app._job_runner.admission_guard():
+        app._job_runner._jobs.pop(failed["id"], None)
+    card = Path(body["sources"][0])
+    changed_path = card / ("new-file.jpg" if source_change == "new_file" else "DSC_0000.jpg")
+    Image.new("RGB", (16, 16), "blue").save(changed_path)
+    body["parent_import_job_id"] = failed["id"]
+    rejected = client.post("/api/jobs/import-photos", json=body)
+    assert rejected.status_code == 400, rejected.get_json()
+    assert "source contents have changed" in rejected.get_json()["error"]
+    assert not list((tmp_path / "arch").rglob("new-file.jpg"))
 
 
 def test_resume_replays_tags_when_chain_ran_but_tags_owed(

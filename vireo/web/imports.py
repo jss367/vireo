@@ -1093,6 +1093,10 @@ def create_imports_blueprint(
         body = request.get_json(silent=True) or {}
         return import_response(imports.import_photos(get_db(), body))
 
+    @blueprint.get("/api/import/<job_id>/recovery-options")
+    def api_import_recovery_options(job_id):
+        return import_response(imports.recovery_options(get_db(), job_id))
+
     @blueprint.get("/api/import/pending-archives")
     def api_pending_archives():
         from pending_archives import active_archive_jobs

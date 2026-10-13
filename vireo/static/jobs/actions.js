@@ -59,12 +59,33 @@ function bindDetailPaneActions() {
       return;
     }
     var retryImportBtn = e.target.closest('[data-retry-import-job]');
+    var recoveryCheckBtn = e.target.closest('[data-check-import-recovery]');
+    if (recoveryCheckBtn) {
+      var recoveryJob = historyJobs.find(function(job) {
+        return job.id === recoveryCheckBtn.getAttribute('data-check-import-recovery');
+      });
+      if (recoveryJob) {
+        refreshHistoryImportRecovery(recoveryJob);
+        if (selectedJobId === recoveryJob.id) renderHistoryDetail(recoveryJob);
+      }
+      return;
+    }
     if (retryImportBtn) {
       var retryJobId = retryImportBtn.getAttribute('data-retry-import-job');
       var retryJob = activeJobs.concat(historyJobs).find(function(job) {
         return job.id === retryJobId;
       });
+      if (retryJob && (retryJob.import_resume_pending ||
+          (retryJob.import_recovery_options && retryJob.import_recovery_options.error &&
+           (!importFailedBeforeStart(retryJob.result) || !retryJob.import_recovery_options.retryable)))) {
+        if (typeof showToast === 'function') showToast(
+          retryJob.import_resume_pending ? 'Checking recovery options…' : retryJob.import_recovery_options.error,
+          'info');
+        return;
+      }
       var retryBody = importRetryBody(retryJob);
+      var directToNas = retryImportBtn.hasAttribute('data-retry-direct-to-nas');
+      if (directToNas) retryBody = directNasImportRetryBody(retryJob, retryBody, historyJobs);
       if (!retryBody) {
         if (typeof showToast === 'function') {
           showToast('The original import settings are no longer available.', 'error');
@@ -107,10 +128,26 @@ function bindDetailPaneActions() {
       var isResume = retryImportBtn.hasAttribute('data-import-resume');
       retryImportBtn.disabled = true;
       retryImportBtn.textContent = isResume ? 'Resuming…' : 'Starting retry…';
-      fetch('/api/jobs/import-photos', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(retryBody),
+      pendingImportRetries[retryJobId] = true;
+      var retryButtons = document.getElementById('jobDetailPane').querySelectorAll('[data-retry-import-job]');
+      retryButtons.forEach(function(button) { button.disabled = true; });
+      var eligibility = Promise.resolve();
+      if (directToNas) {
+        eligibility = fetchImportRecoveryOptions(retryJobId)
+          .then(function(options) {
+            var current = historyJobs.find(function(job) { return job.id === retryJobId; });
+            if (current) current.import_recovery_options = options;
+            if (options.direct_to_nas_allowed !== true) {
+              throw new Error(options.error || 'Direct-to-NAS retry is no longer available. Retry with the original settings.');
+            }
+          });
+      }
+      eligibility.then(function() {
+        return fetch('/api/jobs/import-photos', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(retryBody),
+        });
       }).then(function(response) {
         return response.json().catch(function() { return {}; }).then(function(data) {
           if (!response.ok) {
@@ -119,6 +156,7 @@ function bindDetailPaneActions() {
           return data;
         });
       }).then(function(data) {
+        delete pendingImportRetries[retryJobId];
         if (typeof showToast === 'function') {
           showToast(isResume
             ? 'Import resumed. Files already imported will be skipped.'
@@ -129,8 +167,14 @@ function bindDetailPaneActions() {
         currentView = data.job_id;
         fetchJobs();
       }).catch(function(error) {
+        delete pendingImportRetries[retryJobId];
+        retryButtons.forEach(function(button) { button.disabled = false; });
         retryImportBtn.disabled = false;
         retryImportBtn.textContent = retryOriginalLabel;
+        if (selectedJobId === retryJobId) {
+          var failedRetryParent = historyJobs.find(function(job) { return job.id === retryJobId; });
+          if (failedRetryParent) renderHistoryDetail(failedRetryParent);
+        }
         if (typeof showToast === 'function') showToast(error.message, 'error');
       });
       return;

@@ -17,6 +17,7 @@ var LEAF_MAX = 20;
 var cancellingJobIds = {};
 // Preserve pending restart controls across polling redraws.
 var inPlaceRestarts = {};
+var pendingImportRetries = {};
 var collapsedSteps = {};
 var activeWsId = null;
 var workspaceNames = {};

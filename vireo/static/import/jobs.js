@@ -231,6 +231,36 @@ async function finishJob(jobId) {
   renderResult(job.result, job.status);
 }
 
+async function refreshImportRecoveryOptions(job) {
+  const generation = ++importRecoveryGeneration;
+  if (!canRetryImportDirectToNas(job)) return;
+  try {
+    const response = await fetch('/api/import/' + encodeURIComponent(job.id) + '/recovery-options', {cache: 'no-store'});
+    const options = await response.json();
+    if (generation !== importRecoveryGeneration || lastFinishedImportJob !== job) return;
+    if (response.ok && options.direct_to_nas_allowed === true) {
+      document.getElementById('btnRetryImportDirectToNas').style.display = '';
+      const directHint = document.getElementById('retryImportDirectHint');
+      directHint.textContent = 'Direct to NAS skips the local copy of the originals and keeps the same processing settings.';
+      directHint.style.display = '';
+    }
+  } catch (_error) {
+    // Unknown eligibility leaves the direct option hidden; regular recovery
+    // remains available and the server revalidates every retry request.
+  }
+}
+
+function bindImportRecoveryRefresh() {
+  function refresh() {
+    if (document.hidden || importStartPending || activeJobId || !lastFinishedImportJob) return;
+    document.getElementById('btnRetryImportDirectToNas').style.display = 'none';
+    document.getElementById('retryImportDirectHint').style.display = 'none';
+    refreshImportRecoveryOptions(lastFinishedImportJob);
+  }
+  window.addEventListener('focus', refresh);
+  document.addEventListener('visibilitychange', refresh);
+}
+
 function retryBodyFromFinishedJob(job) {
   const cfg = (job && job.config) || {};
   // Recovery retry always POSTs to /api/jobs/import-photos, which rejects
@@ -335,15 +365,21 @@ function retryBodyFromFinishedJob(job) {
   return body;
 }
 
-async function retryFailedImport() {
-  const button = document.getElementById('btnRetryImport');
+async function retryFailedImport(directToNas) {
+  if (importStartPending || activeJobId) return;
+  const button = document.getElementById(directToNas ? 'btnRetryImportDirectToNas' : 'btnRetryImport');
+  const otherButton = document.getElementById(directToNas ? 'btnRetryImport' : 'btnRetryImportDirectToNas');
   const hint = document.getElementById('retryImportHint');
-  const body = retryBodyFromFinishedJob(lastFinishedImportJob);
+  let body = retryBodyFromFinishedJob(lastFinishedImportJob);
+  if (directToNas) body = directNasImportRetryBody(lastFinishedImportJob, body);
   if (!body) {
     hint.textContent = 'The original import settings are no longer available. Start a new import from the source card.';
     return;
   }
+  const originalLabel = button.textContent;
+  ++importRecoveryGeneration;
   button.disabled = true;
+  otherButton.disabled = true;
   button.textContent = 'Starting retry…';
   hint.textContent = 'Already imported files will be skipped.';
   // Flip the in-flight flag BEFORE the retry request goes out — not after
@@ -359,7 +395,14 @@ async function retryFailedImport() {
   // Codex review.
   importStartPending = true;
   updateStartGate();
+  let directAllowed = !directToNas;
   try {
+    if (directToNas) {
+      const optionsResponse = await fetch('/api/import/' + encodeURIComponent(body.parent_import_job_id) + '/recovery-options', {cache: 'no-store'});
+      const options = await optionsResponse.json().catch(() => ({}));
+      directAllowed = optionsResponse.ok && options.direct_to_nas_allowed === true;
+      if (!directAllowed) throw new Error(options.error || 'Direct-to-NAS recovery is no longer available for this import. Continue from Jobs.');
+    }
     const resp = await fetch('/api/jobs/import-photos', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -378,7 +421,12 @@ async function retryFailedImport() {
     importStartPending = false;
     updateStartGate();
     button.disabled = false;
-    button.textContent = 'Retry failed files';
+    otherButton.disabled = false;
+    button.textContent = originalLabel;
+    if (directToNas && !directAllowed) {
+      button.style.display = 'none';
+      document.getElementById('retryImportDirectHint').style.display = 'none';
+    }
     hint.textContent = String(e.message || e);
   }
 }

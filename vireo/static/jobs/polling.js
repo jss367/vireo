@@ -1,6 +1,54 @@
 // Fetching active jobs and history from the server.
 // Classic page script; load boot.js after all definitions.
 
+function fetchImportRecoveryOptions(jobId) {
+  return fetch('/api/import/' + encodeURIComponent(jobId) + '/recovery-options', {cache: 'no-store'})
+    .then(function(response) {
+      return response.json().then(function(options) {
+        if (!response.ok) {
+          return Object.assign({}, options, {resume_allowed: false, direct_to_nas_allowed: false,
+            error: options.error || 'Could not check import recovery options.', retryable: response.status >= 500});
+        }
+        if (!options || typeof options.resume_allowed !== 'boolean' ||
+            typeof options.direct_to_nas_allowed !== 'boolean') throw new Error('Invalid import recovery options');
+        return options;
+      });
+    })
+    .catch(function() {
+      return {resume_allowed: false, direct_to_nas_allowed: false,
+        error: 'Could not check import recovery options.', retryable: true};
+    });
+}
+
+function refreshHistoryImportRecovery(job) {
+  if (job.import_resume_pending || job.import_direct_pending) return;
+  if (job.type !== 'import' || job.status !== 'failed' || !job.result) return;
+  var interrupted = job.result.interrupted && Array.isArray(job.result.photo_ids);
+  var directCandidate = canRetryImportDirectToNas(job, historyJobs);
+  if (!interrupted && !directCandidate) return;
+  var cfg = jobConfig(job);
+  var ids = importChainProcessJobIds(cfg, job.result, historyJobs, job.id);
+  var missing = ids.some(function(id) {
+    return !historyJobs.some(function(row) { return row.id === id; });
+  });
+  // No receipt can mean the checkpoint preceded the processing handoff.
+  // The server also searches pipelines by chained_from in that crash window.
+  if (!directCandidate && !missing && ids.length) return;
+  job.import_resume_pending = !!interrupted;
+  job.import_direct_pending = directCandidate;
+  function applyOptions(options) {
+    // A subsequent history refresh or selection must not receive stale eligibility.
+    if (historyJobs.indexOf(job) < 0) return;
+    job.import_resume_allowed = options.resume_allowed;
+    job.import_resume_pending = false;
+    job.import_direct_pending = false;
+    job.import_recovery_options = options;
+    if (selectedSource === 'history' && selectedJobId === job.id) renderHistoryDetail(job);
+    else if (currentView === 'history') renderHistoryOverview();
+  }
+  fetchImportRecoveryOptions(job.id).then(applyOptions);
+}
+
 function fetchJobs() {
   fetch('/api/jobs')
     .then(function(r) { return r.json(); })
@@ -57,6 +105,7 @@ function fetchHistory(refreshMissingSelection) {
       });
       updateList();
       populateTypeFilter();
+      historyJobs.forEach(refreshHistoryImportRecovery);
       if (refreshMissingSelection && selectedSource === 'active' && selectedJobId) {
         var historical = historyJobs.find(function(j) { return j.id === selectedJobId; });
         if (historical) {

@@ -110,12 +110,29 @@ function renderJobCard(job, options) {
   }
 
   var failedImportCount = job.result && Number(job.result.failed || 0);
+  var importNotStarted = job.status === 'failed' && importFailedBeforeStart(job.result);
   // Once a later resume or retry took over, the server refuses both
   // Resume and Retry on this row (409), so neither is offered; say where
   // to go instead.
   var resumeTakeover = importResumeTakeover(job, historyJobs);
-  var resumableImport = isResumableImport(job) && !resumeTakeover.by;
-  if (!isLive && (failedImportCount > 0 || resumableImport || resumeTakeover.by) &&
+  var resumableImport = isResumableImport(job, historyJobs) && !resumeTakeover.by;
+  if (!isLive && job.import_resume_pending) {
+    html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">Checking recovery options…</div>';
+  }
+  var recoveryOptions = job.import_recovery_options || {};
+  var recoveryBlocksRetry = recoveryOptions.error && (!importNotStarted || !recoveryOptions.retryable);
+  if (!isLive && !job.import_resume_pending && recoveryOptions.error) {
+    html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">' + esc(recoveryOptions.error);
+    if (recoveryOptions.taken_over_by_job_id) {
+      html += ' <button class="btn-retry" data-show-job="' + escapeAttr(recoveryOptions.taken_over_by_job_id) + '">Show that import</button>';
+    }
+    if (recoveryOptions.retryable) {
+      html += ' <button class="btn-retry" data-check-import-recovery="' + escapeAttr(job.id) + '">Check again</button>';
+    }
+    html += '</div>';
+  }
+  if (!isLive && !job.import_resume_pending && !recoveryBlocksRetry &&
+      (failedImportCount > 0 || importNotStarted || resumableImport || resumeTakeover.by) &&
       importRetryBody(job)) {
     var retryInFlight = hasActiveRetryFor(job.id);
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';
@@ -137,6 +154,22 @@ function renderJobCard(job, options) {
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '" data-import-resume>Resume import</button>';
       html += '<span style="margin-left:8px;">' + esc(importResumeHint(job)) + '</span>';
+    } else if (importNotStarted) {
+      html += '<button class="btn-retry" data-retry-import-job="' +
+        escapeAttr(job.id) + '">Retry import</button>';
+      var directAllowed = recoveryOptions.direct_to_nas_allowed === true &&
+        !job.import_direct_pending && canRetryImportDirectToNas(job, historyJobs);
+      if (directAllowed) {
+        html += '<button class="btn-retry" data-retry-import-job="' +
+          escapeAttr(job.id) + '" data-retry-direct-to-nas style="margin-left:8px;">Retry directly to NAS</button>';
+      }
+      html += '<span style="margin-left:8px;">Fix the error above, then retry with the same selection and settings.</span>';
+      if (job.import_direct_pending) {
+        html += '<span style="margin-left:8px;">Checking NAS retry option…</span>';
+      }
+      if (directAllowed) {
+        html += '<span style="margin-left:8px;">Direct to NAS skips local temporary storage and processes photos in the archive.</span>';
+      }
     } else {
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '">Retry ' + failedImportCount + ' failed file' +
