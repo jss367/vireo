@@ -21,7 +21,8 @@ def test_scripted_scroll_uses_current_motion_preference(live_server, page, surfa
         page.evaluate('''() => {
           retryBodyFromFinishedJob = () => ({sources: ['/example'], destination: '/archive'});
           updateStartGate = () => {};
-          watchJob = () => {};
+          // Simulate completion so each motion preference can start a retry.
+          watchJob = () => { activeJobId = null; importStartPending = false; };
           const originalFetch = window.fetch;
           window.fetch = (url, ...args) => url === '/api/jobs/import-photos'
             ? Promise.resolve({ok: true, json: async () => ({job_id: 'motion-test'})})
