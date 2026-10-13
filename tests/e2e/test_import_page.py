@@ -3956,6 +3956,33 @@ def test_import_action_summary_explains_form_problems_after_preview(live_server,
     expect(summary).to_have_text('3 files selected · 3 to copy')
 
 
+@pytest.mark.parametrize("width,height", [(667, 375), (390, 844)])
+def test_import_action_stays_above_jobs_with_long_error(live_server, page, width, height):
+    page.set_viewport_size({'width': width, 'height': height})
+    page.goto(f"{live_server['url']}/import")
+    _stub_preview(page, _files(12))
+    _set_destination(page)
+    _preview(page)
+    page.evaluate("toggleBottomPanel()")
+    page.evaluate("""showError(
+        'The archive could not be reached. Please reconnect and try again. '
+        + 'Additional error details. '.repeat(30), document.getElementById('btnStart'))""")
+    page.wait_for_function("""() => {
+        const footer = document.querySelector('.import-action-bar').getBoundingClientRect();
+        const panel = document.getElementById('bottomPanel').getBoundingClientRect();
+        return footer.bottom <= panel.top + 1;
+    }""")
+    button = page.locator('#btnStart').bounding_box()
+    error = page.locator('#importError').bounding_box()
+    navbar = page.locator('.navbar').bounding_box()
+    panel = page.locator('#bottomPanel').bounding_box()
+    assert button['y'] >= navbar['y'] + navbar['height']
+    assert button['y'] + button['height'] <= panel['y'] + 1
+    assert error['y'] >= navbar['y'] + navbar['height']
+    assert error['y'] + error['height'] <= panel['y'] + 1
+    assert page.locator('#importError').evaluate('(el) => el.scrollHeight > el.clientHeight')
+
+
 def _day_row(page, day):
     return page.locator(f"#importDayRows tr[data-day='{day}']")
 
