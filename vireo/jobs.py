@@ -724,7 +724,13 @@ class JobRunner:
                         round(elapsed, 1),
                         json.dumps(result, default=str)
                         if result is not None else None,
-                        len(job.get("errors") or []),
+                        # Mirror ``_persist_job``: a bounded-sample ``errors``
+                        # list publishes the real count as ``errors_total``,
+                        # so the checkpointed ``error_count`` must read that
+                        # too — otherwise an interrupted job's startup-sweep
+                        # ``+1`` lands on the capped sample size, not the
+                        # true total.
+                        JobRunner._error_total(job),
                         json.dumps(job.get("steps") or [], default=str),
                         self._build_summary(job),
                         json.dumps(progress, default=str),

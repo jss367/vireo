@@ -1315,13 +1315,20 @@ def create_job_launchers_blueprint(
                             if len(result["errors"]) < _MAX_ERROR_REASONS:
                                 result["errors"].append(reason)
                                 job["errors"].append(reason)
+                            elif result["failed"] > _MAX_ERROR_REASONS:
+                                # Live checkpoints snapshot ``result`` and
+                                # persist ``_error_total`` — publish the
+                                # count the moment it diverges from the
+                                # capped list, not just at the final return,
+                                # so a checkpoint mid-run (and the +1 the
+                                # startup sweep adds to an interrupted row)
+                                # reports the true total.
+                                result["errors_total"] = result["failed"]
                             result["ok"] = False
                     ctx.runner.push_event(job["id"], "progress", {
                         "current": result["processed"], "total": result["total"],
                         "current_file": filename, "phase": "Releasing local originals",
                     })
-                if result["failed"] > _MAX_ERROR_REASONS:
-                    result["errors_total"] = result["failed"]
                 return result
             finally:
                 thread_db.close()

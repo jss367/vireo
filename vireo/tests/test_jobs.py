@@ -852,6 +852,74 @@ def test_job_result_errors_total_reaches_persisted_error_count(tmp_path):
     )
 
 
+def test_checkpoint_persists_errors_total_not_capped_errors_length(tmp_path):
+    """A live checkpoint of a bounded-sample run must persist the true
+    ``errors_total`` as ``error_count``, not ``len(job['errors'])``. The
+    final ``_persist_job`` already does this (see
+    ``test_job_result_errors_total_reaches_persisted_error_count``); the
+    checkpoint path mirrors the same accounting so an interrupted row the
+    startup sweep bumps by +1 lands on the real total, not the capped
+    sample. The release-local-originals and importer paths both cap at
+    50 and would otherwise under-report ``error_count`` through every
+    checkpoint until the final persist.
+    """
+    import json as _json
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    worker_published = threading.Event()
+    release = threading.Event()
+
+    def work(job):
+        # Simulate a bounded-sample run mid-flight: ``job['errors']`` and
+        # ``result['errors']`` carry the capped slice, ``result['failed']``
+        # and ``errors_total`` carry the real count.
+        for i in range(50):
+            job["errors"].append(f"file_{i}.jpg: boom")
+        job["result"] = {
+            "failed": 200,
+            "errors": list(job["errors"]),
+            "errors_total": 200,
+            "ok": False,
+        }
+        worker_published.set()
+        release.wait(timeout=synchronization_timeout(5))
+        return job["result"]
+
+    job_id = runner.start("release-local-originals", work)
+    try:
+        assert worker_published.wait(timeout=synchronization_timeout(5))
+        # Force a deterministic checkpoint while the row is still running.
+        runner.checkpoint_live_jobs()
+        row = db.conn.execute(
+            "SELECT status, error_count, result FROM job_history WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "running"
+        assert row["error_count"] == 200, (
+            "checkpoint must persist errors_total, not the capped sample "
+            f"length; got {row['error_count']}"
+        )
+        persisted_result = _json.loads(row["result"])
+        assert persisted_result["errors_total"] == 200
+        assert len(persisted_result["errors"]) == 50
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+
+    final = db.conn.execute(
+        "SELECT status, error_count FROM job_history WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert final["status"] == "failed"
+    assert final["error_count"] == 200
+
+
 def test_failed_job_history_preserves_structured_result(tmp_path):
     """When a work function stashes a structured result on job['result']
     before raising, _persist_job must preserve that structure in history

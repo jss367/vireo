@@ -375,6 +375,62 @@ def test_release_caps_error_reasons_sample_but_keeps_total_count(
     assert result["errors_total"] == len(photo_ids)
 
 
+def test_release_cancellation_after_cap_still_publishes_errors_total(
+    client_with_photo, monkeypatch,
+):
+    """Cancellation mid-run must still publish the real failure total: the
+    checkpoint path and the startup-sweep +1 both read ``errors_total``, so
+    a run cancelled after the sample cap is reached must set it while the
+    loop is still running, not only in the final-return path.
+    """
+    import offline_cache
+    from web.job_launchers import _MAX_ERROR_REASONS
+
+    app, db, pid = client_with_photo
+    folder_id = db.get_photo(pid)["folder_id"]
+    # Exceed the cap by a visible margin so ``errors_total`` must track the
+    # live total, not the capped slice length.
+    extras = _MAX_ERROR_REASONS + 10
+    photo_ids = [pid]
+    for i in range(extras):
+        photo_ids.append(
+            db.add_photo(
+                folder_id, f"missing_{i}.jpg", ".jpg", file_size=1, file_mtime=0.0,
+            )
+        )
+
+    def pretend_failed(*args, **kwargs):
+        return {"status": "failed", "bytes": 0, "reason": "cache directory unwritable"}
+
+    monkeypatch.setattr(offline_cache, "release_photo_original", pretend_failed)
+
+    push = app._job_runner.push_event
+    cancel_at = _MAX_ERROR_REASONS + 5
+
+    def cancel_after_cap(job_id, event_type, data):
+        push(job_id, event_type, data)
+        if (
+            event_type == "progress"
+            and data.get("phase") == "Releasing local originals"
+            and (data.get("current") or 0) >= cancel_at
+        ):
+            app._job_runner.cancel_job(job_id)
+
+    monkeypatch.setattr(app._job_runner, "push_event", cancel_after_cap)
+
+    job = run_release(app, {"photo_ids": photo_ids})
+    assert job["status"] == "cancelled", job
+    result = job["result"]
+    # The loop was interrupted after at least ``cancel_at`` failures and
+    # before processing every photo, so ``errors_total`` must reflect the
+    # live ``failed`` count — not the capped sample length and not a value
+    # the final-return path would have otherwise set.
+    assert result["failed"] >= cancel_at
+    assert result["failed"] < len(photo_ids)
+    assert len(result["errors"]) == _MAX_ERROR_REASONS
+    assert result["errors_total"] == result["failed"]
+
+
 def test_release_folder_includes_cached_descendants_only(client_with_photo):
     app, db, pid = client_with_photo
     base, source, row = cache_fixture(client_with_photo)
