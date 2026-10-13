@@ -73,7 +73,9 @@ document.addEventListener('keydown', function(e) {
     }
   }
   // Cmd/Ctrl+1..9 → tab position or fixed page, according to Settings.
-  if (mod && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+  // Match logical digits: some layouts need Shift to produce them. A shifted
+  // symbol such as "!" is not a digit and still leaves this handler untouched.
+  if (mod && !e.altKey && /^[1-9]$/.test(e.key)) {
     const pages = window.vireoNumberedNavigationPages();
     const idx = parseInt(e.key, 10) - 1;
     const target = pages[idx];

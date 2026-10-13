@@ -8,10 +8,10 @@ const pages = [
   ['import', '/import'], ['browse', '/browse'], ['pipeline', '/pipeline'],
   ['pipeline_review', '/pipeline/review'], ['review', '/review'], ['cull', '/cull'],
   ['jobs', '/jobs'], ['highlights', '/highlights'], ['misses', '/misses'],
-  ['keywords', '/keywords'], ['storage', '/storage'],
+  ['keywords', '/keywords'], ['storage', '/storage'], ['settings', '/settings'],
 ].map(([id, href]) => ({id, href}));
 
-function harness(invoke) {
+function harness(invoke, platform = 'MacIntel') {
   let tabs = ['keywords', 'storage', 'browse'];
   let keydown;
   const window = {
@@ -21,7 +21,7 @@ function harness(invoke) {
   };
   if (invoke) window.__TAURI_INTERNALS__ = {invoke};
   vm.runInNewContext(source, {
-    window, navigator: {platform: 'MacIntel'}, console,
+    window, navigator: {platform}, console,
     document: {addEventListener: (type, callback) => { if (type === 'keydown') keydown = callback; }},
   });
   return {
@@ -29,7 +29,7 @@ function harness(invoke) {
     reorder: order => { tabs = order; },
     press: (key, modifiers = {}) => {
       let prevented = false;
-      keydown({key, metaKey: true, shiftKey: false, altKey: false,
+      keydown({key, metaKey: platform === 'MacIntel', ctrlKey: platform === 'Win32', shiftKey: false, altKey: false,
         preventDefault: () => { prevented = true; }, ...modifiers});
       return prevented;
     },
@@ -63,9 +63,28 @@ test('unavailable tab positions and modified numbers do not navigate', () => {
   const h = harness();
   assert.equal(h.press('9'), false);
   assert.equal(h.press('1', {altKey: true}), false);
-  assert.equal(h.press('1', {shiftKey: true}), false);
+  assert.equal(h.press('!', {shiftKey: true}), false);
   assert.equal(h.press('1', {metaKey: false}), false);
   assert.equal(h.window.location.href, '');
+});
+
+test('locale-required Shift preserves logical digits in both modes and the desktop Settings fallback', async () => {
+  for (const platform of ['MacIntel', 'Win32']) {
+    for (const native of [false, true]) {
+      const h = harness(native ? async () => {} : undefined, platform);
+      for (const mode of ['tab_order', 'fixed_pages']) {
+        await h.window.vireoSetNumberedNavigationMode(mode);
+        assert(h.press('1', {shiftKey: true, code: 'Digit1'}));
+        assert.equal(h.window.location.href, mode === 'tab_order' ? '/keywords' : '/import');
+        assert.equal(h.press('!', {shiftKey: true, code: 'Digit1'}), false);
+        assert.equal(h.press('1', {shiftKey: true, altKey: true}), false);
+      }
+      h.reorder(['settings', 'browse']);
+      await h.window.vireoSetNumberedNavigationMode('tab_order');
+      assert(h.press('1', {shiftKey: true, code: 'Digit1'}));
+      assert.equal(h.window.location.href, '/settings');
+    }
+  }
 });
 
 test('native menu updates use the same destinations and finish in order', async () => {
