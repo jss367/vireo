@@ -737,8 +737,10 @@ def test_jobs_page_returns_200(app_and_db):
     # resumable as a tag-only replay. ``ok !== false`` discounts a
     # ``chained`` mark on a failed row — ``_chain_after_import`` returns
     # early via its "import failed" branch without actually enqueueing
-    # processing.
-    assert 'result.chained && result.ok !== false && result.tags_applied' in html
+    # processing. A resume whose predecessor already paid the chain
+    # (``chain_already_ran``) also counts as chained so processing is
+    # not re-enqueued.
+    assert 'chain_already_ran || (result.chained && result.ok !== false)) && result.tags_applied' in html
     # Resume must force ``skip_duplicates=true`` — a parent import
     # configured with ``skip_duplicates=false`` would otherwise carry
     # that false through ``importRetryBody`` and the collision resolver
