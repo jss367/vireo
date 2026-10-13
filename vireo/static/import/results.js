@@ -120,6 +120,12 @@ function renderResult(res, status) {
       unsafe.style.display = '';
       unsafe.appendChild(li);
     }
+    if (res.error) {
+      const li = document.createElement('li');
+      li.textContent = res.error;
+      unsafe.style.display = '';
+      unsafe.appendChild(li);
+    }
   }
   // Copy imports leave a second copy on the card, so offer the cleanup
   // page here — including (especially) when the card is NOT safe to
@@ -131,19 +137,23 @@ function renderResult(res, status) {
     cardCleanupImportSources = importedSources;
     freeUpCardBtn.style.display = '';
   }
-  document.getElementById('resultSummary').textContent =
-    res.discovered + ' discovered · ' + res.copied + ' copied · ' +
-    res.skipped_duplicate + ' duplicates skipped · ' + res.failed + ' failed' +
-    (status && status !== 'completed' ? ' · job ' + status : '');
+  const importNotStarted = status === 'failed' && importFailedBeforeStart(res);
+  document.getElementById('resultSummary').textContent = importNotStarted
+    ? 'Import stopped before copying began.'
+    : res.discovered + ' discovered · ' + res.copied + ' copied · ' +
+      res.skipped_duplicate + ' duplicates skipped · ' + res.failed + ' failed' +
+      (status && status !== 'completed' ? ' · job ' + status : '');
   renderFolderTable(document.getElementById('resultFolders'), res.folders || {});
 
   const failedCount = Number(res.failed || 0);
-  if (failedCount > 0 && retryBodyFromFinishedJob(lastFinishedImportJob)) {
+  if ((failedCount > 0 || importNotStarted) && retryBodyFromFinishedJob(lastFinishedImportJob)) {
     retryRow.style.display = '';
-    retryButton.textContent = 'Retry ' + failedCount + ' failed file' +
-      (failedCount === 1 ? '' : 's');
-    retryHint.textContent =
-      'Uses the same source and destination; successful files are skipped.';
+    retryButton.textContent = importNotStarted
+      ? 'Retry import'
+      : 'Retry ' + failedCount + ' failed file' + (failedCount === 1 ? '' : 's');
+    retryHint.textContent = importNotStarted
+      ? 'Fix the error above, then retry with the same selection and settings.'
+      : 'Uses the same source and destination; successful files are skipped.';
   }
 
   renderChainInfo(res);

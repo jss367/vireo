@@ -5448,6 +5448,51 @@ def test_managed_import_checks_temporary_disk_space(app_and_db, tmp_path, monkey
     assert job["status"] == "failed"
     assert not (tmp_path / "staging").exists()
     assert "Not enough free space" in str(job["errors"])
+    assert job["result"]["import_not_started"] is True
+    history = client.get("/api/jobs/history").get_json()
+    assert next(row for row in history if row["id"] == job["id"])["result"]["import_not_started"] is True
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
+    app_and_db, tmp_path, monkeypatch, stub_move, legacy,
+):
+    import local_processing
+    import pipeline_job
+
+    app, db = app_and_db
+    monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": False})
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", lambda *a, **kw: {"ok": True})
+    client = app.test_client()
+    body = {
+        "sources": [_import_card(tmp_path)], "destination": str(tmp_path / "NAS" / "trip"),
+        "local_processing": True, "after_import": _process_id(db, "Cull-ready"),
+    }
+    response = client.post("/api/jobs/import-photos", json=body)
+    parent = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    if legacy:
+        # Old releases kept only the error. Exercise the persisted-history
+        # validation path, after the runner prunes its in-memory row.
+        db.conn.execute("UPDATE job_history SET result=? WHERE id=?", (
+            json.dumps({"error": parent["result"]["error"]}), parent["id"],
+        ))
+        db.commit()
+        with app._job_runner.admission_guard():
+            app._job_runner._jobs.pop(parent["id"], None)
+    monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": True})
+    body["parent_import_job_id"] = parent["id"]
+    response = client.post("/api/jobs/import-photos", json=body)
+    assert response.status_code == 200, response.get_json()
+    retried = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert retried["status"] == "completed", retried
+    assert retried["result"]["copied"] == 1
+    assert retried["config"]["managed_staging"] == parent["config"]["managed_staging"]
+    processed = wait_for_job_via_client(client, retried["result"]["process_job_id"])
+    for job_id in processed["result"]["move_job_ids"]:
+        wait_for_job_via_client(client, job_id)
+    rejected = client.post("/api/jobs/import-photos", json=body)
+    assert rejected.status_code == 409, rejected.get_json()
+    assert rejected.get_json()["taken_over_by_job_id"] == retried["id"]
 
 
 def test_managed_import_to_ssh_target_preserves_final_subpath(app_and_db, tmp_path, monkeypatch, stub_move):

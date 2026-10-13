@@ -1146,7 +1146,16 @@ class _ImportPhotosJob:
         service = self.service
         runner = self.runner
         parent_resume = self.parent_resume
-        import_destination = self._prepare_import_destination()
+        try:
+            import_destination = self._prepare_import_destination()
+        except Exception as exc:
+            # No copying, cataloging, tagging or processing has begun. Keep
+            # that evidence on both live snapshots and persisted history so
+            # recovery does not depend on a per-file failure count.
+            job["result"] = {
+                "ok": False, "error": str(exc), "import_not_started": True,
+            }
+            raise
 
         params = ImportParams(
             sources=self.sources,

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 
-const src = ['format.js', 'import-retry.js']
+const src = fs.readFileSync('vireo/static/import-recovery.js', 'utf8') + '\n' + ['format.js', 'import-retry.js']
   .map(file => fs.readFileSync('vireo/static/jobs/' + file, 'utf8')).join('\n');
 function fn(name) {
   // Page functions are declared at the top level of their classic script.
@@ -16,7 +16,7 @@ function fn(name) {
 }
 
 const ctx = vm.createContext({});
-for (const name of ['jobConfig', 'hasFailedImportFiles', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
+for (const name of ['importFailedBeforeStart', 'jobConfig', 'hasFailedImportFiles', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
   vm.runInContext(fn(name), ctx);
 }
 ctx.scenarios = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));

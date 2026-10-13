@@ -1,4 +1,48 @@
+import pytest
 from playwright.sync_api import expect
+
+
+@pytest.mark.parametrize("result", [
+    {"error": "Not enough free space on this computer for temporary processing. Free up space or import fewer photos."},
+    {"error": "Temporary storage is unavailable", "import_not_started": True, "ok": False},
+])
+def test_import_failure_before_copy_offers_retry(live_server, page, result):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", progress={}, result=result, config={
+        "sources": ["/Volumes/CARD/DCIM"], "destination": "/Volumes/Photos/Archive",
+        "local_processing": True, "after_import": 1,
+        "include_paths": ["/Volumes/CARD/DCIM/selected.jpg"],
+        "previewed_count": 2, "checked_count": 1, "skip_duplicates": False,
+    })
+    captured = []
+
+    def retry(route):
+        captured.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Still not enough space"})
+
+    page.route("**/api/jobs/import-photos", retry)
+    _serve_jobs_page(live_server, page, job, history=True)
+    button = page.get_by_role("button", name="Retry import", exact=True)
+    expect(button).to_be_visible()
+    expect(page.locator("#jobDetailPane")).to_contain_text(result["error"])
+    expect(page.locator("#jobDetailPane")).not_to_contain_text("Retry 0 failed")
+    button.click()
+    expect(button).to_have_text("Retry import")
+    expect(button).to_be_enabled()
+    assert len(captured) == 1
+    assert captured[0]["parent_import_job_id"] == job["id"]
+    assert captured[0]["include_paths"] == job["config"]["include_paths"]
+    assert captured[0]["local_processing"] is True
+    assert captured[0]["skip_duplicates"] is False
+
+    # A completed child owns the recovery; the old row points to it.
+    child = {**job, "id": "finished-retry", "status": "completed",
+             "started_at": "2026-08-16T22:00:00", "config": {
+                 **job["config"], "parent_import_job_id": job["id"],
+             }, "result": {"ok": True, "tags_applied": True, "chained": True}}
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, child])
+    expect(button).to_have_count(0)
+    expect(page.get_by_role("button", name="Show that import")).to_be_visible()
 
 
 def test_completed_move_source_cleanup_requires_review_and_opt_in(live_server, page):

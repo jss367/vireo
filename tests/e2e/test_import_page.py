@@ -1981,6 +1981,44 @@ def test_import_remote_destination_requires_visible_folder_inside_nas(
     )
 
 
+@pytest.mark.parametrize("result", [
+    {"error": "Not enough free space on this computer for temporary processing. Free up space or import fewer photos."},
+    {"error": "Temporary storage is unavailable", "import_not_started": True, "ok": False},
+])
+def test_import_failure_before_copy_result_offers_retry(live_server, page, result):
+    captured = []
+
+    def retry(route):
+        captured.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Still not enough space"})
+
+    page.route("**/api/jobs/import-photos", retry)
+    page.goto(f"{live_server['url']}/import")
+    config = {
+        "sources": ["/Volumes/CARD/DCIM"], "destination": "/Volumes/Photos/Archive",
+        "local_processing": True, "after_import": 1,
+        "include_paths": ["/Volumes/CARD/DCIM/selected.jpg"],
+        "previewed_count": 2, "checked_count": 1,
+    }
+    page.evaluate("job => { lastFinishedImportJob = job; renderResult(job.result, job.status); }", {
+        "id": "space-failure", "type": "import", "status": "failed",
+        "config": config, "result": result,
+    })
+    button = page.locator("#btnRetryImport")
+    expect(button).to_be_visible()
+    expect(button).to_have_text("Retry import")
+    expect(page.locator("#unsafeList")).to_contain_text(result["error"])
+    expect(page.locator("#resultSummary")).to_have_text("Import stopped before copying began.")
+    button.click()
+    expect(page.locator("#retryImportHint")).to_have_text("Still not enough space")
+    expect(button).to_be_enabled()
+    expect(button).to_have_text("Retry import")
+    assert len(captured) == 1
+    assert captured[0]["parent_import_job_id"] == "space-failure"
+    assert captured[0]["include_paths"] == config["include_paths"]
+    assert captured[0]["local_processing"] is True
+
+
 def test_failed_import_result_offers_preconfigured_retry(live_server, page):
     """A mixed import can retry from its result without rebuilding the form;
     the parent's duplicate-skip setting is preserved, and the parent's

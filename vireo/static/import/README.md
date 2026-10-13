@@ -5,6 +5,10 @@ navbar, transfer-help, and folder-browser scripts. Existing inline event
 handlers call the page's global functions. State retains its existing `let`
 and `const` bindings across scripts.
 
+The shared `/static/import-recovery.js` helper also serves the Jobs page. It
+recognizes failures before copying begins so the result shows the error and
+offers "Retry import", including for disk-space failures saved by older releases.
+
 | File | Responsibility |
 | --- | --- |
 | `state.js` | Shared source, preview, selection, readiness, and job state |

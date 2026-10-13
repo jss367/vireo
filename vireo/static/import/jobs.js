@@ -343,6 +343,7 @@ async function retryFailedImport() {
     hint.textContent = 'The original import settings are no longer available. Start a new import from the source card.';
     return;
   }
+  const originalLabel = button.textContent;
   button.disabled = true;
   button.textContent = 'Starting retry…';
   hint.textContent = 'Already imported files will be skipped.';
@@ -378,7 +379,7 @@ async function retryFailedImport() {
     importStartPending = false;
     updateStartGate();
     button.disabled = false;
-    button.textContent = 'Retry failed files';
+    button.textContent = originalLabel;
     hint.textContent = String(e.message || e);
   }
 }

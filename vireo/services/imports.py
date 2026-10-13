@@ -144,11 +144,25 @@ def _has_failed_files(result):
     )
 
 
+def _has_retryable_import_failure(result):
+    # The exact error fallback covers disk-space history rows written before
+    # the pre-import failure marker existed. Mirrors importFailedBeforeStart.
+    return (
+        _has_failed_files(result)
+        or result.get("import_not_started") is True
+        or result.get("error") == (
+            "Not enough free space on this computer for temporary processing. "
+            "Free up space or import fewer photos."
+        )
+    )
+
+
 def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
     """Whether a later run took over an import's Resume or Retry.
 
-    Two rows offer to continue an import: one a Vireo restart interrupted
-    (Resume) and one that failed files (Retry). An interrupted import owes
+    Rows offer to continue an import after a Vireo restart interrupted it
+    (Resume), files failed, or preparation failed before copying (Retry).
+    An interrupted import owes
     the tag/GPS pass (``tags_applied``) and the chain that records its
     collection and queues processing (``chained``); a failed one skipped
     processing, so it owes the chain over its photos plus the failed
@@ -184,7 +198,7 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
     """
     parent_result = _json_dict(parent_result)
     parent_interrupted = bool(parent_result.get("interrupted"))
-    if not (parent_interrupted or _has_failed_files(parent_result)):
+    if not (parent_interrupted or _has_retryable_import_failure(parent_result)):
         # Neither Resume nor Retry applies to this row.
         return {
             "tags_applied": bool(parent_result.get("tags_applied")),
@@ -1083,7 +1097,7 @@ class ImportService:
         if not isinstance(parent_source_snapshots, dict):
             parent_source_snapshots = None
         takeover = None
-        if parent_result.get("interrupted") or _has_failed_files(parent_result):
+        if parent_result.get("interrupted") or _has_retryable_import_failure(parent_result):
             takeover = import_resume_takeover(
                 parent_id, parent_result,
                 self._import_resume_rows(

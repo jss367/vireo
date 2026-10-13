@@ -6,6 +6,12 @@ scripts after the shared navbar scripts. They share page globals: the inline
 `window.applyFilters` (`list.js`), and the page relies on the navbar's
 `escapeAttr`, `safeFetch`, `showToast` and `window.formatJobType`.
 
+Both the Jobs and Import pages load `/static/import-recovery.js` to recognize
+failures before copying begins. New jobs record `result.import_not_started`;
+the helper also recognizes the disk-space error on older history rows. Those
+rows offer "Retry import" without inventing a failed-file count, and participate
+in the same active-retry and completed-descendant gates as failed-file retries.
+
 | File | Responsibility |
 | --- | --- |
 | `state.js` | Shared page state: `activeJobs`, `historyJobs`, the selection (`selectedJobId`, `selectedSource`, `currentView`), the SSE stream, leaf buffers, collapsed steps, optimistic cancels, and workspace names |

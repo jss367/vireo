@@ -89,7 +89,7 @@ function importResumeTakeover(parent, rows) {
   var parentResult = parent && parent.result;
   var parentInterrupted = !!(parentResult && parentResult.interrupted);
   if (!(parent && parent.type === 'import' && parentResult &&
-      (parentInterrupted || hasFailedImportFiles(parentResult)))) {
+      (parentInterrupted || hasFailedImportFiles(parentResult) || importFailedBeforeStart(parentResult)))) {
     return {tagsApplied: !!(parentResult && parentResult.tags_applied),
             chained: !!(parentResult && parentResult.chained),
             by: null, byStartedAt: null, kind: null, parentInterrupted: false};

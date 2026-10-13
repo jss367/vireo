@@ -110,12 +110,13 @@ function renderJobCard(job, options) {
   }
 
   var failedImportCount = job.result && Number(job.result.failed || 0);
+  var importNotStarted = job.status === 'failed' && importFailedBeforeStart(job.result);
   // Once a later resume or retry took over, the server refuses both
   // Resume and Retry on this row (409), so neither is offered; say where
   // to go instead.
   var resumeTakeover = importResumeTakeover(job, historyJobs);
   var resumableImport = isResumableImport(job) && !resumeTakeover.by;
-  if (!isLive && (failedImportCount > 0 || resumableImport || resumeTakeover.by) &&
+  if (!isLive && (failedImportCount > 0 || importNotStarted || resumableImport || resumeTakeover.by) &&
       importRetryBody(job)) {
     var retryInFlight = hasActiveRetryFor(job.id);
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';
@@ -137,6 +138,10 @@ function renderJobCard(job, options) {
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '" data-import-resume>Resume import</button>';
       html += '<span style="margin-left:8px;">' + esc(importResumeHint(job)) + '</span>';
+    } else if (importNotStarted) {
+      html += '<button class="btn-retry" data-retry-import-job="' +
+        escapeAttr(job.id) + '">Retry import</button>';
+      html += '<span style="margin-left:8px;">Fix the error above, then retry with the same selection and settings.</span>';
     } else {
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '">Retry ' + failedImportCount + ' failed file' +
