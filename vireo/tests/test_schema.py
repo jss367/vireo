@@ -418,3 +418,27 @@ def test_version_14_catalog_gains_paired_preview_cache(tmp_path):
             "filename", "photo_id", "bytes", "last_access_at",
         ]
         assert db.conn.execute("PRAGMA foreign_key_list(paired_preview_cache)").fetchone()[2] == "photos"
+
+
+def test_version_15_catalog_gains_prediction_history_instances_without_changing_predictions(tmp_path):
+    db_path = str(tmp_path / 'vireo.db')
+    schema.ensure_schema(db_path)
+    with Database(db_path, initialize_schema=False) as db:
+        fid = db.add_folder('/photos', name='Photos')
+        pid = db.add_photo(fid, 'bird.jpg', '.jpg', 100, 1.0)
+        did = db.save_detections(pid, [
+            {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
+        ], detector_model='test')[0]
+        db.add_prediction(did, 'Bald Eagle', .9, 'test')
+        original = [tuple(row) for row in db.conn.execute('SELECT * FROM predictions')]
+        db.conn.execute('DROP TABLE prediction_history_instances')
+        db.conn.execute('PRAGMA user_version = 15')
+        db.commit()
+    schema.ensure_schema(db_path)
+    with Database(db_path, initialize_schema=False) as db:
+        assert db.conn.execute('PRAGMA user_version').fetchone()[0] == 16
+        assert [tuple(row) for row in db.conn.execute('SELECT * FROM predictions')] == original
+        db.edit_history.ensure_prediction_instances([original[0][0]])
+        db.commit()
+        assert len(db.conn.execute('SELECT instance_id FROM prediction_history_instances').fetchone()[0]) == 32
+        assert db.conn.execute('PRAGMA foreign_key_check').fetchall() == []

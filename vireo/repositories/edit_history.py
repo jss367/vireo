@@ -71,8 +71,20 @@ class EditHistoryRepository:
         ).fetchone()
         return json.dumps({"links": links, "gps_review": review[0] if review else None})
 
+    def ensure_prediction_instances(self, prediction_ids: Sequence[int]) -> None:
+        """Create non-reusable history tokens; the decision caller owns the write."""
+        from sql_chunks import chunked
+        for ids in chunked(list(dict.fromkeys(prediction_ids))):
+            placeholders = ",".join("?" for _ in ids)
+            self.conn.execute(
+                "INSERT INTO prediction_history_instances(prediction_id) "
+                f"SELECT id FROM predictions WHERE id IN ({placeholders}) "
+                "ON CONFLICT(prediction_id) DO NOTHING",
+                ids,
+            )
+
     def prediction_status_state(self, prediction_ids: Sequence[int]) -> str:
-        """Snapshot statuses and semantic identities; SQLite can reuse row IDs."""
+        """Read statuses and instance/semantic identity without changing the catalog."""
         from sql_chunks import chunked
         statuses = {}
         ws = self.workspace_id
@@ -80,12 +92,14 @@ class EditHistoryRepository:
             placeholders = ",".join("?" for _ in ids)
             for row in self.conn.execute(
                 "SELECT p.id, COALESCE(r.status, 'pending') AS status, "
+                "instances.instance_id AS prediction_instance_id, "
                 "d.photo_id, p.detection_id, p.classifier_model, "
                 "p.labels_fingerprint, p.labels_fingerprint_full, p.species, "
                 "p.source_taxon_id, p.confidence, p.created_at AS prediction_created_at, "
                 "d.detector_model, d.runtime_fingerprint, d.box_x, d.box_y, d.box_w, d.box_h, "
                 "d.created_at AS detection_created_at "
                 "FROM predictions p JOIN detections d ON d.id = p.detection_id "
+                "LEFT JOIN prediction_history_instances instances ON instances.prediction_id = p.id "
                 "LEFT JOIN prediction_review r "
                 "ON r.prediction_id = p.id AND r.workspace_id = ? "
                 f"WHERE p.id IN ({placeholders}) ORDER BY p.id",

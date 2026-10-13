@@ -8913,8 +8913,10 @@ class Database:
         for pred_id, state in recorded.items():
             # Classification can reuse deleted IDs. Require the same photo,
             # subject and classifier output before restoring its decision.
-            # Earlier ID-only snapshots cannot prove identity and stay inert.
+            # Earlier snapshots without an instance token stay inert.
             if not isinstance(state, dict) or not state.get('identity'):
+                continue
+            if not state['identity'].get('prediction_instance_id'):
                 continue
             if state['identity'].get('photo_id') != pid:
                 continue

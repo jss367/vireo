@@ -311,3 +311,55 @@ def test_history_source_contract_reads_utf8_with_a_legacy_windows_default(monkey
 
     monkeypatch.setattr(Path, 'read_text', legacy_default)
     test_recorded_action_literals_have_replay_or_explicit_exclusion()
+
+
+@pytest.mark.parametrize('direction', ['undo', 'redo'])
+def test_identical_prediction_recreated_in_same_second_cannot_receive_old_history(app_and_db, direction):
+    import json
+
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]['id']
+    did = db.save_detections(pid, [
+        {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
+    ], detector_model='test')[0]
+    db.add_prediction(did, 'Bald Eagle', .9, 'test')
+    pred_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
+    assert client.post(f'/api/predictions/{pred_id}/reviewed').status_code == 200
+    before = json.loads(db.edit_history.prediction_status_state([pred_id]))[str(pred_id)]['identity']
+    if direction == 'redo':
+        assert client.post('/api/undo').status_code == 200
+    db.clear_predictions(model='test')
+    assert db.conn.execute('SELECT COUNT(*) FROM prediction_history_instances').fetchone()[0] == 0
+    db.add_prediction(did, 'Bald Eagle', .9, 'test', status='accepted')
+    replacement_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
+    assert replacement_id == pred_id
+    db.conn.execute('UPDATE predictions SET created_at = ? WHERE id = ?', (before['prediction_created_at'], pred_id))
+    # Even a replacement captured by another history action gets a fresh token.
+    db.edit_history.ensure_prediction_instances([pred_id])
+    db.commit()
+    after = json.loads(db.edit_history.prediction_status_state([pred_id]))[str(pred_id)]['identity']
+    assert before['prediction_instance_id'] != after['prediction_instance_id']
+    assert {k: v for k, v in before.items() if k != 'prediction_instance_id'} == {k: v for k, v in after.items() if k != 'prediction_instance_id'}
+    assert client.post('/api/' + direction).status_code == 200
+    assert db.get_prediction_status(pred_id) == 'accepted'
+
+
+def test_prediction_instance_is_stable_on_repeated_reads_and_catalog_reopen(app_and_db):
+    import json
+
+    from db import Database
+
+    _, db = app_and_db
+    pid = db.get_photos()[0]['id']
+    pred_id, _, _ = _predictions(db, pid)
+    db.edit_history.ensure_prediction_instances([pred_id])
+    db.commit()
+    before = json.loads(db.edit_history.prediction_status_state([pred_id]))
+    assert not db.in_transaction
+    db.edit_history.prediction_status_state([pred_id])
+    assert not db.in_transaction, 'Reading an identity must not take the writer lock'
+    with Database(db._db_path, initialize_schema=False) as reader:
+        reader.edit_history.ensure_prediction_instances([pred_id])
+        reader.commit()
+        assert json.loads(reader.edit_history.prediction_status_state([pred_id])) == before

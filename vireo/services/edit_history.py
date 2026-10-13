@@ -45,6 +45,7 @@ def change_photo_location(db, photo_id, keyword_id=None):
 
 def prediction_status_item(db, photo_id, prediction_ids, apply):
     """Record precisely the rows a status-only decision changes."""
+    db.edit_history.ensure_prediction_instances(prediction_ids)
     old_value = db.edit_history.prediction_status_state(prediction_ids)
     apply()
     new_value = db.edit_history.prediction_status_state(prediction_ids)
