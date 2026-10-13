@@ -141,6 +141,7 @@ GET          /api/stats
 GET          /api/storage
 GET          /api/storage/files
 GET          /api/storage/masks
+GET          /api/storage/retained
 GET          /api/sync/location-writes
 GET          /api/sync/preview
 GET          /api/sync/status
@@ -414,6 +415,8 @@ POST         /api/storage/masks/delete-inactive
 POST         /api/storage/masks/delete-stale
 POST         /api/storage/masks/delete-variant
 POST         /api/storage/open-folder
+POST         /api/storage/retained/clear
+POST         /api/storage/retention
 POST         /api/sync/discard
 POST         /api/sync/location-writes
 POST         /api/system/install-exiftool
