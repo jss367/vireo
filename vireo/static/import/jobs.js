@@ -335,16 +335,20 @@ function retryBodyFromFinishedJob(job) {
   return body;
 }
 
-async function retryFailedImport() {
-  const button = document.getElementById('btnRetryImport');
+async function retryFailedImport(directToNas) {
+  if (importStartPending || activeJobId) return;
+  const button = document.getElementById(directToNas ? 'btnRetryImportDirectToNas' : 'btnRetryImport');
+  const otherButton = document.getElementById(directToNas ? 'btnRetryImport' : 'btnRetryImportDirectToNas');
   const hint = document.getElementById('retryImportHint');
-  const body = retryBodyFromFinishedJob(lastFinishedImportJob);
+  let body = retryBodyFromFinishedJob(lastFinishedImportJob);
+  if (directToNas) body = directNasImportRetryBody(lastFinishedImportJob, body);
   if (!body) {
     hint.textContent = 'The original import settings are no longer available. Start a new import from the source card.';
     return;
   }
   const originalLabel = button.textContent;
   button.disabled = true;
+  otherButton.disabled = true;
   button.textContent = 'Starting retry…';
   hint.textContent = 'Already imported files will be skipped.';
   // Flip the in-flight flag BEFORE the retry request goes out — not after
@@ -379,6 +383,7 @@ async function retryFailedImport() {
     importStartPending = false;
     updateStartGate();
     button.disabled = false;
+    otherButton.disabled = false;
     button.textContent = originalLabel;
     hint.textContent = String(e.message || e);
   }

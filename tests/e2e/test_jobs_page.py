@@ -34,6 +34,17 @@ def test_import_failure_before_copy_offers_retry(live_server, page, result):
     assert captured[0]["include_paths"] == job["config"]["include_paths"]
     assert captured[0]["local_processing"] is True
     assert captured[0]["skip_duplicates"] is False
+    direct = page.get_by_role("button", name="Retry directly to NAS", exact=True)
+    expect(direct).to_be_visible()
+    direct.click()
+    expect(direct).to_be_enabled()
+    expect(direct).to_have_text("Retry directly to NAS")
+    assert len(captured) == 2
+    assert captured[1]["local_processing"] is False
+    assert captured[1]["defer_nas_transfer"] is False
+    assert captured[1]["retry_direct_to_nas"] is True
+    assert captured[1]["include_paths"] == job["config"]["include_paths"]
+    assert captured[1]["destination"] == job["config"]["destination"]
 
     # A completed child owns the recovery; the old row points to it.
     child = {**job, "id": "finished-retry", "status": "completed",
@@ -42,6 +53,7 @@ def test_import_failure_before_copy_offers_retry(live_server, page, result):
              }, "result": {"ok": True, "tags_applied": True, "chained": True}}
     page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, child])
     expect(button).to_have_count(0)
+    expect(direct).to_have_count(0)
     expect(page.get_by_role("button", name="Show that import")).to_be_visible()
 
 

@@ -2017,6 +2017,18 @@ def test_import_failure_before_copy_result_offers_retry(live_server, page, resul
     assert captured[0]["parent_import_job_id"] == "space-failure"
     assert captured[0]["include_paths"] == config["include_paths"]
     assert captured[0]["local_processing"] is True
+    direct = page.locator("#btnRetryImportDirectToNas")
+    expect(direct).to_be_visible()
+    direct.click()
+    expect(direct).to_be_enabled()
+    expect(direct).to_have_text("Retry directly to NAS")
+    assert len(captured) == 2
+    assert captured[1]["parent_import_job_id"] == "space-failure"
+    assert captured[1]["include_paths"] == config["include_paths"]
+    assert captured[1]["destination"] == config["destination"]
+    assert captured[1]["local_processing"] is False
+    assert captured[1]["defer_nas_transfer"] is False
+    assert captured[1]["retry_direct_to_nas"] is True
 
 
 def test_failed_import_result_offers_preconfigured_retry(live_server, page):

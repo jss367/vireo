@@ -32,6 +32,7 @@ function inPlaceRestartJobId(job) {
 // original failed import — still blocks the original's Retry button.
 function hasActiveRetryFor(parentId) {
   if (!parentId) return false;
+  if (pendingImportRetries[parentId]) return true;
   return activeJobs.some(function(candidate) {
     if (!candidate || candidate.type !== 'import') return false;
     var status = candidate.status;

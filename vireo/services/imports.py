@@ -144,16 +144,33 @@ def _has_failed_files(result):
     )
 
 
-def _has_retryable_import_failure(result):
+def _import_failed_before_start(result):
     # The exact error fallback covers disk-space history rows written before
     # the pre-import failure marker existed. Mirrors importFailedBeforeStart.
     return (
-        _has_failed_files(result)
-        or result.get("import_not_started") is True
+        result.get("import_not_started") is True
         or result.get("error") == (
             "Not enough free space on this computer for temporary processing. "
             "Free up space or import fewer photos."
         )
+    )
+
+
+def _has_retryable_import_failure(result):
+    return _has_failed_files(result) or _import_failed_before_start(result)
+
+
+def _can_retry_import_direct_to_nas(config, result):
+    return (
+        _import_failed_before_start(result)
+        and bool(config.get("local_processing"))
+        and not config.get("parent_import_job_id")
+        and not any((
+            config.get("carry_photo_ids"), config.get("untagged_photo_ids"),
+            config.get("recover_landed_files"), result.get("photo_ids"),
+            result.get("carried_photo_ids"), result.get("recovered_photo_ids"),
+            result.get("landed_files"),
+        ))
     )
 
 
@@ -1097,12 +1114,13 @@ class ImportService:
         if not isinstance(parent_source_snapshots, dict):
             parent_source_snapshots = None
         takeover = None
+        resume_rows = []
         if parent_result.get("interrupted") or _has_retryable_import_failure(parent_result):
+            resume_rows = self._import_resume_rows(
+                db, parent_id, parent_config, parent_workspace,
+            )
             takeover = import_resume_takeover(
-                parent_id, parent_result,
-                self._import_resume_rows(
-                    db, parent_id, parent_config, parent_workspace,
-                ), parent_config,
+                parent_id, parent_result, resume_rows, parent_config,
             )
             if takeover["by"] is not None:
                 return None, None, None, None, None, ImportFailure(
@@ -1122,6 +1140,19 @@ class ImportService:
             snapshot_out.update({
                 "parent_result": parent_result,
                 "takeover": json.loads(json.dumps(takeover)),
+                "direct_nas_retry_allowed": (
+                    parent_status == "failed"
+                    and _can_retry_import_direct_to_nas(parent_config, parent_result)
+                    and all(
+                        _import_failed_before_start(_json_dict(row.get("result")))
+                        or _json_dict(row.get("result")).get("never_started")
+                        for row in resume_rows
+                        if row.get("type") == "import" and (
+                            _json_dict(row.get("config")).get("parent_import_job_id") == parent_id
+                            or _json_dict(row.get("config")).get("root_import_job_id") == parent_id
+                        )
+                    )
+                ),
             })
         if takeover and relocate_landings:
             self._recover_relocated_descendant_landings(

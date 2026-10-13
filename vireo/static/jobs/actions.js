@@ -65,6 +65,8 @@ function bindDetailPaneActions() {
         return job.id === retryJobId;
       });
       var retryBody = importRetryBody(retryJob);
+      var directToNas = retryImportBtn.hasAttribute('data-retry-direct-to-nas');
+      if (directToNas) retryBody = directNasImportRetryBody(retryJob, retryBody);
       if (!retryBody) {
         if (typeof showToast === 'function') {
           showToast('The original import settings are no longer available.', 'error');
@@ -107,6 +109,9 @@ function bindDetailPaneActions() {
       var isResume = retryImportBtn.hasAttribute('data-import-resume');
       retryImportBtn.disabled = true;
       retryImportBtn.textContent = isResume ? 'Resuming…' : 'Starting retry…';
+      pendingImportRetries[retryJobId] = true;
+      var retryButtons = document.getElementById('jobDetailPane').querySelectorAll('[data-retry-import-job]');
+      retryButtons.forEach(function(button) { button.disabled = true; });
       fetch('/api/jobs/import-photos', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -119,6 +124,7 @@ function bindDetailPaneActions() {
           return data;
         });
       }).then(function(data) {
+        delete pendingImportRetries[retryJobId];
         if (typeof showToast === 'function') {
           showToast(isResume
             ? 'Import resumed. Files already imported will be skipped.'
@@ -129,6 +135,8 @@ function bindDetailPaneActions() {
         currentView = data.job_id;
         fetchJobs();
       }).catch(function(error) {
+        delete pendingImportRetries[retryJobId];
+        retryButtons.forEach(function(button) { button.disabled = false; });
         retryImportBtn.disabled = false;
         retryImportBtn.textContent = retryOriginalLabel;
         if (typeof showToast === 'function') showToast(error.message, 'error');

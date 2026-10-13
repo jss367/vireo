@@ -8,6 +8,9 @@ and `const` bindings across scripts.
 The shared `/static/import-recovery.js` helper also serves the Jobs page. It
 recognizes failures before copying begins so the result shows the error and
 offers "Retry import", including for disk-space failures saved by older releases.
+Before any local files have landed, "Retry directly to NAS" preserves the
+selection and destination while bypassing temporary originals storage; the
+selected process then runs on the archive copy.
 
 | File | Responsibility |
 | --- | --- |

@@ -141,7 +141,14 @@ function renderJobCard(job, options) {
     } else if (importNotStarted) {
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '">Retry import</button>';
+      if (canRetryImportDirectToNas(job)) {
+        html += '<button class="btn-retry" data-retry-import-job="' +
+          escapeAttr(job.id) + '" data-retry-direct-to-nas style="margin-left:8px;">Retry directly to NAS</button>';
+      }
       html += '<span style="margin-left:8px;">Fix the error above, then retry with the same selection and settings.</span>';
+      if (canRetryImportDirectToNas(job)) {
+        html += '<span style="margin-left:8px;">Direct to NAS skips local temporary storage and processes photos in the archive.</span>';
+      }
     } else {
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '">Retry ' + failedImportCount + ' failed file' +

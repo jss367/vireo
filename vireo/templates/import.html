@@ -500,6 +500,8 @@ body {
       <div class="row" id="retryImportRow" style="display:none;margin-top:10px;">
         <button class="btn btn-primary" type="button" id="btnRetryImport"
                 onclick="retryFailedImport()">Retry failed files</button>
+        <button class="btn" type="button" id="btnRetryImportDirectToNas" style="display:none;"
+                onclick="retryFailedImport(true)">Retry directly to NAS</button>
         <span class="hint" id="retryImportHint"></span>
       </div>
       <div class="result-links" style="margin-top:8px;">

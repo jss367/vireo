@@ -11,6 +11,10 @@ failures before copying begins. New jobs record `result.import_not_started`;
 the helper also recognizes the disk-space error on older history rows. Those
 rows offer "Retry import" without inventing a failed-file count, and participate
 in the same active-retry and completed-descendant gates as failed-file retries.
+"Retry directly to NAS" is available for a local-processing import that failed
+before copying. The server checks that neither the original run nor later
+attempts left imported photos, preserves the frozen archive destination, and
+runs the selected process in the archive instead of staging.
 
 | File | Responsibility |
 | --- | --- |

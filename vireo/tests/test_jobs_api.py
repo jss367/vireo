@@ -4,6 +4,7 @@ import re
 import sqlite3
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from page_scripts import page_with_scripts
@@ -5416,6 +5417,11 @@ def test_managed_import_retry_reuses_staging_and_freezes_destination(app_and_db,
     parent = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert parent["status"] == "failed"
     body.update(parent_import_job_id=parent["id"], carry_photo_ids=parent["result"]["photo_ids"])
+    direct = client.post("/api/jobs/import-photos", json={
+        **body, "local_processing": False, "retry_direct_to_nas": True,
+    })
+    assert direct.status_code == 400
+    assert "before any photos" in direct.get_json()["error"]
     rejected = client.post("/api/jobs/import-photos", json={**body, "destination": str(tmp_path / "another-NAS")})
     assert rejected.status_code == 400
     assert "destination has changed" in rejected.get_json()["error"]
@@ -5454,8 +5460,10 @@ def test_managed_import_checks_temporary_disk_space(app_and_db, tmp_path, monkey
 
 
 @pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("direct_to_nas", [False, True])
+@pytest.mark.parametrize("deferred", [False, True])
 def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
-    app_and_db, tmp_path, monkeypatch, stub_move, legacy,
+    app_and_db, tmp_path, monkeypatch, stub_move, legacy, direct_to_nas, deferred,
 ):
     import local_processing
     import pipeline_job
@@ -5464,9 +5472,13 @@ def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
     monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": False})
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", lambda *a, **kw: {"ok": True})
     client = app.test_client()
+    card = _import_card(tmp_path, names=("selected.jpg", "excluded.jpg"))
     body = {
-        "sources": [_import_card(tmp_path)], "destination": str(tmp_path / "NAS" / "trip"),
+        "sources": [card], "destination": str(tmp_path / "NAS" / "trip"),
         "local_processing": True, "after_import": _process_id(db, "Cull-ready"),
+        "defer_nas_transfer": deferred,
+        "include_paths": [str(tmp_path / "import-card" / "selected.jpg")],
+        "previewed_count": 2, "checked_count": 1,
     }
     response = client.post("/api/jobs/import-photos", json=body)
     parent = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
@@ -5479,20 +5491,79 @@ def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
         db.commit()
         with app._job_runner.admission_guard():
             app._job_runner._jobs.pop(parent["id"], None)
-    monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": True})
+    if not direct_to_nas:
+        monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": True})
     body["parent_import_job_id"] = parent["id"]
+    if direct_to_nas:
+        body.update(local_processing=False, defer_nas_transfer=False, retry_direct_to_nas=True)
+        wrong_destination = client.post("/api/jobs/import-photos", json={
+            **body, "destination": str(tmp_path / "other-NAS"),
+        })
+        assert wrong_destination.status_code == 400
+        assert "destination has changed" in wrong_destination.get_json()["error"]
     response = client.post("/api/jobs/import-photos", json=body)
     assert response.status_code == 200, response.get_json()
     retried = wait_for_job_via_client(client, response.get_json()["job_id"])
     assert retried["status"] == "completed", retried
     assert retried["result"]["copied"] == 1
-    assert retried["config"]["managed_staging"] == parent["config"]["managed_staging"]
+    if direct_to_nas:
+        assert retried["config"]["managed_staging"] is None
+        assert not (tmp_path / "staging").exists()
+        assert len(list((tmp_path / "NAS").rglob("*.jpg"))) == 1
+        assert len(list((tmp_path / "import-card").rglob("*.jpg"))) == 2
+        assert not list((tmp_path / "NAS").rglob("excluded.jpg"))
+    else:
+        assert retried["config"]["managed_staging"] == parent["config"]["managed_staging"]
     processed = wait_for_job_via_client(client, retried["result"]["process_job_id"])
-    for job_id in processed["result"]["move_job_ids"]:
+    if direct_to_nas:
+        assert not processed["result"].get("move_job_ids")
+        assert not stub_move
+    for job_id in processed["result"].get("move_job_ids", []):
         wait_for_job_via_client(client, job_id)
     rejected = client.post("/api/jobs/import-photos", json=body)
     assert rejected.status_code == 409, rejected.get_json()
     assert rejected.get_json()["taken_over_by_job_id"] == retried["id"]
+
+
+@pytest.mark.parametrize("remaining_work", ["staged_file", "descendant", "inherited_scope"])
+def test_direct_nas_retry_refuses_existing_local_import_work(
+    app_and_db, tmp_path, monkeypatch, remaining_work,
+):
+    import local_processing
+
+    app, db = app_and_db
+    monkeypatch.setattr(local_processing, "storage_plan", lambda *a, **kw: {"enough": False})
+    client = app.test_client()
+    body = {
+        "sources": [_import_card(tmp_path)], "destination": str(tmp_path / "NAS"),
+        "local_processing": True, "after_import": _process_id(db, "Cull-ready"),
+    }
+    response = client.post("/api/jobs/import-photos", json=body)
+    parent = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    if remaining_work == "staged_file":
+        staging = Path(parent["config"]["managed_staging"]["destination"])
+        staging.mkdir(parents=True)
+        (staging / "keep.jpg").write_bytes(b"already imported")
+    elif remaining_work == "descendant":
+        db.conn.execute(
+            "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
+            "VALUES ('cancelled-retry', 'import', 'cancelled', ?, ?, ?)",
+            (json.dumps({"parent_import_job_id": parent["id"]}),
+             json.dumps({"cancelled": True, "landed_files": {"/local/photo.jpg": [1, 2, "hash"]}}),
+             db.active_workspace_id),
+        )
+        db.commit()
+    else:
+        with app._job_runner.admission_guard():
+            app._job_runner._jobs[parent["id"]]["config"]["carry_photo_ids"] = [123]
+    response = client.post("/api/jobs/import-photos", json={
+        **body, "parent_import_job_id": parent["id"],
+        "local_processing": False, "retry_direct_to_nas": True,
+    })
+    assert response.status_code == 400, response.get_json()
+    if remaining_work == "staged_file":
+        assert (staging / "keep.jpg").read_bytes() == b"already imported"
+    assert not (tmp_path / "NAS").exists()
 
 
 def test_managed_import_to_ssh_target_preserves_final_subpath(app_and_db, tmp_path, monkeypatch, stub_move):

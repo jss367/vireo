@@ -5,6 +5,9 @@ function renderResult(res, status) {
   document.getElementById('resultCard').style.display = '';
   const retryRow = document.getElementById('retryImportRow');
   const retryButton = document.getElementById('btnRetryImport');
+  const directRetryButton = document.getElementById('btnRetryImportDirectToNas');
+  directRetryButton.style.display = 'none';
+  directRetryButton.disabled = false;
   const retryHint = document.getElementById('retryImportHint');
   retryRow.style.display = 'none';
   retryHint.textContent = '';
@@ -154,6 +157,10 @@ function renderResult(res, status) {
     retryHint.textContent = importNotStarted
       ? 'Fix the error above, then retry with the same selection and settings.'
       : 'Uses the same source and destination; successful files are skipped.';
+    if (canRetryImportDirectToNas(lastFinishedImportJob)) {
+      directRetryButton.style.display = '';
+      retryHint.textContent += ' Direct to NAS skips local temporary storage and processes photos in the archive.';
+    }
   }
 
   renderChainInfo(res);

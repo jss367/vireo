@@ -315,6 +315,9 @@ class _ImportPhotosRequest:
         local_processing = body.get("local_processing", False)
         if not isinstance(local_processing, bool):
             return ImportFailure("local_processing must be a boolean")
+        self.retry_direct_to_nas = body.get("retry_direct_to_nas", False)
+        if not isinstance(self.retry_direct_to_nas, bool):
+            return ImportFailure("retry_direct_to_nas must be a boolean")
         defer_nas_transfer = body.get("defer_nas_transfer", False)
         if not isinstance(defer_nas_transfer, bool):
             return ImportFailure("defer_nas_transfer must be a boolean")
@@ -859,9 +862,32 @@ class _ImportPhotosRequest:
         local_processing = self.local_processing
         self.managed_staging = None
         parent_staging = (parent_config or {}).get("managed_staging")
-        if parent_config is not None and bool(parent_config.get("defer_nas_transfer")) != self.defer_nas_transfer:
+        if self.retry_direct_to_nas:
+            if (local_processing or self.defer_nas_transfer or self.after_process_move
+                    or not parent_staging
+                    or not self.parent_takeover_snapshot.get("direct_nas_retry_allowed")):
+                return ImportFailure("Retry directly to NAS is available only before any photos were imported locally")
+            from import_staging import check_staged_mount, plan_staged_import
+            from pipeline_job import _load_known_mount_roots
+            try:
+                # Reuse the staging planner's frozen destination/transport
+                # validation without creating or copying anything locally.
+                plan_staged_import(
+                    os.path.dirname(self.service.config["THUMB_CACHE_DIR"]), self.destination,
+                    self.remote_archive_config, parent_staging, _load_known_mount_roots(self.db),
+                )
+                check_staged_mount(self.destination, parent_staging.get("mount_baseline"),
+                                   parent_staging.get("mount_identities"))
+                staging_path = parent_staging["destination"]
+                if os.path.exists(staging_path):
+                    with os.scandir(staging_path) as entries:
+                        if next(entries, None) is not None:
+                            return ImportFailure("Photos remain in local temporary storage; retry with local processing")
+            except (ValueError, OSError, RuntimeError) as exc:
+                return ImportFailure(str(exc))
+        if parent_config is not None and not self.retry_direct_to_nas and bool(parent_config.get("defer_nas_transfer")) != self.defer_nas_transfer:
             return ImportFailure("A recovery retry must preserve the original NAS transfer timing")
-        if bool(parent_staging) != local_processing and parent_config is not None:
+        if bool(parent_staging) != local_processing and parent_config is not None and not self.retry_direct_to_nas:
             return ImportFailure("A recovery retry must preserve the original local processing choice")
         if local_processing:
             if self.after_import is None:
