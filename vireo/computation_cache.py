@@ -1178,7 +1178,9 @@ class ArtifactStore:
             return
         for path in sorted(objects.rglob("*.json")):
             try:
-                body = path.read_bytes()
+                from services.retained_cache import reader_guard
+                with reader_guard("computation"):
+                    body = path.read_bytes()
                 artifact = validate_artifact(json.loads(body))
                 digest = artifact_digest(artifact)
                 if path.name == f"{digest}.json":

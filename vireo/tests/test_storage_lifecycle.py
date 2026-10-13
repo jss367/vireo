@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -51,6 +52,28 @@ def test_rollback_does_not_prune_shared_results(db, tmp_path):
     db.rollback()
     assert db.get_photo(photo)
     assert path.read_bytes() == original
+
+
+def test_result_pruning_waits_for_workspace_writer_and_keeps_its_new_results(tmp_path):
+    from pipeline_locks import acquire_workspace_regroup
+    from testing.waits import synchronization_timeout
+
+    path = tmp_path / "pipeline_results_ws99.json"
+    _pipeline(path, [1, 2])
+    started, finished = threading.Event(), threading.Event()
+    def prune():
+        started.set()
+        result_files.prune_photo_results(str(tmp_path), [1])
+        finished.set()
+    with acquire_workspace_regroup(99):
+        worker = threading.Thread(target=prune)
+        worker.start()
+        assert started.wait(synchronization_timeout(5))
+        assert not finished.wait(0.05)
+        _pipeline(path, [1, 2, 3])
+    worker.join(synchronization_timeout(5))
+    assert finished.is_set()
+    assert [photo["id"] for photo in json.loads(path.read_text())["photos"]] == [2, 3]
 
 
 def test_workspace_delete_removes_snapshots_history_and_never_reuses_id(app_and_db, tmp_path):
@@ -132,6 +155,17 @@ def test_recycled_id_mask_purge_uses_catalog_root_with_custom_thumbnails(db, tmp
     assert not mask.exists()
 
 
+def test_memory_catalog_never_purges_masks_relative_to_process_directory(tmp_path, monkeypatch):
+    from db import Database
+    from preview_cache import purge_cached_files_for_recycled_id
+
+    monkeypatch.chdir(tmp_path)
+    unrelated = _payload(tmp_path / "masks" / "123.png")
+    with Database(":memory:") as db:
+        assert not purge_cached_files_for_recycled_id(str(tmp_path / "generated" / "thumbs"), 123, db=db)
+    assert unrelated.exists()
+
+
 def _cache_config(tmp_path):
     return {"THUMB_CACHE_DIR": str(tmp_path / "generated" / "thumbs"),
             "COMPUTATION_CACHE_DIR": str(tmp_path / "computations"),
@@ -156,7 +190,7 @@ def test_automatic_retention_protects_recent_writes_and_important_files(tmp_path
     mask = _payload(root / "edit-masks" / "1.0123456789ab.png")
     trust = _payload(Path(config["COMPUTATION_CACHE_DIR"]) / "trust.json")
     object_path = _payload(Path(config["COMPUTATION_CACHE_DIR"]) / "objects" / "abc" / ("a" * 64 + ".json"))
-    result = retained_cache.cleanup(config, [], now=now)
+    result = retained_cache.cleanup(config, [], now=now, source_is_readable=lambda _path: True)
     assert result["deleted"] == 2 and result["ok"]
     assert not old.exists() and not object_path.exists()
     assert all(p.exists() for p in (fresh, staging, offline, mask, trust))
@@ -182,6 +216,90 @@ def test_retention_preserves_external_editor_changes_under_age_and_quota_limits(
     for family in ("external-editor", "external-dng"):
         with pytest.raises(ValueError, match="unique edits"):
             retained_cache.cleanup(config, [], family=family, clear=True)
+
+
+@pytest.mark.parametrize("problem", [None, "offline", "unreadable", "changed", "hash", "no-hash", "cache-source"])
+def test_automatic_render_retention_requires_independent_readable_sources(db, tmp_path, monkeypatch, problem):
+    import builtins
+    import hashlib
+
+    config = _cache_config(tmp_path)
+    root = Path(config["THUMB_CACHE_DIR"]).parent
+    source = _payload((root / "offline" if problem == "cache-source" else tmp_path / "photos") / "bird.jpg")
+    info = source.stat()
+    folder = db.add_folder(str(source.parent))
+    photo = db.add_photo(folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
+    db.commit()
+    render = _payload(root / "originals" / f"{photo}.display.jpg")
+    if problem == "offline":
+        source.unlink()
+    elif problem == "changed":
+        source.write_bytes(b"changed")
+    elif problem == "hash":
+        source.write_bytes(b"xxxxxxx")
+        os.utime(source, (info.st_atime, info.st_mtime))
+    elif problem == "no-hash":
+        db.conn.execute("UPDATE photos SET file_hash=NULL WHERE id=?", (photo,))
+        db.commit()
+    elif problem == "unreadable":
+        real_open = builtins.open
+        def refuse(path, *args, **kwargs):
+            if str(path) == str(source):
+                raise PermissionError("offline volume")
+            return real_open(path, *args, **kwargs)
+        monkeypatch.setattr(builtins, "open", refuse)
+    result = retained_cache.cleanup(
+        config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
+        source_is_readable=retained_cache.source_verifier(db, config),
+    )
+    assert render.exists() is (problem is not None)
+    assert result["kept_unverified_sources"] == (1 if problem else 0)
+
+
+def test_prepared_render_reader_is_pinned_until_response_opens(app_and_db, tmp_path, monkeypatch):
+    from testing.waits import synchronization_timeout
+    from web import media
+
+    app, db = app_and_db
+    config = _cache_config(tmp_path)
+    render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / "1.jpg")
+    checked, resume, cleanup_started = threading.Event(), threading.Event(), threading.Event()
+    responses, results = [], []
+    def prepared(*_args):
+        assert render.exists()
+        checked.set()
+        assert resume.wait(synchronization_timeout(5))
+        return str(render)
+    monkeypatch.setattr(media, "_prepared_full_resolution_render", prepared)
+    photo = db.get_photos()[0]["id"]
+    def read():
+        with app.test_client() as client:
+            response = client.get(f'/photos/{photo}/original')
+            responses.append((response.status_code, response.data))
+            response.close()
+    def clear():
+        cleanup_started.set()
+        results.append(retained_cache.cleanup(config, [], family="full-resolution", clear=True))
+    reader = threading.Thread(target=read)
+    cleaner = threading.Thread(target=clear)
+    reader.start()
+    try:
+        assert checked.wait(synchronization_timeout(5))
+        cleaner.start()
+        assert cleanup_started.wait(synchronization_timeout(5))
+        cleaner.join(0.05)
+        assert cleaner.is_alive() and render.exists()
+    finally:
+        resume.set()
+        reader.join(synchronization_timeout(5))
+        if cleaner.ident:
+            cleaner.join(synchronization_timeout(5))
+    assert responses == [(200, b"payload")]
+    assert len(results) == 1
+    # Windows may retain a file while the response descriptor is open.
+    retained_cache.cleanup(config, [], family="full-resolution", clear=True)
+    assert not render.exists()
 
 
 def test_retained_cleanup_rejects_photo_folders_and_symlinks(tmp_path):
@@ -277,6 +395,20 @@ def test_grouping_retention_rolls_back_partial_retirement(db, monkeypatch):
     assert not db.conn.in_transaction
     assert db.edit_history.grouping_payload(first)
     assert db.edit_history.grouping_payload(second)
+
+
+def test_grouping_retention_preserves_caller_transaction_and_smaller_snapshots(db):
+    smaller, oversized = _grouping_edit(db), _grouping_edit(db)
+    db.edit_history.store_grouping_payload(smaller, "x" * 10)
+    db.edit_history.store_grouping_payload(oversized, "x" * 1000)
+    db.commit()
+    db.begin_immediate()
+    db.edit_history.prune(1000, max_payload_bytes=100)
+    assert db.conn.in_transaction
+    assert db.edit_history.grouping_payload(smaller)
+    assert not db.edit_history.grouping_payload(oversized)
+    db.rollback()
+    assert db.edit_history.grouping_payload(oversized)
 
 
 def test_maintenance_keeps_workspace_created_during_the_pass(app_and_db, tmp_path, monkeypatch):

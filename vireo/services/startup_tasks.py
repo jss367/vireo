@@ -74,7 +74,7 @@ class StartupTasks:
     def _maintain_retained_caches(self, job):
         import config as cfg
         from services.result_files import delete_workspace_results, result_files
-        from services.retained_cache import cleanup
+        from services.retained_cache import cleanup, source_verifier
 
         runner = self._app._job_runner
         def checkpoint():
@@ -90,6 +90,7 @@ class StartupTasks:
                     "COMPUTATION_CACHE_DIR": self._app.config["COMPUTATION_CACHE_DIR"]}
         with Database(self._db_path) as db:
             result = cleanup(settings, db.storage.source_folder_paths(),
+                             source_is_readable=source_verifier(db, settings, checkpoint),
                              checkpoint=checkpoint, progress=progress)
             workspaces = db.workspaces.list_all()
             for workspace in workspaces:

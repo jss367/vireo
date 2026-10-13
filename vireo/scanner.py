@@ -50,6 +50,7 @@ from metadata import (
 from PIL import Image
 from preview_cache import (
     RecycledIdIndex,
+    catalog_masks_directory,
     cleanup_cached_files_for_deleted_photos,
     purge_cached_files_for_recycled_id,
 )
@@ -1428,7 +1429,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
                 if vireo_dir:
                     _defer_companion_derivative_cleanup(
                         post_commit_fs_actions, companion, vireo_dir,
-                        thumb_cache_dir, masks_dir=os.path.join(os.path.dirname(db._db_path), "masks"),
+                        thumb_cache_dir, masks_dir=catalog_masks_directory(db._db_path),
                     )
 
     commit_with_retry(db.conn)
@@ -4406,7 +4407,7 @@ class _ScanRun:
                 if self.vireo_dir else ""
             ),
             vireo_dir=self.vireo_dir,
-            masks_dir=os.path.join(os.path.dirname(self.db._db_path), "masks"),
+            masks_dir=catalog_masks_directory(self.db._db_path),
         )
         self.scoped_paths = {str(self.root_path)}
         if self.restrict_dirs is not None:

@@ -43,6 +43,11 @@ def lightbox_fit_preview_sizes(preview_max_size):
     return [full] + [size for size in LIGHTBOX_FIT_TIER_SIZES if size > full]
 
 
+def catalog_masks_directory(db_path):
+    """In-memory catalogs have no on-disk masks location."""
+    return os.path.join(os.path.dirname(os.path.abspath(db_path)), "masks") if db_path and db_path != ":memory:" else None
+
+
 def _mask_directories(vireo_dir, masks_dir=None):
     # Keep the generated-root location in the sweep for legacy layouts and
     # older imports, in addition to the current catalog-owned location.
@@ -694,7 +699,7 @@ def purge_cached_files_for_recycled_id(
     a source at or below the Unix epoch, and callers on the ingest path
     do have ``file_mtime`` in hand.
     """
-    masks_dir = os.path.join(os.path.dirname(db._db_path), "masks") if db is not None else None
+    masks_dir = catalog_masks_directory(getattr(db, "_db_path", None))
     if not thumb_cache_dir:
         return False
     if id_index is not None:

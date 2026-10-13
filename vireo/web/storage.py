@@ -44,7 +44,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
     def api_storage_retention(ctx):
         import config as cfg
         import config_schema as schema
-        from services.retained_cache import cleanup
+        from services.retained_cache import cleanup, source_verifier
 
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
@@ -63,6 +63,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         def work(job):
             with ctx.thread_db() as db:
                 result = cleanup(settings, db.storage.source_folder_paths(),
+                                 source_is_readable=source_verifier(db, settings, lambda: ctx.checkpoint(job)),
                                  checkpoint=lambda: ctx.checkpoint(job))
                 for workspace in db.workspaces.list_all():
                     ctx.checkpoint(job)
@@ -106,18 +107,18 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
             with ctx.thread_db() as db:
                 if family == "grouping-history":
                     db.begin_immediate()
-                    ids = db.storage.grouping_payload_ids()
-                    for edit_id in ids:
-                        ctx.checkpoint(job)
-                        db.edit_history.retire_stale_grouping_entry(edit_id)
-                    db.commit()
+                    with db.transaction():
+                        ids = db.storage.grouping_payload_ids()
+                        for edit_id in ids:
+                            ctx.checkpoint(job)
+                            db.edit_history.retire_stale_grouping_entry(edit_id)
                     return {"deleted": len(ids), "summary":
                             f"Removed {len(ids)} grouping undo and redo snapshots; photo edits were retained."}
 
                 def progress(current, total, path):
                     ctx.runner.push_event(job["id"], "progress", {
                         "current": current, "total": total,
-                        "current_file": os.path.basename(path), "phase": "Removing retained generated files",
+                        "current_file": os.path.basename(path), "phase": "Checking retained generated files",
                     })
                 result = cleanup(settings, db.storage.source_folder_paths(), family=family,
                                  clear=True, checkpoint=lambda: ctx.checkpoint(job), progress=progress)

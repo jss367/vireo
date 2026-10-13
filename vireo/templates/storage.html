@@ -269,7 +269,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
     <label for="groupingHistoryLimit">Grouping undo per workspace (MB)</label>
     <input id="groupingHistoryLimit" type="number" min="0" max="1048576" step="1" required aria-describedby="retainedPolicyNote">
   </div>
-  <p id="retainedPolicyNote" class="storage-legend">Maintenance runs hourly and after applying limits. Newly written files have a one-hour grace period. Age uses the latest filesystem access, write or change timestamp; 0 disables age expiry. Size 0 retains no generated files past the grace period. Grouping history retires the oldest completed snapshots first, preserving photo edits and snapshots awaiting redo. Removing snapshots makes space reusable inside the catalog; the database file may stay the same size.</p>
+  <p id="retainedPolicyNote" class="storage-legend">Maintenance runs hourly and after applying limits. Automatic render cleanup requires independent catalog sources to be fully readable and unchanged; offline or unverifiable sources are retained, even above the limit. Newly written files have a one-hour grace period. Age uses the latest filesystem access, write or change timestamp; 0 disables age expiry. Size 0 retains no generated files past the grace period. Grouping history retires the oldest completed snapshots first, preserving photo edits and snapshots awaiting redo. Removing snapshots makes space reusable inside the catalog; the database file may stay the same size.</p>
   <button class="btn-secondary" onclick="saveRetainedStoragePolicy(this)">Apply retention limits</button>
   <p id="retainedStorageStatus" role="status" aria-live="polite"></p>
   <div id="retainedStorageItems">Loading retained storage…</div>

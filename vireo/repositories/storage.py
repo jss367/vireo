@@ -16,6 +16,14 @@ class StorageRepository:
     def source_folder_paths(self) -> list[str]:
         return [row[0] for row in self.conn.execute("SELECT path FROM folders")]
 
+    def retained_source(self, photo_id: int) -> dict | None:
+        row = self.conn.execute(
+            """SELECT p.id, p.filename, p.file_size, p.file_mtime, p.file_hash,
+                      p.companion_path, f.path AS folder_path
+               FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?""", (photo_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def grouping_history(self, *, limit: int = 200) -> dict:
         summary = self.conn.execute(
             """SELECT COUNT(*) AS count,

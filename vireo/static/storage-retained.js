@@ -102,7 +102,7 @@ async function loadRetainedStorage() {
 async function clearRetainedStorage(type, name, button) {
   var message = type === 'grouping-history'
     ? 'Remove grouping undo and redo snapshots from every workspace? Current grouping and ordinary photo edits remain. Removed grouping history cannot be restored.'
-    : 'Clear ' + name.toLowerCase() + ' shared by every workspace? Renders regenerate from available originals. Imported computation objects must be reimported or recomputed. Original photos, external editor files, and exports remain.';
+    : 'Clear ' + name.toLowerCase() + ' shared by every workspace? Cached renditions may be your only available offline copy. Confirm that sources or backups are available before clearing. Imported computation objects must be reimported or recomputed. Original photos, external editor files, and exports remain.';
   if (!await confirmRetainedStorage(message)) return;
   button.disabled = true;
   try {

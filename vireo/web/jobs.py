@@ -735,7 +735,7 @@ def create_jobs_blueprint(
         phash_threshold = body.get("phash_threshold", 19)
         cross_bucket_merge = body.get("cross_bucket_merge", False)
 
-        def work(job):
+        def analyze(job):
             from culling import analyze_for_culling
 
             thread_db = ctx.thread_db()
@@ -782,6 +782,17 @@ def create_jobs_blueprint(
                 "species_count": len(result["species_groups"]),
                 "photos_missing_phash": result.get("photos_missing_phash", 0),
             }
+
+        def work(job):
+            from pipeline_locks import acquire_workspace_regroup
+            lock = acquire_workspace_regroup(ctx.workspace_id)
+            while not lock.acquire(timeout=0.2):
+                ctx.checkpoint(job)
+            try:
+                ctx.checkpoint(job)
+                return analyze(job)
+            finally:
+                lock.release()
 
         return ctx.start(
             "cull", work, pausable=True, config={"collection_id": collection_id},

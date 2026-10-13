@@ -50,31 +50,40 @@ def delete_workspace_results(catalog_dir, workspace_id):
 def prune_photo_results(catalog_dir, photo_ids):
     """Prune global photo deletions from every workspace after SQL commits."""
     from pipeline import prune_results
+    from pipeline_locks import acquire_workspace_regroup
 
     deleted = set(photo_ids)
     for path, kind, workspace_id in result_files(catalog_dir):
-        try:
-            if kind == "pipeline":
-                prune_results(catalog_dir, workspace_id, deleted)
-            else:
-                with open(path, encoding="utf-8") as handle:
-                    data = json.load(handle)
-                # Recompute counts/recommendations on the next analysis.
-                # A culling snapshot combines interdependent keeper, rank
-                # and grouping decisions; dropping the entire affected
-                # snapshot is safer than keeping stale summary counts.
-                if _contains_photo(data, deleted):
-                    os.unlink(path)
-        except FileNotFoundError:
-            pass
-        except (OSError, ValueError, TypeError, KeyError):
-            log.warning("Could not prune deleted photos from %s", path, exc_info=True)
-            # Do not serve a known-stale snapshot after a failed rewrite.
-            # A failed unlink is logged too and can be retried by cleanup.
-            try:
+        # The catalog deletion has committed before taking this lock. Use
+        # the writer's lock so an older pruned copy cannot replace a newly
+        # grouped snapshot from another workspace.
+        with acquire_workspace_regroup(workspace_id):
+            _prune_file(path, kind, catalog_dir, workspace_id, deleted, prune_results)
+
+
+def _prune_file(path, kind, catalog_dir, workspace_id, deleted, prune_results):
+    try:
+        if kind == "pipeline":
+            prune_results(catalog_dir, workspace_id, deleted)
+        else:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            # Recompute counts/recommendations on the next analysis.
+            # A culling snapshot combines interdependent keeper, rank
+            # and grouping decisions; dropping the entire affected
+            # snapshot is safer than keeping stale summary counts.
+            if _contains_photo(data, deleted):
                 os.unlink(path)
-            except OSError:
-                log.warning("Could not remove stale results %s", path, exc_info=True)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError, KeyError):
+        log.warning("Could not prune deleted photos from %s", path, exc_info=True)
+        # Do not serve a known-stale snapshot after a failed rewrite.
+        # A failed unlink is logged too and can be retried by cleanup.
+        try:
+            os.unlink(path)
+        except OSError:
+            log.warning("Could not remove stale results %s", path, exc_info=True)
 
 
 def _contains_photo(value, photo_ids):

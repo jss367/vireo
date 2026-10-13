@@ -711,9 +711,11 @@ class EditHistoryRepository:
         Undone entries awaiting redo are never pruned.
         """
         ws = self.workspace_id
-        with self.conn:
-            if not self.conn.in_transaction:
-                self.conn.execute("BEGIN IMMEDIATE")
+        owns_transaction = not self.conn.in_transaction
+        if owns_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("SAVEPOINT retained_history_prune")
+        try:
             def totals():
                 return self.conn.execute(
                     """SELECT COUNT(*), COALESCE(SUM(p.bytes), 0)
@@ -741,11 +743,22 @@ class EditHistoryRepository:
                 ).fetchall()
                 retained = 0
                 for row in rows:
-                    retained += row["bytes"]
-                    if retained > max_payload_bytes:
+                    if retained + row["bytes"] > max_payload_bytes:
                         # Preserve any photo edits carried by the grouping edit.
                         self.retire_stale_grouping_entry(row["edit_id"])
+                    else:
+                        retained += row["bytes"]
             after = totals()
+        except BaseException:
+            self.conn.execute("ROLLBACK TO retained_history_prune")
+            self.conn.execute("RELEASE retained_history_prune")
+            if owns_transaction:
+                self.conn.rollback()
+            raise
+        else:
+            self.conn.execute("RELEASE retained_history_prune")
+            if owns_transaction:
+                self.conn.commit()
         return {"grouping_snapshots_retired": before[0] - after[0],
                 "grouping_snapshot_bytes_removed": before[1] - after[1]}
 

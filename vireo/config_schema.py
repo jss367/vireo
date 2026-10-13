@@ -59,7 +59,7 @@ SCHEMA = {
         "type": "int", "min": 0, "max": 1048576, "category": "Paths", "scope": "global",
         "label": "Retained generated files limit (MB)",
         "desc": "Shared limit for full-resolution renders, upload renders and imported computation objects. External editor files are preserved. "
-                "Hourly maintenance removes oldest payloads after a one-hour write grace period. 0 keeps no aged payloads. "
+                "Hourly maintenance removes oldest payloads after a one-hour write grace period. Renders are retained unless independent catalog sources are fully readable and unchanged. 0 keeps no aged payloads. "
                 "Removed computation objects require reimport or recomputation; originals and exports are retained.",
     },
     "retained_cache_max_age_days": {
