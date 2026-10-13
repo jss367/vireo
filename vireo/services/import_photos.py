@@ -1047,8 +1047,8 @@ class _ImportPhotosRequest:
             "workspace_id": self.active_ws,
             "created_workspace": self.created_workspace,
             "carry_photo_ids": carry_photo_ids,
-            # Resume of an interrupted parent only (see
-            # ``_validate_parent_import_job``): the paths its landings sit at,
+            # Recovery scope from ``_validate_parent_import_job``: the paths
+            # the parent's landings sit at,
             # so this run recovers rows the parent's checkpoint missed, and the
             # photos still owed the tag/GPS pass. Persisted so a resume of
             # this run, should it be interrupted too, inherits both.
@@ -1061,6 +1061,9 @@ class _ImportPhotosRequest:
             "paid_tag_photo_ids": (
                 parent_resume["paid_tag_photo_ids"] if parent_resume else []
             ),
+            # A preparation failure happens before the result can mark the
+            # already-paid chain; keep its inherited evidence in the config.
+            "chain_already_ran": bool(parent_resume and parent_resume["chain_already_ran"]),
             # Fingerprint sidecar to carry_photo_ids so a retry-of-retry
             # can still verify the inherited scope by stable identity
             # even after the grandparent's job has aged out of history.

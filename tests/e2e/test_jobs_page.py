@@ -54,6 +54,18 @@ def test_import_failure_before_copy_offers_retry(live_server, page, result):
     page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, child])
     expect(button).to_be_visible()
     expect(direct).to_have_count(0)
+    before_copy = {**child, "id": "before-copy-child", "status": "failed",
+                   "result": {"import_not_started": True}}
+    grandchild = {**child, "config": {**child["config"], "parent_import_job_id": before_copy["id"]}}
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, grandchild, before_copy])
+    expect(direct).to_have_count(0)
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, before_copy])
+    expect(direct).to_be_visible()
+    before_copy["result"] = {"never_started": True}
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, grandchild, before_copy])
+    expect(direct).to_have_count(0)
+    page.evaluate("rows => { historyJobs = rows; renderHistoryDetail(rows[0]); }", [job, before_copy])
+    expect(direct).to_be_visible()
 
     # A completed child owns the recovery; the old row points to it.
     child = {**job, "id": "finished-retry", "status": "completed",

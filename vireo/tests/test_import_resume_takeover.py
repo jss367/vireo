@@ -55,8 +55,16 @@ FAILED_FILES = {"ok": False, "failed": 1, "photo_ids": [],
                 "tags_applied": True, "chained": True}
 
 
+def _inherited_chain_parent(tags_applied):
+    parent = _parent(tags_applied=tags_applied, chained=False, ok=False)
+    parent["config"]["chain_already_ran"] = True
+    return parent
+
+
 def _scenarios():
     return {
+        "inherited chain still owes tags": (_inherited_chain_parent(False), []),
+        "inherited chain and tags are paid": (_inherited_chain_parent(True), []),
         "old tag mark does not pay newly landed tags": (
             _parent(tags_applied=True),
             [_row("d", "2026-09-01T11:00:00", {
@@ -316,6 +324,8 @@ def _server(parent, rows):
 
 # (by, kind, offers Resume, offers Retry)
 EXPECTED = {
+    "inherited chain still owes tags": (None, None, True, False),
+    "inherited chain and tags are paid": (None, None, False, False),
     "tagged sibling does not pay another sibling's new tags": (None, None, True, False),
     "old tag mark does not pay newly landed tags": (None, None, True, False),
     "tag-only descendant pays expanded scope": ("d2", "done", False, False),

@@ -236,8 +236,6 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
             continue
         cfg = _json_dict(row.get("config"))
         result = _json_dict(row.get("result"))
-        if result.get("never_started"):
-            continue
         entry = {
             "id": row.get("id"),
             "status": row.get("status"),
@@ -256,7 +254,8 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
             if child["id"] not in descendants:
                 descendants[child["id"]] = child
                 frontier.append(child["id"])
-    descendants = list(descendants.values())
+    # Traverse through never-started ancestors, then ignore their own marks.
+    descendants = [e for e in descendants.values() if not e["result"].get("never_started")]
 
     for e in descendants:
         result = e["result"]
@@ -292,8 +291,9 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
         # then skips the collection and processing: that debt moves to the
         # run's own Retry instead of being paid.
         e["chained"] = (
-            chain_step and result.get("ok") is not False
-            and result.get("process_job_id") not in never_started_processes
+            bool(e["config"].get("chain_already_ran"))
+            or (chain_step and result.get("ok") is not False
+                and result.get("process_job_id") not in never_started_processes)
         )
         e["resumable"] = (
             e["status"] == "failed"
@@ -371,8 +371,8 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
     # the chain already ran and skip processing on recovery. That is also
     # why a failed-files parent still owes processing to its Retry.
     chained = (
-        bool(parent_result.get("chained"))
-        and parent_result.get("ok") is not False
+        bool(parent_config.get("chain_already_ran"))
+        or (bool(parent_result.get("chained")) and parent_result.get("ok") is not False)
     ) or any(e["chained"] for e in descendants)
     # A Retry of a parent that was not interrupted replays no tags, so only
     # processing is owed there.
@@ -419,6 +419,9 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
         "descendant_photo_fingerprints": descendant_fingerprints,
         "paid_tag_photo_ids": paid_tag_ids,
         "unpaid_tag_photo_ids": unpaid_tag_ids,
+        "descendants_started": any(
+            not _import_failed_before_start(entry["result"]) for entry in descendants
+        ),
     }
 
 
@@ -1143,15 +1146,7 @@ class ImportService:
                 "direct_nas_retry_allowed": (
                     parent_status == "failed"
                     and _can_retry_import_direct_to_nas(parent_config, parent_result)
-                    and all(
-                        _import_failed_before_start(_json_dict(row.get("result")))
-                        or _json_dict(row.get("result")).get("never_started")
-                        for row in resume_rows
-                        if row.get("type") == "import" and (
-                            _json_dict(row.get("config")).get("parent_import_job_id") == parent_id
-                            or _json_dict(row.get("config")).get("root_import_job_id") == parent_id
-                        )
-                    )
+                    and not (takeover or {}).get("descendants_started")
                 ),
             })
         if takeover and relocate_landings:
@@ -1367,6 +1362,7 @@ class ImportService:
             and (
                 parent_config.get("recover_landed_files")
                 or parent_config.get("untagged_photo_ids")
+                or parent_config.get("chain_already_ran")
                 or (takeover and (
                     takeover.get("descendant_landed_files")
                     or takeover.get("unpaid_tag_photo_ids")
@@ -1386,7 +1382,7 @@ class ImportService:
                 ),
             }
         tags_applied = bool(takeover["tags_applied"])
-        chain_already_ran = bool(takeover["chained"])
+        chain_already_ran = bool(takeover["chained"] or parent_config.get("chain_already_ran"))
         # Both post-import steps ran — nothing left to resume; the row
         # only missed the final write. A ``chained`` mark without
         # ``tags_applied`` means a Stop cut the tag pass short or an

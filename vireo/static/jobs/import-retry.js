@@ -62,7 +62,7 @@ function isResumableImport(job) {
   // import failed (``ok === false``) came from ``_chain_after_import``
   // returning early via its "import failed" branch — the chain never
   // actually ran, so the row stays resumable.
-  if (result.chained && result.ok !== false && result.tags_applied) return false;
+  if ((jobConfig(job).chain_already_ran || (result.chained && result.ok !== false)) && result.tags_applied) return false;
   // Chain ran but tag/GPS work is still owed (a Stop cut the pass
   // short, or an error left tags unmarked). The resume replays only
   // the tag pass and skips re-chaining server-side.
@@ -104,7 +104,6 @@ function importResumeTakeover(parent, rows) {
     if (!row || row.type !== 'import' || row.id === parent.id) return;
     if (['completed', 'failed', 'cancelled'].indexOf(row.status) < 0) return;
     var result = (row.result && typeof row.result === 'object') ? row.result : {};
-    if (result.never_started) return;
     var cfg = jobConfig(row) || {};
     var entry = {id: row.id, status: row.status,
                  startedAt: row.started_at || '', result: result,
@@ -130,7 +129,8 @@ function importResumeTakeover(parent, rows) {
       }
     });
   }
-  var descendants = Object.keys(found).map(function(id) { return found[id]; });
+  var descendants = Object.keys(found).map(function(id) { return found[id]; })
+    .filter(function(e) { return !e.result.never_started; });
   descendants.forEach(function(e) {
     var r = e.result;
     var tags, chainStep;
@@ -152,7 +152,8 @@ function importResumeTakeover(parent, rows) {
     }
     e.tagsApplied = tags;
     // After a failed import the chain step marks but skips processing.
-    e.chained = chainStep && r.ok !== false && !neverStartedProcesses.has(r.process_job_id);
+    e.chained = !!e.config.chain_already_ran ||
+      (chainStep && r.ok !== false && !neverStartedProcesses.has(r.process_job_id));
     e.resumable = e.status === 'failed' && !!r.interrupted &&
       Array.isArray(r.photo_ids) && !(tags && e.chained);
     e.hasFailedFiles = hasFailedImportFiles(r);
@@ -223,7 +224,8 @@ function importResumeTakeover(parent, rows) {
   // skips the collection and processing; apply the same ``ok`` filter
   // to the parent's own mark as to a descendant's (above). That is also
   // why a failed-files parent still owes processing to its Retry.
-  var chained = (!!parentResult.chained && parentResult.ok !== false) ||
+  var chained = !!parentCfg.chain_already_ran ||
+    (!!parentResult.chained && parentResult.ok !== false) ||
     descendants.some(function(e) { return e.chained; });
   // A Retry of a parent that was not interrupted replays no tags.
   var tagsPaid = (tagsApplied || !parentInterrupted) && !unpaidScope;

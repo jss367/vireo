@@ -5532,7 +5532,7 @@ def test_disk_space_failure_can_retry_but_finished_retry_takes_over(
     assert rejected.get_json()["taken_over_by_job_id"] == retried["id"]
 
 
-@pytest.mark.parametrize("remaining_work", ["staged_file", "descendant", "inherited_scope"])
+@pytest.mark.parametrize("remaining_work", ["staged_file", "descendant", "grandchild", "never_started_ancestor", "inherited_scope"])
 def test_direct_nas_retry_refuses_existing_local_import_work(
     app_and_db, tmp_path, monkeypatch, remaining_work,
 ):
@@ -5551,11 +5551,21 @@ def test_direct_nas_retry_refuses_existing_local_import_work(
         staging = Path(parent["config"]["managed_staging"]["destination"])
         staging.mkdir(parents=True)
         (staging / "keep.jpg").write_bytes(b"already imported")
-    elif remaining_work == "descendant":
+    elif remaining_work in {"descendant", "grandchild", "never_started_ancestor"}:
+        child_parent = parent["id"]
+        if remaining_work != "descendant":
+            db.conn.execute(
+                "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
+                "VALUES ('before-copy-child', 'import', 'failed', ?, ?, ?)",
+                (json.dumps({"parent_import_job_id": parent["id"]}),
+                 json.dumps({"never_started": True} if remaining_work == "never_started_ancestor"
+                            else {"import_not_started": True}), db.active_workspace_id),
+            )
+            child_parent = "before-copy-child"
         db.conn.execute(
             "INSERT INTO job_history (id, type, status, config, result, workspace_id) "
             "VALUES ('cancelled-retry', 'import', 'cancelled', ?, ?, ?)",
-            (json.dumps({"parent_import_job_id": parent["id"]}),
+            (json.dumps({"parent_import_job_id": child_parent}),
              json.dumps({"cancelled": True, "landed_files": {"/local/photo.jpg": [1, 2, "hash"]}}),
              db.active_workspace_id),
         )
@@ -12399,6 +12409,52 @@ def test_retry_of_a_failed_import_goes_through_a_retry_that_failed_too(
         })
         assert resp.status_code == 200, resp.get_json()
         wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+
+@pytest.mark.parametrize("chain_paid", [False, True])
+def test_resume_preparation_failure_preserves_paid_chain_on_retry(
+    app_and_db, tmp_path, monkeypatch, chain_paid,
+):
+    from services.import_photos import _ImportPhotosJob
+
+    app, db = app_and_db
+    client = app.test_client()
+    original_id, photo_ids = _interrupted_tagged_import(app, db, client, tmp_path, "Recovery tags")
+    original = next(row for row in client.get("/api/jobs/history").get_json() if row["id"] == original_id)
+    original["result"]["chained"] = chain_paid
+    db.conn.execute("UPDATE job_history SET result=? WHERE id=?", (json.dumps(original["result"]), original_id))
+    db.commit()
+    prepare = _ImportPhotosJob._prepare_import_destination
+
+    def fail_preparation(self):
+        raise ValueError("Temporary storage unavailable")
+
+    monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", fail_preparation)
+    body = _resume_body(client, original_id)
+    response = client.post("/api/jobs/import-photos", json=body)
+    assert response.status_code == 200, response.get_json()
+    failed = wait_for_job_via_client(client, response.get_json()["job_id"], wait_for_history=True)
+    assert failed["result"]["import_not_started"] is True
+    assert failed["config"]["chain_already_ran"] is chain_paid
+    monkeypatch.setattr(_ImportPhotosJob, "_prepare_import_destination", prepare)
+    chain = _ImportPhotosJob._chain_after_import
+    chain_calls = []
+
+    def record_chain(self, job, result):
+        chain_calls.append(job["id"])
+        return chain(self, job, result)
+
+    monkeypatch.setattr(_ImportPhotosJob, "_chain_after_import", record_chain)
+    body["parent_import_job_id"] = failed["id"]
+    response = client.post("/api/jobs/import-photos", json=body)
+    assert response.status_code == 200, response.get_json()
+    retried = wait_for_job_via_client(client, response.get_json()["job_id"])
+    assert retried["status"] == "completed", retried
+    assert retried["config"]["chain_already_ran"] is chain_paid
+    assert len(chain_calls) == (0 if chain_paid else 1)
+    if chain_paid:
+        assert retried["result"]["after_import_skipped"] == "chain already ran on the interrupted parent"
+    assert set(retried["config"]["carry_photo_ids"]) == set(photo_ids)
 
 
 def test_resume_replays_tags_when_chain_ran_but_tags_owed(
