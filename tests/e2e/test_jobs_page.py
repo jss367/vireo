@@ -137,6 +137,47 @@ def test_direct_nas_retry_uses_live_server_eligibility(live_server, page, allowe
     assert not posts
 
 
+@pytest.mark.parametrize("failure", ["network", "server", "invalid"])
+def test_direct_nas_click_check_recovers_after_unavailable_response(live_server, page, failure):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", result={"import_not_started": True, "ok": False},
+               config={"sources": ["/card"], "destination": "/nas", "local_processing": True})
+    checks = []
+    posts = []
+
+    def options(route):
+        checks.append(route.request.url)
+        if len(checks) == 2:
+            if failure == "network":
+                route.abort("failed")
+            elif failure == "invalid":
+                route.fulfill(json={})
+            else:
+                route.fulfill(status=503, json={"error": "Recovery check temporarily unavailable."})
+        else:
+            route.fulfill(json={"direct_to_nas_allowed": True, "resume_allowed": False})
+
+    def retry(route):
+        posts.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Unexpected import request"})
+
+    page.route("**/api/import/*/recovery-options", options)
+    page.route("**/api/jobs/import-photos", retry)
+    _serve_jobs_page(live_server, page, job, history=True)
+    direct = page.get_by_role("button", name="Retry directly to NAS", exact=True)
+    expect(direct).to_be_visible()
+    direct.click()
+    check_again = page.get_by_role("button", name="Check again", exact=True)
+    expect(check_again).to_be_visible()
+    expect(direct).to_have_count(0)
+    expect(page.get_by_role("button", name="Retry import", exact=True)).to_be_enabled()
+    check_again.click()
+    expect(direct).to_be_visible()
+    expect(check_again).to_have_count(0)
+    assert len(checks) == 3
+    assert not posts
+
+
 def test_completed_move_source_cleanup_requires_review_and_opt_in(live_server, page):
     job = _move_folder_job(live_server, {"folder_template": "%Y-%m-%d"})
     job.update(status="completed", result={

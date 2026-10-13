@@ -1,6 +1,25 @@
 // Fetching active jobs and history from the server.
 // Classic page script; load boot.js after all definitions.
 
+function fetchImportRecoveryOptions(jobId) {
+  return fetch('/api/import/' + encodeURIComponent(jobId) + '/recovery-options', {cache: 'no-store'})
+    .then(function(response) {
+      return response.json().then(function(options) {
+        if (!response.ok) {
+          return Object.assign({}, options, {resume_allowed: false, direct_to_nas_allowed: false,
+            error: options.error || 'Could not check import recovery options.', retryable: response.status >= 500});
+        }
+        if (!options || typeof options.resume_allowed !== 'boolean' ||
+            typeof options.direct_to_nas_allowed !== 'boolean') throw new Error('Invalid import recovery options');
+        return options;
+      });
+    })
+    .catch(function() {
+      return {resume_allowed: false, direct_to_nas_allowed: false,
+        error: 'Could not check import recovery options.', retryable: true};
+    });
+}
+
 function refreshHistoryImportRecovery(job) {
   if (job.import_resume_pending || job.import_direct_pending) return;
   if (job.type !== 'import' || job.status !== 'failed' || !job.result) return;
@@ -20,10 +39,6 @@ function refreshHistoryImportRecovery(job) {
   function applyOptions(options) {
     // A subsequent history refresh or selection must not receive stale eligibility.
     if (historyJobs.indexOf(job) < 0) return;
-    if (!options || typeof options.resume_allowed !== 'boolean' ||
-        typeof options.direct_to_nas_allowed !== 'boolean') {
-      throw new Error('Invalid import recovery options');
-    }
     job.import_resume_allowed = options.resume_allowed;
     job.import_resume_pending = false;
     job.import_direct_pending = false;
@@ -31,19 +46,7 @@ function refreshHistoryImportRecovery(job) {
     if (selectedSource === 'history' && selectedJobId === job.id) renderHistoryDetail(job);
     else if (currentView === 'history') renderHistoryOverview();
   }
-  fetch('/api/import/' + encodeURIComponent(job.id) + '/recovery-options', {cache: 'no-store'})
-    .then(function(response) {
-      return response.json().then(function(options) {
-        if (response.ok) return options;
-        return Object.assign({}, options, {resume_allowed: false, direct_to_nas_allowed: false,
-          error: options.error || 'Could not check import recovery options.', retryable: response.status >= 500});
-      });
-    })
-    .then(applyOptions)
-    .catch(function() {
-      applyOptions({resume_allowed: false, direct_to_nas_allowed: false,
-        error: 'Could not check import recovery options.', retryable: true});
-    });
+  fetchImportRecoveryOptions(job.id).then(applyOptions);
 }
 
 function fetchJobs() {

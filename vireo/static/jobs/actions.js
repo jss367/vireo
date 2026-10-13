@@ -133,15 +133,13 @@ function bindDetailPaneActions() {
       retryButtons.forEach(function(button) { button.disabled = true; });
       var eligibility = Promise.resolve();
       if (directToNas) {
-        eligibility = fetch('/api/import/' + encodeURIComponent(retryJobId) + '/recovery-options', {cache: 'no-store'})
-          .then(function(response) {
-            return response.json().then(function(options) {
-              var current = historyJobs.find(function(job) { return job.id === retryJobId; });
-              if (current) current.import_recovery_options = options;
-              if (!response.ok || options.direct_to_nas_allowed !== true) {
-                throw new Error(options.error || 'Direct-to-NAS retry is no longer available. Retry with the original settings.');
-              }
-            });
+        eligibility = fetchImportRecoveryOptions(retryJobId)
+          .then(function(options) {
+            var current = historyJobs.find(function(job) { return job.id === retryJobId; });
+            if (current) current.import_recovery_options = options;
+            if (options.direct_to_nas_allowed !== true) {
+              throw new Error(options.error || 'Direct-to-NAS retry is no longer available. Retry with the original settings.');
+            }
           });
       }
       eligibility.then(function() {
