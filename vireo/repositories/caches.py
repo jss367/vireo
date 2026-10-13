@@ -244,15 +244,21 @@ class CachesRepository:
         self, *, workspace_id: int | None = None,
         folder_ids: Sequence[int] | None = None,
     ) -> list[int]:
-        """Tracked originals, optionally scoped to visible photos and folders."""
+        """Cached originals, optionally scoped to visible photos and folders.
+
+        Rows left behind by a failed cache attempt (``missing_source`` or
+        other non-``cached`` statuses) are excluded: Storage counts and bytes
+        only cover ``status='cached'`` rows, so bulk release scopes must do
+        the same to keep released counts honest.
+        """
         from sql_chunks import chunked
 
         chunks = [None] if folder_ids is None else chunked(folder_ids)
         ids = []
         for chunk in chunks:
             query = "SELECT o.photo_id FROM offline_originals o JOIN photos p ON p.id=o.photo_id"
-            params = []
-            conditions = []
+            params: list = []
+            conditions = ["o.status='cached'"]
             if workspace_id is not None:
                 query += " JOIN photo_workspace_visibility wf ON wf.photo_id=p.id"
                 conditions.append("wf.workspace_id=?")
@@ -260,8 +266,7 @@ class CachesRepository:
             if chunk is not None:
                 conditions.append(f"p.folder_id IN ({','.join('?' for _ in chunk)})")
                 params.extend(chunk)
-            if conditions:
-                query += " WHERE " + " AND ".join(conditions)
+            query += " WHERE " + " AND ".join(conditions)
             ids.extend(row["photo_id"] for row in self.conn.execute(query, params))
         return sorted(set(ids))
 
