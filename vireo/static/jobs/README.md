@@ -73,6 +73,8 @@ Keep these request-ordering rules intact when changing this code:
   checkpoint, since the pipeline may already record the handoff. Responses
   apply only to the same history-row object, and
   later polls recheck eligibility without caching the HTTP response.
+  Failed eligibility requests show an explanation and Check again action;
+  they never enable an unverified import retry.
 - Saved processing provenance retains groups: every group must have a
   surviving pipeline, while IDs within a legacy inferred group are
   alternatives. Server recovery preserves these groups before preparation

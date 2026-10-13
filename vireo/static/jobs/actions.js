@@ -59,6 +59,17 @@ function bindDetailPaneActions() {
       return;
     }
     var retryImportBtn = e.target.closest('[data-retry-import-job]');
+    var recoveryCheckBtn = e.target.closest('[data-check-import-recovery]');
+    if (recoveryCheckBtn) {
+      var recoveryJob = historyJobs.find(function(job) {
+        return job.id === recoveryCheckBtn.getAttribute('data-check-import-recovery');
+      });
+      if (recoveryJob) {
+        refreshHistoryImportRecovery(recoveryJob);
+        if (selectedJobId === recoveryJob.id) renderHistoryDetail(recoveryJob);
+      }
+      return;
+    }
     if (retryImportBtn) {
       var retryJobId = retryImportBtn.getAttribute('data-retry-import-job');
       var retryJob = activeJobs.concat(historyJobs).find(function(job) {

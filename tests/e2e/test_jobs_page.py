@@ -343,6 +343,43 @@ def test_interrupted_failed_files_wait_for_recovery_and_show_conflict(live_serve
     expect(pane.locator('[data-show-job="later-import"]')).to_have_count(1 if taken_over else 0)
 
 
+@pytest.mark.parametrize("failure", ["network", "server"])
+def test_import_recovery_check_can_retry_after_connection_failure(live_server, page, failure):
+    job = _move_folder_job(live_server, {})
+    job.update(type="import", status="failed", result={
+        "interrupted": True, "photo_ids": [1], "failed": 2,
+    }, config={"sources": ["/card"], "destination": "/archive"})
+    checks = []
+    import_requests = []
+
+    def options(route):
+        checks.append(route.request.url)
+        if len(checks) == 1:
+            if failure == "network":
+                route.abort("failed")
+            else:
+                route.fulfill(status=503, json={"error": "Recovery check temporarily unavailable."})
+        else:
+            route.fulfill(json={"direct_to_nas_allowed": False, "resume_allowed": True})
+
+    def retry(route):
+        import_requests.append(route.request.post_data_json)
+        route.fulfill(status=400, json={"error": "Unexpected import request"})
+
+    page.route("**/api/import/*/recovery-options", options)
+    page.route("**/api/jobs/import-photos", retry)
+    _serve_jobs_page(live_server, page, job, history=True)
+    pane = page.locator("#jobDetailPane")
+    check_again = page.get_by_role("button", name="Check again", exact=True)
+    expect(check_again).to_be_visible()
+    expect(pane.locator("[data-retry-import-job]")).to_have_count(0)
+    check_again.click()
+    expect(page.get_by_role("button", name="Resume import", exact=True)).to_be_visible()
+    expect(check_again).to_have_count(0)
+    assert len(checks) == 2
+    assert not import_requests
+
+
 def test_move_folder_job_shows_source_and_destination(live_server, page):
     """History entries predating the plan snapshot keep the generic note."""
     job = _move_folder_job(live_server, {"folder_template": "%Y/%Y-%m-%d"})

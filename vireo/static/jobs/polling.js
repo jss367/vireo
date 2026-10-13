@@ -2,6 +2,7 @@
 // Classic page script; load boot.js after all definitions.
 
 function refreshHistoryImportRecovery(job) {
+  if (job.import_resume_pending) return;
   if (job.type !== 'import' || job.status !== 'failed' || !job.result ||
       !job.result.interrupted || !Array.isArray(job.result.photo_ids)) return;
   var cfg = jobConfig(job);
@@ -13,25 +14,29 @@ function refreshHistoryImportRecovery(job) {
   // The server also searches pipelines by chained_from in that crash window.
   if (!missing && ids.length) return;
   job.import_resume_pending = true;
+  function applyOptions(options) {
+    // A subsequent history refresh or selection must not receive stale eligibility.
+    if (!options || typeof options.resume_allowed !== 'boolean' ||
+        historyJobs.indexOf(job) < 0) return;
+    job.import_resume_allowed = options.resume_allowed;
+    job.import_resume_pending = false;
+    job.import_recovery_options = options;
+    if (selectedSource === 'history' && selectedJobId === job.id) renderHistoryDetail(job);
+    else if (currentView === 'history') renderHistoryOverview();
+  }
   fetch('/api/import/' + encodeURIComponent(job.id) + '/recovery-options', {cache: 'no-store'})
     .then(function(response) {
       return response.json().then(function(options) {
         if (response.ok) return options;
         return Object.assign({}, options, {resume_allowed: false, direct_to_nas_allowed: false,
-          error: options.error || 'Could not check import recovery options.'});
+          error: options.error || 'Could not check import recovery options.', retryable: response.status >= 500});
       });
     })
-    .then(function(options) {
-      // A subsequent history refresh or selection must not receive stale eligibility.
-      if (!options || typeof options.resume_allowed !== 'boolean' ||
-          historyJobs.indexOf(job) < 0) return;
-      job.import_resume_allowed = options.resume_allowed;
-      job.import_resume_pending = false;
-      job.import_recovery_options = options;
-      if (selectedSource === 'history' && selectedJobId === job.id) renderHistoryDetail(job);
-      else if (currentView === 'history') renderHistoryOverview();
-    })
-    .catch(function() {});
+    .then(applyOptions)
+    .catch(function() {
+      applyOptions({resume_allowed: false, direct_to_nas_allowed: false,
+        error: 'Could not check import recovery options.', retryable: true});
+    });
 }
 
 function fetchJobs() {

@@ -125,6 +125,9 @@ function renderJobCard(job, options) {
     if (recoveryOptions.taken_over_by_job_id) {
       html += ' <button class="btn-retry" data-show-job="' + escapeAttr(recoveryOptions.taken_over_by_job_id) + '">Show that import</button>';
     }
+    if (recoveryOptions.retryable) {
+      html += ' <button class="btn-retry" data-check-import-recovery="' + escapeAttr(job.id) + '">Check again</button>';
+    }
     html += '</div>';
   }
   if (!isLive && !job.import_resume_pending && !recoveryOptions.error &&
