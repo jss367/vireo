@@ -292,13 +292,14 @@ def _serve_jobs_page(live_server, page, job, *, history=False):
 
 
 @pytest.mark.parametrize("resumable", [True, False])
-def test_import_resume_checks_pipeline_outside_history_window(live_server, page, resumable):
+@pytest.mark.parametrize("recorded", [True, False])
+def test_import_resume_checks_pipeline_outside_history_window(live_server, page, resumable, recorded):
     job = _move_folder_job(live_server, {})
     job.update(type="import", status="failed", result={
         "interrupted": True, "photo_ids": [1], "tags_applied": True,
     }, config={
-        "sources": ["/card"], "destination": "/archive", "chain_already_ran": True,
-        "chain_process_job_ids": ["old-pipeline"],
+        "sources": ["/card"], "destination": "/archive", "chain_already_ran": recorded,
+        "chain_process_job_ids": ["old-pipeline"] if recorded else [],
     })
     requests = []
 
@@ -308,7 +309,7 @@ def test_import_resume_checks_pipeline_outside_history_window(live_server, page,
 
     page.route("**/api/import/*/recovery-options", options)
     _serve_jobs_page(live_server, page, job, history=True)
-    page.wait_for_function("historyJobs[0].import_resume_allowed !== undefined")
+    page.wait_for_function("historyJobs[0].import_resume_allowed === " + str(resumable).lower())
     assert requests
     resume = page.get_by_role("button", name="Resume import", exact=True)
     if resumable:

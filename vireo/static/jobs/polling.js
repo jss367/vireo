@@ -9,7 +9,10 @@ function refreshHistoryImportRecovery(job) {
   var missing = ids.some(function(id) {
     return !historyJobs.some(function(row) { return row.id === id; });
   });
-  if (!missing && (ids.length || !(cfg.chain_already_ran || job.result.chained))) return;
+  // No receipt can mean the checkpoint preceded the processing handoff.
+  // The server also searches pipelines by chained_from in that crash window.
+  if (!missing && ids.length) return;
+  job.import_resume_pending = true;
   fetch('/api/import/' + encodeURIComponent(job.id) + '/recovery-options', {cache: 'no-store'})
     .then(function(response) {
       if (!response.ok) return null;
@@ -20,6 +23,7 @@ function refreshHistoryImportRecovery(job) {
       if (!options || typeof options.resume_allowed !== 'boolean' ||
           historyJobs.indexOf(job) < 0) return;
       job.import_resume_allowed = options.resume_allowed;
+      job.import_resume_pending = false;
       if (selectedSource === 'history' && selectedJobId === job.id) renderHistoryDetail(job);
       else if (currentView === 'history') renderHistoryOverview();
     })

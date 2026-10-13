@@ -69,7 +69,9 @@ Keep these request-ordering rules intact when changing this code:
   render and click. The server enforces the same takeover rule with a 409.
 - When inherited processing evidence is outside the 100-row history window,
   polling asks the recovery-options endpoint for authoritative Resume
-  eligibility. Responses apply only to the same history-row object, and
+  eligibility. It also checks when no processing receipt reached the import
+  checkpoint, since the pipeline may already record the handoff. Responses
+  apply only to the same history-row object, and
   later polls recheck eligibility without caching the HTTP response.
 - Restart import replays a failed or cancelled in-place import's saved scope
   and settings in its original workspace. It rescans rather than resuming at

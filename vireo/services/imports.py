@@ -558,6 +558,9 @@ class ImportService:
             job_id, db.active_workspace_id, db, relocate_landings=False, snapshot_out=snapshot,
         )
         if failure is not None:
+            if failure.status == 409:
+                return {"direct_to_nas_allowed": False, "resume_allowed": False,
+                        "error": failure.message, **(failure.details or {})}
             return failure
         allowed = bool(snapshot.get("direct_nas_retry_allowed"))
         competing = bool(_competing_retry_failure(self.get_runner(), {

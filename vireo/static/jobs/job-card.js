@@ -116,6 +116,9 @@ function renderJobCard(job, options) {
   // to go instead.
   var resumeTakeover = importResumeTakeover(job, historyJobs);
   var resumableImport = isResumableImport(job, historyJobs) && !resumeTakeover.by;
+  if (!isLive && job.import_resume_pending) {
+    html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">Checking recovery options…</div>';
+  }
   if (!isLive && (failedImportCount > 0 || importNotStarted || resumableImport || resumeTakeover.by) &&
       importRetryBody(job)) {
     var retryInFlight = hasActiveRetryFor(job.id);

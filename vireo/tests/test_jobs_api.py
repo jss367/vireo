@@ -5447,21 +5447,23 @@ def test_managed_import_retry_reuses_staging_and_freezes_destination(app_and_db,
     ("cancelled", None, True),
     ("completed", {"ok": True}, False),
 ])
+@pytest.mark.parametrize("recorded", [True, False])
 def test_recovery_options_reads_pipeline_outside_history_window(
-    app_and_db, pipeline_status, pipeline_result, resumable,
+    app_and_db, pipeline_status, pipeline_result, resumable, recorded,
 ):
     app, db = app_and_db
     db.conn.execute(
         "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) "
-        "VALUES ('old-pipeline','pipeline',?,'2020-01-01','{}',?,?)",
-        (pipeline_status, json.dumps(pipeline_result) if pipeline_result is not None else None,
+        "VALUES ('old-pipeline','pipeline',?,'2020-01-01',?,?,?)",
+        (pipeline_status, json.dumps({"chained_from": "interrupted-import"}),
+         json.dumps(pipeline_result) if pipeline_result is not None else None,
          db.active_workspace_id),
     )
     db.conn.execute(
         "INSERT INTO job_history (id,type,status,started_at,config,result,workspace_id) "
         "VALUES ('interrupted-import','import','failed','2026-10-13',?,?,?)",
-        (json.dumps({"sources": ["/card"], "destination": "/archive", "chain_already_ran": True,
-                     "chain_process_job_ids": ["old-pipeline"]}),
+        (json.dumps({"sources": ["/card"], "destination": "/archive", "chain_already_ran": recorded,
+                     "chain_process_job_ids": ["old-pipeline"] if recorded else []}),
          json.dumps({"interrupted": True, "photo_ids": [1], "tags_applied": True}),
          db.active_workspace_id),
     )
