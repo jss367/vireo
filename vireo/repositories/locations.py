@@ -19,6 +19,7 @@ page records are written here too; their read is part of
 """
 
 import time
+from contextlib import contextmanager
 
 
 class LocationRepository:
@@ -29,9 +30,25 @@ class LocationRepository:
         self.chunk_size = chunk_size
         self.photo_date_asc_order = photo_date_asc_order
 
+    @contextmanager
     def transaction(self):
-        """The connection as a context manager: commit on success, roll back on error."""
-        return self.conn
+        """Keep nested location failures local and respect held history commits."""
+        nested = self.conn.in_transaction
+        if nested:
+            self.conn.execute("SAVEPOINT location_edit")
+        try:
+            yield self.conn
+        except BaseException:
+            if nested:
+                self.conn.execute("ROLLBACK TO location_edit")
+                self.conn.execute("RELEASE location_edit")
+            else:
+                self.conn.rollback()
+            raise
+        else:
+            if nested:
+                self.conn.execute("RELEASE location_edit")
+            self.conn.commit()
 
     def _chunks(self, values):
         values = list(values)
@@ -726,7 +743,7 @@ class LocationRepository:
 
     def clear_photo(self, photo_id):
         """Remove any ``type='location'`` keyword links for ``photo_id`` and commit."""
-        with self.conn:
+        with self.transaction():
             self.conn.execute(
                 "DELETE FROM photo_keywords WHERE photo_id = ? "
                 "AND keyword_id IN (SELECT id FROM keywords WHERE type='location')",

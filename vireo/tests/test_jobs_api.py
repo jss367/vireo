@@ -6732,114 +6732,46 @@ def test_after_process_move_rejects_strftime_template_landing_under_mount(
     assert resp.status_code == 200, resp.get_json()
 
 
+@pytest.mark.parametrize('mount_parts, folder_template, expected_status', [
+    pytest.param(('NAS',), '%Y/%Y-%m-%d', 200, id='year-cannot-render-letter-mount'),
+    pytest.param(('NAS', 'shoots'), '%Y/%m/%d', 200, id='digits-cannot-render-deeper-letter-mount'),
+    pytest.param(('shoots', 'mixed'), 'shoots/%d', 200, id='day-cannot-render-mixed-letter-leaf'),
+    pytest.param(('NAS',), '%B/%Y', 400, id='locale-month-remains-conservative-wildcard'),
+])
 def test_after_process_move_accepts_digit_template_against_letter_mount_leaf(
-    app_and_db, tmp_path, stub_move,
+    app_and_db, tmp_path, stub_move, mount_parts, folder_template, expected_status,
 ):
-    """The pre-fix guard treated every ``%``-bearing template component as
-    a wildcard that could produce anything at the mount's depth, so the
-    default ``%Y/%Y-%m-%d`` template against a mount whose leaf is a
-    letter-only name like ``NAS`` was falsely rejected — yet ``%Y``
-    renders four digits and can never equal ``NAS``. Users with a NAS
-    mount below their archive root (a common Photos-drive layout) could
-    not enable the chained move with the default template. Lock in that
-    the guard now inspects each ``%``-bearing component's actual output
-    shape via ``_strftime_template_can_render``: digit-only directives
-    cannot match a letter-only mount leaf, so the request is accepted."""
-    import time as _time
+    """Validate each template against an isolated mount configuration.
 
+    Digit-only directives cannot render letter-only mount components, while
+    locale-dependent month names retain the conservative overlap rejection.
+    Separate fixtures prevent earlier accepted imports from changing files or
+    settings while the next configuration's admission checks are running.
+    """
     import config as cfg
 
-    root = tmp_path / "Photos"
-
-    def _set_mount(mount_path_str):
-        """Persist a mount_path and confirm the endpoint can read it back.
-
-        cfg.save atomically replaces the config file, but on Windows CI the
-        endpoint has been observed to see the previous save's mount_path on
-        the very next request — presumably a brief file-visibility race
-        after os.replace. Polling get_remote_target here means every
-        sub-test starts against the config it just wrote, not the previous
-        one; without this the ``%B/%Y`` assertion could accept a request it
-        should reject because the reader still saw ``<root>/shoots/mixed``
-        from the prior sub-test and ``%Y`` cannot render ``mixed``.
-        """
-        target = {
-            "id": "nas1", "name": "NAS", "host": "nas.local",
-            "user": "julius", "remote_path": "/volume1/Photos",
-            "mount_path": mount_path_str,
-            "local_archive_root": str(root),
-        }
-        current = cfg.load()
-        current["remote_targets"] = [target]
-        cfg.save(current)
-        deadline = _time.time() + 2.0
-        while _time.time() < deadline:
-            saved = cfg.get_remote_target("nas1")
-            if saved and saved.get("mount_path") == mount_path_str:
-                return
-            _time.sleep(0.02)
-        raise AssertionError(
-            f"cfg.save did not make mount_path={mount_path_str!r} visible "
-            f"within 2s; last read: {cfg.get_remote_target('nas1')!r}"
-        )
-
-    # Mount lives at <root>/NAS — the leaf is letters, so no strftime
-    # render of ``%Y`` (four digits) can ever equal it.
-    _set_mount(str(root / "NAS"))
-    card = _import_card(tmp_path)
-    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
-    client = app_and_db[0].test_client()
-
-    # Default dated template: neither ``%Y`` nor ``%Y-%m-%d`` can render
-    # the letter-only mount leaf ``NAS``. Legal.
-    resp = client.post("/api/jobs/import-photos", json={
-        "sources": [card],
-        "destination": str(root),
-        "folder_template": "%Y/%Y-%m-%d",
-        "after_import": cull_ready_id,
-        "after_process_move": {"remote_target_id": "nas1"},
+    root = tmp_path / 'Photos'
+    target = {
+        'id': 'nas1', 'name': 'NAS', 'host': 'nas.local',
+        'user': 'julius', 'remote_path': '/volume1/Photos',
+        'mount_path': str(root.joinpath(*mount_parts)),
+        'local_archive_root': str(root),
+    }
+    current = cfg.load()
+    current['remote_targets'] = [target]
+    cfg.save(current)
+    app, db = app_and_db
+    cull_ready_id = _process_id(db, 'Cull-ready')
+    response = app.test_client().post('/api/jobs/import-photos', json={
+        'sources': [_import_card(tmp_path)],
+        'destination': str(root),
+        'folder_template': folder_template,
+        'after_import': cull_ready_id,
+        'after_process_move': {'remote_target_id': 'nas1'},
     })
-    assert resp.status_code == 200, resp.get_json()
-
-    # Deeper mount whose leaves are letters — no digit-only template can
-    # reach either component. Legal.
-    _set_mount(str(root / "NAS" / "shoots"))
-    resp = client.post("/api/jobs/import-photos", json={
-        "sources": [card],
-        "destination": str(root),
-        "folder_template": "%Y/%m/%d",
-        "after_import": cull_ready_id,
-        "after_process_move": {"remote_target_id": "nas1"},
-    })
-    assert resp.status_code == 200, resp.get_json()
-
-    # Mixed literal + strftime template where the ``%``-bearing component
-    # can't produce the mount leaf at its depth. ``%d`` renders 1-2 digits,
-    # never ``mixed`` — the guard should not reject.
-    _set_mount(str(root / "shoots" / "mixed"))
-    resp = client.post("/api/jobs/import-photos", json={
-        "sources": [card],
-        "destination": str(root),
-        "folder_template": "shoots/%d",
-        "after_import": cull_ready_id,
-        "after_process_move": {"remote_target_id": "nas1"},
-    })
-    assert resp.status_code == 200, resp.get_json()
-
-    # Sanity: locale-varying month-name directive ``%B`` (renders
-    # "January", "February", …) is still treated as a wildcard for
-    # letter-only mount leaves — some locale could plausibly render
-    # ``NAS``-shaped strings, and the guard must stay at least as strict
-    # as the pre-fix wildcard behavior for these tokens.
-    _set_mount(str(root / "NAS"))
-    resp = client.post("/api/jobs/import-photos", json={
-        "sources": [card],
-        "destination": str(root),
-        "folder_template": "%B/%Y",
-        "after_import": cull_ready_id,
-        "after_process_move": {"remote_target_id": "nas1"},
-    })
-    assert resp.status_code == 400, resp.get_json()
+    assert response.status_code == expected_status, response.get_json()
+    if expected_status == 400:
+        assert 'folder_template can render' in response.get_json()['error']
 
 
 def test_after_process_move_rejects_separator_rendering_strftime_template(
@@ -8234,6 +8166,11 @@ def test_import_can_add_structured_locations_from_each_photos_gps(
     photo_id = result["photo_ids"][0]
     location = db.get_assigned_photo_location(photo_id)
     assert location["keyword_location_name"] == "Central Park"
+    assert client.post("/api/undo").status_code == 200
+    assert db.get_assigned_photo_location(photo_id) is None
+    assert client.post("/api/redo").status_code == 200
+    assert db.get_assigned_photo_location(photo_id)["keyword_location_name"] == "Central Park"
+
 
 
 @pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])

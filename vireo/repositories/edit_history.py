@@ -57,6 +57,55 @@ class EditHistoryRepository:
         """Commit the connection's open transaction."""
         self.conn.commit()
 
+    def photo_location_state(self, photo_id: int) -> str:
+        """Capture all assigned places and their provenance, plus GPS review."""
+        links = [dict(row) for row in self.conn.execute(
+            "SELECT pk.keyword_id, pk.source FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location' ORDER BY pk.keyword_id",
+            (photo_id,),
+        )]
+        review = self.conn.execute(
+            "SELECT fingerprint FROM location_gps_reviews WHERE photo_id = ?",
+            (photo_id,),
+        ).fetchone()
+        return json.dumps({"links": links, "gps_review": review[0] if review else None})
+
+    def ensure_prediction_instances(self, prediction_ids: Sequence[int]) -> None:
+        """Create non-reusable history tokens; the decision caller owns the write."""
+        from sql_chunks import chunked
+        for ids in chunked(list(dict.fromkeys(prediction_ids))):
+            placeholders = ",".join("?" for _ in ids)
+            self.conn.execute(
+                "INSERT INTO prediction_history_instances(prediction_id) "
+                f"SELECT id FROM predictions WHERE id IN ({placeholders}) "
+                "ON CONFLICT(prediction_id) DO NOTHING",
+                ids,
+            )
+
+    def prediction_status_state(self, prediction_ids: Sequence[int]) -> str:
+        """Read statuses and immutable instance identity without changing the catalog."""
+        from sql_chunks import chunked
+        statuses = {}
+        ws = self.workspace_id
+        for ids in chunked(list(dict.fromkeys(prediction_ids))):
+            placeholders = ",".join("?" for _ in ids)
+            for row in self.conn.execute(
+                "SELECT p.id, COALESCE(r.status, 'pending') AS status, "
+                "instances.instance_id AS prediction_instance_id, "
+                "d.photo_id "
+                "FROM predictions p JOIN detections d ON d.id = p.detection_id "
+                "LEFT JOIN prediction_history_instances instances ON instances.prediction_id = p.id "
+                "LEFT JOIN prediction_review r "
+                "ON r.prediction_id = p.id AND r.workspace_id = ? "
+                f"WHERE p.id IN ({placeholders}) ORDER BY p.id",
+                (ws, *ids),
+            ):
+                identity = {key: value for key, value in dict(row).items()
+                            if key not in ('id', 'status')}
+                statuses[str(row["id"])] = {"status": row["status"], "identity": identity}
+        return json.dumps(statuses, sort_keys=True)
+
     # -- history rows ---------------------------------------------------------
 
     def record(

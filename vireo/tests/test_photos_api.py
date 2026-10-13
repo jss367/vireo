@@ -9657,7 +9657,7 @@ def test_post_photo_location_records_edit(app_and_db, monkeypatch):
     assert len(post_history) == pre_count + 1
     # Most recent first.
     entry = post_history[0]
-    assert entry["action_type"] == "location_set"
+    assert entry["action_type"] == "photo_location"
     assert "Central Park" in entry["description"]
 
 
@@ -9703,7 +9703,7 @@ def test_batch_photo_location_sets_all_selected_photos(app_and_db, monkeypatch):
         assert queued["value"] == "effective"
 
     entry = db.edit_history.list_recent()[0]
-    assert entry["action_type"] == "location_set"
+    assert entry["action_type"] == "photo_location"
     assert entry["item_count"] == len(photo_ids)
 
 
@@ -9789,7 +9789,7 @@ def test_batch_photo_location_text_sets_all_selected_photos(app_and_db):
         assert dict(row) == {"name": "the meadow", "place_id": None}
 
     entry = db.edit_history.list_recent()[0]
-    assert entry["action_type"] == "location_set"
+    assert entry["action_type"] == "photo_location"
     assert entry["item_count"] == len(photo_ids)
 
 
@@ -9840,7 +9840,7 @@ def test_delete_photo_location_records_edit(app_and_db):
     post_history = db.edit_history.list_recent()
     assert len(post_history) == pre_count + 1
     entry = post_history[0]
-    assert entry["action_type"] == "location_clear"
+    assert entry["action_type"] == "photo_location"
     assert entry["description"] == "cleared location"
 
 
@@ -9962,7 +9962,7 @@ def test_post_photo_location_text_replaces_existing_location(app_and_db):
 
 
 def test_post_photo_location_text_records_edit(app_and_db):
-    """Free-text POST adds an audit-log entry under the same 'location_set' type."""
+    """Free-text POST adds a reversible location-history entry."""
     app, db = app_and_db
     photo = db.get_photos()[0]
     pid = photo["id"]
@@ -9980,7 +9980,7 @@ def test_post_photo_location_text_records_edit(app_and_db):
     post_history = db.edit_history.list_recent()
     assert len(post_history) == pre_count + 1
     entry = post_history[0]
-    assert entry["action_type"] == "location_set"
+    assert entry["action_type"] == "photo_location"
     assert "the meadow" in entry["description"]
 
 
@@ -10625,7 +10625,7 @@ def test_batch_location_from_exif_apply_assigns_per_photo_places(
         "SELECT action_type, is_batch, description FROM edit_history "
         "ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    assert edit["action_type"] == "location_set"
+    assert edit["action_type"] == "photo_location"
     assert edit["is_batch"] == 1
     assert "resolved GPS locations for 2 photos across 2 places" in edit["description"]
 

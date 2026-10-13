@@ -1680,7 +1680,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
 
 
 def test_reject_prediction_records_history(app_and_db):
-    """Rejecting a prediction records prediction_reject in edit history."""
+    """New rejection history reverses and replays the exact prediction status."""
     app, db = app_and_db
     client = app.test_client()
     photos = db.get_photos()
@@ -1696,8 +1696,14 @@ def test_reject_prediction_records_history(app_and_db):
 
     history = db.edit_history.list_recent()
     assert len(history) == 1
-    assert history[0]['action_type'] == 'prediction_reject'
+    assert history[0]['action_type'] == 'prediction_status'
     assert 'House Sparrow' in history[0]['description']
+
+    assert db.get_prediction_status(pred_id) == 'rejected'
+    assert client.post('/api/undo').status_code == 200
+    assert db.get_prediction_status(pred_id) == 'pending'
+    assert client.post('/api/redo').status_code == 200
+    assert db.get_prediction_status(pred_id) == 'rejected'
 
 
 def test_prediction_group_apply_records_history(app_and_db):
@@ -1930,8 +1936,9 @@ def test_sync_discard_all_uses_reviewed_revision(app_and_db):
     assert db.pending_changes.list_all() == []
 
 
-def test_undo_skips_non_undoable_entries(app_and_db):
-    """Undo skips prediction_reject and discard entries to reach real undoable edits."""
+@pytest.mark.parametrize('action', ['prediction_reject', 'discard'])
+def test_undo_skips_non_undoable_entries(app_and_db, action):
+    """Undo skips incomplete legacy rejection and audit-only discard entries."""
     app, db = app_and_db
     client = app.test_client()
     photos = db.get_photos()
@@ -1942,28 +1949,28 @@ def test_undo_skips_non_undoable_entries(app_and_db):
     client.post(f'/api/photos/{pid}/rating', json={'rating': 5})
     assert db.get_photo(pid)['rating'] == 5
 
-    # Create a non-undoable entry (reject prediction)
-    det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
-    db.add_prediction(det_ids[0], 'House Sparrow', 0.60, 'test-model')
-    preds = db.get_predictions(photo_ids=[pid])
-    client.post(f'/api/predictions/{preds[-1]["id"]}/reject')
+    # Legacy rejection rows lack prediction IDs; discarded work is audit-only.
+    db.record_edit(action, 'Legacy audit action', '', [
+        {'photo_id': pid, 'old_value': '', 'new_value': ''},
+    ])
 
-    # History has 2 entries: prediction_reject (most recent) and rating
+    # The legacy audit entry is newer than the rating.
     history = db.edit_history.list_recent()
     assert len(history) == 2
 
-    # Undo should skip the prediction_reject and undo the rating
+    # Undo skips the audit entry and restores the rating.
     resp = client.post('/api/undo')
     assert resp.status_code == 200
     assert db.get_photo(pid)['rating'] == original_rating
 
-    # prediction_reject entry still in history, rating entry removed
+    # The audit entry stays in history while the rating is marked undone.
     history = db.edit_history.list_recent()
     assert len(history) == 1
-    assert history[0]['action_type'] == 'prediction_reject'
+    assert history[0]['action_type'] == action
 
 
-def test_undo_status_skips_non_undoable(app_and_db):
+@pytest.mark.parametrize('action', ['prediction_reject', 'discard'])
+def test_undo_status_skips_non_undoable(app_and_db, action):
     """Undo status reports the next undoable entry, not a non-undoable one."""
     app, db = app_and_db
     client = app.test_client()
@@ -1973,11 +1980,10 @@ def test_undo_status_skips_non_undoable(app_and_db):
     # Create an undoable edit
     client.post(f'/api/photos/{pid}/rating', json={'rating': 5})
 
-    # Create a non-undoable entry on top
-    det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
-    db.add_prediction(det_ids[0], 'Crow', 0.50, 'test-model')
-    preds = db.get_predictions(photo_ids=[pid])
-    client.post(f'/api/predictions/{preds[-1]["id"]}/reject')
+    # Legacy rejection rows lack prediction IDs; discarded work is audit-only.
+    db.record_edit(action, 'Legacy audit action', '', [
+        {'photo_id': pid, 'old_value': '', 'new_value': ''},
+    ])
 
     # Undo status should show the rating edit, not the reject
     resp = client.get('/api/undo/status')
@@ -1987,18 +1993,18 @@ def test_undo_status_skips_non_undoable(app_and_db):
     assert data['count'] == 1  # only 1 undoable entry
 
 
-def test_undo_nothing_when_only_non_undoable(app_and_db):
+@pytest.mark.parametrize('action', ['prediction_reject', 'discard'])
+def test_undo_nothing_when_only_non_undoable(app_and_db, action):
     """Undo returns error when only non-undoable entries exist."""
     app, db = app_and_db
     client = app.test_client()
     photos = db.get_photos()
     pid = photos[0]['id']
 
-    # Only non-undoable entries
-    det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
-    db.add_prediction(det_ids[0], 'Robin', 0.70, 'test-model')
-    preds = db.get_predictions(photo_ids=[pid])
-    client.post(f'/api/predictions/{preds[0]["id"]}/reject')
+    # Legacy rejection rows lack prediction IDs; discarded work is audit-only.
+    db.record_edit(action, 'Legacy audit action', '', [
+        {'photo_id': pid, 'old_value': '', 'new_value': ''},
+    ])
 
     resp = client.post('/api/undo')
     assert resp.status_code == 400  # "nothing to undo"

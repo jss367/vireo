@@ -305,12 +305,15 @@ def test_undo_redo_ignore_other_workspaces(db, pids):
     assert db.redo_last_undo() is None
 
 
-def test_undo_without_handler_still_advances_cursor(db, pids):
-    edit_id = _raw_edit(db, "mystery_action", "x", items=[(pids[0], "a", "b")])
-    assert db.undo_last_edit()["id"] == edit_id
-    assert _history_rows(db, "id = ?", (edit_id,))[0]["undone"] == 1
-    assert db.redo_last_undo()["id"] == edit_id
-    assert _history_rows(db, "id = ?", (edit_id,))[0]["undone"] == 0
+@pytest.mark.parametrize("direction", ["undo", "redo"])
+def test_history_without_handler_does_not_advance_cursor(db, pids, direction):
+    undone = int(direction == "redo")
+    edit_id = _raw_edit(db, "mystery_action", "x", undone=undone,
+                        items=[(pids[0], "a", "b")])
+    method = db.undo_last_edit if direction == "undo" else db.redo_last_undo
+    with pytest.raises(ValueError, match="Unsupported history action"):
+        method()
+    assert _history_rows(db, "id = ?", (edit_id,))[0]["undone"] == undone
 
 
 def test_undo_redo_require_active_workspace(db):

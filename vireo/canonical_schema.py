@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 class CanonicalSchema:
@@ -447,6 +447,14 @@ class CanonicalSchema:
                 -- recorded", never "matched badly".
                 match_score          REAL,
                 UNIQUE(detection_id, classifier_model, labels_fingerprint, species)
+            );
+
+            -- Lazy instance tokens for predictions captured by decision history.
+            -- Deleting a raw prediction removes its token, even if SQLite later
+            -- reuses the ID with identical data and a second-level timestamp.
+            CREATE TABLE IF NOT EXISTS prediction_history_instances (
+                prediction_id INTEGER PRIMARY KEY REFERENCES predictions(id) ON DELETE CASCADE,
+                instance_id TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16))))
             );
 
             CREATE TABLE IF NOT EXISTS detector_runs (

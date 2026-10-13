@@ -97,6 +97,9 @@ function renderCurrentGroup() {
     updateProgress();
     return;
   }
+  // History can restore a group after the completed/empty screen hid these.
+  document.getElementById('locationReviewMain').classList.remove('location-review-hidden');
+  document.getElementById('locationReviewEmpty').classList.add('location-review-hidden');
   state.photoPage = 0;
   state.renderToken += 1;
   if (state.mode === 'discrepancies') { renderDiscrepancyGroup(group); updateProgress(); return; }

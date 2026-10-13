@@ -19224,7 +19224,7 @@ def test_batch_reject_flips_status_and_records_single_undo(app_and_db):
 
     reject_rows = [
         row for row in db.edit_history.list_recent()
-        if row["action_type"] == "prediction_reject"
+        if row["action_type"] == "prediction_status"
     ]
     assert len(reject_rows) == 1
     # Rejecting must not tag anything.
@@ -19305,14 +19305,7 @@ def test_batch_accept_grouped_stays_scoped_to_submitted_photos(app_and_db):
 
 
 def test_batch_reject_does_not_hide_earlier_undoable_edit(app_and_db):
-    """A reject must not shift ``/api/undo/status`` onto an unrelated edit.
-
-    ``prediction_reject`` is in ``Database._NON_UNDOABLE`` (there is no
-    ``_apply_undo`` handler for it), so the undo endpoint keeps advertising
-    whatever undoable edit came before. The frontend accordingly avoids
-    showing an "undo the reject" toast that would silently reverse the
-    unrelated earlier edit instead.
-    """
+    """The latest reject is reversible without changing the earlier accept."""
     app, db = app_and_db
     client = app.test_client()
     photo_a, _ = _seed_prediction_photo(db, "rej-undo-a.jpg", "Bald Eagle", 0.91)
@@ -19332,12 +19325,13 @@ def test_batch_reject_does_not_hide_earlier_undoable_edit(app_and_db):
     ).status_code == 200
 
     status = client.get("/api/undo/status").get_json()
-    # The undo cursor still points at the earlier accept, not the reject.
-    # Advertising the reject as undoable would let Ctrl+Z silently undo the
-    # accept instead.
     assert status["available"] is True
-    assert "Bald Eagle" in status["description"]
-    assert "Great Blue Heron" not in status["description"]
+    assert "Great Blue Heron" in status["description"]
+    assert client.post("/api/undo").status_code == 200
+    assert db.get_prediction_status(reject_pred) == "pending"
+    assert db.get_prediction_status(accept_pred) == "accepted"
+    assert client.post("/api/redo").status_code == 200
+    assert db.get_prediction_status(reject_pred) == "rejected"
 
 
 def test_prediction_states_distinguish_empty_reasons(app_and_db):

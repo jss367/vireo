@@ -8684,15 +8684,12 @@ class Database:
     # Action types that appear in history but cannot be reversed
     _NON_UNDOABLE = (
         'prediction_reject', 'discard',
-        # Location edits (set/clear/link) are auditable but not undoable
-        # in v1 — _apply_undo has no handlers for them, so including them
-        # would silently advance the undo cursor without reverting state.
-        # Adding undo support is a follow-up if it becomes important.
+        # Legacy rows lack the before-state required for a lossless replay.
+        # New assignments use photo_location; new reject/review decisions
+        # use prediction_status. Linking/merging vocabulary is still audited.
         'location_set', 'location_clear', 'location_link', 'location_gps_review',
-        # Compare-page review actions are auditable but not undoable in v1
-        # for the same reason: _apply_undo/_apply_redo have no handlers, so
-        # leaving them undoable would mark the entry undone without
-        # restoring the prediction status or the replaced species keywords.
+        # Legacy reviewed rows omit prediction IDs; replace-species rows
+        # still omit the removed keyword IDs and migrated curation state.
         'prediction_reviewed', 'prediction_replace_species',
     )
 
@@ -8860,6 +8857,8 @@ class Database:
         handlers = self._UNDO_HANDLERS if undo else self._REDO_HANDLERS
         handler = handlers.get(action)
         value_key = 'old_value' if undo else 'new_value'
+        if setter is None and handler is None:
+            raise ValueError(f'Unsupported history action: {action}')
         for item in items:
             if setter is not None:
                 setter(self, item['photo_id'], item[value_key])
@@ -8888,6 +8887,42 @@ class Database:
         self.set_photo_edit_recipe(
             pid, value if value else None, verify_workspace=False,
         )
+
+    def _edit_set_photo_location(self, pid, value):
+        from services.pending_changes import queue_location_sync_if_enabled
+        state = json.loads(value)
+        self.clear_photo_location(pid)
+        for link in state['links']:
+            # Deleted vocabulary stays deleted, like ordinary keyword undo.
+            row = self.get_keyword_place_row(link['keyword_id'])
+            if row is not None and row['type'] == 'location':
+                self.tag_photo(
+                    pid, link['keyword_id'],
+                    source=keyword_source_max(link['source']), _commit=False,
+                )
+        self.delete_location_gps_review(pid)
+        if state.get('gps_review') is not None:
+            self.save_location_gps_reviews([(pid, state['gps_review'])])
+        queue_location_sync_if_enabled(self, pid, _commit=False)
+
+    def _edit_set_prediction_status(self, pid, value):
+        recorded = json.loads(value)
+        current = json.loads(self.edit_history.prediction_status_state(
+            [int(pred_id) for pred_id in recorded],
+        ))
+        for pred_id, state in recorded.items():
+            # Classification can reuse deleted IDs; only the instance token
+            # proves this is the original row. Metadata may be enriched in place.
+            # Earlier snapshots without an instance token stay inert.
+            if not isinstance(state, dict) or not state.get('identity'):
+                continue
+            if not state['identity'].get('prediction_instance_id'):
+                continue
+            current_identity = current.get(pred_id, {}).get('identity', {})
+            if current_identity.get('photo_id') != pid:
+                continue
+            if current_identity.get('prediction_instance_id') == state['identity']['prediction_instance_id']:
+                self.update_prediction_status(int(pred_id), state['status'], _commit=False)
 
     # -- rating -----------------------------------------------------------
 
@@ -9171,6 +9206,8 @@ class Database:
         'wildlife_excluded': _edit_set_wildlife_excluded,
         'color_label': _edit_set_color_label,
         'edit_recipe': _edit_set_edit_recipe,
+        'photo_location': _edit_set_photo_location,
+        'prediction_status': _edit_set_prediction_status,
     }
     _UNDO_HANDLERS = {
         'rating': _undo_rating,

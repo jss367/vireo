@@ -302,6 +302,18 @@
   ],
   [
    "table",
+   "prediction_history_instances",
+   "prediction_history_instances",
+   "CREATE TABLE prediction_history_instances (\n                prediction_id INTEGER PRIMARY KEY REFERENCES predictions(id) ON DELETE CASCADE,\n                instance_id TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16))))\n            )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_prediction_history_instances_1",
+   "prediction_history_instances",
+   null
+  ],
+  [
+   "table",
    "detector_runs",
    "detector_runs",
    "CREATE TABLE detector_runs (\n                photo_id        INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,\n                detector_model  TEXT NOT NULL,\n                runtime_fingerprint TEXT NOT NULL DEFAULT 'legacy',\n                input_fingerprint TEXT,\n                run_at          TEXT DEFAULT (datetime('now')),\n                box_count       INTEGER NOT NULL DEFAULT 0,\n                PRIMARY KEY (photo_id, detector_model)\n            )"

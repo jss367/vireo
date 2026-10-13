@@ -28,6 +28,7 @@ from photo_payload import (
     render_key_for_recipe,
 )
 from services import prediction_decisions
+from services.edit_history import prediction_status_item
 from services.pending_changes import queue_keyword_add
 from services.prediction_ambiguity import ambiguous_prediction_ids, effective_category_resolver, prediction_is_ambiguous
 from services.visual_scope import inject_active_visual_model
@@ -503,17 +504,14 @@ def create_predictions_blueprint(
                     f'prediction already {pred["status"]}; cannot mark reviewed',
                     409,
                 )
-            db.update_prediction_status(pred_id, "reviewed", _commit=False)
+            item = prediction_status_item(
+                db, pred["photo_id"], [pred_id],
+                lambda: db.update_prediction_status(pred_id, "reviewed", _commit=False),
+            )
             db.record_edit(
-                "prediction_reviewed",
+                "prediction_status",
                 f'Marked prediction "{pred["species"]}" reviewed',
-                "reviewed",
-                [{
-                    "photo_id": pred["photo_id"],
-                    "old_value": "pending",
-                    "new_value": "reviewed",
-                }],
-                _commit=False,
+                "reviewed", [item], _commit=False,
             )
             db.commit()
             return jsonify({"ok": True})
@@ -1462,20 +1460,9 @@ def create_predictions_blueprint(
             if pred is None:
                 continue
             species = species or pred["species"]
-            db.update_prediction_status(pid, "rejected", _commit=False)
-            # Sibling alternatives go down with the parent, scoped by
-            # fingerprint so a new label set can't rewrite an old one's
-            # review state — same rule as the single-prediction reject.
-            for sibling_id in db.get_alternative_sibling_ids(
-                pred["detection_id"], pred["model"],
-                pred["labels_fingerprint"], pid,
-            ):
-                db.update_prediction_status(sibling_id, "rejected", _commit=False)
-            items.append({
-                "photo_id": pred["photo_id"],
-                "old_value": "pending",
-                "new_value": "rejected",
-            })
+            item = _reject_prediction_row(db, pid)
+            if item is not None:
+                items.append(item)
 
         # In the same transaction as the statuses it records, for the reason
         # ``batch-accept`` gives.
@@ -1485,7 +1472,7 @@ def create_predictions_blueprint(
             if photo_count > 1:
                 desc += f" on {photo_count} photos"
             db.record_edit(
-                "prediction_reject", desc, "rejected", items,
+                "prediction_status", desc, "rejected", items,
                 is_batch=photo_count > 1, _commit=False,
             )
         db.commit()
@@ -1731,22 +1718,21 @@ def create_predictions_blueprint(
                     if gp["status"] not in _DECIDED_PREDICTION_STATUSES:
                         targets.append((gp["photo_id"], gp["id"]))
             rejected_ids = []
+            items = []
             for _target_photo, target_id in targets:
                 rejected_ids.append(target_id)
-                _reject_prediction_row(db, target_id)
+                item = _reject_prediction_row(db, target_id)
+                if item is not None:
+                    items.append(item)
             target_photos = list(dict.fromkeys(t[0] for t in targets))
             desc = f'Rejected prediction "{pred["species"]}"'
             if len(target_photos) > 1:
                 desc += f" on {len(target_photos)} photos"
             db.record_edit(
-                'prediction_reject',
+                'prediction_status',
                 desc,
                 'rejected',
-                [{
-                    'photo_id': target_photo,
-                    'old_value': 'pending',
-                    'new_value': 'rejected',
-                } for target_photo in target_photos],
+                items,
                 is_batch=len(target_photos) > 1,
                 _commit=False,
             )
@@ -1758,19 +1744,16 @@ def create_predictions_blueprint(
 
     def _reject_prediction_row(db, pred_id):
         """Reject one prediction and its ``alternative`` siblings, in-transaction."""
-        scope = db.get_prediction_scope(pred_id)
-        db.update_prediction_status(pred_id, "rejected", _commit=False)
-        # Also reject sibling alternative predictions for the same
-        # (detection, classifier_model, labels_fingerprint) in this
-        # workspace. Fingerprint scoping matters: without it, rejecting a
-        # prediction from a new label set would rewrite review state for
-        # prior fingerprints' alternatives on the same detection.
-        sibling_ids = db.get_alternative_sibling_ids(
-            scope["detection_id"], scope["classifier_model"],
-            scope["labels_fingerprint"], pred_id,
-        )
-        for sid in sibling_ids:
-            db.update_prediction_status(sid, "rejected", _commit=False)
+        pred = db.get_prediction_decision_row(pred_id)
+        ids = [pred_id, *db.get_alternative_sibling_ids(
+            pred["detection_id"], pred["model"], pred["labels_fingerprint"], pred_id,
+        )]
+
+        def apply():
+            for target_id in ids:
+                db.update_prediction_status(target_id, "rejected", _commit=False)
+
+        return prediction_status_item(db, pred["photo_id"], ids, apply)
 
     @blueprint.route("/api/predictions/group/<group_id>")
     def api_prediction_group(group_id):

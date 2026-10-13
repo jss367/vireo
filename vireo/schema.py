@@ -96,6 +96,14 @@ def _add_paired_preview_cache(conn):
                  "ON paired_preview_cache(photo_id)")
 
 
+def _add_prediction_history_instances(conn):
+    """Identify each prediction instance without changing classifier inserts."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS prediction_history_instances (
+        prediction_id INTEGER PRIMARY KEY REFERENCES predictions(id) ON DELETE CASCADE,
+        instance_id TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16))))
+    )""")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -106,6 +114,7 @@ MIGRATIONS = (
         _add_companion_sync_state, _validate_companion_sync_state,
     ),
     Migration(15, "durable_paired_preview_cache", _add_paired_preview_cache),
+    Migration(16, "prediction_history_instances", _add_prediction_history_instances),
 )
 
 
