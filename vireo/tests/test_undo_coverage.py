@@ -326,6 +326,7 @@ def test_identical_prediction_recreated_in_same_second_cannot_receive_old_histor
     db.add_prediction(did, 'Bald Eagle', .9, 'test')
     pred_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
     assert client.post(f'/api/predictions/{pred_id}/reviewed').status_code == 200
+    original_row = dict(db.conn.execute('SELECT * FROM predictions WHERE id = ?', (pred_id,)).fetchone())
     before = json.loads(db.edit_history.prediction_status_state([pred_id]))[str(pred_id)]['identity']
     if direction == 'redo':
         assert client.post('/api/undo').status_code == 200
@@ -334,13 +335,13 @@ def test_identical_prediction_recreated_in_same_second_cannot_receive_old_histor
     db.add_prediction(did, 'Bald Eagle', .9, 'test', status='accepted')
     replacement_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
     assert replacement_id == pred_id
-    db.conn.execute('UPDATE predictions SET created_at = ? WHERE id = ?', (before['prediction_created_at'], pred_id))
+    db.conn.execute('UPDATE predictions SET created_at = ? WHERE id = ?', (original_row['created_at'], pred_id))
     # Even a replacement captured by another history action gets a fresh token.
     db.edit_history.ensure_prediction_instances([pred_id])
     db.commit()
     after = json.loads(db.edit_history.prediction_status_state([pred_id]))[str(pred_id)]['identity']
     assert before['prediction_instance_id'] != after['prediction_instance_id']
-    assert {k: v for k, v in before.items() if k != 'prediction_instance_id'} == {k: v for k, v in after.items() if k != 'prediction_instance_id'}
+    assert dict(db.conn.execute('SELECT * FROM predictions WHERE id = ?', (pred_id,)).fetchone()) == original_row
     assert client.post('/api/' + direction).status_code == 200
     assert db.get_prediction_status(pred_id) == 'accepted'
 
@@ -363,3 +364,36 @@ def test_prediction_instance_is_stable_on_repeated_reads_and_catalog_reopen(app_
         reader.edit_history.ensure_prediction_instances([pred_id])
         reader.commit()
         assert json.loads(reader.edit_history.prediction_status_state([pred_id])) == before
+
+
+@pytest.mark.parametrize('direction', ['undo', 'redo'])
+@pytest.mark.parametrize('enrichment', ['full_fingerprint', 'refresh_output'])
+def test_same_prediction_instance_remains_undoable_after_metadata_enrichment(app_and_db, direction, enrichment):
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]['id']
+    pred_id, _, _ = _predictions(db, pid)
+    pred = db.get_prediction_decision_row(pred_id)
+    assert client.post(f'/api/predictions/{pred_id}/reject').status_code == 200
+    if direction == 'redo':
+        assert client.post('/api/undo').status_code == 200
+    instance_id = db.conn.execute('SELECT instance_id FROM prediction_history_instances WHERE prediction_id = ?', (pred_id,)).fetchone()[0]
+    if enrichment == 'full_fingerprint':
+        # Computation-cache import enriches this field on the existing row.
+        db.conn.execute('UPDATE predictions SET labels_fingerprint_full = ? WHERE id = ?', ('full fingerprint', pred_id))
+        db.commit()
+    else:
+        db.add_prediction(
+            pred['detection_id'], pred['species'], .8, pred['model'],
+            taxonomy={'taxon_id': 987654}, refresh_output=True, preserve_manual_review=True,
+        )
+    assert db.conn.execute('SELECT instance_id FROM prediction_history_instances WHERE prediction_id = ?', (pred_id,)).fetchone()[0] == instance_id
+    assert db.get_prediction_status(pred_id) == ('rejected' if direction == 'undo' else 'pending')
+    assert client.post('/api/' + direction).status_code == 200
+    assert db.get_prediction_status(pred_id) == ('pending' if direction == 'undo' else 'rejected')
+    # Undo/Redo changes the review, preserving the newly enriched raw fields.
+    row = db.conn.execute('SELECT labels_fingerprint_full, confidence, source_taxon_id FROM predictions WHERE id = ?', (pred_id,)).fetchone()
+    if enrichment == 'full_fingerprint':
+        assert row['labels_fingerprint_full'] == 'full fingerprint'
+    else:
+        assert (row['confidence'], row['source_taxon_id']) == (.8, 987654)

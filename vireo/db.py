@@ -8911,16 +8911,17 @@ class Database:
             [int(pred_id) for pred_id in recorded],
         ))
         for pred_id, state in recorded.items():
-            # Classification can reuse deleted IDs. Require the same photo,
-            # subject and classifier output before restoring its decision.
+            # Classification can reuse deleted IDs; only the instance token
+            # proves this is the original row. Metadata may be enriched in place.
             # Earlier snapshots without an instance token stay inert.
             if not isinstance(state, dict) or not state.get('identity'):
                 continue
             if not state['identity'].get('prediction_instance_id'):
                 continue
-            if state['identity'].get('photo_id') != pid:
+            current_identity = current.get(pred_id, {}).get('identity', {})
+            if current_identity.get('photo_id') != pid:
                 continue
-            if current.get(pred_id, {}).get('identity') == state['identity']:
+            if current_identity.get('prediction_instance_id') == state['identity']['prediction_instance_id']:
                 self.update_prediction_status(int(pred_id), state['status'], _commit=False)
 
     # -- rating -----------------------------------------------------------
