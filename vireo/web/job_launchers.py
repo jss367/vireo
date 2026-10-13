@@ -53,6 +53,16 @@ from web.request_args import (
 
 log = logging.getLogger(__name__)
 
+# Representative reasons kept on the release job result. The Jobs page shows
+# ten items (``MAX_DETAIL_ITEMS``) and the ``kept`` count already reports the
+# total, so the rest of the list only grows the payload serialized into each
+# checkpoint, ``job_history`` row and SSE event. ``_MAX_ERROR_REASONS`` caps
+# the per-photo failure samples the same way; the ``failed`` counter is
+# published as ``errors_total`` when it exceeds the cap so job history still
+# records the true count (the importer uses the same idiom).
+_MAX_KEPT_REASONS = 50
+_MAX_ERROR_REASONS = 50
+
 
 def _count_lines(path):
     if not path:
@@ -1230,6 +1240,115 @@ def create_job_launchers_blueprint(
             work,
             pausable=True,
             config={"photo_ids": photo_ids},
+        )
+
+    @blueprint.route("/api/jobs/release-local-originals", methods=["POST"])
+    @background_job
+    def api_job_release_local_originals(ctx):
+        """Release selected, folder-scoped, or all managed offline originals."""
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        scopes = [key for key in ("photo_ids", "folder_id", "all_cached") if key in body]
+        if len(scopes) != 1:
+            return json_error("provide exactly one of photo_ids, folder_id, or all_cached")
+        db = get_db()
+        all_cached = scopes[0] == "all_cached"
+        if all_cached:
+            if body["all_cached"] is not True:
+                return json_error("all_cached must be true")
+            # Storage reports catalog-wide usage, across every workspace.
+            photo_ids = db.caches.offline_original_ids()
+        elif scopes[0] == "folder_id":
+            folder_id = body["folder_id"]
+            if isinstance(folder_id, bool) or not isinstance(folder_id, int):
+                return json_error("folder_id must be an integer")
+            visible_folders = {folder["id"] for folder in db.get_folder_tree()}
+            if ctx.workspace_id is None or folder_id not in visible_folders:
+                return json_error("folder does not belong to the active workspace", 403)
+            photo_ids = db.caches.offline_original_ids(
+                workspace_id=ctx.workspace_id,
+                folder_ids=db.get_folder_subtree_ids(folder_id),
+            )
+        else:
+            if ctx.workspace_id is None:
+                return json_error("no active workspace", 403)
+            photo_ids, error = parse_selection_photo_ids(
+                db, body, json_error=json_error, limit=None,
+            )
+            if error is not None:
+                return error
+        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        selected_photos = db.get_photos_by_ids(photo_ids)
+
+        def work(job):
+            from offline_cache import release_photo_original
+
+            thread_db = ctx.thread_db()
+            result = {
+                "ok": True, "released": 0, "kept": 0, "not_cached": 0,
+                "failed": 0, "bytes": 0, "total": len(photo_ids),
+                "processed": 0, "kept_reasons": [], "errors": [],
+            }
+            job["result"] = result
+            try:
+                for photo_id in photo_ids:
+                    ctx.checkpoint(job)
+                    photo = selected_photos.get(photo_id)
+                    filename = photo["filename"] if photo else f"Photo {photo_id}"
+                    outcome = (
+                        release_photo_original(
+                            thread_db, photo_id, vireo_dir, verify_workspace=not all_cached,
+                            selected_photo=photo,
+                        ) if photo is not None else {"status": "not_cached", "bytes": 0}
+                    )
+                    status = outcome["status"]
+                    result[status] += 1
+                    result["bytes"] += outcome["bytes"]
+                    result["processed"] += 1
+                    if status in {"kept", "failed"}:
+                        reason = f'{filename}: {outcome["reason"]}'
+                        if status == "kept":
+                            if len(result["kept_reasons"]) < _MAX_KEPT_REASONS:
+                                result["kept_reasons"].append(reason)
+                        else:
+                            if len(result["errors"]) < _MAX_ERROR_REASONS:
+                                # Append to ``job["errors"]`` first so a
+                                # snapshot caught between the two appends
+                                # sees ``snap["errors"]`` at least as long
+                                # as ``snap["result"]["errors"]``.
+                                # ``_error_total(snap)`` reads from
+                                # ``snap["errors"]`` while
+                                # ``_write_checkpoints`` serializes
+                                # ``snap["result"]``, so appending to the
+                                # job-level list first keeps the
+                                # ``error_count`` column from under-reporting
+                                # the serialized result's error details
+                                # before the ``errors_total`` cap branch
+                                # kicks in.
+                                job["errors"].append(reason)
+                                result["errors"].append(reason)
+                            elif result["failed"] > _MAX_ERROR_REASONS:
+                                # Live checkpoints snapshot ``result`` and
+                                # persist ``_error_total`` — publish the
+                                # count the moment it diverges from the
+                                # capped list, not just at the final return,
+                                # so a checkpoint mid-run (and the +1 the
+                                # startup sweep adds to an interrupted row)
+                                # reports the true total.
+                                result["errors_total"] = result["failed"]
+                            result["ok"] = False
+                    ctx.runner.push_event(job["id"], "progress", {
+                        "current": result["processed"], "total": result["total"],
+                        "current_file": filename, "phase": "Releasing local originals",
+                    })
+                return result
+            finally:
+                thread_db.close()
+
+        return ctx.start(
+            "release-local-originals", work, pausable=True,
+            config=body, extra={"total": len(photo_ids)},
         )
 
     @blueprint.route("/api/jobs/prepare-full-resolution", methods=["POST"])

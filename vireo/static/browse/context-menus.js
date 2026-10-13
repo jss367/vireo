@@ -316,6 +316,10 @@ function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
     { label: 'Make Offline', onClick: function() { makeAvailableOffline(); } },
     { label: 'Prepare Full Resolution',
       onClick: function() { prepareFullResolutionSelection(photoIds); } },
+    { label: 'Release Local Originals…', disabled: VireoReleaseOriginals.isRunning(),
+      onClick: function() {
+        VireoReleaseOriginals.release({photo_ids: photoIds}, photoIds.length.toLocaleString() + ' selected photos');
+      } },
     { label: 'Export\u2026', onClick: function() { openExportModal(); } },
     { label: 'Create Panorama\u2026', disabled: photoIds.length < 2 || photoIds.length > 12,
       disabledHint: 'Select 2–12 overlapping photos',
@@ -717,6 +721,10 @@ document.addEventListener('contextmenu', function(e) {
     { label: 'Show Associated Workspaces…', onClick: function() { showFolderWorkspaces(fid); } },
     { separator: true },
     { label: 'Work Locally\u2026', onClick: function() { workLocallyFolder(fid); } },
+    { label: 'Release Local Originals…', disabled: VireoReleaseOriginals.isRunning(),
+      onClick: function() {
+        VireoReleaseOriginals.release({folder_id: fid}, 'this folder and its subfolders');
+      } },
     { label: 'Move\u2026', onClick: function() { moveFolder(fid); } },
     { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },
   ];

@@ -522,6 +522,19 @@ def test_full_resolution_summary_explains_deleted_photos():
     assert out["details"] == []
 
 
+def test_release_originals_summary_explains_retained_and_unchecked_photos():
+    out = describe_result("release-local-originals", {
+        "released": 12, "bytes": 2 * 1024**3, "kept": 2, "not_cached": 1,
+        "failed": 0, "processed": 15, "total": 17,
+        "kept_reasons": ["bird.NEF: Source original has changed since it was cached"],
+    })
+    assert out["summary"] == (
+        "12 local originals released, 2.0 GB reclaimed, 2 kept, "
+        "1 already released, 2 not checked"
+    )
+    assert out["details"] == ["bird.NEF: Source original has changed since it was cached"]
+
+
 def test_partial_failure_leads_with_counts_not_the_error():
     """A job that did its work but had some items fail is 'failed', yet
     its summary is still the counts, with how many failed beside them;

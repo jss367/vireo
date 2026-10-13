@@ -1,4 +1,5 @@
 # vireo/tests/test_jobs.py
+import inspect
 import logging
 import os
 import sys
@@ -849,6 +850,198 @@ def test_job_result_errors_total_reaches_persisted_error_count(tmp_path):
     assert row["status"] == "failed"
     assert row["error_count"] == 200, (
         f"expected error_count=200 (from errors_total), got {row['error_count']}"
+    )
+
+
+def test_checkpoint_persists_errors_total_not_capped_errors_length(tmp_path):
+    """A live checkpoint of a bounded-sample run must persist the true
+    ``errors_total`` as ``error_count``, not ``len(job['errors'])``. The
+    final ``_persist_job`` already does this (see
+    ``test_job_result_errors_total_reaches_persisted_error_count``); the
+    checkpoint path mirrors the same accounting so an interrupted row the
+    startup sweep bumps by +1 lands on the real total, not the capped
+    sample. The release-local-originals and importer paths both cap at
+    50 and would otherwise under-report ``error_count`` through every
+    checkpoint until the final persist.
+    """
+    import json as _json
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    worker_published = threading.Event()
+    release = threading.Event()
+
+    def work(job):
+        # Simulate a bounded-sample run mid-flight: ``job['errors']`` and
+        # ``result['errors']`` carry the capped slice, ``result['failed']``
+        # and ``errors_total`` carry the real count.
+        for i in range(50):
+            job["errors"].append(f"file_{i}.jpg: boom")
+        job["result"] = {
+            "failed": 200,
+            "errors": list(job["errors"]),
+            "errors_total": 200,
+            "ok": False,
+        }
+        worker_published.set()
+        release.wait(timeout=synchronization_timeout(5))
+        return job["result"]
+
+    job_id = runner.start("release-local-originals", work)
+    try:
+        assert worker_published.wait(timeout=synchronization_timeout(5))
+        # Force a deterministic checkpoint while the row is still running.
+        runner.checkpoint_live_jobs()
+        row = db.conn.execute(
+            "SELECT status, error_count, result FROM job_history WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "running"
+        assert row["error_count"] == 200, (
+            "checkpoint must persist errors_total, not the capped sample "
+            f"length; got {row['error_count']}"
+        )
+        persisted_result = _json.loads(row["result"])
+        assert persisted_result["errors_total"] == 200
+        assert len(persisted_result["errors"]) == 50
+    finally:
+        release.set()
+        wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+
+    final = db.conn.execute(
+        "SELECT status, error_count FROM job_history WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert final["status"] == "failed"
+    assert final["error_count"] == 200
+
+
+def test_snapshot_job_freezes_result_against_worker_mutation():
+    """``_snapshot_job`` must return a snapshot whose ``result`` is a
+    distinct top-level mapping from the live job's: a worker that keeps
+    mutating ``job["result"]`` in place (e.g. the release-local-originals
+    loop bumping ``failed`` / ``errors_total`` without holding ``_lock``)
+    would otherwise let ``_write_checkpoints`` dump the result at one
+    state and read ``_error_total`` from it at a later state. The row's
+    ``error_count`` column would then disagree with ``errors_total`` in
+    the serialized result, and the startup-sweep +1 compounds the
+    mismatch on an interrupted row.
+    """
+    from jobs import JobRunner
+
+    live_result = {
+        "failed": 50,
+        "errors": [f"file_{i}.jpg: boom" for i in range(50)],
+        "errors_total": 50,
+        "ok": False,
+    }
+    job = {
+        "id": "release-1",
+        "type": "release-local-originals",
+        "status": "running",
+        "progress": {"current": 50, "total": 200},
+        "steps": [],
+        "errors": [f"file_{i}.jpg: boom" for i in range(50)],
+        "result": live_result,
+    }
+
+    snap = JobRunner._snapshot_job(job)
+
+    # The snapshot's result must be a distinct dict so later worker
+    # mutations cannot bleed into subsequent reads by callers (checkpoint
+    # writer, Jobs API).
+    assert snap["result"] is not live_result
+    snap_result_before = dict(snap["result"])
+
+    # Simulate the worker racing another failure into the live dict
+    # between the snapshot and whatever the caller does next.
+    live_result["failed"] = 200
+    live_result["errors_total"] = 200
+
+    assert snap["result"] == snap_result_before
+    assert snap["result"]["errors_total"] == 50
+    # ``_error_total`` reading from the snapshot must agree with the
+    # ``errors_total`` the same snapshot's result would serialize.
+    assert JobRunner._error_total(snap) == snap["result"]["errors_total"] == 50
+
+
+def test_snapshot_job_freezes_nested_result_sample_lists():
+    """``_snapshot_job`` must also freeze the per-photo sample lists nested
+    inside ``result`` (``errors``, ``kept_reasons``). Workers that append to
+    them without holding ``_lock`` — the release-local-originals loop during
+    the first 50 failures, before the ``errors_total`` cap branch kicks in —
+    would otherwise let ``json.dumps(snap["result"])`` serialize a longer
+    sample than ``snap["errors"]`` (the top-level copy taken a few lines up
+    in the same method), so the checkpoint row's ``error_count`` column
+    could under-report what the serialized ``result`` carries. ``_error_total``
+    and the serialized result must therefore read a single immutable
+    snapshot of the sample.
+    """
+    from jobs import JobRunner
+
+    live_errors = ["file_0.jpg: boom"]
+    live_kept = ["file_1.jpg: source busy"]
+    live_result = {
+        "failed": 1,
+        "kept": 1,
+        "errors": live_errors,
+        "kept_reasons": live_kept,
+        "ok": False,
+    }
+    job = {
+        "id": "release-nested",
+        "type": "release-local-originals",
+        "status": "running",
+        "progress": {"current": 2, "total": 100},
+        "steps": [],
+        "errors": ["file_0.jpg: boom"],
+        "result": live_result,
+    }
+
+    snap = JobRunner._snapshot_job(job)
+
+    # Simulate the worker appending more sample entries after the snapshot.
+    live_errors.append("file_2.jpg: boom")
+    live_kept.append("file_3.jpg: source busy")
+
+    assert snap["result"]["errors"] == ["file_0.jpg: boom"]
+    assert snap["result"]["kept_reasons"] == ["file_1.jpg: source busy"]
+    assert snap["result"]["errors"] is not live_errors
+    assert snap["result"]["kept_reasons"] is not live_kept
+
+
+def test_release_appends_job_errors_before_result_errors():
+    """The release-local-originals worker must append to ``job["errors"]``
+    before ``result["errors"]`` during the first 50 failures (before the
+    ``errors_total`` cap branch kicks in). ``_error_total(snap)`` reads from
+    ``snap["errors"]`` while ``_write_checkpoints`` serializes
+    ``snap["result"]``, so appending to the job-level list first keeps a
+    snapshot caught between the two appends from under-reporting the
+    serialized result's error count.
+    """
+    import re
+
+    from web import job_launchers
+
+    source = inspect.getsource(job_launchers)
+    # The two appends must appear in a specific order inside the per-photo
+    # failure branch; both tokens must be present and the ``job["errors"]``
+    # append must come first.
+    pattern = (
+        r"len\(result\[\"errors\"\]\) < _MAX_ERROR_REASONS\s*:\s*\n"
+        r"(?:[^\n]*\n)*?"
+        r"\s*job\[\"errors\"\]\.append\(reason\)\s*\n"
+        r"\s*result\[\"errors\"\]\.append\(reason\)"
+    )
+    assert re.search(pattern, source), (
+        "release-local-originals worker must append to job['errors'] "
+        "before result['errors']; see _snapshot_job's error-count "
+        "contract."
     )
 
 

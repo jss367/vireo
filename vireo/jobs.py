@@ -724,7 +724,13 @@ class JobRunner:
                         round(elapsed, 1),
                         json.dumps(result, default=str)
                         if result is not None else None,
-                        len(job.get("errors") or []),
+                        # Mirror ``_persist_job``: a bounded-sample ``errors``
+                        # list publishes the real count as ``errors_total``,
+                        # so the checkpointed ``error_count`` must read that
+                        # too — otherwise an interrupted job's startup-sweep
+                        # ``+1`` lands on the capped sample size, not the
+                        # true total.
+                        JobRunner._error_total(job),
                         json.dumps(job.get("steps") or [], default=str),
                         self._build_summary(job),
                         json.dumps(progress, default=str),
@@ -1802,6 +1808,27 @@ class JobRunner:
         snap["progress"] = dict(job.get("progress") or {})
         snap["steps"] = [dict(s) for s in (job.get("steps") or [])]
         snap["errors"] = list(job.get("errors") or [])
+        # Freeze the top-level ``result`` mapping too. Some workers mutate
+        # ``job["result"]`` in place (e.g. the release-local-originals loop
+        # bumps ``failed`` / ``errors_total`` without holding ``_lock``), so
+        # a checkpoint that leaves ``snap["result"]`` as the live dict can
+        # dump the result at one state in ``_write_checkpoints`` and then
+        # read ``_error_total`` at a later state — the row's ``error_count``
+        # column then disagrees with the ``errors_total`` the serialized
+        # result reports, and the startup-sweep +1 compounds the mismatch.
+        # Also freeze the nested per-photo sample lists (``errors`` and
+        # ``kept_reasons``): workers that append to them during the first 50
+        # failures would otherwise let ``json.dumps(snap["result"])``
+        # iterate a live, mid-append list, and the serialized sample size
+        # could race ahead of the top-level ``snap["errors"]`` copy taken a
+        # few lines up — the two counts the checkpoint row cross-references
+        # must come from one immutable snapshot.
+        if isinstance(snap.get("result"), dict):
+            snap["result"] = dict(snap["result"])
+            for key in ("errors", "kept_reasons"):
+                value = snap["result"].get(key)
+                if isinstance(value, list):
+                    snap["result"][key] = list(value)
         if job.get("status") in ("running", "pausing", "paused"):
             timing = get_resource_ledger().owner_timing(job["id"])
             snap["resource_wait_seconds"] = timing["wait_seconds"]

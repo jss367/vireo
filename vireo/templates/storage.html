@@ -312,6 +312,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
   </div>
 </div>
 
+<script src="/static/vireo-release-originals.js"></script>
 <script>
 function storageEscapeHtml(s) {
   return String(s == null ? '' : s)
@@ -708,7 +709,7 @@ async function loadStoragePanel() {
       {name: 'Label Embeddings', size: s.embeddings.size, count: s.embeddings.count, type: 'embeddings', kind: 'safe', kindLabel: 'Safe to clear'},
       {name: 'Models', size: s.models.size, type: null, kind: 'download', kindLabel: 'Download again', settings: true},
       {name: 'Hugging Face Cache', size: s.hf_cache.size, type: null, kind: 'download', kindLabel: 'Download again', settings: true},
-      {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, type: null, kind: 'keep', kindLabel: 'Keep'},
+      {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, release: true, type: null, kind: 'keep', kindLabel: 'Release when done'},
     ];
     var auxiliaryCategories = s.other.categories || [];
     auxiliaryCategories.forEach(function(c) {
@@ -733,7 +734,7 @@ async function loadStoragePanel() {
 
     var html = '';
     categories.forEach(function(c) {
-      if (c.size === 0 && !c.type) return;
+      if (c.size === 0 && !c.type && !(c.release && c.count)) return;
       if (c.type) _storageSummary[c.type] = {count: c.count || 0, size: c.size || 0};
       html += '<div class="stat-card">' +
         '<div class="stat-number">' + storageFormatBytes(c.size) + '</div>' +
@@ -743,8 +744,8 @@ async function loadStoragePanel() {
         '<span class="stat-kind ' + c.kind + '">' + c.kindLabel + '</span>';
       if (c.type) {
         html += '<button class="btn-manage" onclick="openStorageModal(\'' + c.type + '\')">Manage</button>';
-      } else if (c.settings) {
-        html += '<button class="btn-manage" onclick="window.location.href=\'/settings\'">Manage in Settings</button>';
+      } else {
+        html += c.release ? VireoReleaseOriginals.storageButton() : c.settings ? '<button class="btn-manage" onclick="window.location.href=\'/settings\'">Manage in Settings</button>' : '';
       }
       html += '</div>';
     });

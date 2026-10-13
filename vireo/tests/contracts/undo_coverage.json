@@ -230,6 +230,7 @@
       "POST /api/jobs/previews",
       "POST /api/jobs/publish-site",
       "POST /api/jobs/regroup",
+      "POST /api/jobs/release-local-originals",
       "POST /api/jobs/repair-metadata",
       "POST /api/jobs/runtime-warning/dismiss",
       "POST /api/jobs/scan",

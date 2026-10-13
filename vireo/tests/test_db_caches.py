@@ -603,6 +603,29 @@ def test_offline_original_cached_count_counts_only_cached_rows(db):
     assert db.caches.offline_original_cached_count() == 1
 
 
+def test_offline_original_ids_excludes_non_cached_rows(db):
+    """Bulk release scopes must match Storage's cached-only accounting.
+
+    A row left behind by a failed cache attempt (``missing_source`` or any
+    other non-cached status) has no managed paths. Including it in a scope
+    would inflate the released count while releasing zero bytes.
+    """
+    cached = _photo(db, "cached.jpg")
+    missing = _photo(db, "missing.jpg")
+    errored = _photo(db, "errored.jpg")
+    db.caches.offline_original_upsert(**_offline_args(cached))
+    db.caches.offline_original_upsert(
+        **_offline_args(missing, original_path=None, xmp_path=None,
+                        companion_path=None, bytes_=0, status="missing_source"))
+    db.caches.offline_original_upsert(**_offline_args(errored, status="error"))
+
+    assert db.caches.offline_original_ids() == [cached]
+    folder_id = db.conn.execute(
+        "SELECT folder_id FROM photos WHERE id=?", (cached,),
+    ).fetchone()["folder_id"]
+    assert db.caches.offline_original_ids(folder_ids=[folder_id]) == [cached]
+
+
 def test_preview_invalidated_reads_the_marker(db):
     from preview_cache import (
         ensure_preview_cache_invalidations_table,
