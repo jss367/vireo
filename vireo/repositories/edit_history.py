@@ -743,11 +743,13 @@ class EditHistoryRepository:
                 ).fetchall()
                 retained = 0
                 for row in rows:
-                    if retained + row["bytes"] > max_payload_bytes:
+                    # Grouping undo is a chain. Once a newer link is
+                    # retired, no older grouping snapshot can be replayed
+                    # against the current structure, even if it would fit.
+                    retained += row["bytes"]
+                    if retained > max_payload_bytes:
                         # Preserve any photo edits carried by the grouping edit.
                         self.retire_stale_grouping_entry(row["edit_id"])
-                    else:
-                        retained += row["bytes"]
             after = totals()
         except BaseException:
             self.conn.execute("ROLLBACK TO retained_history_prune")

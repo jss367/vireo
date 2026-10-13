@@ -4687,7 +4687,8 @@ class Database:
             return
         try:
             from services.result_files import prune_photo_results
-            prune_photo_results(os.path.dirname(self._db_path), ids)
+            prune_photo_results(os.path.dirname(self._db_path), ids,
+                                [workspace["id"] for workspace in self.workspaces.list_all()])
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
                 raise

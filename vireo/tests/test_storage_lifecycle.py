@@ -54,16 +54,18 @@ def test_rollback_does_not_prune_shared_results(db, tmp_path):
     assert path.read_bytes() == original
 
 
-def test_result_pruning_waits_for_workspace_writer_and_keeps_its_new_results(tmp_path):
+@pytest.mark.parametrize("existing", [True, False])
+def test_result_pruning_waits_for_workspace_writer_and_keeps_its_new_results(tmp_path, existing):
     from pipeline_locks import acquire_workspace_regroup
     from testing.waits import synchronization_timeout
 
     path = tmp_path / "pipeline_results_ws99.json"
-    _pipeline(path, [1, 2])
+    if existing:
+        _pipeline(path, [1, 2])
     started, finished = threading.Event(), threading.Event()
     def prune():
         started.set()
-        result_files.prune_photo_results(str(tmp_path), [1])
+        result_files.prune_photo_results(str(tmp_path), [1], [99])
         finished.set()
     with acquire_workspace_regroup(99):
         worker = threading.Thread(target=prune)
@@ -94,6 +96,34 @@ def test_workspace_delete_removes_snapshots_history_and_never_reuses_id(app_and_
     db.conn.execute("INSERT OR REPLACE INTO job_history (id, workspace_id) VALUES ('late-job', ?)", (ws,))
     db.conn.commit()
     assert db.job_history.get('late-job') is None
+
+
+@pytest.mark.parametrize("job_type", ["cull", "regroup", "pipeline"])
+def test_workspace_delete_rejects_inactive_workspace_with_result_publisher(app_and_db, tmp_path, job_type):
+    from testing.waits import synchronization_timeout
+
+    app, db = app_and_db
+    workspace = db.create_workspace("Publishing results")
+    assert workspace != db.active_workspace_id
+    started, resume = threading.Event(), threading.Event()
+    path = tmp_path / f"culling_results_ws{workspace}.json"
+    def publish(_job):
+        started.set()
+        assert resume.wait(synchronization_timeout(5))
+        path.write_text("{}")
+    job_id = app._job_runner.start(job_type, publish, workspace_id=workspace)
+    client = app.test_client()
+    try:
+        assert started.wait(synchronization_timeout(5))
+        response = client.delete(f'/api/workspaces/{workspace}')
+        assert response.status_code == 409
+        assert db.workspaces.get(workspace)
+    finally:
+        resume.set()
+    wait_for_job_via_client(client, job_id, wait_for_history=True)
+    assert path.exists()
+    assert client.delete(f'/api/workspaces/{workspace}').status_code == 200
+    assert not path.exists()
 
 
 def test_locked_workspace_snapshot_does_not_belong_to_new_workspace(db, tmp_path, monkeypatch):
@@ -523,7 +553,7 @@ def test_grouping_retention_rolls_back_partial_retirement(db, monkeypatch):
     assert db.edit_history.grouping_payload(second)
 
 
-def test_grouping_retention_preserves_caller_transaction_and_smaller_snapshots(db):
+def test_grouping_retention_preserves_caller_transaction_and_contiguous_undo(db):
     smaller, oversized = _grouping_edit(db), _grouping_edit(db)
     db.edit_history.store_grouping_payload(smaller, "x" * 10)
     db.edit_history.store_grouping_payload(oversized, "x" * 1000)
@@ -531,10 +561,11 @@ def test_grouping_retention_preserves_caller_transaction_and_smaller_snapshots(d
     db.begin_immediate()
     db.edit_history.prune(1000, max_payload_bytes=100)
     assert db.conn.in_transaction
-    assert db.edit_history.grouping_payload(smaller)
+    assert not db.edit_history.grouping_payload(smaller)
     assert not db.edit_history.grouping_payload(oversized)
     db.rollback()
     assert db.edit_history.grouping_payload(oversized)
+    assert db.edit_history.grouping_payload(smaller)
 
 
 def test_maintenance_keeps_workspace_created_during_the_pass(app_and_db, tmp_path, monkeypatch):

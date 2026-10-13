@@ -1131,10 +1131,11 @@ def test_prune_pipeline_cache_for_ids(db, monkeypatch):
     assert calls == []
     db.prune_pipeline_cache_for_ids([1, 2])
     import os
-    assert calls == [(os.path.dirname(db._db_path), [1, 2])]
+    workspace_ids = [workspace["id"] for workspace in db.workspaces.list_all()]
+    assert calls == [(os.path.dirname(db._db_path), [1, 2], workspace_ids)]
     db.set_active_workspace(None)
     db.prune_pipeline_cache_for_ids([3])
-    assert calls[-1] == (os.path.dirname(db._db_path), [3])
+    assert calls[-1] == (os.path.dirname(db._db_path), [3], workspace_ids)
 
 
 def test_prune_pipeline_cache_for_ids_swallows_errors_but_not_interrupts(db, monkeypatch):

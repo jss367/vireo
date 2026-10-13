@@ -61,6 +61,33 @@ def test_grouping_and_flags_undo_redo_in_one_history(app_and_db):
     assert all(db.get_photo(pid)['flag'] == 'rejected' for pid in ids)
 
 
+def test_snapshot_budget_keeps_a_replayable_newest_chain(app_and_db):
+    import json
+
+    app, db = app_and_db
+    client = app.test_client()
+    ids, _original = _seed(db)
+    _detach(client, 'photo', photo_id=ids[0])
+    _detach(client, 'photo', photo_id=ids[1])
+    before_newest = _load(db)
+    _detach(client, 'photo', photo_id=ids[2])
+    oldest, middle, newest = [row[0] for row in db.conn.execute(
+        'SELECT edit_id FROM edit_history_payloads ORDER BY edit_id',
+    )]
+    payload = json.loads(db.edit_history.grouping_payload(middle)['payload'])
+    payload['padding'] = 'x' * 100_000
+    db.edit_history.store_grouping_payload(middle, json.dumps(payload))
+    db.commit()
+    budget = db.conn.execute('SELECT bytes FROM edit_history_payloads WHERE edit_id=?', (newest,)).fetchone()[0] + 100
+    db.edit_history.prune(1000, max_payload_bytes=budget)
+    assert db.edit_history.grouping_payload(newest)
+    assert not db.edit_history.grouping_payload(middle)
+    assert not db.edit_history.grouping_payload(oldest)
+    assert client.post('/api/undo').status_code == 200
+    assert _load(db)['encounters'] == before_newest['encounters']
+    assert client.get('/api/undo/status').json['available'] is False
+
+
 def test_grouping_restore_preserves_new_photo_metadata(app_and_db):
     app, db = app_and_db
     client = app.test_client()
