@@ -115,7 +115,7 @@ function renderJobCard(job, options) {
   // Resume and Retry on this row (409), so neither is offered; say where
   // to go instead.
   var resumeTakeover = importResumeTakeover(job, historyJobs);
-  var resumableImport = isResumableImport(job) && !resumeTakeover.by;
+  var resumableImport = isResumableImport(job, historyJobs) && !resumeTakeover.by;
   if (!isLive && (failedImportCount > 0 || importNotStarted || resumableImport || resumeTakeover.by) &&
       importRetryBody(job)) {
     var retryInFlight = hasActiveRetryFor(job.id);

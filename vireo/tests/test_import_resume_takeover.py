@@ -61,8 +61,24 @@ def _inherited_chain_parent(tags_applied):
     return parent
 
 
+def _inherited_pipeline_scenario(*, provenance, never_started):
+    parent = _inherited_chain_parent(True)
+    parent["config"]["parent_import_job_id"] = "ancestor"
+    if provenance:
+        parent["config"]["chain_process_job_ids"] = ["process"]
+    rows = [_row("ancestor", "2026-09-01T09:00:00", {
+        "chained": True, "process_job_id": "process",
+    }, parent=None, root=None), _row("process", "2026-09-01T09:30:00", {
+        "never_started": never_started,
+    }, status="failed" if never_started else "completed", job_type="pipeline", parent=None, root=None)]
+    return parent, rows
+
+
 def _scenarios():
     return {
+        "stored inherited pipeline never started": _inherited_pipeline_scenario(provenance=True, never_started=True),
+        "legacy inherited pipeline never started": _inherited_pipeline_scenario(provenance=False, never_started=True),
+        "inherited pipeline actually ran": _inherited_pipeline_scenario(provenance=True, never_started=False),
         "inherited chain still owes tags": (_inherited_chain_parent(False), []),
         "inherited chain and tags are paid": (_inherited_chain_parent(True), []),
         "old tag mark does not pay newly landed tags": (
@@ -324,6 +340,9 @@ def _server(parent, rows):
 
 # (by, kind, offers Resume, offers Retry)
 EXPECTED = {
+    "stored inherited pipeline never started": (None, None, True, False),
+    "legacy inherited pipeline never started": (None, None, True, False),
+    "inherited pipeline actually ran": (None, None, False, False),
     "inherited chain still owes tags": (None, None, True, False),
     "inherited chain and tags are paid": (None, None, False, False),
     "tagged sibling does not pay another sibling's new tags": (None, None, True, False),

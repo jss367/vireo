@@ -16,13 +16,13 @@ function fn(name) {
 }
 
 const ctx = vm.createContext({});
-for (const name of ['importFailedBeforeStart', 'jobConfig', 'hasFailedImportFiles', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
+for (const name of ['importFailedBeforeStart', 'jobConfig', 'hasFailedImportFiles', 'importChainProcessJobIds', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
   vm.runInContext(fn(name), ctx);
 }
 ctx.scenarios = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const out = vm.runInContext(`scenarios.map(function(s) {
   var takeover = importResumeTakeover(s.parent, s.rows);
-  var offersResume = isResumableImport(s.parent) && !takeover.by;
+  var offersResume = isResumableImport(s.parent, s.rows) && !takeover.by;
   return {
     tags_applied: takeover.tagsApplied,
     chained: takeover.chained,

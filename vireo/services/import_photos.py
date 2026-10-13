@@ -1064,6 +1064,7 @@ class _ImportPhotosRequest:
             # A preparation failure happens before the result can mark the
             # already-paid chain; keep its inherited evidence in the config.
             "chain_already_ran": bool(parent_resume and parent_resume["chain_already_ran"]),
+            "chain_process_job_ids": parent_resume.get("chain_process_job_ids", []) if parent_resume else [],
             # Fingerprint sidecar to carry_photo_ids so a retry-of-retry
             # can still verify the inherited scope by stable identity
             # even after the grandparent's job has aged out of history.
@@ -1177,7 +1178,7 @@ class _ImportPhotosJob:
         self.location_from_gps = request.location_from_gps
         self.carry_photo_ids = request.carry_photo_ids
         self.parent_resume = request.parent_resume
-        self.parent_source_snapshots = request.parent_source_snapshots
+        self.source_snapshots = request.parent_source_snapshots
         self.active_ws = request.active_ws
 
     def work(self, job):
@@ -1195,8 +1196,8 @@ class _ImportPhotosJob:
             job["result"] = {
                 "ok": False, "error": str(exc), "import_not_started": True,
             }
-            if self.parent_source_snapshots:
-                job["result"]["source_snapshots"] = self.parent_source_snapshots
+            if self.source_snapshots:
+                job["result"]["source_snapshots"] = self.source_snapshots
             raise
 
         params = ImportParams(
@@ -1284,6 +1285,12 @@ class _ImportPhotosJob:
             from local_processing import selected_source_files, storage_plan, total_file_bytes
             import_destination = managed_staging["destination"]
             files = selected_source_files(self.sources, self.file_types, self.recursive)
+            if not self.source_snapshots:
+                from import_job import _capture_source_snapshots
+                # Match normal import discovery: snapshot every source file
+                # before applying the user's per-file selection, so retries
+                # can compare the unchanged card even after a space failure.
+                self.source_snapshots = _capture_source_snapshots(files, self.sources)
             if self.include_paths is not None:
                 files = [p for p in files if str(p) in self.include_paths]
             space = storage_plan(self.vireo_dir, total_file_bytes(files))
