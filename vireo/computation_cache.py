@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from file_replace import replace_file
+from services.retained_cache import guarded_reader, reader_guard
 
 log = logging.getLogger(__name__)
 
@@ -1131,6 +1132,7 @@ class ArtifactStore:
             / f"{digest}.json"
         )
 
+    @guarded_reader("computation")
     def put(self, artifact):
         artifact = validate_artifact(artifact)
         body = canonical_bytes(artifact)
@@ -1178,7 +1180,6 @@ class ArtifactStore:
             return
         for path in sorted(objects.rglob("*.json")):
             try:
-                from services.retained_cache import reader_guard
                 with reader_guard("computation"):
                     body = path.read_bytes()
                 artifact = validate_artifact(json.loads(body))
