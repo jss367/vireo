@@ -65,8 +65,7 @@ function isResumableImport(job, rows) {
   var neverStarted = new Set((rows || []).filter(function(row) {
     return pipelineNeverStarted(row);
   }).map(function(row) { return row.id; }));
-  var chainIds = importChainProcessJobIds(jobConfig(job), result, rows, job.id);
-  var chainInvalidated = chainIds.length > 0 && chainIds.every(function(id) { return neverStarted.has(id); });
+  var chainInvalidated = importChainInvalidated(jobConfig(job), result, rows, job.id, neverStarted);
   if (!chainInvalidated && (jobConfig(job).chain_already_ran || (result.chained && result.ok !== false)) && result.tags_applied) return false;
   // Chain ran but tag/GPS work is still owed (a Stop cut the pass
   // short, or an error left tags unmarked). The resume replays only
@@ -78,11 +77,11 @@ function hasFailedImportFiles(result) {
   return !!result && typeof result.failed === 'number' && result.failed > 0;
 }
 
-function importChainProcessJobIds(config, result, rows, jobId) {
+function importChainProcessJobIds(config, result, rows, jobId, inferLegacy) {
   var byId = new Map((rows || []).filter(function(row) {
     return row.type === 'import';
   }).map(function(row) { return [row.id, row]; }));
-  if ((config.chain_already_ran || (!('chain_already_ran' in config) && importFailedBeforeStart(result)) ||
+  if (inferLegacy !== false && (config.chain_already_ran || (!('chain_already_ran' in config) && importFailedBeforeStart(result)) ||
       result.after_import_skipped === 'chain already ran on the interrupted parent') && !(config.chain_process_job_ids || []).length &&
       !result.process_job_id && config.parent_import_job_id) {
     var scopeRoot = config.parent_import_job_id;
@@ -118,6 +117,13 @@ function importChainProcessJobIds(config, result, rows, jobId) {
     config = jobConfig(row);
     result = row.result || {};
   }
+}
+
+function importChainInvalidated(config, result, rows, jobId, neverStarted) {
+  var recorded = importChainProcessJobIds(config, result, rows, jobId, false);
+  if (recorded.length) return recorded.some(function(id) { return neverStarted.has(id); });
+  var candidates = importChainProcessJobIds(config, result, rows, jobId);
+  return candidates.length > 0 && candidates.every(function(id) { return neverStarted.has(id); });
 }
 
 function pipelineNeverStarted(row) {
@@ -207,7 +213,7 @@ function importResumeTakeover(parent, rows) {
     e.chainProcessJobIds = importChainProcessJobIds(e.config, r, rows, e.id);
     e.chained = (!!e.config.chain_already_ran ||
       (chainStep && r.ok !== false && !neverStartedProcesses.has(r.process_job_id))) &&
-      !(e.chainProcessJobIds.length && e.chainProcessJobIds.every(function(id) { return neverStartedProcesses.has(id); }));
+      !importChainInvalidated(e.config, r, rows, e.id, neverStartedProcesses);
     e.resumable = e.status === 'failed' && !!r.interrupted &&
       Array.isArray(r.photo_ids) && !(tags && e.chained);
     e.hasFailedFiles = hasFailedImportFiles(r);
@@ -287,7 +293,7 @@ function importResumeTakeover(parent, rows) {
   var chained = (!!parentCfg.chain_already_ran ||
     (!!parentResult.chained && parentResult.ok !== false) ||
     (!('chain_already_ran' in parentCfg) && importFailedBeforeStart(parentResult) && parentChainIds.length > 0)) &&
-    !(parentChainIds.length && parentChainIds.every(function(id) { return neverStartedProcesses.has(id); })) ||
+    !importChainInvalidated(parentCfg, parentResult, rows, parent.id, neverStartedProcesses) ||
     descendants.some(function(e) { return e.chained; });
   if (allScope.size && parentResult.after_import_skipped === 'no new photos') {
     chained = descendants.some(function(e) { return e.chained; });

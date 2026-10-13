@@ -87,8 +87,35 @@ def _sibling_pipeline_scenario(never_started):
     return parent, rows
 
 
+def _mixed_pipeline_scenario(*, recorded, all_ran=False, inherited=False):
+    parent, rows = _sibling_pipeline_scenario(True)
+    rows[-2]["result"]["never_started"] = not all_ran
+    rows.extend([
+        _row("second-sibling", "2026-09-01T11:00:00", {
+            "chained": True, "process_job_id": "second-process",
+        }, parent="ancestor", root="ancestor"),
+        _row("second-process", "2026-09-01T11:30:00", {},
+             job_type="pipeline", parent=None, root=None),
+    ])
+    if recorded:
+        target = rows[0] if inherited else parent
+        target["config"]["chain_process_job_ids"] = ["process", "second-process"]
+    return parent, rows
+
+
 def _scenarios():
+    mixed_descendant, pipelines = _mixed_pipeline_scenario(recorded=True)
+    mixed_descendant.update(id="child", started_at="2026-09-01T13:00:00")
+    mixed_descendant["config"].update(parent_import_job_id=PARENT_ID, root_import_job_id=PARENT_ID)
     return {
+        "mixed descendant recorded pipelines leave processing owed": (
+            _parent(tags_applied=True),
+            [mixed_descendant, *[row for row in pipelines if row["type"] == "pipeline"]],
+        ),
+        "mixed recorded pipelines leave processing owed": _mixed_pipeline_scenario(recorded=True),
+        "mixed ancestor recorded pipelines leave processing owed": _mixed_pipeline_scenario(recorded=True, inherited=True),
+        "all recorded pipelines ran": _mixed_pipeline_scenario(recorded=True, all_ran=True),
+        "mixed legacy candidates retain paid evidence": _mixed_pipeline_scenario(recorded=False),
         "empty retry cannot pay existing processing scope": (
             _parent(tags_applied=True), [_row("empty", "2026-09-01T11:00:00", {
                 **DONE, "after_import_skipped": "no new photos",
@@ -361,6 +388,11 @@ def _server(parent, rows):
 
 # (by, kind, offers Resume, offers Retry)
 EXPECTED = {
+    "mixed descendant recorded pipelines leave processing owed": ("child", "resume", False, False),
+    "mixed recorded pipelines leave processing owed": (None, None, True, False),
+    "mixed ancestor recorded pipelines leave processing owed": (None, None, True, False),
+    "all recorded pipelines ran": (None, None, False, False),
+    "mixed legacy candidates retain paid evidence": (None, None, False, False),
     "empty retry cannot pay existing processing scope": (None, None, True, False),
     "legacy sibling pipeline never started": (None, None, True, False),
     "legacy sibling pipeline actually ran": (None, None, False, False),

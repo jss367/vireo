@@ -174,13 +174,13 @@ def _can_retry_import_direct_to_nas(config, result):
     )
 
 
-def _chain_process_job_ids(config, result, rows, job_id=None):
+def _chain_process_job_ids(config, result, rows, job_id=None, *, infer_legacy=True):
     """Find the pipeline provenance of a recorded or inherited chain."""
     by_id = {row.get("id"): row for row in rows or [] if row.get("type") == "import"}
     # Older boolean-only rows can inherit payment from a sibling of their
     # parent, not just the parent's own pipeline. Recover the earlier subtree
     # whose rollup supplied that boolean; later imports cannot supply it.
-    if ((config.get("chain_already_ran") or (
+    if (infer_legacy and (config.get("chain_already_ran") or (
             "chain_already_ran" not in config and _import_failed_before_start(result))
             or result.get("after_import_skipped") == "chain already ran on the interrupted parent")
             and not config.get("chain_process_job_ids")
@@ -222,6 +222,15 @@ def _chain_process_job_ids(config, result, rows, job_id=None):
         seen.add(parent_id)
         row = by_id[parent_id]
         config, result = _json_dict(row.get("config")), _json_dict(row.get("result"))
+
+
+def _chain_invalidated(config, result, rows, job_id, never_started):
+    """Every recorded pipeline is owed; legacy candidates only identify payment."""
+    recorded = _chain_process_job_ids(config, result, rows, job_id, infer_legacy=False)
+    if recorded:
+        return any(pid in never_started for pid in recorded)
+    candidates = _chain_process_job_ids(config, result, rows, job_id)
+    return bool(candidates) and all(pid in never_started for pid in candidates)
 
 
 def _pipeline_never_started(row):
@@ -356,7 +365,7 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
             bool(e["config"].get("chain_already_ran"))
             or (chain_step and result.get("ok") is not False
                 and result.get("process_job_id") not in never_started_processes)
-        ) and not (e["chain_process_job_ids"] and all(pid in never_started_processes for pid in e["chain_process_job_ids"]))
+        ) and not _chain_invalidated(e["config"], result, rows, e["id"], never_started_processes)
         e["resumable"] = (
             e["status"] == "failed"
             and bool(result.get("interrupted"))
@@ -442,7 +451,7 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
         or (bool(parent_result.get("chained")) and parent_result.get("ok") is not False)
         or ("chain_already_ran" not in parent_config and _import_failed_before_start(parent_result)
             and bool(parent_chain_ids))
-    ) and not (parent_chain_ids and all(pid in never_started_processes for pid in parent_chain_ids))
+    ) and not _chain_invalidated(parent_config, parent_result, rows, parent_id, never_started_processes)
     if all_scope and parent_result.get("after_import_skipped") == "no new photos":
         parent_chained = False
     chained = parent_chained or any(e["chained"] for e in descendants)

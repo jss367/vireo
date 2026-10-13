@@ -16,7 +16,7 @@ function fn(name) {
 }
 
 const ctx = vm.createContext({});
-for (const name of ['importFailedBeforeStart', 'jobConfig', 'hasFailedImportFiles', 'importChainProcessJobIds', 'pipelineNeverStarted', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
+for (const name of ['importFailedBeforeStart', 'jobConfig', 'hasFailedImportFiles', 'importChainProcessJobIds', 'importChainInvalidated', 'pipelineNeverStarted', 'isResumableImport', 'importResumeTakeover', 'importTakeoverNote']) {
   vm.runInContext(fn(name), ctx);
 }
 ctx.scenarios = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
