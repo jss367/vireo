@@ -227,6 +227,7 @@ DEFAULTS = {
         "file_types": "both",
         "recent_destinations": [],
     },
+    "numbered_navigation_mode": "tab_order",
     "keyboard_shortcuts": {
         "navigation": {
             "import": "",

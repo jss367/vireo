@@ -1,6 +1,9 @@
 async function loadConfig() {
   try {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
+    document.getElementById('cfgNumberedNavigationMode').value =
+      cfg.numbered_navigation_mode === 'fixed_pages' ? 'fixed_pages' : 'tab_order';
+    window.vireoSetNumberedNavigationMode(document.getElementById('cfgNumberedNavigationMode').value);
     var pct = Math.round((cfg.classification_threshold != null ? cfg.classification_threshold : 0.4) * 100);
     document.getElementById('cfgThreshold').value = pct;
     document.getElementById('cfgThresholdVal').textContent = pct + '%';
@@ -287,6 +290,7 @@ async function _postConfigSnapshot(gen) {
     var similarity = parseInt(document.getElementById('cfgSimilarity').value, 10) / 100;
     var secrets = _editedSecrets();
     var keywordCase = document.getElementById('cfgKeywordCase').value;
+    var numberedNavigationMode = document.getElementById('cfgNumberedNavigationMode').value;
     var maxEditHistory = parseInt(document.getElementById('cfgMaxEditHistory').value, 10);
     if (isNaN(maxEditHistory)) maxEditHistory = 1000;
     _saveStatusMark('config', 'inflight', gen);
@@ -299,6 +303,7 @@ async function _postConfigSnapshot(gen) {
           grouping_window_seconds: grouping,
           similarity_threshold: similarity,
           keyword_case: keywordCase,
+          numbered_navigation_mode: numberedNavigationMode,
           max_edit_history: maxEditHistory,
           google_maps_prefer_english: document.getElementById('cfgGoogleMapsPreferEnglish').checked,
           external_editors: collectExternalEditors(),
@@ -396,6 +401,9 @@ async function _postConfigSnapshot(gen) {
       throw e;
     }
     _rememberSavedSecrets(secrets);
+    if (window.vireoSetNumberedNavigationMode) {
+      window.vireoSetNumberedNavigationMode(numberedNavigationMode);
+    }
     _saveStatusMark('config', 'ok', gen);
     if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
     // Drop the cached editor list so the next "Open in Editor" action

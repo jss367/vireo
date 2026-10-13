@@ -1,3 +1,30 @@
+// Both the browser handler and the native menu use this ordered destination list.
+window.vireoNumberedNavigationMode = 'tab_order';
+window.vireoNumberedNavigationPages = function() {
+  const fixed = ['import', 'browse', 'pipeline', 'pipeline_review', 'review',
+    'cull', 'jobs', 'highlights', 'misses'];
+  const nav = window._navTabs;
+  const ids = window.vireoNumberedNavigationMode === 'fixed_pages'
+    ? fixed : (nav ? nav.getTabs() : []);
+  const all = nav ? nav.getAllPages() : [];
+  // Keep empty slots in place if a registry entry is unavailable.
+  return ids.slice(0, 9).map(id => all.find(page => page.id === id) || null);
+};
+let nativeNavigationSync = Promise.resolve();
+window.vireoSyncNumberedNavigation = function() {
+  if (!window._navTabs || !window.__TAURI_INTERNALS__) return;
+  const paths = window.vireoNumberedNavigationPages().map(page => page ? page.href : '');
+  // Serialize native updates so a slower earlier render cannot restore old bindings.
+  nativeNavigationSync = nativeNavigationSync.then(() =>
+    window.__TAURI_INTERNALS__.invoke('sync_navigation_shortcuts', {paths})
+  ).catch(error => console.warn('[nav] Could not sync native shortcuts', error));
+  return nativeNavigationSync;
+};
+window.vireoSetNumberedNavigationMode = function(mode) {
+  window.vireoNumberedNavigationMode = mode === 'fixed_pages' ? 'fixed_pages' : 'tab_order';
+  return window.vireoSyncNumberedNavigation();
+};
+
 window.openCommandPalette = function() {
   // A managed VireoDialog on the stack has made this overlay's branch inert
   // via updateBackground(), so revealing #commandPalette would present a
@@ -22,6 +49,17 @@ window.closeCommandPalette = function() {
 document.addEventListener('keydown', function(e) {
   const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
   const mod = isMac ? e.metaKey : e.ctrlKey;
+  // Keep the desktop's existing secondary navigation shortcuts available
+  // when a menu item uses its single accelerator slot for a number.
+  if (window.__TAURI_INTERNALS__ && mod && e.shiftKey && !e.altKey) {
+    const paths = {j: '/jobs', d: '/dashboard', w: '/workspace', l: '/logs'};
+    const path = paths[e.key.toLowerCase()];
+    if (path) {
+      e.preventDefault();
+      window.location.href = window.vireoResolveNavigationHref(path);
+      return;
+    }
+  }
   if (mod && e.key.toLowerCase() === 'k') {
     e.preventDefault();
     window.openCommandPalette();
@@ -34,17 +72,14 @@ document.addEventListener('keydown', function(e) {
       return;
     }
   }
-  // cmd+1..9 → nth pinned tab
-  if (mod && /^[1-9]$/.test(e.key)) {
-    const tabs = (window._navTabs ? window._navTabs.getTabs() : []);
-    const all = (window._navTabs ? window._navTabs.getAllPages() : []);
+  // Cmd/Ctrl+1..9 → tab position or fixed page, according to Settings.
+  if (mod && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+    const pages = window.vireoNumberedNavigationPages();
     const idx = parseInt(e.key, 10) - 1;
-    if (idx < tabs.length) {
+    const target = pages[idx];
+    if (target) {
       e.preventDefault();
-      const target = all.find(p => p.id === tabs[idx]);
-      if (target) {
-        window.location.href = window.vireoResolveNavigationHref(target.href);
-      }
+      window.location.href = window.vireoResolveNavigationHref(target.href);
     }
   }
   // cmd+W → close current tab (pinned or ephemeral)

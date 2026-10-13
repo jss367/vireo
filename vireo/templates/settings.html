@@ -1159,6 +1159,21 @@
     <div id="scanRootsContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
+  <div class="section">
+    <div class="section-title">Navigation</div>
+    <div class="setting-row">
+      <div class="setting-label">
+        <label for="cfgNumberedNavigationMode">Numbered navigation shortcuts</label>
+        <small>Cmd/Ctrl+1–9 can follow your pinned tab order, including after reordering tabs, or always open fixed pages.</small>
+        <small>Fixed pages: 1 Import, 2 Browse, 3 Process, 4 Process Review, 5 Review, 6 Cull, 7 Jobs, 8 Highlights, 9 Misses.</small>
+      </div>
+      <select id="cfgNumberedNavigationMode" onchange="saveConfig()">
+        <option value="tab_order">Follow tab order</option>
+        <option value="fixed_pages">Fixed pages</option>
+      </select>
+    </div>
+  </div>
+
   <!-- Theme -->
   <div class="section">
     <div class="section-title">Appearance</div>
