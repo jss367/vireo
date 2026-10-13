@@ -96,3 +96,11 @@ def test_location_review_rebuilds_queue_after_history_change(live_server, page):
     page.wait_for_function('!window.vireoHistoryBusy()')
     expect(page.locator('#historyRedoBtn')).to_be_disabled()
     assert page.evaluate('state.groups.length') == 0
+    expect(page.locator('#locationReviewMain')).to_be_hidden()
+    expect(page.locator('#locationReviewEmpty')).to_be_visible()
+    page.locator('#historyUndoBtn').click()
+    page.wait_for_function('!window.vireoHistoryBusy()')
+    expect(page.locator('#historyRedoBtn')).to_be_enabled()
+    expect(page.locator('#locationReviewMain')).to_be_visible()
+    expect(page.locator('#locationReviewEmpty')).to_be_hidden()
+    expect(page.locator('#locationReviewSearch')).to_be_visible()
