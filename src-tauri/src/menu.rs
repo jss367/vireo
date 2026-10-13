@@ -8,6 +8,7 @@ use tauri::{
 /// Menu item IDs used to match events in `on_menu_event`.
 pub mod ids {
     pub const NAV_BROWSE: &str = "nav_browse";
+    pub const NAV_EDIT: &str = "nav_edit";
     pub const NAV_IMPORT: &str = "nav_import";
     pub const NAV_PIPELINE: &str = "nav_pipeline";
     pub const NAV_PIPELINE_REVIEW: &str = "nav_pipeline_review";
@@ -16,7 +17,13 @@ pub mod ids {
     pub const NAV_CULL: &str = "nav_cull";
     pub const NAV_MISSES: &str = "nav_misses";
     pub const NAV_HIGHLIGHTS: &str = "nav_highlights";
+    pub const NAV_LIFE_LIST: &str = "nav_life_list";
+    pub const NAV_KEYWORDS: &str = "nav_keywords";
     pub const NAV_MAP: &str = "nav_map";
+    pub const NAV_LOCATION_REVIEW: &str = "nav_location_review";
+    pub const NAV_STORAGE: &str = "nav_storage";
+    pub const NAV_CARD_CLEANUP: &str = "nav_card_cleanup";
+    pub const NAV_MOVE: &str = "nav_move";
     pub const NAV_AUDIT: &str = "nav_audit";
     pub const NAV_ID_CONFLICTS: &str = "nav_id_conflicts";
     pub const NAV_JOBS: &str = "nav_jobs";
@@ -88,6 +95,7 @@ pub mod ids {
 pub fn route_for_id(id: &str) -> Option<&'static str> {
     match id {
         ids::NAV_BROWSE => Some("/browse"),
+        ids::NAV_EDIT => Some("/edit"),
         ids::NAV_IMPORT => Some("/import"),
         ids::NAV_PIPELINE => Some("/pipeline"),
         ids::NAV_PIPELINE_REVIEW => Some("/pipeline/review"),
@@ -96,7 +104,13 @@ pub fn route_for_id(id: &str) -> Option<&'static str> {
         ids::NAV_CULL => Some("/cull"),
         ids::NAV_MISSES => Some("/misses"),
         ids::NAV_HIGHLIGHTS => Some("/highlights"),
+        ids::NAV_LIFE_LIST => Some("/life-list"),
+        ids::NAV_KEYWORDS => Some("/keywords"),
         ids::NAV_MAP => Some("/map"),
+        ids::NAV_LOCATION_REVIEW => Some("/locations/review"),
+        ids::NAV_STORAGE => Some("/storage"),
+        ids::NAV_CARD_CLEANUP => Some("/card-cleanup"),
+        ids::NAV_MOVE => Some("/move"),
         ids::NAV_AUDIT => Some("/audit"),
         ids::NAV_ID_CONFLICTS => Some("/id-conflicts"),
         ids::NAV_JOBS => Some("/jobs"),
@@ -113,6 +127,45 @@ pub fn route_for_id(id: &str) -> Option<&'static str> {
         ids::HELP_OPEN_LOGS => Some("/logs"),
         _ => None,
     }
+}
+
+/// Keep native accelerators aligned with the browser's numbered destinations.
+/// Clear the old assignments first so reordering never registers a number twice.
+pub fn sync_navigation_shortcuts(app: &AppHandle, paths: &[String]) -> tauri::Result<()> {
+    let Some(menu) = app.menu() else {
+        return Ok(());
+    };
+    let mut items = Vec::new();
+    for submenu in menu.items()? {
+        if let tauri::menu::MenuItemKind::Submenu(submenu) = submenu {
+            for item in submenu.items()? {
+                if let tauri::menu::MenuItemKind::MenuItem(item) = item {
+                    // Settings keeps its conventional Cmd/Ctrl+, binding;
+                    // its numbered shortcut is handled by the web key handler.
+                    if item.id().0.starts_with("nav_") && item.id().0 != ids::NAV_SETTINGS {
+                        item.set_accelerator(None::<&str>)?;
+                        items.push(item);
+                    }
+                }
+            }
+        }
+    }
+    for item in items {
+        let id = item.id().0.as_str();
+        let number =
+            route_for_id(id).and_then(|route| paths.iter().take(9).position(|path| path == route));
+        let accelerator = number
+            .map(|index| format!("CmdOrCtrl+{}", index + 1))
+            .or_else(|| match id {
+                ids::NAV_JOBS => Some("CmdOrCtrl+Shift+J".into()),
+                ids::NAV_DASHBOARD => Some("CmdOrCtrl+Shift+D".into()),
+                ids::NAV_WORKSPACE => Some("CmdOrCtrl+Shift+W".into()),
+                ids::NAV_LOGS => Some("CmdOrCtrl+Shift+L".into()),
+                _ => None,
+            });
+        item.set_accelerator(accelerator.as_deref())?;
+    }
+    Ok(())
 }
 
 /// Map a menu item ID to a shared browser-side command.
@@ -270,13 +323,14 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+2")
                 .build(app)?,
         )
+        .item(&MenuItemBuilder::with_id(ids::NAV_EDIT, "Edit").build(app)?)
         .item(
-            &MenuItemBuilder::with_id(ids::NAV_PIPELINE, "Pipeline")
+            &MenuItemBuilder::with_id(ids::NAV_PIPELINE, "Process")
                 .accelerator("CmdOrCtrl+3")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id(ids::NAV_PIPELINE_REVIEW, "Pipeline Review")
+            &MenuItemBuilder::with_id(ids::NAV_PIPELINE_REVIEW, "Process Review")
                 .accelerator("CmdOrCtrl+4")
                 .build(app)?,
         )
@@ -291,31 +345,36 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+6")
                 .build(app)?,
         )
-        .item(&MenuItemBuilder::with_id(ids::NAV_MISSES, "Misses").build(app)?)
-        .item(&MenuItemBuilder::with_id(ids::NAV_HIGHLIGHTS, "Highlights").build(app)?)
-        .separator()
         .item(
-            &MenuItemBuilder::with_id(ids::NAV_MAP, "Map")
+            &MenuItemBuilder::with_id(ids::NAV_JOBS, "Jobs")
                 .accelerator("CmdOrCtrl+7")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id(ids::NAV_AUDIT, "Audit")
+            &MenuItemBuilder::with_id(ids::NAV_HIGHLIGHTS, "Highlights")
+                .accelerator("CmdOrCtrl+8")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id(ids::NAV_MISSES, "Misses")
                 .accelerator("CmdOrCtrl+9")
                 .build(app)?,
         )
+        .item(&MenuItemBuilder::with_id(ids::NAV_LIFE_LIST, "Life List").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::NAV_KEYWORDS, "Keywords").build(app)?)
+        .separator()
+        .item(&MenuItemBuilder::with_id(ids::NAV_MAP, "Map").build(app)?)
         .item(
-            &MenuItemBuilder::with_id(ids::NAV_ID_CONFLICTS, "ID Conflicts")
-                .accelerator("CmdOrCtrl+0")
+            &MenuItemBuilder::with_id(ids::NAV_LOCATION_REVIEW, "Review Photo Locations")
                 .build(app)?,
         )
+        .item(&MenuItemBuilder::with_id(ids::NAV_STORAGE, "Storage").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::NAV_CARD_CLEANUP, "Card cleanup").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::NAV_MOVE, "Move").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::NAV_AUDIT, "Audit").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::NAV_ID_CONFLICTS, "ID Conflicts").build(app)?)
         .item(&MenuItemBuilder::with_id(ids::NAV_DUPLICATES, "Duplicates").build(app)?)
         .separator()
-        .item(
-            &MenuItemBuilder::with_id(ids::NAV_JOBS, "Jobs")
-                .accelerator("CmdOrCtrl+Shift+J")
-                .build(app)?,
-        )
         .item(
             &MenuItemBuilder::with_id(ids::NAV_DASHBOARD, "Dashboard")
                 .accelerator("CmdOrCtrl+Shift+D")
@@ -430,12 +489,12 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     // -- Tools menu --
     let tools_menu = SubmenuBuilder::new(app, "Tools")
         .item(
-            &MenuItemBuilder::with_id(ids::TOOLS_RUN_PIPELINE, "Run Pipeline")
+            &MenuItemBuilder::with_id(ids::TOOLS_RUN_PIPELINE, "Run Process")
                 .accelerator("CmdOrCtrl+Return")
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id(ids::TOOLS_REVIEW_PIPELINE, "Review Pipeline Results")
+            &MenuItemBuilder::with_id(ids::TOOLS_REVIEW_PIPELINE, "Review Process Results")
                 .build(app)?,
         )
         .separator()

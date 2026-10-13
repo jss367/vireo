@@ -356,6 +356,7 @@
     .then(function(cfg) { return scriptsLoaded.then(function() { return cfg; }); })
     .then(function(cfg) {
       if (!cfg) return;
+      window.vireoSetNumberedNavigationMode(cfg.numbered_navigation_mode);
       var shortcuts = cfg.keyboard_shortcuts || {};
       var navShortcuts = {};
       // Merge defaults with user overrides

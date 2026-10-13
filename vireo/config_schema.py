@@ -55,6 +55,15 @@ CATEGORIES = (
 # Each entry: type, category, scope, label, desc (required) + optional
 # min/max/step/enum/enum_labels/items_enum.
 SCHEMA = {
+    "numbered_navigation_mode": {
+        "type": "enum",
+        "enum": ["tab_order", "fixed_pages"],
+        "enum_labels": {"tab_order": "Follow tab order", "fixed_pages": "Fixed pages"},
+        "category": "Behavior", "scope": "global",
+        "label": "Numbered navigation shortcuts",
+        "desc": "Cmd/Ctrl+1–9 follows the current pinned tab order or always opens "
+                "Import, Browse, Process, Process Review, Review, Cull, Jobs, Highlights, and Misses.",
+    },
     "move_keep_visible_in_other_workspaces": {
         "type": "bool", "category": "Behavior", "scope": "global",
         "label": "Keep moved photos visible in other workspaces",

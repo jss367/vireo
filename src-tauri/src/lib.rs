@@ -90,6 +90,11 @@ fn get_server_port(state: tauri::State<'_, SidecarState>) -> u16 {
     state.port
 }
 
+#[tauri::command]
+fn sync_navigation_shortcuts(app: tauri::AppHandle, paths: Vec<String>) -> Result<(), String> {
+    menu::sync_navigation_shortcuts(&app, &paths).map_err(|e| e.to_string())
+}
+
 // Update the OS-level progress indicator on the dock/taskbar icon.
 // `progress` is 0-100 (None = clear). Tauri treats indeterminate as a normal
 // bar on macOS/Linux, so use a small visible value for unknown-total phases.
@@ -397,6 +402,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_server_port,
+            sync_navigation_shortcuts,
             set_job_progress,
             open_external_url,
         ])

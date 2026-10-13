@@ -162,6 +162,7 @@ window.NAV_ALL_PAGES = [
     }
     applyActiveClass();
     recomputeOverflow();
+    if (window.vireoSyncNumberedNavigation) window.vireoSyncNumberedNavigation();
     // Re-apply hotkey hints (underline + (key) suffix) — tabs are
     // built async, so the initial DOM-ready call doesn't see them.
     if (typeof window._applyNavHotkeyHints === 'function') {

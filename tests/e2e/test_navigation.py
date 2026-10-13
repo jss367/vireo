@@ -103,6 +103,36 @@ def test_closing_ephemeral_editor_into_browse_focuses_current_photo(
     expect(page.locator(f'.grid-card[data-id="{photo_id}"]')).to_be_visible()
 
 
+def test_numbered_navigation_mode_can_switch_in_settings(live_server, page):
+    """Settings persists both modes; tab reordering only affects tab-order mode."""
+    url = live_server["url"]
+    page.goto(f"{url}/settings")
+    page.wait_for_selector('body[data-settings-ready="true"]')
+    page.evaluate("""async () => {
+        const tabs = window._navTabs.getTabs();
+        await window._navTabs.setTabs(['keywords', ...tabs.filter(id => id !== 'keywords')]);
+    }""")
+    selector = page.locator("#cfgNumberedNavigationMode")
+    expect(selector).to_have_value("tab_order")
+    selector.select_option("fixed_pages")
+    page.wait_for_function("window.vireoNumberedNavigationMode === 'fixed_pages'")
+    assert page.request.get(f"{url}/api/config").json()["numbered_navigation_mode"] == "fixed_pages"
+    page.keyboard.press("ControlOrMeta+1")
+    expect(page).to_have_url(f"{url}/import")
+    page.wait_for_function("window.vireoNumberedNavigationMode === 'fixed_pages'")
+    page.keyboard.press("ControlOrMeta+7")
+    expect(page).to_have_url(f"{url}/jobs")
+
+    page.goto(f"{url}/settings")
+    page.wait_for_selector('body[data-settings-ready="true"]')
+    expect(selector).to_have_value("fixed_pages")
+    selector.select_option("tab_order")
+    page.wait_for_function("window.vireoNumberedNavigationMode === 'tab_order'")
+    page.keyboard.press("ControlOrMeta+1")
+    expect(page).to_have_url(f"{url}/keywords")
+    assert page.request.get(f"{url}/api/config").json()["numbered_navigation_mode"] == "tab_order"
+
+
 def test_workspace_dropdown_shows_current(live_server, page):
     """Workspace dropdown displays the current workspace name."""
     url = live_server["url"]
