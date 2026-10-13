@@ -19,8 +19,12 @@ class StorageRepository:
     def retained_source(self, photo_id: int) -> dict | None:
         row = self.conn.execute(
             """SELECT p.id, p.filename, p.file_size, p.file_mtime, p.file_hash,
-                      p.companion_path, f.path AS folder_path
-               FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?""", (photo_id,),
+                      p.companion_path, f.path AS folder_path,
+                      c.file_size AS companion_size, c.file_mtime AS companion_mtime,
+                      c.file_hash AS companion_hash
+               FROM photos p JOIN folders f ON f.id=p.folder_id
+               LEFT JOIN companion_identities c ON c.photo_id=p.id AND c.filename=p.companion_path
+               WHERE p.id=?""", (photo_id,),
         ).fetchone()
         return dict(row) if row else None
 

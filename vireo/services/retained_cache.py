@@ -80,12 +80,15 @@ def source_verifier(db, config, checkpoint=lambda: None):
         source = db.storage.retained_source(photo_id)
         if not source or not source["file_hash"]:
             return False
-        names = [source["filename"]]
+        identities = [(source["filename"], source["file_size"], source["file_mtime"], source["file_hash"])]
         if source["companion_path"]:
-            names.append(source["companion_path"])
+            if not source["companion_hash"]:
+                return False
+            identities.append((source["companion_path"], source["companion_size"],
+                               source["companion_mtime"], source["companion_hash"]))
         checked = []
         try:
-            for index, name in enumerate(names):
+            for name, expected_size, expected_mtime, expected_hash in identities:
                 original = os.path.join(source["folder_path"], name)
                 resolved = os.path.normcase(os.path.realpath(original))
                 if any(_within(resolved, root) for root in excluded):
@@ -94,7 +97,7 @@ def source_verifier(db, config, checkpoint=lambda: None):
                     before = os.fstat(handle.fileno())
                     if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
                         return False
-                    if index == 0 and (before.st_size != source["file_size"] or before.st_mtime != source["file_mtime"]):
+                    if before.st_size != expected_size or before.st_mtime != expected_mtime:
                         return False
                     digest = hashlib.sha256()
                     while block := handle.read(1024 * 1024):
@@ -102,7 +105,7 @@ def source_verifier(db, config, checkpoint=lambda: None):
                         digest.update(block)
                     if _identity(before) != _identity(os.fstat(handle.fileno())):
                         return False
-                    if index == 0 and source["file_hash"] and digest.hexdigest() != source["file_hash"]:
+                    if digest.hexdigest() != expected_hash:
                         return False
                 if _identity(before) != _identity(os.stat(original)):
                     return False

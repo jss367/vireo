@@ -257,6 +257,40 @@ def test_automatic_render_retention_requires_independent_readable_sources(db, tm
     assert result["kept_unverified_sources"] == (1 if problem else 0)
 
 
+@pytest.mark.parametrize("problem", [None, "changed", "hash", "missing-identity", "missing-hash", "stale-path"])
+def test_automatic_paired_render_retention_verifies_stored_companion_identity(db, tmp_path, problem):
+    import hashlib
+
+    config = _cache_config(tmp_path)
+    raw = _payload(tmp_path / "photos" / "bird.NEF")
+    companion = _payload(raw.parent / "bird.jpg")
+    folder = db.add_folder(str(raw.parent))
+    photo = db.add_photo(folder, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash=?, companion_path=? WHERE id=?", (
+        hashlib.sha256(raw.read_bytes()).hexdigest(), companion.name, photo,
+    ))
+    if problem != "missing-identity":
+        db.conn.execute(
+            "INSERT INTO companion_identities(photo_id, filename, file_size, file_mtime, file_hash) VALUES (?,?,?,?,?)",
+            (photo, "old.jpg" if problem == "stale-path" else companion.name,
+             companion.stat().st_size, companion.stat().st_mtime,
+             None if problem == "missing-hash" else hashlib.sha256(companion.read_bytes()).hexdigest()),
+        )
+    db.commit()
+    if problem == "changed":
+        companion.write_bytes(b"changed companion")
+    elif problem == "hash":
+        companion.write_bytes(b"xxxxxxx")
+        os.utime(companion, (100, 100))
+    render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / f"{photo}.display.jpg")
+    result = retained_cache.cleanup(
+        config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
+        source_is_readable=retained_cache.source_verifier(db, config),
+    )
+    assert render.exists() is (problem is not None)
+    assert result["kept_unverified_sources"] == (1 if problem else 0)
+
+
 def test_prepared_render_reader_is_pinned_until_response_opens(app_and_db, tmp_path, monkeypatch):
     from testing.waits import synchronization_timeout
     from web import media
