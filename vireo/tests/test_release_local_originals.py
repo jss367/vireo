@@ -333,6 +333,48 @@ def test_release_caps_kept_reasons_sample_but_keeps_total_count(
     assert len(result["kept_reasons"]) == _MAX_KEPT_REASONS
 
 
+def test_release_caps_error_reasons_sample_but_keeps_total_count(
+    client_with_photo, monkeypatch,
+):
+    """Mirror of the ``kept_reasons`` cap for per-photo failures: if every
+    unlink fails (managed cache directory unwritable, say), the per-photo
+    error strings would otherwise be re-serialized into every checkpoint,
+    the ``job_history`` row and the SSE payload (which also carries
+    ``job["errors"]`` separately). Cap the sample on both ``result["errors"]``
+    and ``job["errors"]``; publish the real ``failed`` count via
+    ``errors_total`` so ``_error_total`` and the persisted ``error_count``
+    stay accurate.
+    """
+    import offline_cache
+    from web.job_launchers import _MAX_ERROR_REASONS
+
+    app, db, pid = client_with_photo
+    folder_id = db.get_photo(pid)["folder_id"]
+    extras = _MAX_ERROR_REASONS + 10
+    photo_ids = [pid]
+    for i in range(extras):
+        photo_ids.append(
+            db.add_photo(
+                folder_id, f"missing_{i}.jpg", ".jpg", file_size=1, file_mtime=0.0,
+            )
+        )
+
+    def pretend_failed(*args, **kwargs):
+        return {"status": "failed", "bytes": 0, "reason": "cache directory unwritable"}
+
+    monkeypatch.setattr(offline_cache, "release_photo_original", pretend_failed)
+
+    job = run_release(app, {"photo_ids": photo_ids})
+    # A result with ``ok=False`` ends the job as "failed" (the runner's
+    # rollup rule for a work function that recorded errors in the job).
+    assert job["status"] == "failed", job
+    result = job["result"]
+    assert result["failed"] == len(photo_ids)
+    assert len(result["errors"]) == _MAX_ERROR_REASONS
+    assert len(job["errors"]) == _MAX_ERROR_REASONS
+    assert result["errors_total"] == len(photo_ids)
+
+
 def test_release_folder_includes_cached_descendants_only(client_with_photo):
     app, db, pid = client_with_photo
     base, source, row = cache_fixture(client_with_photo)

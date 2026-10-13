@@ -56,8 +56,12 @@ log = logging.getLogger(__name__)
 # Representative reasons kept on the release job result. The Jobs page shows
 # ten items (``MAX_DETAIL_ITEMS``) and the ``kept`` count already reports the
 # total, so the rest of the list only grows the payload serialized into each
-# checkpoint, ``job_history`` row and SSE event.
+# checkpoint, ``job_history`` row and SSE event. ``_MAX_ERROR_REASONS`` caps
+# the per-photo failure samples the same way; the ``failed`` counter is
+# published as ``errors_total`` when it exceeds the cap so job history still
+# records the true count (the importer uses the same idiom).
 _MAX_KEPT_REASONS = 50
+_MAX_ERROR_REASONS = 50
 
 
 def _count_lines(path):
@@ -1308,13 +1312,16 @@ def create_job_launchers_blueprint(
                             if len(result["kept_reasons"]) < _MAX_KEPT_REASONS:
                                 result["kept_reasons"].append(reason)
                         else:
-                            result["errors"].append(reason)
-                            job["errors"].append(reason)
+                            if len(result["errors"]) < _MAX_ERROR_REASONS:
+                                result["errors"].append(reason)
+                                job["errors"].append(reason)
                             result["ok"] = False
                     ctx.runner.push_event(job["id"], "progress", {
                         "current": result["processed"], "total": result["total"],
                         "current_file": filename, "phase": "Releasing local originals",
                     })
+                if result["failed"] > _MAX_ERROR_REASONS:
+                    result["errors_total"] = result["failed"]
                 return result
             finally:
                 thread_db.close()
