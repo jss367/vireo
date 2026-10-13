@@ -1256,7 +1256,7 @@ def _delete_companion_row(db, primary, companion, photo_rows):
 
 
 def _defer_companion_derivative_cleanup(
-    post_commit_fs_actions, companion, vireo_dir, thumb_cache_dir,
+    post_commit_fs_actions, companion, vireo_dir, thumb_cache_dir, masks_dir=None,
 ):
     """Queue unlinking the deleted companion's cached derivatives.
 
@@ -1278,10 +1278,10 @@ def _defer_companion_derivative_cleanup(
 
     def _cleanup_companion(
         cid=_companion_id, td=_thumb_dir_for_companion,
-        vd=vireo_dir,
+        vd=vireo_dir, md=masks_dir,
     ):
         cleanup_cached_files_for_deleted_photos(
-            td, [{"photo_id": cid}], vireo_dir=vd,
+            td, [{"photo_id": cid}], vireo_dir=vd, masks_dir=md,
         )
 
     post_commit_fs_actions.append(_cleanup_companion)
@@ -1428,7 +1428,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
                 if vireo_dir:
                     _defer_companion_derivative_cleanup(
                         post_commit_fs_actions, companion, vireo_dir,
-                        thumb_cache_dir,
+                        thumb_cache_dir, masks_dir=os.path.join(os.path.dirname(db._db_path), "masks"),
                     )
 
     commit_with_retry(db.conn)
@@ -4406,6 +4406,7 @@ class _ScanRun:
                 if self.vireo_dir else ""
             ),
             vireo_dir=self.vireo_dir,
+            masks_dir=os.path.join(os.path.dirname(self.db._db_path), "masks"),
         )
         self.scoped_paths = {str(self.root_path)}
         if self.restrict_dirs is not None:

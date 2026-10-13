@@ -55,6 +55,25 @@ CATEGORIES = (
 # Each entry: type, category, scope, label, desc (required) + optional
 # min/max/step/enum/enum_labels/items_enum.
 SCHEMA = {
+    "retained_cache_max_mb": {
+        "type": "int", "min": 0, "max": 1048576, "category": "Paths", "scope": "global",
+        "label": "Retained generated files limit (MB)",
+        "desc": "Shared limit for full-resolution renders, external editor copies, upload renders and imported computation objects. "
+                "Hourly maintenance removes oldest payloads after a one-hour write grace period. 0 keeps no aged payloads. "
+                "Removed computation objects require reimport or recomputation; originals and exports are retained.",
+    },
+    "retained_cache_max_age_days": {
+        "type": "int", "min": 0, "max": 3650, "category": "Paths", "scope": "global",
+        "label": "Retained generated files age limit (days)",
+        "desc": "Hourly maintenance removes generated files older than this age using their latest filesystem access, write or change timestamp. "
+                "0 disables age expiry; the byte limit still applies.",
+    },
+    "grouping_history_max_mb": {
+        "type": "int", "min": 0, "max": 1048576, "category": "Behavior", "scope": "global",
+        "label": "Grouping undo snapshots per workspace (MB)",
+        "desc": "Retires oldest completed grouping undo snapshots above this payload budget. Photo edits remain undoable. "
+                "Snapshots awaiting redo are protected and may exceed the limit. 0 retains only snapshots awaiting redo.",
+    },
     "numbered_navigation_mode": {
         "type": "enum",
         "enum": ["tab_order", "fixed_pages"],

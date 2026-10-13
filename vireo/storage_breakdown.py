@@ -23,6 +23,8 @@ def describe_auxiliary_storage(path, db_path):
         "external-edits": ("External editor files", "Images prepared for or returned from an external editor."),
         "external-dng": ("External editor files", "Converted images used by external editors."),
         "edit-masks": ("Editing masks", "Masks used by photo edits."),
+        "local-folders": ("Managed local originals", "Shared folder copies and sync records. Use Work Locally to sync or discard."),
+        "local-workspaces": ("Managed local originals", "Workspace local copies and sync records. Use Work Locally to sync or discard."),
         "computation-cache": ("Saved computation results", "Stored analysis results used to reuse previous computations."),
         "card_cleanup": ("Memory card cleanup records", "Records used to track memory card cleanup."),
         "inat-uploads": ("iNaturalist transfer files", "Images prepared for iNaturalist uploads and exports."),
@@ -31,6 +33,10 @@ def describe_auxiliary_storage(path, db_path):
     }
     if name in descriptions:
         return descriptions[name]
+    if re.fullmatch(r"pipeline_results_ws[1-9][0-9]*\.json", name):
+        return "Processing results", "Saved encounter and burst results for a workspace."
+    if re.fullmatch(r"culling_results_ws[1-9][0-9]*\.json", name):
+        return "Culling results", "Saved keeper recommendations for a workspace."
     if re.search(r"\.log(?:\.\d+)?$", name):
         return "Application logs", "Diagnostic logs from Vireo."
     return "Additional files", "Files without a dedicated storage category. Review their paths before removing anything."

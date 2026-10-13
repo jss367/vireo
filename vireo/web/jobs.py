@@ -772,8 +772,8 @@ def create_jobs_blueprint(
             cache_path = os.path.join(
                 os.path.dirname(db_path), f"culling_results_ws{ctx.workspace_id}.json"
             )
-            with open(cache_path, "w") as f:
-                json.dump(result, f)
+            from pipeline import _atomic_json_dump
+            _atomic_json_dump(result, cache_path)
 
             return {
                 "total_photos": result["total_photos"],

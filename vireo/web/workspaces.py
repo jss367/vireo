@@ -434,14 +434,14 @@ def create_workspace_blueprint(
                         409,
                     )
             try:
-                db.delete_workspace(ws_id)
+                cleanup_errors = db.delete_workspace(ws_id)
             except ValueError as e:
                 return json_error(str(e), 409)
         # Drop this workspace's cached Missing Originals payload so a
         # later workspace that reuses this SQLite rowid can't be served
         # the deleted workspace's ghost photos / folder paths.
         invalidate_missing_originals(workspace_ids=[ws_id])
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "cleanup_errors": cleanup_errors})
 
     @blueprint.route("/api/workspaces/<int:ws_id>/activate", methods=["POST"])
     def api_activate_workspace(ws_id):

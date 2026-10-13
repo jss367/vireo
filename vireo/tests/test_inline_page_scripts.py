@@ -38,7 +38,7 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "stats.html": 999,
     "storage.html": 885,
     "welcome.html": 374,
-    "workspace.html": 375,
+    "workspace.html": 366,
 }
 
 _SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)

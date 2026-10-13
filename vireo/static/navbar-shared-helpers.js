@@ -1819,6 +1819,8 @@ function formatDuration(seconds) {
   // Scan"). Exposed on window so per-page scripts (e.g. jobs.html) can reuse it.
   window.formatJobType = function(type) {
     if (!type) return '';
+    if (type === 'retained-cache-cleanup') return 'Generated file and history cleanup';
+    if (type === 'retained-cache-maintenance') return 'Storage retention maintenance';
     return String(type)
       .split(/[-_]+/)
       .filter(function(w) { return w.length > 0; })

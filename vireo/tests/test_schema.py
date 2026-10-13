@@ -436,9 +436,29 @@ def test_version_15_catalog_gains_prediction_history_instances_without_changing_
         db.commit()
     schema.ensure_schema(db_path)
     with Database(db_path, initialize_schema=False) as db:
-        assert db.conn.execute('PRAGMA user_version').fetchone()[0] == 16
+        assert db.conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert [tuple(row) for row in db.conn.execute('SELECT * FROM predictions')] == original
         db.edit_history.ensure_prediction_instances([original[0][0]])
         db.commit()
         assert len(db.conn.execute('SELECT instance_id FROM prediction_history_instances').fetchone()[0]) == 32
+        assert db.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+def test_version_16_catalog_backfills_grouping_snapshot_byte_counts(tmp_path):
+    db_path = str(tmp_path / 'vireo.db')
+    schema.ensure_schema(db_path)
+    payload = '{"before": "caf\u00e9 \U0001f985", "after": []}'
+    with Database(db_path, initialize_schema=False) as db:
+        edit = db.record_edit('pipeline_grouping', 'Legacy grouping', '{}', [])
+        db.conn.execute('ALTER TABLE edit_history_payloads DROP COLUMN bytes')
+        db.conn.execute('INSERT INTO edit_history_payloads(edit_id, payload) VALUES (?, ?)', (edit, payload))
+        db.conn.execute('PRAGMA user_version = 16')
+        db.commit()
+    schema.ensure_schema(db_path)
+    with Database(db_path, initialize_schema=False) as db:
+        row = db.conn.execute('SELECT payload, bytes FROM edit_history_payloads WHERE edit_id=?', (edit,)).fetchone()
+        assert row['payload'] == payload
+        assert row['bytes'] == len(payload.encode('utf-8'))
+        assert db.storage.grouping_history()['bytes'] == row['bytes']
+        assert db.conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert db.conn.execute('PRAGMA foreign_key_check').fetchall() == []

@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 class CanonicalSchema:
@@ -575,7 +575,8 @@ class CanonicalSchema:
             -- an actual undo/redo; deleted with the parent row.
             CREATE TABLE IF NOT EXISTS edit_history_payloads (
                 edit_id  INTEGER PRIMARY KEY REFERENCES edit_history(id) ON DELETE CASCADE,
-                payload  TEXT NOT NULL
+                payload  TEXT NOT NULL,
+                bytes    INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS taxa_common_names (

@@ -23,6 +23,15 @@ class JobHistoryRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
+    @staticmethod
+    def ensure_workspace_ownership(conn: sqlite3.Connection) -> None:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id)")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS job_history_require_workspace
+            BEFORE INSERT ON job_history
+            WHEN NEW.workspace_id IS NOT NULL AND NOT EXISTS
+                 (SELECT 1 FROM workspaces WHERE id=NEW.workspace_id)
+            BEGIN SELECT RAISE(IGNORE); END""")
+
     def last_completed_with_result(self, job_type: str) -> sqlite3.Row | None:
         """Newest completed ``job_type`` row that stored a result, or None.
 

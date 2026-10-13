@@ -8,10 +8,11 @@ and EXIF search backfill jobs, and the teardown that stops the job runner
 and closes the startup database. ``StartupTasks`` owns them because they
 share per-app state (the app, its database path and the startup connection).
 
-This module decides *what* each pass does. *When* it runs (the
+This module decides *what* each pass does. Initial scheduling (the
 ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS`` guards, thread and timer start
 points, delays and daemon flags) stays in ``create_app`` so startup ordering is
-readable in one place.
+readable in one place. Retained-cache maintenance owns its recurring timer
+so teardown can cancel it before stopping workers.
 
 ``metadata_repair_count`` (the Import page's repair readiness count) and
 ``utc_iso_now`` are plain functions with no per-app state.
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from datetime import UTC, datetime
 
@@ -42,6 +44,72 @@ class StartupTasks:
         self._app = app
         self._db_path = db_path
         self._init_db = init_db
+        self._retained_cache_timer = None
+        self._retained_cache_stopped = threading.Event()
+
+    def schedule_retained_cache_maintenance(self, delay=10.0):
+        """Visible, periodic maintenance, with work kept off request threads."""
+        if self._retained_cache_stopped.is_set():
+            return
+        def launch():
+            if self._retained_cache_stopped.is_set():
+                return
+            try:
+                self._app._job_runner.start(
+                    "retained-cache-maintenance", self._maintain_retained_caches,
+                    workspace_id=None, singleton_key="retained-cache-maintenance",
+                )
+            except Exception:
+                log.exception("Could not start retained generated-file maintenance")
+            if not self._retained_cache_stopped.is_set():
+                self.schedule_retained_cache_maintenance(3600.0)
+
+        self._retained_cache_timer = threading.Timer(delay, launch)
+        self._retained_cache_timer.daemon = True
+        if self._retained_cache_stopped.is_set():
+            self._retained_cache_timer.cancel()
+            return
+        self._retained_cache_timer.start()
+
+    def _maintain_retained_caches(self, job):
+        import config as cfg
+        from services.result_files import delete_workspace_results, result_files
+        from services.retained_cache import cleanup
+
+        runner = self._app._job_runner
+        def checkpoint():
+            if runner.is_cancelled(job["id"]):
+                raise RuntimeError("Storage maintenance cancelled")
+        def progress(current, total, path):
+            runner.push_event(job["id"], "progress", {
+                "current": current, "total": total,
+                "current_file": os.path.basename(path), "phase": "Storage maintenance",
+            })
+
+        settings = {**cfg.load(), "THUMB_CACHE_DIR": self._app.config["THUMB_CACHE_DIR"],
+                    "COMPUTATION_CACHE_DIR": self._app.config["COMPUTATION_CACHE_DIR"]}
+        with Database(self._db_path) as db:
+            result = cleanup(settings, db.storage.source_folder_paths(),
+                             checkpoint=checkpoint, progress=progress)
+            workspaces = db.workspaces.list_all()
+            for workspace in workspaces:
+                checkpoint()
+                db.set_active_workspace(workspace["id"])
+                retired = db._prune_edit_history()
+                for key, count in retired.items():
+                    result[key] = result.get(key, 0) + count
+            result_workspace_ids = {ws_id for _path, _kind, ws_id in result_files(os.path.dirname(self._db_path))}
+            for ws_id in result_workspace_ids:
+                checkpoint()
+                # A workspace may have been created while the preceding
+                # maintenance passes were running. Check current ownership
+                # rather than deleting from the earlier workspace snapshot.
+                if db.workspaces.get(ws_id) is None:
+                    errors = delete_workspace_results(os.path.dirname(self._db_path), ws_id)
+                    result["errors"].extend(errors)
+                    result["errors_total"] += len(errors)
+                    result["ok"] = result["ok"] and not errors
+            return result
 
     def run_catalog_repairs(self):
         """Run the ordered startup catalog repairs.
@@ -167,6 +235,9 @@ class StartupTasks:
         Returns whether the job runner shut down within ``job_timeout``.
         """
         app = self._app
+        self._retained_cache_stopped.set()
+        if self._retained_cache_timer:
+            self._retained_cache_timer.cancel()
         app._preview_workers.close()
         try:
             jobs_stopped = app._job_runner.shutdown(timeout=job_timeout)

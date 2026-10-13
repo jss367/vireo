@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from playwright.sync_api import expect
@@ -60,3 +61,59 @@ def test_quota_apply_aborts_when_pending_storage_autosave_fails(
     expect(page.locator("body")).to_contain_text(
         "the working-copy limit was not updated"
     )
+
+
+def test_retained_storage_lists_files_and_confirms_cleanup_in_page(live_server, page):
+    root = Path(live_server["app"].config["THUMB_CACHE_DIR"]).parent
+    render = root / "originals" / "1.display.jpg"
+    render.parent.mkdir(exist_ok=True)
+    render.write_bytes(b"render" * 1024)
+    page.goto(f"{live_server['url']}/storage")
+    details = page.locator("#retainedStorageItems details").filter(has_text="Full-resolution renders")
+    expect(details).to_contain_text("6 KB")
+    details.locator("summary").click()
+    expect(details).to_contain_text("1.display.jpg")
+    details.get_by_role("button", name="Clear full-resolution renders").click()
+    expect(page.locator("#retainedActionModal")).to_be_visible()
+    page.locator("#retainedActionCancel").click()
+    assert render.exists()
+    details.get_by_role("button", name="Clear full-resolution renders").click()
+    page.locator("#retainedActionConfirm").click()
+    expect(page.locator("#retainedStorageStatus")).to_contain_text("completed")
+    assert not render.exists()
+    expect(page.locator("#retainedStorageItems")).to_contain_text("Grouping undo snapshots")
+    if screenshot := os.environ.get("VIREO_STORAGE_SCREENSHOT"):
+        page.locator("#retainedCacheLimit").scroll_into_view_if_needed()
+        page.screenshot(path=screenshot)
+
+
+def test_storage_retention_limits_apply_to_global_settings(live_server, page):
+    page.goto(f"{live_server['url']}/storage")
+    expect(page.locator("#retainedCacheLimit")).to_have_value("10240")
+    page.locator("#retainedCacheLimit").fill("2048")
+    page.locator("#retainedCacheAge").fill("45")
+    page.locator("#groupingHistoryLimit").fill("64")
+    page.get_by_role("button", name="Apply retention limits").click()
+    expect(page.locator("#retainedActionDescription")).to_contain_text("every workspace")
+    page.locator("#retainedActionConfirm").click()
+    expect(page.locator("#retainedStorageStatus")).to_contain_text("completed")
+    result = page.evaluate("safeFetch('/api/storage/retained')")
+    assert result["policy"] == {"retained_cache_max_mb": 2048, "retained_cache_max_age_days": 45, "grouping_history_max_mb": 64}
+
+
+def test_workspace_delete_explains_shared_analysis_and_removes_saved_results(live_server, page):
+    db = live_server["db"]
+    workspace = db.workspaces.id_for_name('Field Work')
+    result = Path(db._db_path).parent / f"culling_results_ws{workspace}.json"
+    result.write_text('{}')
+    page.goto(f"{live_server['url']}/workspace")
+    row = page.locator('#workspacesContent .setting-row').filter(
+        has=page.locator('input[value="Field Work"]'),
+    )
+    expect(row).to_have_count(1)
+    row.get_by_role('button', name='Delete', exact=True).click()
+    expect(page.locator('#workspaceDeleteDialog')).to_contain_text('Shared photos, keywords, and photo analysis remain')
+    page.locator('#workspaceDeleteConfirm').click()
+    expect(page.locator('#workspaceDeleteDialog')).to_have_count(0)
+    expect(row).to_have_count(0)
+    assert not result.exists()

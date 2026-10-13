@@ -11,19 +11,20 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
 
+from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
+from web.background_jobs import make_background_job
 from working_copy_cache import working_copy_stats
 
 log = logging.getLogger(__name__)
 
 
-def create_storage_blueprint(get_db, json_error, db_path, config):
+def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner):
     """Build the storage blueprint.
 
     ``config`` is the Flask app's config mapping (``THUMB_CACHE_DIR``,
@@ -31,6 +32,96 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
     rather than when the app is built.
     """
     blueprint = Blueprint("storage", __name__)
+    background_job = make_background_job(get_runner, get_db, db_path, Database)
+
+    def _retained_config():
+        import config as cfg
+        return {**cfg.load(), "THUMB_CACHE_DIR": config["THUMB_CACHE_DIR"],
+                "COMPUTATION_CACHE_DIR": config["COMPUTATION_CACHE_DIR"]}
+
+    @blueprint.route("/api/storage/retention", methods=["POST"])
+    @background_job
+    def api_storage_retention(ctx):
+        import config as cfg
+        import config_schema as schema
+        from services.retained_cache import cleanup
+
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("Expected a JSON object")
+        keys = ("retained_cache_max_mb", "retained_cache_max_age_days", "grouping_history_max_mb")
+        try:
+            values = {key: schema.validate_value(key, body.get(key)) for key in keys}
+        except schema.ValidationError as exc:
+            return json_error(str(exc))
+        with cfg.settings_write_lock:
+            raw = cfg.read_raw_config_file()
+            raw.update(values)
+            cfg.save(raw)
+        settings = _retained_config()
+
+        def work(job):
+            with ctx.thread_db() as db:
+                result = cleanup(settings, db.storage.source_folder_paths(),
+                                 checkpoint=lambda: ctx.checkpoint(job))
+                for workspace in db.workspaces.list_all():
+                    ctx.checkpoint(job)
+                    db.set_active_workspace(workspace["id"])
+                    retired = db._prune_edit_history()
+                    for key, count in retired.items():
+                        result[key] = result.get(key, 0) + count
+                return result
+        return ctx.start("retained-cache-maintenance", work, config=values)
+
+    @blueprint.route("/api/storage/retained")
+    def api_storage_retained():
+        from services.retained_cache import summary
+        settings = _retained_config()
+        return jsonify({
+            "caches": summary(settings),
+            "grouping_history": get_db().storage.grouping_history(),
+            "maintenance": get_db().storage.latest_maintenance(),
+            "policy": {key: settings[key] for key in (
+                "retained_cache_max_mb", "retained_cache_max_age_days", "grouping_history_max_mb",
+            )},
+        })
+
+    @blueprint.route("/api/storage/retained/clear", methods=["POST"])
+    @background_job
+    def api_storage_retained_clear(ctx):
+        from services.retained_cache import FAMILIES, cleanup
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("Expected a JSON object")
+        family = body.get("type")
+        if not isinstance(family, str) or (family not in FAMILIES and family != "grouping-history"):
+            return json_error("Unknown retained cache type")
+        if family == "grouping-history" and body.get("confirm_history_loss") is not True:
+            return json_error("Confirm that grouping undo and redo snapshots will be removed")
+        settings = _retained_config()
+
+        def work(job):
+            with ctx.thread_db() as db:
+                if family == "grouping-history":
+                    db.begin_immediate()
+                    ids = db.storage.grouping_payload_ids()
+                    for edit_id in ids:
+                        ctx.checkpoint(job)
+                        db.edit_history.retire_stale_grouping_entry(edit_id)
+                    db.commit()
+                    return {"deleted": len(ids), "summary":
+                            f"Removed {len(ids)} grouping undo and redo snapshots; photo edits were retained."}
+
+                def progress(current, total, path):
+                    ctx.runner.push_event(job["id"], "progress", {
+                        "current": current, "total": total,
+                        "current_file": os.path.basename(path), "phase": "Removing retained generated files",
+                    })
+                result = cleanup(settings, db.storage.source_folder_paths(), family=family,
+                                 clear=True, checkpoint=lambda: ctx.checkpoint(job), progress=progress)
+                return result
+
+        return ctx.start("retained-cache-cleanup", work, config={"cache_type": family})
 
     def _storage_masks_data(db):
         """Build the shared mask-storage payload once per storage refresh."""
@@ -68,19 +159,16 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
                         total += os.path.getsize(fp)
             return {"count": count, "size": total, "path": path}
 
-        def _dir_size_recursive(path):
-            total = 0
-            if os.path.isdir(path):
-                for dirpath, _dirnames, filenames in os.walk(path):
-                    for f in filenames:
-                        try:
-                            total += os.path.getsize(os.path.join(dirpath, f))
-                        except OSError:
-                            # Cache eviction and generation can race a storage
-                            # refresh. A disappearing file should make this
-                            # snapshot slightly stale, not fail the endpoint.
-                            continue
-            return total
+        from services.storage_paths import (
+            auxiliary_paths as owned_auxiliary_paths,
+        )
+        from services.storage_paths import (
+            directory_bytes as _dir_size_recursive,
+        )
+        from services.storage_paths import (
+            huggingface_cache_dir,
+            huggingface_repositories,
+        )
 
         db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
         thumb = _dir_stats(config["THUMB_CACHE_DIR"])
@@ -104,14 +192,15 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         storage_root = os.path.dirname(config["THUMB_CACHE_DIR"])
 
         # HuggingFace cache — only count Vireo-relevant models
-        hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+        hf_cache = huggingface_cache_dir()
         hf_size = 0
         hf_models = []
+        hf_repositories = huggingface_repositories()
         if os.path.isdir(hf_cache):
             for d in os.listdir(hf_cache):
-                if d.startswith("models--imageomics") or d.startswith(
-                    "models--bioclip"
-                ):
+                if d in hf_repositories or d.startswith((
+                    "models--imageomics--", "models--bioclip--",
+                )):
                     dp = os.path.join(hf_cache, d)
                     size = _dir_size_recursive(dp)
                     hf_size += size
@@ -141,68 +230,9 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             (masks["path"], masks_size),
             (hf_cache, hf_size),
         ]
-        catalog_root = os.path.dirname(os.path.abspath(db_path))
-        if os.path.abspath(storage_root) == catalog_root:
-            # In the conventional layout this is Vireo's dedicated data
-            # directory. Include taxonomy, logs, SQLite sidecars/backups, and
-            # other managed files that do not have their own category.
-            try:
-                with os.scandir(storage_root) as entries:
-                    auxiliary_paths = [entry.path for entry in entries]
-            except OSError:
-                auxiliary_paths = []
-        else:
-            # ``--thumb-dir`` may be any directory (for example
-            # /data/thumbs). Its parent is not necessarily owned by Vireo, so
-            # never recurse across that shared parent and classify siblings as
-            # Vireo data. Count only explicit auxiliary paths Vireo creates.
-            auxiliary_paths = [
-                os.path.join(storage_root, dirname)
-                for dirname in (
-                    "originals",
-                    "external-edits",
-                    "external-dng",
-                    "inat-uploads",
-                    "inat-exports",
-                    "edit-masks",
-                    # ``staging_recovery`` treats <vireo_dir>/staging as
-                    # Vireo-managed storage that may hold the only remaining
-                    # copies of photos from failed or cancelled imports. Omit
-                    # and the Storage page under a custom ``--thumb-dir``
-                    # layout can hide a very large staging tree.
-                    "staging",
-                )
-            ]
-            auxiliary_paths.extend([
-                config["CARD_CLEANUP_DIR"],
-                config["COMPUTATION_CACHE_DIR"],
-                # Taxonomy assets remain beside the catalog even when
-                # generated image caches use a custom thumbnail root.
-                os.path.join(catalog_root, "taxonomy.json"),
-                os.path.join(catalog_root, "taxonomy"),
-                f"{db_path}-wal",
-                f"{db_path}-shm",
-                f"{db_path}-journal",
-            ])
-            # Schema migrations retain one full catalog snapshot beside the
-            # database as ``<db>.pre-v<N>.bak``. In a split custom-thumbnail
-            # layout the catalog parent is deliberately not recursed, so add
-            # only this exact Vireo-owned filename pattern rather than
-            # sweeping unrelated siblings into the Storage total.
-            backup_name_re = re.compile(
-                re.escape(os.path.basename(db_path))
-                + r"\.pre-v\d+\.bak\Z"
-            )
-            try:
-                with os.scandir(catalog_root) as entries:
-                    auxiliary_paths.extend(
-                        entry.path
-                        for entry in entries
-                        if entry.is_file()
-                        and backup_name_re.fullmatch(entry.name)
-                    )
-            except OSError:
-                pass
+        auxiliary_paths = owned_auxiliary_paths(
+            db_path, config["THUMB_CACHE_DIR"], config, db,
+        )
         other_entries = []
         measured_paths = []
         # Measure each top-level auxiliary path once, then remove the bytes
@@ -283,6 +313,11 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             raw_locations.append(("models", "Downloaded models", DEFAULT_MODELS_DIR))
         if hf_size:
             raw_locations.append(("hf_cache", "Hugging Face cache", hf_cache))
+        from services.storage_paths import location_id as managed_location_id
+        for entry in other_entries:
+            path = entry["path"] if os.path.isdir(entry["path"]) else os.path.dirname(entry["path"])
+            if not any(_is_within(path, existing) for _id, _label, existing in raw_locations):
+                raw_locations.append((managed_location_id(path), "Additional managed storage", path))
 
         locations_by_path = {}
         for location_id, label, path in raw_locations:
@@ -530,6 +565,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
         """Open one of Vireo's server-selected storage paths."""
         from classifier import CACHE_DIR as EMB_CACHE_DIR
         from models import DEFAULT_MODELS_DIR
+        from services.storage_paths import auxiliary_paths, huggingface_cache_dir
+        from services.storage_paths import location_id as managed_location_id
 
         location_id = (request.get_json(silent=True) or {}).get(
             "location", "generated"
@@ -539,8 +576,13 @@ def create_storage_blueprint(get_db, json_error, db_path, config):
             "generated": os.path.dirname(config["THUMB_CACHE_DIR"]),
             "embeddings": EMB_CACHE_DIR,
             "models": DEFAULT_MODELS_DIR,
-            "hf_cache": os.path.expanduser("~/.cache/huggingface/hub"),
+            "hf_cache": huggingface_cache_dir(),
         }
+        from services.retained_cache import roots
+        locations.update({"retained-" + family: path for family, path in roots(config).items()})
+        for owned_path in auxiliary_paths(db_path, config["THUMB_CACHE_DIR"], config, get_db()):
+            directory = owned_path if os.path.isdir(owned_path) else os.path.dirname(owned_path)
+            locations[managed_location_id(directory)] = directory
         path = locations.get(location_id)
         if path is None:
             return json_error("Unknown storage location")

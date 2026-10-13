@@ -57,6 +57,7 @@ class PhotoDeletion:
             cleanup_cached_files_for_deleted_photos(
                 self._config["THUMB_CACHE_DIR"], files,
                 progress_callback=progress_callback,
+                masks_dir=os.path.join(os.path.dirname(self._config["DB_PATH"]), "masks"),
             )
         except BaseException as exc:
             reraise_fatal_cleanup_error(exc)

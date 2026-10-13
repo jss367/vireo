@@ -216,10 +216,14 @@ def app_and_db(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     import classifier
     import config as cfg
+    import labels
     import models
+    import taxonomy
     from app import create_app
 
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(labels, "LABELS_DIR", str(tmp_path / "labels"))
+    monkeypatch.setattr(taxonomy, "TAXONOMY_JSON_PATH", str(tmp_path / "taxonomy.json"))
     # Like the model paths below, this is resolved before HOME is patched.
     # Storage totals must not see another xdist worker's embedding writes.
     monkeypatch.setattr(
