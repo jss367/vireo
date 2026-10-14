@@ -7,6 +7,7 @@ import send2trash
 
 
 def test_trash_preserves_same_named_files(tmp_path, isolated_trash):
+    """Files with identical names retain their distinct contents."""
     first = tmp_path / "first" / "bird.jpg"
     second = tmp_path / "second" / "bird.jpg"
     first.parent.mkdir()
@@ -24,6 +25,7 @@ def test_trash_preserves_same_named_files(tmp_path, isolated_trash):
 
 
 def test_trash_refuses_files_from_outside_the_test(tmp_path_factory):
+    """The shared fixture cannot move another test's files."""
     source = tmp_path_factory.mktemp("another-test") / "owl.jpg"
     source.write_bytes(b"keep me")
 
@@ -34,6 +36,7 @@ def test_trash_refuses_files_from_outside_the_test(tmp_path_factory):
 
 
 def test_trash_moves_a_symlink_without_touching_its_target(tmp_path, tmp_path_factory, isolated_trash):
+    """Trashing a link leaves its external target untouched."""
     target = tmp_path_factory.mktemp("outside-target") / "owl.jpg"
     target.write_bytes(b"original photo")
     link = tmp_path / "owl.jpg"
@@ -49,7 +52,43 @@ def test_trash_moves_a_symlink_without_touching_its_target(tmp_path, tmp_path_fa
     assert next(isolated_trash.rglob("owl.jpg")).is_symlink()
 
 
+def test_mounted_volume_trash_stays_in_test_directory(tmp_path, monkeypatch, isolated_trash):
+    """A temporary directory on a volume must not use the volume's Trash."""
+    import app as app_module
+
+    source = tmp_path / "bird.jpg"
+    source.write_bytes(b"photo")
+    volume = tmp_path.parent
+    roots = app_module._NetworkVolumeRoots((), {str(volume)})
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "_volume_root_for_path", lambda _path: str(volume))
+
+    moved, successful, failures = app_module._trash_paths([str(source)], network_roots=roots)
+
+    assert (moved, successful, failures) == (1, {str(source)}, [])
+    assert not source.exists()
+    assert next(isolated_trash.rglob("bird.jpg")).read_bytes() == b"photo"
+    assert not (volume / ".Trashes").exists()
+
+
+def test_mounted_volume_trash_refuses_files_outside_the_test(tmp_path_factory, monkeypatch):
+    """The direct macOS path cannot trash a file outside this test."""
+    import app as app_module
+
+    source = tmp_path_factory.mktemp("another-volume") / "owl.jpg"
+    source.write_bytes(b"keep me")
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "_volume_root_for_path", lambda _path: str(source.parent))
+
+    with pytest.raises(OSError, match="outside this test"):
+        app_module._move_to_volume_trash(str(source))
+
+    assert source.read_bytes() == b"keep me"
+    assert not (source.parent / ".Trashes").exists()
+
+
 def test_finder_fallback_cannot_use_the_host_trash(tmp_path, monkeypatch):
+    """The Finder fallback must never invoke a real deletion subprocess."""
     import app as app_module
 
     source = tmp_path / "bird.jpg"
