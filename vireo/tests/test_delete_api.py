@@ -563,7 +563,7 @@ def test_api_batch_delete_purges_sized_preview_variants(app_and_db):
     assert not os.path.exists(v2560)
 
 
-def test_api_batch_delete_disk_mode(app_and_db, tmp_path):
+def test_api_batch_delete_disk_mode(app_and_db, tmp_path, isolated_trash):
     """API endpoint in disk mode moves files to trash (or deletes them)."""
     app, db = app_and_db
     client = app.test_client()
@@ -592,6 +592,11 @@ def test_api_batch_delete_disk_mode(app_and_db, tmp_path):
     assert data["ok"] is True
     assert data["deleted"] == 1
     assert db.get_photo(pid) is None
+    assert not os.path.exists(real_file)
+    trashed = list(isolated_trash.rglob(photo["filename"]))
+    assert len(trashed) == 1
+    with Image.open(trashed[0]) as image:
+        assert image.size == (10, 10)
 
 
 def test_api_batch_delete_disk_failure_retains_catalog_row(
