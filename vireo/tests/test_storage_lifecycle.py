@@ -283,10 +283,12 @@ def test_automatic_render_retention_requires_independent_readable_sources(db, tm
         config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
         source_is_readable=retained_cache.source_verifier(db, config),
     )
-    assert result["ok"], result
-    assert result["kept_unverified_sources"] == (1 if problem else 0), result
-    assert result["deleted"] == (0 if problem else 1), result
-    assert render.exists() is (problem is not None), result
+    # Pytest truncates dictionary assertion messages at CI verbosity.
+    diagnostics = json.dumps(result, sort_keys=True)
+    assert result["ok"], diagnostics
+    assert result["kept_unverified_sources"] == (1 if problem else 0), diagnostics
+    assert result["deleted"] == (0 if problem else 1), diagnostics
+    assert render.exists() is (problem is not None), diagnostics
 
 
 @pytest.mark.parametrize("problem", [None, "changed", "hash", "missing-identity", "missing-hash", "stale-path"])
@@ -319,10 +321,11 @@ def test_automatic_paired_render_retention_verifies_stored_companion_identity(db
         config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
         source_is_readable=retained_cache.source_verifier(db, config),
     )
-    assert result["ok"], result
-    assert result["kept_unverified_sources"] == (1 if problem else 0), result
-    assert result["deleted"] == (0 if problem else 1), result
-    assert render.exists() is (problem is not None), result
+    diagnostics = json.dumps(result, sort_keys=True)
+    assert result["ok"], diagnostics
+    assert result["kept_unverified_sources"] == (1 if problem else 0), diagnostics
+    assert result["deleted"] == (0 if problem else 1), diagnostics
+    assert render.exists() is (problem is not None), diagnostics
 
 
 def test_prepared_render_reader_is_pinned_until_response_opens(app_and_db, tmp_path, monkeypatch):
@@ -464,8 +467,10 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
     try:
         with guard:
             worker.start()
-            assert waiting.wait(synchronization_timeout(5)), (verification, results)
-            assert verification == [True], results
+            assert waiting.wait(synchronization_timeout(5)), json.dumps({
+                "verification": verification, "results": results,
+            }, sort_keys=True)
+            assert verification == [True], json.dumps(results, sort_keys=True)
             if change == "offline":
                 source.unlink()
             elif change == "changed":
@@ -475,13 +480,14 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
     assert not worker.is_alive()
     assert len(results) == 1
     result = results[0]
-    assert result["ok"], result
-    assert result["kept_unverified_sources"] == (1 if change else 0), result
-    assert result["kept_changed_files"] == 0, result
-    assert result["kept_accessed_files"] == 0, result
-    assert result["kept_unsafe_paths"] == 0, result
-    assert result["deleted"] == (0 if change else 1), result
-    assert render.exists() is (change is not None), result
+    diagnostics = json.dumps(result, sort_keys=True)
+    assert result["ok"], diagnostics
+    assert result["kept_unverified_sources"] == (1 if change else 0), diagnostics
+    assert result["kept_changed_files"] == 0, diagnostics
+    assert result["kept_accessed_files"] == 0, diagnostics
+    assert result["kept_unsafe_paths"] == 0, diagnostics
+    assert result["deleted"] == (0 if change else 1), diagnostics
+    assert render.exists() is (change is not None), diagnostics
 
 
 def test_retained_cleanup_rejects_photo_folders_and_symlinks(tmp_path):
