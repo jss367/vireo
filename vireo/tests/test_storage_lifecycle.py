@@ -279,12 +279,18 @@ def test_automatic_render_retention_requires_independent_readable_sources(db, tm
                 raise PermissionError("offline volume")
             return real_open(path, *args, **kwargs)
         monkeypatch.setattr(builtins, "open", refuse)
+    probe = retained_cache.source_verifier(db, config)
     result = retained_cache.cleanup(
         config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
-        source_is_readable=retained_cache.source_verifier(db, config),
+        source_is_readable=probe,
     )
-    assert render.exists() is (problem is not None)
-    assert result["kept_unverified_sources"] == (1 if problem else 0)
+    # Pytest truncates dictionary assertion messages at CI verbosity.
+    diagnostics = json.dumps({**result, "source_verification_failure": probe.verification_failure}, sort_keys=True)
+    assert result["ok"], diagnostics
+    assert result["kept_unverified_sources"] == (1 if problem else 0), diagnostics
+    assert bool(probe.verification_failure) is (problem is not None), diagnostics
+    assert result["deleted"] == (0 if problem else 1), diagnostics
+    assert render.exists() is (problem is not None), diagnostics
 
 
 @pytest.mark.parametrize("problem", [None, "changed", "hash", "missing-identity", "missing-hash", "stale-path"])
@@ -313,12 +319,17 @@ def test_automatic_paired_render_retention_verifies_stored_companion_identity(db
         companion.write_bytes(b"xxxxxxx")
         os.utime(companion, (100, 100))
     render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / f"{photo}.display.jpg")
+    probe = retained_cache.source_verifier(db, config)
     result = retained_cache.cleanup(
         config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
-        source_is_readable=retained_cache.source_verifier(db, config),
+        source_is_readable=probe,
     )
-    assert render.exists() is (problem is not None)
-    assert result["kept_unverified_sources"] == (1 if problem else 0)
+    diagnostics = json.dumps({**result, "source_verification_failure": probe.verification_failure}, sort_keys=True)
+    assert result["ok"], diagnostics
+    assert result["kept_unverified_sources"] == (1 if problem else 0), diagnostics
+    assert bool(probe.verification_failure) is (problem is not None), diagnostics
+    assert result["deleted"] == (0 if problem else 1), diagnostics
+    assert render.exists() is (problem is not None), diagnostics
 
 
 def test_prepared_render_reader_is_pinned_until_response_opens(app_and_db, tmp_path, monkeypatch):
@@ -414,8 +425,47 @@ def test_paired_render_publication_waits_until_eviction_finishes(app_and_db, tmp
     assert len(responses) == 1 and path.read_bytes() == responses[0]
 
 
-@pytest.mark.parametrize("change", [None, "offline", "changed"])
-def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, change):
+def test_source_verification_preserves_change_time_with_windows_stat_semantics(db, tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+
+    config = _cache_config(tmp_path)
+    source = _payload(tmp_path / "source" / "bird.jpg")
+    info = source.stat()
+    folder = db.add_folder(str(source.parent))
+    photo = db.add_photo(folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
+    db.commit()
+    render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "inat-uploads" / f"{photo}.jpg")
+    version = [0]
+
+    def descriptor_stat(fd):
+        actual = os.fstat(fd)
+        fields = {name: getattr(actual, name) for name in dir(actual) if name.startswith("st_")}
+        # CPython's Windows path stat exposes creation time as ctime,
+        # while fstat exposes ChangeTime. They need not be equal.
+        fields["st_birthtime_ns"] = info.st_ctime_ns
+        fields["st_birthtime"] = info.st_ctime_ns / 1e9
+        fields["st_ctime_ns"] = info.st_ctime_ns + 1_000_000 + version[0]
+        fields["st_ctime"] = fields["st_ctime_ns"] / 1e9
+        return SimpleNamespace(**fields)
+
+    windows_os = SimpleNamespace(**vars(os))
+    windows_os.name = "nt"
+    windows_os.fstat = descriptor_stat
+    # Replace only this module's OS view, not global os.name/pathlib.
+    monkeypatch.setattr(retained_cache, "os", windows_os)
+    probe = retained_cache.source_verifier(db, config)
+    assert probe(str(render)), json.dumps(probe.verification_failure, sort_keys=True)
+
+    source.write_bytes(b"xxxxxxx")
+    os.utime(source, (info.st_atime, info.st_mtime))
+    version[0] += 1_000_000
+    assert not probe.recheck(str(render))
+
+
+@pytest.mark.parametrize("change", [None, "offline", "changed", "restored-mtime", "replaced"])
+def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, monkeypatch, change):
     import hashlib
 
     from testing.waits import synchronization_timeout
@@ -428,7 +478,24 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
     db.commit()
     render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "inat-uploads" / f"{photo}.jpg")
-    verified, results = threading.Event(), []
+    verified, waiting, results = threading.Event(), threading.Event(), []
+    verification = []
+    verification_failures = []
+    guard = retained_cache.reader_guard("inat-uploads")
+
+    class ObservedGuard:
+        def __enter__(self):
+            # Prove contention before signalling: an uncontended schedule
+            # would exercise ordering of operations, not the reader-guard
+            # block this regression is named for.
+            assert not guard.acquire(blocking=False)
+            waiting.set()
+            return guard.__enter__()
+
+        def __exit__(self, *args):
+            return guard.__exit__(*args)
+
+    monkeypatch.setattr(retained_cache, "reader_guard", lambda family: ObservedGuard())
 
     def maintain():
         from db import Database
@@ -438,24 +505,52 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
                 recheck = staticmethod(probe.recheck)
                 def __call__(self, path):
                     result = probe(path)
+                    verification.append(result)
+                    if not result:
+                        verification_failures.append(dict(probe.verification_failure))
                     verified.set()
                     return result
             results.append(retained_cache.cleanup(
                 config, [], now=time.time() + 365 * 86400, source_is_readable=ObservedProbe(),
             ))
 
-    with retained_cache.reader_guard("inat-uploads"):
-        worker = threading.Thread(target=maintain)
-        worker.start()
-        assert verified.wait(synchronization_timeout(5))
-        if change == "offline":
-            source.unlink()
-        elif change == "changed":
-            source.write_bytes(b"modified while an upload was using its handoff")
-    worker.join(synchronization_timeout(5))
+    def source_diagnostics():
+        return json.dumps({
+            "verification": verification, "results": results,
+            "verification_failures": verification_failures,
+        }, sort_keys=True)
+
+    worker = threading.Thread(target=maintain)
+    try:
+        with guard:
+            worker.start()
+            assert verified.wait(synchronization_timeout(5)), source_diagnostics()
+            if verification == [True]:
+                assert waiting.wait(synchronization_timeout(5)), source_diagnostics()
+                if change == "offline":
+                    source.unlink()
+                elif change == "changed":
+                    source.write_bytes(b"modified while an upload was using its handoff")
+                elif change == "restored-mtime":
+                    source.write_bytes(b"xxxxxxx")
+                    os.utime(source, (info.st_atime, info.st_mtime))
+                elif change == "replaced":
+                    replacement = _payload(source.with_name("replacement.jpg"), when=info.st_mtime)
+                    os.replace(replacement, source)
+    finally:
+        worker.join(synchronization_timeout(5))
     assert not worker.is_alive()
-    assert render.exists() is (change is not None)
-    assert results[0]["kept_unverified_sources"] == (1 if change else 0)
+    assert verification == [True], source_diagnostics()
+    assert len(results) == 1
+    result = results[0]
+    diagnostics = json.dumps(result, sort_keys=True)
+    assert result["ok"], diagnostics
+    assert result["kept_unverified_sources"] == (1 if change else 0), diagnostics
+    assert result["kept_changed_files"] == 0, diagnostics
+    assert result["kept_accessed_files"] == 0, diagnostics
+    assert result["kept_unsafe_paths"] == 0, diagnostics
+    assert result["deleted"] == (0 if change else 1), diagnostics
+    assert render.exists() is (change is not None), diagnostics
 
 
 def test_retained_cleanup_rejects_photo_folders_and_symlinks(tmp_path):

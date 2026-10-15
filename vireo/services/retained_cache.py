@@ -50,11 +50,16 @@ def guarded_reader(family):
 
 
 class SourceVerifier:
-    """Separate expensive source verification from the final guarded probe."""
+    """Separate expensive source verification from the final guarded probe.
 
-    def __init__(self, verify, recheck):
+    verification_failure describes the most recent full-source rejection;
+    it is empty after successful verification.
+    """
+
+    def __init__(self, verify, recheck, failure=None):
         self._verify = verify
         self.recheck = recheck
+        self.verification_failure = {} if failure is None else failure
 
     def __call__(self, path):
         return self._verify(path)
@@ -68,22 +73,37 @@ def source_verifier(db, config, checkpoint=lambda: None):
     )], config["THUMB_CACHE_DIR"]]
     excluded = [os.path.normcase(os.path.realpath(path)) for path in excluded]
     verified = {}
+    failure = {}
+
+    def reject(reason, **details):
+        failure.update(reason=reason, **details)
+        return False
+
+    def path_identity(path):
+        # Windows path stat exposes creation time as ctime, while fstat
+        # can expose ChangeTime. Keep every identity field, including the
+        # change-time guard, by querying the named path through fstat too.
+        if os.name == "nt":
+            with open(path, "rb") as handle:
+                return _identity(os.fstat(handle.fileno()))
+        return _identity(os.stat(path))
 
     def verify(path):
+        failure.clear()
         verified.pop(path, None)
         match = re.match(r"([0-9]+)[._]", os.path.basename(path))
         if not match:
-            return False
+            return reject("unrecognized-render-name")
         photo_id = int(match[1])
         if not 0 < photo_id < 2**63:
-            return False
+            return reject("invalid-photo-id")
         source = db.storage.retained_source(photo_id)
         if not source or not source["file_hash"]:
-            return False
+            return reject("missing-source-hash", source_found=bool(source))
         identities = [(source["filename"], source["file_size"], source["file_mtime"], source["file_hash"])]
         if source["companion_path"]:
             if not source["companion_hash"]:
-                return False
+                return reject("missing-companion-hash")
             identities.append((source["companion_path"], source["companion_size"],
                                source["companion_mtime"], source["companion_hash"]))
         checked = []
@@ -92,30 +112,34 @@ def source_verifier(db, config, checkpoint=lambda: None):
                 original = os.path.join(source["folder_path"], name)
                 resolved = os.path.normcase(os.path.realpath(original))
                 if any(_within(resolved, root) for root in excluded):
-                    return False
+                    return reject("managed-source-path")
                 with open(original, "rb") as handle:
                     before = os.fstat(handle.fileno())
                     if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
-                        return False
+                        return reject("nonempty-regular-source-required", mode=before.st_mode, size=before.st_size)
                     if before.st_size != expected_size or before.st_mtime != expected_mtime:
-                        return False
+                        return reject("catalog-metadata-mismatch", expected_size=expected_size,
+                                      actual_size=before.st_size, expected_mtime=expected_mtime,
+                                      actual_mtime=before.st_mtime)
                     digest = hashlib.sha256()
                     while block := handle.read(1024 * 1024):
                         checkpoint()
                         digest.update(block)
-                    if _identity(before) != _identity(os.fstat(handle.fileno())):
-                        return False
+                    after = os.fstat(handle.fileno())
+                    if _identity(before) != _identity(after):
+                        return reject("source-changed-during-read", before=_identity(before), after=_identity(after))
                     if digest.hexdigest() != expected_hash:
-                        return False
-                if _identity(before) != _identity(os.stat(original)):
-                    return False
+                        return reject("source-hash-mismatch")
+                after = path_identity(original)
+                if _identity(before) != after:
+                    return reject("source-path-identity-mismatch", before=_identity(before), after=after)
                 checked.append((original, before))
             if db.storage.retained_source(photo_id) != source:
-                return False
+                return reject("catalog-source-changed")
             verified[path] = (photo_id, source, checked)
             return True
-        except (OSError, ValueError, TypeError):
-            return False
+        except (OSError, ValueError, TypeError) as exc:
+            return reject("source-verification-error", error_type=type(exc).__name__, error=str(exc))
 
     def recheck(path):
         proof = verified.pop(path, None)
@@ -131,12 +155,12 @@ def source_verifier(db, config, checkpoint=lambda: None):
                 with open(original, "rb") as handle:
                     if (_identity(os.fstat(handle.fileno())) != _identity(expected)
                             or not handle.read(1)
-                            or _identity(os.stat(original)) != _identity(expected)):
+                            or path_identity(original) != _identity(expected)):
                         return False
             return db.storage.retained_source(photo_id) == source
         except (OSError, ValueError, TypeError):
             return False
-    return SourceVerifier(verify, recheck)
+    return SourceVerifier(verify, recheck, failure)
 
 
 def roots(config):
@@ -241,6 +265,7 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
     total_bytes = sum(info.st_size for _access, _path, info, _root, _family in candidates)
     removed = freed = 0
     kept_unverified = 0
+    kept_changed = kept_accessed = kept_unsafe = 0
     # Oldest access first; fresh file publications are protected even when
     # the user lowers a limit below one very large render.
     for current, (access, path, expected, approved_root, key) in enumerate(sorted(candidates), 1):
@@ -258,12 +283,15 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
             with reader_guard(key):
                 actual = os.lstat(path)
                 if _identity(actual) != _identity(expected) or not stat.S_ISREG(actual.st_mode):
+                    kept_changed += 1
                     continue
                 if not clear and actual.st_atime > expected.st_atime:
+                    kept_accessed += 1
                     continue
                 # Recheck containment to reject a directory replaced by a link
                 # between the walk and unlink.
                 if not _within(os.path.normcase(os.path.realpath(path)), approved_root):
+                    kept_unsafe += 1
                     continue
                 if not clear and key != "computation":
                     # Uploads can hold this guard while consuming a file.
@@ -283,6 +311,8 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
             add_error(f"Could not remove {path}: {exc}")
     return {"deleted": removed, "freed_bytes": freed, "remaining_bytes": total_bytes,
             "kept_unverified_sources": kept_unverified,
+            "kept_changed_files": kept_changed, "kept_accessed_files": kept_accessed,
+            "kept_unsafe_paths": kept_unsafe,
             "errors": errors, "errors_total": errors_total, "ok": not errors_total}
 
 
