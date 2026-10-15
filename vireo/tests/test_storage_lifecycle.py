@@ -473,6 +473,9 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
     result = results[0]
     assert result["ok"], result
     assert result["kept_unverified_sources"] == (1 if change else 0), result
+    assert result["kept_changed_files"] == 0, result
+    assert result["kept_accessed_files"] == 0, result
+    assert result["kept_unsafe_paths"] == 0, result
     assert result["deleted"] == (0 if change else 1), result
     assert render.exists() is (change is not None), result
 

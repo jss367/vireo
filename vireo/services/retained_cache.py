@@ -241,6 +241,7 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
     total_bytes = sum(info.st_size for _access, _path, info, _root, _family in candidates)
     removed = freed = 0
     kept_unverified = 0
+    kept_changed = kept_accessed = kept_unsafe = 0
     # Oldest access first; fresh file publications are protected even when
     # the user lowers a limit below one very large render.
     for current, (access, path, expected, approved_root, key) in enumerate(sorted(candidates), 1):
@@ -258,12 +259,15 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
             with reader_guard(key):
                 actual = os.lstat(path)
                 if _identity(actual) != _identity(expected) or not stat.S_ISREG(actual.st_mode):
+                    kept_changed += 1
                     continue
                 if not clear and actual.st_atime > expected.st_atime:
+                    kept_accessed += 1
                     continue
                 # Recheck containment to reject a directory replaced by a link
                 # between the walk and unlink.
                 if not _within(os.path.normcase(os.path.realpath(path)), approved_root):
+                    kept_unsafe += 1
                     continue
                 if not clear and key != "computation":
                     # Uploads can hold this guard while consuming a file.
@@ -283,6 +287,8 @@ def cleanup(config, source_folders, *, family=None, clear=False, checkpoint=lamb
             add_error(f"Could not remove {path}: {exc}")
     return {"deleted": removed, "freed_bytes": freed, "remaining_bytes": total_bytes,
             "kept_unverified_sources": kept_unverified,
+            "kept_changed_files": kept_changed, "kept_accessed_files": kept_accessed,
+            "kept_unsafe_paths": kept_unsafe,
             "errors": errors, "errors_total": errors_total, "ok": not errors_total}
 
 
