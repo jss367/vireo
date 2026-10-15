@@ -425,7 +425,46 @@ def test_paired_render_publication_waits_until_eviction_finishes(app_and_db, tmp
     assert len(responses) == 1 and path.read_bytes() == responses[0]
 
 
-@pytest.mark.parametrize("change", [None, "offline", "changed"])
+def test_source_verification_preserves_change_time_with_windows_stat_semantics(db, tmp_path, monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+
+    config = _cache_config(tmp_path)
+    source = _payload(tmp_path / "source" / "bird.jpg")
+    info = source.stat()
+    folder = db.add_folder(str(source.parent))
+    photo = db.add_photo(folder, source.name, ".jpg", info.st_size, info.st_mtime)
+    db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
+    db.commit()
+    render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "inat-uploads" / f"{photo}.jpg")
+    version = [0]
+
+    def descriptor_stat(fd):
+        actual = os.fstat(fd)
+        fields = {name: getattr(actual, name) for name in dir(actual) if name.startswith("st_")}
+        # CPython's Windows path stat exposes creation time as ctime,
+        # while fstat exposes ChangeTime. They need not be equal.
+        fields["st_birthtime_ns"] = info.st_ctime_ns
+        fields["st_birthtime"] = info.st_ctime_ns / 1e9
+        fields["st_ctime_ns"] = info.st_ctime_ns + 1_000_000 + version[0]
+        fields["st_ctime"] = fields["st_ctime_ns"] / 1e9
+        return SimpleNamespace(**fields)
+
+    windows_os = SimpleNamespace(**vars(os))
+    windows_os.name = "nt"
+    windows_os.fstat = descriptor_stat
+    # Replace only this module's OS view, not global os.name/pathlib.
+    monkeypatch.setattr(retained_cache, "os", windows_os)
+    probe = retained_cache.source_verifier(db, config)
+    assert probe(str(render)), json.dumps(probe.verification_failure, sort_keys=True)
+
+    source.write_bytes(b"xxxxxxx")
+    os.utime(source, (info.st_atime, info.st_mtime))
+    version[0] += 1_000_000
+    assert not probe.recheck(str(render))
+
+
+@pytest.mark.parametrize("change", [None, "offline", "changed", "restored-mtime", "replaced"])
 def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, monkeypatch, change):
     import hashlib
 
@@ -492,6 +531,12 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
                     source.unlink()
                 elif change == "changed":
                     source.write_bytes(b"modified while an upload was using its handoff")
+                elif change == "restored-mtime":
+                    source.write_bytes(b"xxxxxxx")
+                    os.utime(source, (info.st_atime, info.st_mtime))
+                elif change == "replaced":
+                    replacement = _payload(source.with_name("replacement.jpg"), when=info.st_mtime)
+                    os.replace(replacement, source)
     finally:
         worker.join(synchronization_timeout(5))
     assert not worker.is_alive()

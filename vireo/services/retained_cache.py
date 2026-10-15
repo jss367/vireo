@@ -79,6 +79,15 @@ def source_verifier(db, config, checkpoint=lambda: None):
         failure.update(reason=reason, **details)
         return False
 
+    def path_identity(path):
+        # Windows path stat exposes creation time as ctime, while fstat
+        # can expose ChangeTime. Keep every identity field, including the
+        # change-time guard, by querying the named path through fstat too.
+        if os.name == "nt":
+            with open(path, "rb") as handle:
+                return _identity(os.fstat(handle.fileno()))
+        return _identity(os.stat(path))
+
     def verify(path):
         failure.clear()
         verified.pop(path, None)
@@ -121,9 +130,9 @@ def source_verifier(db, config, checkpoint=lambda: None):
                         return reject("source-changed-during-read", before=_identity(before), after=_identity(after))
                     if digest.hexdigest() != expected_hash:
                         return reject("source-hash-mismatch")
-                after = os.stat(original)
-                if _identity(before) != _identity(after):
-                    return reject("source-path-identity-mismatch", before=_identity(before), after=_identity(after))
+                after = path_identity(original)
+                if _identity(before) != after:
+                    return reject("source-path-identity-mismatch", before=_identity(before), after=after)
                 checked.append((original, before))
             if db.storage.retained_source(photo_id) != source:
                 return reject("catalog-source-changed")
@@ -146,7 +155,7 @@ def source_verifier(db, config, checkpoint=lambda: None):
                 with open(original, "rb") as handle:
                     if (_identity(os.fstat(handle.fileno())) != _identity(expected)
                             or not handle.read(1)
-                            or _identity(os.stat(original)) != _identity(expected)):
+                            or path_identity(original) != _identity(expected)):
                         return False
             return db.storage.retained_source(photo_id) == source
         except (OSError, ValueError, TypeError):
