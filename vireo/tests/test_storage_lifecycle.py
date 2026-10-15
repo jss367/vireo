@@ -441,6 +441,10 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
 
     class ObservedGuard:
         def __enter__(self):
+            # Prove contention before signalling: an uncontended schedule
+            # would exercise ordering of operations, not the reader-guard
+            # block this regression is named for.
+            assert not guard.acquire(blocking=False)
             waiting.set()
             return guard.__enter__()
 
