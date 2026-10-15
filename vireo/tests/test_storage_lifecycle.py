@@ -279,14 +279,16 @@ def test_automatic_render_retention_requires_independent_readable_sources(db, tm
                 raise PermissionError("offline volume")
             return real_open(path, *args, **kwargs)
         monkeypatch.setattr(builtins, "open", refuse)
+    probe = retained_cache.source_verifier(db, config)
     result = retained_cache.cleanup(
         config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
-        source_is_readable=retained_cache.source_verifier(db, config),
+        source_is_readable=probe,
     )
     # Pytest truncates dictionary assertion messages at CI verbosity.
-    diagnostics = json.dumps(result, sort_keys=True)
+    diagnostics = json.dumps({**result, "source_verification_failure": probe.verification_failure}, sort_keys=True)
     assert result["ok"], diagnostics
     assert result["kept_unverified_sources"] == (1 if problem else 0), diagnostics
+    assert bool(probe.verification_failure) is (problem is not None), diagnostics
     assert result["deleted"] == (0 if problem else 1), diagnostics
     assert render.exists() is (problem is not None), diagnostics
 
@@ -317,13 +319,15 @@ def test_automatic_paired_render_retention_verifies_stored_companion_identity(db
         companion.write_bytes(b"xxxxxxx")
         os.utime(companion, (100, 100))
     render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "originals" / f"{photo}.display.jpg")
+    probe = retained_cache.source_verifier(db, config)
     result = retained_cache.cleanup(
         config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
-        source_is_readable=retained_cache.source_verifier(db, config),
+        source_is_readable=probe,
     )
-    diagnostics = json.dumps(result, sort_keys=True)
+    diagnostics = json.dumps({**result, "source_verification_failure": probe.verification_failure}, sort_keys=True)
     assert result["ok"], diagnostics
     assert result["kept_unverified_sources"] == (1 if problem else 0), diagnostics
+    assert bool(probe.verification_failure) is (problem is not None), diagnostics
     assert result["deleted"] == (0 if problem else 1), diagnostics
     assert render.exists() is (problem is not None), diagnostics
 
@@ -435,8 +439,9 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
     db.conn.execute("UPDATE photos SET file_hash=? WHERE id=?", (hashlib.sha256(source.read_bytes()).hexdigest(), photo))
     db.commit()
     render = _payload(Path(config["THUMB_CACHE_DIR"]).parent / "inat-uploads" / f"{photo}.jpg")
-    waiting, results = threading.Event(), []
+    verified, waiting, results = threading.Event(), threading.Event(), []
     verification = []
+    verification_failures = []
     guard = retained_cache.reader_guard("inat-uploads")
 
     class ObservedGuard:
@@ -462,26 +467,35 @@ def test_retention_rechecks_source_after_waiting_for_reader_guard(db, tmp_path, 
                 def __call__(self, path):
                     result = probe(path)
                     verification.append(result)
+                    if not result:
+                        verification_failures.append(dict(probe.verification_failure))
+                    verified.set()
                     return result
             results.append(retained_cache.cleanup(
                 config, [], now=time.time() + 365 * 86400, source_is_readable=ObservedProbe(),
             ))
 
+    def source_diagnostics():
+        return json.dumps({
+            "verification": verification, "results": results,
+            "verification_failures": verification_failures,
+        }, sort_keys=True)
+
     worker = threading.Thread(target=maintain)
     try:
         with guard:
             worker.start()
-            assert waiting.wait(synchronization_timeout(5)), json.dumps({
-                "verification": verification, "results": results,
-            }, sort_keys=True)
-            assert verification == [True], json.dumps(results, sort_keys=True)
-            if change == "offline":
-                source.unlink()
-            elif change == "changed":
-                source.write_bytes(b"modified while an upload was using its handoff")
+            assert verified.wait(synchronization_timeout(5)), source_diagnostics()
+            if verification == [True]:
+                assert waiting.wait(synchronization_timeout(5)), source_diagnostics()
+                if change == "offline":
+                    source.unlink()
+                elif change == "changed":
+                    source.write_bytes(b"modified while an upload was using its handoff")
     finally:
         worker.join(synchronization_timeout(5))
     assert not worker.is_alive()
+    assert verification == [True], source_diagnostics()
     assert len(results) == 1
     result = results[0]
     diagnostics = json.dumps(result, sort_keys=True)

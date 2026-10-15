@@ -50,11 +50,16 @@ def guarded_reader(family):
 
 
 class SourceVerifier:
-    """Separate expensive source verification from the final guarded probe."""
+    """Separate expensive source verification from the final guarded probe.
 
-    def __init__(self, verify, recheck):
+    verification_failure describes the most recent full-source rejection;
+    it is empty after successful verification.
+    """
+
+    def __init__(self, verify, recheck, failure=None):
         self._verify = verify
         self.recheck = recheck
+        self.verification_failure = {} if failure is None else failure
 
     def __call__(self, path):
         return self._verify(path)
@@ -68,22 +73,28 @@ def source_verifier(db, config, checkpoint=lambda: None):
     )], config["THUMB_CACHE_DIR"]]
     excluded = [os.path.normcase(os.path.realpath(path)) for path in excluded]
     verified = {}
+    failure = {}
+
+    def reject(reason, **details):
+        failure.update(reason=reason, **details)
+        return False
 
     def verify(path):
+        failure.clear()
         verified.pop(path, None)
         match = re.match(r"([0-9]+)[._]", os.path.basename(path))
         if not match:
-            return False
+            return reject("unrecognized-render-name")
         photo_id = int(match[1])
         if not 0 < photo_id < 2**63:
-            return False
+            return reject("invalid-photo-id")
         source = db.storage.retained_source(photo_id)
         if not source or not source["file_hash"]:
-            return False
+            return reject("missing-source-hash", source_found=bool(source))
         identities = [(source["filename"], source["file_size"], source["file_mtime"], source["file_hash"])]
         if source["companion_path"]:
             if not source["companion_hash"]:
-                return False
+                return reject("missing-companion-hash")
             identities.append((source["companion_path"], source["companion_size"],
                                source["companion_mtime"], source["companion_hash"]))
         checked = []
@@ -92,30 +103,34 @@ def source_verifier(db, config, checkpoint=lambda: None):
                 original = os.path.join(source["folder_path"], name)
                 resolved = os.path.normcase(os.path.realpath(original))
                 if any(_within(resolved, root) for root in excluded):
-                    return False
+                    return reject("managed-source-path")
                 with open(original, "rb") as handle:
                     before = os.fstat(handle.fileno())
                     if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
-                        return False
+                        return reject("nonempty-regular-source-required", mode=before.st_mode, size=before.st_size)
                     if before.st_size != expected_size or before.st_mtime != expected_mtime:
-                        return False
+                        return reject("catalog-metadata-mismatch", expected_size=expected_size,
+                                      actual_size=before.st_size, expected_mtime=expected_mtime,
+                                      actual_mtime=before.st_mtime)
                     digest = hashlib.sha256()
                     while block := handle.read(1024 * 1024):
                         checkpoint()
                         digest.update(block)
-                    if _identity(before) != _identity(os.fstat(handle.fileno())):
-                        return False
+                    after = os.fstat(handle.fileno())
+                    if _identity(before) != _identity(after):
+                        return reject("source-changed-during-read", before=_identity(before), after=_identity(after))
                     if digest.hexdigest() != expected_hash:
-                        return False
-                if _identity(before) != _identity(os.stat(original)):
-                    return False
+                        return reject("source-hash-mismatch")
+                after = os.stat(original)
+                if _identity(before) != _identity(after):
+                    return reject("source-path-identity-mismatch", before=_identity(before), after=_identity(after))
                 checked.append((original, before))
             if db.storage.retained_source(photo_id) != source:
-                return False
+                return reject("catalog-source-changed")
             verified[path] = (photo_id, source, checked)
             return True
-        except (OSError, ValueError, TypeError):
-            return False
+        except (OSError, ValueError, TypeError) as exc:
+            return reject("source-verification-error", error_type=type(exc).__name__, error=str(exc))
 
     def recheck(path):
         proof = verified.pop(path, None)
@@ -136,7 +151,7 @@ def source_verifier(db, config, checkpoint=lambda: None):
             return db.storage.retained_source(photo_id) == source
         except (OSError, ValueError, TypeError):
             return False
-    return SourceVerifier(verify, recheck)
+    return SourceVerifier(verify, recheck, failure)
 
 
 def roots(config):
