@@ -283,8 +283,10 @@ def test_automatic_render_retention_requires_independent_readable_sources(db, tm
         config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
         source_is_readable=retained_cache.source_verifier(db, config),
     )
-    assert render.exists() is (problem is not None)
-    assert result["kept_unverified_sources"] == (1 if problem else 0)
+    assert result["ok"], result
+    assert result["kept_unverified_sources"] == (1 if problem else 0), result
+    assert result["deleted"] == (0 if problem else 1), result
+    assert render.exists() is (problem is not None), result
 
 
 @pytest.mark.parametrize("problem", [None, "changed", "hash", "missing-identity", "missing-hash", "stale-path"])
@@ -317,8 +319,10 @@ def test_automatic_paired_render_retention_verifies_stored_companion_identity(db
         config, db.storage.source_folder_paths(), now=time.time() + 365 * 86400,
         source_is_readable=retained_cache.source_verifier(db, config),
     )
-    assert render.exists() is (problem is not None)
-    assert result["kept_unverified_sources"] == (1 if problem else 0)
+    assert result["ok"], result
+    assert result["kept_unverified_sources"] == (1 if problem else 0), result
+    assert result["deleted"] == (0 if problem else 1), result
+    assert render.exists() is (problem is not None), result
 
 
 def test_prepared_render_reader_is_pinned_until_response_opens(app_and_db, tmp_path, monkeypatch):
