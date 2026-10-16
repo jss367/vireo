@@ -167,7 +167,11 @@ When encapsulating another controller, add it to the strict ESLint list and
 types, and add meaningful negative cases to `tests/frontend/type-contracts.ts`.
 Avoid `any` or blanket suppression to make a controller pass. The expected type
 errors and ESLint regression tests ensure the checks continue rejecting invalid
-code as configuration changes.
+code as configuration changes. A classic script whose top-level functions are
+called from other scripts names them in an `/* exported ... */` directive so
+`no-unused-vars` knows they are the file's API, and the navbar globals a strict
+file calls (`showToast`, `safeEventSource`, ...) are declared in
+`types/navbar.d.ts` and listed as that file's ESLint `globals`.
 
 ### Performance budgets
 

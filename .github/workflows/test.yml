@@ -432,12 +432,13 @@ jobs:
           tests/e2e/test_browser_security.py::test_browser_transport_authenticates_internal_mutations
           tests/e2e/test_dialog_accessibility.py
           tests/e2e/test_browse_panel_retry.py
+          tests/e2e/test_jobs_polling.py
 
       - name: Verify Mac frontend controls
         if: needs.changes.outputs.python == 'true' && matrix.browser == 'webkit'
         run: >-
           python -m pytest -o addopts='' -q
-          tests/e2e/test_dialog_accessibility.py tests/e2e/test_browse_panel_retry.py --browser webkit
+          tests/e2e/test_dialog_accessibility.py tests/e2e/test_browse_panel_retry.py tests/e2e/test_jobs_polling.py --browser webkit
           --reruns 2 --reruns-delay 1
 
   rust:
