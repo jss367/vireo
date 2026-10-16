@@ -136,7 +136,6 @@
   "thumbnails.py:generate_all": 174,
   "timm_classifier.py:TimmClassifier.__init__": 133,
   "tone.py:apply_adjustments": 152,
-  "web/app_hooks.py:register_app_hooks": 309,
   "web/batch.py:create_batch_blueprint.api_batch_set_photo_location": 103,
   "web/browse.py:create_browse_blueprint.api_browse_init": 241,
   "web/browse.py:create_browse_blueprint.api_selection_prediction_suggestions": 222,
