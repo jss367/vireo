@@ -54,7 +54,6 @@ def _prediction_scientific_name(db, pred):
     return resolved_prediction_taxonomy(pred, SpeciesResolver(db=db))["scientific_name"]
 
 
-
 def _normalize_export_submissions(submissions):
     """Coerce ``/api/inat/export`` submissions; ``(items, error message)``."""
     normalized_submissions = []
@@ -223,7 +222,6 @@ def _inat_export_work(
     return work
 
 
-
 def _inat_retry_load_from_original(
     img, source_path, using_working_copy, fallback_path, load_kwargs,
     expected_meta,
@@ -371,7 +369,6 @@ def _write_inat_upload_render(
             img.close()
 
 
-
 def _observation_defaults(db, photo, photo_id, data, pred):
     """``(taxon, observed_on, photo_lat, photo_lng)`` for one observation.
 
@@ -391,6 +388,7 @@ def _observation_defaults(db, photo, photo_id, data, pred):
     photo_lat = loc["latitude"] if loc else None
     photo_lng = loc["longitude"] if loc else None
     return taxon, observed_on, photo_lat, photo_lng
+
 
 class InatTokenGeneration:
     """Per-app counter that lets only the newest token write win.

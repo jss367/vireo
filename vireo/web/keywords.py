@@ -59,7 +59,6 @@ def _keyword_update_fields(body):
     return fields, None
 
 
-
 def _location_pipe_rename_error(body, old_row):
     """The refusal for a ``|`` in a rename that lands on a location, or None."""
     # Reject '|' in a rename that lands on a location keyword before we

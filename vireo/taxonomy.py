@@ -792,6 +792,7 @@ def _load_taxonomy_cached(path):
         cached = None
         return _parse_taxonomy_with_retries(path)
 
+
 def _parse_taxonomy_with_retries(path):
     """Parse ``path`` until two stats bracket an unchanged file; cache that.
 

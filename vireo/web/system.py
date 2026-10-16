@@ -317,6 +317,7 @@ def _send_issue_report(report_url, bundle):
         log.exception("Failed to send report to %s", report_url)
         return jsonify({"status": "download", "diagnostics": bundle})
 
+
 def create_system_blueprint(
     get_db,
     json_error,

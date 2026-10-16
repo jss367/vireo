@@ -246,6 +246,7 @@ def _record_place_link(db, keyword_id, details, result):
     if photo_rows:
         db.commit()
 
+
 def _serialize_keyword(db, keyword_id):
     """Return a summary dict for a single ``type='location'`` keyword row.
 
