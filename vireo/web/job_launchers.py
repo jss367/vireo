@@ -1187,78 +1187,7 @@ def create_job_launchers_blueprint(
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
 
         def work(job):
-            from offline_cache import cache_photo_original
-
-            thread_db = ctx.thread_db()
-            photos_map = thread_db.get_photos_by_ids(photo_ids)
-            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-
-            cached = 0
-            skipped = 0
-            failed = 0
-            copied_bytes = 0
-            total = len(photo_ids)
-            job["_start_time"] = time.time()
-            job["progress"]["total"] = total
-
-            for i, pid in enumerate(photo_ids):
-                if ctx.runner.is_cancelled(job["id"]):
-                    break
-                photo = photos_map.get(pid)
-                filename = photo["filename"] if photo else ""
-                if not photo:
-                    failed += 1
-                    job["errors"].append(f"Photo {pid}: not found")
-                else:
-                    try:
-                        result = cache_photo_original(
-                            thread_db, photo, vireo_dir, folders
-                        )
-                        if result["status"] == "cached":
-                            cached += 1
-                            copied_bytes += int(result.get("bytes") or 0)
-                        elif result["status"] == "skipped":
-                            skipped += 1
-                        else:
-                            failed += 1
-                            job["errors"].append(
-                                f'{photo["filename"]}: {result["status"]}'
-                            )
-                    except Exception as exc:
-                        thread_db.rollback()
-                        failed += 1
-                        job["errors"].append(f'{photo["filename"]}: {exc}')
-                        log.warning("Offline cache failed for %s: %s", filename, exc, exc_info=True)
-
-                ctx.runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": i + 1,
-                        "total": total,
-                        "current_file": filename,
-                        "rate": round(
-                            (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
-                        ),
-                        "phase": "Caching originals for offline use",
-                    },
-                )
-
-            result = {
-                "cached": cached,
-                "skipped": skipped,
-                "failed": failed,
-                "total": total,
-                "bytes": copied_bytes,
-            }
-            if failed:
-                job["result"] = result
-                first_err = job["errors"][0] if job["errors"] else "offline cache failed"
-                job["_fatal_error"] = (
-                    f"{failed}/{total} photos could not be cached: {first_err}"
-                )
-                raise RuntimeError(first_err)
-            return result
+            return _run_offline_cache(ctx, job, photo_ids, vireo_dir)
 
         return ctx.start(
             "offline-cache",
@@ -1327,42 +1256,7 @@ def create_job_launchers_blueprint(
                             selected_photo=photo,
                         ) if photo is not None else {"status": "not_cached", "bytes": 0}
                     )
-                    status = outcome["status"]
-                    result[status] += 1
-                    result["bytes"] += outcome["bytes"]
-                    result["processed"] += 1
-                    if status in {"kept", "failed"}:
-                        reason = f'{filename}: {outcome["reason"]}'
-                        if status == "kept":
-                            if len(result["kept_reasons"]) < _MAX_KEPT_REASONS:
-                                result["kept_reasons"].append(reason)
-                        else:
-                            if len(result["errors"]) < _MAX_ERROR_REASONS:
-                                # Append to ``job["errors"]`` first so a
-                                # snapshot caught between the two appends
-                                # sees ``snap["errors"]`` at least as long
-                                # as ``snap["result"]["errors"]``.
-                                # ``_error_total(snap)`` reads from
-                                # ``snap["errors"]`` while
-                                # ``_write_checkpoints`` serializes
-                                # ``snap["result"]``, so appending to the
-                                # job-level list first keeps the
-                                # ``error_count`` column from under-reporting
-                                # the serialized result's error details
-                                # before the ``errors_total`` cap branch
-                                # kicks in.
-                                job["errors"].append(reason)
-                                result["errors"].append(reason)
-                            elif result["failed"] > _MAX_ERROR_REASONS:
-                                # Live checkpoints snapshot ``result`` and
-                                # persist ``_error_total`` — publish the
-                                # count the moment it diverges from the
-                                # capped list, not just at the final return,
-                                # so a checkpoint mid-run (and the +1 the
-                                # startup sweep adds to an interrupted row)
-                                # reports the true total.
-                                result["errors_total"] = result["failed"]
-                            result["ok"] = False
+                    _record_release_outcome(job, result, filename, outcome)
                     ctx.runner.push_event(job["id"], "progress", {
                         "current": result["processed"], "total": result["total"],
                         "current_file": filename, "phase": "Releasing local originals",
@@ -3016,3 +2910,119 @@ def _fail_develop_job(job, result, errors, total):
         f"{errors}/{total} develop operations failed: {first_err}"
     )
     raise RuntimeError(first_err)
+
+
+def _run_offline_cache(ctx, job, photo_ids, vireo_dir):
+    """The ``/api/jobs/offline-cache`` work function."""
+    from offline_cache import cache_photo_original
+
+    thread_db = ctx.thread_db()
+    photos_map = thread_db.get_photos_by_ids(photo_ids)
+    folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+
+    cached = 0
+    skipped = 0
+    failed = 0
+    copied_bytes = 0
+    total = len(photo_ids)
+    job["_start_time"] = time.time()
+    job["progress"]["total"] = total
+
+    for i, pid in enumerate(photo_ids):
+        if ctx.runner.is_cancelled(job["id"]):
+            break
+        photo = photos_map.get(pid)
+        filename = photo["filename"] if photo else ""
+        if not photo:
+            failed += 1
+            job["errors"].append(f"Photo {pid}: not found")
+        else:
+            try:
+                result = cache_photo_original(
+                    thread_db, photo, vireo_dir, folders
+                )
+                if result["status"] == "cached":
+                    cached += 1
+                    copied_bytes += int(result.get("bytes") or 0)
+                elif result["status"] == "skipped":
+                    skipped += 1
+                else:
+                    failed += 1
+                    job["errors"].append(
+                        f'{photo["filename"]}: {result["status"]}'
+                    )
+            except Exception as exc:
+                thread_db.rollback()
+                failed += 1
+                job["errors"].append(f'{photo["filename"]}: {exc}')
+                log.warning("Offline cache failed for %s: %s", filename, exc, exc_info=True)
+
+        ctx.runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": i + 1,
+                "total": total,
+                "current_file": filename,
+                "rate": round(
+                    (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                ),
+                "phase": "Caching originals for offline use",
+            },
+        )
+
+    result = {
+        "cached": cached,
+        "skipped": skipped,
+        "failed": failed,
+        "total": total,
+        "bytes": copied_bytes,
+    }
+    if failed:
+        job["result"] = result
+        first_err = job["errors"][0] if job["errors"] else "offline cache failed"
+        job["_fatal_error"] = (
+            f"{failed}/{total} photos could not be cached: {first_err}"
+        )
+        raise RuntimeError(first_err)
+    return result
+
+
+def _record_release_outcome(job, result, filename, outcome):
+    """Tally one photo's release outcome into the job result."""
+    status = outcome["status"]
+    result[status] += 1
+    result["bytes"] += outcome["bytes"]
+    result["processed"] += 1
+    if status in {"kept", "failed"}:
+        reason = f'{filename}: {outcome["reason"]}'
+        if status == "kept":
+            if len(result["kept_reasons"]) < _MAX_KEPT_REASONS:
+                result["kept_reasons"].append(reason)
+        else:
+            if len(result["errors"]) < _MAX_ERROR_REASONS:
+                # Append to ``job["errors"]`` first so a
+                # snapshot caught between the two appends
+                # sees ``snap["errors"]`` at least as long
+                # as ``snap["result"]["errors"]``.
+                # ``_error_total(snap)`` reads from
+                # ``snap["errors"]`` while
+                # ``_write_checkpoints`` serializes
+                # ``snap["result"]``, so appending to the
+                # job-level list first keeps the
+                # ``error_count`` column from under-reporting
+                # the serialized result's error details
+                # before the ``errors_total`` cap branch
+                # kicks in.
+                job["errors"].append(reason)
+                result["errors"].append(reason)
+            elif result["failed"] > _MAX_ERROR_REASONS:
+                # Live checkpoints snapshot ``result`` and
+                # persist ``_error_total`` — publish the
+                # count the moment it diverges from the
+                # capped list, not just at the final return,
+                # so a checkpoint mid-run (and the +1 the
+                # startup sweep adds to an interrupted row)
+                # reports the true total.
+                result["errors_total"] = result["failed"]
+            result["ok"] = False
