@@ -19,7 +19,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from canonical_schema import (
-    FORMERLY_LAZY_OBJECTS, JOB_HISTORY_LATER_COLUMNS, create_formerly_lazy_objects,
+    FORMERLY_LAZY_OBJECTS,
+    JOB_HISTORY_LATER_COLUMNS,
+    create_formerly_lazy_objects,
 )
 from db import Database, IncompatibleDatabaseError
 from file_replace import replace_file

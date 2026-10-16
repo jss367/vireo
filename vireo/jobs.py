@@ -504,7 +504,6 @@ class JobRunner:
         and skipped (the checkpoint thread retries the insert on its next
         tick).
         """
-        import sqlite3
 
         conn = None
         try:
@@ -647,7 +646,6 @@ class JobRunner:
         its own connection) is skipped, not waited out: the next tick
         tries again.
         """
-        import sqlite3
 
         now_iso = datetime.now().isoformat()
         now = time.time()
@@ -1584,7 +1582,6 @@ class JobRunner:
         if not self._db_path:
             return
 
-        import sqlite3
 
         result_data = job["result"]
         if job["status"] == "failed" and job["errors"]:
