@@ -17,8 +17,14 @@ active-workspace state:
   (``conn = db.conn``) to get under the cap defeats the point: the SQL still
   runs outside the data layer.
 
+- Nothing anywhere (tests and the harness included) closes a catalog handle
+  with ``<expr>.conn.close()``. ``Database.close()`` is the one place that
+  closes the connection: it also drops ``conn`` and makes ``db.closed`` true,
+  so a raw close leaves a ``Database`` that claims to be open while every call
+  raises ``sqlite3.ProgrammingError``.
+
 ``canonical_schema.py`` is part of the data layer, and ``vireo/testing/`` is
-the test harness, so neither is scanned.
+the test harness, so neither is scanned for the first two rules.
 """
 import ast
 from pathlib import Path
@@ -84,6 +90,34 @@ CONN_USE_LIMITS = {
 }
 
 
+REPO = VIREO.parent
+# Every Python file in the repository except ``Database`` itself, which is
+# the one owner of the connection it closes.
+RAW_CLOSE_TREES = ("vireo", "tests", "scripts")
+
+
+def _every_module():
+    for top in RAW_CLOSE_TREES:
+        for path in sorted((REPO / top).rglob("*.py")):
+            rel = path.relative_to(REPO).as_posix()
+            if rel == "vireo/db.py":
+                continue
+            yield rel, ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _raw_connection_closes(tree):
+    """Line numbers of ``<expr>.conn.close()`` calls."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "close"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "conn"
+    ]
+
+
 def _modules():
     for path in sorted(VIREO.rglob("*.py")):
         rel = path.relative_to(VIREO)
@@ -140,4 +174,18 @@ def test_connection_use_outside_data_layer_only_shrinks():
         f"(uses, limit): {shrunk}. Lower CONN_USE_LIMITS in "
         "vireo/tests/test_sql_boundary.py to match (delete entries at zero) so "
         "the move sticks."
+    )
+
+
+def test_connections_close_through_database_close():
+    offenders = {
+        name: lines
+        for name, tree in _every_module()
+        if (lines := _raw_connection_closes(tree))
+    }
+    assert not offenders, (
+        "A catalog connection was closed through its raw handle "
+        f"(module: lines): {offenders}. Call db.close() instead: it closes "
+        "the connection, drops db.conn and makes db.closed true, so the "
+        "Database never claims to be open over a dead handle."
     )
