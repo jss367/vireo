@@ -182,20 +182,48 @@ function sortedObject(object) {
   return Object.fromEntries(Object.entries(object).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
-// Match unchanged lengths before consulting source-order keys: ordinals can
-// change when same-named siblings are reordered. Consume each old entry once.
+// Which baseline entries each current over-cap function answers for. Exact
+// matches first; then, within one file and name, a set of same-named
+// functions whose lengths are the previous lengths in another order is a
+// reordering (ordinals follow source order), not growth; then a key that is
+// new to the baseline may continue a stale entry with the same name and
+// length from another file (a move). A function whose key is already in the
+// baseline and whose group is not a pure reordering is compared to its own
+// entry, so a deleted sibling's budget can never transfer to a growing
+// function. Each old entry is consumed at most once.
 function reconcileBaseline(current, previous, allowNew = [], bootstrapping = false) {
   const remaining = new Set(Object.keys(previous));
   const matched = new Set();
   const moves = [];
   const keys = Object.keys(current).sort();
+  const groupOf = key => `${key.slice(0, key.indexOf(':'))}:${nameOf(key)}`;
+  const sortedLengths = (object, list) => list.map(key => object[key]).sort((a, b) => a - b);
+
   for (const key of keys) {
     if (current[key] === previous[key]) {
       remaining.delete(key);
       matched.add(key);
     }
   }
-  for (const key of keys.filter(key => !matched.has(key))) {
+  const groups = new Map();
+  for (const key of keys.filter(key => !matched.has(key) && key in previous)) {
+    const group = groupOf(key);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(key);
+  }
+  for (const [group, currentKeys] of groups) {
+    const oldKeys = [...remaining].filter(old => groupOf(old) === group);
+    const reordered = oldKeys.length === currentKeys.length
+      && sortedLengths(previous, oldKeys).join() === sortedLengths(current, currentKeys).join();
+    if (!reordered) continue;
+    for (const key of currentKeys) {
+      const from = oldKeys.find(old => remaining.has(old) && previous[old] === current[key]);
+      remaining.delete(from);
+      matched.add(key);
+      moves.push([from, key]);
+    }
+  }
+  for (const key of keys.filter(key => !matched.has(key) && !(key in previous))) {
     const from = [...remaining].find(old => nameOf(old) === nameOf(key) && previous[old] === current[key]);
     if (from !== undefined) {
       remaining.delete(from);
@@ -206,9 +234,12 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
   const grown = [];
   const added = [];
   for (const key of keys.filter(key => !matched.has(key))) {
-    if (key in previous && current[key] > previous[key]) grown.push(key);
-    else if (remaining.has(key)) remaining.delete(key); // A shorter existing function.
-    else if (!bootstrapping && !allowNew.some(prefix => key.startsWith(prefix))) added.push(key);
+    if (key in previous) {
+      remaining.delete(key);
+      if (current[key] > previous[key]) grown.push(key);
+    } else if (!bootstrapping && !allowNew.some(prefix => key.startsWith(prefix))) {
+      added.push(key);
+    }
   }
   return {grown, added, moves};
 }
@@ -290,6 +321,22 @@ if (argv[0] === '--write-baseline') {
       'b.js:render': 105, 'b.js:render#2': 105,
     }, {'a.js:render': 105}).added, ['b.js:render#2']);
     assert.deepEqual(reconcileBaseline({'a.js:render': 111}, previous, ['a.js:']).grown, ['a.js:render']);
+  });
+
+  test('a deleted sibling cannot lend its budget to a same-named function that grew', () => {
+    const previous = {'a.js:render': 105, 'a.js:render#2': 110};
+    // The 110-line sibling is gone and the 105-line one grew to exactly 110:
+    // not a reordering (lengths {110} vs {105, 110}), so render answers for
+    // its own entry.
+    assert.deepEqual(reconcileBaseline({'a.js:render': 110}, previous), {grown: ['a.js:render'], added: [], moves: []});
+    // Same across files: the moved-looking key is new, but the surviving
+    // same-key function is still measured against its own entry.
+    assert.deepEqual(reconcileBaseline({'a.js:render': 110, 'b.js:render': 105}, {'a.js:render': 105}).grown, ['a.js:render']);
+    // A genuine reordering of three siblings is still accepted whole.
+    const three = {'a.js:render': 101, 'a.js:render#2': 102, 'a.js:render#3': 103};
+    const rotated = {'a.js:render': 103, 'a.js:render#2': 101, 'a.js:render#3': 102};
+    assert.deepEqual(reconcileBaseline(rotated, three).grown, []);
+    assert.equal(reconcileBaseline(rotated, three).moves.length, 3);
   });
 
   test('writer reconciliation still permits shrinking, removal, moves and approved extraction', () => {
