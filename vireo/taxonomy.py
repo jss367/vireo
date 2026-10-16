@@ -790,88 +790,98 @@ def _load_taxonomy_cached(path):
         if cached is not None and cached[0] == path:
             _taxonomy_cache = None
         cached = None
-        # Bracket the parse with a pre- and post-stat: if a background
-        # download rewrites the file while Taxonomy(path) is reading it,
-        # the parsed data is a stale snapshot even though a fresh
-        # post-parse stat would look current. Caching that pair would
-        # keep serving the old taxonomy indefinitely. Retry a few times
-        # to get a stable read; if the file keeps changing, return the
-        # latest parse but skip the cache so the next call re-checks.
+        return _parse_taxonomy_with_retries(path)
+
+def _parse_taxonomy_with_retries(path):
+    """Parse ``path`` until two stats bracket an unchanged file; cache that.
+
+    Called by ``_load_taxonomy_cached`` with ``_taxonomy_cache_lock`` held
+    and the cache's entry for ``path`` already released.
+    """
+    global _taxonomy_cache
+    # Bracket the parse with a pre- and post-stat: if a background
+    # download rewrites the file while Taxonomy(path) is reading it,
+    # the parsed data is a stale snapshot even though a fresh
+    # post-parse stat would look current. Caching that pair would
+    # keep serving the old taxonomy indefinitely. Retry a few times
+    # to get a stable read; if the file keeps changing, return the
+    # latest parse but skip the cache so the next call re-checks.
+    taxonomy = None
+    # Keep only the *text* of a failed parse, never the exception. Its
+    # traceback holds the Taxonomy.__init__ frame, which still
+    # references the multi-GB dict json.load() just decoded — so
+    # retaining it across the loop would keep a failed attempt alive
+    # through the next allocation, defeating the between-retry release
+    # right below.
+    last_error_text = None
+    for _ in range(_TAXONOMY_PARSE_RETRY_LIMIT):
+        # Same peak-RSS reason: release the previous retry's
+        # instance before Taxonomy(path) builds the next one, so a
+        # file that keeps changing does not pile up N live copies.
         taxonomy = None
-        # Keep only the *text* of a failed parse, never the exception. Its
-        # traceback holds the Taxonomy.__init__ frame, which still
-        # references the multi-GB dict json.load() just decoded — so
-        # retaining it across the loop would keep a failed attempt alive
-        # through the next allocation, defeating the between-retry release
-        # right below.
-        last_error_text = None
-        for _ in range(_TAXONOMY_PARSE_RETRY_LIMIT):
-            # Same peak-RSS reason: release the previous retry's
-            # instance before Taxonomy(path) builds the next one, so a
-            # file that keeps changing does not pile up N live copies.
-            taxonomy = None
-            pre_stat = _taxonomy_stat_key(path)
+        pre_stat = _taxonomy_stat_key(path)
+        try:
+            taxonomy = Taxonomy(path)
+        except Exception as parse_error:
+            last_error_text = f"{type(parse_error).__name__}: {parse_error}"
+            # A rewrite caught mid-stream — from an atomic-save gap
+            # on another platform, an interrupted download, or an
+            # external tool — leaves a partial JSON document that
+            # Taxonomy() cannot parse. That is the same kind of
+            # transient instability the stat-drift check retries
+            # against; propagating here would surface as a spurious
+            # failure that the very next call could succeed at, and
+            # load_local_taxonomy() would silently fall through to
+            # a stale or nonexistent alternate candidate instead.
+            #
+            # Only retry when the file actually moved, though. A file
+            # that is simply corrupt fails identically every time, and
+            # retrying re-reads most of ~500MB two more times on every
+            # request — reinstating the latency and allocation pressure
+            # this cache exists to remove, for a read that cannot
+            # succeed. Truncated JSON only raises at the end of the
+            # parse, so this is the expensive case, not the cheap one.
             try:
-                taxonomy = Taxonomy(path)
-            except Exception as parse_error:
-                last_error_text = f"{type(parse_error).__name__}: {parse_error}"
-                # A rewrite caught mid-stream — from an atomic-save gap
-                # on another platform, an interrupted download, or an
-                # external tool — leaves a partial JSON document that
-                # Taxonomy() cannot parse. That is the same kind of
-                # transient instability the stat-drift check retries
-                # against; propagating here would surface as a spurious
-                # failure that the very next call could succeed at, and
-                # load_local_taxonomy() would silently fall through to
-                # a stale or nonexistent alternate candidate instead.
+                file_moved = _taxonomy_stat_key(path) != pre_stat
+            except OSError:
+                # Cannot even stat it now; a re-read will not fare
+                # better, so report the parse failure we already have.
+                file_moved = False
+            if not file_moved:
+                # Durable failure at this stat. Record it so subsequent
+                # requests short-circuit before hitting the parse and,
+                # crucially, before the eviction in _load_taxonomy_cached
+                # would drop a still-valid fallback in a corrupt-preferred
+                # scenario.
                 #
-                # Only retry when the file actually moved, though. A file
-                # that is simply corrupt fails identically every time, and
-                # retrying re-reads most of ~500MB two more times on every
-                # request — reinstating the latency and allocation pressure
-                # this cache exists to remove, for a read that cannot
-                # succeed. Truncated JSON only raises at the end of the
-                # parse, so this is the expensive case, not the cheap one.
-                try:
-                    file_moved = _taxonomy_stat_key(path) != pre_stat
-                except OSError:
-                    # Cannot even stat it now; a re-read will not fare
-                    # better, so report the parse failure we already have.
-                    file_moved = False
-                if not file_moved:
-                    # Durable failure at this stat. Record it so subsequent
-                    # requests short-circuit before hitting the parse and,
-                    # crucially, before the eviction above would drop a
-                    # still-valid fallback in a corrupt-preferred scenario.
-                    #
-                    # Only memoize a *content* failure, though — see
-                    # _TRANSIENT_TAXONOMY_ERRORS. Memoizing an environmental
-                    # failure would key the record to a stat its repair does
-                    # not change, leaving taxonomy features off until the
-                    # contents happen to change or the process restarts.
-                    if not isinstance(parse_error, _TRANSIENT_TAXONOMY_ERRORS):
-                        _taxonomy_failed_stats[path] = pre_stat
-                    raise
-                continue
-            post_stat = _taxonomy_stat_key(path)
-            if pre_stat == post_stat:
-                _taxonomy_cache = (path, post_stat, taxonomy)
-                return taxonomy
-        # Retries exhausted. Nothing was cached for this path above, so
-        # there is no stale entry left to clear — and clearing here would
-        # evict a different path's still-valid entry. If every attempt
-        # raised, surface a clean error rather than returning None and
-        # letting the caller misread it as "file was fine but empty".
-        if taxonomy is None:
-            # Carry the last parse failure's message: load_local_taxonomy()
-            # logs this, and "file kept changing" alone doesn't tell you
-            # which byte of which file was malformed. The message rather
-            # than the exception, so no traceback pins the decoded document.
-            detail = f" (last error: {last_error_text})" if last_error_text else ""
-            raise ValueError(
-                f"Unable to parse {path}: file kept changing during read{detail}"
-            )
-        return taxonomy
+                # Only memoize a *content* failure, though — see
+                # _TRANSIENT_TAXONOMY_ERRORS. Memoizing an environmental
+                # failure would key the record to a stat its repair does
+                # not change, leaving taxonomy features off until the
+                # contents happen to change or the process restarts.
+                if not isinstance(parse_error, _TRANSIENT_TAXONOMY_ERRORS):
+                    _taxonomy_failed_stats[path] = pre_stat
+                raise
+            continue
+        post_stat = _taxonomy_stat_key(path)
+        if pre_stat == post_stat:
+            _taxonomy_cache = (path, post_stat, taxonomy)
+            return taxonomy
+    # Retries exhausted. Nothing was cached for this path above, so
+    # there is no stale entry left to clear — and clearing here would
+    # evict a different path's still-valid entry. If every attempt
+    # raised, surface a clean error rather than returning None and
+    # letting the caller misread it as "file was fine but empty".
+    if taxonomy is None:
+        # Carry the last parse failure's message: load_local_taxonomy()
+        # logs this, and "file kept changing" alone doesn't tell you
+        # which byte of which file was malformed. The message rather
+        # than the exception, so no traceback pins the decoded document.
+        detail = f" (last error: {last_error_text})" if last_error_text else ""
+        raise ValueError(
+            f"Unable to parse {path}: file kept changing during read{detail}"
+        )
+    return taxonomy
 
 
 def _drop_cached_taxonomy_path(path):
@@ -1303,18 +1313,9 @@ def download_taxa(dest_path, progress_callback=None):
                                  progress_callback=progress_callback)
 
 
-def load_taxa_from_file(db, gz_path):
-    """Parse taxa.csv.gz and insert filtered taxa into the database.
-
-    Filters to: active taxa, under Animalia/Plantae/Fungi, at major ranks.
-    Resolves parent_id to the nearest ancestor also in the filtered set.
-
-    Returns dict with 'loaded' and 'skipped' counts.
-    """
-    # Pass 1: read all taxa into memory, filter, and determine kingdoms
+def _read_active_taxa(gz_path):
+    """``{inat_id: taxon}`` for every active row of taxa.csv.gz."""
     all_taxa = {}   # inat_id -> {name, rank, rank_level, ancestry_ids, kingdom}
-    kept_ids = set()
-
     with gzip.open(gz_path, 'rt') as f:
         reader = csv.reader(f, delimiter='\t')
         for row in reader:
@@ -1346,7 +1347,12 @@ def load_taxa_from_file(db, gz_path):
                 'rank_level': rank_level,
                 'ancestry_ids': ancestry_ids,
             }
+    return all_taxa
 
+
+def _filter_major_taxa(all_taxa):
+    """The major-rank taxa under a target kingdom, with ``parent_inat_id``."""
+    kept_ids = set()
     # Determine kingdom for each taxon and filter
     filtered = {}
     for inat_id, t in all_taxa.items():
@@ -1384,7 +1390,11 @@ def load_taxa_from_file(db, gz_path):
                 parent_inat_id = aid
                 break
         t['parent_inat_id'] = parent_inat_id
+    return filtered
 
+
+def _insert_filtered_taxa(db, filtered):
+    """Upsert the filtered taxa, then link each to its kept parent."""
     # Insert into database
     # First pass: insert all taxa without parent_id (to get local IDs)
     inat_to_local = {}
@@ -1411,6 +1421,20 @@ def load_taxa_from_file(db, gz_path):
                 "UPDATE taxa SET parent_id = ? WHERE id = ?",
                 (parent_local_id, local_id),
             )
+
+
+def load_taxa_from_file(db, gz_path):
+    """Parse taxa.csv.gz and insert filtered taxa into the database.
+
+    Filters to: active taxa, under Animalia/Plantae/Fungi, at major ranks.
+    Resolves parent_id to the nearest ancestor also in the filtered set.
+
+    Returns dict with 'loaded' and 'skipped' counts.
+    """
+    # Pass 1: read all taxa into memory, filter, and determine kingdoms
+    all_taxa = _read_active_taxa(gz_path)
+    filtered = _filter_major_taxa(all_taxa)
+    _insert_filtered_taxa(db, filtered)
 
     db.relink_source_species_keywords()
     db.conn.commit()
@@ -1441,6 +1465,193 @@ def load_taxonomy(db, data_dir=None):
 
 _DB_MAJOR_RANKS = {"kingdom", "phylum", "class", "order",
                    "family", "genus", "species"}
+
+
+def _taxa_entries_by_inat_id(data, taxa_by_common):
+    """The major-rank taxonomy.json entries, deduplicated by iNat id."""
+    # Dedupe by inat_id (same entry appears in both indices and multiple
+    # common-name keys can point to the same entry).
+    entries_by_inat_id = {}
+    for source in (list(_scientific_entries(data)), taxa_by_common.values()):
+        for entry in source:
+            if entry.get("rank") not in _DB_MAJOR_RANKS:
+                continue
+            inat_id = entry.get("taxon_id")
+            if inat_id is None:
+                continue
+            entries_by_inat_id.setdefault(int(inat_id), entry)
+    return entries_by_inat_id
+
+
+def _refuse_suspicious_taxa_payload(db, entries_by_inat_id):
+    """Raise ``ValueError`` when the payload would gut the taxa table."""
+    # Refuse to proceed on suspicious payloads — the prune step
+    # (_prune_stale_taxa) drops every taxa row whose inat_id isn't in entries_by_inat_id,
+    # so an empty or drastically-reduced payload would destroy a good
+    # existing DB. Fail loudly before any destructive writes.
+    if not entries_by_inat_id:
+        raise ValueError(
+            "Taxonomy payload has no usable entries — refusing to "
+            "populate (would delete the entire local taxa table)"
+        )
+    existing_count = db.conn.execute(
+        "SELECT COUNT(*) FROM taxa"
+    ).fetchone()[0]
+    if existing_count > 100 and len(entries_by_inat_id) < existing_count * 0.1:
+        raise ValueError(
+            f"Taxonomy payload has only {len(entries_by_inat_id):,} entries "
+            f"but local taxa table already has {existing_count:,}; refusing "
+            f"as likely corrupt/partial"
+        )
+
+
+def _prune_stale_taxa(db, entries_by_inat_id, status):
+    """Delete taxa rows whose iNat id left the payload; returns the count."""
+    # Prune stale taxa whose inat_id isn't in the new payload, so taxa
+    # that disappeared from iNat (or dropped out of our major-ranks
+    # filter) stop being matched by add_keyword's auto-detect. Build a
+    # temp table of fresh ids first — the set is too large for a
+    # parameterized IN clause. Several FKs point at taxa(id); none have
+    # ON DELETE SET NULL, so we preempt them:
+    #   - keywords.taxon_id: null out to preserve the keyword row.
+    #   - taxa.parent_id (self-ref): null out on children whose parent
+    #     is being pruned, so a parent-gone-but-child-kept reshuffle
+    #     doesn't trip FK enforcement. The parent-resolve pass
+    #     (_resolve_taxa_parents) reinstates parent_id from the new lineage.
+    #   - taxa_common_names and informal_group_taxa have ON DELETE
+    #     CASCADE and go automatically; seed_informal_groups reseeds
+    #     its side from the fresh taxa afterward.
+    status("Pruning stale taxa...")
+    db.conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS fresh_inat_ids "
+        "(inat_id INTEGER PRIMARY KEY)"
+    )
+    db.conn.execute("DELETE FROM fresh_inat_ids")
+    db.conn.executemany(
+        "INSERT OR IGNORE INTO fresh_inat_ids (inat_id) VALUES (?)",
+        [(iid,) for iid in entries_by_inat_id],
+    )
+    stale_local_ids_sql = (
+        "SELECT id FROM taxa "
+        "WHERE inat_id IS NOT NULL "
+        "  AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
+    )
+    db.conn.execute(
+        f"UPDATE keywords SET taxon_id = NULL "
+        f"WHERE taxon_id IN ({stale_local_ids_sql})"
+    )
+    db.conn.execute(
+        f"UPDATE taxa SET parent_id = NULL "
+        f"WHERE parent_id IN ({stale_local_ids_sql})"
+    )
+    pruned = db.conn.execute(
+        "DELETE FROM taxa WHERE inat_id IS NOT NULL "
+        "  AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
+    ).rowcount
+    db.conn.execute("DROP TABLE fresh_inat_ids")
+    if pruned:
+        status(f"Pruned {pruned:,} taxa no longer in the taxonomy")
+    return pruned
+
+
+def _upsert_taxa_entries(db, entries_by_inat_id, status):
+    """Insert or overwrite one taxa row per payload entry."""
+    status(f"Inserting {len(entries_by_inat_id):,} taxa...")
+    for inat_id, entry in entries_by_inat_id.items():
+        lineage_names = entry.get("lineage_names") or []
+        lineage_ranks = entry.get("lineage_ranks") or []
+        kingdom = None
+        if lineage_ranks and lineage_ranks[0] == "kingdom":
+            kingdom = lineage_names[0] if lineage_names else None
+        common_name = entry.get("common_name") or None
+        # On conflict, overwrite every column including common_name —
+        # don't COALESCE. If upstream removed or emptied a preferred
+        # common name, we need to let it drop to NULL here, otherwise
+        # add_keyword's auto-detect (which reads taxa.common_name before
+        # taxa_common_names) keeps matching the obsolete name.
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, rank, kingdom, common_name) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(inat_id) DO UPDATE SET "
+            "name=excluded.name, rank=excluded.rank, "
+            "kingdom=excluded.kingdom, common_name=excluded.common_name",
+            (inat_id, entry["scientific_name"], entry["rank"],
+             kingdom, common_name),
+        )
+
+
+def _resolve_taxa_parents(db, entries_by_inat_id, status):
+    """Point each taxa row's ``parent_id`` at its lineage parent."""
+    # Resolve parent_id using the full lineage path as the key, not just
+    # the parent's scientific name. Scientific names aren't globally unique
+    # — homonyms exist at different ranks (e.g. plant/animal genera sharing
+    # a name) — so a name-keyed map silently overwrites one inat_id with
+    # another and wires parent_id to the wrong node. Indexing by the full
+    # tuple of lineage_names disambiguates: two taxa with the same
+    # scientific name always have different ancestry.
+    status("Resolving parent relationships...")
+    inat_id_by_lineage = {}
+    local_id_by_inat_id = {}
+    for inat_id, entry in entries_by_inat_id.items():
+        lineage = tuple(entry.get("lineage_names") or [])
+        if lineage:
+            # First winner by iteration order; conflicts would mean two
+            # taxa share the exact same lineage path, which shouldn't
+            # happen in well-formed data.
+            inat_id_by_lineage.setdefault(lineage, inat_id)
+        row = db.conn.execute(
+            "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
+        ).fetchone()
+        if row:
+            local_id_by_inat_id[inat_id] = row["id"]
+
+    for inat_id, entry in entries_by_inat_id.items():
+        lineage = tuple(entry.get("lineage_names") or [])
+        if len(lineage) < 2:
+            continue
+        parent_inat_id = inat_id_by_lineage.get(lineage[:-1])
+        if parent_inat_id is None:
+            continue
+        parent_local = local_id_by_inat_id.get(parent_inat_id)
+        own_local = local_id_by_inat_id.get(inat_id)
+        if parent_local is None or own_local is None or own_local == parent_local:
+            continue
+        db.conn.execute(
+            "UPDATE taxa SET parent_id = ? WHERE id = ?",
+            (parent_local, own_local),
+        )
+
+
+def _index_taxa_common_names(db, taxa_by_common, status):
+    """Rebuild the English ``taxa_common_names`` index; returns rows indexed."""
+    # Populate taxa_common_names — index every English common name (including
+    # alternates) under its taxon so add_keyword's auto-detect can match
+    # regional/alt names like "Green heron" or "Common gallinule".
+    #
+    # Clear the English index first so names that disappeared or were
+    # reassigned in the new taxonomy drop out. Without this the INSERT
+    # OR IGNORE below would leave stale rows behind and add_keyword would
+    # keep matching obsolete common names across re-downloads. Still
+    # inside the populate transaction, so a failure rolls it back.
+    status(f"Indexing {len(taxa_by_common):,} common names...")
+    db.conn.execute("DELETE FROM taxa_common_names WHERE locale = 'en'")
+    cn_loaded = 0
+    for name_lower, entry in taxa_by_common.items():
+        inat_id = entry.get("taxon_id")
+        if inat_id is None:
+            continue
+        row = db.conn.execute(
+            "SELECT id FROM taxa WHERE inat_id = ?", (int(inat_id),)
+        ).fetchone()
+        if not row:
+            continue
+        db.conn.execute(
+            "INSERT OR IGNORE INTO taxa_common_names "
+            "(taxon_id, name, locale) VALUES (?, ?, 'en')",
+            (row["id"], name_lower),
+        )
+        cn_loaded += 1
+    return cn_loaded
 
 
 def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
@@ -1474,171 +1685,12 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
         taxa_by_common.pop(name, None)
     correct_common_name_index(taxa_by_common, taxa_by_sci)
 
-    # Dedupe by inat_id (same entry appears in both indices and multiple
-    # common-name keys can point to the same entry).
-    entries_by_inat_id = {}
-    for source in (list(_scientific_entries(data)), taxa_by_common.values()):
-        for entry in source:
-            if entry.get("rank") not in _DB_MAJOR_RANKS:
-                continue
-            inat_id = entry.get("taxon_id")
-            if inat_id is None:
-                continue
-            entries_by_inat_id.setdefault(int(inat_id), entry)
-
-    # Refuse to proceed on suspicious payloads — the prune step below
-    # drops every taxa row whose inat_id isn't in entries_by_inat_id,
-    # so an empty or drastically-reduced payload would destroy a good
-    # existing DB. Fail loudly before any destructive writes.
-    if not entries_by_inat_id:
-        raise ValueError(
-            "Taxonomy payload has no usable entries — refusing to "
-            "populate (would delete the entire local taxa table)"
-        )
-    existing_count = db.conn.execute(
-        "SELECT COUNT(*) FROM taxa"
-    ).fetchone()[0]
-    if existing_count > 100 and len(entries_by_inat_id) < existing_count * 0.1:
-        raise ValueError(
-            f"Taxonomy payload has only {len(entries_by_inat_id):,} entries "
-            f"but local taxa table already has {existing_count:,}; refusing "
-            f"as likely corrupt/partial"
-        )
-
-    # Prune stale taxa whose inat_id isn't in the new payload, so taxa
-    # that disappeared from iNat (or dropped out of our major-ranks
-    # filter) stop being matched by add_keyword's auto-detect. Build a
-    # temp table of fresh ids first — the set is too large for a
-    # parameterized IN clause. Several FKs point at taxa(id); none have
-    # ON DELETE SET NULL, so we preempt them:
-    #   - keywords.taxon_id: null out to preserve the keyword row.
-    #   - taxa.parent_id (self-ref): null out on children whose parent
-    #     is being pruned, so a parent-gone-but-child-kept reshuffle
-    #     doesn't trip FK enforcement. The parent-resolve pass below
-    #     reinstates parent_id from the new lineage.
-    #   - taxa_common_names and informal_group_taxa have ON DELETE
-    #     CASCADE and go automatically; seed_informal_groups reseeds
-    #     its side from the fresh taxa afterward.
-    _status("Pruning stale taxa...")
-    db.conn.execute(
-        "CREATE TEMP TABLE IF NOT EXISTS fresh_inat_ids "
-        "(inat_id INTEGER PRIMARY KEY)"
-    )
-    db.conn.execute("DELETE FROM fresh_inat_ids")
-    db.conn.executemany(
-        "INSERT OR IGNORE INTO fresh_inat_ids (inat_id) VALUES (?)",
-        [(iid,) for iid in entries_by_inat_id],
-    )
-    stale_local_ids_sql = (
-        "SELECT id FROM taxa "
-        "WHERE inat_id IS NOT NULL "
-        "  AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
-    )
-    db.conn.execute(
-        f"UPDATE keywords SET taxon_id = NULL "
-        f"WHERE taxon_id IN ({stale_local_ids_sql})"
-    )
-    db.conn.execute(
-        f"UPDATE taxa SET parent_id = NULL "
-        f"WHERE parent_id IN ({stale_local_ids_sql})"
-    )
-    pruned = db.conn.execute(
-        "DELETE FROM taxa WHERE inat_id IS NOT NULL "
-        "  AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
-    ).rowcount
-    db.conn.execute("DROP TABLE fresh_inat_ids")
-    if pruned:
-        _status(f"Pruned {pruned:,} taxa no longer in the taxonomy")
-
-    _status(f"Inserting {len(entries_by_inat_id):,} taxa...")
-    for inat_id, entry in entries_by_inat_id.items():
-        lineage_names = entry.get("lineage_names") or []
-        lineage_ranks = entry.get("lineage_ranks") or []
-        kingdom = None
-        if lineage_ranks and lineage_ranks[0] == "kingdom":
-            kingdom = lineage_names[0] if lineage_names else None
-        common_name = entry.get("common_name") or None
-        # On conflict, overwrite every column including common_name —
-        # don't COALESCE. If upstream removed or emptied a preferred
-        # common name, we need to let it drop to NULL here, otherwise
-        # add_keyword's auto-detect (which reads taxa.common_name before
-        # taxa_common_names) keeps matching the obsolete name.
-        db.conn.execute(
-            "INSERT INTO taxa (inat_id, name, rank, kingdom, common_name) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(inat_id) DO UPDATE SET "
-            "name=excluded.name, rank=excluded.rank, "
-            "kingdom=excluded.kingdom, common_name=excluded.common_name",
-            (inat_id, entry["scientific_name"], entry["rank"],
-             kingdom, common_name),
-        )
-
-    # Resolve parent_id using the full lineage path as the key, not just
-    # the parent's scientific name. Scientific names aren't globally unique
-    # — homonyms exist at different ranks (e.g. plant/animal genera sharing
-    # a name) — so a name-keyed map silently overwrites one inat_id with
-    # another and wires parent_id to the wrong node. Indexing by the full
-    # tuple of lineage_names disambiguates: two taxa with the same
-    # scientific name always have different ancestry.
-    _status("Resolving parent relationships...")
-    inat_id_by_lineage = {}
-    local_id_by_inat_id = {}
-    for inat_id, entry in entries_by_inat_id.items():
-        lineage = tuple(entry.get("lineage_names") or [])
-        if lineage:
-            # First winner by iteration order; conflicts would mean two
-            # taxa share the exact same lineage path, which shouldn't
-            # happen in well-formed data.
-            inat_id_by_lineage.setdefault(lineage, inat_id)
-        row = db.conn.execute(
-            "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
-        ).fetchone()
-        if row:
-            local_id_by_inat_id[inat_id] = row["id"]
-
-    for inat_id, entry in entries_by_inat_id.items():
-        lineage = tuple(entry.get("lineage_names") or [])
-        if len(lineage) < 2:
-            continue
-        parent_inat_id = inat_id_by_lineage.get(lineage[:-1])
-        if parent_inat_id is None:
-            continue
-        parent_local = local_id_by_inat_id.get(parent_inat_id)
-        own_local = local_id_by_inat_id.get(inat_id)
-        if parent_local is None or own_local is None or own_local == parent_local:
-            continue
-        db.conn.execute(
-            "UPDATE taxa SET parent_id = ? WHERE id = ?",
-            (parent_local, own_local),
-        )
-
-    # Populate taxa_common_names — index every English common name (including
-    # alternates) under its taxon so add_keyword's auto-detect can match
-    # regional/alt names like "Green heron" or "Common gallinule".
-    #
-    # Clear the English index first so names that disappeared or were
-    # reassigned in the new taxonomy drop out. Without this the INSERT
-    # OR IGNORE below would leave stale rows behind and add_keyword would
-    # keep matching obsolete common names across re-downloads. Still
-    # inside the populate transaction, so a failure rolls it back.
-    _status(f"Indexing {len(taxa_by_common):,} common names...")
-    db.conn.execute("DELETE FROM taxa_common_names WHERE locale = 'en'")
-    cn_loaded = 0
-    for name_lower, entry in taxa_by_common.items():
-        inat_id = entry.get("taxon_id")
-        if inat_id is None:
-            continue
-        row = db.conn.execute(
-            "SELECT id FROM taxa WHERE inat_id = ?", (int(inat_id),)
-        ).fetchone()
-        if not row:
-            continue
-        db.conn.execute(
-            "INSERT OR IGNORE INTO taxa_common_names "
-            "(taxon_id, name, locale) VALUES (?, ?, 'en')",
-            (row["id"], name_lower),
-        )
-        cn_loaded += 1
+    entries_by_inat_id = _taxa_entries_by_inat_id(data, taxa_by_common)
+    _refuse_suspicious_taxa_payload(db, entries_by_inat_id)
+    _prune_stale_taxa(db, entries_by_inat_id, _status)
+    _upsert_taxa_entries(db, entries_by_inat_id, _status)
+    _resolve_taxa_parents(db, entries_by_inat_id, _status)
+    cn_loaded = _index_taxa_common_names(db, taxa_by_common, _status)
 
     db.relink_source_species_keywords()
     db.set_meta("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION), _commit=False)
@@ -1782,6 +1834,183 @@ def seed_informal_groups(db):
 # --- DWCA-based taxonomy loader (legacy) ---
 
 
+def _parse_dwca_taxa(zf, file_list, status):
+    """``{taxon_id: taxon}`` from the archive's taxa.csv."""
+    taxa_by_id = {}
+    # Parse taxa.csv — columns: id, parentNameUsageID, scientificName, taxonRank
+    taxa_file = None
+    for name in file_list:
+        if name.lower().endswith("taxa.csv") or name.lower() == "taxa.csv":
+            taxa_file = name
+            break
+    if not taxa_file:
+        raise FileNotFoundError("taxa.csv not found in DWCA archive")
+
+    log.info("Parsing %s ...", taxa_file)
+    with zf.open(taxa_file) as f:
+        reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
+        for row in reader:
+            taxon_id = row.get("id") or row.get("taxonID")
+            if not taxon_id:
+                continue
+            # parentNameUsageID may be a URL like https://www.inaturalist.org/taxa/48460
+            parent_raw = row.get("parentNameUsageID", "")
+            if parent_raw and "/" in parent_raw:
+                parent_id = parent_raw.rsplit("/", 1)[-1]
+            else:
+                parent_id = parent_raw
+
+            taxa_by_id[taxon_id] = {
+                "taxon_id": int(taxon_id),
+                "scientific_name": row.get("scientificName", ""),
+                "rank": (row.get("taxonRank") or "").lower(),
+                "parent_id": parent_id,
+            }
+    status(f"Parsed {len(taxa_by_id):,} taxa")
+    return taxa_by_id
+
+
+def _parse_dwca_common_names(zf, file_list, taxa_by_id, status):
+    """``(common_names, alt_names)`` from the archive's English vernacular names.
+
+    ``common_names`` maps taxon id to its preferred name, ``alt_names`` to
+    every English vernacular name.
+    """
+    common_names = {}  # taxon_id -> preferred common_name
+    alt_names = {}  # taxon_id -> [all English vernacular names]
+    # Parse VernacularNames (English common names)
+    # Prefer VernacularNames-english.csv, fall back to VernacularNames.csv
+    vn_file = None
+    for name in file_list:
+        if name.lower() == "vernacularnames-english.csv":
+            vn_file = name
+            break
+    if not vn_file:
+        for name in file_list:
+            if name.lower() == "vernacularnames.csv":
+                vn_file = name
+                break
+
+    if vn_file:
+        log.info("Parsing %s ...", vn_file)
+        with zf.open(vn_file) as f:
+            reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
+            for row in reader:
+                # Language-specific files may not have a language column
+                lang = row.get("language", "en")
+                if lang and lang.lower() != "en":
+                    continue
+                taxon_id = row.get("id") or row.get("taxonID")
+                vn = row.get("vernacularName", "")
+                if taxon_id and taxon_id in taxa_by_id and vn:
+                    if taxon_id not in common_names:
+                        common_names[taxon_id] = vn
+                    # Collect all English names per taxon for alternate-name indexing
+                    if taxon_id not in alt_names:
+                        alt_names[taxon_id] = []
+                    alt_names[taxon_id].append(vn)
+        status(f"Found {len(common_names):,} English common names ({sum(len(v) for v in alt_names.values()):,} total including alternates)")
+    else:
+        log.warning("No VernacularNames file found in archive")
+    return common_names, alt_names
+
+
+def _dwca_lineage(taxa_by_id, taxon_id):
+    """``(lineage_names, lineage_ranks)`` from the root down to ``taxon_id``."""
+    # Build lineages by walking parent chains
+    lineage_names = []
+    lineage_ranks = []
+    current = taxon_id
+    seen = set()
+    while current and current in taxa_by_id and current not in seen:
+        seen.add(current)
+        t = taxa_by_id[current]
+        if t["rank"] in RANK_ORDER:
+            lineage_names.append(t["scientific_name"])
+            lineage_ranks.append(t["rank"])
+        current = t["parent_id"]
+    lineage_names.reverse()
+    lineage_ranks.reverse()
+    return lineage_names, lineage_ranks
+
+
+def _build_taxonomy_lookup(taxa_by_id, common_names, alt_names, status):
+    """The taxonomy.json payload built from the parsed archive."""
+    # Build the lookup dictionaries
+    status(f"Building lineages for {len(taxa_by_id):,} taxa...")
+    taxa_by_common = {}
+    entries_by_scientific = {}
+    entries_by_taxon = {}
+
+    for taxon_id, taxon in taxa_by_id.items():
+        rank = taxon["rank"]
+        if rank not in RANK_ORDER:
+            continue
+
+        lineage_names, lineage_ranks = _dwca_lineage(taxa_by_id, taxon_id)
+
+        entry = {
+            "taxon_id": taxon["taxon_id"],
+            "scientific_name": taxon["scientific_name"],
+            "common_name": common_names.get(taxon_id, ""),
+            "rank": rank,
+            "lineage_names": lineage_names,
+            "lineage_ranks": lineage_ranks,
+        }
+        entries_by_taxon[taxon_id] = entry
+
+        # Index by scientific name
+        sci_key = taxon["scientific_name"].lower()
+        entries_by_scientific.setdefault(sci_key, []).append(entry)
+
+    # Scientific names are unique only within a kingdom: keep every
+    # homonym, and index the lowest taxon id so the choice is stable.
+    taxa_by_scientific = {}
+    scientific_homonyms = {}
+    for sci_key, entries in entries_by_scientific.items():
+        entries.sort(key=lambda e: e["taxon_id"])
+        taxa_by_scientific[sci_key] = entries[0]
+        if len(entries) > 1:
+            scientific_homonyms[sci_key] = entries
+
+    # Index preferred common names first so they always win.
+    # Keep the first mapping when two taxa share a preferred name.
+    for taxon_id, cn in common_names.items():
+        entry = entries_by_taxon.get(taxon_id)
+        cn_key = cn.lower()
+        if entry and cn_key not in taxa_by_common:
+            taxa_by_common[cn_key] = entry
+
+    # Then index alternate names only for still-unmapped keys
+    common_candidates = {}
+    for taxon_id, names in alt_names.items():
+        entry = entries_by_taxon.get(taxon_id)
+        if not entry:
+            continue
+        for cn in names:
+            cn_key = cn.lower()
+            common_candidates.setdefault(cn_key, set()).add(taxon_id)
+            if cn_key not in taxa_by_common:
+                taxa_by_common[cn_key] = entry
+
+    ambiguous_common_names = sorted(
+        name for name, ids in common_candidates.items() if len(ids) > 1
+    )
+    for name in ambiguous_common_names:
+        taxa_by_common.pop(name, None)
+
+    result = {
+        "common_name_identity_version": COMMON_NAME_IDENTITY_VERSION,
+        "ambiguous_common_names": ambiguous_common_names,
+        "last_updated": str(date.today()),
+        "source": "iNaturalist DWCA",
+        "taxa_by_common": taxa_by_common,
+        "taxa_by_scientific": taxa_by_scientific,
+        "scientific_homonyms": scientific_homonyms,
+    }
+    return result
+
+
 def download_taxonomy(output_path, progress_callback=None):
     """Download iNaturalist DWCA taxonomy and build taxonomy.json.
 
@@ -1819,169 +2048,19 @@ def download_taxonomy(output_path, progress_callback=None):
         _status("Download complete — parsing...")
 
         # Parse the DWCA zip
-        taxa_by_id = {}
-        common_names = {}  # taxon_id -> preferred common_name
-        alt_names = {}  # taxon_id -> [all English vernacular names]
-
         with zipfile.ZipFile(zip_path) as zf:
             file_list = zf.namelist()
             log.info("Archive contents: %s", file_list)
+            taxa_by_id = _parse_dwca_taxa(zf, file_list, _status)
+            common_names, alt_names = _parse_dwca_common_names(
+                zf, file_list, taxa_by_id, _status,
+            )
 
-            # Parse taxa.csv — columns: id, parentNameUsageID, scientificName, taxonRank
-            taxa_file = None
-            for name in file_list:
-                if name.lower().endswith("taxa.csv") or name.lower() == "taxa.csv":
-                    taxa_file = name
-                    break
-            if not taxa_file:
-                raise FileNotFoundError("taxa.csv not found in DWCA archive")
-
-            log.info("Parsing %s ...", taxa_file)
-            with zf.open(taxa_file) as f:
-                reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
-                for row in reader:
-                    taxon_id = row.get("id") or row.get("taxonID")
-                    if not taxon_id:
-                        continue
-                    # parentNameUsageID may be a URL like https://www.inaturalist.org/taxa/48460
-                    parent_raw = row.get("parentNameUsageID", "")
-                    if parent_raw and "/" in parent_raw:
-                        parent_id = parent_raw.rsplit("/", 1)[-1]
-                    else:
-                        parent_id = parent_raw
-
-                    taxa_by_id[taxon_id] = {
-                        "taxon_id": int(taxon_id),
-                        "scientific_name": row.get("scientificName", ""),
-                        "rank": (row.get("taxonRank") or "").lower(),
-                        "parent_id": parent_id,
-                    }
-            _status(f"Parsed {len(taxa_by_id):,} taxa")
-
-            # Parse VernacularNames (English common names)
-            # Prefer VernacularNames-english.csv, fall back to VernacularNames.csv
-            vn_file = None
-            for name in file_list:
-                if name.lower() == "vernacularnames-english.csv":
-                    vn_file = name
-                    break
-            if not vn_file:
-                for name in file_list:
-                    if name.lower() == "vernacularnames.csv":
-                        vn_file = name
-                        break
-
-            if vn_file:
-                log.info("Parsing %s ...", vn_file)
-                with zf.open(vn_file) as f:
-                    reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
-                    for row in reader:
-                        # Language-specific files may not have a language column
-                        lang = row.get("language", "en")
-                        if lang and lang.lower() != "en":
-                            continue
-                        taxon_id = row.get("id") or row.get("taxonID")
-                        vn = row.get("vernacularName", "")
-                        if taxon_id and taxon_id in taxa_by_id and vn:
-                            if taxon_id not in common_names:
-                                common_names[taxon_id] = vn
-                            # Collect all English names per taxon for alternate-name indexing
-                            if taxon_id not in alt_names:
-                                alt_names[taxon_id] = []
-                            alt_names[taxon_id].append(vn)
-                _status(f"Found {len(common_names):,} English common names ({sum(len(v) for v in alt_names.values()):,} total including alternates)")
-            else:
-                log.warning("No VernacularNames file found in archive")
-
-        # Build lineages by walking parent chains
-        def _build_lineage(taxon_id):
-            lineage_names = []
-            lineage_ranks = []
-            current = taxon_id
-            seen = set()
-            while current and current in taxa_by_id and current not in seen:
-                seen.add(current)
-                t = taxa_by_id[current]
-                if t["rank"] in RANK_ORDER:
-                    lineage_names.append(t["scientific_name"])
-                    lineage_ranks.append(t["rank"])
-                current = t["parent_id"]
-            lineage_names.reverse()
-            lineage_ranks.reverse()
-            return lineage_names, lineage_ranks
-
-        # Build the lookup dictionaries
-        _status(f"Building lineages for {len(taxa_by_id):,} taxa...")
-        taxa_by_common = {}
-        entries_by_scientific = {}
-        entries_by_taxon = {}
-
-        for taxon_id, taxon in taxa_by_id.items():
-            rank = taxon["rank"]
-            if rank not in RANK_ORDER:
-                continue
-
-            lineage_names, lineage_ranks = _build_lineage(taxon_id)
-
-            entry = {
-                "taxon_id": taxon["taxon_id"],
-                "scientific_name": taxon["scientific_name"],
-                "common_name": common_names.get(taxon_id, ""),
-                "rank": rank,
-                "lineage_names": lineage_names,
-                "lineage_ranks": lineage_ranks,
-            }
-            entries_by_taxon[taxon_id] = entry
-
-            # Index by scientific name
-            sci_key = taxon["scientific_name"].lower()
-            entries_by_scientific.setdefault(sci_key, []).append(entry)
-
-        # Scientific names are unique only within a kingdom: keep every
-        # homonym, and index the lowest taxon id so the choice is stable.
-        taxa_by_scientific = {}
-        scientific_homonyms = {}
-        for sci_key, entries in entries_by_scientific.items():
-            entries.sort(key=lambda e: e["taxon_id"])
-            taxa_by_scientific[sci_key] = entries[0]
-            if len(entries) > 1:
-                scientific_homonyms[sci_key] = entries
-
-        # Index preferred common names first so they always win.
-        # Keep the first mapping when two taxa share a preferred name.
-        for taxon_id, cn in common_names.items():
-            entry = entries_by_taxon.get(taxon_id)
-            cn_key = cn.lower()
-            if entry and cn_key not in taxa_by_common:
-                taxa_by_common[cn_key] = entry
-
-        # Then index alternate names only for still-unmapped keys
-        common_candidates = {}
-        for taxon_id, names in alt_names.items():
-            entry = entries_by_taxon.get(taxon_id)
-            if not entry:
-                continue
-            for cn in names:
-                cn_key = cn.lower()
-                common_candidates.setdefault(cn_key, set()).add(taxon_id)
-                if cn_key not in taxa_by_common:
-                    taxa_by_common[cn_key] = entry
-
-        ambiguous_common_names = sorted(
-            name for name, ids in common_candidates.items() if len(ids) > 1
+        result = _build_taxonomy_lookup(
+            taxa_by_id, common_names, alt_names, _status,
         )
-        for name in ambiguous_common_names:
-            taxa_by_common.pop(name, None)
-
-        result = {
-            "common_name_identity_version": COMMON_NAME_IDENTITY_VERSION,
-            "ambiguous_common_names": ambiguous_common_names,
-            "last_updated": str(date.today()),
-            "source": "iNaturalist DWCA",
-            "taxa_by_common": taxa_by_common,
-            "taxa_by_scientific": taxa_by_scientific,
-            "scientific_homonyms": scientific_homonyms,
-        }
+        taxa_by_common = result["taxa_by_common"]
+        taxa_by_scientific = result["taxa_by_scientific"]
 
         _status(
             f"Writing taxonomy ({len(taxa_by_common):,} common + {len(taxa_by_scientific):,} scientific names)..."
