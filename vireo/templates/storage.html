@@ -31,6 +31,7 @@ body { padding-bottom: 36px; }
 .stat-kind.managed { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .stat-kind.download { color: var(--warning); background: color-mix(in srgb, var(--warning) 15%, transparent); }
 .stat-kind.keep { color: var(--text-dim); background: var(--bg-secondary); }
+.stat-note { font-size: 11px; color: var(--text-dim); margin-top: 6px; }
 .storage-health {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px;
 }
@@ -361,9 +362,36 @@ dialog.modal-overlay::backdrop { background: transparent; }
   </div>
 </div>
 
+<div class="modal-overlay" id="hfCacheModal" onclick="if(event.target===this)closeHfCacheModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Manage Hugging Face Cache</h3>
+      <button class="modal-close" onclick="closeHfCacheModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-desc">
+        Vireo downloads models through the Hugging Face hub cache and then copies them
+        into its own models folder, which is the only place the pipeline reads from.
+        A cache entry is useful only while the model it came from is installed: it lets
+        Repair or a re-download skip the network. Entries for models that are not
+        installed, and files from older snapshots, are dead weight and can be removed.
+        Installed models are removed in Settings → Models, which clears their cache entry too.
+      </div>
+      <div id="hfCacheError" style="color:var(--danger);font-size:12px;margin-bottom:10px;display:none;"></div>
+      <div id="hfCacheLoading" style="color:var(--text-ghost);font-size:13px;">Loading cache entries...</div>
+      <ul class="file-list" id="hfCacheRows"></ul>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeHfCacheModal()">Close</button>
+      <button class="btn-danger" id="hfCacheRemoveUnused" onclick="removeUnusedHfCache()" disabled>Remove unused entries</button>
+    </div>
+  </div>
+</div>
+
 <script src="/static/vireo-release-originals.js"></script>
 <script src="/static/storage-retained.js"></script>
 <script src="/static/storage-overview.js"></script>
+<script src="/static/storage-hf-cache.js"></script>
 <script>
 function storageEscapeHtml(s) {
   return String(s == null ? '' : s)
@@ -759,7 +787,7 @@ async function loadStoragePanel() {
       {name: 'Working Copies', size: s.working_copies.size, count: s.working_copies.count, type: null, kind: 'managed', kindLabel: 'Quota managed'},
       {name: 'Label Embeddings', size: s.embeddings.size, count: s.embeddings.count, type: 'embeddings', kind: 'safe', kindLabel: 'Safe to clear'},
       {name: 'Models', size: s.models.size, type: null, kind: 'download', kindLabel: 'Download again', settings: true},
-      {name: 'Hugging Face Cache', size: s.hf_cache.size, type: null, kind: 'download', kindLabel: 'Download again', settings: true},
+      {name: 'Hugging Face Cache', size: s.hf_cache.size, type: null, kind: 'download', kindLabel: 'Download again', hfCache: true, note: hfCacheCardNote(s.hf_cache)},
       {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, release: true, type: null, kind: 'keep', kindLabel: 'Release when done'},
     ];
     var auxiliaryCategories = s.other.categories || [];

@@ -718,6 +718,7 @@ def remove_model(model_id):
                 path = os.path.join(DEFAULT_MODELS_DIR, model_id)
                 if os.path.isdir(path) and _inside_models_dir(path):
                     shutil.rmtree(path)
+                    _purge_hf_cache_for_model(model_id)
                     return {"files_deleted": True, "kept_path": None}
             return None
 
@@ -754,7 +755,26 @@ def remove_model(model_id):
 
     log.info("Removed model %s (weights: %s, deleted: %s)",
              model_id, weights_path, files_deleted)
+    # Outside _CONFIG_LOCK: the purge reads models.json through get_models().
+    _purge_hf_cache_for_model(model_id)
     return {"files_deleted": files_deleted, "kept_path": kept_path}
+
+
+def _purge_hf_cache_for_model(model_id):
+    """Drop the Hugging Face cache copy a removed model's download left behind.
+
+    The cache copy exists only to let Repair and re-downloads skip the
+    network, so once the user removes the model it is invisible dead weight
+    (Settings lists installs, not the cache). Custom models downloaded
+    nothing through the cache, so only known ids have anything to purge.
+    Best-effort: a cache the user has already deleted by hand is not an
+    error for the removal.
+    """
+    try:
+        from services.hf_cache import purge_model
+        purge_model(model_id)
+    except Exception as exc:  # pragma: no cover - cleanup must not fail the removal
+        log.warning("Could not purge HF cache for %s: %s", model_id, exc)
 
 
 def register_model(model_id, name, model_str, weights_path, description="",

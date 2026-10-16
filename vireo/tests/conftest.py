@@ -201,6 +201,21 @@ def _restore_global_config_paths():
             models.DEFAULT_MODELS_DIR = original_models_dir
 
 
+@pytest.fixture(autouse=True)
+def _isolate_huggingface_cache(tmp_path, monkeypatch):
+    """Point the Hugging Face hub cache at an empty per-test directory.
+
+    ``services.hf_cache`` deletes files under ``huggingface_cache_dir()``,
+    and ``models.remove_model`` / the pipeline model delete call it. A test
+    that exercises those without patching ``HOME`` (most of ``test_models.py``)
+    would otherwise purge the developer's real ``~/.cache/huggingface/hub``;
+    that happened once, costing a 570 MB model download. A test that wants
+    its own cache sets ``HF_HUB_CACHE`` itself with ``monkeypatch``, which
+    wins over this fixture.
+    """
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hf-hub-cache"))
+
+
 @pytest.fixture
 def db(tmp_path):
     """Return a Database backed by a temp file."""

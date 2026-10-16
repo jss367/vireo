@@ -849,6 +849,14 @@ def create_models_blueprint(
         if os.path.isdir(model_dir):
             shutil.rmtree(model_dir)
             removed.append(model_dir)
+        # The download left a copy in the Hugging Face cache that only an
+        # installed model benefits from; take it along so it does not sit
+        # invisibly in Storage as "Hugging Face Cache".
+        try:
+            from services.hf_cache import purge_subfolder
+            purge_subfolder(spec["subfolder"])
+        except Exception as exc:  # pragma: no cover - cleanup must not fail the delete
+            log.warning("Could not purge HF cache for %s: %s", model_id, exc)
 
         # Clear the cached session singletons so the next use reloads (or
         # reports the model as missing) instead of serving stale weights.

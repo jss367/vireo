@@ -66,3 +66,37 @@ def test_delete_of_absent_registered_model_is_a_noop(app_and_db, models_root):
     resp = _post(app, {"model_id": "sam2-tiny"})
     assert resp.status_code == 200
     assert resp.get_json() == {"deleted": [], "count": 0, "model_id": "sam2-tiny"}
+
+
+def test_delete_purges_the_models_hugging_face_cache_entry(
+    app_and_db, models_root, tmp_path, monkeypatch,
+):
+    """Deleting a pipeline model must not leave its download in the HF cache,
+    where Settings never shows it and Storage reported it as unmanaged."""
+    import hashlib
+
+    app, _ = app_and_db
+    hub = tmp_path / "hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    repo = hub / "models--jss367--vireo-onnx-models"
+    content = b"s" * 500
+    blob = repo / "blobs" / hashlib.sha256(content).hexdigest()
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(content)
+    snap = repo / "snapshots" / "rev1" / "sam2-large" / "image_encoder.onnx"
+    snap.parent.mkdir(parents=True)
+    try:
+        os.symlink(os.path.relpath(blob, snap.parent), snap)
+    except (OSError, NotImplementedError):  # pragma: no cover - Windows without privilege
+        pytest.skip("symlinks unavailable on this platform")
+    other = repo / "snapshots" / "rev1" / "dinov2-vit-s14" / "model.onnx"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"keep")
+
+    resp = _post(app, {"model_id": "sam2-large"})
+
+    assert resp.status_code == 200
+    assert not (models_root / "models" / "sam2-large").exists()
+    assert not blob.exists()
+    assert not snap.parent.exists()
+    assert other.exists()

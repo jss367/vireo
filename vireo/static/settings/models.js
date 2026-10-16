@@ -293,7 +293,7 @@ async function verifyAllModels() {
 }
 
 async function removeModel(modelId) {
-  if (!confirm('Remove this model? Weights Vireo downloaded are deleted from disk; weights in your own folders are left in place.')) return;
+  if (!confirm('Remove this model? Weights Vireo downloaded are deleted from disk, including its copy in the Hugging Face cache; weights in your own folders are left in place.')) return;
   try {
     var result = await safeFetch('/api/models/' + encodeURIComponent(modelId), {
       method: 'DELETE',
