@@ -48,6 +48,8 @@
   "vireo/static/lightbox/viewport.js:create": 973,
   "vireo/static/location-review/assignment.js:assignCurrentGroup": 129,
   "vireo/static/misses/scope.js:applyLegacyMissScopes": 114,
+  "vireo/static/move/quick-move-preview.js:updateQuickMovePreview": 114,
+  "vireo/static/move/quick-move-start.js:startQuickMove": 150,
   "vireo/static/navbar-folder-banners.js:checkNewImages": 151,
   "vireo/static/navbar-folder-banners.js:loadMissingFolders": 177,
   "vireo/static/navbar-pipeline-inspector.js:renderPipeline": 169,
