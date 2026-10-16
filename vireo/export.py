@@ -353,50 +353,12 @@ def resolve_template(template, photo, species=None, seq=1):
     return result
 
 
-def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
-                      max_size=None, wc_max=4096, developed_dir="",
-                      developed_index=None, output_ext="jpg"):
-    """Load the final export pixels, including edits and source fallbacks.
-
-    The caller owns the returned image and must close it. Both photo exports
-    and website publishing use this renderer so working-copy sizing, RAW
-    fallback, local masks, and developed-output selection stay consistent.
-    """
-    pid = photo["id"]
-    # A TIFF requested from a RAW should retain sensor precision even when no
-    # edits are saved. The sentinel also prevents selecting a JPEG working copy
-    # solely because it has enough pixels for a resized TIFF export.
-    if (
-        not recipe and output_ext in ("tif", "tiff")
-        and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-    ):
-        recipe = {"version": 1}
-    if developed_index is None:
-        developed_index = _DevelopedDirIndex()
-    # Resolve source path.  Precedence:
-    #   1. darktable-developed output ("perfected" rendering) — takes
-    #      priority over RAW so Export ships what the user sees after
-    #      Develop, not a fresh libraw decode of the RAW.
-    #   2. working copy when resizing to a size it can satisfy.
-    #   3. original file (default; also used for full-res exports).
+def _select_pinned_export_source(
+    photo, vireo_dir, folders, load_selected_source, *, recipe, exif_data,
+    max_size, wc_max, developed_dir, developed_index, output_ext,
+):
+    """Select a source, decoding offline working copies under their guard."""
     folder_path = folders.get(photo["folder_id"], "")
-    load_max_size = (
-        None if recipe and recipe.get("crop") else (max_size or None)
-    )
-
-    def _load_selected_source(
-        path, *, _recipe=recipe, _load_max_size=load_max_size,
-    ):
-        is_raw = os.path.splitext(path)[1].lower() in RAW_EXTENSIONS
-        raw_decode = (
-            RAW_DECODE_LINEAR if _recipe and is_raw else None
-        )
-        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
-        return (
-            load_image(path, max_size=_load_max_size, **load_kwargs),
-            is_raw,
-        )
-
     original_abs = os.path.join(folder_path, photo["filename"])
     wc_rel = photo["working_copy_path"]
     wc_abs = os.path.join(vireo_dir, wc_rel) if wc_rel else None
@@ -452,9 +414,124 @@ def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
             # the working copy pinned through validation and decode; the
             # resulting PIL image is independent of the path afterward.
             pinned_decode_attempted = True
-            pinned_img, pinned_source_is_raw = _load_selected_source(
+            pinned_img, pinned_source_is_raw = load_selected_source(
                 source_path,
             )
+    return source_path, pinned_img, pinned_source_is_raw, pinned_decode_attempted
+
+
+def _export_raw_companion(img, photo, folder_path, recipe, max_size,
+                         load_max_size, exif_data):
+    """Replace failed or undersized RAW pixels with a sufficient companion."""
+    # RAW decode either failed outright (`img is None`) or
+    # silently fell back to the embedded JPEG. ``_load_raw``
+    # returns ``raw.extract_thumb()`` when libraw cannot
+    # demosaic the RAW; that preview can be much smaller than
+    # the full-size companion JPEG, so the export would
+    # quietly produce undersized bytes for unsupported RAW+JPEG
+    # files. Compare *both* loaded dimensions against the
+    # source's expected dimensions (capped by
+    # ``load_max_size`` when set) — a long-edge-only check
+    # accepts e.g. 6000x3376 embedded previews for 6000x4000
+    # photos, dropping short-edge content.
+    needs_companion = img is None
+    expected_w, expected_h = 0, 0
+    if img is not None:
+        expected_w, expected_h = scaled_recipe_source_dimensions(
+            photo, load_max_size, exif_data,
+        )
+        if image_is_smaller_than_expected(img, expected_w, expected_h):
+            needs_companion = True
+    if needs_companion:
+        companion_fallback = _companion_can_satisfy_export(
+            photo, folder_path, recipe, max_size,
+            exif_data=exif_data, skip_raw_primary=False,
+        )
+        if companion_fallback:
+            companion_img = load_image(
+                companion_fallback, max_size=load_max_size,
+            )
+            # Prefer companion when it covers img on both
+            # axes — a long-edge-only check misses cases
+            # like a 6000x3376 embedded preview "tying" a
+            # 6000x4000 sidecar and losing the short-edge
+            # content.
+            if companion_image_can_replace_raw_result(
+                companion_img, img, expected_w, expected_h,
+            ):
+                if img is None:
+                    log.info(
+                        "RAW decode failed for %s; falling back "
+                        "to companion JPEG",
+                        photo["filename"],
+                    )
+                else:
+                    log.info(
+                        "RAW decode fell back to undersized "
+                        "embedded JPEG (%dx%d, expected %dx%d) "
+                        "for %s; using companion JPEG (%dx%d) "
+                        "instead",
+                        img.size[0], img.size[1],
+                        expected_w, expected_h,
+                        photo["filename"],
+                        companion_img.size[0],
+                        companion_img.size[1],
+                    )
+                    img.close()
+                img = companion_img
+            elif companion_img is not None:
+                companion_img.close()
+    return img
+
+
+def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
+                      max_size=None, wc_max=4096, developed_dir="",
+                      developed_index=None, output_ext="jpg"):
+    """Load the final export pixels, including edits and source fallbacks.
+
+    The caller owns the returned image and must close it. Both photo exports
+    and website publishing use this renderer so working-copy sizing, RAW
+    fallback, local masks, and developed-output selection stay consistent.
+    """
+    pid = photo["id"]
+    # A TIFF requested from a RAW should retain sensor precision even when no
+    # edits are saved. The sentinel also prevents selecting a JPEG working copy
+    # solely because it has enough pixels for a resized TIFF export.
+    if (
+        not recipe and output_ext in ("tif", "tiff")
+        and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+    ):
+        recipe = {"version": 1}
+    if developed_index is None:
+        developed_index = _DevelopedDirIndex()
+    # Prefer developed pixels, then a sufficient working copy, then the
+    # original. Full-resolution exports do not use capped working copies.
+    folder_path = folders.get(photo["folder_id"], "")
+    load_max_size = (
+        None if recipe and recipe.get("crop") else (max_size or None)
+    )
+
+    def _load_selected_source(
+        path, *, _recipe=recipe, _load_max_size=load_max_size,
+    ):
+        is_raw = os.path.splitext(path)[1].lower() in RAW_EXTENSIONS
+        raw_decode = (
+            RAW_DECODE_LINEAR if _recipe and is_raw else None
+        )
+        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+        return (
+            load_image(path, max_size=_load_max_size, **load_kwargs),
+            is_raw,
+        )
+
+    source_path, pinned_img, pinned_source_is_raw, pinned_decode_attempted = (
+        _select_pinned_export_source(
+            photo, vireo_dir, folders, _load_selected_source, recipe=recipe,
+            exif_data=exif_data, max_size=max_size, wc_max=wc_max,
+            developed_dir=developed_dir, developed_index=developed_index,
+            output_ext=output_ext,
+        )
+    )
     if (
         not source_path
         or (pinned_img is None and not os.path.isfile(source_path))
@@ -481,64 +558,10 @@ def load_export_image(photo, vireo_dir, folders, *, recipe=None, exif_data=None,
                 source_path = fallback_source
                 img, source_is_raw = _load_selected_source(source_path)
         if source_is_raw:
-            # RAW decode either failed outright (`img is None`) or
-            # silently fell back to the embedded JPEG. ``_load_raw``
-            # returns ``raw.extract_thumb()`` when libraw cannot
-            # demosaic the RAW; that preview can be much smaller than
-            # the full-size companion JPEG, so the export would
-            # quietly produce undersized bytes for unsupported RAW+JPEG
-            # files. Compare *both* loaded dimensions against the
-            # source's expected dimensions (capped by
-            # ``load_max_size`` when set) — a long-edge-only check
-            # accepts e.g. 6000x3376 embedded previews for 6000x4000
-            # photos, dropping short-edge content.
-            needs_companion = img is None
-            expected_w, expected_h = 0, 0
-            if img is not None:
-                expected_w, expected_h = scaled_recipe_source_dimensions(
-                    photo, load_max_size, exif_data,
-                )
-                if image_is_smaller_than_expected(img, expected_w, expected_h):
-                    needs_companion = True
-            if needs_companion:
-                companion_fallback = _companion_can_satisfy_export(
-                    photo, folder_path, recipe, max_size,
-                    exif_data=exif_data, skip_raw_primary=False,
-                )
-                if companion_fallback:
-                    companion_img = load_image(
-                        companion_fallback, max_size=load_max_size,
-                    )
-                    # Prefer companion when it covers img on both
-                    # axes — a long-edge-only check misses cases
-                    # like a 6000x3376 embedded preview "tying" a
-                    # 6000x4000 sidecar and losing the short-edge
-                    # content.
-                    if companion_image_can_replace_raw_result(
-                        companion_img, img, expected_w, expected_h,
-                    ):
-                        if img is None:
-                            log.info(
-                                "RAW decode failed for %s; falling back "
-                                "to companion JPEG",
-                                photo["filename"],
-                            )
-                        else:
-                            log.info(
-                                "RAW decode fell back to undersized "
-                                "embedded JPEG (%dx%d, expected %dx%d) "
-                                "for %s; using companion JPEG (%dx%d) "
-                                "instead",
-                                img.size[0], img.size[1],
-                                expected_w, expected_h,
-                                photo["filename"],
-                                companion_img.size[0],
-                                companion_img.size[1],
-                            )
-                            img.close()
-                        img = companion_img
-                    elif companion_img is not None:
-                        companion_img.close()
+            img = _export_raw_companion(
+                img, photo, folder_path, recipe, max_size, load_max_size,
+                exif_data,
+            )
         if img is None:
             raise ValueError("failed to load image")
         if recipe:
@@ -618,191 +641,222 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
         contains only successful output paths and is not guaranteed to remain
         positionally aligned with photo_ids.
     """
-    options = options or {}
-    template = options.get("naming_template", "{original}")
-    max_size = options.get("max_size")
-    if max_size is not None:
-        max_size = int(max_size)
-    format_info = normalize_output_format(
-        options.get("format", options.get("output_format", "jpg"))
+    return _PhotoExportBatch(
+        db, vireo_dir, photo_ids, destination, options,
+        progress_cb, cancel_check, cancel_only_check,
+    ).run()
+
+
+def _export_requested_path(photo, folder_path, photo_destination, template,
+                          output_ext, species, seq_counters):
+    """Allocate a sequence and return a contained output path, or None."""
+    photo_info = {
+        "filename": photo["filename"],
+        "timestamp": photo["timestamp"],
+        "rating": photo["rating"],
+        "folder_name": os.path.basename(folder_path),
+    }
+    subdir_key = (
+        photo_destination,
+        os.path.dirname(resolve_template(template, photo_info, species=species, seq=0)),
     )
-    output_ext = format_info["extension"]
-    quality = normalize_quality(options.get("quality", 92))
-    try:
-        wc_max = int(options.get("working_copy_max_size", 4096))
-    except (ValueError, TypeError):
-        wc_max = 4096
-    developed_dir = options.get("developed_dir") or ""
-    metadata_fields = normalize_metadata_fields(options.get("metadata_fields"))
-    subfolder = (
-        normalize_subfolder_name(options.get("subfolder_name"))
-        if options.get("export_to_subfolder") else ""
+    seq_counters.setdefault(subdir_key, 0)
+    seq_counters[subdir_key] += 1
+    rel_path = resolve_template(
+        template, photo_info, species=species, seq=seq_counters[subdir_key],
     )
-    collect_files = bool(options.get("collect_files", False))
+    # Strip leading slashes/dots, then check the resolved path as templates
+    # and directory symlinks must both stay within the destination.
+    rel_path_safe = os.path.normpath(rel_path).lstrip(os.sep + ".")
+    requested_path = os.path.join(photo_destination, rel_path_safe + f".{output_ext}")
+    dest_real = os.path.realpath(photo_destination)
+    requested_real = os.path.realpath(requested_path)
+    dest_prefix = dest_real if dest_real.endswith(os.sep) else dest_real + os.sep
+    if not requested_real.startswith(dest_prefix) and requested_real != dest_real:
+        return None
+    return requested_path
 
-    if destination:
-        os.makedirs(destination, exist_ok=True)
 
-    photos_map = db.get_photos_by_ids(photo_ids)
-    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
-    exif_data_map = _get_photo_exif_data(db, photo_ids)
-    camera_data_map = (
-        _get_photo_camera_data(db, photo_ids) if "camera" in metadata_fields else {}
-    )
-    location_map = (
-        db.get_effective_photo_locations(photo_ids, verify_workspace=False)
-        if "location" in metadata_fields else {}
-    )
+class _PhotoExportBatch:
+    """Per-run catalog inputs, output accounting, and metadata completion."""
 
-    # Get species keywords for all photos in one query
-    species_map = db.get_species_keywords_for_photos(photo_ids)
-    edit_recipes = db.edits.get_photo_recipes(photo_ids)
-
-    # Track sequence numbers per subdirectory
-    seq_counters = {}
-    exported = 0
-    renamed_outputs = []
-    exported_files = [] if collect_files else None
-    errors = []
-    metadata_jobs = []
-    resolved_destinations = []
-    resolved_destination_set = set()
-    # Destinations that received at least one finished file. A destination is
-    # resolved before its photo is written, so a folder whose only photo
-    # failed is in resolved_destinations but not here.
-    written_destination_set = set()
-    metadata_job_destinations = {}
-
-    # A custom destination is known even if every individual photo later
-    # fails. Beside-original destinations are collected as each catalog folder
-    # is resolved below because a single export can span several folders.
-    if destination:
-        custom_destination = (
-            os.path.join(destination, subfolder) if subfolder else destination
+    def __init__(self, db, vireo_dir, photo_ids, destination, options,
+                 progress_cb, cancel_check, cancel_only_check):
+        self.vireo_dir = vireo_dir
+        self.photo_ids = photo_ids
+        self.destination = destination
+        self.progress_cb = progress_cb
+        self.cancel_check = cancel_check
+        self.cancel_only_check = cancel_only_check
+        options = options or {}
+        self.template = options.get("naming_template", "{original}")
+        self.max_size = options.get("max_size")
+        if self.max_size is not None:
+            self.max_size = int(self.max_size)
+        self.format_info = normalize_output_format(
+            options.get("format", options.get("output_format", "jpg"))
         )
-        custom_destination = os.path.normpath(custom_destination)
-        resolved_destinations.append(custom_destination)
-        resolved_destination_set.add(custom_destination)
+        self.output_ext = self.format_info["extension"]
+        self.quality = normalize_quality(options.get("quality", 92))
+        try:
+            self.wc_max = int(options.get("working_copy_max_size", 4096))
+        except (ValueError, TypeError):
+            self.wc_max = 4096
+        self.developed_dir = options.get("developed_dir") or ""
+        self.metadata_fields = normalize_metadata_fields(options.get("metadata_fields"))
+        self.subfolder = (
+            normalize_subfolder_name(options.get("subfolder_name"))
+            if options.get("export_to_subfolder") else ""
+        )
+        collect_files = bool(options.get("collect_files", False))
 
-    # Per-export cache of developed-directory scans. Keyed by directory
-    # path; each value is the (stem, ext_lower) → absolute-path map that
-    # _find_developed_output would otherwise rebuild for every photo.
-    # Large exports routinely probe the same directory N times; caching
-    # keeps that cost O(1) per photo after the first hit.
-    developed_index = _DevelopedDirIndex()
+        if self.destination:
+            os.makedirs(self.destination, exist_ok=True)
 
-    for i, pid in enumerate(photo_ids):
-        if cancel_check and cancel_check():
-            break
-        photo = photos_map.get(pid)
-        if not photo:
-            errors.append(f"Photo {pid} not found in database")
-            if progress_cb:
-                progress_cb(i + 1, len(photo_ids), "")
-            continue
+        self._load_catalog(db)
 
+        # Track sequence numbers per subdirectory
+        self.seq_counters = {}
+        self.exported = 0
+        self.renamed_outputs = []
+        self.exported_files = [] if collect_files else None
+        self.errors = []
+        self.metadata_jobs = []
+        self.resolved_destinations = []
+        self.resolved_destination_set = set()
+        # Destinations that received at least one finished file. A destination is
+        # resolved before its photo is written, so a folder whose only photo
+        # failed is in resolved_destinations but not here.
+        self.written_destination_set = set()
+        self.metadata_job_destinations = {}
+
+        # A custom destination is known even if every individual photo later
+        # fails. Beside-original destinations are collected as each catalog folder
+        # is resolved below because a single export can span several folders.
+        if self.destination:
+            custom_destination = (
+                os.path.join(self.destination, self.subfolder) if self.subfolder else self.destination
+            )
+            custom_destination = os.path.normpath(custom_destination)
+            self.resolved_destinations.append(custom_destination)
+            self.resolved_destination_set.add(custom_destination)
+
+        # Per-export cache of developed-directory scans. Keyed by directory
+        # path; each value is the (stem, ext_lower) → absolute-path map that
+        # _find_developed_output would otherwise rebuild for every photo.
+        # Large exports routinely probe the same directory N times; caching
+        # keeps that cost O(1) per photo after the first hit.
+        self.developed_index = _DevelopedDirIndex()
+
+    def _load_catalog(self, db):
+        """Fetch catalog data once for the whole batch."""
+        self.photos_map = db.get_photos_by_ids(self.photo_ids)
+        self.folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        self.exif_data_map = _get_photo_exif_data(db, self.photo_ids)
+        self.camera_data_map = (
+            _get_photo_camera_data(db, self.photo_ids) if "camera" in self.metadata_fields else {}
+        )
+        self.location_map = (
+            db.get_effective_photo_locations(self.photo_ids, verify_workspace=False)
+            if "location" in self.metadata_fields else {}
+        )
+
+        # Get species keywords for all photos in one query
+        self.species_map = db.get_species_keywords_for_photos(self.photo_ids)
+        self.edit_recipes = db.edits.get_photo_recipes(self.photo_ids)
+
+    def run(self):
+        """Export each photo, then finish queued metadata writes."""
+        for i, pid in enumerate(self.photo_ids):
+            if self.cancel_check and self.cancel_check():
+                break
+            photo = self.photos_map.get(pid)
+            if not photo:
+                self.errors.append(f"Photo {pid} not found in database")
+                if self.progress_cb:
+                    self.progress_cb(i + 1, len(self.photo_ids), "")
+                continue
+
+            self._export_photo(photo)
+            if self.progress_cb:
+                self.progress_cb(i + 1, len(self.photo_ids), photo["filename"])
+        self._finish_metadata()
+        return self._result()
+
+    def _export_photo(self, photo):
+        """Resolve the destination and safe output name for one photo."""
+        pid = photo["id"]
         # Get species (first species keyword, or None)
-        species_list = species_map.get(pid, [])
+        species_list = self.species_map.get(pid, [])
         species = species_list[0] if species_list else None
 
-        # Build photo dict for template
-        folder_path = folders.get(photo["folder_id"], "")
-        photo_info = {
-            "filename": photo["filename"],
-            "timestamp": photo["timestamp"],
-            "rating": photo["rating"],
-            "folder_name": os.path.basename(folder_path),
-        }
+        folder_path = self.folders.get(photo["folder_id"], "")
 
         # Resolve this photo's destination. An empty shared destination means
         # "beside the original", so selections spanning folders stay beside
         # their respective originals instead of being collapsed together.
-        destination_base = destination or folder_path
+        destination_base = self.destination or folder_path
         if not destination_base:
-            errors.append(f"{photo['filename']}: original folder unavailable")
-            if progress_cb:
-                progress_cb(i + 1, len(photo_ids), photo["filename"])
-            continue
-        if not destination and not os.path.isdir(destination_base):
+            self.errors.append(f"{photo['filename']}: original folder unavailable")
+            return
+        if not self.destination and not os.path.isdir(destination_base):
             # Do not recreate an offline volume's catalog path on the local
             # filesystem merely because a working copy can still be read.
-            errors.append(
+            self.errors.append(
                 f"{photo['filename']}: original folder is not reachable "
                 f"({destination_base})"
             )
-            if progress_cb:
-                progress_cb(i + 1, len(photo_ids), photo["filename"])
-            continue
+            return
         photo_destination = (
-            os.path.join(destination_base, subfolder)
-            if subfolder else destination_base
+            os.path.join(destination_base, self.subfolder)
+            if self.subfolder else destination_base
         )
         photo_destination = os.path.normpath(photo_destination)
-        if photo_destination not in resolved_destination_set:
-            resolved_destinations.append(photo_destination)
-            resolved_destination_set.add(photo_destination)
+        if photo_destination not in self.resolved_destination_set:
+            self.resolved_destinations.append(photo_destination)
+            self.resolved_destination_set.add(photo_destination)
 
-        # Determine subdirectory for sequence counter
-        # Render template once to extract the directory part
-        subdir_key = (
-            photo_destination,
-            os.path.dirname(
-                resolve_template(template, photo_info, species=species, seq=0)
-            ),
+        out_path = _export_requested_path(
+            photo, folder_path, photo_destination, self.template, self.output_ext,
+            species, self.seq_counters,
         )
-        seq_counters.setdefault(subdir_key, 0)
-        seq_counters[subdir_key] += 1
-        seq = seq_counters[subdir_key]
+        if out_path is None:
+            self.errors.append(f"{photo['filename']}: unsafe output path rejected")
+            return
+        self._write_photo(photo, species_list, photo_destination, out_path)
 
-        # Resolve final output path
-        rel_path = resolve_template(template, photo_info, species=species, seq=seq)
-        # Guard against path traversal: strip leading slashes/dots so that
-        # absolute paths and ".." segments cannot escape the destination dir.
-        rel_path_safe = os.path.normpath(rel_path).lstrip(os.sep + ".")
-        out_path = os.path.join(
-            photo_destination, rel_path_safe + f".{output_ext}"
-        )
-        # Final containment check: resolved path must start with destination.
-        # dest_real may already end with os.sep when destination is a root dir
-        # (e.g. "/" on POSIX), so avoid doubling the separator.
-        dest_real = os.path.realpath(photo_destination)
-        out_real = os.path.realpath(out_path)
-        dest_prefix = dest_real if dest_real.endswith(os.sep) else dest_real + os.sep
-        if not out_real.startswith(dest_prefix) and out_real != dest_real:
-            errors.append(f"{photo['filename']}: unsafe output path rejected")
-            if progress_cb:
-                progress_cb(i + 1, len(photo_ids), photo["filename"])
-            continue
-
+    def _write_photo(self, photo, species_list, photo_destination, out_path):
+        """Render one derivative and count it or queue its requested metadata."""
+        pid = photo["id"]
         # Load, resize, and save
         claimed_out_path = None
         requested_out_path = out_path
         try:
             img = load_export_image(
-                photo, vireo_dir, folders, recipe=edit_recipes.get(pid),
-                exif_data=exif_data_map.get(pid), max_size=max_size,
-                wc_max=wc_max, developed_dir=developed_dir,
-                developed_index=developed_index, output_ext=output_ext,
+                photo, self.vireo_dir, self.folders, recipe=self.edit_recipes.get(pid),
+                exif_data=self.exif_data_map.get(pid), max_size=self.max_size,
+                wc_max=self.wc_max, developed_dir=self.developed_dir,
+                developed_index=self.developed_index, output_ext=self.output_ext,
             )
             try:
                 out_path, output_stream = _claim_export_path(out_path)
                 claimed_out_path = out_path
                 try:
                     _save_export_image(
-                        img, output_stream, format_info, quality,
+                        img, output_stream, self.format_info, self.quality,
                     )
                 finally:
                     output_stream.close()
             finally:
                 img.close()
-            if metadata_fields:
+            if self.metadata_fields:
                 try:
                     metadata_args = _export_metadata_args(
-                        metadata_fields,
+                        self.metadata_fields,
                         photo,
                         species_list,
-                        camera_data_map.get(pid, {}),
-                        location_map.get(pid),
+                        self.camera_data_map.get(pid, {}),
+                        self.location_map.get(pid),
                     )
                 except Exception:
                     # A checked metadata option is part of the requested
@@ -812,88 +866,92 @@ def export_photos(db, vireo_dir, photo_ids, destination=None, options=None,
                         os.unlink(out_path)
                     raise
                 if metadata_args:
-                    metadata_jobs.append((out_path, photo["filename"], metadata_args))
-                    metadata_job_destinations[out_path] = photo_destination
+                    self.metadata_jobs.append((out_path, photo["filename"], metadata_args))
+                    self.metadata_job_destinations[out_path] = photo_destination
                 else:
-                    exported += 1
-                    written_destination_set.add(photo_destination)
-                    if exported_files is not None:
-                        exported_files.append(out_path)
+                    self._record_success(out_path, photo_destination)
             else:
-                exported += 1
-                written_destination_set.add(photo_destination)
-                if exported_files is not None:
-                    exported_files.append(out_path)
+                self._record_success(out_path, photo_destination)
             if out_path != requested_out_path:
-                renamed_outputs.append({"path": out_path,
-                                        "requested_name": os.path.basename(requested_out_path),
-                                        "export_name": os.path.basename(out_path)})
+                self.renamed_outputs.append({
+                    "path": out_path,
+                    "requested_name": os.path.basename(requested_out_path),
+                    "export_name": os.path.basename(out_path),
+                })
         except Exception as exc:
             if claimed_out_path:
                 with contextlib.suppress(OSError):
                     os.unlink(claimed_out_path)
             log.warning("Export failed for %s: %s", photo["filename"], exc, exc_info=True)
-            errors.append(f"{photo['filename']}: {exc}")
+            self.errors.append(f"{photo['filename']}: {exc}")
 
-        if progress_cb:
-            progress_cb(i + 1, len(photo_ids), photo["filename"])
+    def _record_success(self, out_path, photo_destination):
+        """Count an output that does not need a deferred metadata write."""
+        self.exported += 1
+        self.written_destination_set.add(photo_destination)
+        if self.exported_files is not None:
+            self.exported_files.append(out_path)
 
-    if metadata_jobs:
-        metadata_exported, metadata_errors, metadata_success_paths = _write_export_metadata_batch(
-            metadata_jobs, cancel_check=cancel_only_check or cancel_check,
-        )
-        # The subprocess has exited, so a pending pause can now park safely.
-        # Keep completed outputs in the result even if cancellation arrived.
-        if cancel_check:
-            cancel_check()
-        exported += metadata_exported
-        errors.extend(metadata_errors)
-        success_set = set(metadata_success_paths)
-        written_destination_set.update(
-            metadata_job_destinations[path] for path in success_set
-            if path in metadata_job_destinations
-        )
-        # A failed metadata job's output cannot be reported as a rename even
-        # when its cleanup unlink was silently swallowed (locked file on
-        # Windows, destination permissions change). Track metadata success
-        # explicitly rather than relying on os.path.isfile as a proxy.
-        failed_metadata_paths = {out_path for out_path, _f, _a in metadata_jobs} - success_set
-        if failed_metadata_paths:
-            renamed_outputs = [r for r in renamed_outputs if r["path"] not in failed_metadata_paths]
-        if exported_files is not None:
-            exported_files.extend(
-                out_path
-                for out_path, _filename, _args in metadata_jobs
-                if out_path in success_set
+    def _finish_metadata(self):
+        """Count only metadata successes, retaining cancellation and pause boundaries."""
+        if self.metadata_jobs:
+            metadata_exported, metadata_errors, metadata_success_paths = _write_export_metadata_batch(
+                self.metadata_jobs, cancel_check=self.cancel_only_check or self.cancel_check,
             )
+            # The subprocess has exited, so a pending pause can now park safely.
+            # Keep completed outputs in the result even if cancellation arrived.
+            if self.cancel_check:
+                self.cancel_check()
+            self.exported += metadata_exported
+            self.errors.extend(metadata_errors)
+            success_set = set(metadata_success_paths)
+            self.written_destination_set.update(
+                self.metadata_job_destinations[path] for path in success_set
+                if path in self.metadata_job_destinations
+            )
+            # A failed metadata job's output cannot be reported as a rename even
+            # when its cleanup unlink was silently swallowed (locked file on
+            # Windows, destination permissions change). Track metadata success
+            # explicitly rather than relying on os.path.isfile as a proxy.
+            failed_metadata_paths = {out_path for out_path, _f, _a in self.metadata_jobs} - success_set
+            if failed_metadata_paths:
+                self.renamed_outputs = [r for r in self.renamed_outputs if r["path"] not in failed_metadata_paths]
+            if self.exported_files is not None:
+                self.exported_files.extend(
+                    out_path
+                    for out_path, _filename, _args in self.metadata_jobs
+                    if out_path in success_set
+                )
 
-    # For the common one-directory case, make the long-standing singular field
-    # useful even when the caller selected "beside originals" (whose request
-    # value is intentionally empty). Multiple beside-original roots cannot be
-    # represented honestly by one path, so retain the empty sentinel there and
-    # expose every resolved root through ``destinations``.
-    result_destination = (
-        resolved_destinations[0]
-        if len(resolved_destinations) == 1
-        else destination
-    )
-    result = {
-        "exported": exported,
-        "renamed": len(renamed_outputs),
-        "renames": [{key: value for key, value in rename.items() if key != "path"}
-                    for rename in renamed_outputs[:20]],
-        "errors": errors,
-        "destination": result_destination,
-        "destinations": resolved_destinations,
-        "written_destinations": [
-            path for path in resolved_destinations if path in written_destination_set
-        ],
-        "destination_mode": "custom" if destination else "original",
-        "subfolder": subfolder,
-    }
-    if exported_files is not None:
-        result["files"] = exported_files
-    return result
+    def _result(self):
+        """Report successful outputs separately from resolved destinations."""
+        # For the common one-directory case, make the long-standing singular field
+        # useful even when the caller selected "beside originals" (whose request
+        # value is intentionally empty). Multiple beside-original roots cannot be
+        # represented honestly by one path, so retain the empty sentinel there and
+        # expose every resolved root through ``destinations``.
+        result_destination = (
+            self.resolved_destinations[0]
+            if len(self.resolved_destinations) == 1
+            else self.destination
+        )
+        result = {
+            "exported": self.exported,
+            "renamed": len(self.renamed_outputs),
+            "renames": [{key: value for key, value in rename.items() if key != "path"}
+                        for rename in self.renamed_outputs[:20]],
+            "errors": self.errors,
+            "destination": result_destination,
+            "destinations": self.resolved_destinations,
+            "written_destinations": [
+                path for path in self.resolved_destinations if path in self.written_destination_set
+            ],
+            "destination_mode": "custom" if self.destination else "original",
+            "subfolder": self.subfolder,
+        }
+        if self.exported_files is not None:
+            result["files"] = self.exported_files
+        return result
 
 
 def _save_export_image(img, output, format_info, quality):
@@ -2077,19 +2135,52 @@ def preview_export_renames(db, photo_ids, destination=None, options=None):
     return preview_export(db, photo_ids, destination, options)["renames"]
 
 
+def _reserve_preview_export_path(requested_path, destination_reservations):
+    """Reserve a path using collision rules from its destination filesystem."""
+    reservation_destination = _nearest_existing_directory(
+        os.path.dirname(requested_path)
+    )
+    reservation_key = _destination_path_identity(reservation_destination)
+    reservation_group = destination_reservations.setdefault(
+        reservation_key, []
+    )
+    reservations = next((
+        candidate for candidate in reservation_group
+        if (
+            candidate.matches_destination(reservation_destination)
+            if hasattr(candidate, "matches_destination")
+            else os.path.realpath(candidate.destination)
+            == os.path.realpath(reservation_destination)
+        )
+    ), None)
+    if reservations is None:
+        reservations = _DestinationPathReservations(
+            reservation_destination
+        )
+        reservation_group.append(reservations)
+
+    def is_reserved(
+        candidate,
+        current_destination=reservation_destination,
+        current_reservations=reservations,
+    ):
+        return current_reservations.contains(candidate, current_destination)
+
+    export_path = _deduplicate_path(
+        requested_path,
+        is_reserved=is_reserved,
+    )
+    reservations.add(export_path, reservation_destination)
+    return export_path
+
+
 def preview_export(db, photo_ids, destination=None, options=None):
     """Preview where an export would write and which names it would change.
 
-    Returns ``{"renames": [...], "destination_folders": [...]}``. Each rename
-    is a filename collision handling would number; ``destination_folders``
-    lists, in export order and without repeats, the folder each exportable
-    photo's naming template is resolved under (the custom destination, or the
-    original's folder, before any export subfolder).
-
-    This preflight mirrors export's source, destination, template, sequence,
-    and deduplication rules without rendering output files. A later filesystem
-    change can still introduce a new collision, so the dialog also states the
-    non-overwrite policy permanently.
+    Returns ``{"renames": [...], "destination_folders": [...]}``, with distinct
+    template roots listed in export order, before any export subfolder.
+    Source, naming, sequence and deduplication rules match export without
+    rendering files. Later filesystem changes can still introduce collisions.
     """
     options = options or {}
     template = options.get("naming_template", "{original}")
@@ -2156,74 +2247,16 @@ def preview_export(db, photo_ids, destination=None, options=None):
 
         species_list = species_map.get(pid, [])
         species = species_list[0] if species_list else None
-        photo_info = {
-            "filename": photo["filename"],
-            "timestamp": photo["timestamp"],
-            "rating": photo["rating"],
-            "folder_name": os.path.basename(folder_path),
-        }
-        subdir_key = (
-            photo_destination,
-            os.path.dirname(
-                resolve_template(template, photo_info, species=species, seq=0)
-            ),
+        requested_path = _export_requested_path(
+            photo, folder_path, photo_destination, template, output_ext,
+            species, seq_counters,
         )
-        seq_counters.setdefault(subdir_key, 0)
-        seq_counters[subdir_key] += 1
-        rel_path = resolve_template(
-            template,
-            photo_info,
-            species=species,
-            seq=seq_counters[subdir_key],
-        )
-        rel_path_safe = os.path.normpath(rel_path).lstrip(os.sep + ".")
-        requested_path = os.path.join(
-            photo_destination, rel_path_safe + f".{output_ext}"
-        )
-
-        dest_real = os.path.realpath(photo_destination)
-        requested_real = os.path.realpath(requested_path)
-        dest_prefix = dest_real if dest_real.endswith(os.sep) else dest_real + os.sep
-        if (
-            not requested_real.startswith(dest_prefix)
-            and requested_real != dest_real
-        ):
+        if requested_path is None:
             continue
 
-        reservation_destination = _nearest_existing_directory(
-            os.path.dirname(requested_path)
+        export_path = _reserve_preview_export_path(
+            requested_path, destination_reservations,
         )
-        reservation_key = _destination_path_identity(reservation_destination)
-        reservation_group = destination_reservations.setdefault(
-            reservation_key, []
-        )
-        reservations = next((
-            candidate for candidate in reservation_group
-            if (
-                candidate.matches_destination(reservation_destination)
-                if hasattr(candidate, "matches_destination")
-                else os.path.realpath(candidate.destination)
-                == os.path.realpath(reservation_destination)
-            )
-        ), None)
-        if reservations is None:
-            reservations = _DestinationPathReservations(
-                reservation_destination
-            )
-            reservation_group.append(reservations)
-
-        def is_reserved(
-            candidate,
-            current_destination=reservation_destination,
-            current_reservations=reservations,
-        ):
-            return current_reservations.contains(candidate, current_destination)
-
-        export_path = _deduplicate_path(
-            requested_path,
-            is_reserved=is_reserved,
-        )
-        reservations.add(export_path, reservation_destination)
         destination_folder = os.path.normpath(destination_base)
         if destination_folder not in seen_destination_folders:
             seen_destination_folders.add(destination_folder)

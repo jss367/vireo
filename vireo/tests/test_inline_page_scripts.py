@@ -31,7 +31,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "lightroom.html": 135,
     "logs.html": 64,
     "map.html": 389,
-    "move.html": 1652,
     "pipeline_rapid_review.html": 1606,
     "shortcuts.html": 251,
     "stats.html": 992,
@@ -92,6 +91,7 @@ SPLIT_PAGES = {
     "/jobs": "jobs",
     "/review": "review",
     "/misses": "misses",
+    "/move": "move",
 }
 
 
