@@ -184,8 +184,16 @@ def _raw_connection_closes(tree, *, exempt=()):
                 for child in ast.iter_child_nodes(node):
                     visit(child, class_aliases, inner, enclosing)
                 return
+            # Decorators, defaults and annotations run where the definition
+            # is evaluated, before the parameters shadow anything.
+            outer_parts = list(getattr(node, "decorator_list", [])) + [node.args]
+            if getattr(node, "returns", None) is not None:
+                outer_parts.append(node.returns)
+            for part in outer_parts:
+                visit(part, aliases, qualname, class_enclosing)
             aliases = enclosing - _scope_bindings(node)
-            for child in ast.iter_child_nodes(node):
+            body = node.body if isinstance(node.body, list) else [node.body]
+            for child in body:
                 visit(child, aliases, inner)
             return
         if isinstance(node, ast.Assign) and _is_conn_read(node.value):
@@ -324,6 +332,10 @@ def test_raw_close_scan_includes_docs_prototypes(tmp_path, monkeypatch):
     ("def typed(db):\n conn: Connection = db.conn\n conn.close()", [3]),
     ("def conditional(db, replace):\n conn = db.conn\n if replace:\n  conn = other\n conn.close()", [5]),
     ("def rebind(db):\n conn = db.conn\n conn = consume(conn.close())", [3]),
+    ("def outer(db):\n conn = db.conn\n def cleanup(conn=conn.close()):\n  pass", [3]),
+    ("def outer(db):\n conn = db.conn\n def cleanup(*, conn=consume(conn.close())):\n  pass", [3]),
+    ("def outer(db):\n conn = db.conn\n def cleanup(conn: conn.close()):\n  pass", [3]),
+    ("def outer(db):\n conn = db.conn\n def cleanup(conn) -> conn.close():\n  pass", [3]),
     ("conn = sqlite3.connect(path)\nconn.close()", []),
     ("db.close()\nother.close()", []),
 ])
