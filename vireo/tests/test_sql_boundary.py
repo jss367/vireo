@@ -124,35 +124,67 @@ def _is_conn_read(node):
     )
 
 
+def _scope_bindings(scope):
+    """Names that shadow an enclosing binding in a function or lambda."""
+    args = scope.args
+    parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+    parameters += [arg for arg in (args.vararg, args.kwarg) if arg is not None]
+    names = {arg.arg for arg in parameters}
+    nonlocals = set()
+
+    def collect(node):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            return
+        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            return
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        if isinstance(node, ast.Global):
+            names.update(node.names)
+        if isinstance(node, ast.Nonlocal):
+            nonlocals.update(node.names)
+        for child in ast.iter_child_nodes(node):
+            collect(child)
+
+    for node in [scope.body] if isinstance(scope, ast.Lambda) else scope.body:
+        collect(node)
+    return names - nonlocals
+
+
 def _raw_connection_closes(tree, *, exempt=()):
     """Line numbers of raw connection closes.
 
     Flags ``<expr>.conn.close()`` and, within one function, ``name.close()``
     where ``name`` was assigned (plain or annotated) from ``<expr>.conn`` or
     ``getattr(<expr>, "conn", ...)`` anywhere earlier in that function. The
-    tracking is syntactic and fails closed: a later rebinding does not clear
+    Captured aliases carry into nested functions unless parameters or local
+    bindings shadow them. Class attributes are not method closure bindings.
+    Tracking is syntactic and fails closed: a later rebinding does not clear
     the alias, because a rebinding inside one branch would otherwise hide a
-    close on the other path, and a nested function inherits the aliases
-    bound so far in its enclosing function (its own parameters shadow
-    them), since a closure can close a captured handle. Use a different
-    name for a different connection. ``exempt`` names ``Class.method`` qualnames whose bodies are
+    close on the other path. Use a different name for a different
+    connection. ``exempt`` names ``Class.method`` qualnames whose bodies are
     skipped.
     """
     offenders = []
 
-    def visit(node, aliases, qualname):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            inner = f"{qualname}.{node.name}" if qualname else node.name
+    def visit(node, aliases, qualname, class_enclosing=None):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            name = getattr(node, "name", "<lambda>")
+            inner = f"{qualname}.{name}" if qualname else name
             if inner in exempt:
                 return
-            if not isinstance(node, ast.ClassDef):
-                # A nested function sees the aliases its enclosing function
-                # has bound so far (a closure can close a captured handle);
-                # its own parameters shadow them.
-                a = node.args
-                params = {p.arg for p in a.posonlyargs + a.args + a.kwonlyargs}
-                params |= {p.arg for p in (a.vararg, a.kwarg) if p is not None}
-                aliases = set(aliases) - params
+            enclosing = aliases if class_enclosing is None else class_enclosing
+            if isinstance(node, ast.ClassDef):
+                class_aliases = aliases.copy()
+                for child in ast.iter_child_nodes(node):
+                    visit(child, class_aliases, inner, enclosing)
+                return
+            aliases = enclosing - _scope_bindings(node)
             for child in ast.iter_child_nodes(node):
                 visit(child, aliases, inner)
             return
@@ -171,7 +203,7 @@ def _raw_connection_closes(tree, *, exempt=()):
         ):
             offenders.append(node.lineno)
         for child in ast.iter_child_nodes(node):
-            visit(child, aliases, qualname)
+            visit(child, aliases, qualname, class_enclosing)
 
     visit(tree, set(), "")
     return offenders
@@ -314,3 +346,25 @@ def test_raw_close_preserves_actual_database_close_owner():
     tree = ast.parse((VIREO / "db.py").read_text(encoding="utf-8"))
     assert _raw_connection_closes(tree), "The real owned handle close must be recognized"
     assert _raw_connection_closes(tree, exempt=("Database.close",)) == []
+
+
+@pytest.mark.parametrize(("source", "lines"), [
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  conn.close()", [4]),
+    ("def outer(db):\n conn: Connection = getattr(db, 'conn')\n async def cleanup():\n  conn.close()", [4]),
+    ("def outer(db):\n conn = db.conn\n def cleanup(conn):\n  conn.close()", []),
+    ("def outer(db):\n conn = db.conn\n def cleanup(*, conn):\n  conn.close()", []),
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  conn = other\n  conn.close()", []),
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  conn.close()\n  conn = other", []),
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  conn: Connection\n  conn.close()", []),
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  conn = db.conn\n  conn.close()", [5]),
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  nonlocal conn\n  conn.close()", [5]),
+    ("def outer(db):\n conn = db.conn\n def middle():\n  def cleanup():\n   conn.close()", [5]),
+    ("def outer(db):\n conn = db.conn\n cleanup = lambda: conn.close()", [3]),
+    ("def outer(db):\n conn = db.conn\n cleanup = lambda conn: conn.close()", []),
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  [conn for conn in others]\n  conn.close()", [5]),
+    ("class Container:\n conn = db.conn\n def cleanup(self):\n  conn.close()", []),
+    ("def outer(db):\n conn = db.conn\n class Container:\n  conn = other\n  def cleanup(self):\n   conn.close()", [6]),
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  global conn\n  conn.close()", []),
+])
+def test_raw_close_captured_aliases_respect_shadowing(source, lines):
+    assert _raw_connection_closes(ast.parse(source)) == lines
