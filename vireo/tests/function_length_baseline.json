@@ -101,8 +101,6 @@
   "pipeline_stages/scanning.py:_ScanPass._check_archive_conflicts": 101,
   "preview_cache.py:cleanup_cached_files_for_deleted_photos": 204,
   "preview_cache.py:purge_cached_files_for_recycled_id": 163,
-  "preview_materializer.py:materialize_preview": 106,
-  "preview_materializer.py:render_preview_bytes": 240,
   "review_server.py:create_app": 279,
   "scanner.py:_ScanRun._attach_companion": 155,
   "scanner.py:_ScanRun._write_photo_columns": 146,
