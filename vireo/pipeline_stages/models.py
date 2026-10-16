@@ -162,28 +162,38 @@ def load_model_bundle(
     }
 
 
-class _FallbackClassifierLoadPaused(RuntimeError):
-    """Stands in for ``classifier.ClassifierLoadPaused`` without the classifier."""
+class ClassifierLoadPaused(RuntimeError):
+    """Stands in for ``classifier.ClassifierLoadPaused`` without the classifier.
+
+    ``model_cache._is_caller_cancelled_error`` and ``embedding_cache``
+    recognize a paused producer by the exact class name, so the stand-in
+    must keep the real class's name for a waiting sibling to retry instead
+    of inheriting the pause.
+    """
 
 
-class _FallbackClassificationCancelled(RuntimeError):
-    """Stands in for ``classifier.ClassificationCancelled`` without the classifier."""
+class ClassificationCancelled(RuntimeError):
+    """Stands in for ``classifier.ClassificationCancelled`` without the classifier.
+
+    Recognized by class name like ``ClassifierLoadPaused`` above, and by the
+    ``__name__ == "ClassificationCancelled"`` checks in the pipeline stages.
+    """
 
 
 def _classifier_load_paused_class() -> type[RuntimeError]:
     try:
-        from classifier import ClassifierLoadPaused
+        from classifier import ClassifierLoadPaused as real_class
     except ImportError:
-        return _FallbackClassifierLoadPaused
-    return ClassifierLoadPaused
+        return ClassifierLoadPaused
+    return real_class
 
 
 def _classification_cancelled_class() -> type[RuntimeError]:
     try:
-        from classifier import ClassificationCancelled
+        from classifier import ClassificationCancelled as real_class
     except ImportError:
-        return _FallbackClassificationCancelled
-    return ClassificationCancelled
+        return ClassificationCancelled
+    return real_class
 
 
 class _BundleLoad:
