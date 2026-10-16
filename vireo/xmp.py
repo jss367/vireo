@@ -1566,6 +1566,177 @@ def read_sync_preview_metadata(xmp_path):
     }
 
 
+def _remove_one_owned_bag_entry(bags, exact_value, parent_map, normalized_match):
+    """Remove the one entry a Vireo location-keyword write authored.
+
+    Prefers a plain ``<rdf:li>`` whose text is exactly ``exact_value``; with
+    none anywhere in ``bags``, falls back to the first plain entry whose
+    text satisfies ``normalized_match``. Qualified entries are never
+    removed. Returns the removed entry's text, or ``None``.
+    """
+    plain_exact_targets = [
+        (bag, li)
+        for bag in bags
+        for li in bag.findall(f"{{{NS_RDF}}}li")
+        if _li_value(li) == exact_value
+        and not _li_carries_qualifier(li, parent_map)
+    ]
+    if plain_exact_targets:
+        # Vireo authored one entry, not many. Remove a single
+        # plain occurrence -- if another tool added exact
+        # duplicates later, they're user- or tool-owned data
+        # we shouldn't sweep away.
+        bag, li = plain_exact_targets[0]
+        value = _li_value(li)
+        bag.remove(li)
+        return value
+    # No plain exact match, so Vireo's owned entry (if it
+    # still exists) is a spelling variant that normalizes
+    # to the recorded key. A qualified exact-match duplicate
+    # from another tool must NOT suppress that fallback:
+    # doing so would clear the ownership marker while
+    # leaving Vireo's owned variant behind forever.
+    fallback = None
+    for bag in bags:
+        fallback = next(
+            (
+                (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
+                if _li_value(li)
+                and normalized_match(_li_value(li))
+                and not _li_carries_qualifier(li, parent_map)
+            ),
+            None,
+        )
+        if fallback is not None:
+            break
+    if fallback is not None:
+        bag, li = fallback
+        value = _li_value(li)
+        bag.remove(li)
+        return value
+    return None
+
+
+def _bag_occurrence_is_qualified(prop, parent_map):
+    """Whether merging this array-property occurrence would drop a qualifier."""
+    # The effective-language check on the deepest element already
+    # walks every ``xml:lang'' in the ancestor chain (honoring
+    # any local reset), so counting ``xml:lang'' on the property,
+    # wrapper or bag as a standalone own qualifier here would
+    # double-classify a container whose reset already made it
+    # effectively unqualified. Use the non-language variant of
+    # ``_has_own_value_qualifier'' -- it still counts every
+    # non-language value qualifier (``foo:source'', identity
+    # attributes, ``rdf:datatype'', ...).
+    # Compute the effective ``xml:lang`` at the deepest
+    # relevant element (the bag when present, else the
+    # property). Walking from there upward honors a local
+    # ``xml:lang=""`` reset at any level -- on the bag, on a
+    # wrapper, on the property itself, or on the owning
+    # Description -- so a bag that cancels the owner's ``en''
+    # is correctly seen as effectively unqualified and stays
+    # a valid reuse target. Every wrapper (an ``rdf:value``,
+    # an ``rdf:Description``, or both) and the bag itself
+    # would be dropped if this occurrence merged into the
+    # target, so any *non-language* attribute they carry
+    # counts -- including RDF's attribute abbreviation for a
+    # nested property, like
+    # ``<rdf:Description foo:source="camera">``, which is
+    # equivalent to a sibling ``<foo:source>...</foo:source>``
+    # of ``rdf:value``. Sibling qualifier ELEMENTS inside the
+    # qualified property carry their own meaning too.
+    bag_el, wrappers = _property_bag_and_wrappers(prop)
+    deepest = bag_el if bag_el is not None else prop
+    return (
+        _ancestor_carries_xml_qualifier(deepest, parent_map)
+        or _has_own_non_language_qualifier(prop)
+        or any(_has_own_non_language_qualifier(w) for w in wrappers)
+        or (bag_el is not None and _has_own_non_language_qualifier(bag_el))
+        or _wrappers_carry_qualifier(prop)
+    )
+
+
+def _update_kept_simple_property(keeper, name, value):
+    """Write ``value`` into the kept occurrence; whether anything changed."""
+    owner, child = keeper
+    if child is None:
+        if owner.get(name) != value:
+            owner.set(name, value)
+            return True
+    elif f"{{{NS_RDF}}}value" in child.attrib or len(child):
+        # Qualified property. Update whichever spelling
+        # already carries the value -- attribute or element
+        # form, on the property itself or inside a nested
+        # ``rdf:Description`` -- in place. That preserves
+        # qualifier attributes and sibling elements; the
+        # helper only writes a fresh ``rdf:value`` if no
+        # form carries one yet.
+        return bool(_update_simple_property_value(child, value))
+    elif (child.text or "").strip() != value:
+        child.text = value
+        return True
+    return False
+
+
+def _drop_duplicate_simple_properties(rest, name, parent_map):
+    """Remove plain duplicate occurrences; whether anything changed."""
+    changed = False
+    for owner, child in rest:
+        if child is None:
+            if _ancestor_carries_xml_qualifier(owner, parent_map):
+                # The attribute is a value-qualified RDF
+                # statement in its own right (the owner or an
+                # ancestor carries ``xml:lang'' / ``xml:base''),
+                # so it carries data Vireo doesn't own and
+                # can't back up per-occurrence. Leave both the
+                # attribute AND its original value alone -- a
+                # later restore of Vireo's own backup only
+                # touches the keeper, so overwriting this
+                # occurrence's value now would permanently
+                # replace it with the keeper's on the next
+                # clear. External readers may resolve the
+                # conflicting copies differently from Vireo,
+                # but that's an acceptable trade for data
+                # preservation.
+                pass
+            else:
+                del owner.attrib[name]
+                changed = True
+        elif (
+            _simple_prop_carries_qualifier(child)
+            or _ancestor_carries_xml_qualifier(child, parent_map)
+        ):
+            # Removing this duplicate would silently drop its
+            # qualifier attributes or elements (a distinct
+            # ``rdf:ID``, a ``foo:source`` attribute-form
+            # qualifier, a sibling qualifier element alongside
+            # ``rdf:value``, etc.) OR its effective inherited
+            # ``xml:lang'' -- the child text inside a
+            # language-qualified context is a language-tagged
+            # statement in its own right, so dropping it
+            # would silently lose the tag. Walk from the
+            # CHILD, not the owner, so a nearer
+            # ``xml:lang=""'' reset on the child correctly
+            # cancels the owner's language and leaves the
+            # effectively-unqualified duplicate open to
+            # removal (its value would otherwise persist as
+            # stale on a keeper-only rewrite). Leave every
+            # genuinely-qualified duplicate entirely alone
+            # (both the element and its original value):
+            # Vireo can't back up this occurrence's value
+            # independently, so overwriting would leave a
+            # later restore with only the keeper's value to
+            # write back and permanently replace this one.
+            # External readers may resolve the conflicting
+            # copies differently from Vireo, but that's an
+            # acceptable trade for data preservation.
+            continue
+        else:
+            owner.remove(child)
+            changed = True
+    return changed
+
+
 class SidecarEditor:
     """Accumulate sidecar edits and publish them in a single atomic write.
 
@@ -1815,60 +1986,16 @@ class SidecarEditor:
         ]
 
         parent_map = _build_parent_map(self._root)
+        elem = self._bag_target_property(desc, tag, found, parent_map)
+        bag, _wrappers = _property_bag_and_wrappers(elem)
+        if bag is None:
+            bag = ET.SubElement(elem, f"{{{NS_RDF}}}Bag")
+            self._dirty = True
+        self._merge_duplicate_bags(bag, elem, found, parent_map)
+        return bag
 
-        def _has_inherited_qualifier(elem):
-            # ``xml:lang``, ``xml:base`` and ``xml:space`` are inherited
-            # from any ancestor, including ``rdf:RDF`` or
-            # ``x:xmpmeta`` above the owner Description. Walk the whole
-            # ancestor chain so a qualifier declared at the sidecar
-            # root still counts. Structural RDF attributes like
-            # ``rdf:parseType`` describe serialization form rather than
-            # value semantics and do not count -- otherwise a keyword
-            # array stored in the qualified resource form
-            # ``<dc:subject rdf:parseType='Resource'><rdf:value><rdf:Bag>...``
-            # would look qualified and force a second bag beside it.
-            return _ancestor_carries_xml_qualifier(elem, parent_map)
-
-        _owner_inherits_qualifier = _has_inherited_qualifier
-        # The effective-language check on the deepest element already
-        # walks every ``xml:lang'' in the ancestor chain (honoring
-        # any local reset), so counting ``xml:lang'' on the property,
-        # wrapper or bag as a standalone own qualifier here would
-        # double-classify a container whose reset already made it
-        # effectively unqualified. Use the non-language variant of
-        # ``_has_own_value_qualifier'' -- it still counts every
-        # non-language value qualifier (``foo:source'', identity
-        # attributes, ``rdf:datatype'', ...).
-        _has_own_qualifier = _has_own_non_language_qualifier
-
-        def _prop_is_qualified(owner, prop):
-            bag_el, wrappers = _property_bag_and_wrappers(prop)
-            # Compute the effective ``xml:lang`` at the deepest
-            # relevant element (the bag when present, else the
-            # property). Walking from there upward honors a local
-            # ``xml:lang=""`` reset at any level -- on the bag, on a
-            # wrapper, on the property itself, or on the owning
-            # Description -- so a bag that cancels the owner's ``en''
-            # is correctly seen as effectively unqualified and stays
-            # a valid reuse target. Every wrapper (an ``rdf:value``,
-            # an ``rdf:Description``, or both) and the bag itself
-            # would be dropped if this occurrence merged into the
-            # target, so any *non-language* attribute they carry
-            # counts -- including RDF's attribute abbreviation for a
-            # nested property, like
-            # ``<rdf:Description foo:source="camera">``, which is
-            # equivalent to a sibling ``<foo:source>...</foo:source>``
-            # of ``rdf:value``. Sibling qualifier ELEMENTS inside the
-            # qualified property carry their own meaning too.
-            deepest = bag_el if bag_el is not None else prop
-            return (
-                _ancestor_carries_xml_qualifier(deepest, parent_map)
-                or _has_own_qualifier(prop)
-                or any(_has_own_qualifier(w) for w in wrappers)
-                or (bag_el is not None and _has_own_qualifier(bag_el))
-                or _wrappers_carry_qualifier(prop)
-            )
-
+    def _bag_target_property(self, desc, tag, found, parent_map):
+        """The array-property element new items go into, creating it if needed."""
         if found:
             # Pick an unqualified target so newly added items don't
             # inherit a container-level qualifier (an ``xml:lang`` on the
@@ -1883,7 +2010,7 @@ class SidecarEditor:
             # qualified copies are left alone in the loop below.
             unqualified_idx = next(
                 (i for i, (owner, child) in enumerate(found)
-                 if not _prop_is_qualified(owner, child)),
+                 if not _bag_occurrence_is_qualified(child, parent_map)),
                 None,
             )
             if unqualified_idx is None:
@@ -1897,19 +2024,29 @@ class SidecarEditor:
             # No existing occurrence at all. Create the new property on
             # an unqualified Description for the same reason as above.
             target = desc
-            if _owner_inherits_qualifier(desc):
+            # ``xml:lang``, ``xml:base`` and ``xml:space`` are inherited
+            # from any ancestor, including ``rdf:RDF`` or
+            # ``x:xmpmeta`` above the owner Description. Walk the whole
+            # ancestor chain so a qualifier declared at the sidecar
+            # root still counts. Structural RDF attributes like
+            # ``rdf:parseType`` describe serialization form rather than
+            # value semantics and do not count -- otherwise a keyword
+            # array stored in the qualified resource form
+            # ``<dc:subject rdf:parseType='Resource'><rdf:value><rdf:Bag>...``
+            # would look qualified and force a second bag beside it.
+            if _ancestor_carries_xml_qualifier(desc, parent_map):
                 target = self._unqualified_photo_description()
             elem = ET.SubElement(target, tag)
             self._dirty = True
-        bag, _wrappers = _property_bag_and_wrappers(elem)
-        if bag is None:
-            bag = ET.SubElement(elem, f"{{{NS_RDF}}}Bag")
-            self._dirty = True
+        return elem
+
+    def _merge_duplicate_bags(self, bag, elem, found, parent_map):
+        """Fold unqualified duplicate copies of the property into ``bag``."""
         seen = {_li_signature(li) for li in bag.findall(f"{{{NS_RDF}}}li")}
         for owner, extra in found:
             if extra is elem:
                 continue
-            extra_bag, extra_wrappers = _property_bag_and_wrappers(extra)
+            extra_bag, _extra_wrappers = _property_bag_and_wrappers(extra)
             # A source whose items live under a non-empty effective
             # ``xml:lang`` (from the owner Description, a wrapper, or
             # the bag itself) would silently drop that language when
@@ -1926,17 +2063,7 @@ class SidecarEditor:
             # alongside the value do too. Any of these leaves the
             # qualified container in place; plain duplicates left by
             # earlier writes still collapse.
-            extra_deepest = extra_bag if extra_bag is not None else extra
-            if (
-                _ancestor_carries_xml_qualifier(extra_deepest, parent_map)
-                or _has_own_qualifier(extra)
-                or any(_has_own_qualifier(w) for w in extra_wrappers)
-                or (
-                    extra_bag is not None
-                    and _has_own_qualifier(extra_bag)
-                )
-                or _wrappers_carry_qualifier(extra)
-            ):
+            if _bag_occurrence_is_qualified(extra, parent_map):
                 continue
             if extra_bag is not None:
                 # Copy every item, not just ones with direct text: a
@@ -1951,7 +2078,6 @@ class SidecarEditor:
                     seen.add(sig)
             owner.remove(extra)
             self._dirty = True
-        return bag
 
     def _get(self, name):
         """Return a simple property's current value, or None when absent."""
@@ -2003,77 +2129,10 @@ class SidecarEditor:
             rest = [
                 entry for i, entry in enumerate(found) if i != best_idx
             ]
-            owner, child = keeper
-            if child is None:
-                if owner.get(name) != value:
-                    owner.set(name, value)
-                    changed = True
-            elif f"{{{NS_RDF}}}value" in child.attrib or len(child):
-                # Qualified property. Update whichever spelling
-                # already carries the value -- attribute or element
-                # form, on the property itself or inside a nested
-                # ``rdf:Description`` -- in place. That preserves
-                # qualifier attributes and sibling elements; the
-                # helper only writes a fresh ``rdf:value`` if no
-                # form carries one yet.
-                if _update_simple_property_value(child, value):
-                    changed = True
-            elif (child.text or "").strip() != value:
-                child.text = value
+            if _update_kept_simple_property(keeper, name, value):
                 changed = True
-            for owner, child in rest:
-                if child is None:
-                    if _ancestor_carries_xml_qualifier(owner, parent_map):
-                        # The attribute is a value-qualified RDF
-                        # statement in its own right (the owner or an
-                        # ancestor carries ``xml:lang'' / ``xml:base''),
-                        # so it carries data Vireo doesn't own and
-                        # can't back up per-occurrence. Leave both the
-                        # attribute AND its original value alone -- a
-                        # later restore of Vireo's own backup only
-                        # touches the keeper, so overwriting this
-                        # occurrence's value now would permanently
-                        # replace it with the keeper's on the next
-                        # clear. External readers may resolve the
-                        # conflicting copies differently from Vireo,
-                        # but that's an acceptable trade for data
-                        # preservation.
-                        pass
-                    else:
-                        del owner.attrib[name]
-                        changed = True
-                elif (
-                    _simple_prop_carries_qualifier(child)
-                    or _ancestor_carries_xml_qualifier(child, parent_map)
-                ):
-                    # Removing this duplicate would silently drop its
-                    # qualifier attributes or elements (a distinct
-                    # ``rdf:ID``, a ``foo:source`` attribute-form
-                    # qualifier, a sibling qualifier element alongside
-                    # ``rdf:value``, etc.) OR its effective inherited
-                    # ``xml:lang'' -- the child text inside a
-                    # language-qualified context is a language-tagged
-                    # statement in its own right, so dropping it
-                    # would silently lose the tag. Walk from the
-                    # CHILD, not the owner, so a nearer
-                    # ``xml:lang=""'' reset on the child correctly
-                    # cancels the owner's language and leaves the
-                    # effectively-unqualified duplicate open to
-                    # removal (its value would otherwise persist as
-                    # stale on a keeper-only rewrite). Leave every
-                    # genuinely-qualified duplicate entirely alone
-                    # (both the element and its original value):
-                    # Vireo can't back up this occurrence's value
-                    # independently, so overwriting would leave a
-                    # later restore with only the keeper's value to
-                    # write back and permanently replace this one.
-                    # External readers may resolve the conflicting
-                    # copies differently from Vireo, but that's an
-                    # acceptable trade for data preservation.
-                    continue
-                else:
-                    owner.remove(child)
-                    changed = True
+            if _drop_duplicate_simple_properties(rest, name, parent_map):
+                changed = True
         if changed:
             self._dirty = True
         return changed
@@ -2402,34 +2461,47 @@ class SidecarEditor:
         # deleting unrelated hierarchies that share a segment with the added
         # flat leaf.
         if hierarchical:
-            for bag in _photo_scoped_bags(
-                self._root, f"{{{NS_LR}}}hierarchicalSubject"
-            ):
-                for li in bag.findall(f"{{{NS_RDF}}}li"):
-                    value = _li_value(li)
-                    if not value or value in exact:
-                        continue
-                    segments = {keyword_match_key(s) for s in value.split("|")}
-                    segments.discard("")
-                    if segments & remove_keys:
-                        if (
-                            keep_exact
-                            and _li_carries_qualifier(li, parent_map)
-                        ):
-                            # See the flat branch: a qualified
-                            # hierarchical variant carries user
-                            # metadata a plain drop would lose. No
-                            # canonical is available here (segments
-                            # match by key, not by whole path), so
-                            # leave the item entirely alone.
-                            continue
-                        removed.append(value)
-                        bag.remove(li)
+            removed.extend(self._remove_hierarchical_keyword_entries(
+                remove_keys, exact, keep_exact, parent_map,
+            ))
 
         if removed:
             self._dirty = True
             log.info("Removed keywords from %s: %s", self.path, removed)
         return bool(removed)
+
+    def _remove_hierarchical_keyword_entries(
+        self, remove_keys, exact, keep_exact, parent_map,
+    ):
+        """Drop ``lr:hierarchicalSubject`` entries with a matching segment.
+
+        Returns the removed entries' text.
+        """
+        removed = []
+        for bag in _photo_scoped_bags(
+            self._root, f"{{{NS_LR}}}hierarchicalSubject"
+        ):
+            for li in bag.findall(f"{{{NS_RDF}}}li"):
+                value = _li_value(li)
+                if not value or value in exact:
+                    continue
+                segments = {keyword_match_key(s) for s in value.split("|")}
+                segments.discard("")
+                if segments & remove_keys:
+                    if (
+                        keep_exact
+                        and _li_carries_qualifier(li, parent_map)
+                    ):
+                        # See the flat branch in ``remove_keywords``: a qualified
+                        # hierarchical variant carries user
+                        # metadata a plain drop would lose. No
+                        # canonical is available here (segments
+                        # match by key, not by whole path), so
+                        # leave the item entirely alone.
+                        continue
+                    removed.append(value)
+                    bag.remove(li)
+        return removed
 
     def set_rating(self, rating, create=False):
         """Set xmp:Rating on a sidecar that exists or is already being written.
@@ -2583,27 +2655,8 @@ class SidecarEditor:
         removed |= self._delete_property(marker)
         return removed
 
-    def set_location_keywords(self, path_parts):
-        """Write the assigned place as Lightroom keywords, creating a sidecar.
-
-        ``path_parts`` is the location keyword chain from broadest to leaf,
-        e.g. ``["United States", "California", "Kumeyaay Lake"]``. The leaf
-        goes into ``dc:subject`` and the whole chain into
-        ``lr:hierarchicalSubject`` as one pipe-delimited entry -- the shape
-        Lightroom reads back as a nested keyword. Ancestors are deliberately
-        not written as separate flat entries: Lightroom derives them from the
-        hierarchy, and writing them would put "United States" in the user's
-        flat keyword list for every photo.
-
-        An empty chain means the photo no longer has a location, which is the
-        removal case. Rewriting a photo whose place changed strips the entries
-        recorded by the previous write before adding the new ones, so the
-        sidecar never accumulates every place a photo has ever been assigned.
-        """
-        parts = [part for part in (path_parts or []) if part and part.strip()]
-        if not parts:
-            return self.remove_vireo_location_keywords()
-
+    def _reject_piped_location_parts(self, parts):
+        """Raise ``ValueError`` when a location name contains ``|``."""
         # A pipe in a location name would corrupt every downstream reader:
         # Lightroom's ``lr:hierarchicalSubject`` uses ``|`` as the segment
         # delimiter, and Vireo's own marker parser splits on the same
@@ -2630,14 +2683,11 @@ class SidecarEditor:
                 f"location name may not contain '|': {parts!r}"
             )
 
-        path = "|".join(parts)
-        was_dirty = self._dirty
-        desc = self._description()
-        previous = self._get(LOCATION_KEYWORDS_MARKER)
-        previous_owned = self._get(LOCATION_KEYWORDS_OWNED)
-        if previous and previous != path:
-            self._remove_location_keyword_entries(previous, previous_owned)
+    def _location_keywords_already_present(self, parts):
+        """Whether the leaf / hierarchy already sit in the sidecar, normalized.
 
+        Returns ``(leaf_key, existed_flat, existed_hier)``.
+        """
         # Look for a pre-existing normalized match of the leaf or hierarchy
         # BEFORE canonicalizing. add_keywords() dedupes on exact text, so a
         # sidecar spelling like `kumeyaay lake` (a Lightroom rewrite, or a
@@ -2685,7 +2735,10 @@ class SidecarEditor:
         # hierarchy already lives in that qualified bag, and a reader
         # that resolves to a single occurrence would then report the
         # photo as having no keywords.
+        return leaf_key, existed_flat, existed_hier
 
+    def _canonicalize_qualified_location_leaf(self, leaf_key, leaf):
+        """Respell qualified ``dc:subject`` variants of the leaf in place."""
         # Canonicalize any *qualified* variant of the leaf in place so
         # its user-authored qualifier metadata survives. Removing a
         # qualified ``<rdf:li rdf:parseType='Resource'><rdf:value>paris
@@ -2699,22 +2752,29 @@ class SidecarEditor:
         # nested value to the canonical spelling instead; the
         # subsequent ``add_keywords`` will see it as already present
         # and skip inserting a plain duplicate.
-        if leaf_key:
-            parent_map = _build_parent_map(self._root)
-            for bag in _photo_scoped_bags(
-                self._root, f"{{{NS_DC}}}subject",
-            ):
-                for li in bag.findall(f"{{{NS_RDF}}}li"):
-                    li_value = _li_value(li)
-                    if (
-                        li_value
-                        and li_value != parts[-1]
-                        and keyword_match_key(li_value) == leaf_key
-                        and _li_carries_qualifier(li, parent_map)
-                        and _update_simple_property_value(li, parts[-1])
-                    ):
-                        self._dirty = True
+        if not leaf_key:
+            return
+        parent_map = _build_parent_map(self._root)
+        for bag in _photo_scoped_bags(
+            self._root, f"{{{NS_DC}}}subject",
+        ):
+            for li in bag.findall(f"{{{NS_RDF}}}li"):
+                li_value = _li_value(li)
+                if (
+                    li_value
+                    and li_value != leaf
+                    and keyword_match_key(li_value) == leaf_key
+                    and _li_carries_qualifier(li, parent_map)
+                    and _update_simple_property_value(li, leaf)
+                ):
+                    self._dirty = True
 
+    def _add_location_keyword_entries(self, parts, path, existed_flat, existed_hier):
+        """Canonicalize the flat leaf and add the missing location entries.
+
+        Returns ``(added_flat, added_hier)``: whether this write inserted the
+        flat leaf / hierarchy, so it may claim them as Vireo-owned.
+        """
         # Canonicalize a flat variant of the leaf the way the species-keyword
         # path does: add_keywords() dedupes on exact text, so a sidecar
         # spelling like `kumeyaay lake` would otherwise sit beside the clean
@@ -2769,6 +2829,48 @@ class SidecarEditor:
         hier_to_add = set() if existed_hier else {path}
         self.add_keywords(
             flat_keywords=flat_to_add, hierarchical_keywords=hier_to_add,
+        )
+        return added_flat, added_hier
+
+    def set_location_keywords(self, path_parts):
+        """Write the assigned place as Lightroom keywords, creating a sidecar.
+
+        ``path_parts`` is the location keyword chain from broadest to leaf,
+        e.g. ``["United States", "California", "Kumeyaay Lake"]``. The leaf
+        goes into ``dc:subject`` and the whole chain into
+        ``lr:hierarchicalSubject`` as one pipe-delimited entry -- the shape
+        Lightroom reads back as a nested keyword. Ancestors are deliberately
+        not written as separate flat entries: Lightroom derives them from the
+        hierarchy, and writing them would put "United States" in the user's
+        flat keyword list for every photo.
+
+        An empty chain means the photo no longer has a location, which is the
+        removal case. Rewriting a photo whose place changed strips the entries
+        recorded by the previous write before adding the new ones, so the
+        sidecar never accumulates every place a photo has ever been assigned.
+        """
+        parts = [part for part in (path_parts or []) if part and part.strip()]
+        if not parts:
+            return self.remove_vireo_location_keywords()
+
+        self._reject_piped_location_parts(parts)
+
+        path = "|".join(parts)
+        was_dirty = self._dirty
+        desc = self._description()
+        previous = self._get(LOCATION_KEYWORDS_MARKER)
+        previous_owned = self._get(LOCATION_KEYWORDS_OWNED)
+        if previous and previous != path:
+            self._remove_location_keyword_entries(previous, previous_owned)
+
+        leaf_key, existed_flat, existed_hier = (
+            self._location_keywords_already_present(parts)
+        )
+
+        self._canonicalize_qualified_location_leaf(leaf_key, parts[-1])
+
+        added_flat, added_hier = self._add_location_keyword_entries(
+            parts, path, existed_flat, existed_hier,
         )
 
         # A no-op rewrite of the same path must not shrink an ownership
@@ -2908,88 +3010,25 @@ class SidecarEditor:
             flat_bags = list(_photo_scoped_bags(
                 self._root, f"{{{NS_DC}}}subject",
             ))
-            plain_exact_targets = [
-                (bag, li)
-                for bag in flat_bags
-                for li in bag.findall(f"{{{NS_RDF}}}li")
-                if _li_value(li) == leaf
-                and not _li_carries_qualifier(li, parent_map)
-            ]
-            if plain_exact_targets:
-                # Vireo authored one entry, not many. Remove a single
-                # plain occurrence -- if another tool added exact
-                # duplicates later, they're user- or tool-owned data
-                # we shouldn't sweep away.
-                bag, li = plain_exact_targets[0]
-                removed.append(_li_value(li))
-                bag.remove(li)
-            else:
-                # No plain exact match, so Vireo's owned entry (if it
-                # still exists) is a spelling variant that normalizes
-                # to ``leaf_key``. A qualified exact-match duplicate
-                # from another tool must NOT suppress that fallback:
-                # doing so would clear the ownership marker while
-                # leaving Vireo's owned variant behind forever.
-                fallback = None
-                for bag in flat_bags:
-                    fallback = next(
-                        (
-                            (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
-                            if _li_value(li)
-                            and keyword_match_key(_li_value(li)) == leaf_key
-                            and not _li_carries_qualifier(li, parent_map)
-                        ),
-                        None,
-                    )
-                    if fallback is not None:
-                        break
-                if fallback is not None:
-                    bag, li = fallback
-                    removed.append(_li_value(li))
-                    bag.remove(li)
+            value = _remove_one_owned_bag_entry(
+                flat_bags, leaf, parent_map,
+                lambda li_value: keyword_match_key(li_value) == leaf_key,
+            )
+            if value is not None:
+                removed.append(value)
 
         if owns_hier:
             hier_bags = list(_photo_scoped_bags(
                 self._root, f"{{{NS_LR}}}hierarchicalSubject",
             ))
-            plain_exact_targets = [
-                (bag, li)
-                for bag in hier_bags
-                for li in bag.findall(f"{{{NS_RDF}}}li")
-                if _li_value(li) == path
-                and not _li_carries_qualifier(li, parent_map)
-            ]
-            if plain_exact_targets:
-                # See the flat branch above: only remove one plain
-                # occurrence.
-                bag, li = plain_exact_targets[0]
-                removed.append(_li_value(li))
-                bag.remove(li)
-            else:
-                # See the flat branch above: a qualified exact
-                # duplicate must not suppress the normalized fallback
-                # that removes Vireo's owned spelling variant.
-                fallback = None
-                for bag in hier_bags:
-                    fallback = next(
-                        (
-                            (bag, li) for li in bag.findall(f"{{{NS_RDF}}}li")
-                            if _li_value(li)
-                            and [
-                                keyword_match_key(s)
-                                for s in _li_value(li).split("|")
-                            ]
-                            == path_keys
-                            and not _li_carries_qualifier(li, parent_map)
-                        ),
-                        None,
-                    )
-                    if fallback is not None:
-                        break
-                if fallback is not None:
-                    bag, li = fallback
-                    removed.append(_li_value(li))
-                    bag.remove(li)
+            value = _remove_one_owned_bag_entry(
+                hier_bags, path, parent_map,
+                lambda li_value: [
+                    keyword_match_key(s) for s in li_value.split("|")
+                ] == path_keys,
+            )
+            if value is not None:
+                removed.append(value)
 
         if removed:
             self._dirty = True

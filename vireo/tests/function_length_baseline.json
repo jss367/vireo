@@ -4,7 +4,7 @@
   "app.py:create_app": 606,
   "app.py:main": 215,
   "audit.py:verify_hashes": 135,
-  "auto_tone.py:fit": 231,
+  "auto_tone.py:fit": 101,
   "capture_time.py:adjust_capture_time": 161,
   "card_cleanup.py:delete_verified": 196,
   "card_cleanup.py:load_manifest": 101,
@@ -203,10 +203,5 @@
   "web/storage.py:create_storage_blueprint.api_storage": 225,
   "web/system.py:create_system_blueprint.api_files_reveal": 148,
   "web/system.py:create_system_blueprint.api_report_issue": 213,
-  "working_copy_cache.py:_evict_once": 244,
-  "xmp.py:SidecarEditor._bag": 154,
-  "xmp.py:SidecarEditor._remove_location_keyword_entries": 140,
-  "xmp.py:SidecarEditor._set_properties": 119,
-  "xmp.py:SidecarEditor.remove_keywords": 105,
-  "xmp.py:SidecarEditor.set_location_keywords": 212
+  "working_copy_cache.py:_evict_once": 244
 }
