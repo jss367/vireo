@@ -35,7 +35,7 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "pipeline_rapid_review.html": 1606,
     "shortcuts.html": 251,
     "stats.html": 992,
-    "storage.html": 885,
+    "storage.html": 867,
     "welcome.html": 374,
     "workspace.html": 366,
 }

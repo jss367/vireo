@@ -40,6 +40,7 @@ body { padding-bottom: 36px; }
 .health-value { color: var(--text-primary); font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
 .health-detail { color: var(--text-ghost); font-size: 10px; margin-top: 4px; }
 .stat-card .btn-manage { display: block; margin-left: auto; margin-right: auto; }
+.storage-sort { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12px; color: var(--text-dim); }
 .storage-breakdown { margin-top: 16px; }
 .storage-breakdown summary { cursor: pointer; font-size: 13px; padding: 10px 0; }
 .storage-breakdown-row { padding: 10px 0; border-top: 1px solid var(--border); }
@@ -165,6 +166,14 @@ dialog.modal-overlay::backdrop { background: transparent; }
       <span class="stat-kind managed">Quota managed</span> removes oldest files over its limit &nbsp;
       <span class="stat-kind download">Download again</span> can be restored from its source &nbsp;
       <span class="stat-kind keep">Keep</span> contains catalog or original data
+    </div>
+    <div class="storage-sort">
+      <label for="storageSort">Sort by</label>
+      <select id="storageSort" onchange="renderStorageCards()">
+        <option value="size-desc">Storage: largest first</option>
+        <option value="size-asc">Storage: smallest first</option>
+        <option value="name">Name: A–Z</option>
+      </select>
     </div>
     <div id="storageGrid" class="stats-grid"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
     <div id="storageBreakdown" class="storage-breakdown"></div>
@@ -354,6 +363,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
 
 <script src="/static/vireo-release-originals.js"></script>
 <script src="/static/storage-retained.js"></script>
+<script src="/static/storage-overview.js"></script>
 <script>
 function storageEscapeHtml(s) {
   return String(s == null ? '' : s)
@@ -771,26 +781,7 @@ async function loadStoragePanel() {
       breakdownHtml += '</details>';
     });
     document.getElementById('storageBreakdown').innerHTML = breakdownHtml;
-    _storageSummary = {};
-
-    var html = '';
-    categories.forEach(function(c) {
-      if (c.size === 0 && !c.type && !(c.release && c.count)) return;
-      if (c.type) _storageSummary[c.type] = {count: c.count || 0, size: c.size || 0};
-      html += '<div class="stat-card">' +
-        '<div class="stat-number">' + storageFormatBytes(c.size) + '</div>' +
-        '<div class="stat-label">' + storageEscapeHtml(c.name) +
-          (c.count != null ? ' (' + c.count.toLocaleString() + ')' : '') +
-        '</div>' +
-        '<span class="stat-kind ' + c.kind + '">' + c.kindLabel + '</span>';
-      if (c.type) {
-        html += '<button class="btn-manage" onclick="openStorageModal(\'' + c.type + '\')">Manage</button>';
-      } else {
-        html += c.release ? VireoReleaseOriginals.storageButton() : c.settings ? '<button class="btn-manage" onclick="window.location.href=\'/settings\'">Manage in Settings</button>' : '';
-      }
-      html += '</div>';
-    });
-    document.getElementById('storageGrid').innerHTML = html || '<span style="color:var(--text-ghost);font-size:13px;">No generated storage yet.</span>';
+    renderStorageCards(categories);
   } catch(e) {
     // Usage is unknown until the next successful scan; keep Apply disabled
     // so a stale zero can't skip the eviction confirmation.
