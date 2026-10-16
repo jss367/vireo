@@ -4,6 +4,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 from db import commit_with_retry
@@ -101,6 +102,22 @@ _NEXT_PHOTO = "next"
 _STOP = "stop"
 
 
+class _MaskFileStage(Protocol):
+    """The staged mask generation ``pipeline_job._StagedMaskFile`` publishes.
+
+    Stages receive the class by injection, so this names the part of its
+    surface the mask pass relies on.
+    """
+
+    final_path: str
+
+    def install(self) -> None: ...
+
+    def restore(self) -> None: ...
+
+    def finish(self) -> None: ...
+
+
 @dataclass
 class _MaskPhoto:
     """One worklist photo: its source paths and in-flight mask generation."""
@@ -112,7 +129,7 @@ class _MaskPhoto:
     folder_path: str
     image_path: str
     existing: object = None
-    mask_file_stage: object = None
+    mask_file_stage: _MaskFileStage | None = None
 
 
 class _MaskPass:

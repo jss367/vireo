@@ -6,6 +6,7 @@ not sensor saturation measurements. No original file or editing recipe changes.
 
 import logging
 import os
+from typing import Literal, overload
 
 import numpy as np
 from PIL import Image
@@ -33,6 +34,18 @@ def resize_linear(rgb, size):
         np.asarray(Image.fromarray(rgb[..., c]).resize(size, Image.Resampling.BOX))
         for c in range(3)
     ], axis=-1)
+
+
+@overload
+def decode_linear(
+    path, max_size: int = ..., *, return_native: Literal[False] = ...,
+) -> np.ndarray | None: ...
+
+
+@overload
+def decode_linear(
+    path, max_size: int = ..., *, return_native: Literal[True],
+) -> tuple[np.ndarray, np.ndarray] | None: ...
 
 
 def decode_linear(path, max_size=1536, *, return_native=False):

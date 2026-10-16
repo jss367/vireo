@@ -162,21 +162,27 @@ def load_model_bundle(
     }
 
 
-def _classifier_load_paused_class():
+class _FallbackClassifierLoadPaused(RuntimeError):
+    """Stands in for ``classifier.ClassifierLoadPaused`` without the classifier."""
+
+
+class _FallbackClassificationCancelled(RuntimeError):
+    """Stands in for ``classifier.ClassificationCancelled`` without the classifier."""
+
+
+def _classifier_load_paused_class() -> type[RuntimeError]:
     try:
         from classifier import ClassifierLoadPaused
     except ImportError:
-        class ClassifierLoadPaused(RuntimeError):
-            pass
+        return _FallbackClassifierLoadPaused
     return ClassifierLoadPaused
 
 
-def _classification_cancelled_class():
+def _classification_cancelled_class() -> type[RuntimeError]:
     try:
         from classifier import ClassificationCancelled
     except ImportError:
-        class ClassificationCancelled(RuntimeError):
-            pass
+        return _FallbackClassificationCancelled
     return ClassificationCancelled
 
 

@@ -6,7 +6,7 @@ import os
 import queue
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from artifact_flight import ArtifactProducerFailed
 from camera_denoise import cache_matches as _camera_cache_matches
@@ -116,7 +116,7 @@ class _ThumbPhoto:
     already_exists: bool = False
     recipe: object = None
     detail_photo: object = None
-    folders: dict = None
+    folders: dict = field(default_factory=dict)
 
 
 class _ThumbPass:
@@ -604,7 +604,7 @@ class _ThumbPass:
         generated, skipped, failed = self.generated, self.skipped, self.failed
         failed_photos = self.failed_photos
         from thumbnails import format_summary as thumb_summary
-        thumb_result = {
+        thumb_result: dict[str, object] = {
             "generated": generated,
             "skipped": skipped,
             "failed": failed,
