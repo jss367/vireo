@@ -198,8 +198,6 @@
   "web/predictions.py:create_predictions_blueprint.api_prediction_group_apply._apply_group_decisions": 176,
   "web/predictions.py:create_predictions_blueprint.api_predictions": 205,
   "web/predictions.py:create_predictions_blueprint.api_predictions_compare": 121,
-  "web/settings.py:create_settings_blueprint.api_config_set": 160,
-  "web/settings.py:create_settings_blueprint.api_settings_import": 302,
   "web/storage.py:create_storage_blueprint.api_storage": 225,
   "web/sync.py:_sync_preview_presentation": 257,
   "web/system.py:create_system_blueprint.api_files_reveal": 148,
