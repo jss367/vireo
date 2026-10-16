@@ -112,8 +112,6 @@
   "preview_cache.py:purge_cached_files_for_recycled_id": 163,
   "preview_materializer.py:materialize_preview": 106,
   "preview_materializer.py:render_preview_bytes": 240,
-  "repositories/photos.py:PhotoRepository.delete": 106,
-  "repositories/photos.py:PhotoRepository.get_browse_summary": 110,
   "review_server.py:create_app": 279,
   "scanner.py:_ScanRun._attach_companion": 155,
   "scanner.py:_ScanRun._write_photo_columns": 146,
