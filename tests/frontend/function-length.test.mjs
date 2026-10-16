@@ -32,13 +32,16 @@
 // `<callee>(<first string argument>)`, so `addEventListener('click', ...)`
 // is `addEventListener('click')`. When two functions in the same scope would
 // share a key, the second and later ones get an ordinal suffix (`render#2`),
-// in source order, so each keeps its own length; literal `%` and `#` in a
-// source name are percent-escaped before adding ordinals. The writer's move rule
-// ignores the ordinal, so a sibling inserted before an over-cap function
+// in source order, so each keeps its own length; literal `%`, `#` and `.` in a
+// source name are percent-escaped before adding ordinals, so an embedded `.`
+// (a callback whose callee is a member chain like `document.addEventListener`)
+// cannot collide with the structural `.` that joins stack elements. The writer's
+// move rule ignores the ordinal, so a sibling inserted before an over-cap function
 // does not count as growth.
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'acorn';
@@ -127,7 +130,7 @@ function walk(node, parent, stack, rel, lengths, seen) {
   let pushed = false;
   if (FUNCTION_TYPES.has(node.type)) {
     if (!isIife(node, parent)) {
-      const name = contextName(node, parent).replace(/[%#]/g, char => char === '%' ? '%25' : '%23');
+      const name = contextName(node, parent).replace(/[%#.]/g, char => char === '%' ? '%25' : char === '#' ? '%23' : '%2E');
       const base = [...stack, name].join('.');
       const ordinal = (seen.get(base) || 0) + 1;
       seen.set(base, ordinal);
@@ -250,12 +253,12 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
   return {grown, added, moves};
 }
 
-export function writeBaseline(allowNew = []) {
-  const lengths = functionLengths();
-  const current = overCap(lengths);
-  const bootstrapping = !fs.existsSync(BASELINE_PATH);
-  const previous = bootstrapping ? {} : loadBaseline();
-  const surviving = new Set(lengths.keys());
+export function writeBaseline(allowNew = [], {lengths = null, baselinePath = BASELINE_PATH} = {}) {
+  const effectiveLengths = lengths ?? functionLengths();
+  const current = overCap(effectiveLengths);
+  const bootstrapping = !fs.existsSync(baselinePath);
+  const previous = bootstrapping ? {} : JSON.parse(fs.readFileSync(baselinePath, 'utf8'));
+  const surviving = new Set(effectiveLengths.keys());
   const {grown, added, moves} = reconcileBaseline(current, previous, allowNew, bootstrapping, surviving);
   if (grown.length) {
     console.log('Refusing to raise baseline entries; shorten these functions instead:');
@@ -272,8 +275,8 @@ export function writeBaseline(allowNew = []) {
     for (const key of added) console.log(`  ${key} (${current[key]} lines)`);
     return 1;
   }
-  fs.writeFileSync(BASELINE_PATH, JSON.stringify(sortedObject(current), null, 2) + '\n');
-  console.log(`wrote ${Object.keys(current).length} entries to ${path.relative(ROOT, BASELINE_PATH)}`);
+  fs.writeFileSync(baselinePath, JSON.stringify(sortedObject(current), null, 2) + '\n');
+  console.log(`wrote ${Object.keys(current).length} entries to ${path.relative(ROOT, baselinePath)}`);
   return 0;
 }
 
@@ -305,6 +308,25 @@ if (argv[0] === '--write-baseline') {
     assert.ok(overCap(lengths)['fixture.js:render']);
     assert.ok(overCap(lengths)['fixture.js:render%232']);
     assert.notEqual(nameOf('fixture.js:render#2'), nameOf('fixture.js:render%232'));
+  });
+
+  test('embedded dots in source names cannot collide with structural qualification', () => {
+    // A literal method named `outer.inner` and a function `inner` nested
+    // inside a function `outer` would both land at base `outer.inner` without
+    // escaping the embedded dot. The second would then be ordinalized as a
+    // same-name sibling, and a closed length permutation between the two
+    // would silently permit the literal method to grow. Escape the dot in
+    // source names so the two keep distinct keys.
+    const longBody = '\n'.repeat(104);
+    const lengths = sourceLengths(`
+      const obj = { 'outer.inner'() {${longBody}} };
+      function outer() { function inner() {${longBody}} }
+    `);
+    assert.ok(lengths.has('fixture.js:outer%2Einner'), [...lengths.keys()].join('\n'));
+    assert.ok(lengths.has('fixture.js:outer.inner'), [...lengths.keys()].join('\n'));
+    assert.equal(lengths.get('fixture.js:outer%2Einner'), 105);
+    assert.equal(lengths.get('fixture.js:outer.inner'), 105);
+    assert.notEqual(nameOf('fixture.js:outer%2Einner'), nameOf('fixture.js:outer.inner'));
   });
 
   test('same-named sibling permutations retain their individual length budgets', () => {
@@ -410,6 +432,37 @@ if (argv[0] === '--write-baseline') {
     }
     assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, previous, ['b.js:']).added, []);
     assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, {}, [], true).added, []);
+  });
+
+  test('writeBaseline passes every surviving function key to reconciliation, not just the over-cap subset', () => {
+    // Guard against a writer-path regression: reconcileBaseline receives
+    // `surviving` from writeBaseline; if writeBaseline derives it from the
+    // over-cap `current` or stops forwarding it, a function that shrank to
+    // the cap boundary can lend its baseline entry to a new over-cap sibling.
+    // Exercise the writer through its own file I/O with a hand-built lengths
+    // map so this failure mode would surface here even if the reconciler
+    // test keeps passing.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ratchet-'));
+    const baselinePath = path.join(tmp, 'baseline.json');
+    const starting = {'a.js:render': 110};
+    fs.writeFileSync(baselinePath, JSON.stringify(starting, null, 2) + '\n');
+    const lengths = new Map([
+      ['a.js:render', 100], // shrank to the cap boundary; dropped from overCap
+      ['b.js:render', 110], // new over-cap sibling matching the old length
+    ]);
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(' '));
+    let exit;
+    try {
+      exit = writeBaseline([], {lengths, baselinePath});
+    } finally {
+      console.log = originalLog;
+    }
+    assert.equal(exit, 1, logs.join('\n'));
+    assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), starting);
+    assert.ok(logs.some(line => line.includes('b.js:render')), logs.join('\n'));
+    fs.rmSync(tmp, {recursive: true, force: true});
   });
 
   test(`no static script function crosses or grows past ${MAX_FUNCTION_LINES} lines`, () => {
