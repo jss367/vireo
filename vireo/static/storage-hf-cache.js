@@ -116,7 +116,15 @@ async function _postHfCacheRemove(body, failure) {
       body: JSON.stringify(body),
     }, { toast: false });
     _hfCacheInventory = result;
-    showToast('Freed ' + storageFormatBytes(result.freed || 0) + ' from the Hugging Face cache', 'success');
+    if (result.failed && result.failed.length) {
+      // Some paths could not be deleted; they stay in the refreshed list.
+      var first = result.failed[0];
+      _showHfCacheError(failure + ': ' + result.failed.length +
+        (result.failed.length === 1 ? ' file' : ' files') + ' could not be deleted (' +
+        first.path + ': ' + first.error + '). Freed ' + storageFormatBytes(result.freed || 0) + '.');
+    } else {
+      showToast('Freed ' + storageFormatBytes(result.freed || 0) + ' from the Hugging Face cache', 'success');
+    }
   } catch (e) {
     _showHfCacheError(failure + (e && e.message ? ': ' + e.message : '.'));
     await loadHfCacheRows();

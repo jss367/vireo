@@ -583,7 +583,16 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
                 result = hf_cache_service.remove(keys)
             except KeyError as exc:
                 return json_error(f"Unknown cache entry: {exc.args[0]}", 404)
-        return jsonify({"ok": True, **result, **hf_cache_service.inventory()})
+            except ValueError as exc:
+                return json_error(
+                    f"{exc.args[0]} backs an installed model; remove the model in "
+                    "Settings → Models to free it", 409,
+                )
+        # ``ok`` is the deletion's own verdict: a failed path stays listed in the
+        # fresh inventory, and the page must not toast success over it.
+        return jsonify({
+            "ok": not result["failed"], **result, **hf_cache_service.inventory(),
+        })
 
     @blueprint.route("/api/storage/open-folder", methods=["POST"])
     def api_storage_open_folder():

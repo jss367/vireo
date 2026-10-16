@@ -115,3 +115,38 @@ def test_storage_page_manages_the_cache_itself(app_and_db):
     assert 'id="hfCacheModal"' in html
     assert "/api/storage/hf-cache/remove" in html
     assert "hfCacheCardNote" in html
+
+
+def test_remove_by_key_rechecks_installed_status_server_side(seeded):
+    """An entry that became installed after the page loaded answers 409."""
+    app, blobs = seeded
+    resp = app.test_client().post(
+        "/api/storage/hf-cache/remove",
+        json={"keys": ["jss367/vireo-onnx-models/dinov2-vit-b14"]},
+    )
+    assert resp.status_code == 409
+    assert "backs an installed model" in resp.get_json()["error"]
+    assert blobs["live"].exists()
+
+
+def test_remove_reports_a_failed_deletion_instead_of_success(seeded, monkeypatch):
+    app, blobs = seeded
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if os.path.realpath(path) == os.path.realpath(blobs["orphan"]):
+            raise PermissionError(13, "Operation not permitted", str(path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    resp = app.test_client().post("/api/storage/hf-cache/remove", json={"unused": True})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is False
+    assert body["removed"] == []
+    assert body["failed"][0]["key"] == "jss367/vireo-onnx-models/bioclip-2.5-vith14"
+    assert blobs["orphan"].exists()
+    assert [e["key"] for e in body["entries"]] == [
+        "jss367/vireo-onnx-models/bioclip-2.5-vith14",
+        "jss367/vireo-onnx-models/dinov2-vit-b14",
+    ]

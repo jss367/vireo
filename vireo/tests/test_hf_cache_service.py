@@ -153,10 +153,17 @@ def test_remove_unused_keeps_installed_entries_and_shared_blobs(hub, tmp_path):
     dino_blob = hub.add("dinov2-vit-b14/model.onnx", b"d" * 300)
     _install(tmp_path, "dinov2-vit-b14")
 
+    before = _entries(hf_cache.inventory())
+    bioclip = before["jss367/vireo-onnx-models/bioclip-2.5-vith14"]
+    assert bioclip["size"] == 5000, "a shared blob is not advertised as reclaimable"
+    assert bioclip["shared_size"] == 2
+    assert hf_cache.inventory()["unused_size"] == 5000
+
     result = hf_cache.remove_unused()
 
-    assert result["removed"] == ["jss367/vireo-onnx-models/bioclip-2.5-vith14"]
-    assert result["freed"] == 5000
+    assert result == {
+        "removed": ["jss367/vireo-onnx-models/bioclip-2.5-vith14"], "failed": [], "freed": 5000,
+    }
     assert not big.exists()
     assert shared.exists(), "a blob the installed model still links must survive"
     assert dino_blob.exists()
@@ -175,7 +182,7 @@ def test_remove_drops_the_repo_dir_when_its_last_snapshot_goes(hub):
 
     result = hf_cache.remove(["jss367/vireo-onnx-models/sam2-small"])
 
-    assert result == {"removed": ["jss367/vireo-onnx-models/sam2-small"], "freed": 400}
+    assert result == {"removed": ["jss367/vireo-onnx-models/sam2-small"], "failed": [], "freed": 400}
     assert not (hub.root / ONNX_DIR).exists()
     assert hf_cache.inventory()["entries"] == []
 
@@ -274,3 +281,118 @@ def test_remove_registered_model_purges_cache_after_unregistering(hub, tmp_path)
     assert result["files_deleted"] is True
     assert not blob.exists()
     assert hf_cache.inventory()["entries"] == []
+
+
+def test_shared_blob_between_two_unused_entries_counts_once_in_unused_size(hub):
+    from services import hf_cache
+
+    hub.add("bioclip-2.5-vith14/config.json", b"{}")
+    hub.add("timm-eva02-large-inat21/config.json", b"{}")
+    hub.add("bioclip-2.5-vith14/image_encoder.onnx.data", b"b" * 500)
+
+    inv = hf_cache.inventory()
+    assert inv["unused_size"] == 502
+    result = hf_cache.remove_unused()
+    assert result["freed"] == 502
+    assert not (hub.root / ONNX_DIR).exists()
+
+
+def test_remove_refuses_a_key_that_now_backs_an_installed_model(hub, tmp_path):
+    """The page may have inventoried before the install finished."""
+    from services import hf_cache
+
+    blob = hub.add("dinov2-vit-b14/model.onnx", b"d" * 300)
+    _install(tmp_path, "dinov2-vit-b14")
+
+    with pytest.raises(ValueError):
+        hf_cache.remove(["jss367/vireo-onnx-models/dinov2-vit-b14"])
+    assert blob.exists()
+
+
+def test_symlinked_snapshot_directories_are_ignored_and_never_deleted_through(hub, tmp_path):
+    from services import hf_cache
+
+    outside = tmp_path / "outside" / "bioclip-2.5-vith14"
+    outside.mkdir(parents=True)
+    victim = outside / "image_encoder.onnx.data"
+    victim.write_bytes(b"v" * 900)
+    repo = hub.root / ONNX_DIR
+    hub.add("sam2-small/mask_decoder.onnx", b"m" * 10)
+    _symlink(outside.parent, repo / "snapshots" / "linked-rev")
+    other = hub.root / "models--imageomics--bioclip"
+    (other / "blobs").mkdir(parents=True)
+    _symlink(tmp_path / "outside", other / "snapshots")
+
+    inv = hf_cache.inventory()
+    assert set(_entries(inv)) == {"jss367/vireo-onnx-models/sam2-small"}
+    hf_cache.remove_unused()
+    assert victim.exists()
+    assert (repo / "snapshots" / "linked-rev").is_symlink()
+
+
+def test_deleting_a_snapshot_file_outside_the_repository_is_refused(hub, tmp_path):
+    """A group whose recorded path escapes snapshots/ is reported, not unlinked."""
+    from services import hf_cache
+
+    hub.add("sam2-small/mask_decoder.onnx", b"m" * 10)
+    victim = tmp_path / "victim.bin"
+    victim.write_bytes(b"v")
+    _total, found = hf_cache._collect(str(hub.root), str(tmp_path / "models"))
+    group = found["jss367/vireo-onnx-models/sam2-small"]
+    group["files"].append(str(victim))
+
+    _freed, failures = hf_cache._delete_groups([group])
+
+    assert victim.exists()
+    assert [f["path"] for f in failures] == [str(victim)]
+
+
+def test_last_snapshot_removal_keeps_the_repo_while_a_download_is_in_flight(hub):
+    from services import hf_cache
+
+    blob = hub.add("sam2-small/mask_decoder.onnx", b"m" * 400)
+    partial = hub.blob("abc.incomplete", b"p" * 50)
+
+    result = hf_cache.remove(["jss367/vireo-onnx-models/sam2-small"])
+
+    assert result["freed"] == 400 and result["failed"] == []
+    assert not blob.exists()
+    assert partial.exists(), "a resumable partial download must survive"
+    assert (hub.root / ONNX_DIR / "blobs").is_dir()
+
+
+def test_last_snapshot_removal_respects_hub_download_locks(hub):
+    from services import hf_cache
+
+    hub.add("sam2-small/mask_decoder.onnx", b"m" * 400)
+    locks = hub.root / ".locks" / ONNX_DIR
+    locks.mkdir(parents=True)
+    (locks / "deadbeef.lock").write_bytes(b"")
+
+    hf_cache.remove(["jss367/vireo-onnx-models/sam2-small"])
+
+    assert (hub.root / ONNX_DIR).is_dir()
+    assert not (hub.root / ONNX_DIR / "snapshots" / "rev1").exists()
+
+
+def test_deletion_failures_are_reported_not_claimed_as_removed(hub, monkeypatch):
+    from services import hf_cache
+
+    big = hub.add("bioclip-2.5-vith14/image_encoder.onnx.data", b"b" * 5000)
+    small = hub.add("sam2-small/mask_decoder.onnx", b"m" * 10)
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if os.path.realpath(path) == os.path.realpath(big):
+            raise PermissionError(13, "Operation not permitted", str(path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+
+    result = hf_cache.remove_unused()
+
+    assert result["removed"] == ["jss367/vireo-onnx-models/sam2-small"]
+    assert result["freed"] == 10
+    assert [f["key"] for f in result["failed"]] == ["jss367/vireo-onnx-models/bioclip-2.5-vith14"]
+    assert "Operation not permitted" in result["failed"][0]["error"]
+    assert big.exists() and not small.exists()

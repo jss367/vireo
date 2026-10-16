@@ -17,6 +17,19 @@ Keys are ``<repo>/<subfolder>`` for the shared ONNX repo (one per model
 subfolder across every snapshot), ``<repo>`` for any other repo (or the ONNX
 repo's top-level files), and ``<repo>#unreferenced`` for blobs no snapshot
 points at any more.
+
+Sizes are reclaimable bytes: a blob two entries share (an identical
+``config.json``) is counted in neither entry's ``size`` and in
+``unused_size`` only when no installed entry also references it, because
+deletion keeps any blob a remaining snapshot still links.
+
+Deletion never follows a symlink: a symlinked repository, ``snapshots`` or
+revision directory is ignored, and every path is checked to sit under the
+real repository before it is unlinked, so a malformed cache cannot steer a
+removal outside the hub cache. A repository directory is only removed once
+it holds no snapshot, no blob (including a partial ``.incomplete`` download)
+and no download lock, so an in-flight download is never pulled out from
+under ``hf_hub_download``.
 """
 
 from __future__ import annotations
@@ -48,7 +61,7 @@ def _cache_dir(cache_dir):
 
 
 def _repo_dirs(cache_dir):
-    """Vireo-relevant ``models--*`` directories under the hub cache."""
+    """Vireo-relevant ``models--*`` directories under the hub cache (no symlinks)."""
     from services.storage_paths import huggingface_repositories
 
     if not os.path.isdir(cache_dir):
@@ -58,7 +71,7 @@ def _repo_dirs(cache_dir):
     for name in sorted(os.listdir(cache_dir)):
         if name in wanted or name.startswith(("models--imageomics--", "models--bioclip--")):
             path = os.path.join(cache_dir, name)
-            if os.path.isdir(path):
+            if os.path.isdir(path) and not os.path.islink(path):
                 out.append((name, path))
     return out
 
@@ -76,6 +89,13 @@ def _has_files(path):
     if not path or not os.path.isdir(path):
         return False
     return any(files for _root, _dirs, files in os.walk(path))
+
+
+def _within(path, root):
+    """True when ``path``'s parent resolves to ``root`` or somewhere beneath it."""
+    root = os.path.realpath(root)
+    parent = os.path.realpath(os.path.dirname(path))
+    return parent == root or parent.startswith(root + os.sep)
 
 
 def _install_candidates(models_dir):
@@ -134,18 +154,20 @@ def _scan_repo(repo_dir, onnx):
     ``groups`` maps a group name (the ONNX subfolder, or ``""`` for a whole
     repo and for the ONNX repo's top-level files) to
     ``{"files": [snapshot paths], "blobs": {path: size}}``. Plain files
-    (no-symlink layouts) are recorded as their own blob.
+    (no-symlink layouts) are recorded as their own blob. Symlinked
+    directories are not entered at any level.
     """
     groups: dict[str, dict] = {}
     referenced: set[str] = set()
     snapshots = os.path.join(repo_dir, "snapshots")
-    if not os.path.isdir(snapshots):
+    if os.path.islink(snapshots) or not os.path.isdir(snapshots):
         return groups, referenced
     for rev in sorted(os.listdir(snapshots)):
         rev_dir = os.path.join(snapshots, rev)
-        if not os.path.isdir(rev_dir):
+        if os.path.islink(rev_dir) or not os.path.isdir(rev_dir):
             continue
-        for root, _dirs, files in os.walk(rev_dir):
+        for root, dirs, files in os.walk(rev_dir):
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
             for name in files:
                 path = os.path.join(root, name)
                 rel = os.path.relpath(path, rev_dir)
@@ -157,11 +179,11 @@ def _scan_repo(repo_dir, onnx):
     return groups, referenced
 
 
-def _unreferenced_blobs(repo_dir, referenced):
+def _blob_files(repo_dir):
+    """``{name: lstat}`` for the regular files directly in ``blobs/``."""
     blobs_dir = os.path.join(repo_dir, "blobs")
-    if not os.path.isdir(blobs_dir):
+    if os.path.islink(blobs_dir) or not os.path.isdir(blobs_dir):
         return {}
-    cutoff = time.time() - INCOMPLETE_GRACE_SECS
     out = {}
     for name in os.listdir(blobs_dir):
         path = os.path.join(blobs_dir, name)
@@ -169,12 +191,33 @@ def _unreferenced_blobs(repo_dir, referenced):
             st = os.lstat(path)
         except OSError:
             continue
-        if os.path.realpath(path) in referenced or not os.path.isfile(path):
+        if os.path.isfile(path) and not os.path.islink(path):
+            out[path] = st
+    return out
+
+
+def _unreferenced_blobs(repo_dir, referenced):
+    cutoff = time.time() - INCOMPLETE_GRACE_SECS
+    out = {}
+    for path, st in _blob_files(repo_dir).items():
+        if os.path.realpath(path) in referenced:
             continue
-        if name.endswith(".incomplete") and st.st_mtime > cutoff:
+        if path.endswith(".incomplete") and st.st_mtime > cutoff:
             continue
         out[os.path.realpath(path)] = st.st_size
     return out
+
+
+def _size_groups(found):
+    """Set each group's ``size`` to the bytes only it references."""
+    referrers: dict[str, set[str]] = {}
+    for group in found.values():
+        for blob in group["blobs"]:
+            referrers.setdefault(blob, set()).add(group["key"])
+    for group in found.values():
+        exclusive = [s for b, s in group["blobs"].items() if referrers[b] == {group["key"]}]
+        group["size"] = sum(exclusive)
+        group["shared_size"] = sum(group["blobs"].values()) - group["size"]
 
 
 def _collect(cache_dir, models_dir):
@@ -202,7 +245,6 @@ def _collect(cache_dir, models_dir):
             found[key] = {
                 "key": key, "name": name, "repo_dir": repo_dir,
                 "files": data["files"], "blobs": data["blobs"],
-                "size": sum(data["blobs"].values()),
                 "installed": install is not None, "install_path": install,
             }
         dangling = _unreferenced_blobs(repo_dir, referenced)
@@ -211,17 +253,17 @@ def _collect(cache_dir, models_dir):
             found[key] = {
                 "key": key, "name": f"{repo}: files no download refers to",
                 "repo_dir": repo_dir, "files": list(dangling), "blobs": dangling,
-                "size": sum(dangling.values()), "installed": False, "install_path": None,
-                "dangling": True,
+                "installed": False, "install_path": None, "dangling": True,
             }
+    _size_groups(found)
     return total, found
 
 
 def _public(group):
     return {
         "key": group["key"], "name": group["name"], "size": group["size"],
-        "installed": group["installed"], "install_path": group["install_path"],
-        "file_count": len(group["files"]),
+        "shared_size": group["shared_size"], "installed": group["installed"],
+        "install_path": group["install_path"], "file_count": len(group["files"]),
     }
 
 
@@ -230,18 +272,22 @@ def inventory(cache_dir=None, models_dir=None):
 
     ``size`` is the bytes the Vireo repos occupy on disk; ``entries`` splits
     them by model with ``installed`` saying whether an install folder exists
-    for it, so ``unused_size`` is what ``remove_unused`` would reclaim.
+    for it. ``unused_size`` is what ``remove_unused`` would reclaim: every
+    blob the unused entries reference that no installed entry also does.
     """
     cache_dir = _cache_dir(cache_dir)
     total, found = _collect(cache_dir, _models_dir(models_dir))
+    installed_blobs: dict[str, int] = {}
+    unused_blobs: dict[str, int] = {}
+    for group in found.values():
+        (installed_blobs if group["installed"] else unused_blobs).update(group["blobs"])
     ordered = sorted(found.values(), key=lambda g: (-g["size"], g["key"]))
-    entries = [_public(g) for g in ordered]
     return {
         "path": cache_dir,
         "size": total,
-        "entries": entries,
-        "unused_size": sum(e["size"] for e in entries if not e["installed"]),
-        "installed_size": sum(e["size"] for e in entries if e["installed"]),
+        "entries": [_public(g) for g in ordered],
+        "unused_size": sum(s for b, s in unused_blobs.items() if b not in installed_blobs),
+        "installed_size": sum(installed_blobs.values()),
     }
 
 
@@ -256,28 +302,72 @@ def _prune_empty_dirs(path, stop):
         path = os.path.dirname(path)
 
 
-def _delete_groups(groups):
-    """Unlink the groups' snapshot files and any blob they alone referenced."""
+def _download_in_progress(repo_dir):
+    """True while ``hf_hub_download`` may still be writing into this repo.
+
+    A partial ``.incomplete`` blob is a resumable download, and the hub keeps
+    a per-file lock under ``<cache>/.locks/<repo>/`` for the duration of a
+    download. Either one means the repository must stay.
+    """
+    if any(p.endswith(".incomplete") for p in _blob_files(repo_dir)):
+        return True
+    locks = os.path.join(os.path.dirname(repo_dir), ".locks", os.path.basename(repo_dir))
+    return os.path.isdir(locks) and bool(os.listdir(locks))
+
+
+def _remove_repo_if_empty(repo_dir):
+    if os.path.islink(repo_dir) or not os.path.isdir(repo_dir):
+        return
+    snapshots = os.path.join(repo_dir, "snapshots")
+    if os.path.isdir(snapshots) and os.listdir(snapshots):
+        return
+    if _blob_files(repo_dir) or _download_in_progress(repo_dir):
+        return
+    shutil.rmtree(repo_dir, ignore_errors=True)
+    log.info("Removed empty HF cache repo %s", repo_dir)
+
+
+def _unlink_snapshot_files(group, failures):
+    """Unlink a group's snapshot entries; return the plain-file bytes freed."""
     freed = 0
-    candidate_blobs: dict[str, dict[str, int]] = {}
+    snapshots = os.path.join(group["repo_dir"], "snapshots")
+    for path in group["files"]:
+        if not _within(path, snapshots) or (os.path.isdir(path) and not os.path.islink(path)):
+            failures.append({"key": group["key"], "path": path,
+                             "error": "not a file inside the repository's snapshots"})
+            continue
+        try:
+            size = 0 if os.path.islink(path) else os.lstat(path).st_size
+            os.unlink(path)
+            freed += size
+        except OSError as exc:
+            log.warning("Could not remove HF cache entry %s: %s", path, exc)
+            failures.append({"key": group["key"], "path": path, "error": str(exc)})
+            continue
+        _prune_empty_dirs(os.path.dirname(path), snapshots)
+    return freed
+
+
+def _delete_groups(groups):
+    """Unlink the groups' snapshot files and any blob they alone referenced.
+
+    Returns ``(freed_bytes, failures)``; a failure names the key and path a
+    deletion could not complete, so callers never report it as removed.
+    """
+    freed = 0
+    failures: list[dict] = []
+    candidate_blobs: dict[str, dict[str, tuple[str, int]]] = {}
     for group in groups:
         repo_dir = group["repo_dir"]
-        blobs_root = os.path.realpath(os.path.join(repo_dir, "blobs")) + os.sep
-        for path in [] if group.get("dangling") else group["files"]:
-            try:
-                if not os.path.islink(path):
-                    freed += os.lstat(path).st_size
-                os.unlink(path)
-            except OSError as exc:
-                log.warning("Could not remove HF cache entry %s: %s", path, exc)
-                continue
-            _prune_empty_dirs(os.path.dirname(path), os.path.join(repo_dir, "snapshots"))
+        if not group.get("dangling"):
+            freed += _unlink_snapshot_files(group, failures)
+        blobs_dir = os.path.join(repo_dir, "blobs")
         for blob, size in group["blobs"].items():
-            if os.path.realpath(blob).startswith(blobs_root):
-                candidate_blobs.setdefault(repo_dir, {})[os.path.realpath(blob)] = size
+            if _within(blob, blobs_dir) and not os.path.islink(blob):
+                candidate_blobs.setdefault(repo_dir, {})[blob] = (group["key"], size)
     for repo_dir, blobs in candidate_blobs.items():
         _groups, still_referenced = _scan_repo(repo_dir, onnx=True)
-        for blob, size in blobs.items():
+        for blob, (key, size) in blobs.items():
             if blob in still_referenced or not os.path.isfile(blob):
                 continue
             try:
@@ -285,35 +375,49 @@ def _delete_groups(groups):
                 freed += size
             except OSError as exc:
                 log.warning("Could not remove HF cache blob %s: %s", blob, exc)
+                failures.append({"key": key, "path": blob, "error": str(exc)})
     for repo_dir in dict.fromkeys(g["repo_dir"] for g in groups):
-        snapshots = os.path.join(repo_dir, "snapshots")
-        if os.path.isdir(repo_dir) and (
-            not os.path.isdir(snapshots) or not os.listdir(snapshots)
-        ):
-            shutil.rmtree(repo_dir, ignore_errors=True)
-            log.info("Removed empty HF cache repo %s", repo_dir)
-    return freed
+        _remove_repo_if_empty(repo_dir)
+    return freed, failures
+
+
+def _result(groups, freed, failures):
+    failed_keys = {f["key"] for f in failures}
+    return {
+        "removed": [g["key"] for g in groups if g["key"] not in failed_keys],
+        "failed": failures,
+        "freed": freed,
+    }
 
 
 def remove(keys, cache_dir=None, models_dir=None):
-    """Remove the entries named by ``keys``. Unknown keys raise ``KeyError``."""
+    """Remove the entries named by ``keys``.
+
+    Unknown keys raise ``KeyError``; a key whose entry backs an installed
+    model raises ``ValueError``, rechecked here rather than trusted from the
+    page, which may have inventoried before the install finished.
+    """
     _total, found = _collect(_cache_dir(cache_dir), _models_dir(models_dir))
     missing = [k for k in keys if k not in found]
     if missing:
         raise KeyError(missing[0])
     groups = [found[k] for k in dict.fromkeys(keys)]
-    freed = _delete_groups(groups)
-    log.info("Removed HF cache entries %s (%d bytes)", list(keys), freed)
-    return {"removed": [g["key"] for g in groups], "freed": freed}
+    installed = [g["key"] for g in groups if g["installed"]]
+    if installed:
+        raise ValueError(installed[0])
+    freed, failures = _delete_groups(groups)
+    log.info("Removed HF cache entries %s (%d bytes, %d failures)", list(keys), freed, len(failures))
+    return _result(groups, freed, failures)
 
 
 def remove_unused(cache_dir=None, models_dir=None):
     """Remove every entry that backs no installed model."""
     _total, found = _collect(_cache_dir(cache_dir), _models_dir(models_dir))
     groups = [g for g in found.values() if not g["installed"]]
-    freed = _delete_groups(groups)
-    log.info("Removed %d unused HF cache entries (%d bytes)", len(groups), freed)
-    return {"removed": [g["key"] for g in groups], "freed": freed}
+    freed, failures = _delete_groups(groups)
+    log.info("Removed %d unused HF cache entries (%d bytes, %d failures)",
+             len(groups), freed, len(failures))
+    return _result(groups, freed, failures)
 
 
 def purge_subfolder(subfolder, cache_dir=None, models_dir=None):
@@ -328,7 +432,7 @@ def purge_subfolder(subfolder, cache_dir=None, models_dir=None):
     group = found.get(f"{ONNX_REPO}/{subfolder}")
     if group is None:
         return 0
-    freed = _delete_groups([group])
+    freed, _failures = _delete_groups([group])
     log.info("Purged HF cache entry for %s (%d bytes)", subfolder, freed)
     return freed
 
@@ -348,5 +452,5 @@ def purge_model(model_id, cache_dir=None, models_dir=None):
         value = km.get(field, "")
         group = found.get(value.removeprefix("hf-hub:")) if value.startswith("hf-hub:") else None
         if group is not None and not group["installed"]:
-            freed += _delete_groups([group])
+            freed += _delete_groups([group])[0]
     return freed
