@@ -767,6 +767,7 @@ def create_models_blueprint(
 
             from huggingface_hub import hf_hub_download
             from models import ONNX_REPO
+            from services.hf_cache import DOWNLOAD_LOCK
 
             spec = PIPELINE_MODELS[model_id]
             subfolder = spec["subfolder"]
@@ -785,14 +786,17 @@ def create_models_blueprint(
                 MAX_RETRIES = 3
                 for attempt in range(1, MAX_RETRIES + 1):
                     try:
-                        cached = hf_hub_download(
-                            repo_id=ONNX_REPO,
-                            filename=filename,
-                            subfolder=subfolder,
-                        )
-                        dest = os.path.join(model_dir, filename)
-                        if cached != dest:
-                            shutil.copy2(cached, dest)
+                        # Held across fetch and copy so a Storage-page
+                        # cleanup cannot remove the blob in between.
+                        with DOWNLOAD_LOCK:
+                            cached = hf_hub_download(
+                                repo_id=ONNX_REPO,
+                                filename=filename,
+                                subfolder=subfolder,
+                            )
+                            dest = os.path.join(model_dir, filename)
+                            if cached != dest:
+                                shutil.copy2(cached, dest)
                         break
                     except Exception as exc:
                         if attempt == MAX_RETRIES:
@@ -1186,15 +1190,20 @@ def create_models_blueprint(
 
             import shutil
 
-            cached_path = hf_hub_download(
-                repo_id=ONNX_REPO,
-                filename="model.onnx",
-                subfolder="megadetector-v6",
-            )
+            from services.hf_cache import DOWNLOAD_LOCK
 
-            dest = MEGADETECTOR_ONNX_PATH
-            if cached_path != dest:
-                shutil.copy2(cached_path, dest)
+            # Held across fetch and copy so a Storage-page cleanup cannot
+            # remove the blob in between.
+            with DOWNLOAD_LOCK:
+                cached_path = hf_hub_download(
+                    repo_id=ONNX_REPO,
+                    filename="model.onnx",
+                    subfolder="megadetector-v6",
+                )
+
+                dest = MEGADETECTOR_ONNX_PATH
+                if cached_path != dest:
+                    shutil.copy2(cached_path, dest)
 
             if not os.path.isfile(dest):
                 raise RuntimeError("Download completed but ONNX file not found")

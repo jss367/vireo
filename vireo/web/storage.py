@@ -571,23 +571,28 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         body = request.get_json(silent=True) or {}
         if not isinstance(body, dict):
             return json_error("Expected a JSON object")
-        if body.get("unused"):
-            result = hf_cache_service.remove_unused()
-        else:
-            keys = body.get("keys")
-            if not isinstance(keys, list) or not keys or not all(
-                isinstance(k, str) for k in keys
-            ):
-                return json_error("keys (a list of entry keys) or unused: true required")
-            try:
+        keys = body.get("keys")
+        if not body.get("unused") and (
+            not isinstance(keys, list) or not keys
+            or not all(isinstance(k, str) for k in keys)
+        ):
+            return json_error("keys (a list of entry keys) or unused: true required")
+        try:
+            if body.get("unused"):
+                result = hf_cache_service.remove_unused()
+            else:
                 result = hf_cache_service.remove(keys)
-            except KeyError as exc:
-                return json_error(f"Unknown cache entry: {exc.args[0]}", 404)
-            except ValueError as exc:
-                return json_error(
-                    f"{exc.args[0]} backs an installed model; remove the model in "
-                    "Settings → Models to free it", 409,
-                )
+        except KeyError as exc:
+            return json_error(f"Unknown cache entry: {exc.args[0]}", 404)
+        except ValueError as exc:
+            return json_error(
+                f"{exc.args[0]} backs an installed model; remove the model in "
+                "Settings → Models to free it", 409,
+            )
+        except hf_cache_service.DownloadInProgress as exc:
+            return json_error(
+                f"A model download is in progress ({exc}); try again when it finishes", 409,
+            )
         # ``ok`` is the deletion's own verdict: a failed path stays listed in the
         # fresh inventory, and the page must not toast success over it.
         return jsonify({

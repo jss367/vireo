@@ -23,13 +23,21 @@ Sizes are reclaimable bytes: a blob two entries share (an identical
 ``unused_size`` only when no installed entry also references it, because
 deletion keeps any blob a remaining snapshot still links.
 
+An entry is ``installed`` when a model directory exists for it, even an
+empty one: every download creates the directory before fetching, so the
+directory is the user's intent and the cache entry is what will fill it.
+
 Deletion never follows a symlink: a symlinked repository, ``snapshots`` or
-revision directory is ignored, and every path is checked to sit under the
-real repository before it is unlinked, so a malformed cache cannot steer a
-removal outside the hub cache. A repository directory is only removed once
-it holds no snapshot, no blob (including a partial ``.incomplete`` download)
-and no download lock, so an in-flight download is never pulled out from
-under ``hf_hub_download``.
+revision directory is ignored, and on POSIX each unlink walks from the
+validated ``snapshots/`` or ``blobs/`` directory descriptor with
+``O_NOFOLLOW`` (``_unlink_within``), so a directory swapped for a symlink
+between the check and the unlink cannot redirect it (Windows has no
+``dir_fd``; there the pathname checks are the guard). In-process downloads
+hold ``DOWNLOAD_LOCK`` across fetch-and-copy and cleanup takes it without
+blocking, answering "a download is running" instead; another process's
+download shows as hub lock files and is refused the same way. A repository
+directory is only removed once it holds no snapshot, no blob (including a
+partial ``.incomplete`` download) and no download lock.
 """
 
 from __future__ import annotations
@@ -37,11 +45,20 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import threading
 import time
 
 log = logging.getLogger(__name__)
 
 UNREFERENCED_SUFFIX = "#unreferenced"
+# Held by every in-process model download across ``hf_hub_download`` and the
+# copy into the models directory, and taken (non-blocking) by cleanup.
+DOWNLOAD_LOCK = threading.RLock()
+
+
+class DownloadInProgress(RuntimeError):
+    """Cleanup refused because a model download may be writing the cache."""
+
 # A partial download HF can still resume. Older than this it is abandoned.
 INCOMPLETE_GRACE_SECS = 24 * 3600
 
@@ -85,10 +102,9 @@ def _onnx_repo_dir_name():
     return "models--" + ONNX_REPO.replace("/", "--")
 
 
-def _has_files(path):
-    if not path or not os.path.isdir(path):
-        return False
-    return any(files for _root, _dirs, files in os.walk(path))
+def _is_install_dir(path):
+    """A model directory, even an empty one a download has just created."""
+    return bool(path) and os.path.isdir(path)
 
 
 def _within(path, root):
@@ -241,7 +257,7 @@ def _collect(cache_dir, models_dir):
                 key, name, candidates = repo, f"{repo}: repository metadata", []
             else:
                 key, name, candidates = repo, repo, by_repo.get(repo, [])
-            install = next((d for d in candidates if _has_files(d)), None)
+            install = next((d for d in candidates if _is_install_dir(d)), None)
             found[key] = {
                 "key": key, "name": name, "repo_dir": repo_dir,
                 "files": data["files"], "blobs": data["blobs"],
@@ -302,15 +318,12 @@ def _prune_empty_dirs(path, stop):
         path = os.path.dirname(path)
 
 
-def _download_in_progress(repo_dir):
-    """True while ``hf_hub_download`` may still be writing into this repo.
+def _hub_locked(repo_dir):
+    """True while another process holds a hub download lock for this repo.
 
-    A partial ``.incomplete`` blob is a resumable download, and the hub keeps
-    a per-file lock under ``<cache>/.locks/<repo>/`` for the duration of a
-    download. Either one means the repository must stay.
+    ``hf_hub_download`` keeps a per-file lock under ``<cache>/.locks/<repo>/``
+    for the duration of a download.
     """
-    if any(p.endswith(".incomplete") for p in _blob_files(repo_dir)):
-        return True
     locks = os.path.join(os.path.dirname(repo_dir), ".locks", os.path.basename(repo_dir))
     return os.path.isdir(locks) and bool(os.listdir(locks))
 
@@ -321,10 +334,45 @@ def _remove_repo_if_empty(repo_dir):
     snapshots = os.path.join(repo_dir, "snapshots")
     if os.path.isdir(snapshots) and os.listdir(snapshots):
         return
-    if _blob_files(repo_dir) or _download_in_progress(repo_dir):
+    # Any blob, a resumable ``.incomplete`` partial included, keeps the repo.
+    if _blob_files(repo_dir) or _hub_locked(repo_dir):
         return
     shutil.rmtree(repo_dir, ignore_errors=True)
     log.info("Removed empty HF cache repo %s", repo_dir)
+
+
+_DIR_FD_UNLINK = (
+    {os.open, os.unlink} <= os.supports_dir_fd
+    and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+)
+
+
+def _unlink_within(root, path):
+    """Unlink ``path`` beneath ``root`` without following a symlinked directory.
+
+    On POSIX this opens ``root`` and each intermediate directory with
+    ``O_NOFOLLOW`` and unlinks by name relative to that descriptor, so a
+    directory swapped for a symlink after the pathname checks cannot redirect
+    the unlink outside the cache. ``path`` itself may be a symlink (a snapshot
+    entry); only the link is removed.
+    """
+    rel = os.path.relpath(path, root)
+    parts = rel.split(os.sep)
+    if os.path.isabs(rel) or ".." in parts or "" in parts:
+        raise OSError(f"{path} is not inside {root}")
+    if not _DIR_FD_UNLINK:  # Windows: pathname checks are the guard
+        os.unlink(path)
+        return
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(root, flags)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        os.unlink(parts[-1], dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 def _unlink_snapshot_files(group, failures):
@@ -338,7 +386,7 @@ def _unlink_snapshot_files(group, failures):
             continue
         try:
             size = 0 if os.path.islink(path) else os.lstat(path).st_size
-            os.unlink(path)
+            _unlink_within(snapshots, path)
             freed += size
         except OSError as exc:
             log.warning("Could not remove HF cache entry %s: %s", path, exc)
@@ -353,10 +401,26 @@ def _delete_groups(groups):
 
     Returns ``(freed_bytes, failures)``; a failure names the key and path a
     deletion could not complete, so callers never report it as removed.
+    Raises ``DownloadInProgress`` without deleting anything while a download
+    holds ``DOWNLOAD_LOCK`` or a hub lock file.
     """
+    if not DOWNLOAD_LOCK.acquire(blocking=False):
+        raise DownloadInProgress("a model download is in progress")
+    try:
+        locked = [g["repo_dir"] for g in groups if _hub_locked(g["repo_dir"])]
+        if locked:
+            raise DownloadInProgress(f"a download holds a hub lock on {locked[0]}")
+        return _delete_groups_locked(groups)
+    finally:
+        DOWNLOAD_LOCK.release()
+
+
+def _delete_groups_locked(groups):
     freed = 0
     failures: list[dict] = []
-    candidate_blobs: dict[str, dict[str, tuple[str, int]]] = {}
+    # repo_dir -> blob -> (owner keys, size); a blob two selected groups share
+    # has every owner recorded so a failed unlink is attributed to each.
+    candidate_blobs: dict[str, dict[str, tuple[set[str], int]]] = {}
     for group in groups:
         repo_dir = group["repo_dir"]
         if not group.get("dangling"):
@@ -364,18 +428,22 @@ def _delete_groups(groups):
         blobs_dir = os.path.join(repo_dir, "blobs")
         for blob, size in group["blobs"].items():
             if _within(blob, blobs_dir) and not os.path.islink(blob):
-                candidate_blobs.setdefault(repo_dir, {})[blob] = (group["key"], size)
+                owners, _size = candidate_blobs.setdefault(repo_dir, {}).setdefault(
+                    blob, (set(), size))
+                owners.add(group["key"])
     for repo_dir, blobs in candidate_blobs.items():
         _groups, still_referenced = _scan_repo(repo_dir, onnx=True)
-        for blob, (key, size) in blobs.items():
+        blobs_root = os.path.realpath(os.path.join(repo_dir, "blobs"))
+        for blob, (owners, size) in blobs.items():
             if blob in still_referenced or not os.path.isfile(blob):
                 continue
             try:
-                os.unlink(blob)
+                _unlink_within(blobs_root, blob)
                 freed += size
             except OSError as exc:
                 log.warning("Could not remove HF cache blob %s: %s", blob, exc)
-                failures.append({"key": key, "path": blob, "error": str(exc)})
+                failures.extend(
+                    {"key": key, "path": blob, "error": str(exc)} for key in sorted(owners))
     for repo_dir in dict.fromkeys(g["repo_dir"] for g in groups):
         _remove_repo_if_empty(repo_dir)
     return freed, failures

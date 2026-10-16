@@ -130,15 +130,17 @@ def test_remove_by_key_rechecks_installed_status_server_side(seeded):
 
 
 def test_remove_reports_a_failed_deletion_instead_of_success(seeded, monkeypatch):
-    app, blobs = seeded
-    real_unlink = os.unlink
+    from services import hf_cache
 
-    def unlink(path, *args, **kwargs):
+    app, blobs = seeded
+    real = hf_cache._unlink_within
+
+    def unlink_within(root, path):
         if os.path.realpath(path) == os.path.realpath(blobs["orphan"]):
             raise PermissionError(13, "Operation not permitted", str(path))
-        return real_unlink(path, *args, **kwargs)
+        return real(root, path)
 
-    monkeypatch.setattr(os, "unlink", unlink)
+    monkeypatch.setattr(hf_cache, "_unlink_within", unlink_within)
     resp = app.test_client().post("/api/storage/hf-cache/remove", json={"unused": True})
     assert resp.status_code == 200
     body = resp.get_json()
@@ -150,3 +152,29 @@ def test_remove_reports_a_failed_deletion_instead_of_success(seeded, monkeypatch
         "jss367/vireo-onnx-models/bioclip-2.5-vith14",
         "jss367/vireo-onnx-models/dinov2-vit-b14",
     ]
+
+
+def test_remove_answers_409_while_a_download_is_in_progress(seeded):
+    from services import hf_cache
+
+    app, blobs = seeded
+    import threading
+
+    held, release = threading.Event(), threading.Event()
+
+    def downloader():
+        with hf_cache.DOWNLOAD_LOCK:
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=downloader)
+    t.start()
+    held.wait(10)
+    try:
+        resp = app.test_client().post("/api/storage/hf-cache/remove", json={"unused": True})
+    finally:
+        release.set()
+        t.join(10)
+    assert resp.status_code == 409
+    assert "download is in progress" in resp.get_json()["error"]
+    assert blobs["orphan"].exists()

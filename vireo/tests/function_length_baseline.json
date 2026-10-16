@@ -92,7 +92,7 @@
   "model_cache.py:ModelCache.acquire": 137,
   "model_verify.py:verify_all_models": 114,
   "models.py:_download_and_verify_file": 104,
-  "models.py:_hf_download_with_retry": 163,
+  "models.py:_hf_download_with_retry": 124,
   "models.py:download_model": 245,
   "models.py:ensure_timm_label_descriptions": 159,
   "move.py:_FolderMove.copy_tree": 125,

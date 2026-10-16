@@ -361,18 +361,22 @@ def test_last_snapshot_removal_keeps_the_repo_while_a_download_is_in_flight(hub)
     assert (hub.root / ONNX_DIR / "blobs").is_dir()
 
 
-def test_last_snapshot_removal_respects_hub_download_locks(hub):
+def test_repo_dir_survives_when_only_a_hub_lock_remains(hub):
+    """``_remove_repo_if_empty`` leaves a repo another process is downloading into."""
     from services import hf_cache
 
-    hub.add("sam2-small/mask_decoder.onnx", b"m" * 400)
+    repo = hub.root / ONNX_DIR
+    (repo / "snapshots").mkdir(parents=True)
+    (repo / "blobs").mkdir()
     locks = hub.root / ".locks" / ONNX_DIR
     locks.mkdir(parents=True)
     (locks / "deadbeef.lock").write_bytes(b"")
 
-    hf_cache.remove(["jss367/vireo-onnx-models/sam2-small"])
-
-    assert (hub.root / ONNX_DIR).is_dir()
-    assert not (hub.root / ONNX_DIR / "snapshots" / "rev1").exists()
+    hf_cache._remove_repo_if_empty(str(repo))
+    assert repo.is_dir()
+    (locks / "deadbeef.lock").unlink()
+    hf_cache._remove_repo_if_empty(str(repo))
+    assert not repo.exists()
 
 
 def test_deletion_failures_are_reported_not_claimed_as_removed(hub, monkeypatch):
@@ -380,14 +384,14 @@ def test_deletion_failures_are_reported_not_claimed_as_removed(hub, monkeypatch)
 
     big = hub.add("bioclip-2.5-vith14/image_encoder.onnx.data", b"b" * 5000)
     small = hub.add("sam2-small/mask_decoder.onnx", b"m" * 10)
-    real_unlink = os.unlink
+    real = hf_cache._unlink_within
 
-    def unlink(path, *args, **kwargs):
+    def unlink_within(root, path):
         if os.path.realpath(path) == os.path.realpath(big):
             raise PermissionError(13, "Operation not permitted", str(path))
-        return real_unlink(path, *args, **kwargs)
+        return real(root, path)
 
-    monkeypatch.setattr(os, "unlink", unlink)
+    monkeypatch.setattr(hf_cache, "_unlink_within", unlink_within)
 
     result = hf_cache.remove_unused()
 
@@ -396,3 +400,116 @@ def test_deletion_failures_are_reported_not_claimed_as_removed(hub, monkeypatch)
     assert [f["key"] for f in result["failed"]] == ["jss367/vireo-onnx-models/bioclip-2.5-vith14"]
     assert "Operation not permitted" in result["failed"][0]["error"]
     assert big.exists() and not small.exists()
+
+
+def test_an_empty_model_directory_marks_its_cache_entry_installed(hub, tmp_path):
+    """Every download creates the directory before fetching, so an empty one
+    is a download in flight (or one to repair), not an orphan."""
+    from services import hf_cache
+
+    hub.add("bioclip-2.5-vith14/image_encoder.onnx.data", b"b" * 500)
+    (tmp_path / "models" / "bioclip-2.5-vith14").mkdir(parents=True)
+
+    entry = _entries(hf_cache.inventory())["jss367/vireo-onnx-models/bioclip-2.5-vith14"]
+    assert entry["installed"] is True
+
+
+def test_cleanup_is_refused_while_a_download_holds_the_lock(hub):
+    import threading
+
+    from services import hf_cache
+
+    blob = hub.add("bioclip-2.5-vith14/image_encoder.onnx.data", b"b" * 500)
+    held = threading.Event()
+    release = threading.Event()
+
+    def downloader():
+        with hf_cache.DOWNLOAD_LOCK:
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=downloader)
+    t.start()
+    held.wait(10)
+    try:
+        with pytest.raises(hf_cache.DownloadInProgress):
+            hf_cache.remove_unused()
+        assert blob.exists()
+    finally:
+        release.set()
+        t.join(10)
+    assert hf_cache.remove_unused()["freed"] == 500
+
+
+def test_cleanup_is_refused_while_another_process_holds_a_hub_lock(hub):
+    from services import hf_cache
+
+    blob = hub.add("bioclip-2.5-vith14/image_encoder.onnx.data", b"b" * 500)
+    locks = hub.root / ".locks" / ONNX_DIR
+    locks.mkdir(parents=True)
+    (locks / "deadbeef.lock").write_bytes(b"")
+
+    with pytest.raises(hf_cache.DownloadInProgress):
+        hf_cache.remove(["jss367/vireo-onnx-models/bioclip-2.5-vith14"])
+    assert blob.exists()
+    assert (hub.root / ONNX_DIR / "snapshots" / "rev1" / "bioclip-2.5-vith14").exists()
+
+
+def test_failed_shared_blob_is_attributed_to_every_selected_owner(hub, monkeypatch):
+    from services import hf_cache
+
+    shared = hub.add("bioclip-2.5-vith14/config.json", b"{}")
+    hub.add("timm-eva02-large-inat21/config.json", b"{}")
+    real = hf_cache._unlink_within
+
+    def unlink_within(root, path):
+        if os.path.realpath(path) == os.path.realpath(shared):
+            raise PermissionError(13, "Operation not permitted", path)
+        return real(root, path)
+
+    monkeypatch.setattr(hf_cache, "_unlink_within", unlink_within)
+
+    result = hf_cache.remove_unused()
+
+    assert result["removed"] == []
+    assert sorted(f["key"] for f in result["failed"]) == [
+        "jss367/vireo-onnx-models/bioclip-2.5-vith14",
+        "jss367/vireo-onnx-models/timm-eva02-large-inat21",
+    ]
+
+
+def test_unlink_within_refuses_paths_that_escape_the_root(tmp_path):
+    from services import hf_cache
+
+    root = tmp_path / "snapshots"
+    (root / "rev" / "sub").mkdir(parents=True)
+    inner = root / "rev" / "sub" / "file.bin"
+    inner.write_bytes(b"x")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"x")
+
+    hf_cache._unlink_within(str(root), str(inner))
+    assert not inner.exists()
+    with pytest.raises(OSError):
+        hf_cache._unlink_within(str(root), str(outside))
+    with pytest.raises(OSError):
+        hf_cache._unlink_within(str(root), str(root / "rev" / ".." / ".." / "outside.bin"))
+    assert outside.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="dir_fd unlink is POSIX-only")
+def test_unlink_within_does_not_follow_a_directory_swapped_for_a_symlink(tmp_path):
+    """The containment decision survives a parent turning into a symlink."""
+    from services import hf_cache
+
+    root = tmp_path / "snapshots"
+    (root / "rev").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    victim = elsewhere / "model.onnx"
+    victim.write_bytes(b"v")
+    _symlink(elsewhere, root / "rev" / "sam2-small")
+
+    with pytest.raises(OSError):
+        hf_cache._unlink_within(str(root), str(root / "rev" / "sam2-small" / "model.onnx"))
+    assert victim.exists()

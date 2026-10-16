@@ -972,53 +972,14 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
                     repo_id, label_path, attempt,
                 )
 
-            cached_path = hf_hub_download(**kwargs)
+            # Hold the cache lock across fetch and copy so a Storage-page
+            # cleanup cannot remove the cached blob between the two (it
+            # answers "a download is in progress" instead).
+            from services.hf_cache import DOWNLOAD_LOCK
 
-            # Copy from cache to our models directory.  On APFS shutil.copy2
-            # uses clonefile() (copy-on-write metadata-only), so cloning a
-            # 1+ GB blob takes milliseconds and shares disk pages with the
-            # cache until either side is modified.
-            dest_path = os.path.join(local_dir, filename)
-            # filename can be repo-relative (e.g. "onnx/model.onnx" for
-            # custom HF repos with the standard onnx/ layout) — create the
-            # full destination directory, not just local_dir, or copy2
-            # raises FileNotFoundError that the retry loop misclassifies
-            # as a connection failure.
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            if cached_path != dest_path:
-                if _needs_atomic_publish(filename):
-                    # Publish atomically. copy2 straight onto dest_path
-                    # makes the destination visible while it is still
-                    # being written, so a concurrent reader (e.g. the
-                    # background label_descriptions heal racing a
-                    # TimmClassifier init) can json.load a torn file, and
-                    # a process exit mid-copy leaves a truncated file
-                    # whose mere existence suppresses future repairs.
-                    # Copy beside it, then os.replace (atomic on POSIX
-                    # and Windows) so readers only ever see the whole
-                    # file or no file. Cheap here: these are small
-                    # metadata files — see _needs_atomic_publish for why
-                    # the multi-GB weight artifacts must not do this.
-                    # The staging name is unique per invocation (see
-                    # _staged_sibling) so two concurrent publishers of the
-                    # same file never share one staging inode.
-                    with _staged_sibling(dest_path) as tmp_path:
-                        shutil.copy2(cached_path, tmp_path)
-                        replace_file(tmp_path, dest_path)
-                else:
-                    # Weights: copy straight into place so a download
-                    # never needs 2x the model size on disk. A failed
-                    # copy still leaves nothing behind — copy2 has
-                    # already truncated any previous copy, so the
-                    # half-written remains are worthless and would only
-                    # look like a healthy artifact to the next
-                    # completeness check.
-                    try:
-                        shutil.copy2(cached_path, dest_path)
-                    except BaseException:
-                        with contextlib.suppress(OSError):
-                            os.unlink(dest_path)
-                        raise
+            with DOWNLOAD_LOCK:
+                dest_path = _copy_from_hub_cache(
+                    hf_hub_download(**kwargs), local_dir, filename)
 
             if from_cache:
                 size_mb = os.path.getsize(dest_path) / 1024 / 1024
@@ -1047,6 +1008,57 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
             if progress_callback:
                 progress_callback(f"Connection error, retrying in {wait}s...")
             _time.sleep(wait)
+
+
+def _copy_from_hub_cache(cached_path, local_dir, filename):
+    """Clone a hub-cache file into the models directory; return the destination.
+
+    On APFS shutil.copy2 uses clonefile() (copy-on-write, metadata-only), so
+    cloning a 1+ GB blob takes milliseconds and shares disk pages with the
+    cache until either side is modified.
+    """
+    dest_path = os.path.join(local_dir, filename)
+    # filename can be repo-relative (e.g. "onnx/model.onnx" for
+    # custom HF repos with the standard onnx/ layout) — create the
+    # full destination directory, not just local_dir, or copy2
+    # raises FileNotFoundError that the retry loop misclassifies
+    # as a connection failure.
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    if cached_path != dest_path:
+        if _needs_atomic_publish(filename):
+            # Publish atomically. copy2 straight onto dest_path
+            # makes the destination visible while it is still
+            # being written, so a concurrent reader (e.g. the
+            # background label_descriptions heal racing a
+            # TimmClassifier init) can json.load a torn file, and
+            # a process exit mid-copy leaves a truncated file
+            # whose mere existence suppresses future repairs.
+            # Copy beside it, then os.replace (atomic on POSIX
+            # and Windows) so readers only ever see the whole
+            # file or no file. Cheap here: these are small
+            # metadata files — see _needs_atomic_publish for why
+            # the multi-GB weight artifacts must not do this.
+            # The staging name is unique per invocation (see
+            # _staged_sibling) so two concurrent publishers of the
+            # same file never share one staging inode.
+            with _staged_sibling(dest_path) as tmp_path:
+                shutil.copy2(cached_path, tmp_path)
+                replace_file(tmp_path, dest_path)
+        else:
+            # Weights: copy straight into place so a download
+            # never needs 2x the model size on disk. A failed
+            # copy still leaves nothing behind — copy2 has
+            # already truncated any previous copy, so the
+            # half-written remains are worthless and would only
+            # look like a healthy artifact to the next
+            # completeness check.
+            try:
+                shutil.copy2(cached_path, dest_path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(dest_path)
+                raise
+    return dest_path
 
 
 def download_model(model_id, progress_callback=None):
