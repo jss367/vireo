@@ -51,7 +51,6 @@ import json
 
 from keyword_normalization import keyword_match_key
 
-
 # ``get_highlights(eligible_only=True)``: the joins and filter that keep only
 # highlights whose photo is reachable, not rejected and still in the bucket.
 _HIGHLIGHT_ELIGIBILITY_JOINS = """
