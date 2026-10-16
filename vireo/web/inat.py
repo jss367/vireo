@@ -54,6 +54,344 @@ def _prediction_scientific_name(db, pred):
     return resolved_prediction_taxonomy(pred, SpeciesResolver(db=db))["scientific_name"]
 
 
+
+def _normalize_export_submissions(submissions):
+    """Coerce ``/api/inat/export`` submissions; ``(items, error message)``."""
+    normalized_submissions = []
+    for item in submissions:
+        if not isinstance(item, dict):
+            return None, "each submission must be an object"
+        raw_photo_id = item.get("photo_id")
+        if isinstance(raw_photo_id, (bool, float)):
+            return None, "photo_id must be an integer"
+        try:
+            photo_id = int(raw_photo_id)
+        except (TypeError, ValueError):
+            return None, "photo_id must be an integer"
+        normalized = dict(item)
+        normalized["photo_id"] = photo_id
+        if normalized.get("include_location", False):
+            latitude = normalized.get("latitude")
+            longitude = normalized.get("longitude")
+            if isinstance(latitude, bool) or isinstance(longitude, bool):
+                return None, "latitude and longitude must be finite numbers"
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except (TypeError, ValueError):
+                return None, "latitude and longitude must be finite numbers"
+            if not math.isfinite(latitude) or not math.isfinite(longitude):
+                return None, "latitude and longitude must be finite numbers"
+            if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+                return None, "latitude or longitude is out of range"
+            normalized["latitude"] = latitude
+            normalized["longitude"] = longitude
+        normalized_submissions.append(normalized)
+    return normalized_submissions, None
+
+
+def _inat_export_metadata(item):
+    """The metadata an export writes: only the fields the user ticked."""
+    metadata = {}
+    if item.get("include_taxon", False):
+        taxon_name = str(
+            item.get("taxon_name") or ""
+        ).strip()
+        if taxon_name:
+            metadata["taxon_name"] = taxon_name
+    if item.get("include_date", False):
+        observed_on = str(
+            item.get("observed_on") or ""
+        ).strip()
+        if observed_on:
+            # The modal discloses a calendar date, not capture
+            # time or timezone, so export only that snapshot.
+            metadata["timestamp"] = observed_on[:10]
+    if item.get("include_location", False):
+        latitude = item.get("latitude")
+        longitude = item.get("longitude")
+        if (
+            latitude not in (None, "")
+            and longitude not in (None, "")
+        ):
+            metadata["latitude"] = latitude
+            metadata["longitude"] = longitude
+    if item.get("include_description", False):
+        description = str(
+            item.get("description") or ""
+        ).strip()
+        if description:
+            metadata["description"] = description[:10000]
+    return metadata
+
+
+def _inat_export_work(
+    ctx, submissions, *, destination, vireo_dir, quality, wc_max_size,
+    developed_dir, reveal,
+):
+    """The ``inat-export`` job's work function over normalized submissions."""
+    from inat_export import (
+        InatExportError,
+        export_inat_photo,
+        reveal_inat_exports,
+    )
+
+    def work(job):
+        thread_db = ctx.thread_db()
+        exported = []
+        errors = []
+        total = len(submissions)
+        job["progress"]["total"] = total
+        try:
+            for index, item in enumerate(submissions, start=1):
+                if ctx.runner.is_cancelled(job["id"]):
+                    break
+                photo_id = item["photo_id"]
+                photo = thread_db.get_photo(
+                    photo_id, verify_workspace=True,
+                )
+                if not photo:
+                    errors.append({
+                        "photo_id": photo_id,
+                        "error": "Photo not found",
+                    })
+                    job["progress"]["current"] = index
+                    ctx.runner.push_event(job["id"], "progress", {
+                        "current": index,
+                        "total": total,
+                        "current_file": "",
+                        "phase": "Exporting for iNaturalist",
+                    })
+                    continue
+
+                metadata = _inat_export_metadata(item)
+
+                try:
+                    path = export_inat_photo(
+                        thread_db,
+                        vireo_dir,
+                        photo_id,
+                        destination,
+                        metadata,
+                        quality=quality,
+                        working_copy_max_size=wc_max_size,
+                        developed_dir=developed_dir,
+                    )
+                    exported.append({
+                        "photo_id": photo_id,
+                        "path": path,
+                        "filename": os.path.basename(path),
+                    })
+                except (InatExportError, OSError, ValueError) as exc:
+                    # ``filename`` names the photo in the job's error
+                    # list ("bird.jpg: render failed"), which the runner
+                    # builds from these entries.
+                    errors.append({
+                        "photo_id": photo_id,
+                        "filename": photo["filename"],
+                        "error": str(exc),
+                    })
+                finally:
+                    job["progress"]["current"] = index
+                    job["progress"]["current_file"] = photo["filename"]
+                    ctx.runner.push_event(job["id"], "progress", {
+                        "current": index,
+                        "total": total,
+                        "current_file": photo["filename"],
+                        "phase": "Exporting for iNaturalist",
+                    })
+
+            revealed = False
+            cancelled = ctx.runner.is_cancelled(job["id"])
+            if exported and reveal and not cancelled:
+                revealed = reveal_inat_exports(
+                    [item["path"] for item in exported], destination,
+                )
+            # Like export and move: a photo that failed to export fails
+            # the job, so 5 of 10 exported doesn't read as "completed".
+            # The counts stay in the result for the summary and modal.
+            return {
+                "ok": not errors,
+                "exported": exported,
+                "errors": errors,
+                "destination": destination,
+                "revealed": revealed,
+            }
+        finally:
+            thread_db.close()
+
+    return work
+
+
+
+def _inat_retry_load_from_original(
+    img, source_path, using_working_copy, fallback_path, load_kwargs,
+    expected_meta,
+):
+    """Retry a failed working-copy decode from the original.
+
+    Returns ``(img, source_path, using_working_copy)``; on a successful
+    retry ``expected_meta`` is re-keyed to the original.
+    """
+    from image_loader import load_image
+
+    if img is None and using_working_copy and fallback_path and (
+        os.path.isfile(fallback_path)
+        and os.path.abspath(fallback_path)
+        != os.path.abspath(source_path)
+    ):
+        # Working copy was evicted between validation and decode;
+        # retry from the original before the companion fallback so
+        # RAW primaries still use the highlight-preserving decode.
+        retry_img = load_image(
+            fallback_path, max_size=None, **load_kwargs,
+        )
+        if retry_img is not None:
+            source_mtime = expected_meta["source_mtime"]
+            with contextlib.suppress(OSError):
+                source_mtime = os.path.getmtime(fallback_path)
+            expected_meta["source_path"] = fallback_path
+            expected_meta["source_mtime"] = source_mtime
+            return retry_img, fallback_path, False
+    return img, source_path, using_working_copy
+
+
+def _inat_companion_fallback(photo, img, source_path, primary_is_raw):
+    """Swap a failed or undersized RAW decode for the companion JPEG.
+
+    Returns the image to render (possibly ``img`` itself, possibly None);
+    an ``img`` that is replaced is closed.
+    """
+    from image_loader import load_image
+
+    expected_w, expected_h = 0, 0
+    needs_companion = False
+    if primary_is_raw:
+        # libraw may return the embedded JPEG when demosaic fails — see
+        # _external_edit_handoff_path for the same gate. Without this an
+        # unsupported RAW would upload clipped/undersized pixels to
+        # iNaturalist even when a usable sidecar JPEG exists. Both axes
+        # checked via the shared helper.
+        expected_w, expected_h = _recipe_source_dimensions(photo)
+        needs_companion = img is None or _image_is_smaller_than_expected(
+            img, expected_w, expected_h,
+        )
+    if needs_companion:
+        # Mirror _external_edit_handoff_path: libraw may fail to decode
+        # this RAW variant, but the full-size companion JPEG can still
+        # carry the recipe for iNaturalist. Without this fallback the
+        # upload silently fails for RAW+JPEG pairs whose RAW is
+        # unsupported. Cache key stays on the RAW source — see comment
+        # in _external_edit_handoff_path for the contract trade-off.
+        companion_path = photo["companion_path"]
+        folder_path = photo["folder_path"]
+        if folder_path and companion_path:
+            companion_abs = os.path.join(folder_path, companion_path)
+            if (
+                os.path.exists(companion_abs)
+                and os.path.abspath(companion_abs)
+                != os.path.abspath(source_path)
+            ):
+                companion_img = load_image(companion_abs, max_size=None)
+                # Prefer companion when it covers the expected size on
+                # both axes — a long-edge-only check misses cases like a
+                # 6000x3376 embedded preview "tying" a 6000x4000 sidecar
+                # and losing the short-edge content.
+                if _companion_image_can_replace_raw_result(
+                    companion_img, img, expected_w, expected_h,
+                ):
+                    if img is None:
+                        log.info(
+                            "iNat upload RAW decode failed for photo %s; "
+                            "falling back to companion JPEG %s",
+                            photo["id"], companion_abs,
+                        )
+                    else:
+                        log.info(
+                            "iNat upload RAW decode fell back to "
+                            "undersized embedded JPEG (%dx%d) for "
+                            "photo %s; using companion JPEG %s (%dx%d)",
+                            img.size[0], img.size[1], photo["id"],
+                            companion_abs,
+                            companion_img.size[0],
+                            companion_img.size[1],
+                        )
+                        img.close()
+                    img = companion_img
+                elif companion_img is not None:
+                    companion_img.close()
+    return img
+
+
+def _write_inat_upload_render(
+    img, recipe, photo, vireo_dir, out_dir, out_path, meta_path, expected_meta,
+):
+    """Render ``recipe`` onto ``img`` and publish the JPEG and its cache key.
+
+    Closes ``img`` (and the render) whether or not the write succeeds.
+    """
+    import config as cfg
+    import local_masks as _local_masks
+    from image_edits import apply_recipe_to_loaded_image
+
+    rendered = None
+    tmp_path = None
+    fd = None
+    try:
+        rendered = apply_recipe_to_loaded_image(
+            img, recipe,
+            camera_metadata=photo,
+            native_size=_recipe_source_dimensions(photo),
+            local_mask=_local_masks.load_snapshot(
+                vireo_dir, photo["id"], recipe,
+            ),
+        )
+        quality = cfg.load().get("working_copy_quality", 92)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
+        )
+        os.close(fd)
+        fd = None
+        rendered.save(tmp_path, format="JPEG", quality=quality)
+        replace_file(tmp_path, out_path)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(expected_meta, f, sort_keys=True)
+    except Exception:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
+            if tmp_path:
+                os.unlink(tmp_path)
+        raise
+    finally:
+        if rendered is not None:
+            rendered.close()
+        if rendered is not img:
+            img.close()
+
+
+
+def _observation_defaults(db, photo, photo_id, data, pred):
+    """``(taxon, observed_on, photo_lat, photo_lng)`` for one observation.
+
+    ``data`` overrides the prediction's taxon and the capture date; the
+    photo's effective location is returned for the caller to override.
+    """
+    default_taxon = (
+        (_prediction_scientific_name(db, pred) or pred["species"]) if pred else None
+    )
+    taxon = data.get("taxon_name", default_taxon)
+    observed_on = (
+        data["observed_on"]
+        if "observed_on" in data
+        else (photo["timestamp"][:10] if photo["timestamp"] else None)
+    )
+    loc = db.get_effective_photo_location(photo_id)
+    photo_lat = loc["latitude"] if loc else None
+    photo_lng = loc["longitude"] if loc else None
+    return taxon, observed_on, photo_lat, photo_lng
+
 class InatTokenGeneration:
     """Per-app counter that lets only the newest token write win.
 
@@ -226,11 +564,6 @@ def create_inat_blueprint(
     def api_inat_export(ctx):
         """Export edited JPEGs with only the selected iNaturalist metadata."""
         import config as cfg
-        from inat_export import (
-            InatExportError,
-            export_inat_photo,
-            reveal_inat_exports,
-        )
 
         body = request.get_json(silent=True) or {}
         destination = str(body.get("destination") or "").strip()
@@ -243,45 +576,9 @@ def create_inat_blueprint(
             return json_error("submissions array is required")
         if len(submissions) > MAX_SELECTION_PHOTOS:
             return json_error("too many photos in selection", 400)
-        normalized_submissions = []
-        for item in submissions:
-            if not isinstance(item, dict):
-                return json_error("each submission must be an object")
-            raw_photo_id = item.get("photo_id")
-            if isinstance(raw_photo_id, (bool, float)):
-                return json_error("photo_id must be an integer")
-            try:
-                photo_id = int(raw_photo_id)
-            except (TypeError, ValueError):
-                return json_error("photo_id must be an integer")
-            normalized = dict(item)
-            normalized["photo_id"] = photo_id
-            if normalized.get("include_location", False):
-                latitude = normalized.get("latitude")
-                longitude = normalized.get("longitude")
-                if isinstance(latitude, bool) or isinstance(longitude, bool):
-                    return json_error(
-                        "latitude and longitude must be finite numbers",
-                    )
-                try:
-                    latitude = float(latitude)
-                    longitude = float(longitude)
-                except (TypeError, ValueError):
-                    return json_error(
-                        "latitude and longitude must be finite numbers",
-                    )
-                if not math.isfinite(latitude) or not math.isfinite(longitude):
-                    return json_error(
-                        "latitude and longitude must be finite numbers",
-                    )
-                if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
-                    return json_error(
-                        "latitude or longitude is out of range",
-                    )
-                normalized["latitude"] = latitude
-                normalized["longitude"] = longitude
-            normalized_submissions.append(normalized)
-        submissions = normalized_submissions
+        submissions, invalid = _normalize_export_submissions(submissions)
+        if invalid is not None:
+            return json_error(invalid)
 
         db = get_db()
         effective_cfg = db.get_effective_config(cfg.load())
@@ -291,118 +588,15 @@ def create_inat_blueprint(
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         reveal = bool(body.get("reveal", False))
 
-        def work(job):
-            thread_db = ctx.thread_db()
-            exported = []
-            errors = []
-            total = len(submissions)
-            job["progress"]["total"] = total
-            try:
-                for index, item in enumerate(submissions, start=1):
-                    if ctx.runner.is_cancelled(job["id"]):
-                        break
-                    photo_id = item["photo_id"]
-                    photo = thread_db.get_photo(
-                        photo_id, verify_workspace=True,
-                    )
-                    if not photo:
-                        errors.append({
-                            "photo_id": photo_id,
-                            "error": "Photo not found",
-                        })
-                        job["progress"]["current"] = index
-                        ctx.runner.push_event(job["id"], "progress", {
-                            "current": index,
-                            "total": total,
-                            "current_file": "",
-                            "phase": "Exporting for iNaturalist",
-                        })
-                        continue
-
-                    metadata = {}
-                    if item.get("include_taxon", False):
-                        taxon_name = str(
-                            item.get("taxon_name") or ""
-                        ).strip()
-                        if taxon_name:
-                            metadata["taxon_name"] = taxon_name
-                    if item.get("include_date", False):
-                        observed_on = str(
-                            item.get("observed_on") or ""
-                        ).strip()
-                        if observed_on:
-                            # The modal discloses a calendar date, not capture
-                            # time or timezone, so export only that snapshot.
-                            metadata["timestamp"] = observed_on[:10]
-                    if item.get("include_location", False):
-                        latitude = item.get("latitude")
-                        longitude = item.get("longitude")
-                        if (
-                            latitude not in (None, "")
-                            and longitude not in (None, "")
-                        ):
-                            metadata["latitude"] = latitude
-                            metadata["longitude"] = longitude
-                    if item.get("include_description", False):
-                        description = str(
-                            item.get("description") or ""
-                        ).strip()
-                        if description:
-                            metadata["description"] = description[:10000]
-
-                    try:
-                        path = export_inat_photo(
-                            thread_db,
-                            vireo_dir,
-                            photo_id,
-                            destination,
-                            metadata,
-                            quality=quality,
-                            working_copy_max_size=wc_max_size,
-                            developed_dir=developed_dir,
-                        )
-                        exported.append({
-                            "photo_id": photo_id,
-                            "path": path,
-                            "filename": os.path.basename(path),
-                        })
-                    except (InatExportError, OSError, ValueError) as exc:
-                        # ``filename`` names the photo in the job's error
-                        # list ("bird.jpg: render failed"), which the runner
-                        # builds from these entries.
-                        errors.append({
-                            "photo_id": photo_id,
-                            "filename": photo["filename"],
-                            "error": str(exc),
-                        })
-                    finally:
-                        job["progress"]["current"] = index
-                        job["progress"]["current_file"] = photo["filename"]
-                        ctx.runner.push_event(job["id"], "progress", {
-                            "current": index,
-                            "total": total,
-                            "current_file": photo["filename"],
-                            "phase": "Exporting for iNaturalist",
-                        })
-
-                revealed = False
-                cancelled = ctx.runner.is_cancelled(job["id"])
-                if exported and reveal and not cancelled:
-                    revealed = reveal_inat_exports(
-                        [item["path"] for item in exported], destination,
-                    )
-                # Like export and move: a photo that failed to export fails
-                # the job, so 5 of 10 exported doesn't read as "completed".
-                # The counts stay in the result for the summary and modal.
-                return {
-                    "ok": not errors,
-                    "exported": exported,
-                    "errors": errors,
-                    "destination": destination,
-                    "revealed": revealed,
-                }
-            finally:
-                thread_db.close()
+        work = _inat_export_work(
+            ctx, submissions,
+            destination=destination,
+            vireo_dir=vireo_dir,
+            quality=quality,
+            wc_max_size=wc_max_size,
+            developed_dir=developed_dir,
+            reveal=reveal,
+        )
 
         return ctx.start(
             "inat-export",
@@ -461,19 +655,12 @@ def create_inat_blueprint(
         return fallback_path, False
 
     def _inat_upload_photo_path(db, photo, fallback_path):
-        import config as cfg
-
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         recipe = db.get_photo_edit_recipe(photo["id"])
         if not recipe:
             return fallback_path, None
 
-        import local_masks as _local_masks
-        from image_edits import (
-            EDIT_MATH_VERSION,
-            apply_recipe_to_loaded_image,
-            recipe_to_json,
-        )
+        from image_edits import EDIT_MATH_VERSION, recipe_to_json
         from image_loader import (
             RAW_DECODE_LINEAR,
             RAW_EXTENSIONS,
@@ -555,119 +742,41 @@ def create_inat_blueprint(
             )
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(source_path, max_size=None, **load_kwargs)
-            if img is None and using_working_copy and fallback_path and (
-                os.path.isfile(fallback_path)
-                and os.path.abspath(fallback_path)
-                != os.path.abspath(source_path)
-            ):
-                # Working copy was evicted between validation and decode;
-                # retry from the original before the companion fallback so
-                # RAW primaries still use the highlight-preserving decode.
-                retry_img = load_image(
-                    fallback_path, max_size=None, **load_kwargs,
-                )
-                if retry_img is not None:
-                    img = retry_img
-                    source_path = fallback_path
-                    using_working_copy = False
-                    with contextlib.suppress(OSError):
-                        source_mtime = os.path.getmtime(source_path)
-                    expected_meta["source_path"] = source_path
-                    expected_meta["source_mtime"] = source_mtime
-        expected_w, expected_h = 0, 0
-        needs_companion = False
-        if primary_is_raw:
-            # libraw may return the embedded JPEG when demosaic fails — see
-            # _external_edit_handoff_path for the same gate. Without this an
-            # unsupported RAW would upload clipped/undersized pixels to
-            # iNaturalist even when a usable sidecar JPEG exists. Both axes
-            # checked via the shared helper.
-            expected_w, expected_h = _recipe_source_dimensions(photo)
-            needs_companion = img is None or _image_is_smaller_than_expected(
-                img, expected_w, expected_h,
+            img, source_path, using_working_copy = _inat_retry_load_from_original(
+                img, source_path, using_working_copy, fallback_path,
+                load_kwargs, expected_meta,
             )
-        if needs_companion:
-            # Mirror _external_edit_handoff_path: libraw may fail to decode
-            # this RAW variant, but the full-size companion JPEG can still
-            # carry the recipe for iNaturalist. Without this fallback the
-            # upload silently fails for RAW+JPEG pairs whose RAW is
-            # unsupported. Cache key stays on the RAW source — see comment
-            # in _external_edit_handoff_path for the contract trade-off.
-            companion_path = photo["companion_path"]
-            folder_path = photo["folder_path"]
-            if folder_path and companion_path:
-                companion_abs = os.path.join(folder_path, companion_path)
-                if (
-                    os.path.exists(companion_abs)
-                    and os.path.abspath(companion_abs)
-                    != os.path.abspath(source_path)
-                ):
-                    companion_img = load_image(companion_abs, max_size=None)
-                    # Prefer companion when it covers the expected size on
-                    # both axes — a long-edge-only check misses cases like a
-                    # 6000x3376 embedded preview "tying" a 6000x4000 sidecar
-                    # and losing the short-edge content.
-                    if _companion_image_can_replace_raw_result(
-                        companion_img, img, expected_w, expected_h,
-                    ):
-                        if img is None:
-                            log.info(
-                                "iNat upload RAW decode failed for photo %s; "
-                                "falling back to companion JPEG %s",
-                                photo["id"], companion_abs,
-                            )
-                        else:
-                            log.info(
-                                "iNat upload RAW decode fell back to "
-                                "undersized embedded JPEG (%dx%d) for "
-                                "photo %s; using companion JPEG %s (%dx%d)",
-                                img.size[0], img.size[1], photo["id"],
-                                companion_abs,
-                                companion_img.size[0],
-                                companion_img.size[1],
-                            )
-                            img.close()
-                        img = companion_img
-                    elif companion_img is not None:
-                        companion_img.close()
+        img = _inat_companion_fallback(photo, img, source_path, primary_is_raw)
         if img is None:
             return None, f"{photo['filename']}: failed to load image"
-        rendered = None
-        tmp_path = None
-        fd = None
-        try:
-            rendered = apply_recipe_to_loaded_image(
-                img, recipe,
-                camera_metadata=photo,
-                native_size=_recipe_source_dimensions(photo),
-                local_mask=_local_masks.load_snapshot(
-                    vireo_dir, photo["id"], recipe,
-                ),
-            )
-            quality = cfg.load().get("working_copy_quality", 92)
-            fd, tmp_path = tempfile.mkstemp(
-                prefix=f".{photo['id']}.", suffix=".jpg.tmp", dir=out_dir,
-            )
-            os.close(fd)
-            fd = None
-            rendered.save(tmp_path, format="JPEG", quality=quality)
-            replace_file(tmp_path, out_path)
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(expected_meta, f, sort_keys=True)
-        except Exception:
-            if fd is not None:
-                with contextlib.suppress(OSError):
-                    os.close(fd)
-            with contextlib.suppress(OSError):
-                if tmp_path:
-                    os.unlink(tmp_path)
-            raise
-        finally:
-            if rendered is not None:
-                rendered.close()
-            if rendered is not img:
-                img.close()
+        _write_inat_upload_render(
+            img, recipe, photo, vireo_dir, out_dir, out_path, meta_path,
+            expected_meta,
+        )
         return out_path, None
+
+    def _offline_original_has_render_source(db, photo, photo_id):
+        """Whether an edit recipe can render from a local copy of ``photo``."""
+        recipe = db.get_photo_edit_recipe(photo_id)
+        wc_rel = photo["working_copy_path"]
+        wc_abs = (
+            wc_rel if wc_rel and os.path.isabs(wc_rel)
+            else os.path.join(
+                os.path.dirname(config["THUMB_CACHE_DIR"]), wc_rel,
+            )
+            if wc_rel else None
+        )
+        companion_abs = (
+            os.path.join(photo["folder_path"], photo["companion_path"])
+            if photo["companion_path"] else None
+        )
+        return bool(
+            recipe
+            and (
+                (wc_abs and os.path.isfile(wc_abs))
+                or (companion_abs and os.path.isfile(companion_abs))
+            )
+        )
 
     @blueprint.route("/api/inat/submit", methods=["POST"])
     @guarded_reader("inat-uploads")
@@ -696,28 +805,10 @@ def create_inat_blueprint(
             )
 
         photo_path = os.path.join(photo["folder_path"], photo["filename"])
-        if not os.path.isfile(photo_path):
-            recipe = db.get_photo_edit_recipe(photo_id)
-            wc_rel = photo["working_copy_path"]
-            wc_abs = (
-                wc_rel if wc_rel and os.path.isabs(wc_rel)
-                else os.path.join(
-                    os.path.dirname(config["THUMB_CACHE_DIR"]), wc_rel,
-                )
-                if wc_rel else None
-            )
-            companion_abs = (
-                os.path.join(photo["folder_path"], photo["companion_path"])
-                if photo["companion_path"] else None
-            )
-            if not (
-                recipe
-                and (
-                    (wc_abs and os.path.isfile(wc_abs))
-                    or (companion_abs and os.path.isfile(companion_abs))
-                )
-            ):
-                return json_error("Photo file not found on disk", 404)
+        if not os.path.isfile(photo_path) and not (
+            _offline_original_has_render_source(db, photo, photo_id)
+        ):
+            return json_error("Photo file not found on disk", 404)
 
         upload_path, upload_error = _inat_upload_photo_path(db, photo, photo_path)
         if upload_error:
@@ -736,18 +827,9 @@ def create_inat_blueprint(
             photo_id, min_detector_confidence=min_conf,
         )
 
-        default_taxon = (
-            (_prediction_scientific_name(db, pred) or pred["species"]) if pred else None
+        taxon, observed_on, photo_lat, photo_lng = _observation_defaults(
+            db, photo, photo_id, data, pred,
         )
-        taxon = data.get("taxon_name", default_taxon)
-        observed_on = (
-            data["observed_on"]
-            if "observed_on" in data
-            else (photo["timestamp"][:10] if photo["timestamp"] else None)
-        )
-        loc = db.get_effective_photo_location(photo_id)
-        photo_lat = loc["latitude"] if loc else None
-        photo_lng = loc["longitude"] if loc else None
         has_latitude = "latitude" in data
         has_longitude = "longitude" in data
         if has_latitude != has_longitude:
@@ -787,6 +869,78 @@ def create_inat_blueprint(
         db.inat.record_submission(photo_id, obs_id, obs_url)
         return jsonify({"observation_id": obs_id, "observation_url": obs_url})
 
+    def _submit_batch_item(db, inat, token, min_conf, sub):
+        """Submit one batch entry; the entry's result row."""
+        photo_id = sub.get("photo_id")
+        has_latitude = "latitude" in sub
+        has_longitude = "longitude" in sub
+        if has_latitude != has_longitude:
+            return {
+                "photo_id": photo_id,
+                "error": "latitude and longitude must be provided together",
+            }
+        photo = db.get_photo_with_folder_path(photo_id)
+        if not photo:
+            return {"photo_id": photo_id, "error": "Photo not found"}
+        if not db._photo_in_workspace(photo_id):
+            return {
+                "photo_id": photo_id,
+                "error": (
+                    f"Photo {photo_id} does not belong to the active workspace"
+                ),
+            }
+
+        photo_path = os.path.join(photo["folder_path"], photo["filename"])
+        if not os.path.isfile(photo_path):
+            return {"photo_id": photo_id, "error": "Photo file not found on disk"}
+
+        upload_path, upload_error = _inat_upload_photo_path(
+            db, photo, photo_path,
+        )
+        if upload_error:
+            return {"photo_id": photo_id, "error": upload_error}
+
+        # Current-fingerprint + workspace-scoped top prediction,
+        # respecting the active detector_confidence floor — avoids
+        # submitting a stale-label-set or now-hidden taxon to iNaturalist.
+        pred = db.get_top_prediction_for_photo(
+            photo_id, min_detector_confidence=min_conf,
+        )
+
+        taxon, observed_on, photo_lat, photo_lng = _observation_defaults(
+            db, photo, photo_id, sub, pred,
+        )
+        if has_latitude:
+            lat = sub["latitude"]
+            lng = sub["longitude"]
+        else:
+            lat = photo_lat
+            lng = photo_lng
+
+        try:
+            obs_id, obs_url = inat.submit_observation(
+                token=token,
+                photo_path=upload_path,
+                taxon_name=taxon,
+                observed_on=observed_on,
+                latitude=lat,
+                longitude=lng,
+                description=sub.get("description"),
+                geoprivacy=sub.get("geoprivacy", "open"),
+            )
+            db.inat.record_submission(photo_id, obs_id, obs_url)
+            return {"photo_id": photo_id, "observation_id": obs_id, "observation_url": obs_url}
+        except inat.InatPartialUploadError as e:
+            return {
+                "photo_id": photo_id,
+                "error": str(e),
+                "partial": True,
+                "observation_id": e.observation_id,
+                "observation_url": e.observation_url,
+            }
+        except (inat.InatAuthError, inat.InatApiError) as e:
+            return {"photo_id": photo_id, "error": str(e)}
+
     @blueprint.route("/api/inat/submit-batch", methods=["POST"])
     @guarded_reader("inat-uploads")
     def api_inat_submit_batch():
@@ -810,95 +964,10 @@ def create_inat_blueprint(
         min_conf = db.get_effective_config(user_cfg).get(
             "detector_confidence", 0.2
         )
-        results = []
-        for sub in submissions:
-            photo_id = sub.get("photo_id")
-            has_latitude = "latitude" in sub
-            has_longitude = "longitude" in sub
-            if has_latitude != has_longitude:
-                results.append({
-                    "photo_id": photo_id,
-                    "error": "latitude and longitude must be provided together",
-                })
-                continue
-            photo = db.get_photo_with_folder_path(photo_id)
-            if not photo:
-                results.append({"photo_id": photo_id, "error": "Photo not found"})
-                continue
-            if not db._photo_in_workspace(photo_id):
-                results.append({
-                    "photo_id": photo_id,
-                    "error": (
-                        f"Photo {photo_id} does not belong to the active workspace"
-                    ),
-                })
-                continue
-
-            photo_path = os.path.join(photo["folder_path"], photo["filename"])
-            if not os.path.isfile(photo_path):
-                results.append({"photo_id": photo_id, "error": "Photo file not found on disk"})
-                continue
-
-            upload_path, upload_error = _inat_upload_photo_path(
-                db, photo, photo_path,
-            )
-            if upload_error:
-                results.append({"photo_id": photo_id, "error": upload_error})
-                continue
-
-            # Current-fingerprint + workspace-scoped top prediction,
-            # respecting the active detector_confidence floor — avoids
-            # submitting a stale-label-set or now-hidden taxon to iNaturalist.
-            pred = db.get_top_prediction_for_photo(
-                photo_id, min_detector_confidence=min_conf,
-            )
-
-            default_taxon = (
-                (_prediction_scientific_name(db, pred) or pred["species"])
-                if pred else None
-            )
-            taxon = sub.get("taxon_name", default_taxon)
-            observed_on = (
-                sub["observed_on"]
-                if "observed_on" in sub
-                else (
-                    photo["timestamp"][:10]
-                    if photo["timestamp"] else None
-                )
-            )
-            loc = db.get_effective_photo_location(photo_id)
-            photo_lat = loc["latitude"] if loc else None
-            photo_lng = loc["longitude"] if loc else None
-            if has_latitude:
-                lat = sub["latitude"]
-                lng = sub["longitude"]
-            else:
-                lat = photo_lat
-                lng = photo_lng
-
-            try:
-                obs_id, obs_url = inat.submit_observation(
-                    token=token,
-                    photo_path=upload_path,
-                    taxon_name=taxon,
-                    observed_on=observed_on,
-                    latitude=lat,
-                    longitude=lng,
-                    description=sub.get("description"),
-                    geoprivacy=sub.get("geoprivacy", "open"),
-                )
-                db.inat.record_submission(photo_id, obs_id, obs_url)
-                results.append({"photo_id": photo_id, "observation_id": obs_id, "observation_url": obs_url})
-            except inat.InatPartialUploadError as e:
-                results.append({
-                    "photo_id": photo_id,
-                    "error": str(e),
-                    "partial": True,
-                    "observation_id": e.observation_id,
-                    "observation_url": e.observation_url,
-                })
-            except (inat.InatAuthError, inat.InatApiError) as e:
-                results.append({"photo_id": photo_id, "error": str(e)})
+        results = [
+            _submit_batch_item(db, inat, token, min_conf, sub)
+            for sub in submissions
+        ]
 
         return jsonify({"results": results})
 
