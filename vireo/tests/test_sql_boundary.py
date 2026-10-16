@@ -39,7 +39,7 @@ CONN_USE_LIMITS = {
     "best_batch.py": 2,
     "capture_time.py": 7,
     "card_cleanup.py": 4,
-    "classify_job.py": 20,
+    "classify_job.py": 19,
     "computation_cache.py": 37,
     "culling.py": 6,
     "duplicate_scan.py": 1,
