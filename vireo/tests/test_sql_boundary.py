@@ -127,8 +127,9 @@ def _is_conn_read(node):
 def _scope_bindings(scope):
     """Names that shadow an enclosing binding in a function or lambda.
 
-    Parameters, local assignments, imports, nested definitions and except
-    targets shadow; names declared ``global`` or ``nonlocal`` never do.
+    Parameters, local assignments, imports, nested definitions, except
+    targets and ``global`` declarations shadow; ``nonlocal`` names the
+    enclosing binding itself, so it never does.
     """
     args = scope.args
     parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs]
@@ -148,9 +149,11 @@ def _scope_bindings(scope):
             names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
         if isinstance(node, ast.ExceptHandler) and node.name:
             names.add(node.name)
-        if isinstance(node, (ast.Global, ast.Nonlocal)):
-            # ``nonlocal`` names the enclosing binding itself; ``global`` may
-            # name a module-level alias. Neither shadows: fail closed.
+        if isinstance(node, ast.Global):
+            # Refers to the module binding, not the enclosing function's:
+            # ``_raw_connection_closes`` re-adds it if the module aliased it.
+            names.update(node.names)
+        if isinstance(node, ast.Nonlocal):
             nonlocals.update(node.names)
         for child in ast.iter_child_nodes(node):
             collect(child)
@@ -158,6 +161,23 @@ def _scope_bindings(scope):
     for node in [scope.body] if isinstance(scope, ast.Lambda) else scope.body:
         collect(node)
     return names - nonlocals
+
+
+def _declared_globals(scope):
+    """Names a function or lambda body declares ``global``."""
+    found = set()
+
+    def collect(node):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            return
+        if isinstance(node, ast.Global):
+            found.update(node.names)
+        for child in ast.iter_child_nodes(node):
+            collect(child)
+
+    for node in [scope.body] if isinstance(scope, ast.Lambda) else scope.body:
+        collect(node)
+    return found
 
 
 def _raw_connection_closes(tree, *, exempt=()):
@@ -175,6 +195,7 @@ def _raw_connection_closes(tree, *, exempt=()):
     skipped.
     """
     offenders = []
+    module_aliases = set()
 
     def visit(node, aliases, qualname, class_enclosing=None):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
@@ -202,6 +223,9 @@ def _raw_connection_closes(tree, *, exempt=()):
                     visit(child, class_aliases, inner, enclosing)
                 return
             aliases = enclosing - _scope_bindings(node)
+            # ``global conn`` reaches past every enclosing function to the
+            # module binding, which is an alias only if the module made it one.
+            aliases |= _declared_globals(node) & module_aliases
             body = node.body if isinstance(node.body, list) else [node.body]
             for child in body:
                 visit(child, aliases, inner)
@@ -223,7 +247,7 @@ def _raw_connection_closes(tree, *, exempt=()):
         for child in ast.iter_child_nodes(node):
             visit(child, aliases, qualname, class_enclosing)
 
-    visit(tree, set(), "")
+    visit(tree, module_aliases, "")
     return offenders
 
 
