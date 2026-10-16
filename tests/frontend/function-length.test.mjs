@@ -40,6 +40,7 @@
 // does not count as growth.
 
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -327,6 +328,13 @@ if (argv[0] === '--write-baseline') {
     assert.equal(lengths.get('fixture.js:outer%2Einner'), 105);
     assert.equal(lengths.get('fixture.js:outer.inner'), 105);
     assert.notEqual(nameOf('fixture.js:outer%2Einner'), nameOf('fixture.js:outer.inner'));
+    const fixture = (literal, nested) => `
+      const obj = { 'outer.inner'() {${'\n'.repeat(literal - 1)}} };
+      function outer() { function inner() {${'\n'.repeat(nested - 1)}} }
+    `;
+    const previous = overCap(sourceLengths(fixture(105, 110)));
+    const current = overCap(sourceLengths(fixture(110, 105)));
+    assert.deepEqual(reconcileBaseline(current, previous).grown, ['fixture.js:outer%2Einner']);
   });
 
   test('same-named sibling permutations retain their individual length budgets', () => {
@@ -434,35 +442,42 @@ if (argv[0] === '--write-baseline') {
     assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, {}, [], true).added, []);
   });
 
-  test('writeBaseline passes every surviving function key to reconciliation, not just the over-cap subset', () => {
-    // Guard against a writer-path regression: reconcileBaseline receives
-    // `surviving` from writeBaseline; if writeBaseline derives it from the
-    // over-cap `current` or stops forwarding it, a function that shrank to
-    // the cap boundary can lend its baseline entry to a new over-cap sibling.
-    // Exercise the writer through its own file I/O with a hand-built lengths
-    // map so this failure mode would surface here even if the reconciler
-    // test keeps passing.
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ratchet-'));
-    const baselinePath = path.join(tmp, 'baseline.json');
-    const starting = {'a.js:render': 110};
-    fs.writeFileSync(baselinePath, JSON.stringify(starting, null, 2) + '\n');
-    const lengths = new Map([
-      ['a.js:render', 100], // shrank to the cap boundary; dropped from overCap
-      ['b.js:render', 110], // new over-cap sibling matching the old length
-    ]);
-    const logs = [];
-    const originalLog = console.log;
-    console.log = (...args) => logs.push(args.join(' '));
-    let exit;
+  test('CLI writer scans under-cap survivors and refuses to reuse their budgets', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ratchet-cli-'));
     try {
-      exit = writeBaseline([], {lengths, baselinePath});
+      const tests = path.join(tmp, 'tests', 'frontend');
+      const staticDir = path.join(tmp, 'vireo', 'static');
+      fs.mkdirSync(tests, {recursive: true});
+      fs.mkdirSync(staticDir, {recursive: true});
+      const script = path.join(tests, 'function-length.test.mjs');
+      fs.copyFileSync(fileURLToPath(import.meta.url), script);
+      // Copy the installed parser so the real CLI can resolve it on every OS,
+      // including Windows without privileged directory symlinks or a network.
+      const acorn = path.dirname(fileURLToPath(import.meta.resolve('acorn/package.json')));
+      fs.cpSync(acorn, path.join(tmp, 'node_modules', 'acorn'), {recursive: true});
+      const baselinePath = path.join(tests, 'function_length_baseline.json');
+      const declaration = lines => `function render() {${'\n'.repeat(lines - 1)}}\n`;
+      fs.writeFileSync(path.join(staticDir, 'b.js'), declaration(110));
+      for (const [lines, ordinal] of [[100, false], [99, false], [100, true]]) {
+        const key = `vireo/static/a.js:render${ordinal ? '#2' : ''}`;
+        const original = JSON.stringify({[key]: 110}, null, 2) + '\n';
+        fs.writeFileSync(baselinePath, original);
+        fs.writeFileSync(path.join(staticDir, 'a.js'), ordinal
+          ? `function render() {}\n{${declaration(lines)}}` : declaration(lines));
+        const result = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+        assert.equal(result.status, 1, `${result.error || ''}\n${result.stdout}\n${result.stderr}`);
+        assert.match(result.stdout, /Refusing to add baseline entries/);
+        assert.match(result.stdout, /vireo\/static\/b\.js:render/);
+        assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
+      }
+      // A genuinely vacated key still supports the existing move exception.
+      fs.unlinkSync(path.join(staticDir, 'a.js'));
+      const moved = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+      assert.equal(moved.status, 0, `${moved.error || ''}\n${moved.stdout}\n${moved.stderr}`);
+      assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), {'vireo/static/b.js:render': 110});
     } finally {
-      console.log = originalLog;
+      fs.rmSync(tmp, {recursive: true, force: true});
     }
-    assert.equal(exit, 1, logs.join('\n'));
-    assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), starting);
-    assert.ok(logs.some(line => line.includes('b.js:render')), logs.join('\n'));
-    fs.rmSync(tmp, {recursive: true, force: true});
   });
 
   test(`no static script function crosses or grows past ${MAX_FUNCTION_LINES} lines`, () => {
