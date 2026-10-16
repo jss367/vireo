@@ -2,24 +2,32 @@
 
 A function longer than ``MAX_FUNCTION_LINES`` is hard to read, test and
 review in one sitting. The functions that already exceed the cap are listed
-in ``function_length_baseline.json`` with their current length; each may only
-get shorter, and a function not listed there may not cross the cap at all.
-Split the function (or move part of it into a helper) instead of adding to
-the baseline.
+in ``function_length_baseline.json`` with their exact current length. The
+test requires each entry to match the function's length today: a longer
+function has grown, and a shorter one must have its entry lowered, so a
+shrink is recorded and cannot quietly be undone later. A function not listed
+there may not cross the cap at all. Split the function (or move part of it
+into a helper) instead of adding to the baseline.
 
 The baseline shrinks like the basedpyright one: after shortening a function,
 run ``python vireo/tests/test_function_length_ratchet.py --write-baseline``,
-which rewrites the file from the current tree and refuses to raise any
-entry. An entry whose function was deleted, renamed, moved, or brought under
-the cap is stale and fails ``test_baseline_has_no_stale_entries`` until it is
-removed, so the list reflects what is actually left to do.
+which rewrites the file from the current tree and refuses, exiting nonzero
+without writing, both to raise an entry and to add one for a function that
+newly crossed the cap. An entry whose function was deleted, renamed, moved,
+or brought under the cap is stale and fails
+``test_baseline_has_no_stale_entries`` until it is removed, so the list
+reflects what is actually left to do. Because the writer refuses new
+entries, a long function that is moved or renamed keeps its entry only by
+hand-editing its key in the JSON; the writer cannot tell a move from a
+new over-cap function.
 
 Two kinds of function are exempt:
 
 - The blueprint factories (``create_<domain>_blueprint``) hold every route of
   a domain as a closure; that is the injection convention in CLAUDE.md, not a
   function doing too much. Their routes are measured individually.
-- ``canonical_schema.create_tables`` is the schema DDL in one place.
+- ``CanonicalSchema.create_tables`` in ``canonical_schema.py`` is the schema
+  DDL in one place.
 
 Lengths are counted from the ``def`` line to the last line of the body,
 including docstrings and comments, so the measure is the same on every
@@ -44,7 +52,7 @@ def is_exempt(path: str, qualname: str) -> bool:
     name = qualname.rsplit(".", 1)[-1]
     if name.startswith("create_") and name.endswith("_blueprint"):
         return True
-    return path == "canonical_schema.py" and qualname == "create_tables"
+    return path == "canonical_schema.py" and qualname == "CanonicalSchema.create_tables"
 
 
 def _collect(node, rel_posix: str, stack: list[str], lengths: dict[str, int]) -> None:
@@ -107,6 +115,14 @@ def test_no_function_crosses_or_grows_past_the_cap():
         + "\n  ".join(f"{key}: {baseline[key]} -> {current[key]} lines" for key in grown)
     )
 
+    shrunk = sorted(key for key in current if key in baseline and current[key] < baseline[key])
+    assert not shrunk, (
+        "These functions got shorter but their baseline entries still hold the "
+        "old length, which would let them grow back; run this module with "
+        "--write-baseline to lower the entries:\n  "
+        + "\n  ".join(f"{key}: {baseline[key]} -> {current[key]} lines" for key in shrunk)
+    )
+
 
 def test_baseline_has_no_stale_entries():
     baseline = load_baseline()
@@ -120,7 +136,7 @@ def test_baseline_has_no_stale_entries():
 
 
 def write_baseline() -> int:
-    """Rewrite the baseline from the tree; refuse to raise any entry."""
+    """Rewrite the baseline from the tree; refuse to raise or add any entry."""
     current = over_cap(function_lengths())
     previous = load_baseline() if BASELINE_PATH.exists() else {}
     grown = sorted(key for key in current if key in previous and current[key] > previous[key])
@@ -130,8 +146,15 @@ def write_baseline() -> int:
             print(f"  {key}: {previous[key]} -> {current[key]} lines")
         return 1
     new = sorted(key for key in current if key not in previous)
-    for key in new:
-        print(f"new entry (a function that crossed the cap): {key} ({current[key]} lines)")
+    if new:
+        print(
+            "Refusing to add baseline entries; split these functions instead "
+            "(a moved or renamed long function keeps its entry by renaming "
+            "its key in the JSON by hand):"
+        )
+        for key in new:
+            print(f"  {key} ({current[key]} lines)")
+        return 1
     BASELINE_PATH.write_text(
         json.dumps(dict(sorted(current.items())), indent=2) + "\n", encoding="utf-8",
     )

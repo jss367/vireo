@@ -6,7 +6,6 @@
   "audit.py:verify_hashes": 135,
   "auto_tone.py:fit": 231,
   "best_batch.py:best_batch_scope": 112,
-  "canonical_schema.py:CanonicalSchema.create_tables": 1051,
   "capture_time.py:adjust_capture_time": 161,
   "card_cleanup.py:delete_verified": 196,
   "card_cleanup.py:load_manifest": 101,
