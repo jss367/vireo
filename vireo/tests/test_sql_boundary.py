@@ -132,8 +132,10 @@ def _raw_connection_closes(tree, *, exempt=()):
     ``getattr(<expr>, "conn", ...)`` anywhere earlier in that function. The
     tracking is syntactic and fails closed: a later rebinding does not clear
     the alias, because a rebinding inside one branch would otherwise hide a
-    close on the other path. Use a different name for a different
-    connection. ``exempt`` names ``Class.method`` qualnames whose bodies are
+    close on the other path, and a nested function inherits the aliases
+    bound so far in its enclosing function (its own parameters shadow
+    them), since a closure can close a captured handle. Use a different
+    name for a different connection. ``exempt`` names ``Class.method`` qualnames whose bodies are
     skipped.
     """
     offenders = []
@@ -143,7 +145,14 @@ def _raw_connection_closes(tree, *, exempt=()):
             inner = f"{qualname}.{node.name}" if qualname else node.name
             if inner in exempt:
                 return
-            aliases = set() if not isinstance(node, ast.ClassDef) else aliases
+            if not isinstance(node, ast.ClassDef):
+                # A nested function sees the aliases its enclosing function
+                # has bound so far (a closure can close a captured handle);
+                # its own parameters shadow them.
+                a = node.args
+                params = {p.arg for p in a.posonlyargs + a.args + a.kwonlyargs}
+                params |= {p.arg for p in (a.vararg, a.kwarg) if p is not None}
+                aliases = set(aliases) - params
             for child in ast.iter_child_nodes(node):
                 visit(child, aliases, inner)
             return
@@ -276,6 +285,9 @@ def test_raw_close_scan_includes_docs_prototypes(tmp_path, monkeypatch):
     ("conn = db.conn\ndef unrelated(conn):\n conn.close()\nconn.close()", [4]),
     ("def first(db):\n conn = db.conn\ndef second(conn):\n conn.close()", []),
     ("def outer(db):\n conn = db.conn\n def inner(conn):\n  conn.close()\n conn.close()", [5]),
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  conn.close()", [4]),
+    ("def outer(db):\n conn = db.conn\n return lambda: conn.close()", [3]),
+    ("def outer(db):\n def early():\n  conn.close()\n conn = db.conn", []),
     ("conn = db.conn\nclass Unrelated:\n conn = other\nconn.close()", [4]),
     ("def typed(db):\n conn: Connection = db.conn\n conn.close()", [3]),
     ("def conditional(db, replace):\n conn = db.conn\n if replace:\n  conn = other\n conn.close()", [5]),
