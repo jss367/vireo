@@ -127,7 +127,6 @@
   "services/pipeline_launch.py:PipelineChain.enqueue_process_job": 146,
   "services/prediction_ambiguity.py:effective_category_resolver": 138,
   "services/render_cache.py:RenderCache.invalidate_photo_render_cache": 127,
-  "services/scan_work.py:build_scan_work": 105,
   "sharpness.py:score_collection_photos": 139,
   "site_publish.py:_publish_site": 104,
   "sync.py:sync_from_xmp": 141,
