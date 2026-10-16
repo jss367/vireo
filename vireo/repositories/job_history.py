@@ -1,8 +1,9 @@
 """Job-route reads and writes of finished jobs in ``job_history``.
 
-``jobs.JobRunner`` creates and migrates the table on its own connection and
-still runs its own writes (the checkpoint, the final record, the startup
-reconciliation and the history listing). This repository holds what the job
+The table is part of the canonical schema (``canonical_schema.
+FORMERLY_LAZY_OBJECTS``, with its workspace index and ownership trigger);
+``jobs.JobRunner`` runs its own writes on its own connection (the checkpoint,
+the final record, the startup reconciliation and the history listing). This repository holds what the job
 routes do through the request's ``Database``: the newest completed result of
 a job type (the Duplicates page restoring its last scan), the lookup of one
 record by id, and the result rewrite that records a follow-up action on a
@@ -22,15 +23,6 @@ from collections.abc import Sequence
 class JobHistoryRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
-
-    @staticmethod
-    def ensure_workspace_ownership(conn: sqlite3.Connection) -> None:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id)")
-        conn.execute("""CREATE TRIGGER IF NOT EXISTS job_history_require_workspace
-            BEFORE INSERT ON job_history
-            WHEN NEW.workspace_id IS NOT NULL AND NOT EXISTS
-                 (SELECT 1 FROM workspaces WHERE id=NEW.workspace_id)
-            BEGIN SELECT RAISE(IGNORE); END""")
 
     def last_completed_with_result(self, job_type: str) -> sqlite3.Row | None:
         """Newest completed ``job_type`` row that stored a result, or None.

@@ -6,14 +6,6 @@
     return option === undefined ? fallback : option;
   }
 
-  function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, function (ch) {
-      return {
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-      }[ch];
-    });
-  }
-
   function formatPhotoCount(value) {
     var count = Number(value || 0);
     return count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');

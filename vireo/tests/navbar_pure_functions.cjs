@@ -136,16 +136,29 @@ test('_offlineRootsKey is order-independent and does not mutate its input', () =
   assert.deepEqual(roots, ['/b', '/a']);
 });
 
-test('formatBytesNav picks the unit at each 1024 boundary', () => {
-  const ctx = load([fn(banners, 'formatBytesNav')]);
-  assert.equal(ctx.formatBytesNav(null), '');
-  assert.equal(ctx.formatBytesNav(undefined), '');
-  assert.equal(ctx.formatBytesNav(0), '0 B');
-  assert.equal(ctx.formatBytesNav(1023), '1023 B');
-  assert.equal(ctx.formatBytesNav(1024), '1.0 KB');
-  assert.equal(ctx.formatBytesNav(1536), '1.5 KB');
-  assert.equal(ctx.formatBytesNav(1024 * 1024), '1.0 MB');
-  assert.equal(ctx.formatBytesNav(5 * 1024 ** 3), '5.00 GB');
+test('formatBytes (vireo-utils.js) picks the unit at each 1024 boundary', () => {
+  const ctx = load([fn('vireo-utils.js', 'formatBytes')]);
+  assert.equal(ctx.formatBytes(null), '');
+  assert.equal(ctx.formatBytes(undefined), '');
+  assert.equal(ctx.formatBytes('not a size'), '');
+  assert.equal(ctx.formatBytes(0), '0 B');
+  assert.equal(ctx.formatBytes('512'), '512 B');
+  assert.equal(ctx.formatBytes(1023), '1023 B');
+  assert.equal(ctx.formatBytes(1024), '1.0 KB');
+  assert.equal(ctx.formatBytes(1536), '1.5 KB');
+  assert.equal(ctx.formatBytes(1024 * 1024), '1.0 MB');
+  assert.equal(ctx.formatBytes(5 * 1024 ** 3), '5.00 GB');
+  assert.equal(ctx.formatBytes(3 * 1024 ** 4), '3.00 TB');
+});
+
+test('escapeHtml and escapeAttr (vireo-utils.js) encode the same five characters', () => {
+  const ctx = load([fn('vireo-utils.js', 'escapeHtml'), fn('vireo-utils.js', 'escapeAttr')]);
+  assert.equal(ctx.escapeHtml(null), '');
+  assert.equal(ctx.escapeHtml(undefined), '');
+  assert.equal(ctx.escapeHtml(0), '0');
+  assert.equal(ctx.escapeHtml(`<a href="x" title='y'>&</a>`),
+    '&lt;a href=&quot;x&quot; title=&#39;y&#39;&gt;&amp;&lt;/a&gt;');
+  assert.equal(ctx.escapeAttr(`"'<>&`), ctx.escapeHtml(`"'<>&`));
 });
 
 test('job predicates agree on which jobs are live, waiting and badge-worthy', () => {

@@ -252,14 +252,6 @@ function showError(msg, target) {
   }
 }
 
-function formatBytes(n) {
-  n = Number(n || 0);
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
-  return (i === 0 ? String(n) : n.toFixed(n >= 10 ? 1 : 2)) + ' ' + units[i];
-}
-
 // SINGLE OWNER of #btnStart.disabled and its label. Every other site that
 // touches the button must call this instead of assigning directly, or the
 // two will race — finishJob() re-enabling the button after an import would

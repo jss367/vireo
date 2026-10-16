@@ -560,30 +560,16 @@ class RecycledIdIndex:
         return False
 
 
-def ensure_preview_cache_invalidations_table(db):
-    """Create the durable "do not adopt this preview" marker table.
-
-    Shared home for the marker `app.py`'s ``_serve_preview`` consults.
-    Backdating a preview file does nothing: the lazy-adoption branch there
-    tests ``os.path.exists(cache_path)`` with no mtime comparison, so an
-    on-disk preview that outlived its owner gets adopted and re-registered
-    verbatim. Only this row keeps it out.
-    """
-    db.conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS preview_cache_invalidations (
-            photo_id INTEGER NOT NULL,
-            size INTEGER NOT NULL,
-            PRIMARY KEY (photo_id, size),
-            FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
-        )
-        """,
-    )
-
-
 def mark_preview_cache_invalid(db, photo_id, size, *, commit=True):
-    """Record that ``(photo_id, size)``'s on-disk preview must not be adopted."""
-    ensure_preview_cache_invalidations_table(db)
+    """Record that ``(photo_id, size)``'s on-disk preview must not be adopted.
+
+    ``preview_cache_invalidations`` is the durable "do not adopt" marker
+    web.media's ``_serve_preview`` consults. Backdating a preview file does
+    nothing: the lazy-adoption branch there tests ``os.path.exists`` with no
+    mtime comparison, so an on-disk preview that outlived its owner gets
+    adopted and re-registered verbatim. Only this row keeps it out. The table
+    is part of the canonical schema (``canonical_schema.FORMERLY_LAZY_OBJECTS``).
+    """
     db.conn.execute(
         "INSERT OR IGNORE INTO preview_cache_invalidations (photo_id, size) "
         "VALUES (?, ?)",

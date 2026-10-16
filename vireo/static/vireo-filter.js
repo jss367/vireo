@@ -864,8 +864,8 @@
     const keywordOnly = searchScope === 'keyword';
     drop.innerHTML = `
       <p class="vf-search-help">${keywordOnly ? 'Search keyword names only' : 'Search all metadata'}. Use AND, OR, NOT, parentheses, or &quot;quoted phrases&quot;.</p>
-      <button type="button" data-search-kind="text"><span>⌕</span><span>${keywordOnly ? 'Keyword' : 'Text'} matches for “${esc(q)}”</span><em>Live</em></button>
-      <button type="button" data-search-kind="visual" class="vf-suggest-visual"><span>✦</span><span>Visually similar to “${esc(q)}”</span><em></em></button>`;
+      <button type="button" data-search-kind="text"><span>⌕</span><span>${keywordOnly ? 'Keyword' : 'Text'} matches for “${escapeHtml(q)}”</span><em>Live</em></button>
+      <button type="button" data-search-kind="visual" class="vf-suggest-visual"><span>✦</span><span>Visually similar to “${escapeHtml(q)}”</span><em></em></button>`;
     drop.hidden = false;
   }
 
@@ -1022,19 +1022,13 @@
     }
   }
 
-  function esc(value) {
-    return String(value == null ? '' : value)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
-
   function renderChips() {
     const list = $('.vf-chips');
     $('.vf-scope-chip span').textContent = state.scopeLabel;
     list.innerHTML = chipEntries().map((entry, idx) =>
       `<button class="vf-chip${entry.visual ? ' visual' : ''}${entry.error ? ' error' : ''}" data-chip="${idx}" type="button" title="Edit filters">
-        <span>${esc(entry.label)}</span>
-        <span class="vf-chip-x" data-chip-x="${idx}" role="button" aria-label="Remove ${esc(entry.label)}">×</span>
+        <span>${escapeHtml(entry.label)}</span>
+        <span class="vf-chip-x" data-chip-x="${idx}" role="button" aria-label="Remove ${escapeHtml(entry.label)}">×</span>
       </button>`).join('');
   }
 
@@ -1340,7 +1334,7 @@
         }
       : null;
     const visualRow = state.visual ? `<div class="vf-rule-row vf-visual-row">
-      <span class="vf-visual-label">✦ Visually similar to “${esc(state.visual.prompt)}”</span>
+      <span class="vf-visual-label">✦ Visually similar to “${escapeHtml(state.visual.prompt)}”</span>
       <div class="vf-segmented vf-visual-strength">
         ${['broad', 'balanced', 'strict'].map((s) =>
           `<button type="button" data-action="visual-strength" data-strength="${s}" class="${state.visual.strength === s ? 'active' : ''}">${s}</button>`).join('')}
@@ -1382,7 +1376,7 @@
     if (isGroup(node)) {
       if (node._qs) {
         return `<div class="vf-rule-row vf-qs-row">
-          <span class="vf-qs-label">${quickSearchLabel(node)}: ${esc(node._qs_text)}</span>
+          <span class="vf-qs-label">${quickSearchLabel(node)}: ${escapeHtml(node._qs_text)}</span>
           <button class="vf-remove" data-action="remove" data-path="${path}" type="button" aria-label="Remove search">×</button>
         </div>`;
       }
@@ -1406,16 +1400,16 @@
       // Chart links select a confirmed identity, which cannot be edited as
       // free text. Keep its readable label and allow removing the constraint.
       return `<div class="vf-rule-row vf-identity-row">
-        <span>${esc(ruleLabel(node))}</span>
+        <span>${escapeHtml(ruleLabel(node))}</span>
         <button class="vf-remove" data-action="remove" data-path="${path}" type="button" aria-label="Remove rule">×</button>
       </div>`;
     }
     const spec = fieldSpec(node.field) || { label: node.field, type: 'text', ops: ['is'] };
     const fieldOptions = state.fieldOrder.filter((key) =>
       (fieldAvailable(key) && !state.fields[key].picker_hidden) || key === node.field).map((key) =>
-      `<option value="${key}" ${key === node.field ? 'selected' : ''}>${esc(state.fields[key].label)}</option>`).join('');
+      `<option value="${key}" ${key === node.field ? 'selected' : ''}>${escapeHtml(state.fields[key].label)}</option>`).join('');
     const opOptions = spec.ops.map((op) =>
-      `<option value="${esc(op)}" ${op === node.op ? 'selected' : ''}>${esc(OP_LABELS[op] || op)}</option>`).join('');
+      `<option value="${escapeHtml(op)}" ${op === node.op ? 'selected' : ''}>${escapeHtml(OP_LABELS[op] || op)}</option>`).join('');
     return `<div class="vf-rule-row">
       <select data-action="field" data-path="${path}" aria-label="Filter field">${fieldOptions}</select>
       <select data-action="op" data-path="${path}" aria-label="Filter operator">${opOptions}</select>
@@ -1449,10 +1443,10 @@
     const selectedKeys = new Set(selected.map((v) => String(v).toLowerCase()));
     return `<div class="vf-extension-picker" data-path="${path}" tabindex="-1">
       ${multiple && selected.length ? `<div class="vf-enum-multi">${selected.map((v) =>
-        `<button type="button" class="vf-enum-pill active" data-action="extension-remove" data-path="${path}" data-value="${esc(v)}" aria-label="Remove ${esc(extensionLabel(v))}">${esc(extensionLabel(v))} ×</button>`).join('')}</div>` : ''}
+        `<button type="button" class="vf-enum-pill active" data-action="extension-remove" data-path="${path}" data-value="${escapeHtml(v)}" aria-label="Remove ${escapeHtml(extensionLabel(v))}">${escapeHtml(extensionLabel(v))} ×</button>`).join('')}</div>` : ''}
       <div class="vf-extension-options" role="group" aria-label="File extensions">
         ${Array.from(values.values()).sort((a, b) => String(a).localeCompare(String(b))).map((v) =>
-          `<label><input type="${multiple ? 'checkbox' : 'radio'}" name="extension-${path}" data-action="extension-pick" data-path="${path}" data-value="${esc(v)}" ${selectedKeys.has(String(v).toLowerCase()) ? 'checked' : ''}><span>${esc(extensionLabel(v))}</span></label>`).join('')}
+          `<label><input type="${multiple ? 'checkbox' : 'radio'}" name="extension-${path}" data-action="extension-pick" data-path="${path}" data-value="${escapeHtml(v)}" ${selectedKeys.has(String(v).toLowerCase()) ? 'checked' : ''}><span>${escapeHtml(extensionLabel(v))}</span></label>`).join('')}
       </div>
       <div class="vf-extension-status" role="status" tabindex="-1">${extensionOptions === null ? 'Loading formats…' : !values.size ? 'No file formats in this workspace.' : multiple ? 'Select one or more formats' : 'Select a format'}</div>
     </div>`;
@@ -1538,7 +1532,7 @@
   function pickerChoice(node, path, value, label) {
     const multiple = node.op === 'in' || node.op === 'not_in';
     const selected = extensionValues(node).some((v) => pickerValueKey(node, v) === pickerValueKey(node, value));
-    return `<label class="vf-choice" title="${esc(value)}"><input type="${multiple ? 'checkbox' : 'radio'}" name="choice-${path}" data-action="choice-pick" data-path="${path}" data-value="${esc(value)}" ${selected ? 'checked' : ''}><span>${esc(label || value)}</span></label>`;
+    return `<label class="vf-choice" title="${escapeHtml(value)}"><input type="${multiple ? 'checkbox' : 'radio'}" name="choice-${path}" data-action="choice-pick" data-path="${path}" data-value="${escapeHtml(value)}" ${selected ? 'checked' : ''}><span>${escapeHtml(label || value)}</span></label>`;
   }
 
   function renderFolderChoices(node, path, picker) {
@@ -1579,7 +1573,7 @@
         const hasChildren = (children.get(f.id) || []).some((child) => visible.has(child.id));
         const expanded = Boolean(q) || !picker.collapsed.has(f.id);
         return `<li><div class="vf-folder-choice">${hasChildren
-          ? `<button type="button" class="vf-folder-toggle" data-action="choice-folder-toggle" data-path="${path}" data-folder="${f.id}" aria-label="${expanded ? 'Collapse' : 'Expand'} ${esc(f.name || f.path)}" aria-expanded="${expanded}">${expanded ? '▾' : '▸'}</button>`
+          ? `<button type="button" class="vf-folder-toggle" data-action="choice-folder-toggle" data-path="${path}" data-folder="${f.id}" aria-label="${expanded ? 'Collapse' : 'Expand'} ${escapeHtml(f.name || f.path)}" aria-expanded="${expanded}">${expanded ? '▾' : '▸'}</button>`
           : '<span class="vf-folder-spacer"></span>'}
           ${pickerChoice(node, path, f.path, parent === null ? f.path : f.name || f.path)}</div>
           ${hasChildren && expanded ? `<ul>${renderBranch(f.id)}</ul>` : ''}</li>`;
@@ -1620,11 +1614,11 @@
     const picker = valuePickerState(node);
     const selected = extensionValues(node);
     return `<div class="vf-value-picker" data-path="${path}">
-      <div class="vf-enum-multi">${selected.map((v) => `<button type="button" class="vf-enum-pill active" data-action="choice-remove" data-path="${path}" data-value="${esc(v)}" aria-label="Remove ${esc(v)}">${esc(v)} ×</button>`).join('')}</div>
-      <details ${picker.open ? 'open' : ''}><summary data-action="choice-open" data-path="${path}">Choose ${esc(spec.label.toLowerCase())}…</summary>
-        <input type="search" data-action="choice-search" data-path="${path}" value="${esc(picker.query)}" placeholder="Search choices…" aria-label="Search ${esc(spec.label.toLowerCase())} choices" autocomplete="off">
-        <div class="vf-choice-options" role="group" aria-label="${esc(spec.label)} choices">${renderPickerChoices(node, path, picker)}</div>
-        <div class="vf-choice-status" role="status">${esc(pickerStatus(node, picker))}</div>
+      <div class="vf-enum-multi">${selected.map((v) => `<button type="button" class="vf-enum-pill active" data-action="choice-remove" data-path="${path}" data-value="${escapeHtml(v)}" aria-label="Remove ${escapeHtml(v)}">${escapeHtml(v)} ×</button>`).join('')}</div>
+      <details ${picker.open ? 'open' : ''}><summary data-action="choice-open" data-path="${path}">Choose ${escapeHtml(spec.label.toLowerCase())}…</summary>
+        <input type="search" data-action="choice-search" data-path="${path}" value="${escapeHtml(picker.query)}" placeholder="Search choices…" aria-label="Search ${escapeHtml(spec.label.toLowerCase())} choices" autocomplete="off">
+        <div class="vf-choice-options" role="group" aria-label="${escapeHtml(spec.label)} choices">${renderPickerChoices(node, path, picker)}</div>
+        <div class="vf-choice-status" role="status">${escapeHtml(pickerStatus(node, picker))}</div>
         <button type="button" data-action="choice-retry" data-path="${path}" ${picker.error ? '' : 'hidden'}>Retry</button>
       </details>
     </div>`;
@@ -1758,42 +1752,42 @@
   function renderValueInput(node, spec, path) {
     if (usesValuePicker(node)) return renderValuePicker(node, spec, path);
     if (['burst_id', 'duplicate_group'].includes(node.field)) {
-      return `<span class="vf-group-reference" title="${esc(node.value)}">${esc(node.value_label || 'Saved group')}<small>Choose groups from a stack’s context menu.</small></span>`;
+      return `<span class="vf-group-reference" title="${escapeHtml(node.value)}">${escapeHtml(node.value_label || 'Saved group')}<small>Choose groups from a stack’s context menu.</small></span>`;
     }
     if (node.field === 'extension') return renderExtensionPicker(node, path);
     if ((node.op === 'in' || node.op === 'not_in') && spec.values) {
       const selected = Array.isArray(node.value) ? node.value : [node.value];
       const labels = spec.labels || {};
       return `<div class="vf-enum-multi" role="group">${spec.values.map((v) =>
-        `<button type="button" class="vf-enum-pill ${selected.includes(v) ? 'active' : ''}" data-action="multi" data-path="${path}" data-value="${esc(v)}" aria-pressed="${selected.includes(v)}">${esc(labels[v] || v)}</button>`).join('')}</div>`;
+        `<button type="button" class="vf-enum-pill ${selected.includes(v) ? 'active' : ''}" data-action="multi" data-path="${path}" data-value="${escapeHtml(v)}" aria-pressed="${selected.includes(v)}">${escapeHtml(labels[v] || v)}</button>`).join('')}</div>`;
     }
     if ((node.op === 'in' || node.op === 'not_in') && !spec.values) {
       // Other suggest-backed enums retain a free-entry list via typeahead.
       const selected = Array.isArray(node.value) ? node.value : [];
-      return `<span class="vf-value-wrap"><input data-action="multi-text" data-path="${path}" data-suggest="${spec.suggest ? '1' : ''}" type="text" autocomplete="off" spellcheck="false" value="${esc(selected.join(', '))}" placeholder="Comma-separated values" aria-label="Filter values"><div class="vf-suggest" hidden></div></span>`;
+      return `<span class="vf-value-wrap"><input data-action="multi-text" data-path="${path}" data-suggest="${spec.suggest ? '1' : ''}" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(selected.join(', '))}" placeholder="Comma-separated values" aria-label="Filter values"><div class="vf-suggest" hidden></div></span>`;
     }
     if (node.op === 'recent') {
       const v = node.value || {};
-      return `<div class="vf-value-pair"><input data-action="recent-n" data-path="${path}" type="number" min="1" step="1" value="${esc(v.n)}" aria-label="Number"><select data-action="recent-unit" data-path="${path}" aria-label="Unit">${RECENT_UNITS.map(([k, , plural]) => `<option value="${k}" ${v.unit === k ? 'selected' : ''}>${plural}</option>`).join('')}</select></div>`;
+      return `<div class="vf-value-pair"><input data-action="recent-n" data-path="${path}" type="number" min="1" step="1" value="${escapeHtml(v.n)}" aria-label="Number"><select data-action="recent-unit" data-path="${path}" aria-label="Unit">${RECENT_UNITS.map(([k, , plural]) => `<option value="${k}" ${v.unit === k ? 'selected' : ''}>${plural}</option>`).join('')}</select></div>`;
     }
     if (node.op === 'between') {
       const pair = Array.isArray(node.value) ? node.value : ['', ''];
       const type = spec.type === 'date' ? 'date' : 'number';
-      return `<div class="vf-value-pair"><input data-action="between-lo" data-path="${path}" type="${type}" value="${esc(pair[0])}" aria-label="Lower bound"><span>and</span><input data-action="between-hi" data-path="${path}" type="${type}" value="${esc(pair[1])}" aria-label="Upper bound"></div>`;
+      return `<div class="vf-value-pair"><input data-action="between-lo" data-path="${path}" type="${type}" value="${escapeHtml(pair[0])}" aria-label="Lower bound"><span>and</span><input data-action="between-hi" data-path="${path}" type="${type}" value="${escapeHtml(pair[1])}" aria-label="Upper bound"></div>`;
     }
     if (spec.type === 'boolean') {
       return `<select data-action="value-bool" data-path="${path}" aria-label="Filter value"><option value="1" ${node.value ? 'selected' : ''}>Yes</option><option value="0" ${!node.value ? 'selected' : ''}>No</option></select>`;
     }
     if (spec.type === 'enum' && spec.values) {
       const labels = spec.labels || {};
-      return `<select data-action="value-select" data-path="${path}" aria-label="Filter value">${spec.values.map((v) => `<option value="${esc(v)}" ${v === node.value ? 'selected' : ''}>${esc(labels[v] || v)}</option>`).join('')}</select>`;
+      return `<select data-action="value-select" data-path="${path}" aria-label="Filter value">${spec.values.map((v) => `<option value="${escapeHtml(v)}" ${v === node.value ? 'selected' : ''}>${escapeHtml(labels[v] || v)}</option>`).join('')}</select>`;
     }
     const inputType = spec.type === 'number' || spec.type === 'rating' ? 'number' : (spec.type === 'date' ? 'date' : 'text');
     const extras = spec.type === 'rating' ? 'min="0" max="5" step="1"' : (inputType === 'number' ? 'step="any"' : '');
     if (spec.suggest && inputType === 'text') {
-      return `<span class="vf-value-wrap"><input data-action="value-input" data-path="${path}" data-suggest="1" type="text" autocomplete="off" spellcheck="false" value="${esc(node.value)}" placeholder="Type or pick a value…" aria-label="Filter value"><div class="vf-suggest" hidden></div></span>`;
+      return `<span class="vf-value-wrap"><input data-action="value-input" data-path="${path}" data-suggest="1" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(node.value)}" placeholder="Type or pick a value…" aria-label="Filter value"><div class="vf-suggest" hidden></div></span>`;
     }
-    return `<input data-action="value-input" data-path="${path}" type="${inputType}" ${extras} value="${esc(node.value)}" aria-label="Filter value">`;
+    return `<input data-action="value-input" data-path="${path}" type="${inputType}" ${extras} value="${escapeHtml(node.value)}" aria-label="Filter value">`;
   }
 
   // ---- typeahead --------------------------------------------------------
@@ -1852,7 +1846,7 @@
       if (!data.values.length) { drop.hidden = true; return; }
       drop.innerHTML = `<div class="vf-suggest-hint">In your photos · counts respect other filters</div>` +
         data.values.map((entry) =>
-          `<button class="vf-value-option" data-suggest-value="${esc(entry.value)}" data-path="${input.dataset.path}" type="button"><span>${esc(entry.value)}</span><em>${entry.count}</em></button>`).join('');
+          `<button class="vf-value-option" data-suggest-value="${escapeHtml(entry.value)}" data-path="${input.dataset.path}" type="button"><span>${escapeHtml(entry.value)}</span><em>${entry.count}</em></button>`).join('');
       drop.hidden = false;
     }).catch(() => { if (seq === suggestSeq) drop.hidden = true; });
   }
@@ -1900,8 +1894,8 @@
       byCategory.get(spec.category).push([key, spec]);
     });
     $('.vf-field-options').innerHTML = Array.from(byCategory.entries()).map(([category, fields]) =>
-      `<div class="vf-field-category">${esc(category)}</div>` + fields.map(([key, spec]) =>
-        `<button class="vf-field-option" data-add-field="${key}" type="button"><span>${esc(spec.label)}</span><span>${esc(spec.type)}</span></button>`).join('')).join('')
+      `<div class="vf-field-category">${escapeHtml(category)}</div>` + fields.map(([key, spec]) =>
+        `<button class="vf-field-option" data-add-field="${key}" type="button"><span>${escapeHtml(spec.label)}</span><span>${escapeHtml(spec.type)}</span></button>`).join('')).join('')
       || '<div class="vf-empty-rules">No fields found</div>';
   }
 
@@ -2483,7 +2477,7 @@
     if (!menu.hidden) { menu.hidden = true; return; }
     menu.innerHTML = HANDOFF_PAGES.filter(([key]) =>
       key !== state.page && handoffPageAvailable(key)).map(([key, path, label, detail]) =>
-      `<button type="button" data-handoff-path="${path}"><span>${label}</span><small>${esc(detail)}</small></button>`).join('');
+      `<button type="button" data-handoff-path="${path}"><span>${label}</span><small>${escapeHtml(detail)}</small></button>`).join('');
     menu.hidden = false;
   }
 

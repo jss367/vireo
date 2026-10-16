@@ -777,15 +777,6 @@ async function loadRapidShortcuts() {
   registerRapidShortcuts();
 }
 
-function escapeHtml(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-  });
-}
-
-function escapeAttr(s) {
-  return escapeHtml(s);
-}
 
 function photoPreviewUrl(id) {
   return '/photos/' + id + '/preview?size=2560';

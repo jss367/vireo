@@ -60,7 +60,6 @@ class RenderCache:
 
     @staticmethod
     def clear_preview_cache_invalid(db, photo_id, size, *, commit=True):
-        preview_cache.ensure_preview_cache_invalidations_table(db)
         db.caches.clear_preview_invalidation(photo_id, size)
         if commit:
             db.commit()

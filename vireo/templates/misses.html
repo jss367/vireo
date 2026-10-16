@@ -539,13 +539,6 @@ var MISS_TUNING_CONTROL_IDS = [
   'missResetPreviewBtn',
 ];
 
-function escapeHtml(s) {
-  if (s == null) return '';
-  return String(s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-function escapeAttr(s) { return escapeHtml(s); }
 
 function photoThumbnailUrl(p) {
   if (!p || p.id == null) return '';

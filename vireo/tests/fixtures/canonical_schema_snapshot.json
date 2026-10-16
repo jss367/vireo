@@ -974,6 +974,54 @@
   ],
   [
    "table",
+   "job_history",
+   "job_history",
+   "CREATE TABLE job_history (\n        id          TEXT PRIMARY KEY,\n        type        TEXT,\n        status      TEXT,\n        started_at  TEXT,\n        finished_at TEXT,\n        duration    REAL,\n        result      TEXT,\n        error_count INTEGER DEFAULT 0,\n        config      TEXT,\n        workspace_id INTEGER,\n        resource_wait_seconds REAL DEFAULT 0,\n        resource_wait_count INTEGER DEFAULT 0,\n        tree        TEXT,\n        summary     TEXT DEFAULT '',\n        progress    TEXT\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_job_history_1",
+   "job_history",
+   null
+  ],
+  [
+   "table",
+   "preview_cache_invalidations",
+   "preview_cache_invalidations",
+   "CREATE TABLE preview_cache_invalidations (\n        photo_id INTEGER NOT NULL,\n        size INTEGER NOT NULL,\n        PRIMARY KEY (photo_id, size),\n        FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE\n    )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_preview_cache_invalidations_1",
+   "preview_cache_invalidations",
+   null
+  ],
+  [
+   "table",
+   "species_identity_repairs",
+   "species_identity_repairs",
+   "CREATE TABLE species_identity_repairs (\n        id INTEGER PRIMARY KEY, prediction_id INTEGER NOT NULL,\n        resolution_identity TEXT NOT NULL, before_json TEXT NOT NULL,\n        after_json TEXT NOT NULL, reason TEXT NOT NULL,\n        repaired_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  ],
+  [
+   "index",
+   "idx_taxa_common_names_name_nocase",
+   "taxa_common_names",
+   "CREATE INDEX idx_taxa_common_names_name_nocase\n        ON taxa_common_names(name COLLATE NOCASE)"
+  ],
+  [
+   "index",
+   "idx_job_history_workspace",
+   "job_history",
+   "CREATE INDEX idx_job_history_workspace ON job_history(workspace_id)"
+  ],
+  [
+   "trigger",
+   "job_history_require_workspace",
+   "job_history",
+   "CREATE TRIGGER job_history_require_workspace\n        BEFORE INSERT ON job_history\n        WHEN NEW.workspace_id IS NOT NULL AND NOT EXISTS\n             (SELECT 1 FROM workspaces WHERE id=NEW.workspace_id)\n        BEGIN SELECT RAISE(IGNORE); END"
+  ],
+  [
+   "table",
    "photo_exif_search_text",
    "photo_exif_search_text",
    "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"
@@ -1019,12 +1067,6 @@
    "workspace_visible_folders",
    "workspace_visible_folders",
    "CREATE VIEW workspace_visible_folders AS\n        SELECT folder_id, workspace_id, is_root FROM workspace_folders\n        UNION\n        SELECT DISTINCT p.folder_id, wp.workspace_id, 1 AS is_root\n        FROM workspace_photos wp JOIN photos p ON p.id = wp.photo_id\n        WHERE NOT EXISTS (SELECT 1 FROM workspace_folders wf\n            WHERE wf.folder_id = p.folder_id AND wf.workspace_id = wp.workspace_id)"
-  ],
-  [
-   "table",
-   "species_identity_repairs",
-   "species_identity_repairs",
-   "CREATE TABLE species_identity_repairs (\n        id INTEGER PRIMARY KEY, prediction_id INTEGER NOT NULL,\n        resolution_identity TEXT NOT NULL, before_json TEXT NOT NULL,\n        after_json TEXT NOT NULL, reason TEXT NOT NULL,\n        repaired_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
   ]
  ],
  "db_meta": {

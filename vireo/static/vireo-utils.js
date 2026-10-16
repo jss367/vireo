@@ -90,9 +90,11 @@ var VireoViewPreferences = (function() {
   // and checkbox controls save on change.
   document.addEventListener('input', onPreferenceEvent, true);
   document.addEventListener('change', onPreferenceEvent, true);
-  // Restore controls already parsed (notably shared navbar controls). Pages
-  // restore their own controls before bootstrap so page-specific validation
-  // can run afterward without a second late restore undoing it.
+  // Restore controls already parsed. This script is the navbar's first, so
+  // on a navbar page that is nothing yet: navbar-shared-helpers.js, loaded
+  // after the navbar markup, restores the navbar's own controls, and pages
+  // restore theirs before bootstrap so page-specific validation can run
+  // afterward without a second late restore undoing it.
   restoreAll(document);
 
   return {
@@ -104,21 +106,41 @@ var VireoViewPreferences = (function() {
   };
 })();
 
+/*
+ * The one HTML escaper. Text and attribute contexts share it: a value that
+ * encodes all five of & < > " ' is safe between tags and inside a quoted
+ * attribute alike, so a page never has to pick the right helper (and a
+ * copy that only escaped the text set once let a quote break out of an
+ * attribute). test_shared_frontend_helpers.py keeps every page on this
+ * definition; no other script may declare escapeHtml, escapeAttr or esc.
+ */
 function escapeHtml(str) {
   if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
+  return String(str).replace(/[&<>"']/g, function(ch) {
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch];
+  });
 }
 
 function escapeAttr(str) {
-  if (str == null) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/'/g, '&#39;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return escapeHtml(str);
+}
+
+/*
+ * The one byte formatter (every page's sizes, the navbar's cleanup banner,
+ * Work Locally's quotas). null/undefined and non-numbers render as '', so a
+ * missing size shows nothing rather than "NaN undefined". Whole bytes stay
+ * integers; KB and MB get one decimal, GB and TB two. test_shared_frontend_helpers.py
+ * keeps formatBytes to this definition.
+ */
+function formatBytes(n) {
+  if (n == null) return '';
+  n = Number(n);
+  if (!isFinite(n)) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  if (n < 1024 * 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  return (n / 1024 / 1024 / 1024 / 1024).toFixed(2) + ' TB';
 }
 
 var VireoTextInputs = (function() {

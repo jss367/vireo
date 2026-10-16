@@ -18,6 +18,10 @@ const ctx = vm.createContext({
       }};
     },
   },
+  // Stand-ins for the shared helpers in vireo-utils.js, which the page loads
+  // from the navbar before any jobs/ script.
+  escapeHtml: value => String(value == null ? '' : value)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'),
   escapeAttr: value => String(value).replaceAll('"', '&quot;'),
   formatJobType: () => 'Import In Place',
   renderMoveRoute: () => '', renderSourceCleanup: () => '',

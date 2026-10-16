@@ -31,13 +31,13 @@ function renderSourceCleanup(job) {
     } else {
       html += '<p>Check the original folder for files left after the move.</p>';
     }
-    if (state.message) html += '<p role="status">' + esc(state.message) + '</p>';
-    if (state.error) html += '<p role="alert">' + esc(state.error) + '</p>';
+    if (state.message) html += '<p role="status">' + escapeHtml(state.message) + '</p>';
+    if (state.error) html += '<p role="alert">' + escapeHtml(state.error) + '</p>';
     if (review && review.files && review.review_token) {
       if (review.files.length) {
         html += '<p>These files were not moved with the photos. Metadata files may contain editing settings.</p><ul>';
         review.files.forEach(function(file) {
-          html += '<li>' + esc(file.name) + ' (' + file.size.toLocaleString() + ' bytes)</li>';
+          html += '<li>' + escapeHtml(file.name) + ' (' + file.size.toLocaleString() + ' bytes)</li>';
         });
         html += '</ul>';
       }

@@ -8,12 +8,8 @@ function restoreLifeListViewPreferences() {
   VireoViewPreferences.restoreAll(document.getElementById('controlsBar'));
 }
 
-// All dynamic values rendered into card HTML pass through escapeAttr —
-// same escaping convention as highlights.html.
-function escapeAttr(s) {
-  if (s === null || s === undefined) return '';
-  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+// All dynamic values rendered into card HTML pass through the shared
+// escapeAttr (vireo-utils.js) — same escaping convention as highlights.html.
 
 function formatDate(iso) {
   if (!iso) return null;

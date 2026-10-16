@@ -258,14 +258,6 @@ const CARD_CLEANUP_VERIFY_REASON = 'archive copy has not been checksum-verified'
 // match as above; test_hash_failed_callout_reason_stays_in_sync pins it.
 const CARD_CLEANUP_HASH_FAILED_REASON = 'see the Audit page';
 
-function formatBytes(n) {
-  n = Number(n || 0);
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
-  return (i === 0 ? String(n) : n.toFixed(n >= 10 ? 1 : 2)) + ' ' + units[i];
-}
-
 function cardCleanupFileCount(n) {
   const count = Number(n || 0);
   return count.toLocaleString() + (count === 1 ? ' file' : ' files');

@@ -132,8 +132,7 @@ class CachesRepository:
     def preview_invalidated(self, photo_id: int, size: int) -> bool:
         """True when ``(photo_id, size)`` carries a "do not adopt" marker.
 
-        Reads ``preview_cache_invalidations``, which the caller creates first
-        (``preview_cache.ensure_preview_cache_invalidations_table``).
+        Reads ``preview_cache_invalidations`` (part of the canonical schema).
         """
         row = self.conn.execute(
             "SELECT 1 FROM preview_cache_invalidations "

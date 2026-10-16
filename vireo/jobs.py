@@ -255,7 +255,8 @@ class JobRunner:
         self._shutting_down = False
         if db:
             self._db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
-            self._ensure_history_table(db)
+            # job_history is part of the canonical schema (canonical_schema.
+            # FORMERLY_LAZY_OBJECTS); the runner only reconciles its rows.
             self._startup_sweep(db)
 
     def _start_worker_thread(self, job, work_fn):
@@ -371,61 +372,6 @@ class JobRunner:
                 )
                 return False
             threads[0].join(timeout=remaining)
-
-    def _ensure_history_table(self, db):
-        db.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS job_history (
-                id          TEXT PRIMARY KEY,
-                type        TEXT,
-                status      TEXT,
-                started_at  TEXT,
-                finished_at TEXT,
-                duration    REAL,
-                result      TEXT,
-                error_count INTEGER DEFAULT 0,
-                config      TEXT,
-                workspace_id INTEGER,
-                resource_wait_seconds REAL DEFAULT 0,
-                resource_wait_count INTEGER DEFAULT 0
-            )
-            """
-        )
-        # Migration: add workspace_id to existing job_history tables
-        try:
-            db.conn.execute("SELECT workspace_id FROM job_history LIMIT 0")
-        except sqlite3.OperationalError:  # no such column: add it
-            db.conn.execute(
-                "ALTER TABLE job_history ADD COLUMN workspace_id INTEGER"
-            )
-        # A catalog-independent download may finish after its workspace was
-        # deleted. Its final INSERT OR REPLACE must not resurrect history
-        # for an owner that no longer exists. NULL is global maintenance.
-        from repositories.job_history import JobHistoryRepository
-        JobHistoryRepository.ensure_workspace_ownership(db.conn)
-        # Migration: add tree column
-        try:
-            db.conn.execute("SELECT tree FROM job_history LIMIT 0")
-        except sqlite3.OperationalError:  # no such column: add it
-            db.conn.execute("ALTER TABLE job_history ADD COLUMN tree TEXT")
-        # Migration: add summary column
-        try:
-            db.conn.execute("SELECT summary FROM job_history LIMIT 0")
-        except sqlite3.OperationalError:  # no such column: add it
-            db.conn.execute("ALTER TABLE job_history ADD COLUMN summary TEXT DEFAULT ''")
-        for column, definition in (
-            ("resource_wait_seconds", "REAL DEFAULT 0"),
-            ("resource_wait_count", "INTEGER DEFAULT 0"),
-            # Last checkpointed job["progress"] (plus checkpoint_at) for
-            # live rows; the startup sweep folds it into interrupted rows.
-            ("progress", "TEXT"),
-        ):
-            try:
-                db.conn.execute(f"SELECT {column} FROM job_history LIMIT 0")
-            except sqlite3.OperationalError:  # no such column: add it
-                db.conn.execute(
-                    f"ALTER TABLE job_history ADD COLUMN {column} {definition}"
-                )
 
     def _startup_sweep(self, db):
         """Reconcile job_history with the fact that we just started.
@@ -558,7 +504,6 @@ class JobRunner:
         and skipped (the checkpoint thread retries the insert on its next
         tick).
         """
-        import sqlite3
 
         conn = None
         try:
@@ -701,7 +646,6 @@ class JobRunner:
         its own connection) is skipped, not waited out: the next tick
         tries again.
         """
-        import sqlite3
 
         now_iso = datetime.now().isoformat()
         now = time.time()
@@ -1638,7 +1582,6 @@ class JobRunner:
         if not self._db_path:
             return
 
-        import sqlite3
 
         result_data = job["result"]
         if job["status"] == "failed" and job["errors"]:

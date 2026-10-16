@@ -126,7 +126,7 @@ function moveDateView(cfg, job) {
 // involved. Jobs enqueued before the plan snapshot existed carry no counts;
 // they fall back to the template-only sentence.
 function moveDateNote(cfg, job) {
-  var template = '<code>' + esc(cfg.folder_template) + '</code>';
+  var template = '<code>' + escapeHtml(cfg.folder_template) + '</code>';
   if (!(cfg.date_destination_count || 0)) {
     return '<span class="job-move-route-note">Organizing photos into ' +
       'capture-date folders using ' + template + '</span>';
@@ -175,7 +175,7 @@ function moveDateNote(cfg, job) {
   html += '<ul class="job-move-route-dates">';
   view.folders.forEach(function(item) {
     html += '<li title="' + escapeAttr(item.path) + '">' +
-      esc(item.label) + ' · ' + item.text + '</li>';
+      escapeHtml(item.label) + ' · ' + item.text + '</li>';
   });
   if (view.listTotal > view.folders.length) {
     var rest = view.listTotal - view.folders.length;
@@ -212,10 +212,10 @@ function renderMoveRoute(job) {
   var html = '<div class="job-move-route" aria-label="Move locations">';
   html += '<span class="job-move-route-label">From</span>';
   html += '<span class="job-move-route-path" title="' +
-    escapeAttr(source) + '">' + esc(source) + '</span>';
+    escapeAttr(source) + '">' + escapeHtml(source) + '</span>';
   html += '<span class="job-move-route-label">To</span>';
   html += '<span class="job-move-route-path" title="' +
-    escapeAttr(destination) + '">' + esc(destination) + '</span>';
+    escapeAttr(destination) + '">' + escapeHtml(destination) + '</span>';
   if (cfg.folder_template) {
     html += moveDateNote(cfg, job);
   } else if (cfg.merge) {

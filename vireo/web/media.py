@@ -45,7 +45,7 @@ from flask import (
     request,
     send_from_directory,
 )
-from preview_cache import PREVIEW_TIER_SIZES, ensure_preview_cache_invalidations_table, paired_preview_ready
+from preview_cache import PREVIEW_TIER_SIZES, paired_preview_ready
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
@@ -228,7 +228,6 @@ def _sweep_stale_paired_previews(paired_dir):
 
 
 def _is_preview_cache_invalid(db, photo_id, size):
-    ensure_preview_cache_invalidations_table(db)
     return db.caches.preview_invalidated(photo_id, size)
 
 def _full_resolution_render_signature(photo, recipe, file_state=None):

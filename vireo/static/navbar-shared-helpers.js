@@ -1,3 +1,11 @@
+/* ---------- Persisted navbar controls ---------- */
+// vireo-utils.js is loaded before the navbar markup, so its load-time
+// restoreAll() found none of the navbar's [data-view-preference] controls
+// (the Missing Photos thumbnail size). This script is the first after that
+// markup: restore everything parsed so far, as the end-of-navbar load of
+// vireo-utils.js used to. test_shared_frontend_helpers.py pins the order.
+VireoViewPreferences.restoreAll(document);
+
 /* ---------- Toast Notifications ---------- */
 (function() {
   var container = document.createElement('div');
