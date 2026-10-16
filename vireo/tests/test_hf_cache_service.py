@@ -361,22 +361,25 @@ def test_last_snapshot_removal_keeps_the_repo_while_a_download_is_in_flight(hub)
     assert (hub.root / ONNX_DIR / "blobs").is_dir()
 
 
-def test_repo_dir_survives_when_only_a_hub_lock_remains(hub):
-    """``_remove_repo_if_empty`` leaves a repo another process is downloading into."""
+def test_emptied_repo_is_removed_with_rmdir_steps_only(hub):
+    """refs/ and .no_exist/ markers go; anything the hub did not write keeps the repo."""
     from services import hf_cache
 
     repo = hub.root / ONNX_DIR
     (repo / "snapshots").mkdir(parents=True)
     (repo / "blobs").mkdir()
-    locks = hub.root / ".locks" / ONNX_DIR
-    locks.mkdir(parents=True)
-    (locks / "deadbeef.lock").write_bytes(b"")
-
-    hf_cache._remove_repo_if_empty(str(repo))
-    assert repo.is_dir()
-    (locks / "deadbeef.lock").unlink()
-    hf_cache._remove_repo_if_empty(str(repo))
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("rev1")
+    (repo / ".no_exist" / "rev1").mkdir(parents=True)
+    (repo / ".no_exist" / "rev1" / "missing.json").write_bytes(b"")
+    assert hf_cache._remove_repo_if_empty(str(repo)) is True
     assert not repo.exists()
+
+    (repo / "snapshots").mkdir(parents=True)
+    (repo / "unexpected").mkdir()
+    (repo / "unexpected" / "keep.bin").write_bytes(b"k")
+    assert hf_cache._remove_repo_if_empty(str(repo)) is False
+    assert (repo / "unexpected" / "keep.bin").exists()
 
 
 def test_deletion_failures_are_reported_not_claimed_as_removed(hub, monkeypatch):
@@ -441,18 +444,48 @@ def test_cleanup_is_refused_while_a_download_holds_the_lock(hub):
     assert hf_cache.remove_unused()["freed"] == 500
 
 
-def test_cleanup_is_refused_while_another_process_holds_a_hub_lock(hub):
+def test_cleanup_is_refused_while_another_downloader_holds_a_hub_lock(hub):
+    """The hub holds a filelock on .locks/<repo>/<etag>.lock during a download."""
+    import threading
+
+    from filelock import FileLock
+    from services import hf_cache
+
+    blob = hub.add("bioclip-2.5-vith14/image_encoder.onnx.data", b"b" * 500)
+    locks = hub.root / ".locks" / ONNX_DIR
+    locks.mkdir(parents=True)
+    held, release = threading.Event(), threading.Event()
+
+    def downloader():
+        with FileLock(str(locks / "deadbeef.lock"), is_singleton=False):
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=downloader)
+    t.start()
+    held.wait(10)
+    try:
+        with pytest.raises(hf_cache.DownloadInProgress):
+            hf_cache.remove(["jss367/vireo-onnx-models/bioclip-2.5-vith14"])
+        assert blob.exists()
+    finally:
+        release.set()
+        t.join(10)
+    assert hf_cache.remove(["jss367/vireo-onnx-models/bioclip-2.5-vith14"])["freed"] == 500
+
+
+def test_stale_hub_lock_files_do_not_block_cleanup(hub):
+    """filelock leaves the lock file behind; presence alone must mean nothing."""
     from services import hf_cache
 
     blob = hub.add("bioclip-2.5-vith14/image_encoder.onnx.data", b"b" * 500)
     locks = hub.root / ".locks" / ONNX_DIR
     locks.mkdir(parents=True)
     (locks / "deadbeef.lock").write_bytes(b"")
+    (locks / "cafebabe.lock").write_bytes(b"")
 
-    with pytest.raises(hf_cache.DownloadInProgress):
-        hf_cache.remove(["jss367/vireo-onnx-models/bioclip-2.5-vith14"])
-    assert blob.exists()
-    assert (hub.root / ONNX_DIR / "snapshots" / "rev1" / "bioclip-2.5-vith14").exists()
+    assert hf_cache.remove_unused()["freed"] == 500
+    assert not blob.exists()
 
 
 def test_failed_shared_blob_is_attributed_to_every_selected_owner(hub, monkeypatch):

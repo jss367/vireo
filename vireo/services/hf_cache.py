@@ -34,17 +34,24 @@ validated ``snapshots/`` or ``blobs/`` directory descriptor with
 between the check and the unlink cannot redirect it (Windows has no
 ``dir_fd``; there the pathname checks are the guard). In-process downloads
 hold ``DOWNLOAD_LOCK`` across fetch-and-copy and cleanup takes it without
-blocking, answering "a download is running" instead; another process's
-download shows as hub lock files and is refused the same way. A repository
-directory is only removed once it holds no snapshot, no blob (including a
-partial ``.incomplete`` download) and no download lock.
+blocking, answering "a download is running" instead. Another process's
+``hf_hub_download`` holds a ``filelock`` on ``<cache>/.locks/<repo>/<etag>.lock``
+for its duration; cleanup acquires every such lock file non-blockingly and
+holds them through deletion (the files outlive their locks, so presence alone
+means nothing). A download that starts in another process after that
+acquisition is the residual race, the same one the hub's own
+``delete_revisions`` accepts with no locking at all. A repository directory
+is only removed with ``rmdir`` steps that fail if anything new appears in
+it, once it holds no snapshot and no blob (including a partial
+``.incomplete`` download).
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
-import shutil
+import stat
 import threading
 import time
 
@@ -318,27 +325,94 @@ def _prune_empty_dirs(path, stop):
         path = os.path.dirname(path)
 
 
-def _hub_locked(repo_dir):
-    """True while another process holds a hub download lock for this repo.
-
-    ``hf_hub_download`` keeps a per-file lock under ``<cache>/.locks/<repo>/``
-    for the duration of a download.
-    """
+def _hub_lock_paths(repo_dir):
     locks = os.path.join(os.path.dirname(repo_dir), ".locks", os.path.basename(repo_dir))
-    return os.path.isdir(locks) and bool(os.listdir(locks))
+    if os.path.islink(locks) or not os.path.isdir(locks):
+        return []
+    return [os.path.join(locks, n) for n in sorted(os.listdir(locks)) if n.endswith(".lock")]
+
+
+@contextlib.contextmanager
+def _holding_hub_locks(repo_dirs):
+    """Hold every existing hub download lock for ``repo_dirs`` while deleting.
+
+    ``hf_hub_download`` holds ``filelock`` on ``.locks/<repo>/<etag>.lock``
+    for the length of a download; the file stays behind afterwards, so only
+    acquiring it says whether a download is running. Raises
+    ``DownloadInProgress`` without deleting anything if one is held.
+    """
+    try:
+        from filelock import FileLock, Timeout
+    except ImportError:  # pragma: no cover - filelock ships with huggingface_hub
+        yield
+        return
+    held = []
+    try:
+        for repo_dir in repo_dirs:
+            for path in _hub_lock_paths(repo_dir):
+                lock = FileLock(path, is_singleton=False)
+                try:
+                    lock.acquire(timeout=0)
+                except Timeout:
+                    raise DownloadInProgress(
+                        f"another process is downloading into {os.path.basename(repo_dir)}"
+                    ) from None
+                held.append(lock)
+        yield
+    finally:
+        for lock in held:
+            lock.release()
+
+
+def _rmdir_tree_of_known_shape(repo_dir):
+    """Remove an emptied repository with ``rmdir`` steps, never recursively.
+
+    Only the layout the hub writes is removed: empty ``snapshots/`` and
+    ``blobs/``, the small ref files under ``refs/``, the marker files under
+    ``.no_exist/<rev>/``, then the repository itself. Each ``rmdir`` fails if
+    anything new has appeared, in which case the repository is left in place
+    and the caller reports that honestly.
+    """
+    def unlink_files_in(directory):
+        if os.path.islink(directory) or not os.path.isdir(directory):
+            return
+        for name in os.listdir(directory):
+            path = os.path.join(directory, name)
+            if os.path.isfile(path) and not os.path.islink(path):
+                _unlink_within(directory, path)
+        os.rmdir(directory)
+
+    for sub in ("snapshots", "blobs"):
+        path = os.path.join(repo_dir, sub)
+        if os.path.lexists(path):
+            os.rmdir(path)
+    unlink_files_in(os.path.join(repo_dir, "refs"))
+    no_exist = os.path.join(repo_dir, ".no_exist")
+    if os.path.isdir(no_exist) and not os.path.islink(no_exist):
+        for rev in os.listdir(no_exist):
+            unlink_files_in(os.path.join(no_exist, rev))
+        os.rmdir(no_exist)
+    os.rmdir(repo_dir)
 
 
 def _remove_repo_if_empty(repo_dir):
+    """Remove the repository directory once nothing in it is worth keeping.
+
+    Returns True when it is gone. Any blob, a resumable ``.incomplete``
+    partial included, keeps it; so does content the hub does not write.
+    """
     if os.path.islink(repo_dir) or not os.path.isdir(repo_dir):
-        return
+        return False
     snapshots = os.path.join(repo_dir, "snapshots")
-    if os.path.isdir(snapshots) and os.listdir(snapshots):
-        return
-    # Any blob, a resumable ``.incomplete`` partial included, keeps the repo.
-    if _blob_files(repo_dir) or _hub_locked(repo_dir):
-        return
-    shutil.rmtree(repo_dir, ignore_errors=True)
+    if (os.path.isdir(snapshots) and os.listdir(snapshots)) or _blob_files(repo_dir):
+        return False
+    try:
+        _rmdir_tree_of_known_shape(repo_dir)
+    except OSError as exc:
+        log.info("Left HF cache repo %s in place: %s", repo_dir, exc)
+        return False
     log.info("Removed empty HF cache repo %s", repo_dir)
+    return True
 
 
 _DIR_FD_UNLINK = (
@@ -360,8 +434,8 @@ def _unlink_within(root, path):
     parts = rel.split(os.sep)
     if os.path.isabs(rel) or ".." in parts or "" in parts:
         raise OSError(f"{path} is not inside {root}")
-    if not _DIR_FD_UNLINK:  # Windows: pathname checks are the guard
-        os.unlink(path)
+    if not _DIR_FD_UNLINK:
+        _unlink_without_dir_fd(root, parts)
         return
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(root, flags)
@@ -373,6 +447,23 @@ def _unlink_within(root, path):
         os.unlink(parts[-1], dir_fd=fd)
     finally:
         os.close(fd)
+
+
+def _unlink_without_dir_fd(root, parts):
+    """Windows fallback: no ``dir_fd``, so re-check every ancestor for a
+    reparse point (junction or symlink) immediately before unlinking by name.
+    Narrower than the descriptor walk, and the best the platform offers."""
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    current = root
+    for part in [None, *parts[:-1]]:
+        if part is not None:
+            current = os.path.join(current, part)
+        st = os.lstat(current)
+        if not stat.S_ISDIR(st.st_mode) or (
+            reparse and getattr(st, "st_file_attributes", 0) & reparse
+        ):
+            raise OSError(f"{current} is not a plain directory")
+    os.unlink(os.path.join(current, parts[-1]))
 
 
 def _unlink_snapshot_files(group, failures):
@@ -402,15 +493,13 @@ def _delete_groups(groups):
     Returns ``(freed_bytes, failures)``; a failure names the key and path a
     deletion could not complete, so callers never report it as removed.
     Raises ``DownloadInProgress`` without deleting anything while a download
-    holds ``DOWNLOAD_LOCK`` or a hub lock file.
+    holds ``DOWNLOAD_LOCK`` or another process holds a hub lock file.
     """
     if not DOWNLOAD_LOCK.acquire(blocking=False):
         raise DownloadInProgress("a model download is in progress")
     try:
-        locked = [g["repo_dir"] for g in groups if _hub_locked(g["repo_dir"])]
-        if locked:
-            raise DownloadInProgress(f"a download holds a hub lock on {locked[0]}")
-        return _delete_groups_locked(groups)
+        with _holding_hub_locks(dict.fromkeys(g["repo_dir"] for g in groups)):
+            return _delete_groups_locked(groups)
     finally:
         DOWNLOAD_LOCK.release()
 
