@@ -29,8 +29,6 @@
   "computation_cache.py:validate_artifact": 221,
   "config.py:_coerce_remote_target": 102,
   "culling.py:analyze_for_culling": 261,
-  "db.py:Database._filter_prediction_rows_by_rules": 191,
-  "db.py:Database._relax_negated_prediction_leaves": 115,
   "db.py:Database.get_missing_photos": 178,
   "db.py:Database.merge_staged_tree_into_archive": 124,
   "db.py:Database.update_keyword": 160,
