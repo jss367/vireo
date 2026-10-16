@@ -23861,8 +23861,12 @@ def test_browse_detail_prediction_buttons_survive_apostrophe_species(
         for name, value in attrs.items():
             assert "Phoebe" not in name, (tag, name)
             assert "Phoebe" not in (value or ""), (tag, name, value)
-    # It is still displayed, and displayed correctly.
-    assert "Say&#x27;s Phoebe" in rendered or "Say's Phoebe" in rendered
+    # It is still displayed, and displayed correctly (the shared escapeHtml
+    # encodes the apostrophe as &#39;; the other spellings are equivalent).
+    assert any(
+        f"Say{apostrophe}s Phoebe" in rendered
+        for apostrophe in ("&#39;", "&#x27;", "'")
+    )
 
     # The round trip: clicking the rendered button calls the accept path
     # with the species the row named, apostrophe and all.
