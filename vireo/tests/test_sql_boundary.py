@@ -17,10 +17,15 @@ active-workspace state:
   (``conn = db.conn``) to get under the cap defeats the point: the SQL still
   runs outside the data layer.
 
-- Nothing anywhere (tests and the harness included) closes a catalog handle
+- Nothing anywhere (tests and the harness included, ``vireo/db.py`` itself
+  and the auxiliary tools under ``tools/`` included) closes a catalog handle
   with ``<expr>.conn.close()``. ``Database.close()`` is the one place that
-  closes the connection: it also drops ``conn`` and makes ``db.closed`` true,
-  so a raw close leaves a ``Database`` that claims to be open while every call
+  closes the connection; its implementation calls ``.close()`` on a local
+  alias of ``self.conn`` so the matcher below does not fire there, and the
+  data layer needs no exemption. The rule holds for the data layer too — a
+  future ``self.conn.close()`` elsewhere in ``db.py`` would trip the test.
+  ``Database.close()`` also drops ``conn`` and makes ``db.closed`` true, so
+  a raw close leaves a ``Database`` that claims to be open while every call
   raises ``sqlite3.ProgrammingError``.
 
 ``canonical_schema.py`` is part of the data layer, and ``vireo/testing/`` is
@@ -91,18 +96,23 @@ CONN_USE_LIMITS = {
 
 
 REPO = VIREO.parent
-# Every Python file in the repository except ``Database`` itself, which is
-# the one owner of the connection it closes.
-RAW_CLOSE_TREES = ("vireo", "tests", "scripts")
+# Every Python file this repository authors. ``Database.close`` owns the
+# connection it closes, but that implementation calls ``.close()`` on a local
+# alias of ``self.conn``, so the raw-close matcher below does not fire there
+# and the data layer needs no exemption. A future ``self.conn.close()`` added
+# to ``Database.close`` or any other method in ``db.py`` would trip the test,
+# which is the point: the rule holds for the data layer too.
+RAW_CLOSE_TREES = ("vireo", "tests", "scripts", "tools")
 
 
 def _every_module():
     for top in RAW_CLOSE_TREES:
         for path in sorted((REPO / top).rglob("*.py")):
             rel = path.relative_to(REPO).as_posix()
-            if rel == "vireo/db.py":
-                continue
             yield rel, ast.parse(path.read_text(encoding="utf-8"))
+    for path in sorted(REPO.glob("*.py")):
+        rel = path.relative_to(REPO).as_posix()
+        yield rel, ast.parse(path.read_text(encoding="utf-8"))
 
 
 def _raw_connection_closes(tree):
