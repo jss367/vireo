@@ -111,46 +111,77 @@ def create_pipeline_blueprint(
             "slot_cap": SLOT_CAP,
         })
 
-    @blueprint.route("/api/pipeline/plan", methods=["POST"])
-    def api_pipeline_plan():
-        """Return the per-stage plan for the pipeline given current UI selections.
+    def _plan_path_list(body, key):
+        """Validate an optional path list in a plan body: ``(paths, error)``.
 
-        Truth source for the Pipeline page's status pills + plan summary —
-        each stage's state ("Will run", "Will skip", "Already done") and
-        its summary text are computed from the same gates the actual
-        pipeline job uses, so the user is never told a stage is done when
-        it isn't (or vice versa).
-
-        Body mirrors a subset of the /api/jobs/pipeline body so the page
-        can pass through the same selections the user is staging.
+        A missing key is ``None``, not ``[]``; the two mean different scopes.
         """
-        from pipeline_plan import PipelinePlanParams, compute_plan
+        if key not in body:
+            return None, None
+        paths = body.get(key)
+        if not isinstance(paths, list):
+            return None, json_error(f"{key} must be a list", 400)
+        if len(paths) > 50000:
+            return None, json_error(
+                f"{key} too large ({len(paths)} > 50000)", 400,
+            )
+        if not all(isinstance(p, str) for p in paths):
+            return None, json_error(f"{key} entries must be strings", 400)
+        return paths, None
 
-        body = request.get_json(silent=True) or {}
-        # source_paths bounds the request. A Z8 SD card can hold ~5k RAWs;
-        # 50k is a generous ceiling that keeps the JSON body well under
-        # Flask's defaults while covering realistic multi-card imports.
-        # Beyond it the plan endpoint refuses rather than truncate, since
-        # a silently-truncated list would mis-classify late files as new.
-        #
-        # An explicit empty list is *not* the same as a missing key: the
-        # frontend sends ``[]`` when the user is in import mode and has
-        # deselected every preview file (a genuine no-op import). Falling
-        # back to whole-workspace scope in that case would re-introduce
-        # the misleading "Already done" pills this endpoint exists to
-        # prevent. So preserve None vs [] all the way through.
-        if "source_paths" in body:
-            source_paths = body.get("source_paths")
-            if not isinstance(source_paths, list):
-                return json_error("source_paths must be a list", 400)
-            if len(source_paths) > 50000:
-                return json_error(
-                    f"source_paths too large ({len(source_paths)} > 50000)", 400,
-                )
-            if not all(isinstance(p, str) for p in source_paths):
-                return json_error("source_paths entries must be strings", 400)
-        else:
-            source_paths = None
+    def _plan_folder_scope_photo_ids(folder_ids):
+        """Resolve a plan's ``folder_ids`` to ``(photo_ids, error)``."""
+        err = folder_ids_error(folder_ids, json_error)
+        if err is not None:
+            return None, err
+        db = get_db()
+        subtree_ids = set()
+        # Mirror the /api/jobs/pipeline folder resolution exactly so the
+        # plan describes the same photos the run will process. Without
+        # the path-based fallback, legacy folders with parent_id=NULL
+        # (whose paths sit under the selected root) are silently omitted
+        # from the plan even though the run walks them via
+        # _folder_subtree_ids_by_path.
+        for fid in folder_ids:
+            if not db.get_workspace_visible_folder_ids([fid]):
+                return None, json_error("folder not found", 404)
+            subtree_ids.update(db.get_folder_subtree_ids(fid))
+            # Intersect the path-based descendants with the workspace's
+            # folder set so nothing leaks in from another workspace that
+            # happens to share a path prefix.
+            subtree_ids.update(db.get_workspace_visible_folder_ids(
+                db._folder_subtree_ids_by_path(fid),
+            ))
+        return [
+            r["id"]
+            for r in db.get_workspace_photos_in_folders(list(subtree_ids))
+        ], None
+
+    def _expand_plan_process(body):
+        """Merge a plan body's saved process under it: ``(body, error)``."""
+        pid = body.get("process_id")
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            kind = "null" if pid is None else type(pid).__name__
+            return None, json_error(
+                f"process_id must be an integer, got {kind}", 400
+            )
+        try:
+            expanded = get_db().resolve_process(pid)
+        except ValueError as e:
+            return None, json_error(str(e), 404)
+        body = {**expanded, **body}
+        # Mirror the job path: a process with Eye Keypoints on opts into
+        # eye scoring, so the plan reflects the eye stage running rather
+        # than deferring to the workspace eye_detect_enabled default.
+        if (
+            not body.get("skip_eye_keypoints")
+            and body.get("eye_detect_override") is None
+        ):
+            body["eye_detect_override"] = True
+        return body, None
+
+    def _plan_legacy_field_error(body):
+        """Refuse plan bodies carrying import/archive or strategy fields."""
         deprecated_plan_fields = [
             key for key in (
                 "destination", "local_processing",
@@ -175,97 +206,10 @@ def create_pipeline_blueprint(
                 "saved_processes id) or explicit stage flags",
                 400,
             )
-        # hash_duplicate_paths is the frontend's pre-computed set of source
-        # paths that ingest() will skip via the global duplicate gate (copy
-        # mode + skip_duplicates=True; metadata-first matching or content
-        # hashes depending on the verify-by-hash toggle — the preview and
-        # ingest share import_dedup.DuplicateChecker, so the set matches
-        # what ingest will actually skip). Same shape/limits as
-        # source_paths; the planner subtracts these from new_count so the
-        # plan doesn't overstate work for duplicate-skipped files.
-        if "hash_duplicate_paths" in body:
-            hash_duplicate_paths = body.get("hash_duplicate_paths")
-            if not isinstance(hash_duplicate_paths, list):
-                return json_error("hash_duplicate_paths must be a list", 400)
-            if len(hash_duplicate_paths) > 50000:
-                return json_error(
-                    f"hash_duplicate_paths too large "
-                    f"({len(hash_duplicate_paths)} > 50000)", 400,
-                )
-            if not all(isinstance(p, str) for p in hash_duplicate_paths):
-                return json_error(
-                    "hash_duplicate_paths entries must be strings", 400,
-                )
-        else:
-            hash_duplicate_paths = None
-        # Folder scope (Process page): resolve folder_ids to their
-        # active-workspace subtree photo ids with the same guards as
-        # /api/jobs/pipeline, so the plan describes exactly the photos a
-        # folder-scoped run would process.
-        scope_photo_ids = None
-        folder_ids = body.get("folder_ids")
-        if folder_ids is not None:
-            err = folder_ids_error(folder_ids, json_error)
-            if err is not None:
-                return err
-            db = get_db()
-            subtree_ids = set()
-            # Mirror the /api/jobs/pipeline folder resolution exactly so the
-            # plan describes the same photos the run will process. Without
-            # the path-based fallback, legacy folders with parent_id=NULL
-            # (whose paths sit under the selected root) are silently omitted
-            # from the plan even though the run walks them via
-            # _folder_subtree_ids_by_path.
-            for fid in folder_ids:
-                if not db.get_workspace_visible_folder_ids([fid]):
-                    return json_error("folder not found", 404)
-                subtree_ids.update(db.get_folder_subtree_ids(fid))
-                # Intersect the path-based descendants with the workspace's
-                # folder set so nothing leaks in from another workspace that
-                # happens to share a path prefix.
-                subtree_ids.update(db.get_workspace_visible_folder_ids(
-                    db._folder_subtree_ids_by_path(fid),
-                ))
-            scope_photo_ids = [
-                r["id"]
-                for r in db.get_workspace_photos_in_folders(list(subtree_ids))
-            ]
-        # Expand a saved-process id the same way /api/jobs/pipeline does so
-        # the plan describes the run the same job body would produce. Without
-        # this, the Identify-birds process (skip_regroup=True + species review)
-        # shows Group as "Disabled" in the plan even though the actual run
-        # prepares species review results — the exact "plan summary is wrong
-        # for the default workflow" transparency failure the review flagged.
-        # Expansion supplies *defaults*; explicitly-present body keys still
-        # win, so a Custom caller can pin one flag on top of a process
-        # (mirrors the merge /api/jobs/pipeline runs). The process page's Run
-        # sends explicit stage flags (including miss_enabled/review_mode), so
-        # process_id is optional here.
-        # Key presence — not truthiness — decides whether a process was
-        # requested, matching /api/jobs/pipeline: a present-but-null process_id
-        # must 400 (not be treated as omitted), so previewing and starting the
-        # same body agree instead of the plan describing a run the job route
-        # would reject.
-        if "process_id" in body:
-            pid = body.get("process_id")
-            if not isinstance(pid, int) or isinstance(pid, bool):
-                kind = "null" if pid is None else type(pid).__name__
-                return json_error(
-                    f"process_id must be an integer, got {kind}", 400
-                )
-            try:
-                expanded = get_db().resolve_process(pid)
-            except ValueError as e:
-                return json_error(str(e), 404)
-            body = {**expanded, **body}
-            # Mirror the job path: a process with Eye Keypoints on opts into
-            # eye scoring, so the plan reflects the eye stage running rather
-            # than deferring to the workspace eye_detect_enabled default.
-            if (
-                not body.get("skip_eye_keypoints")
-                and body.get("eye_detect_override") is None
-            ):
-                body["eye_detect_override"] = True
+        return None
+
+    def _plan_option_error(body):
+        """Type-check a plan body's ``review_mode`` and ``eye_detect_override``."""
         review_mode = body.get("review_mode")
         if review_mode is not None and not isinstance(review_mode, str):
             return json_error(
@@ -284,24 +228,17 @@ def create_pipeline_blueprint(
                 f"eye_detect_override must be boolean, got "
                 f"{type(eye_detect_override_body).__name__}", 400,
             )
-        # Reject visual collections before the plan resolves the scope:
-        # ``compute_plan`` → ``pipeline._resolve_collection_photo_ids()`` →
-        # ``get_collection_photos()`` evaluates ``rules`` only and ignores
-        # ``visual_json``. Without this guard, an API caller or stale/bookmarked
-        # Process page body posting a visual collection id would receive a plan
-        # computed over every metadata match — advertising a widened runnable
-        # job even though ``/api/jobs/pipeline`` already rejects the same id at
-        # start time (Codex review r3622041639).
-        db = get_db()
-        collection_id = coerce_collection_id(body.get("collection_id"))
-        if collection_id is False:
-            return json_error("collection_id must be an integer", 400)
-        err = reject_visual_collection(db, collection_id, json_error=json_error)
-        if err is not None:
-            return err
-        if not isinstance(body.get("raw_subject_analysis", False), bool):
-            return json_error("raw_subject_analysis must be a boolean", 400)
-        params = PipelinePlanParams(
+        return None
+
+    def _plan_params(
+        body, collection_id, scope_photo_ids, source_paths, hash_duplicate_paths,
+    ):
+        """Build the ``PipelinePlanParams`` a validated plan body describes."""
+        from pipeline_plan import PipelinePlanParams
+
+        review_mode = body.get("review_mode")
+        eye_detect_override_body = body.get("eye_detect_override")
+        return PipelinePlanParams(
             raw_subject_analysis=body.get("raw_subject_analysis", False),
             collection_id=collection_id,
             photo_ids=scope_photo_ids,
@@ -320,6 +257,106 @@ def create_pipeline_blueprint(
             hash_duplicate_paths=hash_duplicate_paths,
             preview_max_size=body.get("preview_max_size"),
             review_mode=review_mode,
+        )
+
+    @blueprint.route("/api/pipeline/plan", methods=["POST"])
+    def api_pipeline_plan():
+        """Return the per-stage plan for the pipeline given current UI selections.
+
+        Truth source for the Pipeline page's status pills + plan summary —
+        each stage's state ("Will run", "Will skip", "Already done") and
+        its summary text are computed from the same gates the actual
+        pipeline job uses, so the user is never told a stage is done when
+        it isn't (or vice versa).
+
+        Body mirrors a subset of the /api/jobs/pipeline body so the page
+        can pass through the same selections the user is staging.
+        """
+        from pipeline_plan import compute_plan
+
+        body = request.get_json(silent=True) or {}
+        # source_paths bounds the request. A Z8 SD card can hold ~5k RAWs;
+        # 50k is a generous ceiling that keeps the JSON body well under
+        # Flask's defaults while covering realistic multi-card imports.
+        # Beyond it the plan endpoint refuses rather than truncate, since
+        # a silently-truncated list would mis-classify late files as new.
+        #
+        # An explicit empty list is *not* the same as a missing key: the
+        # frontend sends ``[]`` when the user is in import mode and has
+        # deselected every preview file (a genuine no-op import). Falling
+        # back to whole-workspace scope in that case would re-introduce
+        # the misleading "Already done" pills this endpoint exists to
+        # prevent. So preserve None vs [] all the way through.
+        source_paths, err = _plan_path_list(body, "source_paths")
+        if err is not None:
+            return err
+        err = _plan_legacy_field_error(body)
+        if err is not None:
+            return err
+        # hash_duplicate_paths is the frontend's pre-computed set of source
+        # paths that ingest() will skip via the global duplicate gate (copy
+        # mode + skip_duplicates=True; metadata-first matching or content
+        # hashes depending on the verify-by-hash toggle — the preview and
+        # ingest share import_dedup.DuplicateChecker, so the set matches
+        # what ingest will actually skip). Same shape/limits as
+        # source_paths; the planner subtracts these from new_count so the
+        # plan doesn't overstate work for duplicate-skipped files.
+        hash_duplicate_paths, err = _plan_path_list(body, "hash_duplicate_paths")
+        if err is not None:
+            return err
+        # Folder scope (Process page): resolve folder_ids to their
+        # active-workspace subtree photo ids with the same guards as
+        # /api/jobs/pipeline, so the plan describes exactly the photos a
+        # folder-scoped run would process.
+        scope_photo_ids = None
+        folder_ids = body.get("folder_ids")
+        if folder_ids is not None:
+            scope_photo_ids, err = _plan_folder_scope_photo_ids(folder_ids)
+            if err is not None:
+                return err
+        # Expand a saved-process id the same way /api/jobs/pipeline does so
+        # the plan describes the run the same job body would produce. Without
+        # this, the Identify-birds process (skip_regroup=True + species review)
+        # shows Group as "Disabled" in the plan even though the actual run
+        # prepares species review results — the exact "plan summary is wrong
+        # for the default workflow" transparency failure the review flagged.
+        # Expansion supplies *defaults*; explicitly-present body keys still
+        # win, so a Custom caller can pin one flag on top of a process
+        # (mirrors the merge /api/jobs/pipeline runs). The process page's Run
+        # sends explicit stage flags (including miss_enabled/review_mode), so
+        # process_id is optional here.
+        # Key presence — not truthiness — decides whether a process was
+        # requested, matching /api/jobs/pipeline: a present-but-null process_id
+        # must 400 (not be treated as omitted), so previewing and starting the
+        # same body agree instead of the plan describing a run the job route
+        # would reject.
+        if "process_id" in body:
+            body, err = _expand_plan_process(body)
+            if err is not None:
+                return err
+        err = _plan_option_error(body)
+        if err is not None:
+            return err
+        # Reject visual collections before the plan resolves the scope:
+        # ``compute_plan`` → ``pipeline._resolve_collection_photo_ids()`` →
+        # ``get_collection_photos()`` evaluates ``rules`` only and ignores
+        # ``visual_json``. Without this guard, an API caller or stale/bookmarked
+        # Process page body posting a visual collection id would receive a plan
+        # computed over every metadata match — advertising a widened runnable
+        # job even though ``/api/jobs/pipeline`` already rejects the same id at
+        # start time (Codex review r3622041639).
+        db = get_db()
+        collection_id = coerce_collection_id(body.get("collection_id"))
+        if collection_id is False:
+            return json_error("collection_id must be an integer", 400)
+        err = reject_visual_collection(db, collection_id, json_error=json_error)
+        if err is not None:
+            return err
+        if not isinstance(body.get("raw_subject_analysis", False), bool):
+            return json_error("raw_subject_analysis must be a boolean", 400)
+        params = _plan_params(
+            body, collection_id, scope_photo_ids, source_paths,
+            hash_duplicate_paths,
         )
         return jsonify(compute_plan(db, params, db_path))
 
@@ -456,24 +493,9 @@ def create_pipeline_blueprint(
             )
 
         launch = _PipelineLaunch(body, get_db, json_error)
-        for check in (
-            launch.apply_saved_process,
-            launch.read_scope,
-            launch.read_exclusions,
-            launch.resolve_folder_scope,
-            launch.check_required_scope,
-            launch.check_snapshot,
-            launch.check_source_dirs,
-            launch.reject_import_fields,
-            launch.read_destination,
-            launch.resolve_remote_archive,
-            launch.check_local_processing,
-            launch.check_folder_template,
-            launch.check_run_flags,
-        ):
-            err = check()
-            if err is not None:
-                return err
+        err = launch.run_checks()
+        if err is not None:
+            return err
         params = launch.build_params(PipelineParams)
         launch.materialize_collection(params)
 
@@ -677,7 +699,6 @@ def create_pipeline_blueprint(
 
         import config as cfg
         from pipeline import (
-            compute_group_fingerprint,
             compute_review_readiness,
             load_results,
             prune_missing_photos,
@@ -686,65 +707,16 @@ def create_pipeline_blueprint(
         prune_missing_photos(cache_dir, db.active_workspace_id, db)
         results = load_results(cache_dir, db.active_workspace_id, db=db)
         if results and results.get("photos"):
-            # Cached pipeline rows predate edit recipes, which live in their
-            # own table. Enrich them before Process Review positions overlays
-            # against rendered previews so geometric edits can disable stale
-            # source-coordinate markers.
-            attach_nested_edit_recipes(db, results)
-            photo_ids = [p["id"] for p in results["photos"]]
-            # Chunked in the repository: cached pipeline results can span the
-            # whole workspace, exceeding SQLite's bound-parameter cap in one
-            # IN clause.
-            live_photo_map = db.get_photo_flags_ratings_and_eyes(photo_ids)
-            for p in results["photos"]:
-                live = live_photo_map.get(p["id"])
-                p["flag"] = live["flag"] if live else "none"
-                p["rating"] = live["rating"] if live else 0
-                if live:
-                    p["eye_x"] = live["eye_x"]
-                    p["eye_y"] = live["eye_y"]
-                    p["eye_conf"] = live["eye_conf"]
-                    p["eye_tenengrad"] = live["eye_tenengrad"]
-            # Overlay representative state onto the cached results so
-            # pipeline cards render the badge after a page reload. The
-            # cache is written before eligibility runs (and by pipeline
-            # runs that predate the badge), so is_species_representative
-            # is otherwise absent and every card renders unbadged even
-            # when the DB says the photo is the species rep. The flag
-            # live overlay above is what makes this call correct — the shared
-            # attacher short-circuits rejected photos, and the overlay
-            # ensures p["flag"] reflects the live DB, not a stale cache.
-            attach_species_representatives(db, results["photos"])
+            _overlay_live_photo_state(db, results)
 
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
         results_cache_info = None
         if results is not None:
-            cached_photo_ids = {
-                p.get("id")
-                for p in results.get("photos", [])
-                if p.get("id") is not None
-            }
-            row = db.workspaces.get(db.active_workspace_id)
-            last_group_fp = row["last_group_fingerprint"] if row else None
-            current_group_fp = compute_group_fingerprint(effective_cfg)
-            if not last_group_fp:
-                fp_status = "untracked"
-            elif last_group_fp == current_group_fp:
-                fp_status = "current"
-            else:
-                fp_status = "outdated"
-            results_cache_info = {
-                "workspace_photo_count": total_photos,
-                "cached_photo_count": len(cached_photo_ids),
-                "missing_photo_count": max(
-                    total_photos - len(cached_photo_ids), 0,
-                ),
-                "is_partial": len(cached_photo_ids) < total_photos,
-                "group_fingerprint_status": fp_status,
-                "review_mode": results.get("review_mode"),
-            }
+            results_cache_info = _results_cache_info(
+                db, results, total_photos, effective_cfg,
+            )
 
         # Variant must match the active DINOv2 variant so embedding coverage
         # reflects what /api/pipeline/regroup-live would actually consume —
@@ -1218,29 +1190,7 @@ def create_pipeline_blueprint(
             encounters.pop(enc_idx)
         else:
             # Update encounter metadata and recalculate species predictions
-            enc["photo_ids"] = [pid for pid in enc["photo_ids"] if pid not in detached_ids]
-            enc["photo_count"] = len(enc["photo_ids"])
-            enc["burst_count"] = len(bursts)
-            # Photos left, so the remaining range can only shrink; recompute it
-            # (mirrors _auto_detach_burst_for_species) instead of leaving a stale,
-            # too-wide range that would misplace this encounter under time sorts.
-            enc["time_range"] = compute_time_range(photos_by_id, enc["photo_ids"])
-            enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
-            # No fallback: if the remaining photos have no predictions the
-            # source encounter's stale label was likely inherited from the
-            # burst we just detached, so keeping it would advertise the
-            # detached burst's species as a one-click candidate on an
-            # unrelated group of photos.
-            enc["species"] = rebuild_encounter_species_label(
-                results, enc["photo_ids"]
-            )
-            # Pair indices in trace reference the original photo composition;
-            # drop it so the algorithm-trace panel renders an honest "needs
-            # recompute" state instead of stale rows.
-            enc.pop("trace", None)
-            # Recalculate remaining burst predictions too
-            for b in bursts:
-                b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
+            _shrink_source_encounter(results, enc, bursts, detached_ids, photos_by_id)
 
         # Create new encounter from detached burst
         new_enc_predictions = rebuild_species_predictions(results, detached_ids)
@@ -1545,6 +1495,73 @@ def create_pipeline_blueprint(
             }
         return jsonify({"photos": photos, "species_kid": species_kid})
 
+    def _detach_group_removed(db, body, results, removed, seen):
+        """Validate group apply's ``removed`` photos and detach them from the burst.
+
+        Returns an error response, or None once every removed photo is detached.
+        """
+        if not isinstance(removed, list) or any(type(pid) is not int for pid in removed):
+            return json_error("Invalid removed photo IDs")
+        if len(set(removed)) != len(removed) or set(removed) & seen:
+            return json_error("Removed photos must not appear in another zone")
+        if removed:
+            enc_idx, burst_idx = body.get("encounter_index"), body.get("burst_index")
+            if (results is None or type(enc_idx) is not int or type(burst_idx) is not int
+                    or enc_idx < 0 or enc_idx >= len(results["encounters"])):
+                return json_error("The photo groups changed. Reload before applying.", 409)
+            enc = results["encounters"][enc_idx]
+            bursts = enc.get("bursts", [])
+            if burst_idx < 0 or burst_idx >= len(bursts):
+                return json_error("The photo groups changed. Reload before applying.", 409)
+            source = bursts[burst_idx]
+            ids = source["photo_ids"] if isinstance(source, dict) else source
+            if body.get("expected_burst_photo_ids") != ids or not set(removed) <= set(ids):
+                return json_error("The photo groups changed. Reload before applying.", 409)
+            for pid in removed:
+                if not db._photo_in_workspace(pid):
+                    return json_error(f"Photo {pid} is not in the active workspace", 403)
+                detach_review_photo(results, enc_idx, burst_idx, pid)
+        return None
+
+    def _apply_group_zone_flags(db, picks, rejects, candidates, old_flags):
+        """Write each zone's target flag where it changes: ``(flag_items, error)``."""
+        try:
+            # Apply target flags. We rely on update_photo_flag's own write
+            # being a no-op at the SQL level when the value matches, but we
+            # still skip when unchanged so we don't record useless history.
+            flag_items = []
+            for pid in picks:
+                old = old_flags.get(pid, "none")
+                if old != "flagged":
+                    db.photo_review.set_flag(pid, "flagged", _commit=False)
+                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "flagged"})
+            for pid in rejects:
+                old = old_flags.get(pid, "none")
+                if old != "rejected":
+                    db.photo_review.set_flag(pid, "rejected", _commit=False)
+                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "rejected"})
+            for pid in candidates:
+                old = old_flags.get(pid, "none")
+                if old in ("flagged", "rejected"):
+                    db.photo_review.set_flag(pid, "none", _commit=False)
+                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "none"})
+        except ValueError as e:
+            return None, json_error(str(e), 403)
+        return flag_items, None
+
+    def _group_apply_photo_states(db, photo_ids):
+        """Each photo's flag after a group apply, for the client's card update."""
+        result_photos = {}
+        for pid in photo_ids:
+            row = db.get_photo(pid)
+            if not row:
+                continue
+            result_photos[pid] = {
+                "flag": row["flag"] or "none",
+                "has_species_keyword": False,
+            }
+        return result_photos
+
     @blueprint.route("/api/pipeline/group/apply", methods=["POST"])
     @grouping_edit
     def api_pipeline_group_apply():
@@ -1581,27 +1598,9 @@ def create_pipeline_blueprint(
         results = load_results_raw(os.path.dirname(db_path), db.require_workspace_id())
         before = copy.deepcopy(results)
         removed = body.get("removed", [])
-        if not isinstance(removed, list) or any(type(pid) is not int for pid in removed):
-            return json_error("Invalid removed photo IDs")
-        if len(set(removed)) != len(removed) or set(removed) & seen:
-            return json_error("Removed photos must not appear in another zone")
-        if removed:
-            enc_idx, burst_idx = body.get("encounter_index"), body.get("burst_index")
-            if (results is None or type(enc_idx) is not int or type(burst_idx) is not int
-                    or enc_idx < 0 or enc_idx >= len(results["encounters"])):
-                return json_error("The photo groups changed. Reload before applying.", 409)
-            enc = results["encounters"][enc_idx]
-            bursts = enc.get("bursts", [])
-            if burst_idx < 0 or burst_idx >= len(bursts):
-                return json_error("The photo groups changed. Reload before applying.", 409)
-            source = bursts[burst_idx]
-            ids = source["photo_ids"] if isinstance(source, dict) else source
-            if body.get("expected_burst_photo_ids") != ids or not set(removed) <= set(ids):
-                return json_error("The photo groups changed. Reload before applying.", 409)
-            for pid in removed:
-                if not db._photo_in_workspace(pid):
-                    return json_error(f"Photo {pid} is not in the active workspace", 403)
-                detach_review_photo(results, enc_idx, burst_idx, pid)
+        err = _detach_group_removed(db, body, results, removed, seen)
+        if err is not None:
+            return err
 
         # Capture current state for diffing + edit history.
         old_flags = {}
@@ -1610,28 +1609,11 @@ def create_pipeline_blueprint(
             if row:
                 old_flags[pid] = row["flag"] or "none"
 
-        try:
-            # Apply target flags. We rely on update_photo_flag's own write
-            # being a no-op at the SQL level when the value matches, but we
-            # still skip when unchanged so we don't record useless history.
-            flag_items = []
-            for pid in picks:
-                old = old_flags.get(pid, "none")
-                if old != "flagged":
-                    db.photo_review.set_flag(pid, "flagged", _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "flagged"})
-            for pid in rejects:
-                old = old_flags.get(pid, "none")
-                if old != "rejected":
-                    db.photo_review.set_flag(pid, "rejected", _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "rejected"})
-            for pid in candidates:
-                old = old_flags.get(pid, "none")
-                if old in ("flagged", "rejected"):
-                    db.photo_review.set_flag(pid, "none", _commit=False)
-                    flag_items.append({"photo_id": pid, "old_value": old, "new_value": "none"})
-        except ValueError as e:
-            return json_error(str(e), 403)
+        flag_items, err = _apply_group_zone_flags(
+            db, picks, rejects, candidates, old_flags,
+        )
+        if err is not None:
+            return err
 
         if flag_items:
             for item in flag_items:
@@ -1671,16 +1653,10 @@ def create_pipeline_blueprint(
         # `has_species_keyword` is kept in the payload (now always False) so the
         # client cache-sync code need not change shape; this endpoint no longer
         # tags species.
-        result_photos = {}
-        for pid in picks + rejects + candidates:
-            row = db.get_photo(pid)
-            if not row:
-                continue
-            result_photos[pid] = {
-                "flag": row["flag"] or "none",
-                "has_species_keyword": False,
-            }
-        response = {"ok": True, "photos": result_photos}
+        response = {
+            "ok": True,
+            "photos": _group_apply_photo_states(db, picks + rejects + candidates),
+        }
         if results is not None:
             response.update(encounters=results["encounters"], summary=results.get("summary", {}))
         return jsonify(response)
@@ -1813,77 +1789,11 @@ def create_pipeline_blueprint(
             del pred["labels_fingerprint"], pred["source_taxon_id"]
             result["predictions"].append(pred)
 
-        # Match strength: how well the best label in each list actually fit,
-        # as opposed to which label fit least badly. Reported for every
-        # detection on the photo, including the full-image pseudo-detection
-        # and boxes under the detector threshold — those are excluded from
-        # `predictions` above, and a run this page hides is very often the one
-        # that produced the species the user is asking about.
-        import match_confidence
-        match_rows = db.model_runs.get_match_scores_for_photo(photo_id)
-        for row in match_rows:
-            # Per-row verdicts as well as the summary: this page is the one
-            # place that shows every run side by side, so each needs its own
-            # explanation rather than inheriting the photo's.
-            row["assessment"] = match_confidence.assess(
-                row["classifier_model"],
-                row.get("score_kind"),
-                row.get("max_match_score"),
-                row.get("match_margin"),
-                effective_cfg,
-            )
-        result["match_scores"] = match_rows
-        result["match_summary"] = match_confidence.summarize_photo(
-            match_rows,
-            effective_cfg,
-            unscored_current_runs=(
-                db.model_runs.get_unscored_current_prediction_runs(photo_id)
-            ),
-        )
+        _attach_inspector_match_scores(db, photo_id, effective_cfg, result)
 
-        current_pred_rows = db.model_runs.current_prediction_detector_confidences(
-            photo_id, full_image=False,
+        result["classification_diagnostics"] = _inspector_classification_diagnostics(
+            db, photo_id, min_conf, raw_dets, dets, preds,
         )
-        classifier_runs = db.model_runs.classifier_runs_for_photo(
-            photo_id, full_image=False,
-        )
-        full_image_pred_rows = db.model_runs.current_prediction_detector_confidences(
-            photo_id, full_image=True,
-        )
-        full_image_classifier_runs = db.model_runs.classifier_runs_for_photo(
-            photo_id, full_image=True,
-        )
-        max_raw_conf = (
-            max(d["detector_confidence"] for d in raw_dets)
-            if raw_dets else None
-        )
-        result["classification_diagnostics"] = {
-            "detector_confidence_threshold": min_conf,
-            "raw_detection_count": len(raw_dets),
-            "visible_detection_count": len(dets),
-            "hidden_detection_count": max(0, len(raw_dets) - len(dets)),
-            "max_detector_confidence": max_raw_conf,
-            "current_prediction_count": len(current_pred_rows),
-            "visible_prediction_count": len(preds),
-            "hidden_prediction_count": sum(
-                1
-                for p in current_pred_rows
-                if p["detector_confidence"] < min_conf
-            ),
-            "classifier_run_count": len(classifier_runs),
-            "full_image_prediction_count": len(full_image_pred_rows),
-            "full_image_classifier_run_count": len(full_image_classifier_runs),
-            "hidden_classifier_run_count": sum(
-                1
-                for r in classifier_runs
-                if r["detector_confidence"] < min_conf
-            ),
-            "zero_prediction_classifier_run_count": sum(
-                1
-                for r in classifier_runs
-                if r["prediction_count"] == 0
-            ),
-        }
 
         # Get keywords
         keywords = db.get_photo_keywords(photo_id)
@@ -1906,6 +1816,176 @@ def create_pipeline_blueprint(
         return jsonify(result)
 
     return blueprint
+
+
+def _shrink_source_encounter(results, enc, bursts, detached_ids, photos_by_id):
+    """Recompute an encounter's metadata after one of its bursts was detached."""
+    from pipeline import rebuild_species_predictions
+
+    enc["photo_ids"] = [pid for pid in enc["photo_ids"] if pid not in detached_ids]
+    enc["photo_count"] = len(enc["photo_ids"])
+    enc["burst_count"] = len(bursts)
+    # Photos left, so the remaining range can only shrink; recompute it
+    # (mirrors _auto_detach_burst_for_species) instead of leaving a stale,
+    # too-wide range that would misplace this encounter under time sorts.
+    enc["time_range"] = compute_time_range(photos_by_id, enc["photo_ids"])
+    enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+    # No fallback: if the remaining photos have no predictions the
+    # source encounter's stale label was likely inherited from the
+    # burst we just detached, so keeping it would advertise the
+    # detached burst's species as a one-click candidate on an
+    # unrelated group of photos.
+    enc["species"] = rebuild_encounter_species_label(
+        results, enc["photo_ids"]
+    )
+    # Pair indices in trace reference the original photo composition;
+    # drop it so the algorithm-trace panel renders an honest "needs
+    # recompute" state instead of stale rows.
+    enc.pop("trace", None)
+    # Recalculate remaining burst predictions too
+    for b in bursts:
+        b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
+
+
+def _overlay_live_photo_state(db, results):
+    """Overlay live flags, ratings, eyes and edit recipes on cached results."""
+    # Cached pipeline rows predate edit recipes, which live in their
+    # own table. Enrich them before Process Review positions overlays
+    # against rendered previews so geometric edits can disable stale
+    # source-coordinate markers.
+    attach_nested_edit_recipes(db, results)
+    photo_ids = [p["id"] for p in results["photos"]]
+    # Chunked in the repository: cached pipeline results can span the
+    # whole workspace, exceeding SQLite's bound-parameter cap in one
+    # IN clause.
+    live_photo_map = db.get_photo_flags_ratings_and_eyes(photo_ids)
+    for p in results["photos"]:
+        live = live_photo_map.get(p["id"])
+        p["flag"] = live["flag"] if live else "none"
+        p["rating"] = live["rating"] if live else 0
+        if live:
+            p["eye_x"] = live["eye_x"]
+            p["eye_y"] = live["eye_y"]
+            p["eye_conf"] = live["eye_conf"]
+            p["eye_tenengrad"] = live["eye_tenengrad"]
+    # Overlay representative state onto the cached results so
+    # pipeline cards render the badge after a page reload. The
+    # cache is written before eligibility runs (and by pipeline
+    # runs that predate the badge), so is_species_representative
+    # is otherwise absent and every card renders unbadged even
+    # when the DB says the photo is the species rep. The flag
+    # live overlay above is what makes this call correct — the shared
+    # attacher short-circuits rejected photos, and the overlay
+    # ensures p["flag"] reflects the live DB, not a stale cache.
+    attach_species_representatives(db, results["photos"])
+
+
+def _results_cache_info(db, results, total_photos, effective_cfg):
+    """How much of the workspace the cached results cover, and how current."""
+    from pipeline import compute_group_fingerprint
+
+    cached_photo_ids = {
+        p.get("id")
+        for p in results.get("photos", [])
+        if p.get("id") is not None
+    }
+    row = db.workspaces.get(db.active_workspace_id)
+    last_group_fp = row["last_group_fingerprint"] if row else None
+    current_group_fp = compute_group_fingerprint(effective_cfg)
+    if not last_group_fp:
+        fp_status = "untracked"
+    elif last_group_fp == current_group_fp:
+        fp_status = "current"
+    else:
+        fp_status = "outdated"
+    return {
+        "workspace_photo_count": total_photos,
+        "cached_photo_count": len(cached_photo_ids),
+        "missing_photo_count": max(
+            total_photos - len(cached_photo_ids), 0,
+        ),
+        "is_partial": len(cached_photo_ids) < total_photos,
+        "group_fingerprint_status": fp_status,
+        "review_mode": results.get("review_mode"),
+    }
+
+
+def _attach_inspector_match_scores(db, photo_id, effective_cfg, result):
+    """Add the inspector's per-run ``match_scores`` and ``match_summary``."""
+    # Match strength: how well the best label in each list actually fit,
+    # as opposed to which label fit least badly. Reported for every
+    # detection on the photo, including the full-image pseudo-detection
+    # and boxes under the detector threshold — those are excluded from
+    # the inspector's `predictions`, and a run this page hides is very often the one
+    # that produced the species the user is asking about.
+    import match_confidence
+    match_rows = db.model_runs.get_match_scores_for_photo(photo_id)
+    for row in match_rows:
+        # Per-row verdicts as well as the summary: this page is the one
+        # place that shows every run side by side, so each needs its own
+        # explanation rather than inheriting the photo's.
+        row["assessment"] = match_confidence.assess(
+            row["classifier_model"],
+            row.get("score_kind"),
+            row.get("max_match_score"),
+            row.get("match_margin"),
+            effective_cfg,
+        )
+    result["match_scores"] = match_rows
+    result["match_summary"] = match_confidence.summarize_photo(
+        match_rows,
+        effective_cfg,
+        unscored_current_runs=(
+            db.model_runs.get_unscored_current_prediction_runs(photo_id)
+        ),
+    )
+
+
+def _inspector_classification_diagnostics(db, photo_id, min_conf, raw_dets, dets, preds):
+    """Counts that tell "classifier not run" from "hidden by the threshold"."""
+    current_pred_rows = db.model_runs.current_prediction_detector_confidences(
+        photo_id, full_image=False,
+    )
+    classifier_runs = db.model_runs.classifier_runs_for_photo(
+        photo_id, full_image=False,
+    )
+    full_image_pred_rows = db.model_runs.current_prediction_detector_confidences(
+        photo_id, full_image=True,
+    )
+    full_image_classifier_runs = db.model_runs.classifier_runs_for_photo(
+        photo_id, full_image=True,
+    )
+    max_raw_conf = (
+        max(d["detector_confidence"] for d in raw_dets)
+        if raw_dets else None
+    )
+    return {
+        "detector_confidence_threshold": min_conf,
+        "raw_detection_count": len(raw_dets),
+        "visible_detection_count": len(dets),
+        "hidden_detection_count": max(0, len(raw_dets) - len(dets)),
+        "max_detector_confidence": max_raw_conf,
+        "current_prediction_count": len(current_pred_rows),
+        "visible_prediction_count": len(preds),
+        "hidden_prediction_count": sum(
+            1
+            for p in current_pred_rows
+            if p["detector_confidence"] < min_conf
+        ),
+        "classifier_run_count": len(classifier_runs),
+        "full_image_prediction_count": len(full_image_pred_rows),
+        "full_image_classifier_run_count": len(full_image_classifier_runs),
+        "hidden_classifier_run_count": sum(
+            1
+            for r in classifier_runs
+            if r["detector_confidence"] < min_conf
+        ),
+        "zero_prediction_classifier_run_count": sum(
+            1
+            for r in classifier_runs
+            if r["prediction_count"] == 0
+        ),
+    }
 
 
 def _save_recent_destination(destination):
@@ -1981,9 +2061,9 @@ def _job_config_scan_paths(job_config):
 class _PipelineLaunch:
     """One ``/api/jobs/pipeline`` request on its way to a queued job.
 
-    ``api_job_pipeline`` calls the request checks in order; each reads what
-    it needs from the request body onto this object and returns the error
-    response that ends the request, or None to continue.
+    ``api_job_pipeline`` calls the request checks in order (``run_checks``);
+    each reads what it needs from the request body onto this object and
+    returns the error response that ends the request, or None to continue.
     """
 
     def __init__(self, body, get_db, json_error):
@@ -1997,6 +2077,28 @@ class _PipelineLaunch:
         self.pending_folder_collection = None
         self.remote_archive_config = None
         self.collection_name = None
+
+    def run_checks(self):
+        """Run the request checks in order; the first error response, or None."""
+        for check in (
+            self.apply_saved_process,
+            self.read_scope,
+            self.read_exclusions,
+            self.resolve_folder_scope,
+            self.check_required_scope,
+            self.check_snapshot,
+            self.check_source_dirs,
+            self.reject_import_fields,
+            self.read_destination,
+            self.resolve_remote_archive,
+            self.check_local_processing,
+            self.check_folder_template,
+            self.check_run_flags,
+        ):
+            err = check()
+            if err is not None:
+                return err
+        return None
 
     def apply_saved_process(self):
         """Expand a saved process id server-side into stage flags.
