@@ -67,6 +67,256 @@ def _application_version():
         return "0.0.0"
 
 
+def _launch_reveal(path, is_folder):
+    """Run the platform's reveal command for ``path``.
+
+    Returns ``(proc, None)``, or ``(None, reason)`` when a preflight finds
+    the target missing. Launch failures raise as ``subprocess.run`` does.
+    """
+    if sys.platform == "darwin":
+        # "open -R <dir>" reveals the folder inside its parent; that's
+        # the right behavior for folder reveals too, consistent with
+        # how Finder treats folder-targeted reveal.
+        proc = subprocess.run(
+            ["open", "-R", "--", path],
+            timeout=5,
+            check=False,
+            capture_output=True,
+            text=True,
+            **no_window_kwargs(),
+        )
+    elif sys.platform.startswith("win"):
+        # explorer.exe's exit status is not a reliable success signal
+        # (see the returncode check in api_files_reveal), so a stale catalog
+        # entry whose path no longer exists would otherwise silently
+        # return ok=True and produce a bogus "Revealed in File
+        # Explorer" toast. Preflight the target path so those cases
+        # surface as failures instead.
+        if is_folder:
+            if not os.path.isdir(path):
+                return None, "folder not found"
+            # Open the folder itself so the user sees its contents.
+            proc = subprocess.run(
+                ["explorer", path],
+                timeout=5,
+                check=False,
+                capture_output=True,
+                text=True,
+                **no_window_kwargs(),
+            )
+        else:
+            if not os.path.isfile(path):
+                return None, "photo file not found"
+            proc = subprocess.run(
+                ["explorer", f"/select,{path}"],
+                timeout=5,
+                check=False,
+                capture_output=True,
+                text=True,
+                **no_window_kwargs(),
+            )
+    else:
+        # xdg-open on a file has inconsistent behavior across desktops
+        # (some open the image viewer, not the file manager), so for
+        # photo reveals we open the parent directory instead. Passing
+        # a directory to xdg-open opens the folder in the file manager,
+        # which is exactly what we want for folder reveals.
+        #
+        # Because photo reveals target the parent directory rather than
+        # the file itself, xdg-open will happily succeed for a stale
+        # catalog entry whose folder still exists but whose photo has
+        # been deleted or moved — the user gets a "revealed" toast even
+        # though nothing is selected. Verify the photo file exists first
+        # so those cases surface as failures instead of false successes.
+        if not is_folder and not os.path.isfile(path):
+            return None, "photo file not found"
+        target = path if is_folder else (os.path.dirname(path) or path)
+        # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
+        # so a crafted leading-dash path can't be parsed as a flag.
+        target = os.path.abspath(target)
+        proc = subprocess.run(
+            ["xdg-open", target],
+            timeout=5,
+            check=False,
+            capture_output=True,
+            text=True,
+            **no_window_kwargs(),
+        )
+    return proc, None
+
+
+def _issue_report_app_state(get_db):
+    """``(db, ws_name, folder_count, photo_count, pred_count)`` for a report.
+
+    ``db`` is None when the catalog could not be opened at all.
+    """
+    db = None
+    try:
+        db = get_db()
+        ws_id = db.active_workspace_id
+        ws = db.workspaces.get(ws_id) if ws_id is not None else None
+        ws_name = ws["name"] if ws else "unknown"
+        folder_count = db.count_all_folders()
+        photo_count = db.count_catalog_photos()
+        # Predictions are global now; workspace scoping happens through
+        # the detection -> photo -> workspace_folders join.
+        pred_count = db.count_workspace_predictions()
+    except Exception:
+        # Issue reports are how users report a degraded catalog; collect
+        # what we can and keep going.
+        log.warning("Could not read catalog state for issue report", exc_info=True)
+        ws_name = "unknown"
+        folder_count = photo_count = pred_count = 0
+    return db, ws_name, folder_count, photo_count, pred_count
+
+
+def _redact(obj):
+    """Replace secret- and path-named values in nested dicts and lists."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            key = k.lower()
+            if any(s in key for s in ("token", "secret", "password")) or key.endswith("_key"):
+                out[k] = "[REDACTED]"
+            elif any(s in key for s in ("path", "root", "_bin", "directory", "editor")):
+                out[k] = "[REDACTED_PATH]" if v else v
+            else:
+                out[k] = _redact(v)
+        return out
+    if isinstance(obj, list):
+        return [_redact(item) for item in obj]
+    return obj
+
+
+def _redact_issue_report_config(config_values):
+    """The config with secrets, paths and free-form strings replaced."""
+    import config_schema
+
+    # Config strings are kept only where the value is one of a fixed set
+    # of identifiers *the schema allows for that key*. Every other string
+    # (NAS hosts and user names in remote_targets, recent import
+    # destinations, output folders, quick filter labels, and any key
+    # added later) is replaced: matching key names for secrets and paths
+    # let those through whenever a new key was named differently. An
+    # arbitrary string stored for an enum key by an older unvalidated
+    # write path must NOT slip through on the key name alone.
+    enum_allowlist = {}
+    for key, spec in config_schema.SCHEMA.items():
+        if spec["type"] == "enum":
+            enum_allowlist[key] = frozenset(spec["enum"])
+        elif spec["type"] == "list_string" and "items_enum" in spec:
+            enum_allowlist[key] = frozenset(spec["items_enum"])
+
+    def _redact_config(obj, dotted=""):
+        if isinstance(obj, dict):
+            out = {}
+            for k, v in obj.items():
+                key = str(k).lower()
+                child = f"{dotted}.{k}" if dotted else str(k)
+                if any(s in key for s in ("token", "secret", "password")) or key.endswith("_key"):
+                    out[k] = "[REDACTED]"
+                elif any(s in key for s in ("path", "root", "_bin", "directory", "editor")):
+                    out[k] = "[REDACTED_PATH]" if v else v
+                else:
+                    out[k] = _redact_config(v, child)
+            return out
+        if isinstance(obj, list):
+            return [_redact_config(item, dotted) for item in obj]
+        if isinstance(obj, str) and obj:
+            if dotted.startswith("keyboard_shortcuts."):
+                return obj
+            allowed = enum_allowlist.get(dotted)
+            if allowed is not None and obj in allowed:
+                return obj
+            return "[REDACTED]"
+        return obj
+
+    return _redact_config(config_values)
+
+
+def _issue_report_private_values(db):
+    """``(private_paths, sanitize)``: catalog roots and their scrubber."""
+    # Exact catalog roots are private and can also appear in logs. Issue
+    # reports retain the diagnostic message while replacing those values;
+    # the user can paste a path into the description when it is relevant.
+    private_paths = []
+    if db is not None:
+        try:
+            private_paths = [
+                row["path"] for row in db.get_all_folders() if row["path"]
+            ]
+        except sqlite3.Error:
+            log.warning(
+                "Could not read folder paths; issue report will not redact catalog roots",
+                exc_info=True,
+            )
+
+    def _sanitize_text(value):
+        text = str(value)
+        for private_path in sorted(private_paths, key=len, reverse=True):
+            text = text.replace(private_path, "[PHOTO_PATH]")
+        home = os.path.expanduser("~")
+        if home:
+            text = text.replace(home, "~")
+        return text
+
+    def _sanitize_private_values(value):
+        if isinstance(value, dict):
+            return {key: _sanitize_private_values(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_sanitize_private_values(item) for item in value]
+        if isinstance(value, str):
+            return _sanitize_text(value)
+        return value
+
+    return private_paths, _sanitize_private_values
+
+
+def _issue_report_platform(private_paths):
+    """``(filesystems, support_info, execution_info)`` for a report."""
+    import config as cfg
+
+    try:
+        from platform_support import filesystem_type, platform_support_info
+
+        filesystems = sorted({
+            kind for path in private_paths
+            if (kind := filesystem_type(path))
+        })
+        support_info = _redact(platform_support_info(cfg.load()))
+    except Exception:
+        log.warning("Could not collect platform support info for issue report", exc_info=True)
+        filesystems = []
+        support_info = {}
+    execution_info = {}
+    try:
+        execution_info = runtime_execution_info()
+    except Exception:
+        log.warning("Could not collect inference runtime info for issue report", exc_info=True)
+    return filesystems, support_info, execution_info
+
+
+def _send_issue_report(report_url, bundle):
+    """POST the bundle to ``report_url``; fall back to a download."""
+    import urllib.request
+
+    try:
+        payload = json.dumps(bundle).encode("utf-8")
+        req = urllib.request.Request(
+            report_url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        if 200 <= resp.status < 300:
+            return jsonify({"status": "sent"})
+        else:
+            return jsonify({"status": "download", "diagnostics": bundle})
+    except Exception:
+        log.exception("Failed to send report to %s", report_url)
+        return jsonify({"status": "download", "diagnostics": bundle})
+
 def create_system_blueprint(
     get_db,
     json_error,
@@ -151,6 +401,55 @@ def create_system_blueprint(
             cfg.save(raw)
         return jsonify({"ok": True})
 
+    def _reveal_target(body):
+        """``(path, is_folder, None)`` for a reveal body, or ``(None, False, error)``."""
+        pid_raw = body.get("photo_id")
+        fid_raw = body.get("folder_id")
+
+        if pid_raw is None and fid_raw is None:
+            return None, False, json_error("photo_id or folder_id required")
+
+        db = get_db()
+        is_folder = False
+        path = ""
+
+        if pid_raw is not None:
+            try:
+                pid_int = int(pid_raw)
+            except (TypeError, ValueError):
+                return None, False, json_error("photo_id must be an integer")
+            # Duplicate results are library-wide. Match their thumbnail
+            # membership guard without allowing arbitrary hidden photos.
+            duplicate_scope = body.get("scope") == "duplicates"
+            if duplicate_scope and not db.duplicates.is_group_member(pid_int):
+                return None, False, json_error("photo not found", 404)
+            photo = db.get_photo(pid_int, verify_workspace=not duplicate_scope)
+            if not photo:
+                return None, False, json_error("photo not found", 404)
+            folder_row = db.get_folder(photo["folder_id"])
+            folder_path = folder_row["path"] if folder_row else ""
+            if not folder_path or not photo["filename"]:
+                return None, False, jsonify({"ok": False, "reason": "no path"})
+            path = os.path.join(folder_path, photo["filename"])
+        else:
+            try:
+                fid_int = int(fid_raw)
+            except (TypeError, ValueError):
+                return None, False, json_error("folder_id must be an integer")
+            folder = db.get_folder(fid_int)
+            if not folder:
+                return None, False, json_error("folder not found", 404)
+            # Reject reveal for folders not linked to the active workspace,
+            # matching the photo branch's verify_workspace gate.
+            if fid_int not in db.get_workspace_visible_folder_ids([fid_int]):
+                return None, False, json_error("folder not found", 404)
+            folder_path = folder["path"]
+            if not folder_path:
+                return None, False, jsonify({"ok": False, "reason": "no path"})
+            path = folder_path
+            is_folder = True
+        return path, is_folder, None
+
     @blueprint.route("/api/files/reveal", methods=["POST"])
     def api_files_reveal():
         """Reveal a photo or folder in the OS file manager.
@@ -171,122 +470,14 @@ def create_system_blueprint(
         neither id was provided or either is malformed.
         """
         body = request.get_json(silent=True) or {}
-        pid_raw = body.get("photo_id")
-        fid_raw = body.get("folder_id")
-
-        if pid_raw is None and fid_raw is None:
-            return json_error("photo_id or folder_id required")
-
-        db = get_db()
-        is_folder = False
-        path = ""
-
-        if pid_raw is not None:
-            try:
-                pid_int = int(pid_raw)
-            except (TypeError, ValueError):
-                return json_error("photo_id must be an integer")
-            # Duplicate results are library-wide. Match their thumbnail
-            # membership guard without allowing arbitrary hidden photos.
-            duplicate_scope = body.get("scope") == "duplicates"
-            if duplicate_scope and not db.duplicates.is_group_member(pid_int):
-                return json_error("photo not found", 404)
-            photo = db.get_photo(pid_int, verify_workspace=not duplicate_scope)
-            if not photo:
-                return json_error("photo not found", 404)
-            folder_row = db.get_folder(photo["folder_id"])
-            folder_path = folder_row["path"] if folder_row else ""
-            if not folder_path or not photo["filename"]:
-                return jsonify({"ok": False, "reason": "no path"})
-            path = os.path.join(folder_path, photo["filename"])
-        else:
-            try:
-                fid_int = int(fid_raw)
-            except (TypeError, ValueError):
-                return json_error("folder_id must be an integer")
-            folder = db.get_folder(fid_int)
-            if not folder:
-                return json_error("folder not found", 404)
-            # Reject reveal for folders not linked to the active workspace,
-            # matching the photo branch's verify_workspace gate.
-            if fid_int not in db.get_workspace_visible_folder_ids([fid_int]):
-                return json_error("folder not found", 404)
-            folder_path = folder["path"]
-            if not folder_path:
-                return jsonify({"ok": False, "reason": "no path"})
-            path = folder_path
-            is_folder = True
+        path, is_folder, error = _reveal_target(body)
+        if error is not None:
+            return error
 
         try:
-            if sys.platform == "darwin":
-                # "open -R <dir>" reveals the folder inside its parent; that's
-                # the right behavior for folder reveals too, consistent with
-                # how Finder treats folder-targeted reveal.
-                proc = subprocess.run(
-                    ["open", "-R", "--", path],
-                    timeout=5,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    **no_window_kwargs(),
-                )
-            elif sys.platform.startswith("win"):
-                # explorer.exe's exit status is not a reliable success signal
-                # (see the returncode-check gate below), so a stale catalog
-                # entry whose path no longer exists would otherwise silently
-                # return ok=True and produce a bogus "Revealed in File
-                # Explorer" toast. Preflight the target path so those cases
-                # surface as failures instead.
-                if is_folder:
-                    if not os.path.isdir(path):
-                        return jsonify({"ok": False, "reason": "folder not found"})
-                    # Open the folder itself so the user sees its contents.
-                    proc = subprocess.run(
-                        ["explorer", path],
-                        timeout=5,
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        **no_window_kwargs(),
-                    )
-                else:
-                    if not os.path.isfile(path):
-                        return jsonify({"ok": False, "reason": "photo file not found"})
-                    proc = subprocess.run(
-                        ["explorer", f"/select,{path}"],
-                        timeout=5,
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        **no_window_kwargs(),
-                    )
-            else:
-                # xdg-open on a file has inconsistent behavior across desktops
-                # (some open the image viewer, not the file manager), so for
-                # photo reveals we open the parent directory instead. Passing
-                # a directory to xdg-open opens the folder in the file manager,
-                # which is exactly what we want for folder reveals.
-                #
-                # Because photo reveals target the parent directory rather than
-                # the file itself, xdg-open will happily succeed for a stale
-                # catalog entry whose folder still exists but whose photo has
-                # been deleted or moved — the user gets a "revealed" toast even
-                # though nothing is selected. Verify the photo file exists first
-                # so those cases surface as failures instead of false successes.
-                if not is_folder and not os.path.isfile(path):
-                    return jsonify({"ok": False, "reason": "photo file not found"})
-                target = path if is_folder else (os.path.dirname(path) or path)
-                # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
-                # so a crafted leading-dash path can't be parsed as a flag.
-                target = os.path.abspath(target)
-                proc = subprocess.run(
-                    ["xdg-open", target],
-                    timeout=5,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    **no_window_kwargs(),
-                )
+            proc, missing = _launch_reveal(path, is_folder)
+            if missing is not None:
+                return jsonify({"ok": False, "reason": missing})
             # explorer.exe's exit status is not a reliable success signal:
             # `explorer /select,<path>` (and `explorer <folder>`) routinely
             # return 1 even when File Explorer opens correctly, with nothing
@@ -637,7 +828,6 @@ def create_system_blueprint(
         """Collect diagnostics and optionally send to a configured report URL."""
         import platform
         import sys
-        import urllib.request
 
         data = request.get_json(force=True, silent=True) or {}
         description = (data.get("description") or "").strip()
@@ -647,23 +837,9 @@ def create_system_blueprint(
         vireo_version = _application_version()
 
         # --- App state ---
-        db = None
-        try:
-            db = get_db()
-            ws_id = db.active_workspace_id
-            ws = db.workspaces.get(ws_id) if ws_id is not None else None
-            ws_name = ws["name"] if ws else "unknown"
-            folder_count = db.count_all_folders()
-            photo_count = db.count_catalog_photos()
-            # Predictions are global now; workspace scoping happens through
-            # the detection -> photo -> workspace_folders join.
-            pred_count = db.count_workspace_predictions()
-        except Exception:
-            # Issue reports are how users report a degraded catalog; collect
-            # what we can and keep going.
-            log.warning("Could not read catalog state for issue report", exc_info=True)
-            ws_name = "unknown"
-            folder_count = photo_count = pred_count = 0
+        db, ws_name, folder_count, photo_count, pred_count = (
+            _issue_report_app_state(get_db)
+        )
 
         # --- Recent jobs ---
         try:
@@ -675,119 +851,17 @@ def create_system_blueprint(
         # --- Config (sanitized) ---
         import config as cfg
 
-        def _redact(obj):
-            if isinstance(obj, dict):
-                out = {}
-                for k, v in obj.items():
-                    key = k.lower()
-                    if any(s in key for s in ("token", "secret", "password")) or key.endswith("_key"):
-                        out[k] = "[REDACTED]"
-                    elif any(s in key for s in ("path", "root", "_bin", "directory", "editor")):
-                        out[k] = "[REDACTED_PATH]" if v else v
-                    else:
-                        out[k] = _redact(v)
-                return out
-            if isinstance(obj, list):
-                return [_redact(item) for item in obj]
-            return obj
+        sanitized_config = _redact_issue_report_config(cfg.load())
 
-        import config_schema
-
-        # Config strings are kept only where the value is one of a fixed set
-        # of identifiers *the schema allows for that key*. Every other string
-        # (NAS hosts and user names in remote_targets, recent import
-        # destinations, output folders, quick filter labels, and any key
-        # added later) is replaced: matching key names for secrets and paths
-        # let those through whenever a new key was named differently. An
-        # arbitrary string stored for an enum key by an older unvalidated
-        # write path must NOT slip through on the key name alone.
-        enum_allowlist = {}
-        for key, spec in config_schema.SCHEMA.items():
-            if spec["type"] == "enum":
-                enum_allowlist[key] = frozenset(spec["enum"])
-            elif spec["type"] == "list_string" and "items_enum" in spec:
-                enum_allowlist[key] = frozenset(spec["items_enum"])
-
-        def _redact_config(obj, dotted=""):
-            if isinstance(obj, dict):
-                out = {}
-                for k, v in obj.items():
-                    key = str(k).lower()
-                    child = f"{dotted}.{k}" if dotted else str(k)
-                    if any(s in key for s in ("token", "secret", "password")) or key.endswith("_key"):
-                        out[k] = "[REDACTED]"
-                    elif any(s in key for s in ("path", "root", "_bin", "directory", "editor")):
-                        out[k] = "[REDACTED_PATH]" if v else v
-                    else:
-                        out[k] = _redact_config(v, child)
-                return out
-            if isinstance(obj, list):
-                return [_redact_config(item, dotted) for item in obj]
-            if isinstance(obj, str) and obj:
-                if dotted.startswith("keyboard_shortcuts."):
-                    return obj
-                allowed = enum_allowlist.get(dotted)
-                if allowed is not None and obj in allowed:
-                    return obj
-                return "[REDACTED]"
-            return obj
-
-        sanitized_config = _redact_config(cfg.load())
-
-        # Exact catalog roots are private and can also appear in logs. Issue
-        # reports retain the diagnostic message while replacing those values;
-        # the user can paste a path into the description when it is relevant.
-        private_paths = []
-        if db is not None:
-            try:
-                private_paths = [
-                    row["path"] for row in db.get_all_folders() if row["path"]
-                ]
-            except sqlite3.Error:
-                log.warning(
-                    "Could not read folder paths; issue report will not redact catalog roots",
-                    exc_info=True,
-                )
-
-        def _sanitize_text(value):
-            text = str(value)
-            for private_path in sorted(private_paths, key=len, reverse=True):
-                text = text.replace(private_path, "[PHOTO_PATH]")
-            home = os.path.expanduser("~")
-            if home:
-                text = text.replace(home, "~")
-            return text
-
-        def _sanitize_private_values(value):
-            if isinstance(value, dict):
-                return {key: _sanitize_private_values(item) for key, item in value.items()}
-            if isinstance(value, list):
-                return [_sanitize_private_values(item) for item in value]
-            if isinstance(value, str):
-                return _sanitize_text(value)
-            return value
+        private_paths, _sanitize_private_values = _issue_report_private_values(db)
 
         sanitized_logs = _sanitize_private_values(
             get_log_broadcaster().get_recent(200)
         )
 
-        try:
-            from platform_support import filesystem_type, platform_support_info
-
-            filesystems = sorted({
-                kind for path in private_paths
-                if (kind := filesystem_type(path))
-            })
-            support_info = _redact(platform_support_info(cfg.load()))
-        except Exception:
-            log.warning("Could not collect platform support info for issue report", exc_info=True)
-            filesystems = []
-            support_info = {}
-        execution_info = {}
-        try:
-            execution_info = runtime_execution_info()
-        except Exception:
-            log.warning("Could not collect inference runtime info for issue report", exc_info=True)
+        filesystems, support_info, execution_info = (
+            _issue_report_platform(private_paths)
+        )
 
         # --- Build the bundle ---
         from datetime import datetime
@@ -828,22 +902,7 @@ def create_system_blueprint(
         report_url = effective.get("report_url", "")
 
         if report_url:
-            try:
-                payload = json.dumps(bundle).encode("utf-8")
-                req = urllib.request.Request(
-                    report_url,
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                resp = urllib.request.urlopen(req, timeout=10)
-                if 200 <= resp.status < 300:
-                    return jsonify({"status": "sent"})
-                else:
-                    return jsonify({"status": "download", "diagnostics": bundle})
-            except Exception:
-                log.exception("Failed to send report to %s", report_url)
-                return jsonify({"status": "download", "diagnostics": bundle})
+            return _send_issue_report(report_url, bundle)
 
         return jsonify({"status": "download", "diagnostics": bundle})
 

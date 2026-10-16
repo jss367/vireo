@@ -197,8 +197,6 @@
   "web/predictions.py:create_predictions_blueprint.api_predictions_compare": 121,
   "web/storage.py:create_storage_blueprint.api_storage": 225,
   "web/sync.py:_sync_preview_presentation": 257,
-  "web/system.py:create_system_blueprint.api_files_reveal": 148,
-  "web/system.py:create_system_blueprint.api_report_issue": 213,
   "working_copy_cache.py:_evict_once": 244,
   "xmp.py:SidecarEditor._bag": 154,
   "xmp.py:SidecarEditor._remove_location_keyword_entries": 140,
