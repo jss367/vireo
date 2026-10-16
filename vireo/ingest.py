@@ -364,6 +364,106 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
     }
 
 
+def _source_root_unwalkable(source_path, onerror):
+    """Whether discovery must refuse the source root without walking it.
+
+    Reports the refusal to ``onerror`` (when given) as a synthetic
+    ``OSError`` so the import ledger never treats it as a clean, empty
+    enumeration.
+    """
+    # prune_scan_dirs filters only children of the walked root; if the
+    # selected source is, or sits inside, an other-app data bundle (e.g.
+    # user picks ``~/Pictures/Photos Library.photoslibrary`` or a child
+    # like ``.../Photos Library.photoslibrary/originals`` as an import
+    # source), os.walk would still open it and trip the macOS TCC prompt.
+    # This must run BEFORE ``source_path.is_dir()`` — is_dir follows
+    # symlinks and stat's the target, so for a directly selected bundle
+    # (or a symlink to one) the existence test alone is enough to trip TCC.
+    if is_excluded_scan_path(source_path):
+        # Root is an excluded data-bundle. Legacy ingest() and the
+        # UI-preview callers silently drop these (they picked the wrong
+        # thing; no user contract to enumerate it). But when import_job
+        # passes an ``onerror`` collector it is holding safe_to_format
+        # against every enumeration being provably clean; a source root
+        # we refuse to walk is exactly the case where the pill would
+        # otherwise go green over a card whose files were never seen.
+        # Emit a synthetic OSError so the ledger records it as a
+        # discovery failure. See PR #1107 review (P1 line 927).
+        if onerror is not None:
+            onerror(PermissionError(
+                errno.EACCES,
+                "source is an excluded data bundle",
+                str(source_path),
+            ))
+        return True
+    if not source_path.is_dir():
+        # Root does not resolve to a directory: nonexistent, unmounted
+        # removable media, permission-denied on the root, or a plain
+        # file. Same reasoning as above — silent [] hides "we saw
+        # nothing" from safe_to_format. Emit a synthetic OSError for
+        # onerror callers so discover'd == 0 is treated as unsafe.
+        if onerror is not None:
+            onerror(FileNotFoundError(
+                errno.ENOENT,
+                "source is not an accessible directory",
+                str(source_path),
+            ))
+        return True
+    return False
+
+
+def _allowed_source_extensions(file_types):
+    """The suffixes ``discover_source_files`` keeps for ``file_types``."""
+    if isinstance(file_types, list):
+        allowed = {ext.lower() for ext in file_types}
+    elif file_types == "raw":
+        allowed = RAW_EXTENSIONS
+    elif file_types == "jpeg":
+        allowed = IMAGE_EXTENSIONS
+    else:
+        allowed = SUPPORTED_EXTENSIONS
+    return allowed
+
+
+def _walk_candidate_paths(source_path, onerror, cancel_check, report_progress):
+    """Yield every file path below ``source_path``, streamed from the walk."""
+    # cancel_check is threaded into safe_scan_walk itself so pause
+    # and cancel fire not just between directories but between
+    # scandir entries too. A single very large directory (a media
+    # dump with 1M+ files) would otherwise keep the walker inside
+    # its ``os.scandir`` loop for the full enumeration, so
+    # per-yield checks here can't see the cancel until every
+    # entry has been classified. The outer per-directory check
+    # below still guards the interval between yield resumption
+    # and the next scandir call.
+    #
+    # ``on_scandir_batch`` rides the same 256-entry checkpoint so
+    # a directory that streams millions of entries still emits
+    # discovery heartbeats before it finally yields. Without this
+    # the Jobs UI would show one initial phase event and then
+    # nothing until the whole enumeration finished — looking
+    # stalled during the largest single-directory case.
+    walked = enumerate(safe_scan_walk(
+        str(source_path), onerror=onerror, cancel_check=cancel_check,
+        on_scandir_batch=report_progress,
+    ), start=1)
+    for dirs_walked, (dirpath, _dirnames, filenames) in walked:
+        if cancel_check is not None and cancel_check():
+            raise ScanCancelled("file discovery cancelled")
+        # A source dominated by empty (or all-filtered) subtrees
+        # would otherwise never advance the outer per-candidate
+        # loop, so a discovery pass could walk thousands of
+        # directories without emitting a single heartbeat. Fire
+        # the callback periodically here so the UI stays alive
+        # during long directory-only traversals — the counts
+        # don't change (no new candidate was seen) but the
+        # heartbeat proves the walk is still making progress.
+        if not filenames and (dirs_walked % 64) == 0:
+            report_progress()
+        for name in filenames:
+            yield Path(dirpath) / name
+
+
 def discover_source_files(
     source_dir, file_types="both", recursive=True, onerror=None,
     cancel_check=None, progress_callback=None,
@@ -391,53 +491,10 @@ def discover_source_files(
         Sorted list of Path objects for matching files
     """
     source_path = Path(source_dir)
-    # prune_scan_dirs filters only children of the walked root; if the
-    # selected source is, or sits inside, an other-app data bundle (e.g.
-    # user picks ``~/Pictures/Photos Library.photoslibrary`` or a child
-    # like ``.../Photos Library.photoslibrary/originals`` as an import
-    # source), os.walk would still open it and trip the macOS TCC prompt.
-    # This must run BEFORE ``source_path.is_dir()`` — is_dir follows
-    # symlinks and stat's the target, so for a directly selected bundle
-    # (or a symlink to one) the existence test alone is enough to trip TCC.
-    if is_excluded_scan_path(source_path):
-        # Root is an excluded data-bundle. Legacy ingest() and the
-        # UI-preview callers silently drop these (they picked the wrong
-        # thing; no user contract to enumerate it). But when import_job
-        # passes an ``onerror`` collector it is holding safe_to_format
-        # against every enumeration being provably clean; a source root
-        # we refuse to walk is exactly the case where the pill would
-        # otherwise go green over a card whose files were never seen.
-        # Emit a synthetic OSError so the ledger records it as a
-        # discovery failure. See PR #1107 review (P1 line 927).
-        if onerror is not None:
-            onerror(PermissionError(
-                errno.EACCES,
-                "source is an excluded data bundle",
-                str(source_path),
-            ))
-        return []
-    if not source_path.is_dir():
-        # Root does not resolve to a directory: nonexistent, unmounted
-        # removable media, permission-denied on the root, or a plain
-        # file. Same reasoning as above — silent [] hides "we saw
-        # nothing" from safe_to_format. Emit a synthetic OSError for
-        # onerror callers so discover'd == 0 is treated as unsafe.
-        if onerror is not None:
-            onerror(FileNotFoundError(
-                errno.ENOENT,
-                "source is not an accessible directory",
-                str(source_path),
-            ))
+    if _source_root_unwalkable(source_path, onerror):
         return []
 
-    if isinstance(file_types, list):
-        allowed = {ext.lower() for ext in file_types}
-    elif file_types == "raw":
-        allowed = RAW_EXTENSIONS
-    elif file_types == "jpeg":
-        allowed = IMAGE_EXTENSIONS
-    else:
-        allowed = SUPPORTED_EXTENSIONS
+    allowed = _allowed_source_extensions(file_types)
 
     files = []
     checked = 0
@@ -456,51 +513,13 @@ def discover_source_files(
         # tree (and stall the preview before any photo is copied). The
         # previous Path.rglob path was likewise consumed lazily by
         # ``sorted()``.
-        def _candidate_paths():
-            # cancel_check is threaded into safe_scan_walk itself so pause
-            # and cancel fire not just between directories but between
-            # scandir entries too. A single very large directory (a media
-            # dump with 1M+ files) would otherwise keep the walker inside
-            # its ``os.scandir`` loop for the full enumeration, so
-            # per-yield checks here can't see the cancel until every
-            # entry has been classified. The outer per-directory check
-            # below still guards the interval between yield resumption
-            # and the next scandir call.
-            #
-            # ``on_scandir_batch`` rides the same 256-entry checkpoint so
-            # a directory that streams millions of entries still emits
-            # discovery heartbeats before it finally yields. Without this
-            # the Jobs UI would show one initial phase event and then
-            # nothing until the whole enumeration finished — looking
-            # stalled during the largest single-directory case.
-            def _scandir_heartbeat():
-                if progress_callback is not None:
-                    progress_callback(checked, len(files))
+        def _report_progress():
+            if progress_callback is not None:
+                progress_callback(checked, len(files))
 
-            walked = enumerate(safe_scan_walk(
-                str(source_path), onerror=onerror, cancel_check=cancel_check,
-                on_scandir_batch=_scandir_heartbeat,
-            ), start=1)
-            for dirs_walked, (dirpath, _dirnames, filenames) in walked:
-                if cancel_check is not None and cancel_check():
-                    raise ScanCancelled("file discovery cancelled")
-                # A source dominated by empty (or all-filtered) subtrees
-                # would otherwise never advance the outer per-candidate
-                # loop, so a discovery pass could walk thousands of
-                # directories without emitting a single heartbeat. Fire
-                # the callback periodically here so the UI stays alive
-                # during long directory-only traversals — the counts
-                # don't change (no new candidate was seen) but the
-                # heartbeat proves the walk is still making progress.
-                if (
-                    progress_callback is not None
-                    and not filenames
-                    and (dirs_walked % 64) == 0
-                ):
-                    progress_callback(checked, len(files))
-                for name in filenames:
-                    yield Path(dirpath) / name
-        candidates = _candidate_paths()
+        candidates = _walk_candidate_paths(
+            source_path, onerror, cancel_check, _report_progress,
+        )
     else:
         # safe_iter_dir drops excluded bundle children before the
         # is_file() filter below would stat them. With recursion off, a
