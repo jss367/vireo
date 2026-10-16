@@ -58,7 +58,8 @@ function setup() {
     _batchToggleMixed() {},
     browseSelectionStackNote: () => '',
     openLightbox: (...args) => opened.push(args),
-    getActiveSelection: () => ctx._activeSelection || [],
+    getBrowseSelection: () => ctx._activeSelection || [],
+    getActiveSelection: () => ctx._vireoNativeMenuPhotoIdsOverride || ctx._activeSelection || [],
   });
   ctx.window = ctx;
   vm.runInContext(fs.readFileSync('vireo/static/vireo-panel-loader.js', 'utf8'), ctx);
@@ -214,6 +215,31 @@ for (const [loader, responseField, elementId] of [
     pending[0].resolve({[responseField]: ['current']});
     await Promise.all([current, stale]);
     assert.deepEqual(rendered, [['current']]);
+  });
+
+  test(loader + ': a native-menu action override cannot discard the visible selection response', async () => {
+    const {ctx, pending, rendered} = setup();
+    const current = ctx[loader]([1, 2]);
+    ctx._vireoNativeMenuPhotoIdsOverride = [9];
+    pending[0].resolve({[responseField]: ['visible selection']});
+    await current;
+    assert.deepEqual(rendered, [['visible selection']]);
+    await ctx[loader]([2, 1]);
+    assert.equal(pending.length, 1);
+  });
+
+  test(loader + ': failures and Retry stay with the grid while menu actions target another photo', async () => {
+    const {ctx, pending, rendered} = setup();
+    ctx._vireoNativeMenuPhotoIdsOverride = [9];
+    const current = ctx[loader]([1, 2]);
+    pending[0].reject(new Error('offline'));
+    await current;
+    const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
+    const retry = ctx.Vireo.browse.panelLoaders[kind].retry();
+    assert.deepEqual(JSON.parse(pending[1].options.body).photo_ids, [1, 2]);
+    pending[1].resolve({[responseField]: ['recovered']});
+    await retry;
+    assert.deepEqual(rendered, [['recovered']]);
   });
 }
 

@@ -148,6 +148,12 @@ function getActiveSelection() {
   if (window._vireoNativeMenuPhotoIdsOverride && window._vireoNativeMenuPhotoIdsOverride.length) {
     return window._vireoNativeMenuPhotoIdsOverride.slice();
   }
+  return getBrowseSelection();
+}
+
+// Read-only panels belong to the visible grid selection. A native-menu action
+// may temporarily target a different lightbox photo without changing that view.
+function getBrowseSelection() {
   if (selectedPhotos.size > 0) return Array.from(selectedPhotos);
   if (selectedPhotoId != null) return [selectedPhotoId];
   return [];

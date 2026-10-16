@@ -49,6 +49,10 @@ a retry immediately removes the old action, paints loading, and clears stale
 row state. Keyboard focus moves to the container while it loads, without a late
 response moving focus back from another control.
 
+Panel ownership uses `getBrowseSelection()`, which reads the actual grid selection.
+`getActiveSelection()` additionally honors temporary native-menu action targets;
+that override must not cause a still-current panel response to be discarded.
+
 The loader and its Browse wiring use strict type, undefined-name, and unused-name
 checks. The selection response fields are typed; nested detail prediction payloads
 remain opaque at the legacy renderer boundary. Browser recovery tests in

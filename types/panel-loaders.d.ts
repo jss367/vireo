@@ -49,7 +49,7 @@ interface Window {
   };
 }
 
-declare function getActiveSelection(): number[];
+declare function getBrowseSelection(): number[];
 declare function selectionIdsKey(ids: readonly number[]): string;
 declare function safeFetch<T>(url: string, options?: RequestInit, errorOptions?: {toast: boolean}): Promise<T>;
 declare function renderSelectionKeywordSuggestions(rows: SelectionKeywordSuggestion[], selectedCount: number): void;

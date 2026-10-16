@@ -10,7 +10,10 @@
   /** @param {readonly number[]} ids */
   function acceptsSelection(ids) { return ids.length > 1 && ids.length <= 1000; }
   /** @param {readonly number[]} ids */
-  function isActiveSelection(ids) { return selectionIdsKey(ids) === selectionIdsKey(getActiveSelection()); }
+  function isActiveSelection(ids) {
+    const selected = getBrowseSelection();
+    return ids.length === selected.length && selectionIdsKey(ids) === selectionIdsKey(selected);
+  }
   /** @param {readonly number[]} ids */
   function snapshot(ids) { return ids.slice(); }
 

@@ -120,3 +120,47 @@ def test_photo_prediction_retry_recovers_after_initial_failure(live_server, page
     expect(panel).not_to_contain_text("Could not load")
     assert requests[0] == requests[1]
     assert page.evaluate("selectedPhotoId") == selected
+
+
+@pytest.mark.parametrize("kind,panel_id,endpoint,label", PANELS)
+@pytest.mark.parametrize("fails", [False, True])
+def test_menu_action_target_does_not_replace_panel_selection(live_server, page, kind, panel_id, endpoint, label, fails):
+    held = []
+    pattern = f"**/api/selection/{endpoint}"
+    page.route(pattern, lambda route: held.append(route))
+    page.goto(f"{live_server['url']}/browse")
+    selected = select_pair(page)
+    panel = page.locator(f"#{panel_id}")
+    expect(panel).to_contain_text("Checking")
+    # Native Photo menu actions capture a lightbox photo as their write target
+    # without changing the underlying Browse multi-selection.
+    page.evaluate(
+        """id => {
+      nativeMenuSetPhotoIdsOverride([id]);
+      batchAddKeyword();
+    }""",
+        selected[0],
+    )
+    dialog = page.locator("#batchKeywordModal")
+    expect(dialog).to_be_visible()
+    assert page.evaluate("getActiveSelection()") == [selected[0]]
+    assert sorted(page.evaluate("getBrowseSelection()")) == selected
+    with page.expect_response(pattern):
+        if fails:
+            held[0].fulfill(status=503, json={"error": "Temporary failure"})
+        else:
+            held[0].continue_()
+    expect(panel).not_to_contain_text("Checking")
+    dialog.get_by_role("button", name="Cancel", exact=True).click()
+    assert sorted(page.evaluate("getActiveSelection()")) == selected
+    retry = panel.get_by_role("button", name=label, exact=True)
+    if fails:
+        expect(retry).to_be_visible()
+        with page.expect_request(pattern):
+            retry.click()
+        assert sorted(held[1].request.post_data_json["photo_ids"]) == selected
+        with page.expect_response(pattern):
+            held[1].continue_()
+    expect(retry).to_have_count(0)
+    expect(panel).not_to_contain_text("Checking")
+    expect(panel).not_to_contain_text("Could not load")

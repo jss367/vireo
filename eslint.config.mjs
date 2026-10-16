@@ -39,7 +39,7 @@ export default [
     files: ['vireo/static/browse/panel-loaders.js'],
     languageOptions: {
       globals: {
-        getActiveSelection: 'readonly',
+        getBrowseSelection: 'readonly',
         selectionIdsKey: 'readonly',
         safeFetch: 'readonly',
         renderSelectionKeywordSuggestions: 'readonly',
