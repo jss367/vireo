@@ -104,9 +104,37 @@ jobs:
       # otherwise push coverage below the threshold for reasons unrelated to
       # the change. These runners are smaller/slower, so cap xdist workers at
       # 2 to avoid OOM worker crashes on the heavier ML tests.
+      #
+      # Windows gets one bounded rerun per failing test. Six of the seven
+      # red runs on main between late September and mid-October 2026 were a
+      # single Windows-only test failing once and passing on the next run
+      # (file timing, path identity, a loaded worker missing a fixed sleep),
+      # and each one opened a main-red issue and fired the fix-main routine.
+      # A test that fails twice in a row still fails the job; a test that
+      # passed only on its rerun is surfaced by the step below. Linux keeps
+      # no reruns because its run records the per-test coverage map.
       - name: Run tests (macOS / Windows)
         if: runner.os != 'Linux'
-        run: python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread
+        shell: bash
+        run: >-
+          python -m pytest tests/ vireo/tests/ -n 2 -v --tb=short --timeout=120 --timeout-method=thread
+          ${{ runner.os == 'Windows' && '--reruns 1 --reruns-delay 2' || '' }}
+          2>&1 | tee pytest-output.txt
+
+      # A test that only passed on its rerun keeps the job green but must not
+      # disappear: list each one as a warning annotation so the run summary
+      # shows what flaked. Tests that failed again are left to the FAILED
+      # lines main-health.yml already parses; a fixture that errored on both
+      # attempts ends as ERROR rather than FAILED, so that is excluded too.
+      - name: Surface tests that passed only on rerun
+        if: runner.os == 'Windows' && !cancelled()
+        shell: bash
+        run: |
+          grep -oE 'RERUN [^ ]+::[^ ]+' pytest-output.txt | sed 's/^RERUN //' | sort -u > reruns.txt || true
+          grep -oE '(FAILED|ERROR) [^ ]+::[^ ]+' pytest-output.txt | sed -E 's/^(FAILED|ERROR) //' | sort -u > failed.txt || true
+          comm -23 reruns.txt failed.txt | while read -r test; do
+            echo "::warning title=Passed only on rerun (Windows)::$test"
+          done
 
       # Package the coverage data as the test-impact map. ``build-map``
       # refuses a map whose per-test contexts don't account for the tests
