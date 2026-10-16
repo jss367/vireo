@@ -539,20 +539,8 @@ def _match_summary_row(db, detection_id, classifier_model, labels_fingerprint):
     return match
 
 
-def promote_and_publish_classifier_run(
-    db,
-    detection_id,
-    classifier_model,
-    labels_fingerprint,
-    labels_fingerprint_full,
-    model_identity,
-    store=None,
-    taxonomy_identity="no-tax",
-    source_is_original=None,
-):
-    """Attach portable identity to one fresh run and publish its raw output."""
-    if not _is_sha256(labels_fingerprint_full):
-        return None
+def _promotable_detection_row(db, detection_id, source_is_original):
+    """The detection row for a publishable run, or None when it stays local."""
     # Classification records the actual decoded source at image-preparation
     # time. A later quota eviction can clear ``working_copy_path`` before
     # this delayed promotion runs; never let that mutable row turn rendition-
@@ -583,20 +571,78 @@ def promote_and_publish_classifier_run(
         or not _is_sha256(row["runtime_fingerprint"])
     ):
         return None
+    return row
+
+
+def _subject_for_detection(key, detection):
+    """A portable subject (box or full image) for one detection row."""
+    kind = "full_image" if detection["detector_model"] == "full-image" else "box"
+    subject = {"key": key, "kind": kind}
+    if kind == "box":
+        subject["box"] = {
+            "x": detection["box_x"], "y": detection["box_y"],
+            "w": detection["box_w"], "h": detection["box_h"],
+        }
+        subject["category"] = detection["category"] or "animal"
+    return subject
+
+
+def _record_portable_run_identity(
+    db, detection_id, classifier_model, labels_fingerprint,
+    labels_fingerprint_full, classifier_runtime, input_fp,
+):
+    """Stamp the run's portable identity on its catalog rows and commit."""
+    try:
+        db.conn.execute(
+            """UPDATE classifier_runs
+               SET labels_fingerprint_full = ?, runtime_fingerprint = ?,
+                   input_fingerprint = ?
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ?""",
+            (
+                labels_fingerprint_full, classifier_runtime, input_fp,
+                detection_id, classifier_model, labels_fingerprint,
+            ),
+        )
+        db.conn.execute(
+            """UPDATE predictions SET labels_fingerprint_full = ?
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ?""",
+            (
+                labels_fingerprint_full, detection_id,
+                classifier_model, labels_fingerprint,
+            ),
+        )
+        db.conn.commit()
+    except Exception:
+        db.conn.rollback()
+        raise
+
+
+def promote_and_publish_classifier_run(
+    db,
+    detection_id,
+    classifier_model,
+    labels_fingerprint,
+    labels_fingerprint_full,
+    model_identity,
+    store=None,
+    taxonomy_identity="no-tax",
+    source_is_original=None,
+):
+    """Attach portable identity to one fresh run and publish its raw output."""
+    if not _is_sha256(labels_fingerprint_full):
+        return None
+    row = _promotable_detection_row(db, detection_id, source_is_original)
+    if row is None:
+        return None
     classifier_runtime = classifier_runtime_fingerprint(
         model_identity, labels_fingerprint_full, row["runtime_fingerprint"],
         taxonomy_identity=taxonomy_identity,
     )
     if classifier_runtime is None:
         return None
-    kind = "full_image" if row["detector_model"] == "full-image" else "box"
-    subject = {"key": "d0", "kind": kind}
-    if kind == "box":
-        subject["box"] = {
-            "x": row["box_x"], "y": row["box_y"],
-            "w": row["box_w"], "h": row["box_h"],
-        }
-        subject["category"] = row["category"] or "animal"
+    subject = _subject_for_detection("d0", row)
     input_block, input_fp = classification_input(
         row["file_hash"], row["runtime_fingerprint"], [subject],
     )
@@ -633,30 +679,7 @@ def promote_and_publish_classifier_run(
         return None
     candidates = []
     for prediction in predictions:
-        candidate = {
-            "species": prediction["species"],
-            "confidence": prediction["confidence"],
-        }
-        # Omitted rather than serialized as null when absent: an artifact
-        # published from rows written before the column existed must
-        # materialize as "not recorded", and a key that is simply not there
-        # cannot be mistaken for a measured zero.
-        if prediction["match_score"] is not None:
-            candidate["match_score"] = prediction["match_score"]
-        taxonomy = {
-            "taxon_id": prediction["source_taxon_id"],
-            "scientific_name": prediction["scientific_name"],
-            "kingdom": prediction["taxonomy_kingdom"],
-            "phylum": prediction["taxonomy_phylum"],
-            "class": prediction["taxonomy_class"],
-            "order": prediction["taxonomy_order"],
-            "family": prediction["taxonomy_family"],
-            "genus": prediction["taxonomy_genus"],
-        }
-        taxonomy = {key: value for key, value in taxonomy.items() if value}
-        if taxonomy:
-            candidate["taxonomy"] = taxonomy
-        candidates.append(candidate)
+        candidates.append(_prediction_candidate(prediction))
     subject["candidates"] = candidates
     if match is not None:
         subject["match"] = match
@@ -686,31 +709,10 @@ def promote_and_publish_classifier_run(
         "completed": True,
         "subjects": [subject],
     }
-    try:
-        db.conn.execute(
-            """UPDATE classifier_runs
-               SET labels_fingerprint_full = ?, runtime_fingerprint = ?,
-                   input_fingerprint = ?
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ?""",
-            (
-                labels_fingerprint_full, classifier_runtime, input_fp,
-                detection_id, classifier_model, labels_fingerprint,
-            ),
-        )
-        db.conn.execute(
-            """UPDATE predictions SET labels_fingerprint_full = ?
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ?""",
-            (
-                labels_fingerprint_full, detection_id,
-                classifier_model, labels_fingerprint,
-            ),
-        )
-        db.conn.commit()
-    except Exception:
-        db.conn.rollback()
-        raise
+    _record_portable_run_identity(
+        db, detection_id, classifier_model, labels_fingerprint,
+        labels_fingerprint_full, classifier_runtime, input_fp,
+    )
     digest, _created = (store or ArtifactStore()).put(artifact)
     return digest
 
@@ -893,11 +895,8 @@ def _has_measured_match(subject):
     ) and not isinstance(match.get("max_match_score"), bool)
 
 
-def validate_artifact(artifact):
-    """Validate one artifact and return its normalized data-only form."""
-    artifact = _normalize_json(artifact)
-    if not isinstance(artifact, dict):
-        raise CacheFormatError("artifact must be an object")
+def _validate_envelope(artifact):
+    """Check the fields every artifact carries, whatever its type."""
     required = {
         "artifact_schema", "type", "photo_sha256", "runtime_fingerprint",
         "input_fingerprint", "input", "completed", "subjects",
@@ -923,196 +922,234 @@ def validate_artifact(artifact):
     if not isinstance(artifact["subjects"], list):
         raise CacheFormatError("subjects must be a list")
 
+
+def _validate_box_subject(subject):
+    """Check a box subject's geometry and optional category."""
+    _validate_box(subject.get("box"))
+    # Category is optional on classification box subjects
+    # (materialize falls back to "animal") but MUST be a bounded
+    # string when supplied.  ``compute_detection_id`` feeds it to
+    # ``positive_int_hash``, which calls ``len()`` on each part —
+    # a bool/int/None would raise ``TypeError`` mid-materialization
+    # after the bundle object has already been published, leaving
+    # an unmaterialized entry behind and returning 500 to the
+    # import route.  Detection artifacts still require the field
+    # to be present (checked further below).
+    if "category" in subject:
+        category = subject["category"]
+        if (
+            not isinstance(category, str)
+            or not category
+            or len(category) > 80
+        ):
+            raise CacheFormatError(
+                "subject category must be a non-empty string"
+            )
+
+
+def _validate_classification_subject(subject):
+    """Check a classification subject's candidates and match summary."""
+    candidates = subject.get("candidates")
+    if not isinstance(candidates, list):
+        raise CacheFormatError(
+            "classification subject needs at least one candidate"
+        )
+    # An empty candidate list is allowed ONLY when the subject also
+    # carries a measured run-level ``match`` block.
+    #
+    # The bare empty list stays rejected because a completed
+    # classification subject with no predictions still writes a
+    # classifier_runs marker on materialize, which
+    # _all_photos_cache_satisfied counts as covered: a bundle of
+    # contentless subjects could short-circuit an entire Classify job
+    # and leave the photos permanently unclassified until a forced
+    # reclassify.
+    #
+    # A ``match`` block is what distinguishes the real thing from
+    # that. A run whose every label fell under the confidence floor
+    # produces no prediction rows but does produce a maximum raw score
+    # over the full list, and "nothing in this list matched" is the
+    # verdict this whole feature exists to record. Requiring the
+    # measurement means an empty subject has to carry evidence that
+    # inference actually happened, rather than asserting coverage it
+    # never earned.
+    if not candidates and not _has_measured_match(subject):
+        raise CacheFormatError(
+            "classification subject needs at least one candidate or a "
+            "measured match summary"
+        )
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise CacheFormatError("classification candidate must be an object")
+        species = candidate.get("species")
+        if not isinstance(species, str) or not species or len(species) > 500:
+            raise CacheFormatError("candidate species must be a non-empty string")
+        _validate_confidence(candidate.get("confidence"))
+        _validate_candidate_taxonomy(candidate.get("taxonomy"))
+        _validate_match_number(
+            candidate.get("match_score"), "candidate match_score",
+        )
+    _validate_subject_match(subject.get("match"))
+
+
+def _validate_subject(artifact_type, subject, seen_keys):
+    """Check one subject; ``seen_keys`` collects keys already used."""
+    if not isinstance(subject, dict):
+        raise CacheFormatError("subject must be an object")
+    key = subject.get("key")
+    kind = subject.get("kind")
+    if not isinstance(key, str) or not key or len(key) > 80:
+        raise CacheFormatError("subject key must be a short non-empty string")
+    if key in seen_keys:
+        raise CacheFormatError(f"duplicate subject key {key!r}")
+    seen_keys.add(key)
+    if kind not in {"box", "full_image"}:
+        raise CacheFormatError(f"unsupported subject kind {kind!r}")
+    if kind == "box":
+        _validate_box_subject(subject)
+    elif "box" in subject:
+        raise CacheFormatError("full_image subject must not contain a box")
+
+    if artifact_type == "detection":
+        if kind != "box":
+            raise CacheFormatError("detection artifacts contain only boxes")
+        _validate_confidence(subject.get("confidence"))
+        if not isinstance(subject.get("category"), str):
+            raise CacheFormatError("detection category must be a string")
+    else:
+        _validate_classification_subject(subject)
+
+
+def _validate_labels_metadata(labels):
+    """Check a classification artifact's ``labels`` block (already a dict)."""
+    full_fp = labels.get("fingerprint")
+    if not _is_sha256(full_fp):
+        raise CacheFormatError("labels.fingerprint must be a full SHA-256")
+    short = labels.get("short_fingerprint")
+    if not isinstance(short, str) or not short or len(short) > 64:
+        raise CacheFormatError("labels.short_fingerprint is invalid")
+    # short_fingerprint is a cache key for classifier_runs — normal jobs
+    # derive it from the first 12 characters of the full digest.  An
+    # arbitrary short key would let a crafted bundle claim an unrelated
+    # historical row (e.g. a legacy row with full_fingerprint IS NULL)
+    # and replace its unreviewed predictions under a foreign label set.
+    #
+    # Tree-of-Life mode is the documented exception: compute_fingerprint([])
+    # returns the "tol" sentinel as the classifier_runs short key, while
+    # classify_job synthesizes a portable 64-char labels.fingerprint from
+    # the classifier identity.  The sentinel is a well-known constant, not
+    # attacker-controlled, and cannot impersonate a legacy row (whose short
+    # key is "legacy"), so exempt it from the digest-prefix check.
+    from labels_fingerprint import TOL_SENTINEL
+
+    if short != TOL_SENTINEL and short != full_fp[:12]:
+        raise CacheFormatError(
+            "labels.short_fingerprint must be the first 12 chars of labels.fingerprint"
+        )
+    # Optional scalar metadata is bound directly to SQLite text/int
+    # columns by materialize_artifacts.  A list or dict here would
+    # surface as an uncaught binding error mid-write and leave the
+    # supposedly-validated object in the local store, so validate
+    # its shape up-front alongside the fingerprints.
+    display_name = labels.get("display_name")
+    if display_name is not None and (
+        not isinstance(display_name, str) or len(display_name) > 500
+    ):
+        raise CacheFormatError(
+            "labels.display_name must be a string of at most 500 chars"
+        )
+    label_count = labels.get("count")
+    # SQLite integer columns are signed 64-bit; a bundle carrying an
+    # arbitrarily large JSON int (e.g. 10**100) would pass a naive
+    # non-negativity check and only fail with OverflowError when
+    # materialize_artifacts binds the value.  By that point the bundle
+    # object has already been published, leaving an unmaterialized
+    # entry behind.  Reject out-of-range values up-front instead.
+    if label_count is not None and (
+        isinstance(label_count, bool)
+        or not isinstance(label_count, int)
+        or label_count < 0
+        or label_count > _SQLITE_INT64_MAX
+    ):
+        raise CacheFormatError(
+            "labels.count must be a non-negative integer within SQLite's 64-bit range"
+        )
+
+
+def _validate_classification_metadata(artifact):
+    """Check the classification-only fields and the input block they imply."""
+    if not isinstance(artifact.get("classifier_model"), str):
+        raise CacheFormatError("classification artifact needs classifier_model")
+    if not isinstance(artifact.get("detector_model"), str):
+        raise CacheFormatError("classification artifact needs detector_model")
+    labels = artifact.get("labels")
+    if not isinstance(labels, dict):
+        raise CacheFormatError("classification artifact needs labels metadata")
+    _validate_labels_metadata(labels)
+    detector_runtime = artifact.get("detector_runtime_fingerprint")
+    if not _is_sha256(detector_runtime):
+        raise CacheFormatError(
+            "classification artifact needs detector_runtime_fingerprint"
+        )
+    enrichment = artifact.get("output_enrichment")
+    if enrichment is not None:
+        if not isinstance(enrichment, dict):
+            raise CacheFormatError(
+                "output_enrichment must be an object when present"
+            )
+        tax_id = enrichment.get("taxonomy_identity")
+        if not isinstance(tax_id, str) or not tax_id or len(tax_id) > 128:
+            raise CacheFormatError(
+                "output_enrichment.taxonomy_identity must be a bounded string"
+            )
+    if artifact["input"].get("source_sha256") != artifact["photo_sha256"]:
+        raise CacheFormatError("classification input source does not match photo")
+    if (
+        artifact["input"].get("detector_runtime_fingerprint")
+        != detector_runtime
+    ):
+        raise CacheFormatError("classification input detector runtime mismatch")
+    expected_input, _expected_fp = classification_input(
+        artifact["photo_sha256"], detector_runtime, artifact["subjects"],
+    )
+    if artifact["input"] != expected_input:
+        raise CacheFormatError("classification input does not match subjects")
+
+
+def _validate_detection_metadata(artifact):
+    """Check the detection-only fields and the input block they imply."""
+    if not isinstance(artifact.get("detector_model"), str):
+        raise CacheFormatError("detection artifact needs detector_model")
+    sources = artifact["input"].get("sources")
+    if not isinstance(sources, list) or not any(
+        isinstance(source, dict)
+        and source.get("role") == "original"
+        and source.get("sha256") == artifact["photo_sha256"]
+        for source in sources
+    ):
+        raise CacheFormatError("detection input source does not match photo")
+    expected_input, _expected_fp = source_input(
+        artifact["photo_sha256"], "vireo-detector-source-v1",
+    )
+    if artifact["input"] != expected_input:
+        raise CacheFormatError("unsupported detection input recipe")
+
+
+def validate_artifact(artifact):
+    """Validate one artifact and return its normalized data-only form."""
+    artifact = _normalize_json(artifact)
+    if not isinstance(artifact, dict):
+        raise CacheFormatError("artifact must be an object")
+    _validate_envelope(artifact)
+
     seen_keys = set()
     for subject in artifact["subjects"]:
-        if not isinstance(subject, dict):
-            raise CacheFormatError("subject must be an object")
-        key = subject.get("key")
-        kind = subject.get("kind")
-        if not isinstance(key, str) or not key or len(key) > 80:
-            raise CacheFormatError("subject key must be a short non-empty string")
-        if key in seen_keys:
-            raise CacheFormatError(f"duplicate subject key {key!r}")
-        seen_keys.add(key)
-        if kind not in {"box", "full_image"}:
-            raise CacheFormatError(f"unsupported subject kind {kind!r}")
-        if kind == "box":
-            _validate_box(subject.get("box"))
-            # Category is optional on classification box subjects
-            # (materialize falls back to "animal") but MUST be a bounded
-            # string when supplied.  ``compute_detection_id`` feeds it to
-            # ``positive_int_hash``, which calls ``len()`` on each part —
-            # a bool/int/None would raise ``TypeError`` mid-materialization
-            # after the bundle object has already been published, leaving
-            # an unmaterialized entry behind and returning 500 to the
-            # import route.  Detection artifacts still require the field
-            # to be present (checked further below).
-            if "category" in subject:
-                category = subject["category"]
-                if (
-                    not isinstance(category, str)
-                    or not category
-                    or len(category) > 80
-                ):
-                    raise CacheFormatError(
-                        "subject category must be a non-empty string"
-                    )
-        elif "box" in subject:
-            raise CacheFormatError("full_image subject must not contain a box")
-
-        if artifact["type"] == "detection":
-            if kind != "box":
-                raise CacheFormatError("detection artifacts contain only boxes")
-            _validate_confidence(subject.get("confidence"))
-            if not isinstance(subject.get("category"), str):
-                raise CacheFormatError("detection category must be a string")
-        else:
-            candidates = subject.get("candidates")
-            if not isinstance(candidates, list):
-                raise CacheFormatError(
-                    "classification subject needs at least one candidate"
-                )
-            # An empty candidate list is allowed ONLY when the subject also
-            # carries a measured run-level ``match`` block.
-            #
-            # The bare empty list stays rejected because a completed
-            # classification subject with no predictions still writes a
-            # classifier_runs marker on materialize, which
-            # _all_photos_cache_satisfied counts as covered: a bundle of
-            # contentless subjects could short-circuit an entire Classify job
-            # and leave the photos permanently unclassified until a forced
-            # reclassify.
-            #
-            # A ``match`` block is what distinguishes the real thing from
-            # that. A run whose every label fell under the confidence floor
-            # produces no prediction rows but does produce a maximum raw score
-            # over the full list, and "nothing in this list matched" is the
-            # verdict this whole feature exists to record. Requiring the
-            # measurement means an empty subject has to carry evidence that
-            # inference actually happened, rather than asserting coverage it
-            # never earned.
-            if not candidates and not _has_measured_match(subject):
-                raise CacheFormatError(
-                    "classification subject needs at least one candidate or a "
-                    "measured match summary"
-                )
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    raise CacheFormatError("classification candidate must be an object")
-                species = candidate.get("species")
-                if not isinstance(species, str) or not species or len(species) > 500:
-                    raise CacheFormatError("candidate species must be a non-empty string")
-                _validate_confidence(candidate.get("confidence"))
-                _validate_candidate_taxonomy(candidate.get("taxonomy"))
-                _validate_match_number(
-                    candidate.get("match_score"), "candidate match_score",
-                )
-            _validate_subject_match(subject.get("match"))
+        _validate_subject(artifact["type"], subject, seen_keys)
 
     if artifact["type"] == "classification":
-        if not isinstance(artifact.get("classifier_model"), str):
-            raise CacheFormatError("classification artifact needs classifier_model")
-        if not isinstance(artifact.get("detector_model"), str):
-            raise CacheFormatError("classification artifact needs detector_model")
-        labels = artifact.get("labels")
-        if not isinstance(labels, dict):
-            raise CacheFormatError("classification artifact needs labels metadata")
-        full_fp = labels.get("fingerprint")
-        if not _is_sha256(full_fp):
-            raise CacheFormatError("labels.fingerprint must be a full SHA-256")
-        short = labels.get("short_fingerprint")
-        if not isinstance(short, str) or not short or len(short) > 64:
-            raise CacheFormatError("labels.short_fingerprint is invalid")
-        # short_fingerprint is a cache key for classifier_runs — normal jobs
-        # derive it from the first 12 characters of the full digest.  An
-        # arbitrary short key would let a crafted bundle claim an unrelated
-        # historical row (e.g. a legacy row with full_fingerprint IS NULL)
-        # and replace its unreviewed predictions under a foreign label set.
-        #
-        # Tree-of-Life mode is the documented exception: compute_fingerprint([])
-        # returns the "tol" sentinel as the classifier_runs short key, while
-        # classify_job synthesizes a portable 64-char labels.fingerprint from
-        # the classifier identity.  The sentinel is a well-known constant, not
-        # attacker-controlled, and cannot impersonate a legacy row (whose short
-        # key is "legacy"), so exempt it from the digest-prefix check.
-        from labels_fingerprint import TOL_SENTINEL
-
-        if short != TOL_SENTINEL and short != full_fp[:12]:
-            raise CacheFormatError(
-                "labels.short_fingerprint must be the first 12 chars of labels.fingerprint"
-            )
-        # Optional scalar metadata is bound directly to SQLite text/int
-        # columns by materialize_artifacts.  A list or dict here would
-        # surface as an uncaught binding error mid-write and leave the
-        # supposedly-validated object in the local store, so validate
-        # its shape up-front alongside the fingerprints.
-        display_name = labels.get("display_name")
-        if display_name is not None and (
-            not isinstance(display_name, str) or len(display_name) > 500
-        ):
-            raise CacheFormatError(
-                "labels.display_name must be a string of at most 500 chars"
-            )
-        label_count = labels.get("count")
-        # SQLite integer columns are signed 64-bit; a bundle carrying an
-        # arbitrarily large JSON int (e.g. 10**100) would pass a naive
-        # non-negativity check and only fail with OverflowError when
-        # materialize_artifacts binds the value.  By that point the bundle
-        # object has already been published, leaving an unmaterialized
-        # entry behind.  Reject out-of-range values up-front instead.
-        if label_count is not None and (
-            isinstance(label_count, bool)
-            or not isinstance(label_count, int)
-            or label_count < 0
-            or label_count > _SQLITE_INT64_MAX
-        ):
-            raise CacheFormatError(
-                "labels.count must be a non-negative integer within SQLite's 64-bit range"
-            )
-        detector_runtime = artifact.get("detector_runtime_fingerprint")
-        if not _is_sha256(detector_runtime):
-            raise CacheFormatError(
-                "classification artifact needs detector_runtime_fingerprint"
-            )
-        enrichment = artifact.get("output_enrichment")
-        if enrichment is not None:
-            if not isinstance(enrichment, dict):
-                raise CacheFormatError(
-                    "output_enrichment must be an object when present"
-                )
-            tax_id = enrichment.get("taxonomy_identity")
-            if not isinstance(tax_id, str) or not tax_id or len(tax_id) > 128:
-                raise CacheFormatError(
-                    "output_enrichment.taxonomy_identity must be a bounded string"
-                )
-        if artifact["input"].get("source_sha256") != artifact["photo_sha256"]:
-            raise CacheFormatError("classification input source does not match photo")
-        if (
-            artifact["input"].get("detector_runtime_fingerprint")
-            != detector_runtime
-        ):
-            raise CacheFormatError("classification input detector runtime mismatch")
-        expected_input, _expected_fp = classification_input(
-            artifact["photo_sha256"], detector_runtime, artifact["subjects"],
-        )
-        if artifact["input"] != expected_input:
-            raise CacheFormatError("classification input does not match subjects")
-    elif not isinstance(artifact.get("detector_model"), str):
-        raise CacheFormatError("detection artifact needs detector_model")
+        _validate_classification_metadata(artifact)
     else:
-        sources = artifact["input"].get("sources")
-        if not isinstance(sources, list) or not any(
-            isinstance(source, dict)
-            and source.get("role") == "original"
-            and source.get("sha256") == artifact["photo_sha256"]
-            for source in sources
-        ):
-            raise CacheFormatError("detection input source does not match photo")
-        expected_input, _expected_fp = source_input(
-            artifact["photo_sha256"], "vireo-detector-source-v1",
-        )
-        if artifact["input"] != expected_input:
-            raise CacheFormatError("unsupported detection input recipe")
+        _validate_detection_metadata(artifact)
     return artifact
 
 
@@ -1540,6 +1577,198 @@ def import_bundle(source, store):
     }
 
 
+def _export_detection_artifacts(db, detection_rows, artifacts, summary):
+    """Append a portable artifact per fully identified detector run."""
+    for row in detection_rows:
+        if not _is_sha256(row["file_hash"]):
+            summary["skipped_missing_hash"] += 1
+            continue
+        if not _is_sha256(row["runtime_fingerprint"]):
+            summary["skipped_legacy"] += 1
+            continue
+        input_block, expected_input = source_input(
+            row["file_hash"], "vireo-detector-source-v1",
+        )
+        if row["input_fingerprint"] != expected_input:
+            summary["skipped_incompatible_input"] += 1
+            continue
+        detections = db.conn.execute(
+            """SELECT box_x, box_y, box_w, box_h,
+                      detector_confidence, category
+               FROM detections
+               WHERE photo_id = ? AND detector_model = ?
+                 AND runtime_fingerprint = ?
+               ORDER BY detector_confidence DESC, id ASC""",
+            (row["photo_id"], row["detector_model"],
+             row["runtime_fingerprint"]),
+        ).fetchall()
+        subjects = [{
+            "key": f"d{index}",
+            "kind": "box",
+            "box": {
+                "x": det["box_x"], "y": det["box_y"],
+                "w": det["box_w"], "h": det["box_h"],
+            },
+            "confidence": det["detector_confidence"],
+            "category": det["category"] or "animal",
+        } for index, det in enumerate(detections)]
+        artifacts.append({
+            "artifact_schema": ARTIFACT_SCHEMA,
+            "type": "detection",
+            "detector_model": row["detector_model"],
+            "photo_sha256": row["file_hash"],
+            "runtime_fingerprint": row["runtime_fingerprint"],
+            "input_fingerprint": expected_input,
+            "input": input_block,
+            "completed": True,
+            "subjects": subjects,
+        })
+        summary["detector_runs"] += 1
+
+
+def _prediction_candidate(prediction):
+    """Return the portable candidate for one stored prediction row."""
+    candidate = {
+        "species": prediction["species"],
+        "confidence": prediction["confidence"],
+    }
+    # Omitted rather than serialized as null when absent: an artifact
+    # published from rows written before the column existed must
+    # materialize as "not recorded", and a key that is simply not there
+    # cannot be mistaken for a measured zero.
+    if prediction["match_score"] is not None:
+        candidate["match_score"] = prediction["match_score"]
+    taxonomy = {
+        "taxon_id": prediction["source_taxon_id"],
+        "scientific_name": prediction["scientific_name"],
+        "kingdom": prediction["taxonomy_kingdom"],
+        "phylum": prediction["taxonomy_phylum"],
+        "class": prediction["taxonomy_class"],
+        "order": prediction["taxonomy_order"],
+        "family": prediction["taxonomy_family"],
+        "genus": prediction["taxonomy_genus"],
+    }
+    taxonomy = {key: value for key, value in taxonomy.items() if value}
+    if taxonomy:
+        candidate["taxonomy"] = taxonomy
+    return candidate
+
+
+def _classification_subjects(db, row):
+    """Return the portable subjects for one classifier run row."""
+    classified = db.conn.execute(
+        """SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h,
+                  d.detector_model, d.category
+           FROM detections d
+           JOIN classifier_runs cr ON cr.detection_id = d.id
+           WHERE d.photo_id = ? AND d.detector_model = ?
+             AND d.runtime_fingerprint = ?
+             AND cr.classifier_model = ?
+             AND cr.labels_fingerprint = ?
+             AND cr.labels_fingerprint_full = ?
+             AND cr.runtime_fingerprint = ?
+             AND cr.input_fingerprint = ?
+           ORDER BY d.detector_confidence DESC, d.id ASC""",
+        (
+            row["photo_id"], row["detector_model"],
+            row["detector_runtime"], row["classifier_model"],
+            row["labels_fingerprint"],
+            row["labels_fingerprint_full"],
+            row["runtime_fingerprint"], row["input_fingerprint"],
+        ),
+    ).fetchall()
+    subjects = []
+    for index, detection in enumerate(classified):
+        subject = _subject_for_detection(f"d{index}", detection)
+        predictions = db.conn.execute(
+            """SELECT species, confidence, scientific_name, source_taxon_id,
+                      taxonomy_kingdom, taxonomy_phylum,
+                      taxonomy_class, taxonomy_order,
+                      taxonomy_family, taxonomy_genus,
+                      match_score
+               FROM predictions
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ?
+               ORDER BY confidence DESC, species COLLATE NOCASE""",
+            (detection["id"], row["classifier_model"],
+             row["labels_fingerprint"]),
+        ).fetchall()
+        candidates = []
+        for prediction in predictions:
+            candidates.append(_prediction_candidate(prediction))
+        subject["candidates"] = candidates
+        match = _match_summary_row(
+            db, detection["id"], row["classifier_model"],
+            row["labels_fingerprint"],
+        )
+        if match is not None:
+            subject["match"] = match
+        subjects.append(subject)
+    return subjects
+
+
+def _export_classification_artifacts(db, artifacts, summary):
+    """Append a portable artifact per fully identified classifier run."""
+    classifier_rows = db.conn.execute(
+        """SELECT DISTINCT
+                  p.id AS photo_id, p.file_hash,
+                  d.detector_model, d.runtime_fingerprint AS detector_runtime,
+                  cr.classifier_model, cr.labels_fingerprint,
+                  cr.labels_fingerprint_full, cr.runtime_fingerprint,
+                  cr.input_fingerprint, cr.input_recipe
+           FROM classifier_runs cr
+           JOIN detections d ON d.id = cr.detection_id
+           JOIN photos p ON p.id = d.photo_id
+           ORDER BY p.id, cr.classifier_model, cr.labels_fingerprint"""
+    ).fetchall()
+    for row in classifier_rows:
+        if not _is_sha256(row["file_hash"]):
+            summary["skipped_missing_hash"] += 1
+            continue
+        if (
+            not _is_sha256(row["runtime_fingerprint"])
+            or not _is_sha256(row["detector_runtime"])
+            or not _is_sha256(row["labels_fingerprint_full"])
+        ):
+            summary["skipped_legacy"] += 1
+            continue
+        subjects = _classification_subjects(db, row)
+        input_block, expected_input = classification_input(
+            row["file_hash"], row["detector_runtime"], subjects,
+        )
+        if row["input_fingerprint"] != expected_input:
+            summary["skipped_incompatible_input"] += 1
+            continue
+        label_meta = db.conn.execute(
+            """SELECT display_name, label_count
+               FROM labels_fingerprints WHERE fingerprint = ?""",
+            (row["labels_fingerprint"],),
+        ).fetchone()
+        artifacts.append({
+            "artifact_schema": ARTIFACT_SCHEMA,
+            "type": "classification",
+            "classifier_model": row["classifier_model"],
+            # Without it the importer records NULL, which reads as a
+            # standard crops run even for raw-rendition predictions.
+            "input_recipe": row["input_recipe"],
+            "detector_model": row["detector_model"],
+            "photo_sha256": row["file_hash"],
+            "runtime_fingerprint": row["runtime_fingerprint"],
+            "detector_runtime_fingerprint": row["detector_runtime"],
+            "input_fingerprint": expected_input,
+            "input": input_block,
+            "labels": {
+                "fingerprint": row["labels_fingerprint_full"],
+                "short_fingerprint": row["labels_fingerprint"],
+                "display_name": label_meta["display_name"] if label_meta else None,
+                "count": label_meta["label_count"] if label_meta else None,
+            },
+            "completed": True,
+            "subjects": subjects,
+        })
+        summary["classifier_runs"] += 1
+
+
 def exportable_artifacts(db, artifact_types=None):
     """Synthesize portable artifacts from fully identified database runs.
 
@@ -1573,187 +1802,10 @@ def exportable_artifacts(db, artifact_types=None):
            ORDER BY p.id, dr.detector_model"""
     ).fetchall()
     if "detection" in artifact_types:
-        for row in detection_rows:
-            if not _is_sha256(row["file_hash"]):
-                summary["skipped_missing_hash"] += 1
-                continue
-            if not _is_sha256(row["runtime_fingerprint"]):
-                summary["skipped_legacy"] += 1
-                continue
-            input_block, expected_input = source_input(
-                row["file_hash"], "vireo-detector-source-v1",
-            )
-            if row["input_fingerprint"] != expected_input:
-                summary["skipped_incompatible_input"] += 1
-                continue
-            detections = db.conn.execute(
-                """SELECT box_x, box_y, box_w, box_h,
-                          detector_confidence, category
-                   FROM detections
-                   WHERE photo_id = ? AND detector_model = ?
-                     AND runtime_fingerprint = ?
-                   ORDER BY detector_confidence DESC, id ASC""",
-                (row["photo_id"], row["detector_model"],
-                 row["runtime_fingerprint"]),
-            ).fetchall()
-            subjects = [{
-                "key": f"d{index}",
-                "kind": "box",
-                "box": {
-                    "x": det["box_x"], "y": det["box_y"],
-                    "w": det["box_w"], "h": det["box_h"],
-                },
-                "confidence": det["detector_confidence"],
-                "category": det["category"] or "animal",
-            } for index, det in enumerate(detections)]
-            artifacts.append({
-                "artifact_schema": ARTIFACT_SCHEMA,
-                "type": "detection",
-                "detector_model": row["detector_model"],
-                "photo_sha256": row["file_hash"],
-                "runtime_fingerprint": row["runtime_fingerprint"],
-                "input_fingerprint": expected_input,
-                "input": input_block,
-                "completed": True,
-                "subjects": subjects,
-            })
-            summary["detector_runs"] += 1
+        _export_detection_artifacts(db, detection_rows, artifacts, summary)
 
     if "classification" in artifact_types:
-        classifier_rows = db.conn.execute(
-            """SELECT DISTINCT
-                      p.id AS photo_id, p.file_hash,
-                      d.detector_model, d.runtime_fingerprint AS detector_runtime,
-                      cr.classifier_model, cr.labels_fingerprint,
-                      cr.labels_fingerprint_full, cr.runtime_fingerprint,
-                      cr.input_fingerprint, cr.input_recipe
-               FROM classifier_runs cr
-               JOIN detections d ON d.id = cr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               ORDER BY p.id, cr.classifier_model, cr.labels_fingerprint"""
-        ).fetchall()
-        for row in classifier_rows:
-            if not _is_sha256(row["file_hash"]):
-                summary["skipped_missing_hash"] += 1
-                continue
-            if (
-                not _is_sha256(row["runtime_fingerprint"])
-                or not _is_sha256(row["detector_runtime"])
-                or not _is_sha256(row["labels_fingerprint_full"])
-            ):
-                summary["skipped_legacy"] += 1
-                continue
-            classified = db.conn.execute(
-                """SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h,
-                          d.detector_model, d.category
-                   FROM detections d
-                   JOIN classifier_runs cr ON cr.detection_id = d.id
-                   WHERE d.photo_id = ? AND d.detector_model = ?
-                     AND d.runtime_fingerprint = ?
-                     AND cr.classifier_model = ?
-                     AND cr.labels_fingerprint = ?
-                     AND cr.labels_fingerprint_full = ?
-                     AND cr.runtime_fingerprint = ?
-                     AND cr.input_fingerprint = ?
-                   ORDER BY d.detector_confidence DESC, d.id ASC""",
-                (
-                    row["photo_id"], row["detector_model"],
-                    row["detector_runtime"], row["classifier_model"],
-                    row["labels_fingerprint"],
-                    row["labels_fingerprint_full"],
-                    row["runtime_fingerprint"], row["input_fingerprint"],
-                ),
-            ).fetchall()
-            subjects = []
-            for index, detection in enumerate(classified):
-                kind = (
-                    "full_image"
-                    if detection["detector_model"] == "full-image" else "box"
-                )
-                subject = {"key": f"d{index}", "kind": kind}
-                if kind == "box":
-                    subject["box"] = {
-                        "x": detection["box_x"], "y": detection["box_y"],
-                        "w": detection["box_w"], "h": detection["box_h"],
-                    }
-                    subject["category"] = detection["category"] or "animal"
-                predictions = db.conn.execute(
-                    """SELECT species, confidence, scientific_name, source_taxon_id,
-                              taxonomy_kingdom, taxonomy_phylum,
-                              taxonomy_class, taxonomy_order,
-                              taxonomy_family, taxonomy_genus,
-                              match_score
-                       FROM predictions
-                       WHERE detection_id = ? AND classifier_model = ?
-                         AND labels_fingerprint = ?
-                       ORDER BY confidence DESC, species COLLATE NOCASE""",
-                    (detection["id"], row["classifier_model"],
-                     row["labels_fingerprint"]),
-                ).fetchall()
-                candidates = []
-                for prediction in predictions:
-                    candidate = {
-                        "species": prediction["species"],
-                        "confidence": prediction["confidence"],
-                    }
-                    if prediction["match_score"] is not None:
-                        candidate["match_score"] = prediction["match_score"]
-                    taxonomy = {
-                        "taxon_id": prediction["source_taxon_id"],
-                        "scientific_name": prediction["scientific_name"],
-                        "kingdom": prediction["taxonomy_kingdom"],
-                        "phylum": prediction["taxonomy_phylum"],
-                        "class": prediction["taxonomy_class"],
-                        "order": prediction["taxonomy_order"],
-                        "family": prediction["taxonomy_family"],
-                        "genus": prediction["taxonomy_genus"],
-                    }
-                    taxonomy = {key: value for key, value in taxonomy.items() if value}
-                    if taxonomy:
-                        candidate["taxonomy"] = taxonomy
-                    candidates.append(candidate)
-                subject["candidates"] = candidates
-                match = _match_summary_row(
-                    db, detection["id"], row["classifier_model"],
-                    row["labels_fingerprint"],
-                )
-                if match is not None:
-                    subject["match"] = match
-                subjects.append(subject)
-            input_block, expected_input = classification_input(
-                row["file_hash"], row["detector_runtime"], subjects,
-            )
-            if row["input_fingerprint"] != expected_input:
-                summary["skipped_incompatible_input"] += 1
-                continue
-            label_meta = db.conn.execute(
-                """SELECT display_name, label_count
-                   FROM labels_fingerprints WHERE fingerprint = ?""",
-                (row["labels_fingerprint"],),
-            ).fetchone()
-            artifacts.append({
-                "artifact_schema": ARTIFACT_SCHEMA,
-                "type": "classification",
-                "classifier_model": row["classifier_model"],
-                # Without it the importer records NULL, which reads as a
-                # standard crops run even for raw-rendition predictions.
-                "input_recipe": row["input_recipe"],
-                "detector_model": row["detector_model"],
-                "photo_sha256": row["file_hash"],
-                "runtime_fingerprint": row["runtime_fingerprint"],
-                "detector_runtime_fingerprint": row["detector_runtime"],
-                "input_fingerprint": expected_input,
-                "input": input_block,
-                "labels": {
-                    "fingerprint": row["labels_fingerprint_full"],
-                    "short_fingerprint": row["labels_fingerprint"],
-                    "display_name": label_meta["display_name"] if label_meta else None,
-                    "count": label_meta["label_count"] if label_meta else None,
-                },
-                "completed": True,
-                "subjects": subjects,
-            })
-            summary["classifier_runs"] += 1
+        _export_classification_artifacts(db, artifacts, summary)
     return artifacts, summary
 
 
@@ -2551,7 +2603,37 @@ class _ArtifactMaterialization:
                     candidate.get("match_score"),
                 ),
             )
-        # Written alongside the classifier_runs marker below, and
+        self._replace_subject_match_score(artifact, detection_id, subject)
+        db.conn.execute(
+            """INSERT INTO classifier_runs
+                 (detection_id, classifier_model, labels_fingerprint,
+                  labels_fingerprint_full, runtime_fingerprint,
+                  input_fingerprint, prediction_count, input_recipe)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(detection_id, classifier_model,
+                           labels_fingerprint)
+               DO UPDATE SET
+                 labels_fingerprint_full = excluded.labels_fingerprint_full,
+                 runtime_fingerprint = excluded.runtime_fingerprint,
+                 input_fingerprint = excluded.input_fingerprint,
+                 prediction_count = excluded.prediction_count,
+                 input_recipe = excluded.input_recipe,
+                 run_at = datetime('now')""",
+            (
+                detection_id, artifact["classifier_model"],
+                labels["short_fingerprint"], labels["fingerprint"],
+                artifact["runtime_fingerprint"],
+                artifact["input_fingerprint"],
+                len(subject["candidates"]), artifact.get("input_recipe"),
+            ),
+        )
+
+    def _replace_subject_match_score(self, artifact, detection_id, subject):
+        """Replace the run-level match summary for one materialized subject."""
+        db = self.db
+        labels = artifact["labels"]
+        # Written alongside the classifier_runs marker the caller
+        # writes next, and
         # for the same reason it has to be written here at all:
         # that marker is the re-classification gate, so a
         # detection materialized from cache is never inferred
@@ -2596,29 +2678,6 @@ class _ArtifactMaterialization:
                     match.get("score_kind"),
                 ),
             )
-        db.conn.execute(
-            """INSERT INTO classifier_runs
-                 (detection_id, classifier_model, labels_fingerprint,
-                  labels_fingerprint_full, runtime_fingerprint,
-                  input_fingerprint, prediction_count, input_recipe)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(detection_id, classifier_model,
-                           labels_fingerprint)
-               DO UPDATE SET
-                 labels_fingerprint_full = excluded.labels_fingerprint_full,
-                 runtime_fingerprint = excluded.runtime_fingerprint,
-                 input_fingerprint = excluded.input_fingerprint,
-                 prediction_count = excluded.prediction_count,
-                 input_recipe = excluded.input_recipe,
-                 run_at = datetime('now')""",
-            (
-                detection_id, artifact["classifier_model"],
-                labels["short_fingerprint"], labels["fingerprint"],
-                artifact["runtime_fingerprint"],
-                artifact["input_fingerprint"],
-                len(subject["candidates"]), artifact.get("input_recipe"),
-            ),
-        )
 
 
 def materialize_artifacts(
