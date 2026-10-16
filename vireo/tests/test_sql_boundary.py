@@ -180,6 +180,27 @@ def _declared_globals(scope):
     return found
 
 
+def _module_aliases(tree):
+    """Module-level names bound from a connection read, wherever in the module."""
+    found = set()
+
+    def collect(node):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            return
+        if isinstance(node, ast.Assign) and _is_conn_read(node.value):
+            found.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        if isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and isinstance(node.target, ast.Name) and _is_conn_read(node.value):
+            found.add(node.target.id)
+        for child in ast.iter_child_nodes(node):
+            collect(child)
+
+    collect(tree)
+    return found
+
+
+COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
 def _raw_connection_closes(tree, *, exempt=()):
     """Line numbers of raw connection closes.
 
@@ -195,7 +216,7 @@ def _raw_connection_closes(tree, *, exempt=()):
     skipped.
     """
     offenders = []
-    module_aliases = set()
+    module_aliases = _module_aliases(tree)
 
     def visit(node, aliases, qualname, class_enclosing=None):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
@@ -218,7 +239,10 @@ def _raw_connection_closes(tree, *, exempt=()):
             if inner in exempt:
                 return
             if isinstance(node, ast.ClassDef):
-                class_aliases = aliases.copy()
+                # A class namespace is not a closure scope: a nested class
+                # body starts from the enclosing function/module aliases, not
+                # from the containing class's.
+                class_aliases = enclosing.copy()
                 for child in node.body:
                     visit(child, class_aliases, inner, enclosing)
                 return
@@ -230,9 +254,24 @@ def _raw_connection_closes(tree, *, exempt=()):
             for child in body:
                 visit(child, aliases, inner)
             return
+        if isinstance(node, COMPREHENSIONS):
+            # The first iterable is evaluated in the enclosing scope; the
+            # comprehension's own targets shadow aliases everywhere else.
+            first, *rest = node.generators
+            visit(first.iter, aliases, qualname, class_enclosing)
+            bound = {
+                n.id for g in node.generators for n in ast.walk(g.target)
+                if isinstance(n, ast.Name)
+            }
+            comp_aliases = aliases - bound
+            for part in first.ifs + [x for g in rest for x in [g.iter, *g.ifs]]:
+                visit(part, comp_aliases, qualname, class_enclosing)
+            for part in [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]:
+                visit(part, comp_aliases, qualname, class_enclosing)
+            return
         if isinstance(node, ast.Assign) and _is_conn_read(node.value):
             aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and _is_conn_read(node.value):
+        if isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and isinstance(node.target, ast.Name) and _is_conn_read(node.value):
             aliases.add(node.target.id)
         if (
             isinstance(node, ast.Call)
@@ -247,7 +286,7 @@ def _raw_connection_closes(tree, *, exempt=()):
         for child in ast.iter_child_nodes(node):
             visit(child, aliases, qualname, class_enclosing)
 
-    visit(tree, module_aliases, "")
+    visit(tree, set(), "")
     return offenders
 
 
@@ -375,6 +414,14 @@ def test_raw_close_scan_includes_docs_prototypes(tmp_path, monkeypatch):
     ("conn = db.conn\ndef cleanup[T: conn.close()]():\n pass", [2]),
     ("conn = db.conn\nclass K[T: conn.close()]:\n pass", [2]),
     ("conn = db.conn\n@consume(conn.close())\nclass K:\n pass", [2]),
+    ("def cleanup():\n global conn\n conn.close()\nconn = db.conn", [3]),
+    ("if (conn := db.conn):\n conn.close()", [2]),
+    ("conn = db.conn\n[conn.close() for conn in others]", []),
+    ("conn = db.conn\n{k: conn.close() for k, conn in pairs}", []),
+    ("conn = db.conn\n[conn.close() for x in others]", [2]),
+    ("conn = db.conn\n[x for x in conn.close()]", [2]),
+    ("class Outer:\n conn = db.conn\n class Inner:\n  conn.close()", []),
+    ("class Outer:\n conn = db.conn\n class Inner(consume(conn.close())):\n  pass", [3]),
     ("conn = sqlite3.connect(path)\nconn.close()", []),
     ("db.close()\nother.close()", []),
 ])
