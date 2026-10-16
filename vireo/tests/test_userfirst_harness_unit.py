@@ -1,5 +1,6 @@
 """Unit tests for harness internals that don't need a real Flask server."""
 
+import pytest
 from testing.userfirst.harness import (
     _free_port,
     _new_run_id,
@@ -66,3 +67,37 @@ def test_relative_url_same_origin_returns_none_for_external():
     assert _relative_url_same_origin(
         "https://example.com/x.js", "http://localhost:8089"
     ) is None
+
+
+@pytest.mark.parametrize("seed_name", [
+    "browse_seed", "prediction_selection_seed", "misses_seed",
+    "orphan_folder_seed", "import_card_seed",
+])
+def test_seed_databases_report_closed_after_return(tmp_path, monkeypatch, seed_name):
+    import sqlite3
+
+    import db as db_module
+    from testing.userfirst import seeds
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    real_database = db_module.Database
+    owned = []
+
+    def track_database(path):
+        database = real_database(path)
+        owned.append((database, database.conn))
+        return database
+
+    monkeypatch.setattr(db_module, "Database", track_database)
+    try:
+        getattr(seeds, seed_name)(str(tmp_path / "seed.db"), str(tmp_path / "thumbs"), str(tmp_path / "photos"))
+        assert owned
+        for database, connection in owned:
+            assert database.closed
+            assert not hasattr(database, "conn")
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+            database.close()
+    finally:
+        for database, _connection in owned:
+            database.close()

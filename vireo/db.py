@@ -811,9 +811,10 @@ class Database:
         # don't cross-read each other's cached results (workspace_id=1 is
         # reused across every database as the default workspace).
         self._db_path = db_path
-        # Pre-set so __del__ can run safely if sqlite3.connect raises.
-        self.conn = None
-        self.conn = sqlite3.connect(
+        # ``conn`` exists only while the connection is open: ``close`` deletes
+        # it, so its type is the connection, never ``None``. ``close`` and
+        # ``__del__`` tolerate its absence if ``sqlite3.connect`` raises.
+        self.conn: _Connection = sqlite3.connect(
             db_path, check_same_thread=False, factory=_Connection,
         )
         self.conn.row_factory = sqlite3.Row
@@ -897,6 +898,10 @@ class Database:
         accumulating unclosed connections in long-running test suites
         exhausts the per-process fd limit and breaks coverage's own
         sqlite database.
+
+        Closing removes ``conn`` rather than setting it to ``None``, so the
+        attribute is always a live connection while it exists; ``closed``
+        reports the state.
         """
         conn = getattr(self, "conn", None)
         if conn is not None:
@@ -904,7 +909,12 @@ class Database:
             # thread; nothing useful can be done with a handle we are dropping.
             with contextlib.suppress(sqlite3.Error):
                 conn.close()
-            self.conn = None
+            del self.conn
+
+    @property
+    def closed(self):
+        """True once ``close`` has run (or ``__init__`` never connected)."""
+        return not hasattr(self, "conn")
 
     def __enter__(self):
         return self

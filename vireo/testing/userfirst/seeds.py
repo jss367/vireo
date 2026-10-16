@@ -136,7 +136,7 @@ def browse_seed(db_path, thumb_dir, photos_root):
     for pid in photos:
         _make_thumb(thumb_dir, pid)
 
-    db.conn.close()
+    db.close()
 
 
 def prediction_selection_seed(db_path, thumb_dir, photos_root):
@@ -191,7 +191,7 @@ def prediction_selection_seed(db_path, thumb_dir, photos_root):
                 detection_ids[1], "Blue-breasted Quail", 0.93, "bioclip",
             )
 
-    db.conn.close()
+    db.close()
 
 
 def misses_seed(db_path, thumb_dir, photos_root):
@@ -250,7 +250,7 @@ def misses_seed(db_path, thumb_dir, photos_root):
     for pid in photos:
         _make_thumb(thumb_dir, pid)
 
-    db.conn.close()
+    db.close()
 
 
 def orphan_folder_seed(db_path, thumb_dir, photos_root):
@@ -302,7 +302,7 @@ def orphan_folder_seed(db_path, thumb_dir, photos_root):
     for pid in photos:
         _make_thumb(thumb_dir, pid)
 
-    db.conn.close()
+    db.close()
 
 
 def import_card_seed(db_path, thumb_dir, photos_root):

@@ -101,7 +101,7 @@ def test_fresh_server_releases_resources(tmp_path, monkeypatch, fail_to_start):
             data = next(fixture)
             with pytest.raises(StopIteration):
                 next(fixture)
-            assert data["db"].conn is None
+            assert data["db"].closed
 
         assert apps[0]._log_broadcaster not in logging.getLogger().handlers
         db_path = (tmp_path / "test.db").resolve()
