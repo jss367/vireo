@@ -6,16 +6,29 @@
  * the jobs panel, and the click looked like it had done nothing. watch()
  * follows the job's stream and toasts what actually happened; outcome() is
  * the pure mapping from the job's terminal event to that toast.
+ *
+ * Classic script: VireoExportJob is the page global the export modals call.
+ */
+/* exported VireoExportJob */
+
+/**
+ * @typedef {{exported?: number, errors?: string[], renamed?: number,
+ *   destination?: string, destinations?: string[],
+ *   written_destinations?: string[]}} ExportJobResult
+ * @typedef {{status?: string, result?: ExportJobResult | null,
+ *   errors?: string[]}} ExportJobDone
  */
 var VireoExportJob = (function() {
   var VISIBLE_ERRORS = 2;
 
+  /** @param {number} n */
   function photos(n) {
     return n.toLocaleString() + ' photo' + (n === 1 ? '' : 's');
   }
 
   // Where the files went: one folder by name, several by count. Only folders
   // that received a file count; a folder whose photos all failed does not.
+  /** @param {ExportJobResult} result */
   function where(result) {
     var destinations = result.written_destinations || result.destinations || [];
     if (destinations.length > 1) return ' to ' + destinations.length + ' folders';
@@ -23,14 +36,19 @@ var VireoExportJob = (function() {
     return destination ? ' to ' + destination : '';
   }
 
+  /** @param {string[]} errors */
   function errorDetail(errors) {
     var shown = errors.slice(0, VISIBLE_ERRORS).join('; ');
     var more = errors.length - VISIBLE_ERRORS;
     return more > 0 ? shown + '; and ' + more.toLocaleString() + ' more' : shown;
   }
 
-  // done: the job's `complete` event ({status, result, errors}).
-  // Returns {message, type} for showToast.
+  /**
+   * The job's `complete` event ({status, result, errors}) to the
+   * {message, type} showToast shows for it.
+   * @param {ExportJobDone | null | undefined} done
+   * @returns {{message: string, type: string}}
+   */
   function outcome(done) {
     done = done || {};
     var result = done.result;
@@ -76,9 +94,11 @@ var VireoExportJob = (function() {
     return {message: message, type: type};
   }
 
+  /** @param {string | null | undefined} jobId */
   function watch(jobId) {
     if (!jobId || typeof safeEventSource !== 'function') return;
     safeEventSource('/api/jobs/' + encodeURIComponent(jobId) + '/stream', {
+      /** @param {ExportJobDone} done */
       onComplete: function(done) {
         var toast = outcome(done);
         showToast(toast.message, toast.type);

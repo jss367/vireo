@@ -1,4 +1,22 @@
-// Shared by the Import result and Jobs detail views.
+// Shared by the Import result and Jobs detail views. Classic script: the
+// Import and Jobs pages call these as globals, so ESLint is told which one
+// only other files use.
+/* exported directNasImportRetryBody */
+
+/**
+ * @typedef {{import_not_started?: boolean, error?: string, never_started?: boolean,
+ *   photo_ids?: object, carried_photo_ids?: object, recovered_photo_ids?: object,
+ *   landed_files?: object}} ImportJobResult
+ * @typedef {{local_processing?: boolean, parent_import_job_id?: string,
+ *   root_import_job_id?: string, carry_photo_ids?: object,
+ *   untagged_photo_ids?: object, recover_landed_files?: object}} ImportJobConfig
+ * @typedef {{id: string, type?: string, status?: string, config?: ImportJobConfig,
+ *   result?: ImportJobResult}} ImportJobRow
+ * @typedef {{local_processing?: boolean, defer_nas_transfer?: boolean,
+ *   retry_direct_to_nas?: boolean, after_process_move?: unknown}} ImportRetryBody
+ */
+
+/** @param {ImportJobResult | null | undefined} result */
 function importFailedBeforeStart(result) {
   if (!result) return false;
   if (result.import_not_started === true) return true;
@@ -7,12 +25,19 @@ function importFailedBeforeStart(result) {
   return result.error === 'Not enough free space on this computer for temporary processing. Free up space or import fewer photos.';
 }
 
+/**
+ * @param {ImportJobRow | null | undefined} job
+ * @param {ImportJobRow[] | null | undefined} rows
+ */
 function canRetryImportDirectToNas(job, rows) {
   if (!job || job.type !== 'import' || job.status !== 'failed' ||
       !importFailedBeforeStart(job.result)) return false;
   var cfg = job.config || {}, result = job.result || {};
   if (!cfg.local_processing || cfg.parent_import_job_id) return false;
-  var descendantIds = new Set([job.id]), descendants = [];
+  /** @type {Set<string | undefined>} */
+  var descendantIds = new Set([job.id]);
+  /** @type {ImportJobRow[]} */
+  var descendants = [];
   var changed = true;
   while (changed) {
     changed = false;
@@ -37,6 +62,11 @@ function canRetryImportDirectToNas(job, rows) {
     });
 }
 
+/**
+ * @param {ImportJobRow | null | undefined} job
+ * @param {ImportRetryBody | null | undefined} body
+ * @param {ImportJobRow[] | null | undefined} rows
+ */
 function directNasImportRetryBody(job, body, rows) {
   if (!body || !canRetryImportDirectToNas(job, rows)) return null;
   body.local_processing = false;

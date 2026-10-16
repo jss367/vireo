@@ -1,15 +1,5 @@
 {
     "files": {
-        "./vireo/pipeline_stages/scanning.py": [
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 31,
-                    "endColumn": 38,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./vireo/repositories/collections.py": [
             {
                 "code": "reportArgumentType",

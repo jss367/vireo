@@ -27317,3 +27317,24 @@ def test_has_pending_location_change(tmp_path):
     db.queue_change(pid, "location", "effective")
     assert db.has_pending_location_change(pid) is True
     db.close()
+
+
+def test_close_removes_the_connection_and_reports_closed(tmp_path):
+    """``conn`` is a live connection while it exists; ``close`` deletes it.
+
+    Code (and the type checker) can treat ``db.conn`` as never ``None``;
+    ``closed`` is how callers ask whether the handle is gone. Closing twice
+    is still a no-op.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "close.db"))
+    assert not db.closed
+    assert db.conn.execute("SELECT 1").fetchone()[0] == 1
+
+    db.close()
+    assert db.closed
+    assert not hasattr(db, "conn")
+
+    db.close()  # idempotent
+    assert db.closed

@@ -13,12 +13,17 @@
     "types/frontend.d.ts",
     "types/dialogs.d.ts",
     "types/panel-loaders.d.ts",
+    "types/navbar.d.ts",
     "vireo/static/vireo-panel-loader.js",
     "vireo/static/browse/panel-loaders.js",
     "vireo/static/vireo-dialog.js",
     "vireo/static/browse/panel-requests.js",
     "vireo/static/browse/selection-panel-state.js",
     "vireo/static/browse/selection-panel-events.js",
+    "vireo/static/import-recovery.js",
+    "vireo/static/pipeline-messages.js",
+    "vireo/static/map-focus.js",
+    "vireo/static/vireo-export-job.js",
     "tests/frontend/type-contracts.ts"
   ]
 }

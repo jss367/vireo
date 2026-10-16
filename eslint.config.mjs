@@ -8,6 +8,13 @@ const checkedControllers = [
   'vireo/static/vireo-dialog.js',
   'vireo/static/vireo-panel-loader.js',
   'vireo/static/browse/panel-loaders.js',
+  // Small shared classic scripts: each names the page globals it exports in
+  // an `exported` directive, and the navbar globals it calls are declared
+  // for it below.
+  'vireo/static/import-recovery.js',
+  'vireo/static/pipeline-messages.js',
+  'vireo/static/map-focus.js',
+  'vireo/static/vireo-export-job.js',
 ];
 
 export default [
@@ -45,6 +52,15 @@ export default [
         renderSelectionKeywordSuggestions: 'readonly',
         renderSelectionPredictions: 'readonly',
         renderDetailPredictions: 'readonly',
+      },
+    },
+  },
+  {
+    files: ['vireo/static/vireo-export-job.js'],
+    languageOptions: {
+      globals: {
+        safeEventSource: 'readonly',
+        showToast: 'readonly',
       },
     },
   },

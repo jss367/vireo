@@ -8463,7 +8463,7 @@ def test_import_in_place_closes_worker_database(
         else:
             assert job["result"]["cancelled"] is True, job
         assert worker_databases
-        assert all(db.conn is None for db in worker_databases)
+        assert all(db.closed for db in worker_databases)
     finally:
         for db in worker_databases:
             db.close()
