@@ -1511,6 +1511,25 @@ def _sweep_abandoned_transient_originals(app):
         )
 
 
+@dataclass
+class _AppWiring:
+    """The per-app objects ``create_app`` builds and hands to the blueprints."""
+
+    db_path: str
+    get_db: object
+    init_db: Database
+    location_errors: LocationErrors
+    render_cache: RenderCache
+    photo_deletion: PhotoDeletion
+    missing_originals: MissingOriginals
+    visual_scope: VisualScope
+    bulk_gps_locations: BulkGpsLocations
+    inat_token_generation: InatTokenGeneration
+    build_scan_work: object
+    folder_moves: FolderMoves
+    pipeline_chain: PipelineChain
+
+
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -1522,35 +1541,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             traffic is rejected with 401 — the token is expected to be
             supplied by ``main()`` after calling ``runtime.generate_token``.
     """
-    app = Flask(
-        __name__, template_folder=os.path.join(os.path.dirname(__file__), "templates")
-    )
-    app.config["DB_PATH"] = db_path
-    app.config["COMPUTATION_CACHE_DIR"] = os.path.expanduser(
-        "~/.vireo/computation-cache"
-    )
-    app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
-        "~/.vireo/thumbnails"
-    )
-    app.config["API_TOKEN"] = api_token
-    app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1", "::1"]
-    app.config["BROWSER_SESSION_COOKIE"] = "vireo_session"
-    app.config["BROWSER_SESSION_TOKEN"] = secrets.token_urlsafe(32)
-    app.config["BROWSER_AUTH_ENABLED"] = (
-        os.environ.get("VIREO_DISABLE_BROWSER_AUTH") != "1"
-    )
-    app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] = (
-        os.environ.get("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "1") != "0"
-    )
-    app.config["CARD_CLEANUP_DIR"] = os.path.join(
-        os.path.dirname(os.path.abspath(db_path)), "card_cleanup"
-    )
-    # Built here rather than on first request: a check-then-set in the request
-    # path lets two concurrent first requests each build their own store, and a
-    # token handed out by whichever store loses the race is never found again.
-    # The endpoint would then silently re-derive the whole comparison — the
-    # multi-second cost this store exists to avoid.
-    app.config["ID_CONFLICTS_SNAPSHOTS"] = id_conflicts.SnapshotStore()
+    app = _new_configured_app(db_path, thumb_cache_dir, api_token)
 
     # Schema creation and migrations are startup work, never request work.
     # `:memory:` is the development exception because each SQLite connection
@@ -1589,11 +1580,89 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         render_edit_preview_job, threads=app.config.get('EDIT_PREVIEW_THREADS', 2),
     )
 
-    # Batch delete and the post-delete cache sweep (services.photo_deletion).
-    # The filesystem helpers are wrapped in lambdas so they are looked up on
-    # this module at call time — tests monkeypatch ``app._trash_paths`` /
-    # ``app._chunked`` and must keep reaching the delete path.
-    photo_deletion = PhotoDeletion(
+    photo_deletion = _build_photo_deletion(app)
+
+    # Startup catalog, its repairs, the job runner and the background passes.
+    # Missing Originals is built here, before the shared services below:
+    # FolderMoves, build_scan_work and PipelineChain capture
+    # ``missing_originals.invalidate`` at construction.
+    init_db, missing_originals = _start_app_runtime(app, db_path)
+
+    wiring = _build_shared_services(
+        app,
+        db_path=db_path,
+        get_db=_get_db,
+        init_db=init_db,
+        location_errors=location_errors,
+        render_cache=render_cache,
+        photo_deletion=photo_deletion,
+        missing_originals=missing_originals,
+    )
+
+    # -- Blueprints --
+    # Per-app service methods are passed as bound methods at registration;
+    # pure helpers are imported by the blueprint modules themselves. The
+    # registration order below is the order the blueprints are added to the
+    # app, and it ends with the photos blueprint, which the /api/v1 alias
+    # loop needs registered.
+    serve_original_photo, serve_photo_preview = _register_core_blueprints(
+        app, wiring,
+    )
+    _register_library_blueprints(app, wiring)
+    _register_browse_blueprints(app, wiring)
+    _register_file_blueprints(app, wiring)
+    _register_job_blueprints(app, wiring)
+    _register_photo_blueprints(
+        app, wiring, serve_original_photo, serve_photo_preview,
+    )
+
+    _register_v1_aliases(app, _reservation_exempt_endpoints)
+
+    return app
+
+
+def _new_configured_app(db_path, thumb_cache_dir, api_token):
+    """The bare Flask app with every ``app.config`` value create_app sets."""
+    app = Flask(
+        __name__, template_folder=os.path.join(os.path.dirname(__file__), "templates")
+    )
+    app.config["DB_PATH"] = db_path
+    app.config["COMPUTATION_CACHE_DIR"] = os.path.expanduser(
+        "~/.vireo/computation-cache"
+    )
+    app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
+        "~/.vireo/thumbnails"
+    )
+    app.config["API_TOKEN"] = api_token
+    app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1", "::1"]
+    app.config["BROWSER_SESSION_COOKIE"] = "vireo_session"
+    app.config["BROWSER_SESSION_TOKEN"] = secrets.token_urlsafe(32)
+    app.config["BROWSER_AUTH_ENABLED"] = (
+        os.environ.get("VIREO_DISABLE_BROWSER_AUTH") != "1"
+    )
+    app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] = (
+        os.environ.get("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "1") != "0"
+    )
+    app.config["CARD_CLEANUP_DIR"] = os.path.join(
+        os.path.dirname(os.path.abspath(db_path)), "card_cleanup"
+    )
+    # Built here rather than on first request: a check-then-set in the request
+    # path lets two concurrent first requests each build their own store, and a
+    # token handed out by whichever store loses the race is never found again.
+    # The endpoint would then silently re-derive the whole comparison — the
+    # multi-second cost this store exists to avoid.
+    app.config["ID_CONFLICTS_SNAPSHOTS"] = id_conflicts.SnapshotStore()
+    return app
+
+
+def _build_photo_deletion(app):
+    """Batch delete and the post-delete cache sweep (services.photo_deletion).
+
+    The filesystem helpers are wrapped in lambdas so they are looked up on
+    this module at call time — tests monkeypatch ``app._trash_paths`` /
+    ``app._chunked`` and must keep reaching the delete path.
+    """
+    return PhotoDeletion(
         app.config,
         chunked=lambda *args, **kwargs: _chunked(*args, **kwargs),
         trash_paths=lambda *args, **kwargs: _trash_paths(*args, **kwargs),
@@ -1605,6 +1674,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ),
     )
 
+
+def _start_app_runtime(app, db_path):
+    """Open the startup catalog, run its repairs, and start the job runner.
+
+    Returns ``(init_db, missing_originals)``. Also sets the ``app._*``
+    runtime attributes (job runner, log broadcaster, sync lock, the Missing
+    Originals state, the backfill kickoffs) and starts the startup
+    background threads and timers unless
+    ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS`` is set.
+    """
     # Load user config (e.g. HF token) on startup
     import config as cfg
 
@@ -1636,6 +1715,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         threading.Thread(target=startup.mark_species, daemon=True).start()
 
+    missing_originals = _start_missing_originals(app, db_path)
+
+    app._job_runner = JobRunner(db=init_db)
+
+    # XMP sidecars are read-modify-written files; serialize sync jobs so
+    # repeated clicks cannot race while touching the same sidecar.
+    app._sync_job_lock = threading.Lock()
+    app._log_broadcaster = LogBroadcaster(buffer_size=500)
+    app._log_broadcaster.install()
+
+    app._cleanup_app_resources = startup.cleanup_app_resources
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        startup.schedule_retained_cache_maintenance()
+
+    # Live progress of the most recent new-images walk, keyed by
+    # (db_path, workspace_id). Written by the walk's progress callback and
+    # read by the GET/POST endpoints so a ``pending`` response can say
+    # "38,000 files checked, 2,100 new so far" instead of a bare spinner —
+    # the transparency the banner-click path needs on multi-minute walks
+    # over large network volumes. Values are per-spawn dicts; a new walk
+    # replaces the key wholesale, so readers never see torn state.
+    app._new_images_walk_progress = {}
+
+    # Working copies are generated by imports, scans, and on-demand reads.
+    # Do not warm the library-wide cache at startup: it consumes disk and
+    # CPU for photos the user has not requested.
+
+    _schedule_startup_backfills(app, startup)
+
+    return init_db, missing_originals
+
+
+def _start_missing_originals(app, db_path):
+    """Build the Missing Originals service and start its folder-health loop."""
+    import threading
+
     # Missing Originals scan cache and the folder-health loop. The app
     # attributes below are the service's own lock and dicts (not copies), so
     # code and tests that reach ``app._missing_originals_*`` see live state.
@@ -1664,31 +1779,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # since fired.
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         threading.Thread(target=missing_originals.folder_health_loop, daemon=True).start()
+    return missing_originals
 
-    app._job_runner = JobRunner(db=init_db)
 
-    # XMP sidecars are read-modify-written files; serialize sync jobs so
-    # repeated clicks cannot race while touching the same sidecar.
-    app._sync_job_lock = threading.Lock()
-    app._log_broadcaster = LogBroadcaster(buffer_size=500)
-    app._log_broadcaster.install()
-
-    app._cleanup_app_resources = startup.cleanup_app_resources
-    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
-        startup.schedule_retained_cache_maintenance()
-
-    # Live progress of the most recent new-images walk, keyed by
-    # (db_path, workspace_id). Written by the walk's progress callback and
-    # read by the GET/POST endpoints so a ``pending`` response can say
-    # "38,000 files checked, 2,100 new so far" instead of a bare spinner —
-    # the transparency the banner-click path needs on multi-minute walks
-    # over large network volumes. Values are per-spawn dicts; a new walk
-    # replaces the key wholesale, so readers never see torn state.
-    app._new_images_walk_progress = {}
-
-    # Working copies are generated by imports, scans, and on-demand reads.
-    # Do not warm the library-wide cache at startup: it consumes disk and
-    # CPU for photos the user has not requested.
+def _schedule_startup_backfills(app, startup):
+    """Expose the backfill kickoffs on ``app`` and arm their startup timers."""
+    import threading
 
     # thumb_path self-healing backfill: aligns photos.thumb_path with the
     # thumbnails on disk (see StartupTasks.kickoff_thumb_path_backfill).
@@ -1721,8 +1817,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _exif_search_timer.daemon = True
         _exif_search_timer.start()
 
-    # -- Per-app services shared by several blueprints --
 
+def _build_shared_services(
+    app, *, db_path, get_db, init_db, location_errors, render_cache,
+    photo_deletion, missing_originals,
+):
+    """Per-app services shared by several blueprints, gathered with the rest."""
     # Resolves visual-search clauses; owns the per-app query-text
     # embedding cache, so every route shares one instance.
     visual_scope = VisualScope()
@@ -1748,7 +1848,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     )
     folder_moves = FolderMoves(
         get_runner=lambda: app._job_runner,
-        get_db=_get_db,
+        get_db=get_db,
         db_path=db_path,
         config=app.config,
         invalidate_missing_originals=missing_originals.invalidate,
@@ -1764,10 +1864,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         enqueue_move_folder_job=folder_moves.enqueue_job,
     )
 
-    # -- Blueprints --
-    # Per-app service methods are passed as bound methods at registration;
-    # pure helpers are imported by the blueprint modules themselves.
+    return _AppWiring(
+        db_path=db_path,
+        get_db=get_db,
+        init_db=init_db,
+        location_errors=location_errors,
+        render_cache=render_cache,
+        photo_deletion=photo_deletion,
+        missing_originals=missing_originals,
+        visual_scope=visual_scope,
+        bulk_gps_locations=bulk_gps_locations,
+        inat_token_generation=inat_token_generation,
+        build_scan_work=build_scan_work,
+        folder_moves=folder_moves,
+        pipeline_chain=pipeline_chain,
+    )
 
+
+def _register_core_blueprints(app, w):
+    """Pages, highlights, Work Locally, jobs and media, in that order.
+
+    Returns the registered ``/original`` and ``/preview`` views for the
+    prepare-full-resolution job.
+    """
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
     app.register_blueprint(create_pages_blueprint(_get_db))
     app.register_blueprint(create_highlights_blueprint(_get_db, json_error))
     app.register_blueprint(
@@ -1807,8 +1927,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             json_error,
             db_path,
             app.config,
-            invalid_preview_cache_paths=render_cache.invalid_preview_cache_paths,
-            clear_preview_cache_invalid=render_cache.clear_preview_cache_invalid,
+            invalid_preview_cache_paths=w.render_cache.invalid_preview_cache_paths,
+            clear_preview_cache_invalid=w.render_cache.clear_preview_cache_invalid,
             render_edit_preview=app._preview_workers.render,
             cancel_edit_preview=app._preview_workers.cancel,
         )
@@ -1818,7 +1938,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # lightbox's.
     serve_original_photo = app.view_functions["media.serve_original_photo"]
     serve_photo_preview = app.view_functions["media.serve_photo_preview"]
+    return serve_original_photo, serve_photo_preview
 
+
+def _register_library_blueprints(app, w):
+    """Labels and review through settings, iNaturalist and folders, in order."""
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
+    photo_deletion = w.photo_deletion
     app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))
     app.register_blueprint(create_photo_review_blueprint(_get_db, json_error))
     app.register_blueprint(create_life_list_blueprint(_get_db, json_error))
@@ -1842,7 +1968,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db,
             json_error,
             app.config,
-            advance_inat_token_generation=inat_token_generation.advance,
+            advance_inat_token_generation=w.inat_token_generation.advance,
         )
     )
     app.register_blueprint(
@@ -1852,7 +1978,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            token_generation=inat_token_generation,
+            token_generation=w.inat_token_generation,
         )
     )
     app.register_blueprint(
@@ -1875,13 +2001,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             json_error,
             lambda: app._job_runner,
             db_path,
-            build_scan_work=build_scan_work,
+            build_scan_work=w.build_scan_work,
             cleanup_cached_files_for_deleted_photos=(
                 photo_deletion.cleanup_cached_files_for_deleted_photos
             ),
             invalidate_missing_originals=missing_originals.invalidate,
         )
     )
+
+
+def _register_browse_blueprints(app, w):
+    """Capture time and system through collections and dashboard, in order."""
+    _get_db, db_path = w.get_db, w.db_path
     app.register_blueprint(create_capture_time_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_remote_setup_blueprint(_get_db, json_error, app.config)
@@ -1900,22 +2031,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     )
     app.register_blueprint(
         create_misses_blueprint(
-            _get_db, json_error, resolve_visual=visual_scope.resolve,
+            _get_db, json_error, resolve_visual=w.visual_scope.resolve,
         )
     )
     app.register_blueprint(
-        create_browse_blueprint(_get_db, json_error, visual_scope=visual_scope)
+        create_browse_blueprint(_get_db, json_error, visual_scope=w.visual_scope)
     )
     app.register_blueprint(
         create_predictions_blueprint(
-            _get_db, json_error, app.config, visual_scope=visual_scope,
+            _get_db, json_error, app.config, visual_scope=w.visual_scope,
         )
     )
     app.register_blueprint(create_encounters_blueprint(_get_db, json_error, db_path))
-    # Registered before the /api/v1 alias loop below, which aliases two of
+    # Registered before the /api/v1 alias loop, which aliases two of
     # these endpoints by their ``collections.``-qualified names.
     app.register_blueprint(create_collections_blueprint(_get_db, json_error))
     app.register_blueprint(create_dashboard_blueprint(_get_db, json_error))
+
+
+def _register_file_blueprints(app, w):
+    """Sync, moves, duplicates and card cleanup, in that order."""
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
+    folder_moves = w.folder_moves
     app.register_blueprint(
         create_sync_blueprint(
             _get_db,
@@ -1939,7 +2076,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             network_volume_roots=lambda: _network_volume_roots(),
             path_on_network_volume=_path_on_network_volume,
             cleanup_cached_files_for_deleted_photos=(
-                photo_deletion.cleanup_cached_files_for_deleted_photos
+                w.photo_deletion.cleanup_cached_files_for_deleted_photos
             ),
             invalidate_missing_originals=missing_originals.invalidate,
         )
@@ -1949,13 +2086,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db, json_error, lambda: app._job_runner, db_path, app.config,
         )
     )
+
+
+def _register_job_blueprints(app, w):
+    """Models and caches through imports, keywords, locations and batch."""
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
     app.register_blueprint(
         create_models_blueprint(
             _get_db,
             json_error,
             lambda: app._job_runner,
             db_path,
-            count_keywords=init_db.count_keywords,
+            count_keywords=w.init_db.count_keywords,
         )
     )
     app.register_blueprint(
@@ -1968,7 +2110,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            resolve_visual=visual_scope.resolve,
+            resolve_visual=w.visual_scope.resolve,
         )
     )
     app.register_blueprint(
@@ -1989,10 +2131,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db_path,
             app.config,
             invalidate_missing_originals=missing_originals.invalidate,
-            enqueue_process_job=pipeline_chain.enqueue_process_job,
-            chain_after_move=pipeline_chain.chain_after_move,
-            bulk_gps_location_payload=bulk_gps_locations.payload,
-            guard_move_folder=folder_moves.guard_error,
+            enqueue_process_job=w.pipeline_chain.enqueue_process_job,
+            chain_after_move=w.pipeline_chain.chain_after_move,
+            bulk_gps_location_payload=w.bulk_gps_locations.payload,
+            guard_move_folder=w.folder_moves.guard_error,
             sync_job_lock=app._sync_job_lock,
         )
     )
@@ -2001,22 +2143,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         create_locations_blueprint(
             _get_db,
             json_error,
-            location_errors=location_errors,
-            normalize_photo_id_list=bulk_gps_locations.normalize_photo_id_list,
-            bulk_gps_location_source_ids=bulk_gps_locations.source_ids,
+            location_errors=w.location_errors,
+            normalize_photo_id_list=w.bulk_gps_locations.normalize_photo_id_list,
+            bulk_gps_location_source_ids=w.bulk_gps_locations.source_ids,
         )
     )
     app.register_blueprint(
         create_batch_blueprint(
             _get_db,
             json_error,
-            location_errors=location_errors,
-            bulk_gps_location_payload=bulk_gps_locations.payload,
-            run_batch_delete=photo_deletion.run_batch_delete,
+            location_errors=w.location_errors,
+            bulk_gps_location_payload=w.bulk_gps_locations.payload,
+            run_batch_delete=w.photo_deletion.run_batch_delete,
             invalidate_missing_originals=missing_originals.invalidate,
         )
     )
-    # Registered before the /api/v1 alias loop below, which aliases
+
+
+def _register_photo_blueprints(app, w, serve_original_photo, serve_photo_preview):
+    """The photo data API, edit recipes, history and the job launchers."""
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
+    render_cache, folder_moves = w.render_cache, w.folder_moves
+    # Registered before the /api/v1 alias loop, which aliases
     # ``photos.api_photos`` and ``photos.api_photo_detail``.
     app.register_blueprint(
         create_photos_blueprint(
@@ -2025,11 +2173,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            visual_scope=visual_scope,
+            visual_scope=w.visual_scope,
             missing_originals_payload=missing_originals.payload,
             start_missing_originals_scan=missing_originals.start_scan,
             invalidate_missing_originals=missing_originals.invalidate,
-            run_batch_delete=photo_deletion.run_batch_delete,
+            run_batch_delete=w.photo_deletion.run_batch_delete,
         )
     )
     app.register_blueprint(
@@ -2050,7 +2198,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     )
     app.register_blueprint(
         create_photo_location_keywords_blueprint(
-            _get_db, json_error, location_errors=location_errors,
+            _get_db, json_error, location_errors=w.location_errors,
         )
     )
     app.register_blueprint(
@@ -2061,8 +2209,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db_path,
             app.config,
             invalidate_missing_originals=missing_originals.invalidate,
-            run_batch_delete=photo_deletion.run_batch_delete,
-            build_scan_work=build_scan_work,
+            run_batch_delete=w.photo_deletion.run_batch_delete,
+            build_scan_work=w.build_scan_work,
             pending_local_workspace_transition=(
                 folder_moves.pending_local_workspace_transition
             ),
@@ -2080,22 +2228,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
     )
 
-    # --- /api/v1/* aliases over the stable subset of /api/* ---
-    # These are the endpoints advertised to external callers in docs/headless-api.md.
-    # Keep this list tight — expanding it locks the surface.
-    _V1_ALIASES = [
-        # (v1 path, existing endpoint name, methods)
-        ("/api/v1/photos", "photos.api_photos", ["GET"]),
-        ("/api/v1/photos/<int:photo_id>", "photos.api_photo_detail", ["GET"]),
-        ("/api/v1/collections", "collections.api_collections", ["GET"]),
-        ("/api/v1/collections/<int:collection_id>/photos",
-         "collections.api_collection_photos", ["GET"]),
-        ("/api/v1/workspaces", "workspaces.api_get_workspaces", ["GET"]),
-        ("/api/v1/workspaces/<int:ws_id>/activate",
-         "workspaces.api_activate_workspace", ["POST"]),
-        ("/api/v1/keywords", "keywords.api_keywords", ["GET"]),
-    ]
 
+# --- /api/v1/* aliases over the stable subset of /api/* ---
+# These are the endpoints advertised to external callers in docs/headless-api.md.
+# Keep this list tight — expanding it locks the surface.
+_V1_ALIASES = [
+    # (v1 path, existing endpoint name, methods)
+    ("/api/v1/photos", "photos.api_photos", ["GET"]),
+    ("/api/v1/photos/<int:photo_id>", "photos.api_photo_detail", ["GET"]),
+    ("/api/v1/collections", "collections.api_collections", ["GET"]),
+    ("/api/v1/collections/<int:collection_id>/photos",
+     "collections.api_collection_photos", ["GET"]),
+    ("/api/v1/workspaces", "workspaces.api_get_workspaces", ["GET"]),
+    ("/api/v1/workspaces/<int:ws_id>/activate",
+     "workspaces.api_activate_workspace", ["POST"]),
+    ("/api/v1/keywords", "keywords.api_keywords", ["GET"]),
+]
+
+
+def _register_v1_aliases(app, reservation_exempt_endpoints):
+    """Add the ``/api/v1`` aliases; runs after every blueprint is registered.
+
+    Adds ``v1_<view>`` to ``reservation_exempt_endpoints`` (the set
+    ``register_app_hooks`` holds) for each alias of an exempt endpoint.
+    """
     for v1_path, endpoint_name, methods in _V1_ALIASES:
         view = app.view_functions.get(endpoint_name)
         if view is None:
@@ -2113,10 +2269,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         # An alias is exempt from the workspace mutation reservation exactly
         # when the view it aliases is, so the two surfaces can't drift.
-        if endpoint_name in _reservation_exempt_endpoints:
-            _reservation_exempt_endpoints.add(v1_endpoint)
-
-    return app
+        if endpoint_name in reservation_exempt_endpoints:
+            reservation_exempt_endpoints.add(v1_endpoint)
 
 
 def _emit_incompatible_database_exit(e):
