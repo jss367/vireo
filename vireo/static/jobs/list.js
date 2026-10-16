@@ -40,7 +40,12 @@ function updateList() {
 
   html += '<div class="jobs-list-divider clickable' + (currentView === 'history' ? ' selected' : '') + '" data-view="history">History</div>';
   if (filtered.length === 0 && running.length === 0) {
-    html += '<div style="padding:24px;text-align:center;color:var(--text-ghost);font-size:13px;">No jobs yet</div>';
+    var emptyMessage = 'No jobs yet';
+    if (!jobsPollState.active.loaded || !jobsPollState.history.loaded) {
+      emptyMessage = jobsPollState.active.error || jobsPollState.history.error
+        ? 'Some job lists could not be loaded.' : 'Loading jobs…';
+    }
+    html += '<div style="padding:24px;text-align:center;color:var(--text-ghost);font-size:13px;">' + emptyMessage + '</div>';
   }
   filtered.forEach(function(j) { html += renderListItem(j, 'history'); });
   container.innerHTML = html;

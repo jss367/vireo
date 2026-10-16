@@ -6,6 +6,13 @@ var historyJobs = [];
 var selectedJobId = null;
 var selectedSource = null;
 var pollTimer = null;
+// Active jobs and history refresh independently. A new explicit refresh retires
+// its lane's older request; scheduled polls wait for that lane to settle.
+var jobsPollState = {
+  active: {generation: 0, pending: false, loaded: false, error: false, controller: null},
+  history: {generation: 0, pending: false, loaded: false, error: false, controller: null},
+};
+var historyRefreshSelectionId = null;
 var sseSource = null;
 var leafBuffers = {};
 var leafBufferSources = {};
