@@ -9,7 +9,6 @@ import hashlib
 import os
 
 import pytest
-
 from page_scripts import page_with_scripts
 
 ONNX_DIR = "models--jss367--vireo-onnx-models"
@@ -41,7 +40,7 @@ def seeded(app_and_db, tmp_path, monkeypatch):
     installed = tmp_path / "vireo-models" / "dinov2-vit-b14"
     installed.mkdir(parents=True)
     (installed / "model.onnx").write_bytes(b"installed")
-    assert models.DEFAULT_MODELS_DIR == str(tmp_path / "vireo-models")
+    assert str(tmp_path / "vireo-models") == models.DEFAULT_MODELS_DIR
     return app, {
         "orphan": _add(hub, "bioclip-2.5-vith14/image_encoder.onnx.data", b"b" * 5000),
         "live": _add(hub, "dinov2-vit-b14/model.onnx", b"d" * 300),

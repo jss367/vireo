@@ -75,10 +75,7 @@ def _onnx_repo_dir_name():
 def _has_files(path):
     if not path or not os.path.isdir(path):
         return False
-    for _root, _dirs, files in os.walk(path):
-        if files:
-            return True
-    return False
+    return any(files for _root, _dirs, files in os.walk(path))
 
 
 def _install_candidates(models_dir):
