@@ -139,7 +139,6 @@
   "web/browse.py:create_browse_blueprint.api_selection_prediction_suggestions": 222,
   "web/collections.py:create_collections_blueprint.api_collection_photos": 117,
   "web/collections.py:create_collections_blueprint.api_collections": 103,
-  "web/duplicates.py:create_duplicates_blueprint.api_duplicates_delete_loser_files": 192,
   "web/export.py:create_export_blueprint.api_job_export": 131,
   "web/inat.py:create_inat_blueprint._inat_upload_photo_path": 208,
   "web/inat.py:create_inat_blueprint.api_inat_export": 190,

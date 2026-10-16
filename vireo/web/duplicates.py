@@ -122,42 +122,14 @@ def create_duplicates_blueprint(
             "skipped": result["skipped"],
         })
 
-    @blueprint.route("/api/duplicates/delete-loser-files", methods=["POST"])
-    def api_duplicates_delete_loser_files():
-        """Move duplicate loser files to OS Trash and remove their DB rows.
-
-        Body: {"photo_ids": [int, ...]}. For each id we require:
-          - the row's flag is 'rejected' (already auto-resolved or
-            user-applied), AND
-          - at least one OTHER photo with the same ``file_hash`` is NOT
-            rejected (the kept "winner" anchor that makes this row a
-            duplicate-loser rather than an unrelated rejection).
-
-        Validating both conditions prevents this endpoint from being misused
-        to trash files for arbitrary rejected photos (e.g. a photo the user
-        manually rejected for non-duplicate reasons).
-
-        After a successful trash we also delete the loser's photo row (and
-        its cached thumbnail / preview / working-copy files). Without that,
-        ``/api/duplicates/disk-cleanup-summary`` would keep reporting the
-        same count forever — the summary predicate can't cheaply tell that
-        the on-disk file has been removed (stat'ing every loser path on a
-        slow network volume would make the banner poll expensive). Deleting
-        the row makes the count correct without a stat. The keywords/rating
-        were merged onto the winner during ``apply_duplicate_resolution``,
-        so nothing of value is lost. If the user later restores the file
-        from Trash and re-scans, the auto-resolve hook re-creates the row
-        and the cycle is idempotent.
-
-        Returns ``{trashed: N, skipped: [{id, reason}, ...],
-        failed: [{id, path, error}, ...]}``.
-        """
+    def _loser_photo_ids_from_request():
+        """The validated ``photo_ids`` list, or ``(None, error_response)``."""
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
-            return json_error("photo_ids required")
+            return None, json_error("photo_ids required")
         photo_ids = body.get("photo_ids")
         if not isinstance(photo_ids, list) or not photo_ids:
-            return json_error("photo_ids required")
+            return None, json_error("photo_ids required")
         for pid in photo_ids:
             # ``bool`` is a subclass of ``int`` in Python, so a bare
             # ``isinstance(pid, int)`` would accept ``True``/``False`` as
@@ -166,9 +138,17 @@ def create_duplicates_blueprint(
             # trick the endpoint into trashing whichever rejected row
             # happens to have id 1.
             if isinstance(pid, bool) or not isinstance(pid, int):
-                return json_error("photo_ids must be a list of integers")
+                return None, json_error("photo_ids must be a list of integers")
+        return photo_ids, None
 
-        db = get_db()
+    def _classify_loser_candidates(db, photo_ids):
+        """Split the request into trashable losers and skipped ids.
+
+        Returns ``(trash_candidates, trashed_pids, skipped, network_roots)``:
+        ``(pid, filepath)`` pairs to send to Trash, ids whose local file is
+        already gone (their rows still drop), skip entries, and the mount
+        table snapshot the Trash call must reuse.
+        """
         # The lookup is chunked — bulk cleanup actions may hand us thousands
         # of ids at once, and SQLite builds with the legacy 999-parameter cap
         # would otherwise fail before any cleanup runs.
@@ -187,7 +167,6 @@ def create_duplicates_blueprint(
         trash_candidates = []
         trashed_pids = []
         skipped = []
-        failed = []
         # Classify paths via the bounded kernel mount table BEFORE any
         # per-path stat. Calling ``os.path.isfile`` on an unhealthy SMB path
         # can block indefinitely inside this endpoint, meaning the new
@@ -236,6 +215,82 @@ def create_duplicates_blueprint(
                 skipped.append({"id": pid, "reason": "no verified distinct duplicate winner exists"})
                 continue
             trash_candidates.append((pid, filepath))
+        return trash_candidates, trashed_pids, skipped, network_roots
+
+    def _record_trash_outcomes(
+        trash_candidates, successful_paths, already_missing_paths,
+        trash_failures, trashed_pids, skipped, failed,
+    ):
+        """Sort each Trash candidate into ``trashed_pids`` or ``failed``."""
+        failure_by_path = {
+            failure["path"]: failure for failure in trash_failures
+        }
+        for pid, filepath in trash_candidates:
+            if filepath in successful_paths:
+                if filepath in already_missing_paths:
+                    skipped.append({
+                        "id": pid, "reason": "file already missing",
+                    })
+                trashed_pids.append(pid)
+                continue
+            failure = failure_by_path.get(filepath) or {}
+            failed.append({
+                "id": pid,
+                "path": filepath,
+                "error": failure.get("error", "Trash operation failed"),
+            })
+
+    def _drop_trashed_loser_rows(db, trashed_pids):
+        """Delete the trashed losers' rows and cached derivatives, chunked."""
+        all_files = []
+        deleted_rows = 0
+        for chunk in chunked(trashed_pids):
+            result = db.delete_photos(chunk)
+            all_files.extend(result.get("files", []))
+            deleted_rows += result.get("deleted", 0)
+        cleanup_cached_files_for_deleted_photos(all_files)
+        if deleted_rows:
+            invalidate_missing_originals()
+
+    @blueprint.route("/api/duplicates/delete-loser-files", methods=["POST"])
+    def api_duplicates_delete_loser_files():
+        """Move duplicate loser files to OS Trash and remove their DB rows.
+
+        Body: {"photo_ids": [int, ...]}. For each id we require:
+          - the row's flag is 'rejected' (already auto-resolved or
+            user-applied), AND
+          - at least one OTHER photo with the same ``file_hash`` is NOT
+            rejected (the kept "winner" anchor that makes this row a
+            duplicate-loser rather than an unrelated rejection).
+
+        Validating both conditions prevents this endpoint from being misused
+        to trash files for arbitrary rejected photos (e.g. a photo the user
+        manually rejected for non-duplicate reasons).
+
+        After a successful trash we also delete the loser's photo row (and
+        its cached thumbnail / preview / working-copy files). Without that,
+        ``/api/duplicates/disk-cleanup-summary`` would keep reporting the
+        same count forever — the summary predicate can't cheaply tell that
+        the on-disk file has been removed (stat'ing every loser path on a
+        slow network volume would make the banner poll expensive). Deleting
+        the row makes the count correct without a stat. The keywords/rating
+        were merged onto the winner during ``apply_duplicate_resolution``,
+        so nothing of value is lost. If the user later restores the file
+        from Trash and re-scans, the auto-resolve hook re-creates the row
+        and the cycle is idempotent.
+
+        Returns ``{trashed: N, skipped: [{id, reason}, ...],
+        failed: [{id, path, error}, ...]}``.
+        """
+        photo_ids, err = _loser_photo_ids_from_request()
+        if err is not None:
+            return err
+
+        db = get_db()
+        trash_candidates, trashed_pids, skipped, network_roots = (
+            _classify_loser_candidates(db, photo_ids)
+        )
+        failed = []
 
         # Track paths whose end state already held (local preflight found
         # them absent, or Finder reported them missing on a still-mounted
@@ -258,23 +313,10 @@ def create_duplicates_blueprint(
             already_missing_out=already_missing_paths,
             network_roots=network_roots,
         )
-        failure_by_path = {
-            failure["path"]: failure for failure in trash_failures
-        }
-        for pid, filepath in trash_candidates:
-            if filepath in successful_paths:
-                if filepath in already_missing_paths:
-                    skipped.append({
-                        "id": pid, "reason": "file already missing",
-                    })
-                trashed_pids.append(pid)
-                continue
-            failure = failure_by_path.get(filepath) or {}
-            failed.append({
-                "id": pid,
-                "path": filepath,
-                "error": failure.get("error", "Trash operation failed"),
-            })
+        _record_trash_outcomes(
+            trash_candidates, successful_paths, already_missing_paths,
+            trash_failures, trashed_pids, skipped, failed,
+        )
 
         # Drop DB rows + cached derivatives for every photo whose file is now
         # gone. Chunked so ``delete_photos``' five internal IN-clause queries
@@ -283,15 +325,7 @@ def create_duplicates_blueprint(
         # builds AFTER files were already trashed, leaving the DB inconsistent.
         if trashed_pids:
             try:
-                all_files = []
-                deleted_rows = 0
-                for chunk in chunked(trashed_pids):
-                    result = db.delete_photos(chunk)
-                    all_files.extend(result.get("files", []))
-                    deleted_rows += result.get("deleted", 0)
-                cleanup_cached_files_for_deleted_photos(all_files)
-                if deleted_rows:
-                    invalidate_missing_originals()
+                _drop_trashed_loser_rows(db, trashed_pids)
             except Exception:
                 # Files are already in Trash; if the row delete fails we
                 # surface a 500 so the caller knows reconciliation is
