@@ -1159,7 +1159,6 @@ def _migrate_legacy_preview_cache(app):
     try:
         migrated = 0
         orphaned = 0
-        adopted = 0
         if unsized_files and target_size == 0:
             log.info(
                 "Leaving %d legacy preview files (preview_max_size=0 — can't assign tier)",
@@ -1168,67 +1167,19 @@ def _migrate_legacy_preview_cache(app):
 
         # Pass 1: rename unsized {id}.jpg → {id}_<target>.jpg + insert.
         if target_size:
-            for fname in unsized_files:
-                m = unsized_pat.match(fname)
-                photo_id = int(m.group(1))
-                src = os.path.join(preview_dir, fname)
-                dst = os.path.join(preview_dir, f"{photo_id}_{target_size}.jpg")
-                # Skip orphans: if the photo was deleted, inserting into
-                # preview_cache would raise a FK error and rolling back the
-                # already-performed os.rename is ugly. Unlink the orphan so
-                # disk doesn't keep pointing at vanished photos.
-                photo_row = db.conn.execute(
-                    "SELECT 1 FROM photos WHERE id=?", (photo_id,)
-                ).fetchone()
-                if photo_row is None:
-                    try:
-                        os.remove(src)
-                        orphaned += 1
-                    except OSError:
-                        pass
-                    continue
-                if os.path.exists(dst):
-                    try:
-                        os.remove(src)
-                    except OSError:
-                        pass
-                    continue
-                try:
-                    os.rename(src, dst)
-                    st = os.stat(dst)
-                    db.caches.preview_insert(photo_id, target_size, st.st_size)
-                    migrated += 1
-                except OSError as e:
-                    log.warning("Failed to migrate legacy preview %s: %s", src, e)
+            migrated, orphaned = _adopt_unsized_legacy_previews(
+                db, preview_dir, unsized_files, unsized_pat, target_size,
+            )
 
         # Pass 2: adopt pre-existing sized {id}_{size}.jpg files that
         # aren't tracked yet. These are produced by older /preview calls
         # that ran before preview_cache existed; without this pass they
         # stay invisible to accounting/eviction even though they already
         # match the new naming scheme.
-        for fname in sized_files:
-            m = sized_pat.match(fname)
-            photo_id = int(m.group(1))
-            size = int(m.group(2))
-            path = os.path.join(preview_dir, fname)
-            if db.caches.preview_get(photo_id, size):
-                continue
-            photo_row = db.conn.execute(
-                "SELECT 1 FROM photos WHERE id=?", (photo_id,)
-            ).fetchone()
-            if photo_row is None:
-                try:
-                    os.remove(path)
-                    orphaned += 1
-                except OSError:
-                    pass
-                continue
-            try:
-                st = os.stat(path)
-                db.caches.preview_insert(photo_id, size, st.st_size)
-                adopted += 1
-            except OSError as e:
-                log.warning("Failed to adopt sized preview %s: %s", path, e)
+        adopted, sized_orphaned = _adopt_untracked_sized_previews(
+            db, preview_dir, sized_files, sized_pat,
+        )
+        orphaned += sized_orphaned
 
         if migrated:
             log.info(
@@ -1241,6 +1192,82 @@ def _migrate_legacy_preview_cache(app):
             log.info("Removed %d orphaned legacy preview files", orphaned)
     finally:
         db.close()
+
+
+def _adopt_unsized_legacy_previews(db, preview_dir, unsized_files, unsized_pat,
+                                   target_size):
+    """Rename each unsized ``{id}.jpg`` to ``{id}_<target>.jpg`` and track it.
+
+    Returns ``(migrated, orphaned)``.
+    """
+    migrated = 0
+    orphaned = 0
+    for fname in unsized_files:
+        m = unsized_pat.match(fname)
+        photo_id = int(m.group(1))
+        src = os.path.join(preview_dir, fname)
+        dst = os.path.join(preview_dir, f"{photo_id}_{target_size}.jpg")
+        # Skip orphans: if the photo was deleted, inserting into
+        # preview_cache would raise a FK error and rolling back the
+        # already-performed os.rename is ugly. Unlink the orphan so
+        # disk doesn't keep pointing at vanished photos.
+        photo_row = db.conn.execute(
+            "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+        if photo_row is None:
+            try:
+                os.remove(src)
+                orphaned += 1
+            except OSError:
+                pass
+            continue
+        if os.path.exists(dst):
+            try:
+                os.remove(src)
+            except OSError:
+                pass
+            continue
+        try:
+            os.rename(src, dst)
+            st = os.stat(dst)
+            db.caches.preview_insert(photo_id, target_size, st.st_size)
+            migrated += 1
+        except OSError as e:
+            log.warning("Failed to migrate legacy preview %s: %s", src, e)
+    return migrated, orphaned
+
+
+def _adopt_untracked_sized_previews(db, preview_dir, sized_files, sized_pat):
+    """Track each sized ``{id}_{size}.jpg`` that has no preview_cache row.
+
+    Returns ``(adopted, orphaned)``.
+    """
+    adopted = 0
+    orphaned = 0
+    for fname in sized_files:
+        m = sized_pat.match(fname)
+        photo_id = int(m.group(1))
+        size = int(m.group(2))
+        path = os.path.join(preview_dir, fname)
+        if db.caches.preview_get(photo_id, size):
+            continue
+        photo_row = db.conn.execute(
+            "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+        if photo_row is None:
+            try:
+                os.remove(path)
+                orphaned += 1
+            except OSError:
+                pass
+            continue
+        try:
+            st = os.stat(path)
+            db.caches.preview_insert(photo_id, size, st.st_size)
+            adopted += 1
+        except OSError as e:
+            log.warning("Failed to adopt sized preview %s: %s", path, e)
+    return adopted, orphaned
 
 
 def _migrate_edit_math_render_caches(app):
@@ -1292,101 +1319,17 @@ def _migrate_edit_math_render_caches(app):
         # row could still be served, and bumping the version would make the
         # next boot skip the migration and never retry. Leaving the version
         # behind makes the migration idempotent and self-retrying.
-        purge_failed = False
-
-        # Scan preview_dir once and group untracked preview files by photo id.
-        # The per-photo listdir would otherwise be O(N*M) (N edited photos x M
-        # preview files) and can spend minutes just rescanning the same
-        # directory on a large library before the server even starts.
-        edited_set = set(photo_ids)
-        untracked_previews_by_pid = {}
-        try:
-            preview_names = os.listdir(preview_dir)
-        except FileNotFoundError:
-            # Cache dir doesn't exist yet — nothing untracked to clean up.
-            preview_names = ()
-        except OSError:
-            # Permissions / locked network volume / other transient read
-            # failure: we can't see what's in there, so we don't know whether
-            # there are stale orphans to purge. Skip the scan but leave the
-            # version old so the next boot retries — matches the unlink-error
-            # contract instead of taking the app down for a disposable cache
-            # problem.
-            log.warning(
-                "Failed to list preview cache dir %s during edit-math "
-                "migration; leaving version at %s to retry next boot",
-                preview_dir, stored_version, exc_info=True,
-            )
-            preview_names = ()
-            purge_failed = True
-
-        for name in preview_names:
-            if not name.endswith(".jpg"):
-                continue
-            underscore = name.find("_")
-            if underscore <= 0:
-                continue
-            try:
-                file_pid = int(name[:underscore])
-            except ValueError:
-                continue
-            if file_pid in edited_set:
-                untracked_previews_by_pid.setdefault(file_pid, []).append(name)
+        untracked_previews_by_pid, purge_failed = _untracked_previews_by_photo(
+            preview_dir, set(photo_ids), stored_version,
+        )
         for pid in photo_ids:
-            for row in db.conn.execute(
-                "SELECT size FROM preview_cache WHERE photo_id = ?", (pid,)
-            ).fetchall():
-                size_value = row["size"]
-                path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    log.warning(
-                        "Failed to remove stale preview cache %s during "
-                        "edit-math migration", path, exc_info=True,
-                    )
-                    purge_failed = True
-                    continue
-                db.conn.execute(
-                    "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
-                    (pid, size_value),
-                )
-                invalidated_previews += 1
-            for name in untracked_previews_by_pid.get(pid, ()):
-                path = os.path.join(preview_dir, name)
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    purge_failed = True
-            thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
-            try:
-                if os.path.exists(thumb_cache):
-                    os.remove(thumb_cache)
-                    invalidated_thumbs += 1
-            except OSError:
-                log.warning(
-                    "Failed to remove stale thumbnail %s during "
-                    "edit-math migration", thumb_cache, exc_info=True,
-                )
-                purge_failed = True
-                continue
-            for source in ("raw", "jpeg"):
-                variant = os.path.join(thumb_dir, f"{pid}_{source}.jpg")
-                try:
-                    if os.path.exists(variant):
-                        os.remove(variant)
-                        invalidated_thumbs += 1
-                except OSError:
-                    log.warning(
-                        "Failed to remove paired thumbnail %s during "
-                        "edit-math migration", variant, exc_info=True,
-                    )
-                    purge_failed = True
-            db.conn.execute(
-                "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+            previews, thumbs, failed = _purge_edited_photo_renders(
+                db, pid, preview_dir, thumb_dir,
+                untracked_previews_by_pid.get(pid, ()),
             )
+            invalidated_previews += previews
+            invalidated_thumbs += thumbs
+            purge_failed = purge_failed or failed
 
         if purge_failed:
             # Commit the row deletions that did succeed, but leave the stored
@@ -1419,6 +1362,118 @@ def _migrate_edit_math_render_caches(app):
             )
     finally:
         db.close()
+
+
+def _untracked_previews_by_photo(preview_dir, edited_set, stored_version):
+    """Group the preview files of edited photos by photo id, in one listdir.
+
+    Returns ``(names_by_pid, purge_failed)``; ``purge_failed`` is True when
+    the directory could not be listed, so the migration retries next boot.
+    """
+    # Scan preview_dir once and group untracked preview files by photo id.
+    # The per-photo listdir would otherwise be O(N*M) (N edited photos x M
+    # preview files) and can spend minutes just rescanning the same
+    # directory on a large library before the server even starts.
+    purge_failed = False
+    untracked_previews_by_pid = {}
+    try:
+        preview_names = os.listdir(preview_dir)
+    except FileNotFoundError:
+        # Cache dir doesn't exist yet — nothing untracked to clean up.
+        preview_names = ()
+    except OSError:
+        # Permissions / locked network volume / other transient read
+        # failure: we can't see what's in there, so we don't know whether
+        # there are stale orphans to purge. Skip the scan but leave the
+        # version old so the next boot retries — matches the unlink-error
+        # contract instead of taking the app down for a disposable cache
+        # problem.
+        log.warning(
+            "Failed to list preview cache dir %s during edit-math "
+            "migration; leaving version at %s to retry next boot",
+            preview_dir, stored_version, exc_info=True,
+        )
+        preview_names = ()
+        purge_failed = True
+
+    for name in preview_names:
+        if not name.endswith(".jpg"):
+            continue
+        underscore = name.find("_")
+        if underscore <= 0:
+            continue
+        try:
+            file_pid = int(name[:underscore])
+        except ValueError:
+            continue
+        if file_pid in edited_set:
+            untracked_previews_by_pid.setdefault(file_pid, []).append(name)
+    return untracked_previews_by_pid, purge_failed
+
+
+def _purge_edited_photo_renders(db, pid, preview_dir, thumb_dir, untracked_names):
+    """Drop one edited photo's cached previews and thumbnails.
+
+    Returns ``(invalidated_previews, invalidated_thumbs, purge_failed)``.
+    A thumbnail that cannot be removed leaves ``photos.thumb_path`` alone.
+    """
+    invalidated_previews = 0
+    invalidated_thumbs = 0
+    purge_failed = False
+    for row in db.conn.execute(
+        "SELECT size FROM preview_cache WHERE photo_id = ?", (pid,)
+    ).fetchall():
+        size_value = row["size"]
+        path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            log.warning(
+                "Failed to remove stale preview cache %s during "
+                "edit-math migration", path, exc_info=True,
+            )
+            purge_failed = True
+            continue
+        db.conn.execute(
+            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+            (pid, size_value),
+        )
+        invalidated_previews += 1
+    for name in untracked_names:
+        path = os.path.join(preview_dir, name)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            purge_failed = True
+    thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
+    try:
+        if os.path.exists(thumb_cache):
+            os.remove(thumb_cache)
+            invalidated_thumbs += 1
+    except OSError:
+        log.warning(
+            "Failed to remove stale thumbnail %s during "
+            "edit-math migration", thumb_cache, exc_info=True,
+        )
+        return invalidated_previews, invalidated_thumbs, True
+    for source in ("raw", "jpeg"):
+        variant = os.path.join(thumb_dir, f"{pid}_{source}.jpg")
+        try:
+            if os.path.exists(variant):
+                os.remove(variant)
+                invalidated_thumbs += 1
+        except OSError:
+            log.warning(
+                "Failed to remove paired thumbnail %s during "
+                "edit-math migration", variant, exc_info=True,
+            )
+            purge_failed = True
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+    )
+    return invalidated_previews, invalidated_thumbs, purge_failed
 
 
 def _enforce_preview_cache_quota_at_startup(app):
@@ -2302,9 +2357,7 @@ def _emit_incompatible_database_exit(e):
     raise SystemExit(3) from e
 
 
-def main():
-    _setup_file_logging()
-
+def _parse_main_args():
     parser = argparse.ArgumentParser(description="Vireo Photo Browser")
     parser.add_argument(
         "--db",
@@ -2335,59 +2388,53 @@ def main():
         action="store_true",
         help="Verify the bundled/system ExifTool, print its version, and exit",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    if args.check_exiftool:
-        from metadata import exiftool_status
 
-        status = exiftool_status()
-        if status["available"]:
-            print(status["version"] or "unknown")
-            raise SystemExit(0)
-        print(status.get("error") or status.get("hint") or "ExifTool unavailable", file=sys.stderr)
-        raise SystemExit(1)
+def _check_exiftool_and_exit():
+    """``--check-exiftool``: print the ExifTool version (or why not) and exit."""
+    from metadata import exiftool_status
 
-    if args.headless:
-        args.no_browser = True
-
-    if args.load_taxonomy:
-        from db import Database
-        from taxonomy import fetch_common_names, load_taxonomy, seed_informal_groups
-        # Run the newer-schema guard before Database(args.db) executes any
-        # legacy DDL/ALTERs against a catalog stamped by a future Vireo build.
-        # create_app takes this same check through ensure_schema; keep the two
-        # entry points in sync so `--load-taxonomy` can't corrupt a newer DB.
-        try:
-            ensure_schema(args.db)
-        except IncompatibleDatabaseError as e:
-            _emit_incompatible_database_exit(e)
-        db = Database(args.db)
-        log.info("Loading taxonomy tree from iNaturalist...")
-        stats = load_taxonomy(db)
-        log.info("  Taxonomy: %d taxa loaded, %d skipped", stats['loaded'], stats['skipped'])
-        log.info("Fetching common names from iNat API (this may take a few minutes)...")
-        cn_stats = fetch_common_names(db)
-        log.info("  Common names: %d taxa updated", cn_stats['updated'])
-        log.info("Seeding informal groups...")
-        ig_stats = seed_informal_groups(db)
-        log.info("  Informal groups: %d groups created", ig_stats['groups_created'])
-        log.info("Done.")
+    status = exiftool_status()
+    if status["available"]:
+        print(status["version"] or "unknown")
         raise SystemExit(0)
+    print(status.get("error") or status.get("hint") or "ExifTool unavailable", file=sys.stderr)
+    raise SystemExit(1)
 
-    # Resolve port: --port 0 means pick a random free port
-    port = args.port
-    if port == 0:
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
 
+def _load_taxonomy_and_exit(db_path):
+    """``--load-taxonomy``: import the iNaturalist taxonomy, then exit."""
+    from db import Database
+    from taxonomy import fetch_common_names, load_taxonomy, seed_informal_groups
+    # Run the newer-schema guard before Database(args.db) executes any
+    # legacy DDL/ALTERs against a catalog stamped by a future Vireo build.
+    # create_app takes this same check through ensure_schema; keep the two
+    # entry points in sync so `--load-taxonomy` can't corrupt a newer DB.
+    try:
+        ensure_schema(db_path)
+    except IncompatibleDatabaseError as e:
+        _emit_incompatible_database_exit(e)
+    db = Database(db_path)
+    log.info("Loading taxonomy tree from iNaturalist...")
+    stats = load_taxonomy(db)
+    log.info("  Taxonomy: %d taxa loaded, %d skipped", stats['loaded'], stats['skipped'])
+    log.info("Fetching common names from iNat API (this may take a few minutes)...")
+    cn_stats = fetch_common_names(db)
+    log.info("  Common names: %d taxa updated", cn_stats['updated'])
+    log.info("Seeding informal groups...")
+    ig_stats = seed_informal_groups(db)
+    log.info("  Informal groups: %d groups created", ig_stats['groups_created'])
+    log.info("Done.")
+    raise SystemExit(0)
+
+
+def _reserve_single_instance_or_exit():
+    """Take the single-instance slot and register the cleanup that frees it."""
     from runtime import (
         acquire_single_instance,
         delete_runtime_json,
-        generate_token,
         release_single_instance,
-        write_runtime_json,
     )
 
     # Atomically reserve the single-instance slot BEFORE any heavy
@@ -2429,9 +2476,9 @@ def main():
     atexit.register(_cleanup_runtime_state)
     _signal.signal(_signal.SIGTERM, lambda *_: (_cleanup_runtime_state(), os._exit(0)))
 
-    api_token = generate_token()
-    mode = "headless" if args.headless else "gui"
 
+def _create_app_or_exit(args, api_token):
+    """``create_app`` with the structured startup-failure exits."""
     try:
         app = create_app(
             db_path=args.db, thumb_cache_dir=args.thumb_dir, api_token=api_token,
@@ -2441,7 +2488,7 @@ def main():
         # Fail fast with actionable guidance instead of letting a raw
         # OperationalError traceback escape (which the sidecar host only sees
         # as "did not become healthy within 30s"). The atexit/SIGTERM cleanup
-        # registered above releases the single-instance lock and runtime.json
+        # registered by _reserve_single_instance_or_exit releases the single-instance lock and runtime.json
         # on this exit, so a retry isn't blocked by a stale reservation.
         _emit_incompatible_database_exit(e)
     except Exception as e:
@@ -2458,8 +2505,10 @@ def main():
             "reason": str(e) or e.__class__.__name__,
         }) + "\n")
         raise SystemExit(2) from e
+    return app
 
-    # Startup banner
+
+def _log_startup_banner(args, port):
     import config as cfg
     startup_cfg = cfg.load()
     log.info("=" * 50)
@@ -2474,25 +2523,68 @@ def main():
         log.info("  HuggingFace token: configured")
     log.info("=" * 50)
 
+
+def _open_browser_when_ready(port):
+    """Open the browser once the server answers, polling for up to 5 s."""
+    import http.client
+    import threading
+    import urllib.request
+
+    def _open_browser():
+        url = f"http://localhost:{port}"
+        for _ in range(50):  # try for up to 5 seconds
+            try:
+                urllib.request.urlopen(url, timeout=0.1)
+                webbrowser.open(url)
+                return
+            except (OSError, http.client.HTTPException):
+                # Server not accepting connections yet; poll again.
+                time.sleep(0.1)
+        log.warning("Server did not answer on %s within 5s; not opening a browser", url)
+
+    threading.Thread(target=_open_browser, daemon=True).start()
+
+
+def main():
+    _setup_file_logging()
+
+    args = _parse_main_args()
+
+    if args.check_exiftool:
+        _check_exiftool_and_exit()
+
+    if args.headless:
+        args.no_browser = True
+
+    if args.load_taxonomy:
+        _load_taxonomy_and_exit(args.db)
+
+    # Resolve port: --port 0 means pick a random free port
+    port = args.port
+    if port == 0:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+    from runtime import (
+        generate_token,
+        write_runtime_json,
+    )
+
+    _reserve_single_instance_or_exit()
+
+    api_token = generate_token()
+    mode = "headless" if args.headless else "gui"
+
+    app = _create_app_or_exit(args, api_token)
+
+    # Startup banner
+    _log_startup_banner(args, port)
+
     # Open browser after server is ready, not before
     if not args.no_browser:
-        import http.client
-        import threading
-        import urllib.request
-
-        def _open_browser():
-            url = f"http://localhost:{port}"
-            for _ in range(50):  # try for up to 5 seconds
-                try:
-                    urllib.request.urlopen(url, timeout=0.1)
-                    webbrowser.open(url)
-                    return
-                except (OSError, http.client.HTTPException):
-                    # Server not accepting connections yet; poll again.
-                    time.sleep(0.1)
-            log.warning("Server did not answer on %s within 5s; not opening a browser", url)
-
-        threading.Thread(target=_open_browser, daemon=True).start()
+        _open_browser_when_ready(port)
 
     # Look up the running version with the helper /api/version uses:
     # package metadata, then pyproject.toml, then "0.0.0".
@@ -2504,7 +2596,8 @@ def main():
 
     # Finalize runtime.json, replacing the reservation marker with the full
     # payload now that the port and token are known. Cleanup handlers were
-    # registered immediately after `acquire_single_instance` above.
+    # registered immediately after `acquire_single_instance` (in
+    # _reserve_single_instance_or_exit).
     write_runtime_json(
         port=port, pid=os.getpid(), version=ver, db_path=args.db,
         token=api_token, mode=mode,

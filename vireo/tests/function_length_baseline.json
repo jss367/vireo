@@ -1,7 +1,4 @@
 {
-  "app.py:_migrate_edit_math_render_caches": 176,
-  "app.py:_migrate_legacy_preview_cache": 129,
-  "app.py:main": 215,
   "audit.py:verify_hashes": 135,
   "auto_tone.py:fit": 231,
   "capture_time.py:adjust_capture_time": 161,
