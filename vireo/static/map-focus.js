@@ -9,11 +9,22 @@
  * Classic script loaded before map.html's inline script. The pure
  * describeUnplottableFocus is unit-tested in vireo/tests/map_focus.cjs.
  */
+/* exported showUnplottableFocusNotice */
 
+/**
+ * @typedef {{id?: number, filename?: string, reason?: string,
+ *   location_keywords?: {id: number, name: string}[]}} UnplottableFocus
+ * @typedef {{label: string, href: string}} FocusAction
+ */
+
+/**
+ * @param {UnplottableFocus | null | undefined} focus
+ * @returns {{title: string, detail: string, actions: FocusAction[]}}
+ */
 function describeUnplottableFocus(focus) {
   var id = focus && focus.id;
   var name = (focus && focus.filename) || 'This photo';
-  var browse = { label: 'Open in Browse', href: '/browse?photo_id=' + encodeURIComponent(id) };
+  var browse = { label: 'Open in Browse', href: '/browse?photo_id=' + encodeURIComponent(String(id)) };
   if (!focus || focus.reason === 'not_found') {
     return {
       title: 'Photo not found',
@@ -65,9 +76,14 @@ function hideUnplottableFocusNotice() {
 /* Show the notice for ``focus``. ``onShowAll`` reloads the map without the
  * deep link; the URL drops ``photo_id`` too, so a reload stays on the full
  * map instead of bringing the notice back. */
+/**
+ * @param {UnplottableFocus | null | undefined} focus
+ * @param {() => void} onShowAll
+ */
 function showUnplottableFocusNotice(focus, onShowAll) {
   var view = describeUnplottableFocus(focus);
   var notice = document.getElementById('mapFocusNotice');
+  if (!notice) return;
   notice.textContent = '';
 
   var title = document.createElement('div');
@@ -101,5 +117,6 @@ function showUnplottableFocusNotice(focus, onShowAll) {
   notice.appendChild(detail);
   notice.appendChild(actions);
   notice.hidden = false;
-  document.getElementById('mapStatus').textContent = view.title + '.';
+  var status = document.getElementById('mapStatus');
+  if (status) status.textContent = view.title + '.';
 }

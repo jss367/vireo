@@ -45,4 +45,34 @@ function verifyFrontendContracts() {
     // @ts-expect-error Retry uses its owned snapshot, not caller-supplied ids.
     loaders.predictions.retry([3, 4]);
   }
+
+  // Navbar globals (types/navbar.d.ts) and the small shared classic scripts.
+  showToast('Exported 2 photos', 'success');
+  safeEventSource('/api/jobs/1/stream', {quietError: true, onError: () => {}});
+  // @ts-expect-error A toast message is a string.
+  showToast(42);
+  // @ts-expect-error quietError is a flag, not a message.
+  safeEventSource('/api/jobs/1/stream', {quietError: 'yes'});
+
+  VireoExportJob.outcome({status: 'completed', result: {exported: 2, errors: []}}).message;
+  // @ts-expect-error The exported count is a number.
+  VireoExportJob.outcome({status: 'completed', result: {exported: '2'}});
+  // @ts-expect-error A job id is a string.
+  VireoExportJob.watch(7);
+
+  splitPipelineMessages(['[classify] Fatal: no model'], null).errorList.length;
+  // @ts-expect-error Split messages are strings keyed by stage, not objects.
+  splitPipelineMessages([], []).errors.classify?.stage;
+
+  describeUnplottableFocus({reason: 'not_found'}).actions.length;
+  // @ts-expect-error Location keywords carry numeric ids.
+  describeUnplottableFocus({location_keywords: [{id: '7', name: 'Park'}]});
+  // @ts-expect-error Show-all is a callback.
+  showUnplottableFocusNotice({reason: 'unavailable'}, 'reload');
+
+  canRetryImportDirectToNas({id: 'j1', type: 'import', status: 'failed'}, []);
+  // @ts-expect-error A job row needs an id.
+  canRetryImportDirectToNas({type: 'import', status: 'failed'}, []);
+  // @ts-expect-error The retry body is an object, not a JSON string.
+  directNasImportRetryBody({id: 'j1'}, '{}', []);
 }

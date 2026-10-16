@@ -11,20 +11,30 @@
 //
 // Classic script: declares one page global, loaded before pipeline.html's
 // inline script.
+/* exported splitPipelineMessages */
 
 // splitPipelineMessages(errors, notes) -> {errors: {stage: msg},
 // notes: {stage: msg}, errorList: [msg], noteList: [msg]}. One message per
 // stage: a "[stage] Fatal:" entry wins over that stage's other errors, since
 // it carries the actionable instruction. A stage with any real error is a
 // failure, so its notes are not shown on its card (they stay in noteList).
+/**
+ * @param {unknown} errors
+ * @param {unknown} notes
+ * @returns {{errors: Record<string, string>, notes: Record<string, string>,
+ *   errorList: string[], noteList: string[]}}
+ */
 function splitPipelineMessages(errors, notes) {
+  /** @type {Record<string, boolean>} */
   var noteSet = {};
-  (Array.isArray(notes) ? notes : []).forEach(function(n) { noteSet[n] = true; });
+  (Array.isArray(notes) ? notes : []).forEach(function(n) { noteSet[String(n)] = true; });
+  /** @type {{errors: Record<string, string>, notes: Record<string, string>,
+   *   errorList: string[], noteList: string[]}} */
   var out = {errors: {}, notes: {}, errorList: [], noteList: []};
   (Array.isArray(errors) ? errors : []).forEach(function(msg) {
     var text = String(msg);
     var match = text.match(/^\[(\w+)\]/);
-    var stage = match ? match[1] : 'unknown';
+    var stage = (match && match[1]) || 'unknown';
     if (noteSet[text]) {
       out.noteList.push(text);
       if (out.notes[stage] === undefined) out.notes[stage] = text;
