@@ -140,6 +140,92 @@ def _any_present(label_sets):
     )
 
 
+def _saved_label_metas(paths):
+    """The saved metadata for each label-file path, or a bare stand-in."""
+    saved = get_saved_labels()
+    saved_by_file = {s["labels_file"]: s for s in saved}
+    return [saved_by_file.get(p, {"labels_file": p}) for p in paths]
+
+
+def _select_labels(labels_file, labels_files, db):
+    """Load the label set the caller, the workspace or the globals chose.
+
+    Returns ``(labels, label_metas, selected)``; ``selected`` says whether a
+    list was actually chosen, which ``_load_labels`` uses to tell a chosen
+    list that classifies nothing apart from no choice at all.
+    """
+    labels = None
+    label_metas: list[dict] = []
+    # Did the caller (or the workspace) actually choose a list? Not the
+    # same question as "did anything come back": a chosen list that
+    # classifies nothing must be refused, while choosing nothing is what
+    # the Tree-of-Life fallback is for.
+    selected = False
+
+    # ``load_merged_labels_with_metas`` returns the metadata of the sets it
+    # actually opened and read, filtered in the same pass — so a file
+    # deleted between the caller composing ``requested`` and the loader
+    # reading it drops out of both ``labels`` and ``label_metas`` together.
+    # Without this atomic capture, ``describe_label_source`` could name and
+    # count a list that contributed no classes and
+    # ``_record_labels_fingerprint`` would write the same false provenance
+    # into ``labels_fingerprints`` (the Settings DELETE endpoint can retire
+    # a label file while this background job is loading).
+
+    if labels_files and isinstance(labels_files, list):
+        requested = _saved_label_metas(labels_files)
+        labels, label_metas = load_merged_labels_with_metas(requested)
+        selected = _any_present(requested)
+        log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
+    elif labels_file and os.path.exists(labels_file):
+        # One file, same normalization as a list of them. A hand-authored
+        # .txt used to be passed to the classifier as written, which made
+        # ``Robin`` and ``robin`` two classes here and one through
+        # ``labels_files`` — so readiness, the embedding matrix and
+        # precompute (which all report the merged list) described a run
+        # this branch would not perform, and warmed an embedding identity
+        # it would not look up. There is one answer to "what does this
+        # file classify as" and it is the merged one.
+        labels, label_metas = load_merged_labels_with_metas(
+            _saved_label_metas([labels_file]),
+        )
+        selected = True
+        if not os.path.exists(labels_file):
+            # Racing DELETE between exists() above and the loader's read.
+            log.warning(
+                "Label file vanished between exists() and read, skipping: %s",
+                labels_file,
+            )
+            selected = False
+        else:
+            log.info("Using %d labels from file: %s", len(labels), labels_file)
+    else:
+        # Try workspace-scoped active labels first
+        ws_labels = db.get_workspace_active_labels() if db else None
+        if ws_labels is not None:
+            requested = _saved_label_metas(ws_labels)
+            labels, label_metas = load_merged_labels_with_metas(requested)
+            selected = _any_present(requested)
+            names = [s.get("name", "?") for s in label_metas]
+            log.info(
+                "Using %d merged labels from workspace active sets: %s",
+                len(labels),
+                ", ".join(names),
+            )
+        else:
+            active_sets = get_active_labels()
+            if active_sets:
+                labels, label_metas = load_merged_labels_with_metas(list(active_sets))
+                selected = _any_present(active_sets)
+                names = [s.get("name", "?") for s in label_metas]
+                log.info(
+                    "Using %d merged labels from global active sets: %s",
+                    len(labels),
+                    ", ".join(names),
+                )
+    return labels, label_metas, selected
+
+
 def _load_labels(
     model_type, model_str, labels_file, labels_files, db=None, model_dir=None,
 ):
@@ -167,84 +253,7 @@ def _load_labels(
         log.info("Classification config: model=%s (timm) — no labels needed", model_str)
         return None, False, []
 
-    labels = None
-    label_metas: list[dict] = []
-    # Did the caller (or the workspace) actually choose a list? Not the
-    # same question as "did anything come back": a chosen list that
-    # classifies nothing must be refused, while choosing nothing is what
-    # the Tree-of-Life fallback is for.
-    selected = False
-
-    # ``load_merged_labels_with_metas`` returns the metadata of the sets it
-    # actually opened and read, filtered in the same pass — so a file
-    # deleted between the caller composing ``requested`` and the loader
-    # reading it drops out of both ``labels`` and ``label_metas`` together.
-    # Without this atomic capture, ``describe_label_source`` could name and
-    # count a list that contributed no classes and
-    # ``_record_labels_fingerprint`` would write the same false provenance
-    # into ``labels_fingerprints`` (the Settings DELETE endpoint can retire
-    # a label file while this background job is loading).
-
-    if labels_files and isinstance(labels_files, list):
-        saved = get_saved_labels()
-        saved_by_file = {s["labels_file"]: s for s in saved}
-        requested = [
-            saved_by_file.get(p, {"labels_file": p}) for p in labels_files
-        ]
-        labels, label_metas = load_merged_labels_with_metas(requested)
-        selected = _any_present(requested)
-        log.info("Using %d merged labels from %d sets", len(labels), len(label_metas))
-    elif labels_file and os.path.exists(labels_file):
-        # One file, same normalization as a list of them. A hand-authored
-        # .txt used to be passed to the classifier as written, which made
-        # ``Robin`` and ``robin`` two classes here and one through
-        # ``labels_files`` — so readiness, the embedding matrix and
-        # precompute (which all report the merged list) described a run
-        # this branch would not perform, and warmed an embedding identity
-        # it would not look up. There is one answer to "what does this
-        # file classify as" and it is the merged one.
-        saved = get_saved_labels()
-        saved_by_file = {s["labels_file"]: s for s in saved}
-        single_meta = saved_by_file.get(labels_file, {"labels_file": labels_file})
-        labels, label_metas = load_merged_labels_with_metas([single_meta])
-        selected = True
-        if not os.path.exists(labels_file):
-            # Racing DELETE between exists() above and the loader's read.
-            log.warning(
-                "Label file vanished between exists() and read, skipping: %s",
-                labels_file,
-            )
-            selected = False
-        else:
-            log.info("Using %d labels from file: %s", len(labels), labels_file)
-    else:
-        # Try workspace-scoped active labels first
-        ws_labels = db.get_workspace_active_labels() if db else None
-        if ws_labels is not None:
-            saved = get_saved_labels()
-            saved_by_file = {s["labels_file"]: s for s in saved}
-            requested = [
-                saved_by_file.get(p, {"labels_file": p}) for p in ws_labels
-            ]
-            labels, label_metas = load_merged_labels_with_metas(requested)
-            selected = _any_present(requested)
-            names = [s.get("name", "?") for s in label_metas]
-            log.info(
-                "Using %d merged labels from workspace active sets: %s",
-                len(labels),
-                ", ".join(names),
-            )
-        else:
-            active_sets = get_active_labels()
-            if active_sets:
-                labels, label_metas = load_merged_labels_with_metas(list(active_sets))
-                selected = _any_present(active_sets)
-                names = [s.get("name", "?") for s in label_metas]
-                log.info(
-                    "Using %d merged labels from global active sets: %s",
-                    len(labels),
-                    ", ".join(names),
-                )
+    labels, label_metas, selected = _select_labels(labels_file, labels_files, db)
 
     if labels:
         log.info(
@@ -551,6 +560,47 @@ def _all_photos_cache_satisfied(
         return False
     from db import _chunks  # module-level helper, avoids exceeding SQLITE_MAX_VARIABLE_NUMBER
 
+    run_filter = _cache_run_filter(
+        db, photo_ids, classifier_model, labels_fingerprint,
+        model_identity, labels_fingerprint_full, taxonomy_identity,
+    )
+
+    total = 0
+    covered = 0
+    covered_photos = 0
+    distinct_identities = set()
+    identity_gate = classifier_model is None or labels_fingerprint is None
+
+    # Chunk ``photo_ids`` so a large collection (per_page=999999) does
+    # not blow past SQLite's default SQLITE_MAX_VARIABLE_NUMBER (999)
+    # and fail the whole classify job.
+    for chunk in _chunks(photo_ids):
+        chunk_total, chunk_covered, chunk_photos = _chunk_cache_coverage(
+            db, chunk, run_filter, detector_confidence,
+        )
+        total += chunk_total
+        covered += chunk_covered
+        covered_photos += chunk_photos
+
+        if identity_gate and _chunk_has_mixed_identities(
+            db, chunk, run_filter, detector_confidence, distinct_identities,
+        ):
+            return False
+
+    if total == 0 or covered != total:
+        return False
+    return covered_photos == len(photo_ids)
+
+
+def _cache_run_filter(
+    db, photo_ids, classifier_model, labels_fingerprint,
+    model_identity, labels_fingerprint_full, taxonomy_identity,
+):
+    """The classifier_runs filters ``_all_photos_cache_satisfied`` joins on.
+
+    Returns ``(filter_sql, filter_args, runtime_clause, runtime_args)``:
+    the requested model / label-set filter and the runtime filter.
+    """
     filter_sql = " AND cr.input_recipe IS NULL"
     filter_args = []
     if classifier_model is not None:
@@ -560,13 +610,30 @@ def _all_photos_cache_satisfied(
         filter_sql += " AND cr.labels_fingerprint = ?"
         filter_args.append(labels_fingerprint)
 
-    # Derive the set of expected classifier runtime_fingerprints.  A
-    # classifier runtime encodes (model_identity, labels_full,
-    # detector_runtime), so each distinct detector runtime in the
-    # collection produces its own expected classifier runtime.  Empty
-    # when the caller couldn't resolve either input (fresh install with
-    # no downloaded weights) — the runtime filter is then omitted and
-    # we keep the historic model/labels-only behavior.
+    expected_runtimes = _expected_classifier_runtimes(
+        db, photo_ids, model_identity, labels_fingerprint_full,
+        taxonomy_identity,
+    )
+    runtime_clause, runtime_args = _classifier_runtime_clause(
+        expected_runtimes, model_identity,
+    )
+    return filter_sql, filter_args, runtime_clause, runtime_args
+
+
+def _expected_classifier_runtimes(
+    db, photo_ids, model_identity, labels_fingerprint_full, taxonomy_identity,
+):
+    """The classifier runtime_fingerprints a current run would carry.
+
+    A classifier runtime encodes (model_identity, labels_full,
+    detector_runtime), so each distinct detector runtime in the
+    collection produces its own expected classifier runtime.  Empty
+    when the caller couldn't resolve either input (fresh install with
+    no downloaded weights) — the runtime filter is then omitted and
+    we keep the historic model/labels-only behavior.
+    """
+    from db import _chunks
+
     expected_runtimes = set()
     if model_identity is not None and labels_fingerprint_full:
         try:
@@ -592,7 +659,15 @@ def _all_photos_cache_satisfied(
                     expected_runtimes.add(expected)
         except (OSError, ValueError):
             expected_runtimes = set()
+    return expected_runtimes
 
+
+def _classifier_runtime_clause(expected_runtimes, model_identity):
+    """The classifier_runs runtime filter for the cache-coverage queries.
+
+    Returns ``(clause, args)``. Without expected runtimes the clause only
+    excludes torn ``'incomplete'`` rows.
+    """
     runtime_clause = ""
     runtime_args = []
     if expected_runtimes:
@@ -642,105 +717,116 @@ def _all_photos_cache_satisfied(
         runtime_args = list(expected_runtimes) + [AUTO_MATCH_REVIEW_MARKER]
 
     runtime_clause += " AND cr.runtime_fingerprint != 'incomplete'"
+    return runtime_clause, runtime_args
 
-    # Only classifier_runs backed by at least one predictions row — or by a
-    # measured ``classifier_match_scores`` summary — count as cache-satisfying.
-    # See docstring: a classifier_run without matching predictions is
-    # ordinarily a torn write from a crashed local job. But a completed run
-    # that matched nothing legitimately publishes a zero-candidate artifact
-    # (see ``computation_cache._match_summary_row`` and the note there), and
-    # its output-of-record is the ``classifier_match_scores`` row rather than
-    # any predictions. Ignoring it would (a) fail cache-only classification
-    # on an install without model weights and (b) needlessly re-run inference
-    # on an install that has them, discarding exactly the "nothing in your
-    # list fits" verdict this feature exists to preserve (Codex P2 on
-    # 22cc0ac).
-    predictions_exists = (
-        "(EXISTS (SELECT 1 FROM predictions pr "
-        "WHERE pr.detection_id = cr.detection_id "
-        "AND pr.classifier_model = cr.classifier_model "
-        "AND pr.labels_fingerprint = cr.labels_fingerprint)"
-        " OR EXISTS (SELECT 1 FROM classifier_match_scores cms "
-        "WHERE cms.detection_id = cr.detection_id "
-        "AND cms.classifier_model = cr.classifier_model "
-        "AND cms.labels_fingerprint = cr.labels_fingerprint))"
+
+# Only classifier_runs backed by at least one predictions row — or by a
+# measured ``classifier_match_scores`` summary — count as cache-satisfying.
+# See ``_all_photos_cache_satisfied``'s docstring: a classifier_run without
+# matching predictions is ordinarily a torn write from a crashed local job.
+# But a completed run that matched nothing legitimately publishes a
+# zero-candidate artifact (see ``computation_cache._match_summary_row`` and
+# the note there), and its output-of-record is the ``classifier_match_scores``
+# row rather than any predictions. Ignoring it would (a) fail cache-only
+# classification on an install without model weights and (b) needlessly
+# re-run inference on an install that has them, discarding exactly the
+# "nothing in your list fits" verdict this feature exists to preserve (Codex
+# P2 on 22cc0ac).
+_CACHE_PREDICTIONS_EXIST_SQL = (
+    "(EXISTS (SELECT 1 FROM predictions pr "
+    "WHERE pr.detection_id = cr.detection_id "
+    "AND pr.classifier_model = cr.classifier_model "
+    "AND pr.labels_fingerprint = cr.labels_fingerprint)"
+    " OR EXISTS (SELECT 1 FROM classifier_match_scores cms "
+    "WHERE cms.detection_id = cr.detection_id "
+    "AND cms.classifier_model = cr.classifier_model "
+    "AND cms.labels_fingerprint = cr.labels_fingerprint))"
+)
+_CACHE_CLASSIFIABLE_DETECTION_SQL = (
+    "(d.detector_model = 'full-image' OR "
+    "(d.detector_model != 'full-image' "
+    "AND COALESCE(d.category, 'animal') = 'animal' "
+    "AND d.detector_confidence >= ?))"
+)
+
+
+def _chunk_cache_coverage(db, chunk, run_filter, detector_confidence):
+    """Count one chunk's classifiable detections, covered ones, and photos.
+
+    ``run_filter`` is ``(filter_sql, filter_args, runtime_clause,
+    runtime_args)`` from ``_all_photos_cache_satisfied``. Returns
+    ``(total, covered, covered_photos)``.
+    """
+    filter_sql, filter_args, runtime_clause, runtime_args = run_filter
+    predictions_exists = _CACHE_PREDICTIONS_EXIST_SQL
+    classifiable_detection = _CACHE_CLASSIFIABLE_DETECTION_SQL
+    placeholders = ",".join("?" for _ in chunk)
+    row = db.conn.execute(
+        f"""SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN cr.detection_id IS NOT NULL
+                             AND {predictions_exists}
+                            THEN 1 ELSE 0 END)
+                     AS covered
+             FROM detections d
+             LEFT JOIN classifier_runs cr
+               ON cr.detection_id = d.id{filter_sql}{runtime_clause}
+            WHERE {classifiable_detection}
+              AND d.photo_id IN ({placeholders})""",
+        filter_args + runtime_args + [detector_confidence] + list(chunk),
+    ).fetchone()
+    total = (row["total"] if row else 0) or 0
+    covered = (row["covered"] if row else 0) or 0
+
+    photo_row = db.conn.execute(
+        f"""SELECT COUNT(DISTINCT photo_id) AS covered_photos
+             FROM detections
+            WHERE (detector_model = 'full-image' OR
+                   (detector_model != 'full-image'
+                    AND COALESCE(category, 'animal') = 'animal'
+                    AND detector_confidence >= ?))
+              AND photo_id IN ({placeholders})""",
+        [detector_confidence] + list(chunk),
+    ).fetchone()
+    covered_photos = (
+        (photo_row["covered_photos"] if photo_row else 0) or 0
     )
-    classifiable_detection = (
-        "(d.detector_model = 'full-image' OR "
-        "(d.detector_model != 'full-image' "
-        "AND COALESCE(d.category, 'animal') = 'animal' "
-        "AND d.detector_confidence >= ?))"
-    )
+    return total, covered, covered_photos
 
-    total = 0
-    covered = 0
-    covered_photos = 0
-    distinct_identities = set()
-    identity_gate = classifier_model is None or labels_fingerprint is None
 
-    # Chunk ``photo_ids`` so a large collection (per_page=999999) does
-    # not blow past SQLite's default SQLITE_MAX_VARIABLE_NUMBER (999)
-    # and fail the whole classify job.
-    for chunk in _chunks(photo_ids):
-        placeholders = ",".join("?" for _ in chunk)
-        row = db.conn.execute(
-            f"""SELECT COUNT(*) AS total,
-                       SUM(CASE WHEN cr.detection_id IS NOT NULL
-                                 AND {predictions_exists}
-                                THEN 1 ELSE 0 END)
-                         AS covered
-                 FROM detections d
-                 LEFT JOIN classifier_runs cr
-                   ON cr.detection_id = d.id{filter_sql}{runtime_clause}
-                WHERE {classifiable_detection}
-                  AND d.photo_id IN ({placeholders})""",
-            filter_args + runtime_args + [detector_confidence] + list(chunk),
-        ).fetchone()
-        total += (row["total"] if row else 0) or 0
-        covered += (row["covered"] if row else 0) or 0
+def _chunk_has_mixed_identities(
+    db, chunk, run_filter, detector_confidence, distinct_identities,
+):
+    """Add this chunk's covering (model, fp) pairs; True once two are seen.
 
-        photo_row = db.conn.execute(
-            f"""SELECT COUNT(DISTINCT photo_id) AS covered_photos
-                 FROM detections
-                WHERE (detector_model = 'full-image' OR
-                       (detector_model != 'full-image'
-                        AND COALESCE(category, 'animal') = 'animal'
-                        AND detector_confidence >= ?))
-                  AND photo_id IN ({placeholders})""",
-            [detector_confidence] + list(chunk),
-        ).fetchone()
-        covered_photos += (
-            (photo_row["covered_photos"] if photo_row else 0) or 0
+    Track how many distinct (model, fp) pairs cover this chunk's
+    classifier_runs so the caller can't finalize under a single identity
+    when several are actually present.  We short-circuit as soon as two
+    are seen.  Same predictions-must-exist filter as the coverage query:
+    a torn classifier_runs row without predictions is not a real identity
+    that can satisfy the cache. ``distinct_identities`` accumulates
+    across chunks.
+    """
+    filter_sql, filter_args, runtime_clause, runtime_args = run_filter
+    predictions_exists = _CACHE_PREDICTIONS_EXIST_SQL
+    classifiable_detection = _CACHE_CLASSIFIABLE_DETECTION_SQL
+    placeholders = ",".join("?" for _ in chunk)
+    for identity_row in db.conn.execute(
+        f"""SELECT DISTINCT cr.classifier_model AS m,
+                            cr.labels_fingerprint AS fp
+             FROM detections d
+             JOIN classifier_runs cr
+               ON cr.detection_id = d.id
+            WHERE d.photo_id IN ({placeholders})
+              AND {classifiable_detection}
+              AND {predictions_exists}{filter_sql}{runtime_clause}""",
+        list(chunk) + [detector_confidence] + filter_args + runtime_args,
+    ):
+        distinct_identities.add(
+            (identity_row["m"], identity_row["fp"])
         )
-
-        if identity_gate:
-            # Track how many distinct (model, fp) pairs cover this
-            # chunk's classifier_runs so the caller can't finalize
-            # under a single identity when several are actually
-            # present.  We short-circuit as soon as two are seen.
-            # Same predictions-must-exist filter as the coverage
-            # query: a torn classifier_runs row without predictions
-            # is not a real identity that can satisfy the cache.
-            for identity_row in db.conn.execute(
-                f"""SELECT DISTINCT cr.classifier_model AS m,
-                                    cr.labels_fingerprint AS fp
-                     FROM detections d
-                     JOIN classifier_runs cr
-                       ON cr.detection_id = d.id
-                    WHERE d.photo_id IN ({placeholders})
-                      AND {classifiable_detection}
-                      AND {predictions_exists}{filter_sql}{runtime_clause}""",
-                list(chunk) + [detector_confidence] + filter_args + runtime_args,
-            ):
-                distinct_identities.add(
-                    (identity_row["m"], identity_row["fp"])
-                )
-                if len(distinct_identities) > 1:
-                    return False
-
-    if total == 0 or covered != total:
-        return False
-    return covered_photos == len(photo_ids)
+        if len(distinct_identities) > 1:
+            return True
+    return False
 
 
 def _resolve_label_set_metas(params, db):
@@ -835,49 +921,11 @@ def _describe_cached_label_source(
     if not photo_ids:
         return None
     try:
-        from db import _chunks
-
         found_fp = labels_fingerprint
         if found_fp is None:
-            filter_sql = ""
-            filter_args = []
-            if classifier_model is not None:
-                filter_sql = " AND cr.classifier_model = ?"
-                filter_args.append(classifier_model)
-            # Match ``_all_photos_cache_satisfied``'s eligibility filters:
-            # only classifiable detections at the workspace threshold, and
-            # only classifier_runs backed by an actual predictions row
-            # (a torn run without predictions is not a real cache hit).
-            classifiable_detection = (
-                "(d.detector_model = 'full-image' OR "
-                "(d.detector_model != 'full-image' "
-                "AND COALESCE(d.category, 'animal') = 'animal' "
-                "AND d.detector_confidence >= ?))"
+            found_fp = _cached_labels_fingerprint(
+                db, photo_ids, classifier_model, detector_confidence,
             )
-            predictions_exists = (
-                "EXISTS (SELECT 1 FROM predictions p "
-                "WHERE p.detection_id = cr.detection_id "
-                "AND p.classifier_model = cr.classifier_model "
-                "AND p.labels_fingerprint = cr.labels_fingerprint)"
-            )
-            for chunk in _chunks(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                row = db.conn.execute(
-                    f"""SELECT DISTINCT cr.labels_fingerprint AS fp
-                         FROM detections d
-                         JOIN classifier_runs cr
-                           ON cr.detection_id = d.id{filter_sql}
-                        WHERE d.photo_id IN ({placeholders})
-                          AND {classifiable_detection}
-                          AND {predictions_exists}
-                          AND cr.runtime_fingerprint != 'incomplete'
-                          AND cr.labels_fingerprint IS NOT NULL
-                        LIMIT 1""",
-                    filter_args + list(chunk) + [detector_confidence],
-                ).fetchone()
-                if row and row["fp"]:
-                    found_fp = row["fp"]
-                    break
         if not found_fp:
             return "Reused cached predictions (label source unavailable)"
 
@@ -888,34 +936,89 @@ def _describe_cached_label_source(
                 break
         if not sidecar:
             return "Reused cached predictions (label source unavailable)"
-
-        sources = sidecar.get("sources") or []
-        names = [os.path.basename(s) for s in sources if s]
-        count = sidecar.get("label_count") or 0
-        count_text = f"{count:,} species" if count else "cached label set"
-        if not names:
-            display = (sidecar.get("display_name") or "").strip()
-            if display:
-                return (
-                    f"Reused cached predictions from "
-                    f"{count_text}: {display}"
-                )
-            return "Reused cached predictions (label source unavailable)"
-        if len(names) > 3:
-            shown = ", ".join(names[:3]) + f" and {len(names) - 3} more"
-        else:
-            shown = ", ".join(names)
-        if len(names) == 1:
-            return f"Reused cached predictions from {count_text}: {shown}"
-        return (
-            f"Reused cached predictions from {count_text} across "
-            f"{len(names)} lists: {shown}"
-        )
+        return _cached_label_sidecar_text(sidecar)
     except Exception:
         log.debug(
             "Could not describe cached label source", exc_info=True,
         )
         return None
+
+
+def _cached_labels_fingerprint(db, photo_ids, classifier_model, detector_confidence):
+    """The first labels_fingerprint covering an eligible cached detection.
+
+    Returns ``None`` when no eligible, prediction-backed classifier run
+    carries one.
+    """
+    from db import _chunks
+
+    found_fp = None
+    filter_sql = ""
+    filter_args = []
+    if classifier_model is not None:
+        filter_sql = " AND cr.classifier_model = ?"
+        filter_args.append(classifier_model)
+    # Match ``_all_photos_cache_satisfied``'s eligibility filters:
+    # only classifiable detections at the workspace threshold, and
+    # only classifier_runs backed by an actual predictions row
+    # (a torn run without predictions is not a real cache hit).
+    classifiable_detection = (
+        "(d.detector_model = 'full-image' OR "
+        "(d.detector_model != 'full-image' "
+        "AND COALESCE(d.category, 'animal') = 'animal' "
+        "AND d.detector_confidence >= ?))"
+    )
+    predictions_exists = (
+        "EXISTS (SELECT 1 FROM predictions p "
+        "WHERE p.detection_id = cr.detection_id "
+        "AND p.classifier_model = cr.classifier_model "
+        "AND p.labels_fingerprint = cr.labels_fingerprint)"
+    )
+    for chunk in _chunks(photo_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        row = db.conn.execute(
+            f"""SELECT DISTINCT cr.labels_fingerprint AS fp
+                 FROM detections d
+                 JOIN classifier_runs cr
+                   ON cr.detection_id = d.id{filter_sql}
+                WHERE d.photo_id IN ({placeholders})
+                  AND {classifiable_detection}
+                  AND {predictions_exists}
+                  AND cr.runtime_fingerprint != 'incomplete'
+                  AND cr.labels_fingerprint IS NOT NULL
+                LIMIT 1""",
+            filter_args + list(chunk) + [detector_confidence],
+        ).fetchone()
+        if row and row["fp"]:
+            found_fp = row["fp"]
+            break
+    return found_fp
+
+
+def _cached_label_sidecar_text(sidecar):
+    """Describe a reused label set from its ``labels_fingerprints`` row."""
+    sources = sidecar.get("sources") or []
+    names = [os.path.basename(s) for s in sources if s]
+    count = sidecar.get("label_count") or 0
+    count_text = f"{count:,} species" if count else "cached label set"
+    if not names:
+        display = (sidecar.get("display_name") or "").strip()
+        if display:
+            return (
+                f"Reused cached predictions from "
+                f"{count_text}: {display}"
+            )
+        return "Reused cached predictions (label source unavailable)"
+    if len(names) > 3:
+        shown = ", ".join(names[:3]) + f" and {len(names) - 3} more"
+    else:
+        shown = ", ".join(names)
+    if len(names) == 1:
+        return f"Reused cached predictions from {count_text}: {shown}"
+    return (
+        f"Reused cached predictions from {count_text} across "
+        f"{len(names)} lists: {shown}"
+    )
 
 
 def describe_label_source(
@@ -1045,6 +1148,43 @@ class _DetectBatchRun:
             with acquire_photo_mask(photo["id"]):
                 sync_primary(self.db, photo["id"], min_conf=self.det_conf_threshold)
                 commit_with_retry(self.db.conn)
+
+    def analyze_subjects(self, runner, vireo_dir):
+        """Analyze every retained subject after the detection loop.
+
+        Includes cached detector runs from older libraries.
+        Detection/classification results remain usable if a source goes
+        offline; missing analyses are retried on the next run.
+        """
+        job = self.job
+        # Cancellation participates cooperatively: the outer detect loop honors
+        # ``runner.is_cancelled`` and re-classify has already cleared the prior
+        # detection rows for photos the user asked to stop. Committing more
+        # subject analyses after cancel would silently publish work past the
+        # stop button, so probe before each photo and inside ``analyze_photo``'s
+        # lock-guarded commit points via the checkpoint callback.
+        def _subject_analysis_checkpoint():
+            if runner is not None and runner.is_cancelled(job["id"]):
+                raise ResourceWaitCancelled(
+                    "Cancelled during subject analysis"
+                )
+
+        try:
+            _analyze_subjects(
+                self.photos, self.folders, self.db, self.reclassify,
+                self.det_conf_threshold, self.cached_detections,
+                self.processed_ids, vireo_dir,
+                _subject_analysis_checkpoint,
+            )
+        except ResourceWaitCancelled as exc:
+            # Detection rows for these photos are already committed, so the
+            # caller must still see them as processed: a reclassify Stop
+            # rebuilds predictions for exactly the photos whose boxes were
+            # replaced, and the in-flight photo is one of them.
+            _attach_partial_detect_result(
+                exc, self.detection_map, self.detected, self.processed_ids,
+            )
+            raise
 
     def mark_cached_photos_for_analysis(self):
         """Queue cached detector runs for subject analysis without a detector.
@@ -1457,38 +1597,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
 
     run.sync_reclassified_subjects()
-
-    # Analyze every retained subject, including cached detector runs from older
-    # libraries. Detection/classification results remain usable if a source goes
-    # offline; missing analyses are retried on the next run.
-    #
-    # Cancellation participates cooperatively: the outer detect loop honors
-    # ``runner.is_cancelled`` and re-classify has already cleared the prior
-    # detection rows for photos the user asked to stop. Committing more
-    # subject analyses after cancel would silently publish work past the
-    # stop button, so probe before each photo and inside ``analyze_photo``'s
-    # lock-guarded commit points via the checkpoint callback.
-    def _subject_analysis_checkpoint():
-        if runner is not None and runner.is_cancelled(job["id"]):
-            raise ResourceWaitCancelled(
-                "Cancelled during subject analysis"
-            )
-
-    try:
-        _analyze_subjects(
-            photos, folders, db, reclassify, run.det_conf_threshold,
-            cached_detections, run.processed_ids, vireo_dir,
-            _subject_analysis_checkpoint,
-        )
-    except ResourceWaitCancelled as exc:
-        # Detection rows for these photos are already committed, so the
-        # caller must still see them as processed: a reclassify Stop
-        # rebuilds predictions for exactly the photos whose boxes were
-        # replaced, and the in-flight photo is one of them.
-        _attach_partial_detect_result(
-            exc, run.detection_map, run.detected, run.processed_ids,
-        )
-        raise
+    run.analyze_subjects(runner, vireo_dir)
 
     return run.detection_map, run.detected, run.processed_ids
 
@@ -2171,45 +2280,9 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1,
     failed = 0
 
     try:
-        # GPU serialisation across concurrent pipelines lives inside the
-        # classifier helpers (around the ``session.run`` calls), so this
-        # path holds no process-wide lock around preprocessing, DB upserts,
-        # or result-building. See ``Classifier._get_image_embedding`` and
-        # ``TimmClassifier.classify[_batch]``.
-        try:
-            if model_type == "timm":
-                batch_preds = clf.classify_batch(images, threshold=0)
-                batch_results = [(preds, None) for preds in batch_preds]
-            else:
-                batch_results = clf.classify_batch_with_embedding(images, threshold=0)
-        except ResourceWaitCancelled:
-            if propagate_cancel:
-                raise
-            log.warning("Batch classification failed, falling back to single-image", exc_info=True)
-            batch_results = None
-        except Exception:
-            log.warning("Batch classification failed, falling back to single-image", exc_info=True)
-            batch_results = None
-        if batch_results is None:
-            batch_results = []
-            for entry in batch:
-                try:
-                    if model_type == "timm":
-                        preds = clf.classify(entry["img"], threshold=0)
-                        batch_results.append((preds, None))
-                    else:
-                        preds, emb = clf.classify_with_embedding(entry["img"], threshold=0)
-                        batch_results.append((preds, emb))
-                except ResourceWaitCancelled:
-                    if propagate_cancel:
-                        raise
-                    log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
-                    batch_results.append(None)
-                    failed += 1
-                except Exception:
-                    log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
-                    batch_results.append(None)
-                    failed += 1
+        batch_results, failed = _classify_batch_images(
+            batch, images, clf, model_type, propagate_cancel,
+        )
 
         for entry, result in zip(batch, batch_results, strict=True):
             if result is None:
@@ -2217,78 +2290,140 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1,
             all_preds, embedding = result
 
             if embedding is not None:
-                emb_bytes = embedding.tobytes()
-                db.upsert_photo_embedding(
-                    entry["photo"]["id"], model_name, emb_bytes,
-                )
-                # Also key by detection so multi-subject reruns from
-                # cache pick each detection's own vector instead of the
-                # last-detection-wins photo-level row. Without this, two
-                # subjects on the same photo would share one cached
-                # embedding and refine_groups_by_similarity would merge
-                # them (or misgroup them across a burst) on non-reclassify
-                # reruns even though no fresh inference ran.
-                det_id = entry.get("detection_id")
-                if det_id is not None:
-                    db.upsert_photo_embedding(
-                        entry["photo"]["id"], model_name, emb_bytes,
-                        variant=f"det:{det_id}",
-                    )
+                _store_batch_embedding(db, entry, model_name, embedding)
 
             if not all_preds:
                 continue
 
-            # Computed from the unfiltered list, before anything below is
-            # allowed to drop labels.
-            match = _match_stats(all_preds, model_type)
-
-            top = all_preds[0]
-            log.info(
-                '%s: "%s" at %.0f%%',
-                entry["photo"]["filename"],
-                top["species"],
-                top["score"] * 100,
+            raw_results.append(
+                _batch_raw_result(entry, all_preds, embedding, model_type, top_k),
             )
-
-            timestamp = _photo_timestamp(entry["photo"])
-
-            # Build alternatives list (predictions 2..top_k)
-            alternatives = []
-            for alt_pred in all_preds[1:top_k]:
-                alternatives.append({
-                    "species": alt_pred["species"],
-                    "confidence": alt_pred["score"],
-                    "raw_score": alt_pred.get("raw_score"),
-                    "taxonomy": alt_pred.get("taxonomy"),
-                })
-
-            raw_result = {
-                "photo": entry["photo"],
-                "detection_id": entry.get("detection_id"),
-                "folder_path": entry["folder_path"],
-                "image_path": entry["image_path"],
-                "prediction": top["species"],
-                "confidence": top["score"],
-                "raw_score": top.get("raw_score"),
-                "match": match,
-                "timestamp": timestamp,
-                "filename": entry["photo"]["filename"],
-                "embedding": embedding,
-                "taxonomy": top.get("taxonomy"),
-                "alternatives": alternatives,
-            }
-            input_source = getattr(entry["img"], "info", {}).get(
-                "_vireo_input_source"
-            )
-            if input_source in ("original", "working_copy"):
-                raw_result["_input_source"] = input_source
-            raw_results.append(raw_result)
     finally:
         # Close all PIL images to avoid resource leaks
         for entry in batch:
             entry["img"].close()
 
     return failed
+
+
+def _classify_batch_images(batch, images, clf, model_type, propagate_cancel):
+    """Classify a batch at once, falling back to one image at a time.
+
+    Returns ``(batch_results, failed)``: one ``(preds, embedding)`` pair per
+    entry (``None`` where single-image classification failed) and the
+    number of those failures.
+    """
+    failed = 0
+    # GPU serialisation across concurrent pipelines lives inside the
+    # classifier helpers (around the ``session.run`` calls), so this
+    # path holds no process-wide lock around preprocessing, DB upserts,
+    # or result-building. See ``Classifier._get_image_embedding`` and
+    # ``TimmClassifier.classify[_batch]``.
+    try:
+        if model_type == "timm":
+            batch_preds = clf.classify_batch(images, threshold=0)
+            batch_results = [(preds, None) for preds in batch_preds]
+        else:
+            batch_results = clf.classify_batch_with_embedding(images, threshold=0)
+    except ResourceWaitCancelled:
+        if propagate_cancel:
+            raise
+        log.warning("Batch classification failed, falling back to single-image", exc_info=True)
+        batch_results = None
+    except Exception:
+        log.warning("Batch classification failed, falling back to single-image", exc_info=True)
+        batch_results = None
+    if batch_results is None:
+        batch_results = []
+        for entry in batch:
+            try:
+                if model_type == "timm":
+                    preds = clf.classify(entry["img"], threshold=0)
+                    batch_results.append((preds, None))
+                else:
+                    preds, emb = clf.classify_with_embedding(entry["img"], threshold=0)
+                    batch_results.append((preds, emb))
+            except ResourceWaitCancelled:
+                if propagate_cancel:
+                    raise
+                log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
+                batch_results.append(None)
+                failed += 1
+            except Exception:
+                log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
+                batch_results.append(None)
+                failed += 1
+    return batch_results, failed
+
+
+def _store_batch_embedding(db, entry, model_name, embedding):
+    """Persist one classified entry's embedding by photo and by detection."""
+    emb_bytes = embedding.tobytes()
+    db.upsert_photo_embedding(
+        entry["photo"]["id"], model_name, emb_bytes,
+    )
+    # Also key by detection so multi-subject reruns from
+    # cache pick each detection's own vector instead of the
+    # last-detection-wins photo-level row. Without this, two
+    # subjects on the same photo would share one cached
+    # embedding and refine_groups_by_similarity would merge
+    # them (or misgroup them across a burst) on non-reclassify
+    # reruns even though no fresh inference ran.
+    det_id = entry.get("detection_id")
+    if det_id is not None:
+        db.upsert_photo_embedding(
+            entry["photo"]["id"], model_name, emb_bytes,
+            variant=f"det:{det_id}",
+        )
+
+
+def _batch_raw_result(entry, all_preds, embedding, model_type, top_k):
+    """The raw classifier result for one entry with predictions."""
+    # Computed from the unfiltered list, before anything below is
+    # allowed to drop labels.
+    match = _match_stats(all_preds, model_type)
+
+    top = all_preds[0]
+    log.info(
+        '%s: "%s" at %.0f%%',
+        entry["photo"]["filename"],
+        top["species"],
+        top["score"] * 100,
+    )
+
+    timestamp = _photo_timestamp(entry["photo"])
+
+    # Build alternatives list (predictions 2..top_k)
+    alternatives = []
+    for alt_pred in all_preds[1:top_k]:
+        alternatives.append({
+            "species": alt_pred["species"],
+            "confidence": alt_pred["score"],
+            "raw_score": alt_pred.get("raw_score"),
+            "taxonomy": alt_pred.get("taxonomy"),
+        })
+
+    raw_result = {
+        "photo": entry["photo"],
+        "detection_id": entry.get("detection_id"),
+        "folder_path": entry["folder_path"],
+        "image_path": entry["image_path"],
+        "prediction": top["species"],
+        "confidence": top["score"],
+        "raw_score": top.get("raw_score"),
+        "match": match,
+        "timestamp": timestamp,
+        "filename": entry["photo"]["filename"],
+        "embedding": embedding,
+        "taxonomy": top.get("taxonomy"),
+        "alternatives": alternatives,
+    }
+    input_source = getattr(entry["img"], "info", {}).get(
+        "_vireo_input_source"
+    )
+    if input_source in ("original", "working_copy"):
+        raw_result["_input_source"] = input_source
+    return raw_result
 
 
 class _ClassifyPhotosPass:
@@ -3166,6 +3301,56 @@ def _can_auto_accept_detection_prediction(prediction, category, existing_keyword
     return True
 
 
+def _reconcile_existing_pending_prediction(
+    db, item, model_name, labels_fingerprint, category,
+    group_id, vote_count, total_votes, individual,
+):
+    """Refresh a reused cached prediction's review and group state in place.
+
+    Returns True when the cached row exists (nothing further to store), False
+    when the caller must still write it.
+    """
+    existing_row = db.conn.execute(
+        """SELECT id FROM predictions
+           WHERE detection_id = ? AND classifier_model = ?
+             AND labels_fingerprint = ? AND species IS ?""",
+        (
+            item["detection_id"],
+            model_name,
+            labels_fingerprint,
+            item["prediction"],
+        ),
+    ).fetchone()
+    db.reconcile_match_review_state(
+        item["detection_id"], model_name, labels_fingerprint,
+        item["prediction"], category,
+        auto_accept=False,
+    )
+    if existing_row is None:
+        return False
+    if group_id is not None:
+        db.update_prediction_group_info(
+            detection_id=item["detection_id"],
+            model=model_name,
+            group_id=group_id,
+            vote_count=vote_count,
+            total_votes=total_votes,
+            individual=individual,
+            labels_fingerprint=labels_fingerprint,
+        )
+    else:
+        # Cached prediction may still carry group metadata from an
+        # earlier grouped burst; if the current run decided this
+        # detection is not group-reviewable, drop the stale group_id
+        # so ungrouping actually takes effect on reuse.
+        db.clear_prediction_group_info(
+            detection_id=item["detection_id"],
+            model=model_name,
+            labels_fingerprint=labels_fingerprint,
+        )
+    return True
+
+
 def _store_pending_detection_prediction(
     db,
     item,
@@ -3179,45 +3364,11 @@ def _store_pending_detection_prediction(
     individual=None,
 ):
     tax_hierarchy = _prediction_taxonomy(tax, item["prediction"], item.get("taxonomy"))
-    if item.get("_existing"):
-        existing_row = db.conn.execute(
-            """SELECT id FROM predictions
-               WHERE detection_id = ? AND classifier_model = ?
-                 AND labels_fingerprint = ? AND species IS ?""",
-            (
-                item["detection_id"],
-                model_name,
-                labels_fingerprint,
-                item["prediction"],
-            ),
-        ).fetchone()
-        db.reconcile_match_review_state(
-            item["detection_id"], model_name, labels_fingerprint,
-            item["prediction"], category,
-            auto_accept=False,
-        )
-        if existing_row is not None:
-            if group_id is not None:
-                db.update_prediction_group_info(
-                    detection_id=item["detection_id"],
-                    model=model_name,
-                    group_id=group_id,
-                    vote_count=vote_count,
-                    total_votes=total_votes,
-                    individual=individual,
-                    labels_fingerprint=labels_fingerprint,
-                )
-            else:
-                # Cached prediction may still carry group metadata from an
-                # earlier grouped burst; if the current run decided this
-                # detection is not group-reviewable, drop the stale group_id
-                # so ungrouping actually takes effect on reuse.
-                db.clear_prediction_group_info(
-                    detection_id=item["detection_id"],
-                    model=model_name,
-                    labels_fingerprint=labels_fingerprint,
-                )
-            return
+    if item.get("_existing") and _reconcile_existing_pending_prediction(
+        db, item, model_name, labels_fingerprint, category,
+        group_id, vote_count, total_votes, individual,
+    ):
+        return
 
     refresh_output = item.get("_replace_prediction_outputs", False) and not item.get("_existing")
     retained_species = [item["prediction"]]
@@ -3273,6 +3424,151 @@ def _store_pending_detection_prediction(
         )
     if refresh_output:
         db.retain_prediction_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
+
+
+def _xmp_review_category(item, tax, comparison_name, read_keywords):
+    """Categorize one result against its photo's XMP keywords.
+
+    Returns ``(category, auto_accept)``; without a taxonomy every result is
+    ``"new"`` and goes to review.
+    """
+    photo = item["photo"]
+    category = "new"
+    auto_accept = False
+    if tax:
+        xmp_path = os.path.join(
+            item["folder_path"],
+            os.path.splitext(photo["filename"])[0] + ".xmp",
+        )
+        existing = read_keywords(xmp_path)
+        category = _categorize_detection_prediction(
+            comparison_name(item), existing, tax,
+        )
+        auto_accept = _can_auto_accept_detection_prediction(
+            comparison_name(item), category, existing, tax,
+        )
+    return category, auto_accept
+
+
+def _store_burst_group(
+    db, group, gid, model_name, labels_fingerprint, tax,
+    identity_for, comparison_name, consensus_prediction, read_keywords,
+):
+    """Store one burst group's predictions under its consensus vote.
+
+    Returns ``(stored, already_labeled)``; both are 0 when the group has no
+    consensus.
+    """
+    # Vote on identity, retaining the first display spelling for
+    # each key. Synonymous prompts must not split a unanimous vote.
+    display_by_key = {}
+    for item in group:
+        identity = identity_for(item)
+        display_by_key.setdefault(identity.key, _folded_species_key(identity.display_name))
+
+    cons_input = [
+        {
+            "prediction": identity_for(item).key,
+            "confidence": item["confidence"],
+        }
+        for item in group
+    ]
+    cons = consensus_prediction(cons_input)
+    if not cons:
+        return 0, 0
+
+    group_species = {
+        identity_for(item).key
+        for item in group
+        if item.get("prediction")
+    }
+    group_reviewable = len(group_species) == 1
+    cons["prediction"] = display_by_key[cons["prediction"]]
+    individual_json = (
+        json.dumps({display_by_key[key]: count for key, count in cons["individual_predictions"].items()})
+        if group_reviewable
+        else None
+    )
+    stored_in_group = 0
+    skipped_match = 0
+    for item in group:
+        category, auto_accept = _xmp_review_category(
+            item, tax, comparison_name, read_keywords,
+        )
+
+        if auto_accept:
+            _store_match_prediction(
+                db, item, model_name, labels_fingerprint, tax,
+                store_alternatives=False,
+            )
+            skipped_match += 1
+            continue
+
+        _store_pending_detection_prediction(
+            db,
+            item,
+            model_name,
+            labels_fingerprint,
+            category,
+            tax,
+            group_id=gid if group_reviewable else None,
+            vote_count=cons["vote_count"] if group_reviewable else None,
+            total_votes=cons["total_votes"] if group_reviewable else None,
+            individual=individual_json,
+        )
+        stored_in_group += 1
+    return stored_in_group, skipped_match
+
+
+def _store_single_prediction(
+    db, item, model_name, labels_fingerprint, tax,
+    comparison_name, read_keywords,
+):
+    """Store a result that formed no burst group.
+
+    Returns ``(stored, already_labeled)``: ``(0, 1)`` when it auto-accepted
+    as a match, ``(1, 0)`` when it went to review.
+    """
+    category, auto_accept = _xmp_review_category(
+        item, tax, comparison_name, read_keywords,
+    )
+
+    if auto_accept:
+        _store_match_prediction(
+            db, item, model_name, labels_fingerprint, tax,
+        )
+        return 0, 1
+
+    _store_pending_detection_prediction(
+        db, item, model_name, labels_fingerprint, category, tax,
+    )
+    return 1, 0
+
+
+def _release_stored_classifier_runs(db, raw_results, model_name, labels_fingerprint):
+    """Mark this run's freshly stored classifier_runs reusable, then commit.
+
+    A flush only reserves a run. It becomes reusable once its predictions
+    were actually stored. Cancellation before this point leaves an explicit
+    cache miss instead of an empty 'legacy' cache hit.
+    """
+    for item in raw_results:
+        did = item.get("detection_id")
+        if did is not None and not item.get("_existing"):
+            db.conn.execute(
+                "UPDATE classifier_runs SET runtime_fingerprint='legacy' "
+                "WHERE detection_id=? AND classifier_model=? AND labels_fingerprint=? "
+                "AND runtime_fingerprint='incomplete' AND (EXISTS ("
+                "SELECT 1 FROM predictions p WHERE p.detection_id=classifier_runs.detection_id "
+                "AND p.classifier_model=classifier_runs.classifier_model "
+                "AND p.labels_fingerprint=classifier_runs.labels_fingerprint) OR EXISTS ("
+                "SELECT 1 FROM classifier_match_scores cms "
+                "WHERE cms.detection_id=classifier_runs.detection_id "
+                "AND cms.classifier_model=classifier_runs.classifier_model "
+                "AND cms.labels_fingerprint=classifier_runs.labels_fingerprint))",
+                (did, model_name, labels_fingerprint),
+            )
+    db.conn.commit()
 
 
 def _store_grouped_predictions(
@@ -3331,113 +3627,23 @@ def _store_grouped_predictions(
 
     for group in groups:
         if len(group) == 1:
-            item = group[0]
-            photo = item["photo"]
-            folder_path = item["folder_path"]
-
-            category = "new"
-            auto_accept = False
-            if tax:
-                xmp_path = os.path.join(
-                    folder_path,
-                    os.path.splitext(photo["filename"])[0] + ".xmp",
-                )
-                existing = read_keywords(xmp_path)
-                category = _categorize_detection_prediction(
-                    comparison_name(item), existing, tax,
-                )
-                auto_accept = _can_auto_accept_detection_prediction(
-                    comparison_name(item), category, existing, tax,
-                )
-
-            if auto_accept:
-                _store_match_prediction(
-                    db, item, model_name, labels_fingerprint, tax,
-                )
-                skipped_match += 1
-                continue
-
-            _store_pending_detection_prediction(
-                db, item, model_name, labels_fingerprint, category, tax,
+            stored, matched = _store_single_prediction(
+                db, group[0], model_name, labels_fingerprint, tax,
+                comparison_name, read_keywords,
             )
-            predictions_stored += 1
         else:
             group_count += 1
             group_namespace = hashlib.sha256(
                 json.dumps([job_id, model_name, labels_fingerprint]).encode()
             ).hexdigest()[:16]
             gid = f"g{group_namespace}-{group_count:04d}"
-            # Vote on identity, retaining the first display spelling for
-            # each key. Synonymous prompts must not split a unanimous vote.
-            display_by_key = {}
-            for item in group:
-                identity = identity_for(item)
-                display_by_key.setdefault(identity.key, _folded_species_key(identity.display_name))
-
-            cons_input = [
-                {
-                    "prediction": identity_for(item).key,
-                    "confidence": item["confidence"],
-                }
-                for item in group
-            ]
-            cons = consensus_prediction(cons_input)
-            if not cons:
-                continue
-
-            group_species = {
-                identity_for(item).key
-                for item in group
-                if item.get("prediction")
-            }
-            group_reviewable = len(group_species) == 1
-            cons["prediction"] = display_by_key[cons["prediction"]]
-            individual_json = (
-                json.dumps({display_by_key[key]: count for key, count in cons["individual_predictions"].items()})
-                if group_reviewable
-                else None
+            stored, matched = _store_burst_group(
+                db, group, gid, model_name, labels_fingerprint, tax,
+                identity_for, comparison_name, consensus_prediction,
+                read_keywords,
             )
-            stored_in_group = 0
-            for item in group:
-                photo = item["photo"]
-                category = "new"
-                auto_accept = False
-                if tax:
-                    xmp_path = os.path.join(
-                        item["folder_path"],
-                        os.path.splitext(photo["filename"])[0] + ".xmp",
-                    )
-                    existing = read_keywords(xmp_path)
-                    category = _categorize_detection_prediction(
-                        comparison_name(item), existing, tax,
-                    )
-                    auto_accept = _can_auto_accept_detection_prediction(
-                        comparison_name(item), category, existing, tax,
-                    )
-
-                if auto_accept:
-                    _store_match_prediction(
-                        db, item, model_name, labels_fingerprint, tax,
-                        store_alternatives=False,
-                    )
-                    skipped_match += 1
-                    continue
-
-                _store_pending_detection_prediction(
-                    db,
-                    item,
-                    model_name,
-                    labels_fingerprint,
-                    category,
-                    tax,
-                    group_id=gid if group_reviewable else None,
-                    vote_count=cons["vote_count"] if group_reviewable else None,
-                    total_votes=cons["total_votes"] if group_reviewable else None,
-                    individual=individual_json,
-                )
-                stored_in_group += 1
-
-            predictions_stored += stored_in_group
+        predictions_stored += stored
+        skipped_match += matched
 
     singles = len([g for g in groups if len(g) == 1])
     grouped_photos = sum(len(g) for g in groups if len(g) > 1)
@@ -3451,26 +3657,7 @@ def _store_grouped_predictions(
         skipped_match,
     )
 
-    # A flush only reserves a run. It becomes reusable once its predictions
-    # were actually stored. Cancellation before this point leaves an explicit
-    # cache miss instead of an empty 'legacy' cache hit.
-    for item in raw_results:
-        did = item.get("detection_id")
-        if did is not None and not item.get("_existing"):
-            db.conn.execute(
-                "UPDATE classifier_runs SET runtime_fingerprint='legacy' "
-                "WHERE detection_id=? AND classifier_model=? AND labels_fingerprint=? "
-                "AND runtime_fingerprint='incomplete' AND (EXISTS ("
-                "SELECT 1 FROM predictions p WHERE p.detection_id=classifier_runs.detection_id "
-                "AND p.classifier_model=classifier_runs.classifier_model "
-                "AND p.labels_fingerprint=classifier_runs.labels_fingerprint) OR EXISTS ("
-                "SELECT 1 FROM classifier_match_scores cms "
-                "WHERE cms.detection_id=classifier_runs.detection_id "
-                "AND cms.classifier_model=classifier_runs.classifier_model "
-                "AND cms.labels_fingerprint=classifier_runs.labels_fingerprint))",
-                (did, model_name, labels_fingerprint),
-            )
-    db.conn.commit()
+    _release_stored_classifier_runs(db, raw_results, model_name, labels_fingerprint)
     return {
         "predictions_stored": predictions_stored,
         "burst_groups": group_count,
@@ -3538,37 +3725,12 @@ def _finalize_cached_only(
 
     # Name the label space on the classify step BEFORE the reconcile pass.
     # Without this, a cached-only run finishes with no label_source line and
-    # its history row looks the same as a pre-feature run. ``class_count``
-    # is unavailable here — no classifier is constructed — so the two
-    # count-dependent branches (Tree of Life exact count, timm exact count)
-    # degrade to their generic wording; that is acceptable because the
-    # regional-list branch carries its count in ``labels``.
-    label_source_text = None
-    if peek_succeeded:
-        peek_model_type = (peek_model or {}).get("model_type", "bioclip")
-        label_source_text = describe_label_source(
-            params, thread_db,
-            labels=peek_labels,
-            use_tol=peek_use_tol,
-            model_type=peek_model_type,
-            label_metas=peek_label_metas,
-        )
-    else:
-        # ``_load_labels`` raised (e.g. an imported cache on a fresh install
-        # whose selected labels or Tree-of-Life artifacts aren't present),
-        # so we don't have a live label space to name. The identity gate in
-        # ``_all_photos_cache_satisfied`` guarantees a single (model, fp)
-        # pair covers every reused row — recover its provenance from
-        # ``labels_fingerprints`` so the classify history row still says
-        # which list produced the predictions instead of being unlabeled,
-        # which was exactly the pre-feature state.
-        label_source_text = _describe_cached_label_source(
-            thread_db,
-            [p["id"] for p in photos],
-            classifier_model=classifier_model,
-            labels_fingerprint=labels_fingerprint,
-            detector_confidence=detector_confidence,
-        )
+    # its history row looks the same as a pre-feature run.
+    label_source_text = _cached_only_label_source(
+        thread_db, params, photos, classifier_model, labels_fingerprint,
+        peek_model, peek_labels, peek_use_tol, peek_label_metas,
+        peek_succeeded, detector_confidence,
+    )
     if label_source_text:
         runner.update_step(
             job["id"], "classify", label_source=label_source_text,
@@ -3576,6 +3738,118 @@ def _finalize_cached_only(
 
     folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
     photo_ids = [p["id"] for p in photos]
+    detection_map = _cached_only_detection_map(thread_db, photo_ids)
+
+    runner.update_step(job["id"], "classify", status="running")
+
+    raw_results, resolved_model, resolved_fingerprint = (
+        _cached_only_raw_results(
+            thread_db, photos, folders, detection_map,
+            classifier_model, labels_fingerprint,
+        )
+    )
+    reused_predictions = len(raw_results)
+    runner.update_step(
+        job["id"], "classify",
+        status="completed",
+        summary=(
+            f"{reused_predictions} cached"
+            if reused_predictions else "No cached predictions"
+        ),
+    )
+
+    group_result = _finalize_cached_results(
+        thread_db, runner, job, params, tax, total,
+        raw_results, resolved_model, resolved_fingerprint,
+    )
+    return {
+        "total": total,
+        "predictions_stored": group_result["predictions_stored"],
+        "burst_groups": group_result["burst_groups"],
+        "already_classified": reused_predictions,
+        "already_labeled": group_result["already_labeled"],
+        "detected": 0,
+        "failed": 0,
+    }
+
+
+def _finalize_cached_results(
+    thread_db, runner, job, params, tax, total,
+    raw_results, resolved_model, resolved_fingerprint,
+):
+    """Run the finalize step over reused results; returns the group result."""
+    runner.update_step(job["id"], "finalize", status="running")
+    runner.push_event(
+        job["id"], "progress",
+        {
+            "current": total,
+            "total": total,
+            "current_file": "Grouping bursts and computing consensus...",
+            "rate": 0,
+            "phase": "Finalizing results",
+        },
+    )
+    group_result = _store_grouped_predictions(
+        raw_results=raw_results,
+        job_id=job["id"],
+        model_name=resolved_model,
+        grouping_window=params.grouping_window,
+        similarity_threshold=params.similarity_threshold,
+        tax=tax,
+        db=thread_db,
+        labels_fingerprint=resolved_fingerprint or "legacy",
+    )
+    runner.update_step(
+        job["id"], "finalize",
+        status="completed", summary=_finalize_summary(group_result),
+    )
+    return group_result
+
+
+def _cached_only_label_source(
+    thread_db, params, photos, classifier_model, labels_fingerprint,
+    peek_model, peek_labels, peek_use_tol, peek_label_metas,
+    peek_succeeded, detector_confidence,
+):
+    """The ``label_source`` line for a cached-only classify step, or None.
+
+    ``class_count`` is unavailable here — no classifier is constructed — so
+    the two count-dependent branches (Tree of Life exact count, timm exact
+    count) degrade to their generic wording; that is acceptable because the
+    regional-list branch carries its count in ``labels``.
+    """
+    if peek_succeeded:
+        peek_model_type = (peek_model or {}).get("model_type", "bioclip")
+        return describe_label_source(
+            params, thread_db,
+            labels=peek_labels,
+            use_tol=peek_use_tol,
+            model_type=peek_model_type,
+            label_metas=peek_label_metas,
+        )
+    # ``_load_labels`` raised (e.g. an imported cache on a fresh install
+    # whose selected labels or Tree-of-Life artifacts aren't present),
+    # so we don't have a live label space to name. The identity gate in
+    # ``_all_photos_cache_satisfied`` guarantees a single (model, fp)
+    # pair covers every reused row — recover its provenance from
+    # ``labels_fingerprints`` so the classify history row still says
+    # which list produced the predictions instead of being unlabeled,
+    # which was exactly the pre-feature state.
+    return _describe_cached_label_source(
+        thread_db,
+        [p["id"] for p in photos],
+        classifier_model=classifier_model,
+        labels_fingerprint=labels_fingerprint,
+        detector_confidence=detector_confidence,
+    )
+
+
+def _cached_only_detection_map(thread_db, photo_ids):
+    """The classifiable detections a cached-only finalize reconciles.
+
+    Returns ``{photo_id: [detection, ...]}``: animal detections at the
+    workspace threshold plus every synthetic full-image anchor.
+    """
     # Apply the workspace-effective detector_confidence so imported bundles
     # from a machine with a lower threshold don't surface subjects the
     # destination workspace would hide.  The normal (non-cache) classify path
@@ -3608,13 +3882,21 @@ def _finalize_cached_only(
             detection for detection in detections
             if detection["id"] not in existing_ids
         )
+    return detection_map
 
-    runner.update_step(job["id"], "classify", status="running")
 
+def _cached_only_raw_results(
+    thread_db, photos, folders, detection_map,
+    classifier_model, labels_fingerprint,
+):
+    """Rebuild raw classifier results from each detection's cached top-1.
+
+    Returns ``(raw_results, resolved_model, resolved_fingerprint)``; one
+    raw result per reused prediction.
+    """
     raw_results = []
     resolved_model = classifier_model
     resolved_fingerprint = labels_fingerprint
-    reused_predictions = 0
     for photo in photos:
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
@@ -3652,57 +3934,17 @@ def _finalize_cached_only(
                 "alternatives": [],
                 "_existing": True,
             })
-            reused_predictions += 1
-    runner.update_step(
-        job["id"], "classify",
-        status="completed",
-        summary=(
-            f"{reused_predictions} cached"
-            if reused_predictions else "No cached predictions"
-        ),
-    )
+    return raw_results, resolved_model, resolved_fingerprint
 
-    runner.update_step(job["id"], "finalize", status="running")
-    runner.push_event(
-        job["id"], "progress",
-        {
-            "current": total,
-            "total": total,
-            "current_file": "Grouping bursts and computing consensus...",
-            "rate": 0,
-            "phase": "Finalizing results",
-        },
-    )
-    group_result = _store_grouped_predictions(
-        raw_results=raw_results,
-        job_id=job["id"],
-        model_name=resolved_model,
-        grouping_window=params.grouping_window,
-        similarity_threshold=params.similarity_threshold,
-        tax=tax,
-        db=thread_db,
-        labels_fingerprint=resolved_fingerprint or "legacy",
-    )
+
+def _finalize_summary(group_result):
+    """The finalize step's summary line for a grouped-store result."""
     finalize_parts = [f"{group_result['predictions_stored']} predictions"]
     if group_result["burst_groups"]:
         finalize_parts.append(f"{group_result['burst_groups']} burst groups")
     if group_result["already_labeled"]:
-        finalize_parts.append(
-            f"{group_result['already_labeled']} already labeled"
-        )
-    runner.update_step(
-        job["id"], "finalize",
-        status="completed", summary=", ".join(finalize_parts),
-    )
-    return {
-        "total": total,
-        "predictions_stored": group_result["predictions_stored"],
-        "burst_groups": group_result["burst_groups"],
-        "already_classified": reused_predictions,
-        "already_labeled": group_result["already_labeled"],
-        "detected": 0,
-        "failed": 0,
-    }
+        finalize_parts.append(f"{group_result['already_labeled']} already labeled")
+    return ", ".join(finalize_parts)
 
 
 def run_classify_job(
@@ -3755,93 +3997,102 @@ def run_classify_job(
             {"id": "finalize", "label": "Finalize results"},
         ])
 
-        classify.load_photos()
-
-        # If the subject-skip filter (or an empty source collection) left
-        # nothing to classify, short-circuit before model resolution. Model
-        # resolution can fail with RuntimeError when no model is downloaded,
-        # which would surface as a hard error for a job that has no work.
-        if classify.total == 0:
-            return classify.finish_without_photos()
-
-        classify.apply_local_computation_cache()
-
-        # Cancellation gate before the expensive phases (model resolution,
-        # weight download, inference). The job loops below also check
-        # per-photo; _run_job flips the terminal status to 'cancelled'.
-        if runner.is_cancelled(job["id"]):
-            log.info("Classify job cancelled before model resolution")
-            return classify.cancelled_before_start(
-                ["load_taxonomy", "load_model", "detect", "classify",
-                 "finalize"],
-            )
-
-        # Model resolution is otherwise unavoidable — get_active_model()
-        # raises "No model available" on a fresh install with no downloads.
-        # But when materialization has already covered every photo, the
-        # classifier is not going to add any work: skip resolution and
-        # finish so an all-cache-hit run on a fresh machine still succeeds.
-        #
-        # Opportunistically resolve the requested classifier name and its
-        # labels_fingerprint before checking so a cache built with a
-        # DIFFERENT model or label set does not silently pass as
-        # "satisfied".  When we can't resolve either (no downloaded model
-        # AND no labels file), we still fall through to the permissive
-        # any-run check — the whole point of the short-circuit is the
-        # fresh-install case where nothing else is available.
-        peek = classify.peek_cache_constraints()
-        if not params.reclassify and classify.cache_satisfied(peek):
-            log.info(
-                "Classify job: every photo has cached classifier runs — "
-                "skipping model resolution and detection",
-            )
-            # Route reused rows through the ordinary finalize path so
-            # imported predictions get auto-match reconciliation against
-            # destination XMP/taxonomy and burst grouping metadata, which
-            # the earlier early-return silently skipped.
-            return classify.finalize_cached_only(peek)
-
-        classify.resolve_model()
-        classify.load_taxonomy_and_labels()
-
-        cancelled = classify.load_classifier()
-        if cancelled is not None:
-            return cancelled
-        classify.record_loaded_classifier()
-
-        # Classifier init succeeded — now it's safe to start the
-        # reclassify purge for any failure before this point would leave
-        # the cache intact (see ``_ClassifyJobRun.load_classifier``).
-        #
-        # Nothing is cleared upfront: ``_detect_subjects`` replaces each
-        # photo's detections as its new result lands, and
-        # ``_classify_photos`` clears a photo's predictions for this model
-        # only when it reaches that photo. A cancel therefore leaves every
-        # photo it did not reach with its old state intact.
-        #
-        # This pre-detection cancel gate still applies: a cancel that
-        # landed during taxonomy/label/model init would otherwise advance
-        # into the detection loop and start rewriting rows before the
-        # user's cancel takes effect.
-        if runner.is_cancelled(job["id"]):
-            log.info("Classify job cancelled before reclassify purge")
-            return classify.cancelled_before_start(
-                ["detect", "classify", "finalize"],
-            )
-
-        cancelled = classify.detect_subjects()
-        if cancelled is not None:
-            return cancelled
-
-        if not params.reclassify:
-            classify.reapply_local_computation_cache()
-
-        classify.classify_photos()
-        return classify.store_predictions()
+        return _run_classify_phases(classify, job, runner, params)
     finally:
         if classify.classifier_cache_handle is not None:
             classify.classifier_cache_handle.release()
         thread_db.close()
+
+
+def _run_classify_phases(classify, job, runner, params):
+    """Run ``run_classify_job``'s phases in order and return its result.
+
+    Each early return ends the job there: no photos, a cancel before an
+    expensive phase, or a collection the cache already covers.
+    """
+    classify.load_photos()
+
+    # If the subject-skip filter (or an empty source collection) left
+    # nothing to classify, short-circuit before model resolution. Model
+    # resolution can fail with RuntimeError when no model is downloaded,
+    # which would surface as a hard error for a job that has no work.
+    if classify.total == 0:
+        return classify.finish_without_photos()
+
+    classify.apply_local_computation_cache()
+
+    # Cancellation gate before the expensive phases (model resolution,
+    # weight download, inference). The job loops below also check
+    # per-photo; _run_job flips the terminal status to 'cancelled'.
+    if runner.is_cancelled(job["id"]):
+        log.info("Classify job cancelled before model resolution")
+        return classify.cancelled_before_start(
+            ["load_taxonomy", "load_model", "detect", "classify",
+             "finalize"],
+        )
+
+    # Model resolution is otherwise unavoidable — get_active_model()
+    # raises "No model available" on a fresh install with no downloads.
+    # But when materialization has already covered every photo, the
+    # classifier is not going to add any work: skip resolution and
+    # finish so an all-cache-hit run on a fresh machine still succeeds.
+    #
+    # Opportunistically resolve the requested classifier name and its
+    # labels_fingerprint before checking so a cache built with a
+    # DIFFERENT model or label set does not silently pass as
+    # "satisfied".  When we can't resolve either (no downloaded model
+    # AND no labels file), we still fall through to the permissive
+    # any-run check — the whole point of the short-circuit is the
+    # fresh-install case where nothing else is available.
+    peek = classify.peek_cache_constraints()
+    if not params.reclassify and classify.cache_satisfied(peek):
+        log.info(
+            "Classify job: every photo has cached classifier runs — "
+            "skipping model resolution and detection",
+        )
+        # Route reused rows through the ordinary finalize path so
+        # imported predictions get auto-match reconciliation against
+        # destination XMP/taxonomy and burst grouping metadata, which
+        # the earlier early-return silently skipped.
+        return classify.finalize_cached_only(peek)
+
+    classify.resolve_model()
+    classify.load_taxonomy_and_labels()
+
+    cancelled = classify.load_classifier()
+    if cancelled is not None:
+        return cancelled
+    classify.record_loaded_classifier()
+
+    # Classifier init succeeded — now it's safe to start the
+    # reclassify purge for any failure before this point would leave
+    # the cache intact (see ``_ClassifyJobRun.load_classifier``).
+    #
+    # Nothing is cleared upfront: ``_detect_subjects`` replaces each
+    # photo's detections as its new result lands, and
+    # ``_classify_photos`` clears a photo's predictions for this model
+    # only when it reaches that photo. A cancel therefore leaves every
+    # photo it did not reach with its old state intact.
+    #
+    # This pre-detection cancel gate still applies: a cancel that
+    # landed during taxonomy/label/model init would otherwise advance
+    # into the detection loop and start rewriting rows before the
+    # user's cancel takes effect.
+    if runner.is_cancelled(job["id"]):
+        log.info("Classify job cancelled before reclassify purge")
+        return classify.cancelled_before_start(
+            ["detect", "classify", "finalize"],
+        )
+
+    cancelled = classify.detect_subjects()
+    if cancelled is not None:
+        return cancelled
+
+    if not params.reclassify:
+        classify.reapply_local_computation_cache()
+
+    classify.classify_photos()
+    return classify.store_predictions()
 
 
 def _empty_classify_result(total, detected=0):
@@ -4427,40 +4678,12 @@ class _ClassifyJobRun:
         )
         return self.cancelled_before_start(["detect", "classify", "finalize"])
 
-    def load_classifier(self):
-        """Phase 4: Initialize classifier.
-
-        Returns the job result when a cancel lands before the classifier
-        is ready, else ``None``.
-
-        The reclassify purge (destructive clears of detections +
-        predictions + cascaded review state) is deferred until AFTER the
-        classifier initializes. Running it before model load means any
-        weight-load failure leaves affected photos with no predictions AND
-        no detections AND no replacement results — shared-folder
-        workspaces lose their cached state too. Deferring preserves the
-        cache on setup failure; users see a clean error and their
-        workspace is unchanged.
-        """
-        job, runner = self.job, self.runner
+    def _classifier_factory(self, _factory_cancel_check):
+        """The ``factory`` ``acquire_cached_classifier`` builds on a cache miss."""
         model_type, model_str = self.model_type, self.model_str
         weights_path, labels, use_tol = self.weights_path, self.labels, self.use_tol
         tax, thread_db = self.tax, self.db
-        effective_name = self.effective_name
-        runner.update_step(job["id"], "load_model", status="running")
         if model_type == "timm":
-            phase_msg = f"Loading {effective_name} timm model..."
-        elif use_tol:
-            phase_msg = f"Loading {effective_name} Tree of Life classifier..."
-        else:
-            phase_msg = f"Loading {effective_name} model and computing label embeddings..."
-
-        self._progress(0, self.total, phase_msg, "Step 3/5: Loading model")
-
-        _factory_cancel_check = self._factory_cancel_check
-        if model_type == "timm":
-            if runner.is_cancelled(job["id"]):
-                return self._cancel_model_load()
             def _construct_classifier():
                 if _factory_cancel_check():
                     raise ClassificationCancelled("classification cancelled")
@@ -4479,6 +4702,42 @@ class _ClassifyJobRun:
                     cancel_check=_factory_cancel_check,
                     pause_check=self._factory_pause_check,
                 )
+        return _construct_classifier
+
+    def load_classifier(self):
+        """Phase 4: Initialize classifier.
+
+        Returns the job result when a cancel lands before the classifier
+        is ready, else ``None``.
+
+        The reclassify purge (destructive clears of detections +
+        predictions + cascaded review state) is deferred until AFTER the
+        classifier initializes. Running it before model load means any
+        weight-load failure leaves affected photos with no predictions AND
+        no detections AND no replacement results — shared-folder
+        workspaces lose their cached state too. Deferring preserves the
+        cache on setup failure; users see a clean error and their
+        workspace is unchanged.
+        """
+        job, runner = self.job, self.runner
+        model_type, model_str = self.model_type, self.model_str
+        weights_path, labels, use_tol = self.weights_path, self.labels, self.use_tol
+        tax = self.tax
+        effective_name = self.effective_name
+        runner.update_step(job["id"], "load_model", status="running")
+        if model_type == "timm":
+            phase_msg = f"Loading {effective_name} timm model..."
+        elif use_tol:
+            phase_msg = f"Loading {effective_name} Tree of Life classifier..."
+        else:
+            phase_msg = f"Loading {effective_name} model and computing label embeddings..."
+
+        self._progress(0, self.total, phase_msg, "Step 3/5: Loading model")
+
+        _factory_cancel_check = self._factory_cancel_check
+        if model_type == "timm" and runner.is_cancelled(job["id"]):
+            return self._cancel_model_load()
+        _construct_classifier = self._classifier_factory(_factory_cancel_check)
 
         try:
             from classifier import ClassifierLoadPaused
@@ -4963,14 +5222,9 @@ class _ClassifyJobRun:
             taxonomy_identity=job.get("_taxonomy_identity", "no-tax"),
             store=_publish_store,
         )
-        finalize_parts = [f"{group_result['predictions_stored']} predictions"]
-        if group_result["burst_groups"]:
-            finalize_parts.append(f"{group_result['burst_groups']} burst groups")
-        if group_result["already_labeled"]:
-            finalize_parts.append(f"{group_result['already_labeled']} already labeled")
         runner.update_step(
             job["id"], "finalize", status="completed",
-            summary=", ".join(finalize_parts),
+            summary=_finalize_summary(group_result),
         )
 
         log.info(
