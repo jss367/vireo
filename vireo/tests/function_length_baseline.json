@@ -151,7 +151,6 @@
   "web/job_launchers.py:create_job_launchers_blueprint.api_job_scan": 139,
   "web/jobs.py:create_jobs_blueprint.api_job_regroup": 161,
   "web/jobs.py:create_jobs_blueprint.api_job_regroup.work": 141,
-  "web/keywords.py:create_keywords_blueprint.api_update_keyword": 200,
   "web/life_list.py:_build_explorer_payload": 144,
   "web/local_folder.py:create_local_folder_blueprint.stage_local_folders": 126,
   "web/local_folder.py:create_local_folder_blueprint.sync_local_folders": 215,
