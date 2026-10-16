@@ -28,15 +28,12 @@
 // their own. A function's key is "<path>:<qualname>", where qualname nests
 // the names of the enclosing functions with dots. An anonymous function is
 // named by what it is assigned to or passed to: `const render = function`
-// and `obj.render = () =>` are `render`; a callback is
-// `<callee>(<first string argument>)`, so `addEventListener('click', ...)`
-// is `addEventListener('click')`. When two functions in the same scope would
-// share a key, the second and later ones get an ordinal suffix (`render#2`),
-// in source order, so each keeps its own length; literal `%`, `#` and `.` in a
-// source name are percent-escaped before adding ordinals, so an embedded `.`
-// (a callback whose callee is a member chain like `document.addEventListener`)
-// cannot collide with the structural `.` that joins stack elements. Callee member
-// components are escaped before joining, retaining computed literal boundaries.
+// and `obj.render = () =>` are `render`. Synthesized names use reserved
+// @call, @new, @returned and @anonymous tags with structured escaped payloads,
+// preserving expression/member and argument boundaries. Source names escape
+// %, #, . and @, so they cannot imitate tags, nested qualification or ordinals.
+// When functions in the same scope share a key, later ones receive #2, #3, ...
+// in source order; the suffix lives outside the encoded source context.
 // A short sibling inserted before a long function may shift its ordinal. The
 // writer accepts this only with an identical tracked HEAD implementation; without
 // that proof, surviving keys keep their budgets and the ambiguous shift fails.
@@ -89,45 +86,51 @@ function keyName(node) {
 }
 
 function escapeName(name) {
-  return name.replace(/[%#.]/g, char => char === '%' ? '%25' : char === '#' ? '%23' : '%2E');
+  return name.replace(/[%#.@]/g, char => ({'%': '%25', '#': '%23', '.': '%2E', '@': '%40'})[char]);
 }
 
-// Reserve source-component boundaries before joining member chains. The walk's
-// final escape then distinguishes a literal dot (%252E) from a member dot (%2E).
+// Tagged arrays retain expression/member boundaries; source positions and raw
+// quoting are excluded so inserting siblings or changing quote style is stable.
+function syntaxIdentity(node) {
+  return JSON.stringify(node, (key, value) => {
+    if (['start', 'end', 'loc', 'raw'].includes(key)) return undefined;
+    return typeof value === 'bigint' ? {bigint: String(value)} : value;
+  });
+}
+
 function calleeName(callee) {
-  if (callee.type === 'Identifier') return escapeName(callee.name);
+  if (callee.type === 'Identifier') return ['identifier', callee.name];
   if (callee.type === 'MemberExpression') {
-    const object = calleeName(callee.object);
-    const rawProperty = keyName(callee.property);
-    const property = rawProperty === null ? null : escapeName(rawProperty);
-    return object && property ? `${object}.${property}` : property;
+    const property = callee.computed ? ['computed', syntaxIdentity(callee.property)]
+      : ['property', callee.property.type, callee.property.name];
+    return ['member', calleeName(callee.object), property, Boolean(callee.optional)];
   }
-  return null;
+  return ['expression', syntaxIdentity(callee)];
 }
 
 // The name an anonymous function gets from its syntactic context.
 function contextName(node, parent) {
   if (node.id) return node.id.name;
-  if (!parent) return '<anonymous>';
+  if (!parent) return {kind: 'anonymous', value: null};
   switch (parent.type) {
     case 'VariableDeclarator':
-      return parent.id.type === 'Identifier' ? parent.id.name : '<anonymous>';
+      return parent.id.type === 'Identifier' ? parent.id.name : {kind: 'anonymous', value: syntaxIdentity(parent.id)};
     case 'AssignmentExpression':
-      return keyName(parent.left) || '<anonymous>';
+      return keyName(parent.left) ?? {kind: 'anonymous', value: syntaxIdentity(parent.left)};
     case 'Property':
     case 'PropertyDefinition':
     case 'MethodDefinition':
-      return keyName(parent.key) || '<anonymous>';
+      return keyName(parent.key) ?? {kind: 'anonymous', value: syntaxIdentity(parent.key)};
     case 'CallExpression':
     case 'NewExpression': {
-      const callee = calleeName(parent.callee) || '<call>';
+      const callee = calleeName(parent.callee);
       const literal = parent.arguments.find(arg => arg.type === 'Literal' && typeof arg.value === 'string');
-      return literal ? `${callee}('${literal.value}')` : `${callee}()`;
+      return {kind: parent.type === 'NewExpression' ? 'new' : 'call', value: [callee, literal ? literal.value : null]};
     }
     case 'ReturnStatement':
-      return '<returned>';
+      return {kind: 'returned', value: null};
     default:
-      return '<anonymous>';
+      return {kind: 'anonymous', value: null};
   }
 }
 
@@ -140,7 +143,9 @@ function walk(node, parent, stack, rel, lengths, seen, identities, source) {
   let pushed = false;
   if (FUNCTION_TYPES.has(node.type)) {
     if (!isIife(node, parent)) {
-      const name = escapeName(contextName(node, parent));
+      const context = contextName(node, parent);
+      const name = typeof context === 'string' ? escapeName(context)
+        : `@${context.kind}:${escapeName(JSON.stringify(context.value))}`;
       const base = [...stack, name].join('.');
       const ordinal = (seen.get(base) || 0) + 1;
       seen.set(base, ordinal);
@@ -198,8 +203,8 @@ function sortedObject(object) {
 
 // Which baseline entries each current over-cap function answers for. Exact
 // matches first; then, within one file and name, a set of same-named
-// functions whose lengths are the previous lengths in another order is a
-// reordering (ordinals follow source order), not growth; then a key that is
+// functions whose lengths are the previous lengths in another order may be a
+// reordering. The writer requires complete tracked identity proof for it; then a key that is
 // new to the baseline may continue a stale entry with the same name and
 // length from another file (a move) — only if that stale key is actually
 // gone from the current tree, so a surviving same-key function cannot lend
@@ -211,7 +216,7 @@ function sortedObject(object) {
 // baseline and whose group is not a pure reordering is compared to its own
 // entry, so a deleted sibling's budget can never transfer to a growing
 // function. Each old entry is consumed at most once.
-function reconcileBaseline(current, previous, allowNew = [], bootstrapping = false, surviving = null, verifiedMoves = new Map()) {
+function reconcileBaseline(current, previous, allowNew = [], bootstrapping = false, surviving = null, verifiedMoves = new Map(), requireIdentity = false) {
   const remaining = new Set(Object.keys(previous));
   const matched = new Set();
   const moves = [];
@@ -220,8 +225,15 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
   const groupOf = key => `${key.slice(0, key.indexOf(':'))}:${nameOf(key)}`;
   const sortedLengths = (object, list) => list.map(key => object[key]).sort((a, b) => a - b);
 
+  // Complete tracked groups take precedence over coincidentally equal ordinal
+  // keys, which may now belong to a different sibling of the same length.
+  for (const [key, old] of verifiedMoves) {
+    remaining.delete(old);
+    matched.add(key);
+    if (key !== old) moves.push([old, key]);
+  }
   for (const key of keys) {
-    if (current[key] === previous[key]) {
+    if (!matched.has(key) && remaining.has(key) && current[key] === previous[key]) {
       remaining.delete(key);
       matched.add(key);
     }
@@ -232,7 +244,7 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
     if (!groups.has(group)) groups.set(group, []);
     groups.get(group).push(key);
   }
-  for (const [group, currentKeys] of groups) {
+  for (const [group, currentKeys] of requireIdentity ? [] : groups) {
     const oldKeys = [...remaining].filter(old => groupOf(old) === group);
     const reordered = oldKeys.length === currentKeys.length
       && sortedLengths(previous, oldKeys).join() === sortedLengths(current, currentKeys).join();
@@ -245,7 +257,7 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
     }
   }
   for (const key of keys.filter(key => !matched.has(key) && !(key in previous))) {
-    const from = [...remaining].find(old => (!survivingKeys.has(old) || verifiedMoves.get(key)?.has(old))
+    const from = [...remaining].find(old => !survivingKeys.has(old)
       && nameOf(old) === nameOf(key) && previous[old] === current[key]);
     if (from !== undefined) {
       remaining.delete(from);
@@ -267,18 +279,25 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
 }
 
 // Lengths cannot identify an inserted short sibling versus a shrunk survivor.
-// Only override that ambiguity for an unchanged implementation proved against
-// this checkout's tracked HEAD. Missing Git/source/identity evidence fails closed.
-function verifiedOrdinalMoves(current, previous, lengths, identities) {
+// Only override that ambiguity for a complete unchanged sibling group proved
+// against this checkout's tracked HEAD. Missing Git/source/identity evidence fails closed.
+function verifiedOrdinalMoves(current, previous, identities) {
   const verified = new Map();
   const tracked = new Map();
-  const candidates = Object.keys(current).filter(key => !(key in previous) && identities.has(key));
-  const sameFile = (a, b) => a.slice(0, a.indexOf(':')) === b.slice(0, b.indexOf(':'));
+  const groupOf = key => `${key.slice(0, key.indexOf(':'))}:${nameOf(key)}`;
+  const groups = new Map();
+  for (const key of Object.keys(current)) {
+    const group = groupOf(key);
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(key);
+  }
   let trackedHead = null;
-  for (const key of candidates) {
-    const oldKeys = Object.keys(previous).filter(old => lengths.has(old) && lengths.get(old) <= MAX_FUNCTION_LINES
-      && previous[old] === current[key] && sameFile(old, key) && nameOf(old) === nameOf(key));
-    if (!oldKeys.length) continue;
+  for (const [group, keys] of groups) {
+    if (!keys.some(key => current[key] !== previous[key])) continue;
+    const oldKeys = Object.keys(previous).filter(old => groupOf(old) === group);
+    // Prove the entire old long-function multiset survives, without extra long
+    // functions. A partial proof must never donate a deleted sibling's budget.
+    if (!oldKeys.length || oldKeys.length !== keys.length || !keys.every(key => identities.has(key))) continue;
     if (trackedHead === null) {
       const repo = spawnSync('git', ['-C', ROOT, 'rev-parse', '--show-toplevel'], {encoding: 'utf8'});
       if (repo.status !== 0 || fs.realpathSync(repo.stdout.trim()) !== fs.realpathSync(ROOT)) return verified;
@@ -286,7 +305,7 @@ function verifiedOrdinalMoves(current, previous, lengths, identities) {
       if (head.status !== 0 || !/^[0-9a-f]{40,64}$/.test(head.stdout.trim())) return verified;
       trackedHead = head.stdout.trim();
     }
-    const file = key.slice(0, key.indexOf(':'));
+    const file = keys[0].slice(0, keys[0].indexOf(':'));
     if (!tracked.has(file)) {
       const result = spawnSync('git', ['-C', ROOT, 'cat-file', 'blob', `${trackedHead}:${file}`], {encoding: 'utf8', maxBuffer: 8 * 1024 * 1024});
       const priorIdentities = new Map();
@@ -297,12 +316,16 @@ function verifiedOrdinalMoves(current, previous, lengths, identities) {
       tracked.set(file, {priorLengths, priorIdentities});
     }
     const {priorLengths, priorIdentities} = tracked.get(file);
-    for (const old of oldKeys) {
-      if (priorLengths.get(old) === previous[old] && priorIdentities.get(old) === identities.get(key)) {
-        if (!verified.has(key)) verified.set(key, new Set());
-        verified.get(key).add(old);
-      }
+    const available = new Set(oldKeys);
+    const proof = new Map();
+    for (const key of keys) {
+      const old = [...available].find(old => previous[old] === current[key]
+        && priorLengths.get(old) === previous[old] && priorIdentities.get(old) === identities.get(key));
+      if (old === undefined) break;
+      available.delete(old);
+      proof.set(key, old);
     }
+    if (proof.size === keys.length) for (const [key, old] of proof) verified.set(key, old);
   }
   return verified;
 }
@@ -314,8 +337,8 @@ export function writeBaseline(allowNew = [], {lengths = null, baselinePath = BAS
   const bootstrapping = !fs.existsSync(baselinePath);
   const previous = bootstrapping ? {} : JSON.parse(fs.readFileSync(baselinePath, 'utf8'));
   const surviving = new Set(effectiveLengths.keys());
-  const verifiedMoves = verifiedOrdinalMoves(current, previous, effectiveLengths, identities);
-  const {grown, added, moves} = reconcileBaseline(current, previous, allowNew, bootstrapping, surviving, verifiedMoves);
+  const verifiedMoves = verifiedOrdinalMoves(current, previous, identities);
+  const {grown, added, moves} = reconcileBaseline(current, previous, allowNew, bootstrapping, surviving, verifiedMoves, true);
   if (grown.length) {
     console.log('Refusing to raise baseline entries; shorten these functions instead:');
     for (const key of grown) console.log(`  ${key}: ${previous[key]} -> ${current[key]} lines`);
@@ -375,11 +398,24 @@ if (argv[0] === '--write-baseline') {
       obj['outer#2.inner'](${callback(107)});
     `);
     assert.equal(lengths.size, 4);
-    assert.equal(lengths.get('fixture.js:obj%2Eouter%252Einner()'), 105);
-    assert.equal(lengths.get('fixture.js:obj%2Eouter%2Einner()'), 110);
-    assert.equal(lengths.get('fixture.js:obj%2Eouter%25252Einner()'), 106);
-    assert.equal(lengths.get('fixture.js:obj%2Eouter%25232%252Einner()'), 107);
-    assert.notEqual(nameOf('fixture.js:obj%2Eouter%252Einner()'), nameOf('fixture.js:obj%2Eouter%2Einner()'));
+    assert.deepEqual([...lengths.values()].sort((a, b) => a - b), [105, 106, 107, 110]);
+    assert.equal(new Set([...lengths.keys()].map(nameOf)).size, 4);
+    assert.ok([...lengths.keys()].every(key => key.startsWith('fixture.js:@call:')));
+  });
+
+  test('literal names cannot imitate tagged structural contexts', () => {
+    const callback = lines => `function () {true;${'\n'.repeat(lines - 1)}}`;
+    for (const form of [fn => `obj.foo(${fn});`, fn => `new Widget(${fn});`, fn => `[${fn}];`]) {
+      const [key] = sourceLengths(form(callback(110))).keys();
+      const forged = key.slice(key.indexOf(':') + 1);
+      const source = `const x = {${JSON.stringify(forged)}() {true;${'\n'.repeat(104)}}};` + form(callback(110));
+      assert.equal(new Set([...sourceLengths(source).keys()].map(nameOf)).size, 2);
+    }
+    const returned = `function outer() {
+      const x = {'@returned:null'() {true;${'\n'.repeat(104)}}};
+      return ${callback(110)};
+    }`;
+    assert.equal(new Set([...sourceLengths(returned).keys()].map(nameOf)).size, 3);
   });
 
   test('embedded dots in source names cannot collide with structural qualification', () => {
@@ -560,6 +596,27 @@ if (argv[0] === '--write-baseline') {
       assert.equal(grown.status, 1, `${grown.error || ''}\n${grown.stdout}\n${grown.stderr}`);
       assert.match(grown.stdout, /Refusing to raise baseline entries/);
       assert.equal(fs.readFileSync(baselinePath, 'utf8'), starting);
+      fs.unlinkSync(path.join(staticDir, 'callbacks.js'));
+      const body = lines => 'true;' + '\n'.repeat(lines - 1);
+      const method = (name, lines) => `const holder = {${JSON.stringify(name)}() {${body(lines)}}};`;
+      const callback = lines => `function () {${body(lines)}}`;
+      const contextCases = [
+        (a, b) => method('obj.foo()', a) + `obj.foo(${callback(b)});`,
+        (a, b) => method("obj.foo('x')", a) + `obj.foo('x', ${callback(b)});`,
+        (a, b) => method('Widget()', a) + `new Widget(${callback(b)});`,
+        (a, b) => method('<anonymous>', a) + `[${callback(b)}];`,
+        (a, b) => `function outer() {${method('<returned>', a)} return ${callback(b)};}`,
+        (a, b) => `Widget(${callback(a)}); new Widget(${callback(b)});`,
+      ];
+      for (const fixture of contextCases) {
+        const original = JSON.stringify(overCap(sourceLengths(fixture(105, 110), 'vireo/static/contexts.js')), null, 2) + '\n';
+        fs.writeFileSync(baselinePath, original);
+        fs.writeFileSync(path.join(staticDir, 'contexts.js'), fixture(110, 105));
+        const result = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+        assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+        assert.match(result.stdout, /Refusing to raise baseline entries/);
+        assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
+      }
     } finally {
       fs.rmSync(tmp, {recursive: true, force: true});
     }
@@ -618,8 +675,45 @@ if (argv[0] === '--write-baseline') {
       assert.equal(crossFile.status, 1, `${crossFile.stdout}\n${crossFile.stderr}`);
       assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
       fs.unlinkSync(path.join(staticDir, 'b.js'));
+      const declaration = (lines, label) => `function render() {/*${label}*/${'\n'.repeat(lines - 1)}}\n`;
+      for (const sizes of [[105, 110], [110, 110]]) {
+        const a = declaration(sizes[0], 'A');
+        const b = declaration(sizes[1], 'B');
+        const groupSource = a + b;
+        const groupBaseline = JSON.stringify(overCap(sourceLengths(groupSource, 'vireo/static/a.js')), null, 2) + '\n';
+        fs.writeFileSync(sourcePath, groupSource);
+        fs.writeFileSync(baselinePath, groupBaseline);
+        git(['add', 'vireo/static/a.js', 'tests/frontend/function_length_baseline.json']);
+        git(['commit', '--quiet', '-m', `Synthetic sibling group ${sizes.join('-')}`]);
+        for (const source of [b + a, short + a + b, short + short + a + b, a + short + b, short + b + a]) {
+          fs.writeFileSync(sourcePath, source);
+          fs.writeFileSync(baselinePath, groupBaseline);
+          const result = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
+          assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+          assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')),
+            overCap(sourceLengths(source, 'vireo/static/a.js')));
+        }
+        const invalid = [short + a.replace('/*A*/', '/*changed*/') + b, short + a + b + b];
+        if (sizes[0] !== sizes[1]) invalid.push(b, declaration(sizes[1], 'A') + declaration(sizes[0], 'B'));
+        for (const source of invalid) {
+          fs.writeFileSync(sourcePath, source);
+          fs.writeFileSync(baselinePath, groupBaseline);
+          const result = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
+          assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+          assert.equal(fs.readFileSync(baselinePath, 'utf8'), groupBaseline);
+        }
+        fs.writeFileSync(sourcePath, short + a + b);
+        fs.writeFileSync(baselinePath, JSON.stringify(overCap(sourceLengths(short + a + b, 'vireo/static/a.js')), null, 2) + '\n');
+        git(['add', 'vireo/static/a.js', 'tests/frontend/function_length_baseline.json']);
+        git(['commit', '--quiet', '-m', 'Synthetic short sibling to remove']);
+        fs.writeFileSync(sourcePath, groupSource);
+        const removed = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
+        assert.equal(removed.status, 0, `${removed.stdout}\n${removed.stderr}`);
+        assert.equal(fs.readFileSync(baselinePath, 'utf8'), groupBaseline);
+      }
       // Without the tracked identity proof, even the harmless case fails closed.
       fs.renameSync(path.join(tmp, '.git'), path.join(tmp, 'saved-git'));
+      fs.writeFileSync(baselinePath, original);
       fs.writeFileSync(sourcePath, short + long);
       const unproved = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
       assert.equal(unproved.status, 1, `${unproved.stdout}\n${unproved.stderr}`);
