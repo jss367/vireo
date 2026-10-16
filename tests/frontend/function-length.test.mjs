@@ -17,7 +17,7 @@
 //
 // The writer refuses to raise an entry or to add one, with two exceptions it
 // can tell apart from growth: a function that moved between files (same
-// name and same length as a stale entry) keeps its entry under the new key,
+// name, length, and tracked body as a stale entry) keeps its entry under the new key,
 // and `--allow-new <path-prefix>` admits the functions of a page whose
 // inline template script was just extracted to vireo/static/<page>/ (they
 // were long before; the ratchet simply could not see inline JS, which Jinja
@@ -206,7 +206,7 @@ function sortedObject(object) {
 // functions whose lengths are the previous lengths in another order may be a
 // reordering. The writer requires complete tracked identity proof for it; then a key that is
 // new to the baseline may continue a stale entry with the same name and
-// length from another file (a move) — only if that stale key is actually
+// length and tracked body from another file (a move), only if the stale key is
 // gone from the current tree, so a surviving same-key function cannot lend
 // its old length to a new over-cap sibling that just happens to match it.
 // `surviving` is every current function key, including those under the cap,
@@ -228,6 +228,9 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
   // Complete tracked groups take precedence over coincidentally equal ordinal
   // keys, which may now belong to a different sibling of the same length.
   for (const [key, old] of verifiedMoves) {
+    if (!remaining.has(old) || previous[old] !== current[key]) continue;
+    const differentFile = old.slice(0, old.indexOf(':')) !== key.slice(0, key.indexOf(':'));
+    if (differentFile && survivingKeys.has(old)) continue;
     remaining.delete(old);
     matched.add(key);
     if (key !== old) moves.push([old, key]);
@@ -256,15 +259,7 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
       moves.push([from, key]);
     }
   }
-  for (const key of keys.filter(key => !matched.has(key) && !(key in previous))) {
-    const from = [...remaining].find(old => !survivingKeys.has(old)
-      && nameOf(old) === nameOf(key) && previous[old] === current[key]);
-    if (from !== undefined) {
-      remaining.delete(from);
-      matched.add(key);
-      moves.push([from, key]);
-    }
-  }
+  // No name/length-only move fallback: every transferred budget needs a proof.
   const grown = [];
   const added = [];
   for (const key of keys.filter(key => !matched.has(key))) {
@@ -278,12 +273,38 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
   return {grown, added, moves};
 }
 
-// Lengths cannot identify an inserted short sibling versus a shrunk survivor.
-// Only override that ambiguity for a complete unchanged sibling group proved
-// against this checkout's tracked HEAD. Missing Git/source/identity evidence fails closed.
-function verifiedOrdinalMoves(current, previous, identities) {
+// Share one pinned HEAD and parse cache across all move proofs. Missing Git,
+// missing files or an unreliable prior parse cannot authorize a transfer.
+function trackedFunctionReader() {
+  let head;
+  const files = new Map();
+  return file => {
+    if (head === undefined) {
+      const repo = spawnSync('git', ['-C', ROOT, 'rev-parse', '--show-toplevel'], {encoding: 'utf8'});
+      const revision = spawnSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], {encoding: 'utf8'});
+      if (repo.status !== 0 || revision.status !== 0 || !/^[0-9a-f]{40,64}$/.test(revision.stdout.trim())
+        || fs.realpathSync(repo.stdout.trim()) !== fs.realpathSync(ROOT)) head = null;
+      else head = revision.stdout.trim();
+    }
+    if (head === null) return null;
+    if (!files.has(file)) {
+      const result = spawnSync('git', ['-C', ROOT, 'cat-file', 'blob', `${head}:${file}`], {encoding: 'utf8', maxBuffer: 8 * 1024 * 1024});
+      const identities = new Map();
+      let lengths = new Map();
+      if (result.status === 0) {
+        try { lengths = sourceLengths(result.stdout, file, identities); } catch { /* No reliable prior parse. */ }
+      }
+      files.set(file, {lengths, identities});
+    }
+    return files.get(file);
+  };
+}
+
+// Every accepted transfer preserves a tracked body and consumes its budget
+// once. Same-file group permutations do not pin occupied slots or AST owners.
+function verifiedBodyMoves(current, previous, lengths, identities) {
   const verified = new Map();
-  const tracked = new Map();
+  const readTracked = trackedFunctionReader();
   const groupOf = key => `${key.slice(0, key.indexOf(':'))}:${nameOf(key)}`;
   const groups = new Map();
   for (const key of Object.keys(current)) {
@@ -291,41 +312,35 @@ function verifiedOrdinalMoves(current, previous, identities) {
     if (!groups.has(group)) groups.set(group, []);
     groups.get(group).push(key);
   }
-  let trackedHead = null;
   for (const [group, keys] of groups) {
     if (!keys.some(key => current[key] !== previous[key])) continue;
     const oldKeys = Object.keys(previous).filter(old => groupOf(old) === group);
-    // Prove the entire old long-function multiset survives, without extra long
-    // functions. A partial proof must never donate a deleted sibling's budget.
     if (!oldKeys.length || oldKeys.length !== keys.length || !keys.every(key => identities.has(key))) continue;
-    if (trackedHead === null) {
-      const repo = spawnSync('git', ['-C', ROOT, 'rev-parse', '--show-toplevel'], {encoding: 'utf8'});
-      if (repo.status !== 0 || fs.realpathSync(repo.stdout.trim()) !== fs.realpathSync(ROOT)) return verified;
-      const head = spawnSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], {encoding: 'utf8'});
-      if (head.status !== 0 || !/^[0-9a-f]{40,64}$/.test(head.stdout.trim())) return verified;
-      trackedHead = head.stdout.trim();
-    }
-    const file = keys[0].slice(0, keys[0].indexOf(':'));
-    if (!tracked.has(file)) {
-      const result = spawnSync('git', ['-C', ROOT, 'cat-file', 'blob', `${trackedHead}:${file}`], {encoding: 'utf8', maxBuffer: 8 * 1024 * 1024});
-      const priorIdentities = new Map();
-      let priorLengths = new Map();
-      if (result.status === 0) {
-        try { priorLengths = sourceLengths(result.stdout, file, priorIdentities); } catch { /* No reliable prior parse. */ }
-      }
-      tracked.set(file, {priorLengths, priorIdentities});
-    }
-    const {priorLengths, priorIdentities} = tracked.get(file);
+    const prior = readTracked(keys[0].slice(0, keys[0].indexOf(':')));
+    if (!prior) continue;
     const available = new Set(oldKeys);
     const proof = new Map();
     for (const key of keys) {
       const old = [...available].find(old => previous[old] === current[key]
-        && priorLengths.get(old) === previous[old] && priorIdentities.get(old) === identities.get(key));
+        && prior.lengths.get(old) === previous[old] && prior.identities.get(old) === identities.get(key));
       if (old === undefined) break;
       available.delete(old);
       proof.set(key, old);
     }
     if (proof.size === keys.length) for (const [key, old] of proof) verified.set(key, old);
+  }
+  const used = new Set(verified.values());
+  const stale = new Set(Object.keys(previous).filter(old => !lengths.has(old) && !used.has(old)));
+  for (const key of Object.keys(current).filter(key => !(key in previous) && !verified.has(key) && identities.has(key))) {
+    for (const old of stale) {
+      if (nameOf(old) !== nameOf(key) || previous[old] !== current[key]) continue;
+      const prior = readTracked(old.slice(0, old.indexOf(':')));
+      if (prior?.lengths.get(old) === previous[old] && prior.identities.get(old) === identities.get(key)) {
+        verified.set(key, old);
+        stale.delete(old);
+        break;
+      }
+    }
   }
   return verified;
 }
@@ -337,7 +352,7 @@ export function writeBaseline(allowNew = [], {lengths = null, baselinePath = BAS
   const bootstrapping = !fs.existsSync(baselinePath);
   const previous = bootstrapping ? {} : JSON.parse(fs.readFileSync(baselinePath, 'utf8'));
   const surviving = new Set(effectiveLengths.keys());
-  const verifiedMoves = verifiedOrdinalMoves(current, previous, identities);
+  const verifiedMoves = verifiedBodyMoves(current, previous, effectiveLengths, identities);
   const {grown, added, moves} = reconcileBaseline(current, previous, allowNew, bootstrapping, surviving, verifiedMoves, true);
   if (grown.length) {
     console.log('Refusing to raise baseline entries; shorten these functions instead:');
@@ -464,7 +479,7 @@ if (argv[0] === '--write-baseline') {
     assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, previous).added, ['b.js:newName']);
     assert.deepEqual(reconcileBaseline({
       'b.js:render': 105, 'b.js:render#2': 105,
-    }, {'a.js:render': 105}).added, ['b.js:render#2']);
+    }, {'a.js:render': 105}).added, ['b.js:render', 'b.js:render#2']);
     assert.deepEqual(reconcileBaseline({'a.js:render': 111}, previous, ['a.js:']).grown, ['a.js:render']);
   });
 
@@ -502,6 +517,11 @@ if (argv[0] === '--write-baseline') {
       reconcileBaseline({'b.js:render': 110}, previous, [], false, surviving),
       {grown: [], added: ['b.js:render'], moves: []},
     );
+    assert.deepEqual(
+      reconcileBaseline({'b.js:render': 110}, previous, [], false, surviving,
+        new Map([['b.js:render', 'a.js:render']])),
+      {grown: [], added: ['b.js:render'], moves: []},
+    );
     // Same shape with an ordinal that shrank below the cap and so is
     // missing from the over-cap `current`.
     assert.deepEqual(
@@ -517,6 +537,7 @@ if (argv[0] === '--write-baseline') {
     assert.deepEqual(
       reconcileBaseline(
         {'b.js:render': 110}, previous, [], false, new Set(['b.js:render']),
+        new Map([['b.js:render', 'a.js:render']]),
       ),
       {grown: [], added: [], moves: [['a.js:render', 'b.js:render']]},
     );
@@ -540,11 +561,15 @@ if (argv[0] === '--write-baseline') {
 
   test('writer reconciliation still permits shrinking, removal, moves and approved extraction', () => {
     const previous = {'a.js:render': 110, 'a.js:obsolete': 120};
-    for (const current of [{}, {'a.js:render': 105}, {'b.js:render': 110}]) {
+    for (const current of [{}, {'a.js:render': 105}]) {
       const result = reconcileBaseline(current, previous);
       assert.deepEqual(result.grown, []);
       assert.deepEqual(result.added, []);
     }
+    const moved = reconcileBaseline({'b.js:render': 110}, previous, [], false, null,
+      new Map([['b.js:render', 'a.js:render']]));
+    assert.deepEqual(moved.added, []);
+    assert.deepEqual(moved.moves, [['a.js:render', 'b.js:render']]);
     assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, previous, ['b.js:']).added, []);
     assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, {}, [], true).added, []);
   });
@@ -577,11 +602,13 @@ if (argv[0] === '--write-baseline') {
         assert.match(result.stdout, /vireo\/static\/b\.js:render/);
         assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
       }
-      // A genuinely vacated key still supports the existing move exception.
+      // A vacated key without tracked source is insufficient proof of a move.
+      const untrackedBaseline = fs.readFileSync(baselinePath, 'utf8');
       fs.unlinkSync(path.join(staticDir, 'a.js'));
       const moved = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
-      assert.equal(moved.status, 0, `${moved.error || ''}\n${moved.stdout}\n${moved.stderr}`);
-      assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), {'vireo/static/b.js:render': 110});
+      assert.equal(moved.status, 1, `${moved.error || ''}\n${moved.stdout}\n${moved.stderr}`);
+      assert.match(moved.stdout, /Refusing to add baseline entries/);
+      assert.equal(fs.readFileSync(baselinePath, 'utf8'), untrackedBaseline);
       // Run the full parser-to-writer path: these different callees must not
       // become ordinal siblings whose exchanged lengths hide callback growth.
       fs.unlinkSync(path.join(staticDir, 'b.js'));
@@ -674,6 +701,21 @@ if (argv[0] === '--write-baseline') {
       const crossFile = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
       assert.equal(crossFile.status, 1, `${crossFile.stdout}\n${crossFile.stderr}`);
       assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
+      fs.unlinkSync(sourcePath);
+      for (const replacement of [long.replace('{', '{/* unrelated */'), long + long]) {
+        fs.writeFileSync(baselinePath, original);
+        fs.writeFileSync(path.join(staticDir, 'b.js'), replacement);
+        const rejected = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
+        assert.equal(rejected.status, 1, `${rejected.stdout}\n${rejected.stderr}`);
+        assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
+      }
+      for (const movedBody of [long, long.replace(/\n/g, '\r\n')]) {
+        fs.writeFileSync(baselinePath, original);
+        fs.writeFileSync(path.join(staticDir, 'b.js'), movedBody);
+        const moved = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
+        assert.equal(moved.status, 0, `${moved.stdout}\n${moved.stderr}`);
+        assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), {'vireo/static/b.js:render': 110});
+      }
       fs.unlinkSync(path.join(staticDir, 'b.js'));
       const declaration = (lines, label) => `function render() {/*${label}*/${'\n'.repeat(lines - 1)}}\n`;
       for (const sizes of [[105, 110], [110, 110]]) {
@@ -685,6 +727,17 @@ if (argv[0] === '--write-baseline') {
         fs.writeFileSync(baselinePath, groupBaseline);
         git(['add', 'vireo/static/a.js', 'tests/frontend/function_length_baseline.json']);
         git(['commit', '--quiet', '-m', `Synthetic sibling group ${sizes.join('-')}`]);
+        fs.unlinkSync(sourcePath);
+        for (const [source, exit] of [[groupSource, 0], [groupSource.replace('/*A*/', '/*replacement*/'), 1], [groupSource + a, 1]]) {
+          fs.writeFileSync(baselinePath, groupBaseline);
+          fs.writeFileSync(path.join(staticDir, 'b.js'), source);
+          const result = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
+          assert.equal(result.status, exit, `${result.stdout}\n${result.stderr}`);
+          if (exit) assert.equal(fs.readFileSync(baselinePath, 'utf8'), groupBaseline);
+          else assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), overCap(sourceLengths(source, 'vireo/static/b.js')));
+        }
+        fs.unlinkSync(path.join(staticDir, 'b.js'));
+
         for (const source of [b + a, short + a + b, short + short + a + b, a + short + b, short + b + a]) {
           fs.writeFileSync(sourcePath, source);
           fs.writeFileSync(baselinePath, groupBaseline);
@@ -711,6 +764,19 @@ if (argv[0] === '--write-baseline') {
         assert.equal(removed.status, 0, `${removed.stdout}\n${removed.stderr}`);
         assert.equal(fs.readFileSync(baselinePath, 'utf8'), groupBaseline);
       }
+      // Preserve the owner's body-based contract: unchanged bodies may exchange
+      // occupied same-file slots, even under different enclosing conditions.
+      const a = declaration(105, 'A');
+      const b = declaration(110, 'B');
+      const branches = (left, right) => `if (featureA) {${left}} if (featureB) {${right}}`;
+      fs.writeFileSync(sourcePath, branches(a, b));
+      fs.writeFileSync(baselinePath, JSON.stringify(overCap(sourceLengths(branches(a, b), 'vireo/static/a.js')), null, 2) + '\n');
+      git(['add', 'vireo/static/a.js', 'tests/frontend/function_length_baseline.json']);
+      git(['commit', '--quiet', '-m', 'Synthetic unchanged body slots']);
+      fs.writeFileSync(sourcePath, branches(b, a));
+      const swapped = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
+      assert.equal(swapped.status, 0, `${swapped.stdout}\n${swapped.stderr}`);
+      assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), overCap(sourceLengths(branches(b, a), 'vireo/static/a.js')));
       // Without the tracked identity proof, even the harmless case fails closed.
       fs.renameSync(path.join(tmp, '.git'), path.join(tmp, 'saved-git'));
       fs.writeFileSync(baselinePath, original);
