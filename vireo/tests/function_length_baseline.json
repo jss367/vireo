@@ -136,8 +136,6 @@
   "timm_classifier.py:TimmClassifier.__init__": 133,
   "tone.py:apply_adjustments": 152,
   "web/batch.py:create_batch_blueprint.api_batch_set_photo_location": 103,
-  "web/browse.py:create_browse_blueprint.api_browse_init": 241,
-  "web/browse.py:create_browse_blueprint.api_selection_prediction_suggestions": 222,
   "web/card_cleanup.py:create_card_cleanup_blueprint.api_card_cleanup_delete": 101,
   "web/collections.py:create_collections_blueprint.api_collection_photos": 117,
   "web/collections.py:create_collections_blueprint.api_collections": 103,
