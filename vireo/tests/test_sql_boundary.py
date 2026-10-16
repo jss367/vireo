@@ -125,7 +125,11 @@ def _is_conn_read(node):
 
 
 def _scope_bindings(scope):
-    """Names that shadow an enclosing binding in a function or lambda."""
+    """Names that shadow an enclosing binding in a function or lambda.
+
+    Parameters, local assignments, imports, nested definitions and except
+    targets shadow; names declared ``global`` or ``nonlocal`` never do.
+    """
     args = scope.args
     parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs]
     parameters += [arg for arg in (args.vararg, args.kwarg) if arg is not None]
@@ -144,9 +148,9 @@ def _scope_bindings(scope):
             names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
         if isinstance(node, ast.ExceptHandler) and node.name:
             names.add(node.name)
-        if isinstance(node, ast.Global):
-            names.update(node.names)
-        if isinstance(node, ast.Nonlocal):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            # ``nonlocal`` names the enclosing binding itself; ``global`` may
+            # name a module-level alias. Neither shadows: fail closed.
             nonlocals.update(node.names)
         for child in ast.iter_child_nodes(node):
             collect(child)
@@ -176,21 +180,27 @@ def _raw_connection_closes(tree, *, exempt=()):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
             name = getattr(node, "name", "<lambda>")
             inner = f"{qualname}.{name}" if qualname else name
-            if inner in exempt:
-                return
             enclosing = aliases if class_enclosing is None else class_enclosing
+            # Decorators, bases, type parameters, defaults and annotations run
+            # where the definition is evaluated: before the parameters shadow
+            # anything, and outside any body exemption.
+            outer_parts = list(getattr(node, "decorator_list", []))
+            outer_parts += list(getattr(node, "type_params", []))
             if isinstance(node, ast.ClassDef):
-                class_aliases = aliases.copy()
-                for child in ast.iter_child_nodes(node):
-                    visit(child, class_aliases, inner, enclosing)
-                return
-            # Decorators, defaults and annotations run where the definition
-            # is evaluated, before the parameters shadow anything.
-            outer_parts = list(getattr(node, "decorator_list", [])) + [node.args]
-            if getattr(node, "returns", None) is not None:
-                outer_parts.append(node.returns)
+                outer_parts += node.bases + [k.value for k in node.keywords]
+            else:
+                outer_parts.append(node.args)
+                if getattr(node, "returns", None) is not None:
+                    outer_parts.append(node.returns)
             for part in outer_parts:
                 visit(part, aliases, qualname, class_enclosing)
+            if inner in exempt:
+                return
+            if isinstance(node, ast.ClassDef):
+                class_aliases = aliases.copy()
+                for child in node.body:
+                    visit(child, class_aliases, inner, enclosing)
+                return
             aliases = enclosing - _scope_bindings(node)
             body = node.body if isinstance(node.body, list) else [node.body]
             for child in body:
@@ -336,6 +346,11 @@ def test_raw_close_scan_includes_docs_prototypes(tmp_path, monkeypatch):
     ("def outer(db):\n conn = db.conn\n def cleanup(*, conn=consume(conn.close())):\n  pass", [3]),
     ("def outer(db):\n conn = db.conn\n def cleanup(conn: conn.close()):\n  pass", [3]),
     ("def outer(db):\n conn = db.conn\n def cleanup(conn) -> conn.close():\n  pass", [3]),
+    ("conn = db.conn\ndef cleanup():\n global conn\n conn.close()", [4]),
+    ("def outer(db):\n conn = db.conn\n def cleanup():\n  nonlocal conn\n  conn = other\n  conn.close()", [6]),
+    ("conn = db.conn\ndef cleanup[T: conn.close()]():\n pass", [2]),
+    ("conn = db.conn\nclass K[T: conn.close()]:\n pass", [2]),
+    ("conn = db.conn\n@consume(conn.close())\nclass K:\n pass", [2]),
     ("conn = sqlite3.connect(path)\nconn.close()", []),
     ("db.close()\nother.close()", []),
 ])
@@ -380,3 +395,13 @@ def test_raw_close_preserves_actual_database_close_owner():
 ])
 def test_raw_close_captured_aliases_respect_shadowing(source, lines):
     assert _raw_connection_closes(ast.parse(source)) == lines
+
+
+def test_raw_close_exemption_covers_only_the_body():
+    tree = ast.parse(
+        "class Database:\n"
+        " @consume(db.conn.close())\n"
+        " def close(self, conn=other.conn.close()):\n"
+        "  conn = getattr(self, 'conn', None)\n  conn.close()\n"
+    )
+    assert _raw_connection_closes(tree, exempt=("Database.close",)) == [2, 3]
