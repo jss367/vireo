@@ -703,105 +703,10 @@ def previews_stage(
 
         folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
         total = len(photos)
-        generated = 0
-        skipped = 0
-        failed = 0
-
-        for i, photo in enumerate(photos):
-            if run.control.should_abort(run.abort):
-                break
-            detail_photo = thread_db.get_photo(photo["id"]) or photo
-            cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
-            recipe = thread_db.get_photo_edit_recipe(photo["id"])
-            if os.path.exists(cache_path):
-                cache_row = None
-                try:
-                    cache_row = thread_db.caches.preview_get(photo["id"], max_size)
-                except sqlite3.Error:
-                    # Treated as untracked: an edited photo's preview is
-                    # then re-rendered rather than trusted.
-                    log.warning(
-                        "Could not read the preview cache row for photo %s",
-                        photo["id"], exc_info=True,
-                    )
-                if recipe and (cache_row is None or not _camera_cache_matches(cache_path, detail_photo, recipe)):
-                    with contextlib.suppress(OSError):
-                        os.remove(cache_path)
-                    if os.path.exists(cache_path):
-                        skipped += 1
-                        log.info(
-                            "Skipping untracked edited preview for photo %s; "
-                            "existing cache file could not be removed",
-                            photo["id"],
-                        )
-                        continue
-                else:
-                    skipped += 1
-                    try:
-                        if cache_row is None:
-                            thread_db.caches.preview_insert(
-                                photo["id"],
-                                max_size,
-                                os.path.getsize(cache_path),
-                            )
-                    except (sqlite3.Error, OSError):
-                        # The photo (FK) or the file may have been deleted
-                        # mid-pipeline; the preview itself is already on disk.
-                        log.debug(
-                            "Could not track existing preview for photo %s",
-                            photo["id"], exc_info=True,
-                        )
-                    continue
-            if not os.path.exists(cache_path):
-                folder_path = folders.get(detail_photo["folder_id"])
-                try:
-                    materialized = materialize_preview(
-                        thread_db,
-                        detail_photo,
-                        folder_path,
-                        size=max_size,
-                        vireo_dir=base_dir,
-                        preview_quality=preview_quality,
-                        recipe=recipe,
-                        cache_path=cache_path,
-                    )
-                except PreviewSourceUnavailable as exc:
-                    skipped += 1
-                    log.info(
-                        "Skipping pipeline preview for photo %s: %s",
-                        photo["id"], exc,
-                    )
-                except ArtifactProducerFailed as exc:
-                    if isinstance(exc.__cause__, PreviewSourceUnavailable):
-                        skipped += 1
-                        log.info(
-                            "Skipping pipeline preview for photo %s: %s",
-                            photo["id"], exc.__cause__,
-                        )
-                    else:
-                        failed += 1
-                except PreviewMaterializationError:
-                    # image_loader logged the source failure; count it
-                    # here so it remains visible in the stage rollup.
-                    failed += 1
-                else:
-                    if materialized.generated:
-                        generated += 1
-                    else:
-                        skipped += 1
-
-            run.stages["previews"]["count"] = i + 1
-            run.stages["previews"]["total"] = total
-            run.runner.update_step(run.job["id"], "previews",
-                               current_file=photo["filename"],
-                               progress={"current": i + 1, "total": total})
-            run.emit_progress(
-                run.runner, run.job["id"], run.stages, "previews", "Generating previews",
-                current_file=photo["filename"],
-                rate=round(
-                    (i + 1) / max(time.time() - run.job["_start_time"], 0.01) * 60, 1
-                ),
-            )
+        generated, skipped, failed = _generate_previews(
+            run, thread_db, photos, folders,
+            _PreviewTarget(preview_dir, max_size, base_dir, preview_quality),
+        )
 
         # One eviction pass after the stage so preview_cache_max_mb is
         # enforced even when the pipeline is the only producer (e.g.
@@ -810,26 +715,7 @@ def previews_stage(
         from preview_cache import evict_if_over_quota
         evict_if_over_quota(thread_db, base_dir)
 
-        run.result["stages"]["previews"] = {
-            "generated": generated, "skipped": skipped, "failed": failed, "total": total
-        }
-        final_status = "failed" if failed > 0 else "completed"
-        run.stages["previews"]["status"] = final_status
-        previews_rollup = (
-            f"[previews] {failed} of {total} previews failed to generate"
-            if failed > 0 else None
-        )
-        if previews_rollup:
-            run.errors.append(previews_rollup)
-        summary_parts = [f"{generated} generated"]
-        if skipped:
-            summary_parts.append(f"{skipped} cached")
-        if failed:
-            summary_parts.append(f"{failed} failed")
-        run.runner.update_step(run.job["id"], "previews", status=final_status,
-                           summary=", ".join(summary_parts),
-                           error_count=failed,
-                           error=previews_rollup)
+        _record_previews_result(run, generated, skipped, failed, total)
     except Exception as e:
         run.errors.append(f"[previews] Fatal: {e}")
         log.exception("Pipeline previews stage failed")
@@ -837,3 +723,177 @@ def previews_stage(
         run.runner.update_step(run.job["id"], "previews", status="failed", error=str(e))
 
     run.update_stages(run.runner, run.job["id"], run.stages)
+
+
+@dataclass(frozen=True)
+class _PreviewTarget:
+    """Where and how the previews stage writes each preview."""
+
+    preview_dir: str
+    max_size: int
+    base_dir: str
+    preview_quality: int
+
+
+def _generate_previews(run: PipelineRun, thread_db, photos, folders, target: _PreviewTarget):
+    """Warm each photo's preview; return (generated, skipped, failed)."""
+    total = len(photos)
+    generated = 0
+    skipped = 0
+    failed = 0
+
+    for i, photo in enumerate(photos):
+        if run.control.should_abort(run.abort):
+            break
+        outcome = _preview_photo(thread_db, photo, folders, target)
+        if outcome == "generated":
+            generated += 1
+        elif outcome == "failed":
+            failed += 1
+        elif outcome is not None:
+            skipped += 1
+        if outcome == "cached":
+            continue
+
+        run.stages["previews"]["count"] = i + 1
+        run.stages["previews"]["total"] = total
+        run.runner.update_step(run.job["id"], "previews",
+                           current_file=photo["filename"],
+                           progress={"current": i + 1, "total": total})
+        run.emit_progress(
+            run.runner, run.job["id"], run.stages, "previews", "Generating previews",
+            current_file=photo["filename"],
+            rate=round(
+                (i + 1) / max(time.time() - run.job["_start_time"], 0.01) * 60, 1
+            ),
+        )
+    return generated, skipped, failed
+
+
+def _preview_photo(thread_db, photo, folders, target: _PreviewTarget):
+    """Warm one preview.
+
+    Returns ``"cached"`` when an existing file is kept (counted as skipped,
+    with no progress event), else ``"generated"``, ``"skipped"`` or
+    ``"failed"``, or None when a removed stale file reappeared before it
+    could be regenerated (nothing is counted).
+    """
+    detail_photo = thread_db.get_photo(photo["id"]) or photo
+    cache_path = os.path.join(target.preview_dir, f'{photo["id"]}_{target.max_size}.jpg')
+    recipe = thread_db.get_photo_edit_recipe(photo["id"])
+    if os.path.exists(cache_path) and _keep_existing_preview(
+        thread_db, photo, detail_photo, cache_path, recipe, target.max_size,
+    ):
+        return "cached"
+    if not os.path.exists(cache_path):
+        return _materialize_photo_preview(
+            thread_db, photo, detail_photo, folders, cache_path, recipe, target,
+        )
+    return None
+
+
+def _keep_existing_preview(thread_db, photo, detail_photo, cache_path, recipe, max_size):
+    """Track a reusable preview file, or remove a stale edited one.
+
+    Returns True when the existing file stays (the photo is then skipped);
+    False when it was removed and must be regenerated.
+    """
+    cache_row = None
+    try:
+        cache_row = thread_db.caches.preview_get(photo["id"], max_size)
+    except sqlite3.Error:
+        # Treated as untracked: an edited photo's preview is
+        # then re-rendered rather than trusted.
+        log.warning(
+            "Could not read the preview cache row for photo %s",
+            photo["id"], exc_info=True,
+        )
+    if recipe and (cache_row is None or not _camera_cache_matches(cache_path, detail_photo, recipe)):
+        with contextlib.suppress(OSError):
+            os.remove(cache_path)
+        if os.path.exists(cache_path):
+            log.info(
+                "Skipping untracked edited preview for photo %s; "
+                "existing cache file could not be removed",
+                photo["id"],
+            )
+            return True
+        return False
+    try:
+        if cache_row is None:
+            thread_db.caches.preview_insert(
+                photo["id"],
+                max_size,
+                os.path.getsize(cache_path),
+            )
+    except (sqlite3.Error, OSError):
+        # The photo (FK) or the file may have been deleted
+        # mid-pipeline; the preview itself is already on disk.
+        log.debug(
+            "Could not track existing preview for photo %s",
+            photo["id"], exc_info=True,
+        )
+    return True
+
+
+def _materialize_photo_preview(
+    thread_db, photo, detail_photo, folders, cache_path, recipe, target: _PreviewTarget,
+):
+    """Render one missing preview; return its stage outcome."""
+    folder_path = folders.get(detail_photo["folder_id"])
+    try:
+        materialized = materialize_preview(
+            thread_db,
+            detail_photo,
+            folder_path,
+            size=target.max_size,
+            vireo_dir=target.base_dir,
+            preview_quality=target.preview_quality,
+            recipe=recipe,
+            cache_path=cache_path,
+        )
+    except PreviewSourceUnavailable as exc:
+        log.info(
+            "Skipping pipeline preview for photo %s: %s",
+            photo["id"], exc,
+        )
+        return "skipped"
+    except ArtifactProducerFailed as exc:
+        if isinstance(exc.__cause__, PreviewSourceUnavailable):
+            log.info(
+                "Skipping pipeline preview for photo %s: %s",
+                photo["id"], exc.__cause__,
+            )
+            return "skipped"
+        return "failed"
+    except PreviewMaterializationError:
+        # image_loader logged the source failure; count it
+        # here so it remains visible in the stage rollup.
+        return "failed"
+    if materialized.generated:
+        return "generated"
+    return "skipped"
+
+
+def _record_previews_result(run: PipelineRun, generated, skipped, failed, total):
+    """Store the previews rollup and mark the step's final status."""
+    run.result["stages"]["previews"] = {
+        "generated": generated, "skipped": skipped, "failed": failed, "total": total
+    }
+    final_status = "failed" if failed > 0 else "completed"
+    run.stages["previews"]["status"] = final_status
+    previews_rollup = (
+        f"[previews] {failed} of {total} previews failed to generate"
+        if failed > 0 else None
+    )
+    if previews_rollup:
+        run.errors.append(previews_rollup)
+    summary_parts = [f"{generated} generated"]
+    if skipped:
+        summary_parts.append(f"{skipped} cached")
+    if failed:
+        summary_parts.append(f"{failed} failed")
+    run.runner.update_step(run.job["id"], "previews", status=final_status,
+                       summary=", ".join(summary_parts),
+                       error_count=failed,
+                       error=previews_rollup)
