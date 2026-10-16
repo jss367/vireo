@@ -248,13 +248,14 @@ jobs:
       # A test that only passed on its rerun keeps the job green but must not
       # disappear: list each one as a warning annotation so the run summary
       # shows what flaked. Tests that failed again are left to the FAILED
-      # lines main-health.yml already parses.
+      # lines main-health.yml already parses; a fixture that errored on both
+      # attempts ends as ERROR rather than FAILED, so that is excluded too.
       - name: Surface tests that passed only on rerun
         if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'full' && runner.os == 'Windows' && !cancelled()
         shell: bash
         run: |
           grep -oE 'RERUN [^ ]+::[^ ]+' pytest-output.txt | sed 's/^RERUN //' | sort -u > reruns.txt || true
-          grep -oE 'FAILED [^ ]+::[^ ]+' pytest-output.txt | sed 's/^FAILED //' | sort -u > failed.txt || true
+          grep -oE '(FAILED|ERROR) [^ ]+::[^ ]+' pytest-output.txt | sed -E 's/^(FAILED|ERROR) //' | sort -u > failed.txt || true
           comm -23 reruns.txt failed.txt | while read -r test; do
             echo "::warning title=Passed only on rerun (Windows)::$test"
           done
