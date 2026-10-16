@@ -41,7 +41,7 @@
   "vireo/static/lightbox/inat.js:openInatQuickModal": 125,
   "vireo/static/lightbox/keyboard.js:document.addEventListener('keydown')": 139,
   "vireo/static/lightbox/navigation.js:openLightbox": 503,
-  "vireo/static/lightbox/navigation.js:openLightbox.then()": 112,
+  "vireo/static/lightbox/navigation.js:openLightbox.then()#2": 112,
   "vireo/static/lightbox/session.js:create": 489,
   "vireo/static/lightbox/session.js:create._lbPrimeAdjacentPhotos": 111,
   "vireo/static/lightbox/source-loading.js:_lbScheduleSourceSwap": 122,

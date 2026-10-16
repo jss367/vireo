@@ -30,8 +30,11 @@
 // named by what it is assigned to or passed to: `const render = function`
 // and `obj.render = () =>` are `render`; a callback is
 // `<callee>(<first string argument>)`, so `addEventListener('click', ...)`
-// is `addEventListener('click')`. Two functions with the same key keep the
-// longer length.
+// is `addEventListener('click')`. When two functions in the same scope would
+// share a key, the second and later ones get an ordinal suffix (`render#2`),
+// in source order, so each keeps its own length; the writer's move rule
+// ignores the ordinal, so a sibling inserted before an over-cap function
+// does not count as growth.
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -118,23 +121,24 @@ function isIife(node, parent) {
   return parent && parent.type === 'CallExpression' && parent.callee === node;
 }
 
-function walk(node, parent, stack, rel, lengths) {
+function walk(node, parent, stack, rel, lengths, seen) {
   if (!node || typeof node.type !== 'string') return;
   let pushed = false;
   if (FUNCTION_TYPES.has(node.type)) {
     if (!isIife(node, parent)) {
-      stack.push(contextName(node, parent));
+      const base = [...stack, contextName(node, parent)].join('.');
+      const ordinal = (seen.get(base) || 0) + 1;
+      seen.set(base, ordinal);
+      stack.push(ordinal === 1 ? contextName(node, parent) : `${contextName(node, parent)}#${ordinal}`);
       pushed = true;
-      const key = `${rel}:${stack.join('.')}`;
-      const length = node.loc.end.line - node.loc.start.line + 1;
-      lengths.set(key, Math.max(length, lengths.get(key) || 0));
+      lengths.set(`${rel}:${stack.join('.')}`, node.loc.end.line - node.loc.start.line + 1);
     }
   }
   for (const value of Object.values(node)) {
     if (Array.isArray(value)) {
-      for (const child of value) if (child && typeof child.type === 'string') walk(child, node, stack, rel, lengths);
+      for (const child of value) if (child && typeof child.type === 'string') walk(child, node, stack, rel, lengths, seen);
     } else if (value && typeof value.type === 'string' && value !== node.loc) {
-      walk(value, node, stack, rel, lengths);
+      walk(value, node, stack, rel, lengths, seen);
     }
   }
   if (pushed) stack.pop();
@@ -145,7 +149,7 @@ export function functionLengths() {
   for (const file of sourceFiles()) {
     const rel = path.relative(ROOT, file).split(path.sep).join('/');
     const tree = parseScript(fs.readFileSync(file, 'utf8'), rel);
-    walk(tree, null, [], rel, lengths);
+    walk(tree, null, [], rel, lengths, new Map());
   }
   return lengths;
 }
@@ -160,8 +164,11 @@ export function loadBaseline() {
   return JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8'));
 }
 
+// The qualified name without its file, and without collision ordinals, so a
+// function that moved files or gained an earlier same-named sibling still
+// matches its old entry.
 function nameOf(key) {
-  return key.slice(key.indexOf(':') + 1);
+  return key.slice(key.indexOf(':') + 1).replace(/#\d+(?=\.|$)/g, '');
 }
 
 function sortedObject(object) {
