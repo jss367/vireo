@@ -484,6 +484,22 @@ class KeywordRepository:
                         return r["name"]
                 return name
             return rows[0]["name"]
+        linked_display = self._linked_taxon_display(name)
+        if linked_display is not None:
+            return linked_display
+        if not apply_case_convention:
+            return name
+        convention = (
+            self.species_case_convention()
+            if case_convention is self._DETECT_CASE_CONVENTION
+            else case_convention
+        )
+        if convention:
+            return self._apply_case_convention(name, convention)
+        return name
+
+    def _linked_taxon_display(self, name):
+        """The stored spelling for a hierarchy leaf linked to one taxon, if any."""
         linked_taxa = self.conn.execute(
             """SELECT DISTINCT taxon_id FROM keywords
                WHERE name = ? COLLATE NOCASE
@@ -523,16 +539,7 @@ class KeywordRepository:
             ).fetchone()
             if leaf is not None and leaf["name"]:
                 return leaf["name"]
-        if not apply_case_convention:
-            return name
-        convention = (
-            self.species_case_convention()
-            if case_convention is self._DETECT_CASE_CONVENTION
-            else case_convention
-        )
-        if convention:
-            return self._apply_case_convention(name, convention)
-        return name
+        return None
 
     def species_root_name_for_taxon(self, taxon_id):
         """Canonical root keyword spelling for a species taxon, if any.
@@ -611,41 +618,11 @@ class KeywordRepository:
             return target["id"] if target else None
         for variant in self._taxon_lookup_variants(name):
             if prefer_species or species_only:
-                direct = self.conn.execute(
-                    """SELECT t.id, t.rank FROM taxa t
-                       WHERE t.common_name = ? COLLATE NOCASE
-                          OR t.name = ? COLLATE NOCASE
-                       ORDER BY (t.rank = 'species') DESC, t.id ASC
-                       LIMIT 1""",
-                    (variant, variant),
-                ).fetchone()
-                if direct and direct["rank"] == "species":
-                    return direct["id"]
-                # Direct match (if any) is not species-rank. Consult the
-                # common-names index for a species-rank alternate before
-                # returning the higher-rank direct hit.
-                common = self.conn.execute(
-                    """SELECT tcn.taxon_id AS id, t.rank FROM taxa_common_names tcn
-                       JOIN taxa t ON t.id = tcn.taxon_id
-                       WHERE tcn.name = ? COLLATE NOCASE
-                       ORDER BY (t.rank = 'species') DESC, t.id ASC
-                       LIMIT 1""",
-                    (variant,),
-                ).fetchone()
-                if common and common["rank"] == "species":
-                    return common["id"]
-                if species_only:
-                    # Reject the higher-rank fallback: an explicit
-                    # species add would stamp is_species=1 on this row
-                    # and every rank reader would then hide the tag.
-                    continue
-                # No species-rank match on this variant; prefer the direct
-                # (higher-rank) hit, otherwise fall back to the common-name
-                # hit if one exists.
-                if direct:
-                    return direct["id"]
-                if common:
-                    return common["id"]
+                taxon_id = self._species_preferring_taxon_match(
+                    variant, species_only,
+                )
+                if taxon_id is not None:
+                    return taxon_id
             else:
                 taxon = self.conn.execute(
                     """SELECT t.id FROM taxa t
@@ -664,6 +641,45 @@ class KeywordRepository:
                 ).fetchone()
                 if taxon:
                     return taxon["id"]
+        return None
+
+    def _species_preferring_taxon_match(self, variant, species_only):
+        """``lookup_taxon_id``'s species-preferring match for one variant."""
+        direct = self.conn.execute(
+            """SELECT t.id, t.rank FROM taxa t
+                       WHERE t.common_name = ? COLLATE NOCASE
+                          OR t.name = ? COLLATE NOCASE
+                       ORDER BY (t.rank = 'species') DESC, t.id ASC
+                       LIMIT 1""",
+            (variant, variant),
+        ).fetchone()
+        if direct and direct["rank"] == "species":
+            return direct["id"]
+        # Direct match (if any) is not species-rank. Consult the
+        # common-names index for a species-rank alternate before
+        # returning the higher-rank direct hit.
+        common = self.conn.execute(
+            """SELECT tcn.taxon_id AS id, t.rank FROM taxa_common_names tcn
+                       JOIN taxa t ON t.id = tcn.taxon_id
+                       WHERE tcn.name = ? COLLATE NOCASE
+                       ORDER BY (t.rank = 'species') DESC, t.id ASC
+                       LIMIT 1""",
+            (variant,),
+        ).fetchone()
+        if common and common["rank"] == "species":
+            return common["id"]
+        if species_only:
+            # Reject the higher-rank fallback: an explicit
+            # species add would stamp is_species=1 on this row
+            # and every rank reader would then hide the tag.
+            return None
+        # No species-rank match on this variant; prefer the direct
+        # (higher-rank) hit, otherwise fall back to the common-name
+        # hit if one exists.
+        if direct:
+            return direct["id"]
+        if common:
+            return common["id"]
         return None
 
     def add_source_species(self, name, source_taxon_id, parent_id=None, _commit=True):
@@ -762,25 +778,7 @@ class KeywordRepository:
             resolved = self.resolve_import_alias(self.db, name, parent_id, kw_type=kw_type)
             if resolved is not None:
                 return resolved
-        # Reconcile is_species and kw_type to keep the legacy column coherent
-        # with the type enum.
-        if is_species and kw_type is not None and kw_type != 'taxonomy':
-            raise ValueError(
-                f"is_species=True requires kw_type='taxonomy', got {kw_type!r}"
-            )
-        if kw_type == 'taxonomy':
-            is_species = True
-        # Symmetric reconciliation: callers like the prediction-accept and
-        # pipeline-apply flows pass is_species=True with no kw_type. Treat
-        # that as a typed taxonomy lookup so the candidate-filtering below
-        # correctly excludes a same-name 'individual'/'location'/'genre'
-        # row (e.g. a person tag named "Robin"). Without this, the
-        # untyped lookup would return the homonym row, the typed promotion
-        # would no-op (only 'general'/'taxonomy' get promoted), and the
-        # caller would get back a non-taxonomy id — silently mis-tagging
-        # the accepted species.
-        if is_species and kw_type is None:
-            kw_type = 'taxonomy'
+        is_species, kw_type = self._reconcile_species_type(is_species, kw_type)
         if source_taxon_id is not None:
             if not is_species:
                 raise ValueError("source_taxon_id requires a species keyword")
@@ -808,108 +806,154 @@ class KeywordRepository:
         # (case convention) and ``kw_type`` (auto-detection).
         lookup_name, lookup_kw_type, lookup_is_species = name, kw_type, is_species
         if existing:
-            # Older confirmed-species rows can be correctly typed yet have a
-            # NULL taxon_id because the historic is_species=True insert path
-            # skipped taxonomy lookup. Backfill opportunistically whenever
-            # such a row is resolved so future identity checks use taxon_id.
-            # When the preferred lookup returns a species-rank taxon and the
-            # row is already bound to a non-species-rank homonym (e.g. an
-            # older catalog stamped ``Puma`` with the genus taxon before
-            # ``prefer_species`` existed), overwrite that binding. Without
-            # this rebind the row stays flagged is_species/taxonomy while
-            # its taxon_id points at a genus/family, so every downstream
-            # ``t.rank = 'species'`` filter (Life List, Compare, Explorer)
-            # silently drops photos carrying the accepted keyword.
-            if is_species or kw_type == 'taxonomy':
-                # species_only: this branch stamps the row is_species=1
-                # via the taxonomy promotion below, so binding to a
-                # higher-rank homonym would silently hide the accepted
-                # keyword behind every downstream rank='species' filter.
-                taxon_id = self._lookup_taxon_id_for_keyword(
-                    name, species_only=True,
-                )
-                if taxon_id:
-                    self.conn.execute(
-                        "UPDATE keywords SET taxon_id = ? "
-                        "WHERE id = ? AND type IN ('general', 'taxonomy') "
-                        "AND ("
-                        "  taxon_id IS NULL "
-                        "  OR ("
-                        "    (SELECT rank FROM taxa WHERE id = ?) = 'species' "
-                        "    AND COALESCE("
-                        "      (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
-                        "    ) != 'species'"
-                        "  )"
-                        ")",
-                        (taxon_id, existing["id"], taxon_id),
-                    )
-                # Preserve an existing higher-rank ``taxon_id`` when no
-                # species-rank replacement is available. Earlier revisions
-                # cleared the link so the row would fall under the old
-                # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
-                # Life List, Compare, and highlight/preference eligibility.
-                # Those readers now accept linked higher-rank identifications
-                # (see :meth:`get_life_list_candidates` and
-                # :meth:`get_life_list_locations`), so clearing here would
-                # strip the row's ``taxon_rank`` / ``scientific_name`` /
-                # ``taxonomic_class`` metadata and silently break the new
-                # genus / family / class Life List filters — mirroring the
-                # startup preservation in :meth:`mark_species_keywords`.
-            if kw_type is None and not is_species and existing["type"] == "general":
-                taxon_id = self._lookup_taxon_id_for_keyword(
-                    name, prefer_species=True,
-                )
-                if taxon_id:
-                    self.conn.execute(
-                        "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                        "taxon_id = CASE "
-                        "  WHEN taxon_id IS NULL THEN ? "
-                        "  WHEN (SELECT rank FROM taxa WHERE id = ?) = 'species' "
-                        "    AND COALESCE("
-                        "      (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
-                        "    ) != 'species' THEN ? "
-                        "  ELSE taxon_id END "
-                        "WHERE id = ? AND type = 'general'",
-                        (taxon_id, taxon_id, taxon_id, existing["id"]),
-                    )
-                    if _commit:
-                        self.conn.commit()
-            # Promote an unset row to taxonomy when this call indicates a
-            # species. Restrict to 'general' (the legacy default for unknown
-            # rows) so a deliberate user type — 'individual', 'location',
-            # 'genre' — is preserved instead of silently rewritten when a
-            # later caller passes is_species=True or kw_type='taxonomy'.
-            if is_species:
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy' "
-                    "WHERE id = ? AND is_species = 0 AND type IN ('general', 'taxonomy')",
-                    (existing["id"],),
-                )
-                if _commit:
-                    self.conn.commit()
-            # Upgrade an existing 'general' row to the explicitly requested type.
-            # Without this, explicitly typed callers would hit the
-            # case-insensitive fast path and silently get back a wrong-typed row.
-            if kw_type and kw_type != 'general':
-                self.conn.execute(
-                    "UPDATE keywords SET type = ? WHERE id = ? AND type = 'general'",
-                    (kw_type, existing["id"]),
-                )
-                if kw_type == 'taxonomy':
-                    # Gate on type='taxonomy' so a preserved deliberate type
-                    # (e.g. 'individual') doesn't get is_species=1 stamped on
-                    # it when the type update above was a no-op. Otherwise
-                    # Subject filters with `OR is_species=1` would otherwise
-                    # treat that non-taxonomy row as a species.
-                    self.conn.execute(
-                        "UPDATE keywords SET is_species = 1 "
-                        "WHERE id = ? AND type = 'taxonomy'",
-                        (existing["id"],),
-                    )
-                if _commit:
-                    self.conn.commit()
+            self._backfill_candidate_taxon(
+                existing, name, is_species, kw_type, _commit,
+            )
+            self._promote_candidate_type(existing, is_species, kw_type, _commit)
             return existing["id"]
 
+        name, kw_type, taxon_id = self._new_keyword_name_and_type(
+            name, is_species, kw_type,
+        )
+        return self._insert_new_keyword(
+            name, parent_id, is_species, kw_type, taxon_id, lookup_name,
+            lookup_kw_type, lookup_is_species, _commit,
+        )
+
+    @staticmethod
+    def _reconcile_species_type(is_species, kw_type):
+        """``add``'s ``(is_species, kw_type)`` after reconciling the two."""
+        # Reconcile is_species and kw_type to keep the legacy column coherent
+        # with the type enum.
+        if is_species and kw_type is not None and kw_type != 'taxonomy':
+            raise ValueError(
+                f"is_species=True requires kw_type='taxonomy', got {kw_type!r}"
+            )
+        if kw_type == 'taxonomy':
+            is_species = True
+        # Symmetric reconciliation: callers like the prediction-accept and
+        # pipeline-apply flows pass is_species=True with no kw_type. Treat
+        # that as a typed taxonomy lookup so the candidate-filtering below
+        # correctly excludes a same-name 'individual'/'location'/'genre'
+        # row (e.g. a person tag named "Robin"). Without this, the
+        # untyped lookup would return the homonym row, the typed promotion
+        # would no-op (only 'general'/'taxonomy' get promoted), and the
+        # caller would get back a non-taxonomy id — silently mis-tagging
+        # the accepted species.
+        if is_species and kw_type is None:
+            kw_type = 'taxonomy'
+        return is_species, kw_type
+
+    def _backfill_candidate_taxon(
+        self, existing, name, is_species, kw_type, _commit,
+    ):
+        """Link the row ``add`` reuses to its species-rank taxon."""
+        # Older confirmed-species rows can be correctly typed yet have a
+        # NULL taxon_id because the historic is_species=True insert path
+        # skipped taxonomy lookup. Backfill opportunistically whenever
+        # such a row is resolved so future identity checks use taxon_id.
+        # When the preferred lookup returns a species-rank taxon and the
+        # row is already bound to a non-species-rank homonym (e.g. an
+        # older catalog stamped ``Puma`` with the genus taxon before
+        # ``prefer_species`` existed), overwrite that binding. Without
+        # this rebind the row stays flagged is_species/taxonomy while
+        # its taxon_id points at a genus/family, so every downstream
+        # ``t.rank = 'species'`` filter (Life List, Compare, Explorer)
+        # silently drops photos carrying the accepted keyword.
+        if is_species or kw_type == 'taxonomy':
+            # species_only: this branch stamps the row is_species=1
+            # via the taxonomy promotion below, so binding to a
+            # higher-rank homonym would silently hide the accepted
+            # keyword behind every downstream rank='species' filter.
+            taxon_id = self._lookup_taxon_id_for_keyword(
+                name, species_only=True,
+            )
+            if taxon_id:
+                self.conn.execute(
+                    "UPDATE keywords SET taxon_id = ? "
+                    "WHERE id = ? AND type IN ('general', 'taxonomy') "
+                    "AND ("
+                    "  taxon_id IS NULL "
+                    "  OR ("
+                    "    (SELECT rank FROM taxa WHERE id = ?) = 'species' "
+                    "    AND COALESCE("
+                    "      (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
+                    "    ) != 'species'"
+                    "  )"
+                    ")",
+                    (taxon_id, existing["id"], taxon_id),
+                )
+            # Preserve an existing higher-rank ``taxon_id`` when no
+            # species-rank replacement is available. Earlier revisions
+            # cleared the link so the row would fall under the old
+            # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
+            # Life List, Compare, and highlight/preference eligibility.
+            # Those readers now accept linked higher-rank identifications
+            # (see :meth:`get_life_list_candidates` and
+            # :meth:`get_life_list_locations`), so clearing here would
+            # strip the row's ``taxon_rank`` / ``scientific_name`` /
+            # ``taxonomic_class`` metadata and silently break the new
+            # genus / family / class Life List filters — mirroring the
+            # startup preservation in :meth:`mark_species_keywords`.
+        if kw_type is None and not is_species and existing["type"] == "general":
+            taxon_id = self._lookup_taxon_id_for_keyword(
+                name, prefer_species=True,
+            )
+            if taxon_id:
+                self.conn.execute(
+                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+                    "taxon_id = CASE "
+                    "  WHEN taxon_id IS NULL THEN ? "
+                    "  WHEN (SELECT rank FROM taxa WHERE id = ?) = 'species' "
+                    "    AND COALESCE("
+                    "      (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
+                    "    ) != 'species' THEN ? "
+                    "  ELSE taxon_id END "
+                    "WHERE id = ? AND type = 'general'",
+                    (taxon_id, taxon_id, taxon_id, existing["id"]),
+                )
+                if _commit:
+                    self.conn.commit()
+
+    def _promote_candidate_type(self, existing, is_species, kw_type, _commit):
+        """Upgrade the row ``add`` reuses to the type this call asks for."""
+        # Promote an unset row to taxonomy when this call indicates a
+        # species. Restrict to 'general' (the legacy default for unknown
+        # rows) so a deliberate user type — 'individual', 'location',
+        # 'genre' — is preserved instead of silently rewritten when a
+        # later caller passes is_species=True or kw_type='taxonomy'.
+        if is_species:
+            self.conn.execute(
+                "UPDATE keywords SET is_species = 1, type = 'taxonomy' "
+                "WHERE id = ? AND is_species = 0 AND type IN ('general', 'taxonomy')",
+                (existing["id"],),
+            )
+            if _commit:
+                self.conn.commit()
+        # Upgrade an existing 'general' row to the explicitly requested type.
+        # Without this, explicitly typed callers would hit the
+        # case-insensitive fast path and silently get back a wrong-typed row.
+        if kw_type and kw_type != 'general':
+            self.conn.execute(
+                "UPDATE keywords SET type = ? WHERE id = ? AND type = 'general'",
+                (kw_type, existing["id"]),
+            )
+            if kw_type == 'taxonomy':
+                # Gate on type='taxonomy' so a preserved deliberate type
+                # (e.g. 'individual') doesn't get is_species=1 stamped on
+                # it when the type update above was a no-op. Otherwise
+                # Subject filters with `OR is_species=1` would otherwise
+                # treat that non-taxonomy row as a species.
+                self.conn.execute(
+                    "UPDATE keywords SET is_species = 1 "
+                    "WHERE id = ? AND type = 'taxonomy'",
+                    (existing["id"],),
+                )
+            if _commit:
+                self.conn.commit()
+
+    def _new_keyword_name_and_type(self, name, is_species, kw_type):
+        """``(name, kw_type, taxon_id)`` for a keyword ``add`` will insert."""
         # Apply casing convention for new species keywords
         if is_species:
             import config as cfg
@@ -949,7 +993,13 @@ class KeywordRepository:
                 )
                 if taxon_id:
                     kw_type = 'taxonomy'
+        return name, kw_type, taxon_id
 
+    def _insert_new_keyword(
+        self, name, parent_id, is_species, kw_type, taxon_id, lookup_name,
+        lookup_kw_type, lookup_is_species, _commit,
+    ):
+        """Insert the keyword ``add`` found no row for, racing safely."""
         # The lookup above ran without a write lock, so a second connection
         # can pass the same check before either inserts. UNIQUE(name,
         # parent_id) cannot catch that for a top-level keyword (SQLite treats
@@ -1567,6 +1617,19 @@ class KeywordRepository:
                     else "name:" + keyword_match_key(r["name"])
                 )
                 source_keys.setdefault((r["photo_id"], identity), key)
+        canonical_roots = self._canonical_species_roots(chosen)
+        result = {}
+        for photo_id, by_identity in chosen.items():
+            names = []
+            for identity, (name, is_root) in by_identity.items():
+                if identity[0] == "taxon" and not is_root:
+                    name = canonical_roots.get(identity[1], name)
+                names.append({"name": name, "key": source_keys[(photo_id, identity)]} if include_identities else name)
+            result[photo_id] = sorted(names, key=lambda n: keyword_match_key(n["name"] if include_identities else n))
+        return result
+
+    def _canonical_species_roots(self, chosen):
+        """``{taxon_id: root spelling}`` for the taxa ``chosen`` links to."""
         taxon_ids = {
             identity[1]
             for by_identity in chosen.values()
@@ -1587,45 +1650,10 @@ class KeywordRepository:
                 ).fetchall()
                 for row in root_rows:
                     canonical_roots.setdefault(row["taxon_id"], row["name"])
-        result = {}
-        for photo_id, by_identity in chosen.items():
-            names = []
-            for identity, (name, is_root) in by_identity.items():
-                if identity[0] == "taxon" and not is_root:
-                    name = canonical_roots.get(identity[1], name)
-                names.append({"name": name, "key": source_keys[(photo_id, identity)]} if include_identities else name)
-            result[photo_id] = sorted(names, key=lambda n: keyword_match_key(n["name"] if include_identities else n))
-        return result
+        return canonical_roots
 
-    def get_photos_with_equivalent_species(
-        self, photo_ids, keyword_id, exclude_keyword_ids=None,
-    ):
-        """Return submitted photo ids already carrying the target species.
-
-        Species identity is the linked taxon when available, not a particular
-        keyword row. This lets a hierarchical ``Birds|Verdin`` tag satisfy a
-        later confirmation that resolved to the top-level Verdin keyword.
-        Unlinked legacy species fall back to the normalized display name.
-
-        When ``exclude_keyword_ids`` is provided, keyword rows with those ids
-        are ignored during the match. Callers use this to look past rows that
-        are about to be removed — for example, a same-taxon replacement where
-        the "already carries this species" answer must reflect only the rows
-        that will survive the mutation.
-        """
-        if not photo_ids:
-            return set()
-        target = self.conn.execute(
-            "SELECT name, taxon_id FROM keywords WHERE id = ?", (keyword_id,)
-        ).fetchone()
-        if target is None:
-            return set()
-        result = set()
-        ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
-        target_key = keyword_match_key(target["name"])
-        excluded = tuple(dict.fromkeys(int(x) for x in (exclude_keyword_ids or ())))
-        excl_placeholders = ",".join("?" for _ in excluded)
-        excl_clause = f" AND k.id NOT IN ({excl_placeholders})" if excluded else ""
+    def _species_homonym_conflict(self, target, keyword_id, target_key):
+        """Whether a distinct linked species shares the target's match key."""
         # When another taxonomy/species keyword row shares the target's
         # match key but points at a different taxon (e.g. legacy
         # ``Robin`` alongside taxonomy ``robin``), the taxon_id-is-NULL
@@ -1663,50 +1691,96 @@ class KeywordRepository:
                 if keyword_match_key(row["name"]) == target_key:
                     homonym_conflict = True
                     break
-        for chunk in self._chunks(ids):
-            placeholders = ",".join("?" for _ in chunk)
-            if target["taxon_id"] is not None:
-                # Match rows linked to the same taxon first — the fast,
-                # authoritative case that survives any display-name rename.
-                rows = self.conn.execute(
-                    f"""SELECT DISTINCT pk.photo_id
+        return homonym_conflict
+
+    def _linked_species_photo_ids(
+        self, chunk, placeholders, target, target_key, excl_clause, excluded,
+        homonym_conflict,
+    ):
+        """Photos in ``chunk`` carrying a taxon-linked target species."""
+        found = set()
+        # Match rows linked to the same taxon first — the fast,
+        # authoritative case that survives any display-name rename.
+        rows = self.conn.execute(
+            f"""SELECT DISTINCT pk.photo_id
                         FROM photo_keywords pk
                         JOIN keywords k ON k.id = pk.keyword_id
                         WHERE pk.photo_id IN ({placeholders})
                           AND k.taxon_id = ?
                           AND (k.is_species = 1 OR k.type = 'taxonomy')
                           {excl_clause}""",
-                    [*chunk, target["taxon_id"], *excluded],
-                ).fetchall()
-                result.update(row["photo_id"] for row in rows)
-                if homonym_conflict:
-                    continue
-                # Fallback: upgraded libraries can carry a hierarchical
-                # species leaf typed as taxonomy/is_species that
-                # mark_species_keywords hasn't yet linked to a taxon_id
-                # (see the explicit ``taxon_id IS NULL`` branch it
-                # handles). A strict taxon_id equality above would miss
-                # those legacy leaves, so a follow-up
-                # confirm/accept-species after add_keyword created a
-                # linked top-level root would not recognize the existing
-                # hierarchy and would queue a duplicate root tag plus
-                # sidecar add. Match unlinked rows by normalized display
-                # name to preserve the hierarchy. Guarded above so an
-                # ambiguous same-key homonym doesn't get folded in.
-                rows = self.conn.execute(
-                    f"""SELECT pk.photo_id, k.name
+            [*chunk, target["taxon_id"], *excluded],
+        ).fetchall()
+        found.update(row["photo_id"] for row in rows)
+        if homonym_conflict:
+            return found
+        # Fallback: upgraded libraries can carry a hierarchical
+        # species leaf typed as taxonomy/is_species that
+        # mark_species_keywords hasn't yet linked to a taxon_id
+        # (see the explicit ``taxon_id IS NULL`` branch it
+        # handles). A strict taxon_id equality above would miss
+        # those legacy leaves, so a follow-up
+        # confirm/accept-species after add_keyword created a
+        # linked top-level root would not recognize the existing
+        # hierarchy and would queue a duplicate root tag plus
+        # sidecar add. Match unlinked rows by normalized display
+        # name to preserve the hierarchy. Guarded above so an
+        # ambiguous same-key homonym doesn't get folded in.
+        rows = self.conn.execute(
+            f"""SELECT pk.photo_id, k.name
                         FROM photo_keywords pk
                         JOIN keywords k ON k.id = pk.keyword_id
                         WHERE pk.photo_id IN ({placeholders})
                           AND k.taxon_id IS NULL
                           AND (k.is_species = 1 OR k.type = 'taxonomy')
                           {excl_clause}""",
-                    [*chunk, *excluded],
-                ).fetchall()
-                result.update(
-                    row["photo_id"] for row in rows
-                    if keyword_match_key(row["name"]) == target_key
-                )
+            [*chunk, *excluded],
+        ).fetchall()
+        found.update(
+            row["photo_id"] for row in rows
+            if keyword_match_key(row["name"]) == target_key
+        )
+        return found
+
+    def get_photos_with_equivalent_species(
+        self, photo_ids, keyword_id, exclude_keyword_ids=None,
+    ):
+        """Return submitted photo ids already carrying the target species.
+
+        Species identity is the linked taxon when available, not a particular
+        keyword row. This lets a hierarchical ``Birds|Verdin`` tag satisfy a
+        later confirmation that resolved to the top-level Verdin keyword.
+        Unlinked legacy species fall back to the normalized display name.
+
+        When ``exclude_keyword_ids`` is provided, keyword rows with those ids
+        are ignored during the match. Callers use this to look past rows that
+        are about to be removed — for example, a same-taxon replacement where
+        the "already carries this species" answer must reflect only the rows
+        that will survive the mutation.
+        """
+        if not photo_ids:
+            return set()
+        target = self.conn.execute(
+            "SELECT name, taxon_id FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        if target is None:
+            return set()
+        result = set()
+        ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
+        target_key = keyword_match_key(target["name"])
+        excluded = tuple(dict.fromkeys(int(x) for x in (exclude_keyword_ids or ())))
+        excl_placeholders = ",".join("?" for _ in excluded)
+        excl_clause = f" AND k.id NOT IN ({excl_placeholders})" if excluded else ""
+        homonym_conflict = self._species_homonym_conflict(
+            target, keyword_id, target_key,
+        )
+        for chunk in self._chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            if target["taxon_id"] is not None:
+                result.update(self._linked_species_photo_ids(
+                    chunk, placeholders, target, target_key, excl_clause,
+                    excluded, homonym_conflict,
+                ))
                 continue
             # Target is unlinked. When a distinct linked row shares this
             # match key, any same-key row on the photo could be either
@@ -1925,137 +1999,150 @@ class KeywordRepository:
             taxon = taxonomy.lookup(kw["name"])
             if not taxon:
                 continue
-            local_taxon_id = kw["taxon_id"]
-            lookup_local_id = None
-            lookup_rank = None
-            inat_id = taxon.get("taxon_id")
-            if inat_id is not None:
-                row = self.conn.execute(
-                    "SELECT id, rank FROM taxa WHERE inat_id = ?", (inat_id,)
-                ).fetchone()
-                if row:
-                    lookup_local_id = row["id"]
-                    lookup_rank = row["rank"]
-            # The structured taxa table intentionally keeps major ranks only
-            # (kingdom through species), while taxonomy.json can resolve a
-            # label to a subspecies or another infraspecific rank. Walk that
-            # result's scientific lineage back to its species ancestor rather
-            # than leaving a valid, more-precise identification unlinked and
-            # absent from Explorer completeness. Higher-rank lookups have no
-            # species member in their lineage and therefore remain unchanged.
-            if lookup_rank != "species":
-                lineage_names = taxon.get("lineage_names") or []
-                lineage_ranks = taxon.get("lineage_ranks") or []
-                species_index = next(
-                    (
-                        i for i, rank in enumerate(lineage_ranks)
-                        if rank == "species"
-                    ),
-                    None,
-                )
-                if species_index is not None:
-                    species_name = lineage_names[species_index]
-                    # Ancestor scientific names above the species rank, used
-                    # to disambiguate homonyms. Two taxa with the same
-                    # species-rank scientific name can legitimately coexist
-                    # in the local ``taxa`` table (see the taxonomy loader
-                    # around ``_build_lineage`` — the schema keys on
-                    # ``inat_id``, not on ``(name, rank)`` — and iNat itself
-                    # allows homonyms across kingdoms). A name-only
-                    # ``LIMIT 1`` binding an infraspecific label to an
-                    # arbitrary row could permanently credit the wrong Life
-                    # List species/class; verify each candidate's parent
-                    # chain matches the taxonomy lookup's lineage instead.
-                    expected_ancestors = [
-                        name for name, rank in zip(
-                            lineage_names[:species_index],
-                            lineage_ranks[:species_index],
-                            strict=False,
-                        )
-                        if rank in (
-                            "genus", "family", "order",
-                            "class", "phylum", "kingdom",
-                        )
-                    ]
-                    species_row = self._resolve_species_by_lineage(
-                        species_name, expected_ancestors
-                    )
-                    if species_row:
-                        lookup_local_id = species_row["id"]
-                        lookup_rank = species_row["rank"]
-            if local_taxon_id is None and lookup_rank == "species":
-                local_taxon_id = lookup_local_id
-            # Only bind ``taxon_id`` to a species-rank local taxon. Binding a
-            # species-marked keyword to a genus/family id would let the new
-            # rank filters (Life List, Compare, highlight/preference
-            # eligibility) silently drop every photo carrying that keyword,
-            # because those readers require ``t.rank = 'species' OR
-            # t.rank IS NULL``. Leaving ``taxon_id`` NULL for non-species
-            # matches mirrors ``add_keyword``'s species-add path (see
-            # ``test_add_species_leaves_taxon_null_when_only_higher_rank_matches``)
-            # so upgraded catalogs stay visible under the ``rank IS NULL``
-            # branch until a species-rank taxon becomes available.
-            #
-            # Rebind an existing higher-rank link when the taxonomy lookup
-            # resolves to a species-rank local taxon. Without this pass,
-            # mark_species_keywords skipped fully typed rows and legacy
-            # keywords bound by the old species-agnostic lookup to a
-            # genus/family stayed bound; the new ``t.rank = 'species'``
-            # filter (Life List, Compare) then silently dropped every
-            # photo carrying those keywords after upgrade.
-            rebind_taxon_id = None
-            if (
-                kw["taxon_id"] is not None
-                and kw["taxon_rank"] is not None
-                and kw["taxon_rank"] != "species"
-                and lookup_local_id is not None
-                and lookup_rank == "species"
-                and lookup_local_id != kw["taxon_id"]
-            ):
-                rebind_taxon_id = lookup_local_id
-            # Preserve an existing higher-rank ``taxon_id`` when no
-            # species-rank replacement is available. Earlier revisions
-            # cleared the link to keep the row visible under the old
-            # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
-            # Life List, Compare, and highlight/preference eligibility.
-            # Those readers now accept linked higher-rank identifications
-            # (see :meth:`get_life_list_candidates` and
-            # :meth:`get_life_list_locations`), so clearing on startup
-            # would strip the row's ``taxon_rank`` / ``scientific_name`` /
-            # ``taxonomic_class`` metadata and silently break the new
-            # genus / family / class Life List filters after the first
-            # restart.
-            # Skip no-op updates so the "updated" count reflects real
-            # changes. A matched row is fully consistent when type is
-            # 'taxonomy', is_species is 1, and (taxon_id is already set to
-            # a species-rank id OR we have no local id to link it to).
-            is_type_change = kw["type"] != "taxonomy"
-            is_species_fix = kw["is_species"] != 1
-            is_taxon_link = kw["taxon_id"] is None and local_taxon_id is not None
-            is_rebind = rebind_taxon_id is not None
-            if not (
-                is_type_change
-                or is_species_fix
-                or is_taxon_link
-                or is_rebind
-            ):
-                continue
-            if is_rebind:
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                    "taxon_id = ? WHERE id = ?",
-                    (rebind_taxon_id, kw["id"]),
-                )
-            else:
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                    "taxon_id = COALESCE(taxon_id, ?) WHERE id = ?",
-                    (local_taxon_id, kw["id"]),
-                )
-            updated += 1
+            lookup_local_id, lookup_rank = self._local_species_taxon(taxon)
+            if self._mark_species_row(kw, lookup_local_id, lookup_rank):
+                updated += 1
         if updated:
             self.conn.commit()
         return updated
+
+    def _local_species_taxon(self, taxon):
+        """``(local id, rank)`` of the taxa row a taxonomy lookup resolves to.
+
+        An infraspecific result resolves to its species ancestor.
+        """
+        lookup_local_id = None
+        lookup_rank = None
+        inat_id = taxon.get("taxon_id")
+        if inat_id is not None:
+            row = self.conn.execute(
+                "SELECT id, rank FROM taxa WHERE inat_id = ?", (inat_id,)
+            ).fetchone()
+            if row:
+                lookup_local_id = row["id"]
+                lookup_rank = row["rank"]
+        # The structured taxa table intentionally keeps major ranks only
+        # (kingdom through species), while taxonomy.json can resolve a
+        # label to a subspecies or another infraspecific rank. Walk that
+        # result's scientific lineage back to its species ancestor rather
+        # than leaving a valid, more-precise identification unlinked and
+        # absent from Explorer completeness. Higher-rank lookups have no
+        # species member in their lineage and therefore remain unchanged.
+        if lookup_rank != "species":
+            lineage_names = taxon.get("lineage_names") or []
+            lineage_ranks = taxon.get("lineage_ranks") or []
+            species_index = next(
+                (
+                    i for i, rank in enumerate(lineage_ranks)
+                    if rank == "species"
+                ),
+                None,
+            )
+            if species_index is not None:
+                species_name = lineage_names[species_index]
+                # Ancestor scientific names above the species rank, used
+                # to disambiguate homonyms. Two taxa with the same
+                # species-rank scientific name can legitimately coexist
+                # in the local ``taxa`` table (see the taxonomy loader
+                # around ``_build_lineage`` — the schema keys on
+                # ``inat_id``, not on ``(name, rank)`` — and iNat itself
+                # allows homonyms across kingdoms). A name-only
+                # ``LIMIT 1`` binding an infraspecific label to an
+                # arbitrary row could permanently credit the wrong Life
+                # List species/class; verify each candidate's parent
+                # chain matches the taxonomy lookup's lineage instead.
+                expected_ancestors = [
+                    name for name, rank in zip(
+                        lineage_names[:species_index],
+                        lineage_ranks[:species_index],
+                        strict=False,
+                    )
+                    if rank in (
+                        "genus", "family", "order",
+                        "class", "phylum", "kingdom",
+                    )
+                ]
+                species_row = self._resolve_species_by_lineage(
+                    species_name, expected_ancestors
+                )
+                if species_row:
+                    lookup_local_id = species_row["id"]
+                    lookup_rank = species_row["rank"]
+        return lookup_local_id, lookup_rank
+
+    def _mark_species_row(self, kw, lookup_local_id, lookup_rank):
+        """Retype or relink one ``mark_species`` row; False when a no-op."""
+        local_taxon_id = kw["taxon_id"]
+        if local_taxon_id is None and lookup_rank == "species":
+            local_taxon_id = lookup_local_id
+        # Only bind ``taxon_id`` to a species-rank local taxon. Binding a
+        # species-marked keyword to a genus/family id would let the new
+        # rank filters (Life List, Compare, highlight/preference
+        # eligibility) silently drop every photo carrying that keyword,
+        # because those readers require ``t.rank = 'species' OR
+        # t.rank IS NULL``. Leaving ``taxon_id`` NULL for non-species
+        # matches mirrors ``add_keyword``'s species-add path (see
+        # ``test_add_species_leaves_taxon_null_when_only_higher_rank_matches``)
+        # so upgraded catalogs stay visible under the ``rank IS NULL``
+        # branch until a species-rank taxon becomes available.
+        #
+        # Rebind an existing higher-rank link when the taxonomy lookup
+        # resolves to a species-rank local taxon. Without this pass,
+        # mark_species_keywords skipped fully typed rows and legacy
+        # keywords bound by the old species-agnostic lookup to a
+        # genus/family stayed bound; the new ``t.rank = 'species'``
+        # filter (Life List, Compare) then silently dropped every
+        # photo carrying those keywords after upgrade.
+        rebind_taxon_id = None
+        if (
+            kw["taxon_id"] is not None
+            and kw["taxon_rank"] is not None
+            and kw["taxon_rank"] != "species"
+            and lookup_local_id is not None
+            and lookup_rank == "species"
+            and lookup_local_id != kw["taxon_id"]
+        ):
+            rebind_taxon_id = lookup_local_id
+        # Preserve an existing higher-rank ``taxon_id`` when no
+        # species-rank replacement is available. Earlier revisions
+        # cleared the link to keep the row visible under the old
+        # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
+        # Life List, Compare, and highlight/preference eligibility.
+        # Those readers now accept linked higher-rank identifications
+        # (see :meth:`get_life_list_candidates` and
+        # :meth:`get_life_list_locations`), so clearing on startup
+        # would strip the row's ``taxon_rank`` / ``scientific_name`` /
+        # ``taxonomic_class`` metadata and silently break the new
+        # genus / family / class Life List filters after the first
+        # restart.
+        # Skip no-op updates so the "updated" count reflects real
+        # changes. A matched row is fully consistent when type is
+        # 'taxonomy', is_species is 1, and (taxon_id is already set to
+        # a species-rank id OR we have no local id to link it to).
+        is_type_change = kw["type"] != "taxonomy"
+        is_species_fix = kw["is_species"] != 1
+        is_taxon_link = kw["taxon_id"] is None and local_taxon_id is not None
+        is_rebind = rebind_taxon_id is not None
+        if not (
+            is_type_change
+            or is_species_fix
+            or is_taxon_link
+            or is_rebind
+        ):
+            return False
+        if is_rebind:
+            self.conn.execute(
+                "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+                "taxon_id = ? WHERE id = ?",
+                (rebind_taxon_id, kw["id"]),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+                "taxon_id = COALESCE(taxon_id, ?) WHERE id = ?",
+                (local_taxon_id, kw["id"]),
+            )
+        return True
 
     # -- SQL of the façade methods that call ``_merge_keyword_into`` ----------
     #
