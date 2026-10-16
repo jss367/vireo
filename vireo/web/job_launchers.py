@@ -469,105 +469,7 @@ def create_job_launchers_blueprint(
             return json_error("model_id and labels_file required")
 
         def work(job):
-            from classifier import precompute_label_embeddings
-            from labels import get_saved_labels, load_label_set
-            from models import get_models
-
-            # Find the model
-            models = get_models()
-            model = None
-            for m in models:
-                if m["id"] == model_id:
-                    model = m
-                    break
-            if not model or not model["downloaded"]:
-                raise RuntimeError(f"Model {model_id} not found or not downloaded")
-            if model.get("model_type", "bioclip") == "timm":
-                raise RuntimeError(
-                    f"Model {model['name']} has a fixed class head and does "
-                    "not use per-label embeddings — nothing to precompute."
-                )
-
-            ctx.runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": 0,
-                    "total": 0,
-                    "current_file": f'Loading {model["name"]} and computing embeddings...',
-                    "rate": 0,
-                },
-            )
-
-            # The same list the classify job will load, so the warmed
-            # cache is the one it looks for.
-            saved = {ls.get("labels_file"): ls for ls in get_saved_labels()}
-            labels = load_label_set(labels_file, saved.get(labels_file))
-            if not labels:
-                skipped = len(getattr(labels, "dropped_ambiguous", ()))
-                raise RuntimeError(
-                    f"{os.path.basename(labels_file)} has no usable species"
-                    + (f" — all {skipped:,} of its names are shared by more "
-                       "than one species" if skipped else "")
-                    + ". Download the list again in Settings → Labels to "
-                    "split them by scientific name."
-                )
-
-            log.info(
-                "Pre-computing embeddings: %d labels with %s",
-                len(labels),
-                model["name"],
-            )
-
-            def _progress(current, total):
-                ctx.runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": current,
-                        "total": total,
-                        "current_file": f"Computing embeddings ({current}/{total} labels)…",
-                        "rate": 0,
-                    },
-                )
-
-            from classifier import ClassifierLoadPaused
-
-            def _pause_requested():
-                return ctx.runner.pause_requested(job["id"])
-
-            def _cancelled():
-                # Pure cancel probe: the pause is handled by the retry
-                # loop below, outside the embedding single-flight, so the
-                # producer never parks while equal-key waiters are joined.
-                return ctx.runner.cancellation_requested(job["id"])
-
-            # The shared service loads only the text side and joins an
-            # equal-key pipeline/precompute already doing this work.
-            while True:
-                try:
-                    precompute_label_embeddings(
-                        labels=labels,
-                        model_str=model["model_str"],
-                        pretrained_str=model["weights_path"],
-                        progress_callback=_progress,
-                        cancel_check=_cancelled,
-                        pause_check=_pause_requested,
-                    )
-                    break
-                except ClassifierLoadPaused:
-                    # Progress is checkpointed. Park here with no shared
-                    # lock held; the next attempt resumes from the
-                    # checkpoint. A Cancel during the pause surfaces on
-                    # the retry through the cancel probe.
-                    log.info(
-                        "Pre-computing embeddings paused; parking until "
-                        "Resume",
-                    )
-                    ctx.runner.is_cancelled(job["id"])
-                    continue
-
-            return {"labels": len(labels), "model": model["name"]}
+            return _run_precompute_embeddings(ctx, job, model_id, labels_file)
 
         return ctx.start(
             "precompute-embeddings",
@@ -643,40 +545,7 @@ def create_job_launchers_blueprint(
             thread_db = ctx.thread_db()
             thread_db.set_workspace_active_labels([labels_path])
 
-            precompute = None
-            from models import get_active_model
-
-            active_model = get_active_model()
-            # timm models have a fixed class head — no per-label embeddings.
-            if (
-                active_model
-                and active_model["downloaded"]
-                and active_model.get("model_type", "bioclip") != "timm"
-            ):
-                try:
-                    from classifier import _embedding_is_cached, _resolve_model_dir
-
-                    labels = load_label_set(labels_path)
-                    model_dir = _resolve_model_dir(
-                        active_model["model_str"], active_model.get("weights_path")
-                    )
-                    # Use the shared helper: it validates payload shape and
-                    # dtype rather than accepting any file at the identity
-                    # path, so a truncated or wrong-shape cache no longer
-                    # reports as ready here.
-                    if not _embedding_is_cached(
-                        labels, active_model["model_str"], model_dir
-                    ):
-                        precompute = {
-                            "model_id": active_model["id"],
-                            "model_name": active_model["name"],
-                            "labels_file": labels_path,
-                        }
-                except Exception:
-                    log.warning(
-                        "Could not inspect embedding cache after label download",
-                        exc_info=True,
-                    )
+            precompute = _embedding_precompute_offer(load_label_set, labels_path)
 
             return {
                 "species_count": len(set(species)),
@@ -3026,3 +2895,160 @@ def _record_release_outcome(job, result, filename, outcome):
                 # reports the true total.
                 result["errors_total"] = result["failed"]
             result["ok"] = False
+
+
+def _run_precompute_embeddings(ctx, job, model_id, labels_file):
+    """The ``/api/jobs/precompute-embeddings`` work function."""
+    from classifier import precompute_label_embeddings
+    from labels import get_saved_labels, load_label_set
+    from models import get_models
+
+    model = _precompute_model(get_models, model_id)
+
+    ctx.runner.push_event(
+        job["id"],
+        "progress",
+        {
+            "current": 0,
+            "total": 0,
+            "current_file": f'Loading {model["name"]} and computing embeddings...',
+            "rate": 0,
+        },
+    )
+
+    labels = _precompute_labels(get_saved_labels, load_label_set, labels_file)
+
+    log.info(
+        "Pre-computing embeddings: %d labels with %s",
+        len(labels),
+        model["name"],
+    )
+
+    def _progress(current, total):
+        ctx.runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": current,
+                "total": total,
+                "current_file": f"Computing embeddings ({current}/{total} labels)…",
+                "rate": 0,
+            },
+        )
+
+    from classifier import ClassifierLoadPaused
+
+    def _pause_requested():
+        return ctx.runner.pause_requested(job["id"])
+
+    def _cancelled():
+        # Pure cancel probe: the pause is handled by the retry
+        # loop below, outside the embedding single-flight, so the
+        # producer never parks while equal-key waiters are joined.
+        return ctx.runner.cancellation_requested(job["id"])
+
+    # The shared service loads only the text side and joins an
+    # equal-key pipeline/precompute already doing this work.
+    while True:
+        try:
+            precompute_label_embeddings(
+                labels=labels,
+                model_str=model["model_str"],
+                pretrained_str=model["weights_path"],
+                progress_callback=_progress,
+                cancel_check=_cancelled,
+                pause_check=_pause_requested,
+            )
+            break
+        except ClassifierLoadPaused:
+            # Progress is checkpointed. Park here with no shared
+            # lock held; the next attempt resumes from the
+            # checkpoint. A Cancel during the pause surfaces on
+            # the retry through the cancel probe.
+            log.info(
+                "Pre-computing embeddings paused; parking until "
+                "Resume",
+            )
+            ctx.runner.is_cancelled(job["id"])
+            continue
+
+    return {"labels": len(labels), "model": model["name"]}
+
+
+def _precompute_model(get_models, model_id):
+    """Find the downloaded embedding model a precompute job runs with."""
+    models = get_models()
+    model = None
+    for m in models:
+        if m["id"] == model_id:
+            model = m
+            break
+    if not model or not model["downloaded"]:
+        raise RuntimeError(f"Model {model_id} not found or not downloaded")
+    if model.get("model_type", "bioclip") == "timm":
+        raise RuntimeError(
+            f"Model {model['name']} has a fixed class head and does "
+            "not use per-label embeddings — nothing to precompute."
+        )
+    return model
+
+
+def _precompute_labels(get_saved_labels, load_label_set, labels_file):
+    """Load the label set a precompute job embeds, refusing an empty one."""
+    # The same list the classify job will load, so the warmed
+    # cache is the one it looks for.
+    saved = {ls.get("labels_file"): ls for ls in get_saved_labels()}
+    labels = load_label_set(labels_file, saved.get(labels_file))
+    if not labels:
+        skipped = len(getattr(labels, "dropped_ambiguous", ()))
+        raise RuntimeError(
+            f"{os.path.basename(labels_file)} has no usable species"
+            + (f" — all {skipped:,} of its names are shared by more "
+               "than one species" if skipped else "")
+            + ". Download the list again in Settings → Labels to "
+            "split them by scientific name."
+        )
+    return labels
+
+
+def _embedding_precompute_offer(load_label_set, labels_path):
+    """The precompute the fetch-labels result offers, or None.
+
+    Offered when the active model uses per-label embeddings and the
+    freshly downloaded list has no valid embedding cache for it yet.
+    """
+    precompute = None
+    from models import get_active_model
+
+    active_model = get_active_model()
+    # timm models have a fixed class head — no per-label embeddings.
+    if (
+        active_model
+        and active_model["downloaded"]
+        and active_model.get("model_type", "bioclip") != "timm"
+    ):
+        try:
+            from classifier import _embedding_is_cached, _resolve_model_dir
+
+            labels = load_label_set(labels_path)
+            model_dir = _resolve_model_dir(
+                active_model["model_str"], active_model.get("weights_path")
+            )
+            # Use the shared helper: it validates payload shape and
+            # dtype rather than accepting any file at the identity
+            # path, so a truncated or wrong-shape cache no longer
+            # reports as ready here.
+            if not _embedding_is_cached(
+                labels, active_model["model_str"], model_dir
+            ):
+                precompute = {
+                    "model_id": active_model["id"],
+                    "model_name": active_model["name"],
+                    "labels_file": labels_path,
+                }
+        except Exception:
+            log.warning(
+                "Could not inspect embedding cache after label download",
+                exc_info=True,
+            )
+    return precompute
