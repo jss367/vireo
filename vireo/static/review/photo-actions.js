@@ -1,12 +1,52 @@
 // Per-photo actions (rating, flag, reveal, copy path, lightbox) and keeping Representative badges current.
 // Classic page script; load boot.js after all definitions.
 
+// Serialize each photo/field separately. Adjacent identical pending actions
+// share one result and notification; a different choice runs after its predecessor.
+// Clipboard writes share one lane so a late lookup cannot overwrite a newer copy.
+var enqueueReviewPhotoAction = (function() {
+  var pending = new Map();
+  return function(key, value, run) {
+    var previous = pending.get(key);
+    if (previous && previous.value === value) return previous.promise;
+    var task = {value: value, promise: null};
+    task.promise = (previous ? previous.promise.catch(function() {}) : Promise.resolve())
+      .then(run).finally(function() {
+        if (pending.get(key) === task) pending.delete(key);
+      });
+    pending.set(key, task);
+    return task.promise;
+  };
+})();
+
+function saveReviewPhotoValue(photoId, field, value) {
+  return enqueueReviewPhotoAction(field + ':' + photoId, value, async function() {
+    try {
+      var body = {photo_ids: [photoId]};
+      body[field] = value;
+      var data = await safeFetch('/api/batch/' + field, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      }, {toast: false});
+      if (!data || data.ok !== true || data.updated !== 1) {
+        throw new Error('The server did not confirm the update. Reload Review before trying again.');
+      }
+    } catch (error) {
+      // The history transport already explains why undo/redo blocked a write.
+      if (!error || error.code !== 'history_busy') {
+        showToast('Could not save ' + field + ': ' + (error && error.message || 'Request failed. Try again.'), 'error');
+      }
+      return false;
+    }
+    if (field === 'flag' && _clearPredictionRepresentativeStateIfIneligible(photoId, value)) renderAll();
+    showToast(field === 'rating' ? 'Rating updated' : 'Flag updated', 'success');
+    return true;
+  });
+}
+
 function setReviewRating(photoId, rating) {
-  safeFetch('/api/batch/rating', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ photo_ids: [photoId], rating: rating }),
-  }, { toast: false }).catch(function() {});
+  return saveReviewPhotoValue(photoId, 'rating', rating);
 }
 
 // Server-side representative eligibility (see get_species_representatives)
@@ -37,16 +77,7 @@ function _clearPredictionRepresentativeStateIfIneligible(photoId, flag) {
 }
 
 function setReviewFlag(photoId, flag) {
-  return safeFetch('/api/batch/flag', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ photo_ids: [photoId], flag: flag }),
-  }, { toast: false }).then(function() {
-    if (_clearPredictionRepresentativeStateIfIneligible(photoId, flag)) {
-      renderAll();
-    }
-    return true;
-  }).catch(function() { return false; });
+  return saveReviewPhotoValue(photoId, 'flag', flag);
 }
 
 function revealReviewPhoto(photoId) {
@@ -65,13 +96,24 @@ function revealReviewPhoto(photoId) {
   });
 }
 
-async function copyReviewPhotoPath(photoId) {
-  try {
-    var data = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
-    if (data && data.path) {
-      try { await navigator.clipboard.writeText(data.path); } catch(e) {}
+function copyReviewPhotoPath(photoId) {
+  return enqueueReviewPhotoAction('copy-path', photoId, async function() {
+    try {
+      var data = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
+      if (!data || typeof data.path !== 'string' || !data.path.trim()) {
+        throw new Error('The photo path is unavailable.');
+      }
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        throw new Error('Clipboard access is unavailable in this window.');
+      }
+      await navigator.clipboard.writeText(data.path);
+    } catch (error) {
+      showToast('Could not copy path: ' + (error && error.message || 'The operation failed. Try again.'), 'error');
+      return false;
     }
-  } catch(e) {}
+    showToast('Path copied', 'success');
+    return true;
+  });
 }
 
 function openReviewLightbox(photoId, filename) {
