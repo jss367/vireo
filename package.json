@@ -7,12 +7,13 @@
     "tauri": "tauri",
     "lint:frontend": "eslint vireo/static",
     "typecheck:frontend": "tsc --project tsconfig.frontend.json",
-    "test:frontend-checks": "node --test tests/frontend/checks.test.mjs tests/frontend/duplicates-categories.test.mjs tests/frontend/numbered-navigation.test.mjs",
+    "test:frontend-checks": "node --test tests/frontend/checks.test.mjs tests/frontend/duplicates-categories.test.mjs tests/frontend/numbered-navigation.test.mjs tests/frontend/function-length.test.mjs",
     "check:frontend": "npm run lint:frontend && npm run typecheck:frontend && npm run test:frontend-checks"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2",
+    "acorn": "^8.19.0",
     "eslint": "^10.12.0",
     "globals": "^17.13.0",
     "typescript": "^7.0.2"
