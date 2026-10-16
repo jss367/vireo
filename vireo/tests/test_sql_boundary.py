@@ -102,7 +102,7 @@ REPO = VIREO.parent
 # and the data layer needs no exemption. A future ``self.conn.close()`` added
 # to ``Database.close`` or any other method in ``db.py`` would trip the test,
 # which is the point: the rule holds for the data layer too.
-RAW_CLOSE_TREES = ("vireo", "tests", "scripts", "tools")
+RAW_CLOSE_TREES = ("vireo", "tests", "scripts", "tools", "docs")
 
 
 def _every_module():
@@ -199,3 +199,15 @@ def test_connections_close_through_database_close():
         "the connection, drops db.conn and makes db.closed true, so the "
         "Database never claims to be open over a dead handle."
     )
+
+
+def test_raw_close_scan_includes_docs_prototypes(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "REPO", tmp_path)
+    name = "docs/plans/example-prototype/check.py"
+    path = tmp_path / name
+    path.parent.mkdir(parents=True)
+    path.write_text("db.conn.close()\n", encoding="utf-8")
+
+    modules = dict(_every_module())
+    assert name in modules
+    assert _raw_connection_closes(modules[name]) == [1]
