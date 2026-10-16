@@ -33,6 +33,8 @@ the test harness, so neither is scanned for the first two rules.
 import ast
 from pathlib import Path
 
+import pytest
+
 VIREO = Path(__file__).resolve().parents[1]
 
 DATA_LAYER = {"db.py", "canonical_schema.py"}
@@ -251,3 +253,52 @@ def test_raw_close_scan_includes_docs_prototypes(tmp_path, monkeypatch):
     modules = dict(_every_module())
     assert name in modules
     assert _raw_connection_closes(modules[name]) == [1]
+
+
+@pytest.mark.parametrize(("source", "lines"), [
+    ("db.conn.close()", [1]),
+    ("conn = db.conn\nconn.close()", [2]),
+    ("conn = getattr(db, 'conn', None)\nconn.close()", [2]),
+    ("conn: Connection = db.conn\nconn.close()", [2]),
+    ("conn: Connection = getattr(db, 'conn', None)\nconn.close()", [2]),
+    ("conn = db.conn\nconn: Connection\nconn.close()", [3]),
+    ("conn = db.conn\nconn: Connection = other\nconn.close()", [3]),
+    ("conn = db.conn\nconn = other\nconn.close()", [3]),
+    ("conn = db.conn\nconn = consume(conn.close())", [2]),
+    ("conn = db.conn\nconn: Connection = consume(conn.close())", [2]),
+    ("conn = db.conn\nconn = consume(conn.close())\nconn.close()", [2, 3]),
+    ("conn = db.conn\nif replace:\n conn = other\nconn.close()", [4]),
+    ("conn = db.conn\nif replace:\n pass\nelse:\n conn = other\nconn.close()", [6]),
+    ("if choose:\n conn = db.conn\nelse:\n conn = other\nconn.close()", [5]),
+    ("conn = db.conn\nif choose:\n conn = other\nelse:\n conn = another\nconn.close()", [6]),
+    ("conn = db.conn\nif choose:\n conn = other\n conn.close()\nconn.close()", [4, 5]),
+    ("conn = db.conn\nif choose:\n if replace:\n  conn = other\nconn.close()", [5]),
+    ("conn = db.conn\ndef unrelated(conn):\n conn.close()\nconn.close()", [4]),
+    ("def first(db):\n conn = db.conn\ndef second(conn):\n conn.close()", []),
+    ("def outer(db):\n conn = db.conn\n def inner(conn):\n  conn.close()\n conn.close()", [5]),
+    ("conn = db.conn\nclass Unrelated:\n conn = other\nconn.close()", [4]),
+    ("def typed(db):\n conn: Connection = db.conn\n conn.close()", [3]),
+    ("def conditional(db, replace):\n conn = db.conn\n if replace:\n  conn = other\n conn.close()", [5]),
+    ("def rebind(db):\n conn = db.conn\n conn = consume(conn.close())", [3]),
+    ("conn = sqlite3.connect(path)\nconn.close()", []),
+    ("db.close()\nother.close()", []),
+])
+def test_raw_close_fail_closed_alias_contract(source, lines):
+    assert _raw_connection_closes(ast.parse(source)) == lines
+
+
+def test_raw_close_exempts_only_database_close():
+    tree = ast.parse(
+        "class Database:\n"
+        " def close(self):\n  conn = getattr(self, 'conn', None)\n  conn.close()\n"
+        " def unsafe(self):\n  self.conn.close()\n"
+        "class Other:\n def close(self):\n  self.conn.close()\n"
+    )
+    assert _raw_connection_closes(tree) == [4, 6, 9]
+    assert _raw_connection_closes(tree, exempt=("Database.close",)) == [6, 9]
+
+
+def test_raw_close_preserves_actual_database_close_owner():
+    tree = ast.parse((VIREO / "db.py").read_text(encoding="utf-8"))
+    assert _raw_connection_closes(tree), "The real owned handle close must be recognized"
+    assert _raw_connection_closes(tree, exempt=("Database.close",)) == []
