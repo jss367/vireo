@@ -5,14 +5,28 @@
  */
 (function() {
   'use strict';
-  var root = document.getElementById('gridContainer');
-  var grid = document.getElementById('grid');
-  if (!root || !grid) return;
+  const rootElement = document.getElementById('gridContainer');
+  const gridElement = document.getElementById('grid');
+  if (!rootElement || !gridElement) return;
+  const root = rootElement;
+  const grid = gridElement;
 
   var selector = 'img[data-thumbnail-src]';
+  /**
+   * @typedef {object} ThumbnailRequestState
+   * @property {HTMLImageElement} img
+   * @property {string | null} url
+   * @property {AbortController | null} controller
+   * @property {string | null} objectUrl
+   * @property {boolean} loaded
+   * @property {boolean} failed
+   */
+  /** @type {Map<HTMLImageElement, ThumbnailRequestState>} */
   var states = new Map();
+  /** @type {Set<ThumbnailRequestState>} */
   var nearby = new Set();
   var active = 0;
+  /** @type {number | null} */
   var frame = null;
   var margin = 200;
 
@@ -20,11 +34,13 @@
     if (frame === null) frame = requestAnimationFrame(pump);
   }
 
+  /** @param {ThumbnailRequestState} state */
   function cancel(state) {
     if (state.controller) state.controller.abort();
     state.controller = null;
   }
 
+  /** @param {ThumbnailRequestState} state */
   function release(state) {
     if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
     state.objectUrl = null;
@@ -32,6 +48,7 @@
     state.img.removeAttribute('src');
   }
 
+  /** @param {ThumbnailRequestState} state */
   function leave(state) {
     nearby.delete(state);
     cancel(state);
@@ -39,7 +56,9 @@
     state.img.dispatchEvent(new Event('vireo:thumbnail-cancelled'));
   }
 
+  /** @param {Node} img */
   function sync(img) {
+    if (!(img instanceof HTMLImageElement)) return;
     var state = states.get(img);
     if (!grid.contains(img) || !img.matches(selector)) {
       if (state) {
@@ -52,7 +71,7 @@
     }
     var url = img.getAttribute('data-thumbnail-src');
     if (!state) {
-      state = {img: img, url: url};
+      state = {img: img, url: url, controller: null, objectUrl: null, loaded: false, failed: false};
       states.set(img, state);
       observer.observe(img);
     } else if (state.url !== url) {
@@ -64,12 +83,15 @@
     schedule();
   }
 
+  /** @param {ThumbnailRequestState} state */
   async function download(state) {
+    var url = state.url;
+    if (!url) return;
     var controller = new AbortController();
     state.controller = controller;
     active++;
     try {
-      var response = await fetch(state.url, {
+      var response = await fetch(url, {
         signal: controller.signal,
         credentials: 'same-origin'
       });
@@ -81,7 +103,7 @@
       state.objectUrl = URL.createObjectURL(blob);
       state.loaded = true;
       state.img.src = state.objectUrl;
-    } catch (error) {
+    } catch {
       if (state.controller === controller && !controller.signal.aborted) {
         state.failed = true;
         state.img.dispatchEvent(new Event('error'));
@@ -97,6 +119,7 @@
   function pump() {
     frame = null;
     var bounds = root.getBoundingClientRect();
+    /** @type {{state: ThumbnailRequestState, distance: number, visible: boolean}[]} */
     var candidates = [];
     nearby.forEach(function(state) {
       var rect = state.img.getBoundingClientRect();
@@ -116,13 +139,15 @@
     candidates.sort(function(a, b) {
       return Number(b.visible) - Number(a.visible) || a.distance - b.distance;
     });
-    for (var i = 0; i < candidates.length && active < 2; i++) {
-      download(candidates[i].state);
+    for (var candidate of candidates) {
+      if (active >= 2) break;
+      download(candidate.state);
     }
   }
 
   var observer = new IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
+      if (!(entry.target instanceof HTMLImageElement)) return;
       var state = states.get(entry.target);
       if (!state) return;
       if (entry.isIntersecting) nearby.add(state);
@@ -131,8 +156,9 @@
     schedule();
   }, {root: root, rootMargin: margin + 'px 0px'});
 
+  /** @param {Node} node */
   function visit(node) {
-    if (node.nodeType !== 1) return;
+    if (!(node instanceof Element)) return;
     if (node.matches(selector)) sync(node);
     node.querySelectorAll(selector).forEach(sync);
   }
