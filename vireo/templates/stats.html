@@ -1238,14 +1238,6 @@ function renderHours(hours) {
   container.innerHTML = html;
 }
 
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B';
-  var k = 1024;
-  var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  var i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
 function renderOverview(d) {
   document.getElementById('photoCount').textContent = (d.total_photos || 0).toLocaleString();
   document.getElementById('folderCount').textContent = (d.folder_count || 0).toLocaleString();

@@ -627,13 +627,9 @@ def test_offline_original_ids_excludes_non_cached_rows(db):
 
 
 def test_preview_invalidated_reads_the_marker(db):
-    from preview_cache import (
-        ensure_preview_cache_invalidations_table,
-        mark_preview_cache_invalid,
-    )
+    from preview_cache import mark_preview_cache_invalid
 
     pid = _photo(db)
-    ensure_preview_cache_invalidations_table(db)
     assert db.caches.preview_invalidated(pid, 1920) is False
     mark_preview_cache_invalid(db, pid, 1920)
     assert db.caches.preview_invalidated(pid, 1920) is True

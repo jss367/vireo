@@ -18,6 +18,9 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from canonical_schema import (
+    FORMERLY_LAZY_OBJECTS, JOB_HISTORY_LATER_COLUMNS, create_formerly_lazy_objects,
+)
 from db import Database, IncompatibleDatabaseError
 from file_replace import replace_file
 
@@ -113,6 +116,39 @@ def _add_grouping_payload_bytes(conn):
         conn.execute("UPDATE edit_history_payloads SET bytes=LENGTH(CAST(payload AS BLOB))")
 
 
+def _add_formerly_lazy_tables(conn):
+    """Create the tables that used to be created on first write.
+
+    ``job_history`` (the job runner), ``preview_cache_invalidations`` (the
+    preview cache), ``species_identity_repairs`` and the common-name lookup
+    index (the identity repair) were each created by the code that first
+    wrote them, with ``job_history`` gaining columns one ``ALTER`` at a time. They are part of the canonical
+    schema now; a catalog that already has them keeps its rows, and a
+    ``job_history`` that predates one of its columns gains it here.
+    """
+    create_formerly_lazy_objects(conn)
+    present = {row[1] for row in conn.execute("PRAGMA table_info(job_history)")}
+    for column, definition in JOB_HISTORY_LATER_COLUMNS:
+        if column not in present:
+            conn.execute(f"ALTER TABLE job_history ADD COLUMN {column} {definition}")
+
+
+def _validate_formerly_lazy_tables(conn):
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger')"
+        )
+    }
+    for statement in FORMERLY_LAZY_OBJECTS:
+        name = statement.split("IF NOT EXISTS", 1)[1].split()[0].split("(")[0]
+        if name not in tables:
+            raise RuntimeError(f"{name} is missing")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(job_history)")}
+    missing = [column for column, _ in JOB_HISTORY_LATER_COLUMNS if column not in columns]
+    if missing:
+        raise RuntimeError(f"job_history is missing {', '.join(missing)}")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -125,6 +161,10 @@ MIGRATIONS = (
     Migration(15, "durable_paired_preview_cache", _add_paired_preview_cache),
     Migration(16, "prediction_history_instances", _add_prediction_history_instances),
     Migration(17, "grouping_payload_bytes", _add_grouping_payload_bytes),
+    Migration(
+        18, "formerly_lazy_tables",
+        _add_formerly_lazy_tables, _validate_formerly_lazy_tables,
+    ),
 )
 
 

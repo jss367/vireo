@@ -9,7 +9,7 @@ function populateTypeFilter() {
   var current = sel.value;
   sel.innerHTML = '<option value="">All types</option>';
   Object.keys(types).sort().forEach(function(t) {
-    sel.innerHTML += '<option value="' + esc(t) + '">' + esc(window.formatJobType(t)) + '</option>';
+    sel.innerHTML += '<option value="' + escapeHtml(t) + '">' + escapeHtml(window.formatJobType(t)) + '</option>';
   });
   sel.value = current;
 }
@@ -59,28 +59,28 @@ function renderListItem(j, source) {
   var visibleProgress = activeProgress(j.progress);
   var collectionText = jobCollectionText(j);
   if (isLiveStatus(j.status) && j.progress && j.progress.phase) {
-    detail = esc(j.progress.phase);
+    detail = escapeHtml(j.progress.phase);
     if (visibleProgress && visibleProgress.phase) {
       detail += ' ' + visibleProgress.current.toLocaleString() + '/' + visibleProgress.total.toLocaleString();
     }
   } else if (j.summary) {
-    detail = esc(j.summary);
+    detail = escapeHtml(j.summary);
   } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
-    detail = '<span style="color:var(--danger);">' + esc(j.errors[0]).substring(0, 60) + '</span>';
+    detail = '<span style="color:var(--danger);">' + escapeHtml(j.errors[0]).substring(0, 60) + '</span>';
   } else if (j.duration) {
     detail = formatElapsed(j.duration);
   }
   if (collectionText) {
-    detail = detail ? detail + ' &middot; ' + esc(collectionText) : esc(collectionText);
+    detail = detail ? detail + ' &middot; ' + escapeHtml(collectionText) : escapeHtml(collectionText);
   }
   var pct = 0;
   if (visibleProgress) {
     pct = progressPct(visibleProgress);
   }
-  var html = '<div class="job-list-item' + selected + '" data-job-id="' + esc(j.id) + '" data-job-source="' + source + '">';
+  var html = '<div class="job-list-item' + selected + '" data-job-id="' + escapeHtml(j.id) + '" data-job-source="' + source + '">';
   html += '<div class="job-list-item-header">';
   html += '<span class="job-list-item-dot ' + dot + '"></span>';
-  html += '<span class="job-list-item-type">' + esc(window.formatJobType(j.type)) + '</span>';
+  html += '<span class="job-list-item-type">' + escapeHtml(window.formatJobType(j.type)) + '</span>';
   html += '<span class="job-list-item-time">' + time + '</span>';
   html += '</div>';
   if (detail) html += '<div class="job-list-item-detail">' + detail + '</div>';

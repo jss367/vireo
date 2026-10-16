@@ -890,7 +890,7 @@ async function checkDupCleanup() {
     }
 
     if (count > 0 && !_isDupCleanupDismissed(count)) {
-      const sizeStr = formatBytesNav(data.total_size || 0);
+      const sizeStr = formatBytes(data.total_size || 0);
       msg.textContent = count + ' duplicate file ' + (count === 1 ? 'copy' : 'copies') +
         ' could be cleaned up from disk (estimated ' + sizeStr + ').';
       banner.dataset.count = String(count);
@@ -908,16 +908,6 @@ function dismissDupCleanupBanner() {
   const count = Number(banner.dataset.count || 0);
   banner.style.display = 'none';
   sessionStorage.setItem(_dupCleanupDismissKey(), String(count));
-}
-
-// Local byte formatter — _navbar.html ships before page-specific JS that
-// might define one, and a banner can't depend on per-page utilities.
-function formatBytesNav(n) {
-  if (n == null) return '';
-  if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
-  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
 }
 
 checkDupCleanup();

@@ -50,10 +50,6 @@ def refresh_common_name_index(conn, taxonomy_data):
         conn.executemany("""INSERT OR IGNORE INTO taxa_common_names (taxon_id, name, locale)
             SELECT id, ?, 'en' FROM taxa WHERE inat_id = ?""",
             ((name, tid) for tid, name in aliases))
-        # The primary key starts with taxon_id; it cannot accelerate the
-        # resolver's case-insensitive lookup by name across this large index.
-        conn.execute("""CREATE INDEX IF NOT EXISTS idx_taxa_common_names_name_nocase
-            ON taxa_common_names(name COLLATE NOCASE)""")
         for key, value in (
             ("common_name_identity_version", str(COMMON_NAME_IDENTITY_VERSION)),
             ("ambiguous_common_names", json.dumps(sorted(ambiguous))),
@@ -101,12 +97,6 @@ def apply_repairs(conn, changes, retire_artifacts=True):
     False only when a fresh run in this catalog would write the corrected
     values itself, so the cached output still matches its fingerprint.
     """
-    conn.execute("""CREATE TABLE IF NOT EXISTS species_identity_repairs (
-        id INTEGER PRIMARY KEY, prediction_id INTEGER NOT NULL,
-        resolution_identity TEXT NOT NULL, before_json TEXT NOT NULL,
-        after_json TEXT NOT NULL, reason TEXT NOT NULL,
-        repaired_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )""")
     count = 0
     for change in changes:
         after = {

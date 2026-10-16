@@ -12,13 +12,6 @@ window.VireoReleaseOriginals = (function() {
       : value ? 'Releasing…' : 'Release local originals…';
   }
 
-  function formatBytes(bytes) {
-    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    var index = 0;
-    while (bytes >= 1024 && index < units.length - 1) { bytes /= 1024; index++; }
-    return (index ? bytes.toFixed(1) : bytes) + ' ' + units[index];
-  }
-
   async function release(scope, description) {
     if (running) return;
     if (!window.confirm(

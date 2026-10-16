@@ -33,9 +33,9 @@ function renderJobCard(job, options) {
 
   // Header: type, workspace label, status, cancel
   html += '<div class="job-card-header">';
-  html += '<span class="job-detail-title">' + esc(window.formatJobType(job.type)) + '</span>';
+  html += '<span class="job-detail-title">' + escapeHtml(window.formatJobType(job.type)) + '</span>';
   if (options.workspaceName) {
-    html += '<span class="job-card-workspace">' + esc(options.workspaceName) + '</span>';
+    html += '<span class="job-card-workspace">' + escapeHtml(options.workspaceName) + '</span>';
   }
   html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
   if (isLive) {
@@ -70,7 +70,7 @@ function renderJobCard(job, options) {
     if (cancellingJobIds[job.id]) {
       html += '<button class="btn-cancel cancelling" disabled>Cancelling…</button>';
     } else {
-      html += '<button class="btn-cancel" data-cancel-job="' + esc(job.id) + '">Cancel</button>';
+      html += '<button class="btn-cancel" data-cancel-job="' + escapeHtml(job.id) + '">Cancel</button>';
     }
   }
   html += '</div>';
@@ -81,11 +81,11 @@ function renderJobCard(job, options) {
   html += '<span>Elapsed: ' + elapsed + '</span>';
   var collectionText = jobCollectionText(job);
   if (collectionText) {
-    html += '<span>' + esc(collectionText) + '</span>';
+    html += '<span>' + escapeHtml(collectionText) + '</span>';
   }
   var visibleProgress = activeProgress(job.progress);
   if (visibleProgress) {
-    html += '<span>' + esc(visibleProgress.label) + ': ' + progressPct(visibleProgress) + '%</span>';
+    html += '<span>' + escapeHtml(visibleProgress.label) + ': ' + progressPct(visibleProgress) + '%</span>';
   }
   html += '</div>';
 
@@ -122,7 +122,7 @@ function renderJobCard(job, options) {
   var recoveryOptions = job.import_recovery_options || {};
   var recoveryBlocksRetry = recoveryOptions.error && (!importNotStarted || !recoveryOptions.retryable);
   if (!isLive && !job.import_resume_pending && recoveryOptions.error) {
-    html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">' + esc(recoveryOptions.error);
+    html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">' + escapeHtml(recoveryOptions.error);
     if (recoveryOptions.taken_over_by_job_id) {
       html += ' <button class="btn-retry" data-show-job="' + escapeAttr(recoveryOptions.taken_over_by_job_id) + '">Show that import</button>';
     }
@@ -137,7 +137,7 @@ function renderJobCard(job, options) {
     var retryInFlight = hasActiveRetryFor(job.id);
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';
     if (resumeTakeover.by && !retryInFlight) {
-      html += '<span>' + esc(importTakeoverNote(resumeTakeover)) + '</span> ' +
+      html += '<span>' + escapeHtml(importTakeoverNote(resumeTakeover)) + '</span> ' +
         '<button class="btn-retry" data-show-job="' + escapeAttr(resumeTakeover.by) +
         '" style="margin-left:8px;">Show that import</button>';
     } else if (retryInFlight) {
@@ -153,7 +153,7 @@ function renderJobCard(job, options) {
     } else if (resumableImport) {
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '" data-import-resume>Resume import</button>';
-      html += '<span style="margin-left:8px;">' + esc(importResumeHint(job)) + '</span>';
+      html += '<span style="margin-left:8px;">' + escapeHtml(importResumeHint(job)) + '</span>';
     } else if (importNotStarted) {
       html += '<button class="btn-retry" data-retry-import-job="' +
         escapeAttr(job.id) + '">Retry import</button>';
@@ -186,7 +186,7 @@ function renderJobCard(job, options) {
   // what to fix before pressing Resume.
   var pauseReason = job.progress && job.progress.pause_reason;
   if (pauseReason && (job.status === 'pausing' || job.status === 'paused')) {
-    html += '<div class="job-pause-banner">' + esc(pauseReason) + '</div>';
+    html += '<div class="job-pause-banner">' + escapeHtml(pauseReason) + '</div>';
   }
 
   // Interrupted-by-restart banner. The startup sweep keeps whatever
@@ -194,7 +194,7 @@ function renderJobCard(job, options) {
   // stamps result.interrupted; say plainly what was recorded and when,
   // instead of leaving the user with a bare error string.
   if (!isLive && job.result && job.result.interrupted) {
-    html += '<div class="job-pause-banner">' + esc(interruptedText(job)) + '</div>';
+    html += '<div class="job-pause-banner">' + escapeHtml(interruptedText(job)) + '</div>';
   }
 
   // Steps
@@ -208,14 +208,14 @@ function renderJobCard(job, options) {
   } else if (isLive && job.progress) {
     // Fallback for running jobs without steps
     html += '<div class="job-tree"><div style="padding:8px;font-size:13px;color:var(--text-muted);">';
-    if (job.progress.phase) html += '<div style="color:var(--accent);font-weight:500;margin-bottom:8px;">' + esc(job.progress.phase) + '</div>';
+    if (job.progress.phase) html += '<div style="color:var(--accent);font-weight:500;margin-bottom:8px;">' + escapeHtml(job.progress.phase) + '</div>';
     var fallbackProgress = activeProgress(job.progress);
     if (fallbackProgress) {
       var pct = progressPct(fallbackProgress);
       html += '<div class="tree-step-bar" style="width:200px;margin-bottom:4px;"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
-      html += '<div>' + esc(fallbackProgress.label) + ': ' + fallbackProgress.current.toLocaleString() + ' / ' + fallbackProgress.total.toLocaleString() + '</div>';
+      html += '<div>' + escapeHtml(fallbackProgress.label) + ': ' + fallbackProgress.current.toLocaleString() + ' / ' + fallbackProgress.total.toLocaleString() + '</div>';
     }
-    if (job.progress.current_file) html += '<div style="margin-top:4px;">' + esc(job.progress.current_file) + '</div>';
+    if (job.progress.current_file) html += '<div style="margin-top:4px;">' + escapeHtml(job.progress.current_file) + '</div>';
     html += '</div></div>';
   } else if (!isLive) {
     // Fallback for completed/failed jobs without steps. The server
@@ -232,20 +232,20 @@ function renderJobCard(job, options) {
       resultError = '';
     }
     if (resultError) {
-      html += '<div style="color:var(--danger);font-weight:500;">Error: ' + esc(resultError) + '</div>';
+      html += '<div style="color:var(--danger);font-weight:500;">Error: ' + escapeHtml(resultError) + '</div>';
     }
     var resultSummary = job.summary || '';
     // Job-authored summaries often wrap the error ("Move failed — <error>");
     // don't print the same message twice. Interrupted rows' summaries
     // restate the banner, so skip them too.
     if (resultSummary && !(resultError && resultSummary.indexOf(resultError) !== -1) && !wasInterrupted) {
-      html += '<div class="job-result-summary">' + esc(resultSummary) + '</div>';
+      html += '<div class="job-result-summary">' + escapeHtml(resultSummary) + '</div>';
     }
     var resultDetails = Array.isArray(job.result_details) ? job.result_details : [];
     if (resultDetails.length > 0) {
       html += '<div class="job-result-details">';
       resultDetails.forEach(function(line) {
-        html += '<div class="job-result-detail-line">' + esc(line) + '</div>';
+        html += '<div class="job-result-detail-line">' + escapeHtml(line) + '</div>';
       });
       html += '</div>';
     }

@@ -253,11 +253,6 @@ var rejectedAtLoadSeq = {};
 // flight; without a stamp, an older response can arrive after a newer one and
 // overwrite the fresher photos/ordering keys.
 var bucketRefetchSeq = {};
-function escapeAttr(s) {
-  if (s === null || s === undefined) return '';
-  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 function formatScore(v) {
   return v == null ? '—' : Number(v).toFixed(2);
 }

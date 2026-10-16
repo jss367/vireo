@@ -1,6 +1,7 @@
 """Behavior pins for the job-history domain of ``Database``.
 
-``jobs.JobRunner`` creates the table and keeps its own writes; these tests
+The table is part of the canonical schema; ``jobs.JobRunner`` keeps its own
+writes. These tests
 cover what the job routes do through the ``db.job_history`` accessor: reading
 a job type's newest completed result back (the Duplicates page restoring its
 last scan), the single-record lookup, and the result rewrite. The structural
@@ -22,10 +23,6 @@ from repositories.job_history import JobHistoryRepository
 
 @pytest.fixture
 def history(db):
-    # The real table definition and migrations; the method reads no runner state.
-    JobRunner._ensure_history_table(None, db)
-    db.conn.commit()
-
     def add(job_id, job_type, status, finished_at, result):
         db.conn.execute(
             "INSERT INTO job_history (id, type, status, started_at, finished_at, result) "

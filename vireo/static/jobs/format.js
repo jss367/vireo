@@ -1,12 +1,6 @@
-// Formatting helpers: escaping, elapsed time, status icons, and progress.
+// Formatting helpers: elapsed time, status icons, and progress (escaping
+// is the shared escapeHtml from vireo-utils.js).
 // Classic page script; load boot.js after all definitions.
-
-function esc(s) {
-  if (!s) return '';
-  var d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
 
 function formatElapsed(secs) {
   if (secs < 60) return Math.round(secs) + 's';

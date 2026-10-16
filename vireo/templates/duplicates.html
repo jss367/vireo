@@ -397,15 +397,6 @@
   // can detect that a fresh scan is already underway and skip its render.
   var _scanInProgress = false;
 
-  function escapeHtml(s) {
-    if (s == null) return '';
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
 
   function showProgress(msg) {
     var pg = document.getElementById('progress');
@@ -1227,14 +1218,6 @@
     // cleanup of one already-gone file would render "Cleanup complete ·
     // 0 moved · 1 skipped" while the card reads "Cleaned up".
     return s.reason !== 'file already missing';
-  }
-
-  function formatBytes(n) {
-    if (n == null) return '';
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
-    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
   }
 
   function clearResults() {

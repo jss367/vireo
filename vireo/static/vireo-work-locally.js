@@ -331,10 +331,10 @@
       var folder = byFolder[id];
       if (!line || !folder) return;
       line.style.color = 'var(--text-secondary)';
-      line.textContent = formatBytesNav(folder.total_bytes || 0) + ' to copy · ' +
+      line.textContent = formatBytes(folder.total_bytes || 0) + ' to copy · ' +
         Number(folder.total_files || 0).toLocaleString() + ' file' +
         (Number(folder.total_files || 0) === 1 ? '' : 's') + ' · ' +
-        formatBytesNav(folder.free_bytes || 0) + ' free on destination';
+        formatBytes(folder.free_bytes || 0) + ' free on destination';
     });
 
     var blocked = (preflight.volumes || []).filter(function(volume) {
@@ -345,15 +345,15 @@
       if (blocked.length) {
         capacity.innerHTML = blocked.map(function(volume) {
           return '<div><strong>Not enough space.</strong> ' +
-            escapeHtml(formatBytesNav(volume.copy_bytes || 0)) + ' would be copied to this disk, ' +
-            escapeHtml(formatBytesNav(volume.free_bytes || 0)) + ' is free, and Vireo keeps ' +
-            escapeHtml(formatBytesNav(volume.reserve_bytes || 0)) + ' free for safety.</div>';
+            escapeHtml(formatBytes(volume.copy_bytes || 0)) + ' would be copied to this disk, ' +
+            escapeHtml(formatBytes(volume.free_bytes || 0)) + ' is free, and Vireo keeps ' +
+            escapeHtml(formatBytes(volume.reserve_bytes || 0)) + ' free for safety.</div>';
         }).join('');
       } else {
         var volumeCount = (preflight.volumes || []).length;
-        var summary = formatBytesNav(preflight.total_bytes || 0) + ' total to copy' +
+        var summary = formatBytes(preflight.total_bytes || 0) + ' total to copy' +
           (volumeCount === 1
-            ? ' · ' + formatBytesNav(preflight.volumes[0].after_copy_bytes || 0) + ' will remain free'
+            ? ' · ' + formatBytes(preflight.volumes[0].after_copy_bytes || 0) + ' will remain free'
             : ' across ' + volumeCount + ' destination disks');
         var closeToReserve = (preflight.volumes || []).filter(function(volume) {
           var reserve = Number(volume.reserve_bytes || 0);
@@ -371,18 +371,18 @@
             Number(volume.after_copy_bytes || 0) - Number(volume.reserve_bytes || 0)
           );
           summary += headroom > 0
-            ? '. That leaves ' + formatBytesNav(headroom) +
-              " above Vireo's " + formatBytesNav(volume.reserve_bytes || 0) +
+            ? '. That leaves ' + formatBytes(headroom) +
+              " above Vireo's " + formatBytes(volume.reserve_bytes || 0) +
               ' safety reserve'
-            : ". That is exactly Vireo's " + formatBytesNav(volume.reserve_bytes || 0) +
+            : ". That is exactly Vireo's " + formatBytes(volume.reserve_bytes || 0) +
               ' safety reserve, with no extra headroom';
         } else if (closeToReserve.length) {
           summary += '. ' + closeToReserve.length + ' destination disk' +
             (closeToReserve.length === 1
-              ? ' is close to its ' + formatBytesNav(closeToReserve[0].reserve_bytes || 0) +
+              ? ' is close to its ' + formatBytes(closeToReserve[0].reserve_bytes || 0) +
                 ' safety reserve'
               : 's are close to their safety reserves (' + closeToReserve.map(function(volume) {
-                return formatBytesNav(volume.reserve_bytes || 0);
+                return formatBytes(volume.reserve_bytes || 0);
               }).join(', ') + ')');
         }
         capacity.textContent = summary + '.';
@@ -530,8 +530,8 @@
       detail = Number(p.current || 0).toLocaleString() + ' / ' +
         Number(p.total).toLocaleString() + ' files';
       if (p.bytes_total) {
-        detail += ' · ' + formatBytesNav(p.bytes_current || 0) + ' of ' +
-          formatBytesNav(p.bytes_total);
+        detail += ' · ' + formatBytes(p.bytes_current || 0) + ' of ' +
+          formatBytes(p.bytes_total);
       }
     }
     return '<div style="font-size:13px;color:var(--text-secondary);">' +

@@ -171,13 +171,6 @@ function encounterKey(enc) {
   return enc.photo_ids.slice().sort(function(a, b) { return a - b; }).join(',');
 }
 
-function escapeHtml(s) {
-  if (s == null) return '';
-  var d = document.createElement('div');
-  d.textContent = String(s);
-  return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
 function formatEncounterTimeRange(timeRange) {
   if (!timeRange || !timeRange[0]) return '';
 

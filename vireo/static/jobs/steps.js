@@ -21,11 +21,11 @@ function renderRichStep(step, job, isLive) {
     leafBufferSources[step.id] = step.source_index;
   }
 
-  var html = '<div class="tree-step" data-step-id="' + esc(step.id) + '">';
-  html += '<div class="tree-step-header" data-toggle-step="' + esc(step.id) + '">';
+  var html = '<div class="tree-step" data-step-id="' + escapeHtml(step.id) + '">';
+  html += '<div class="tree-step-header" data-toggle-step="' + escapeHtml(step.id) + '">';
   html += toggleIcon(isExpanded);
   html += statusIcon(step.status, warningCount);
-  html += '<span class="tree-step-label' + (step.status === 'pending' ? ' pending' : '') + '">' + esc(step.label) + '</span>';
+  html += '<span class="tree-step-label' + (step.status === 'pending' ? ' pending' : '') + '">' + escapeHtml(step.label) + '</span>';
 
   // 1-3: Progress counts, bar, percentage (for steps with progress)
   if (step.progress && step.progress.current > 0) {
@@ -45,7 +45,7 @@ function renderRichStep(step, job, isLive) {
   // so far)"), and some failed steps (e.g. scan) — show them all.
   var isTerminal = step.status === 'completed' || step.status === 'cancelled' || step.status === 'failed';
   if (isTerminal && step.summary) {
-    html += '<span class="tree-step-summary">(' + esc(step.summary) + ')</span>';
+    html += '<span class="tree-step-summary">(' + escapeHtml(step.summary) + ')</span>';
   }
 
   // 6: Duration — live timer for running, final for completed
@@ -79,7 +79,7 @@ function renderRichStep(step, job, isLive) {
     // list and against Tree of Life are different classifiers as far as
     // the results go, so the list has to be named too.
     if (step.label_source) {
-      html += '<div class="tree-step-label-source">' + esc(step.label_source) + '</div>';
+      html += '<div class="tree-step-label-source">' + escapeHtml(step.label_source) + '</div>';
     }
 
     // Import-in-place publishes explicit discovery and metadata sub-phases.
@@ -184,13 +184,13 @@ function renderRichStep(step, job, isLive) {
     // 4: Current file (step-level preferred, fall back to job-level)
     var currentFile = step.current_file || (isRunning && job.progress && job.progress.current_file ? job.progress.current_file : '');
     if (isRunning && currentFile) {
-      html += '<div class="tree-step-current-file">' + esc(currentFile) + '</div>';
+      html += '<div class="tree-step-current-file">' + escapeHtml(currentFile) + '</div>';
     }
 
     // Error detail
     if (step.error) {
       var detailClass = step.status === 'completed' ? ' warning' : '';
-      html += '<div class="tree-step-error' + detailClass + '">' + esc(step.error) + '</div>';
+      html += '<div class="tree-step-error' + detailClass + '">' + escapeHtml(step.error) + '</div>';
     }
 
     var stageResult = job.result && job.result.stages
@@ -200,8 +200,8 @@ function renderRichStep(step, job, isLive) {
       html += '<div class="tree-repair-list">';
       repairPhotos.forEach(function(photo) {
         var label = photo.filename || ('Photo ' + photo.id);
-        html += '<div class="tree-repair-item"><b>' + esc(label) + '</b>' +
-          (photo.reason ? ': ' + esc(photo.reason) : '') + '</div>';
+        html += '<div class="tree-repair-item"><b>' + escapeHtml(label) + '</b>' +
+          (photo.reason ? ': ' + escapeHtml(photo.reason) : '') + '</div>';
       });
       if (stageResult.failed_photos_truncated) {
         html += '<div class="tree-repair-item">And ' +
@@ -232,7 +232,7 @@ function renderRichStep(step, job, isLive) {
         html += '<div class="tree-leaves">';
         leaves.forEach(function(l) {
           var cls = l.status === 'current' ? ' current' : l.status === 'failed' ? ' failed' : '';
-          html += '<div class="tree-leaf' + cls + '">' + esc(l.name) + '</div>';
+          html += '<div class="tree-leaf' + cls + '">' + escapeHtml(l.name) + '</div>';
         });
         html += '</div>';
       }

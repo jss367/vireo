@@ -1,13 +1,5 @@
 /* ---------- Dashboard ---------- */
 
-function formatBytes(b) {
-  if (b == null || b === 0) return '0';
-  if (b < 1024) return b + ' B';
-  if (b < 1024 * 1024) return Math.round(b / 1024) + ' KB';
-  if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
-  return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
-}
-
 /* ---------- Embedding Matrix ---------- */
 async function loadEmbeddingMatrix() {
   var matrixEl = document.getElementById('matrixContent');

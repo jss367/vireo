@@ -8407,10 +8407,7 @@ def test_prepared_render_survivor_does_not_get_a_preview_marker(tmp_path):
     preview that legitimately gets written later.
     """
     from db import Database
-    from preview_cache import (
-        ensure_preview_cache_invalidations_table,
-        purge_cached_files_for_recycled_id,
-    )
+    from preview_cache import purge_cached_files_for_recycled_id
 
     vireo_dir = tmp_path / "vireo"
     thumb_dir = vireo_dir / "thumbnails"
@@ -8422,9 +8419,6 @@ def test_prepared_render_survivor_does_not_get_a_preview_marker(tmp_path):
         folder_id=fid, filename="gull.jpg", extension=".jpg",
         file_size=10, file_mtime=1.0,
     )
-    # Create the table up front so an empty result means "no marker was
-    # written", not "the purge never touched this family".
-    ensure_preview_cache_invalidations_table(db)
     render = vireo_dir / "originals" / f"{pid}_2048.jpg"
     render.parent.mkdir(parents=True)
     render.write_bytes(b"prepared-render")

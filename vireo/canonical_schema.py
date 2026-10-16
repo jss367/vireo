@@ -20,7 +20,81 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
+
+# Schema objects that the code which first wrote them used to create on
+# demand (the job runner's history, the preview cache's "do not adopt"
+# markers, the species-identity repair audit and the common-name lookup
+# index). ``create_tables`` builds them with the rest of the schema;
+# ``schema.MIGRATIONS`` entry 18 runs the same statements on a catalog that
+# predates the move, so this tuple is the one definition.
+# test_schema_ddl_boundary.py keeps new DDL out of the code that writes rows.
+FORMERLY_LAZY_OBJECTS = (
+    """CREATE TABLE IF NOT EXISTS job_history (
+        id          TEXT PRIMARY KEY,
+        type        TEXT,
+        status      TEXT,
+        started_at  TEXT,
+        finished_at TEXT,
+        duration    REAL,
+        result      TEXT,
+        error_count INTEGER DEFAULT 0,
+        config      TEXT,
+        workspace_id INTEGER,
+        resource_wait_seconds REAL DEFAULT 0,
+        resource_wait_count INTEGER DEFAULT 0,
+        tree        TEXT,
+        summary     TEXT DEFAULT '',
+        progress    TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id)",
+    # A catalog-independent download may finish after its workspace was
+    # deleted. Its final INSERT OR REPLACE must not resurrect history for an
+    # owner that no longer exists. NULL is global maintenance.
+    """CREATE TRIGGER IF NOT EXISTS job_history_require_workspace
+        BEFORE INSERT ON job_history
+        WHEN NEW.workspace_id IS NOT NULL AND NOT EXISTS
+             (SELECT 1 FROM workspaces WHERE id=NEW.workspace_id)
+        BEGIN SELECT RAISE(IGNORE); END""",
+    # The durable "do not adopt this preview" marker web.media's _serve_preview
+    # consults: an on-disk preview that outlived its owner would otherwise be
+    # adopted and re-registered verbatim.
+    """CREATE TABLE IF NOT EXISTS preview_cache_invalidations (
+        photo_id INTEGER NOT NULL,
+        size INTEGER NOT NULL,
+        PRIMARY KEY (photo_id, size),
+        FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+    )""",
+    # In-database before/after audit of species_identity_repair.apply_repairs.
+    """CREATE TABLE IF NOT EXISTS species_identity_repairs (
+        id INTEGER PRIMARY KEY, prediction_id INTEGER NOT NULL,
+        resolution_identity TEXT NOT NULL, before_json TEXT NOT NULL,
+        after_json TEXT NOT NULL, reason TEXT NOT NULL,
+        repaired_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
+    # The primary key starts with taxon_id; it cannot accelerate the species
+    # resolver's case-insensitive lookup by name across this large table.
+    """CREATE INDEX IF NOT EXISTS idx_taxa_common_names_name_nocase
+        ON taxa_common_names(name COLLATE NOCASE)""",
+)
+
+# Columns ``job_history`` gained one ``ALTER`` at a time while the job runner
+# owned its DDL. ``create_tables`` creates the table with all of them; the
+# ``ALTER`` for a catalog still missing one is migration 18's, in schema.py.
+JOB_HISTORY_LATER_COLUMNS = (
+    ("workspace_id", "INTEGER"),
+    ("tree", "TEXT"),
+    ("summary", "TEXT DEFAULT ''"),
+    ("resource_wait_seconds", "REAL DEFAULT 0"),
+    ("resource_wait_count", "INTEGER DEFAULT 0"),
+    ("progress", "TEXT"),
+)
+
+
+def create_formerly_lazy_objects(conn):
+    """Create ``FORMERLY_LAZY_OBJECTS`` (``IF NOT EXISTS``: idempotent)."""
+    for statement in FORMERLY_LAZY_OBJECTS:
+        conn.execute(statement)
 
 
 class CanonicalSchema:
@@ -1035,6 +1109,7 @@ class CanonicalSchema:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_keywords_place_id "
             "ON keywords(place_id) WHERE place_id IS NOT NULL"
         )
+        create_formerly_lazy_objects(self.conn)
 
         # Seed user-editable saved processes once. db_meta-guarded (NOT
         # user_version-guarded) because the live DB's user_version can run

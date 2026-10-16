@@ -94,13 +94,21 @@ that information for interactive use.
   so services keep staging, activation and restoration atomic.
 - Schema changes are ordered migrations in `vireo/schema.py`. They execute once
   at startup, use a transaction, advance `PRAGMA user_version`, and validate
-  before committing. Request connections must use the initialized schema. The
-  schema they build on (`CREATE TABLE IF NOT EXISTS` for the shape at
-  `BASELINE_VERSION`) lives in `vireo/canonical_schema.py`. A column is added
-  by a migration, not by an inline `ALTER` there.
+  before committing, after a `.pre-v<N>.bak` snapshot of the catalog. Request
+  connections must use the initialized schema. The schema they build on
+  (`CREATE TABLE IF NOT EXISTS` for the current shape) lives in
+  `vireo/canonical_schema.py`. A column is added by a migration, not by an
+  inline `ALTER` there, and no module outside the schema modules creates
+  tables, indexes, triggers or views on first write:
+  `test_schema_ddl_boundary.py` caps such DDL at its current count.
 - Shared browser code is exposed through the `Vireo` namespace. Network calls
-  use `Vireo.api`; shared DOM state uses `Vireo.dom`. New inline event handlers
-  and page-global variables are not permitted.
+  use `Vireo.api`; shared DOM state uses `Vireo.dom`; `escapeHtml`,
+  `escapeAttr` and `formatBytes` come from `vireo/static/vireo-utils.js`,
+  which the navbar loads before any other script, and have no page-local
+  copies (`test_shared_frontend_helpers.py`). New inline event handlers and
+  page-global variables are not permitted. The dates for retiring the
+  remaining per-page helper copies and inline template scripts are in
+  `docs/plans/2026-10-16-frontend-schema-consolidation-plan.md`.
 
 ## Compatibility rules
 

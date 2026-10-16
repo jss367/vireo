@@ -462,3 +462,66 @@ def test_version_16_catalog_backfills_grouping_snapshot_byte_counts(tmp_path):
         assert db.storage.grouping_history()['bytes'] == row['bytes']
         assert db.conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert db.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+def test_version_17_catalog_gains_the_formerly_lazy_tables_and_keeps_job_history(tmp_path):
+    """A catalog whose job runner created ``job_history`` before some of its
+    columns existed, and that never wrote a preview-cache marker or an
+    identity repair, comes out with every table and column and its rows."""
+    db_path = str(tmp_path / 'vireo.db')
+    schema.ensure_schema(db_path)
+    with Database(db_path, initialize_schema=False) as db:
+        for name in ('job_history', 'preview_cache_invalidations', 'species_identity_repairs'):
+            db.conn.execute(f'DROP TABLE {name}')
+        db.conn.execute('DROP INDEX idx_taxa_common_names_name_nocase')
+        db.conn.execute("""CREATE TABLE job_history (
+            id TEXT PRIMARY KEY, type TEXT, status TEXT, started_at TEXT,
+            finished_at TEXT, duration REAL, result TEXT,
+            error_count INTEGER DEFAULT 0, config TEXT, workspace_id INTEGER
+        )""")
+        db.conn.execute(
+            "INSERT INTO job_history (id, type, status, started_at, workspace_id) "
+            "VALUES ('old', 'scan', 'completed', '2026-01-01T00:00:00', ?)",
+            (db.active_workspace_id,),
+        )
+        db.conn.execute('PRAGMA user_version = 17')
+        db.commit()
+    schema.ensure_schema(db_path)
+    with Database(db_path, initialize_schema=False) as db:
+        assert db.conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        columns = [r[1] for r in db.conn.execute('PRAGMA table_info(job_history)')]
+        assert columns[:10] == [
+            'id', 'type', 'status', 'started_at', 'finished_at', 'duration',
+            'result', 'error_count', 'config', 'workspace_id',
+        ]
+        assert set(columns) >= {'tree', 'summary', 'resource_wait_seconds',
+                                'resource_wait_count', 'progress'}
+        assert db.job_history.get('old')['summary'] == ''
+        objects = {
+            row[0] for row in db.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger')"
+            )
+        }
+        assert objects >= {
+            'preview_cache_invalidations', 'species_identity_repairs',
+            'idx_job_history_workspace', 'job_history_require_workspace',
+            'idx_taxa_common_names_name_nocase',
+        }
+        # The ownership trigger came along: a row for a deleted workspace is dropped.
+        db.conn.execute(
+            "INSERT INTO job_history (id, type, status, workspace_id) VALUES ('ghost', 'scan', 'completed', 999999)"
+        )
+        assert db.job_history.get('ghost') is None
+        assert db.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+def test_fresh_catalog_needs_no_formerly_lazy_table_migration(tmp_path):
+    """``create_tables`` builds migration 18's end state, so the registry
+    entry is a no-op on a fresh database: running it changes nothing."""
+    db_path = str(tmp_path / 'fresh.db')
+    schema.ensure_schema(db_path)
+    with Database(db_path, initialize_schema=False) as db:
+        before = db.conn.execute('SELECT type, name, sql FROM sqlite_master ORDER BY name').fetchall()
+        schema._add_formerly_lazy_tables(db.conn)
+        schema._validate_formerly_lazy_tables(db.conn)
+        assert db.conn.execute('SELECT type, name, sql FROM sqlite_master ORDER BY name').fetchall() == before
