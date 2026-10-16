@@ -26,7 +26,7 @@ async function main() {
     browseSelectionIdsForClick: id => [id], loadDetail() {},
     refreshCardSelectionVisuals() {}, noteFocusedCardVisibility() {},
   });
-  for (const name of ['observeBrowseWindow', 'selectAllMatchingPhotos', 'selectPhoto', 'getActiveSelection']) {
+  for (const name of ['observeBrowseWindow', 'selectAllMatchingPhotos', 'selectPhoto', 'getBrowseSelection', 'getActiveSelection']) {
     vm.runInContext(fn(browse, name), ctx);
   }
   const pending = ctx.selectAllMatchingPhotos();
@@ -35,6 +35,13 @@ async function main() {
   complete({photo_ids: [1, 2, 3, 4]});
   await pending;
   assert.deepEqual(Array.from(ctx.getActiveSelection()), [2]);
+  ctx.window._vireoNativeMenuPhotoIdsOverride = [99];
+  assert.deepEqual(Array.from(ctx.getActiveSelection()), [99]);
+  assert.deepEqual(Array.from(ctx.getBrowseSelection()), [2]);
+  ctx.selectedPhotos.add(2);
+  ctx.selectedPhotos.add(3);
+  assert.deepEqual(Array.from(ctx.getBrowseSelection()), [2, 3]);
+  assert.deepEqual(Array.from(ctx.getActiveSelection()), [99]);
   
 
   const flags = [];

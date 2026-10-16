@@ -82,6 +82,7 @@ interface Window {
     browse?: {
       panelRequests?: Record<'keywords' | 'predictions' | 'detailPredictions' | 'predictionPhotos' | 'wildlife', PanelRequestLane>;
       selectionPanel?: BrowseSelectionPanel;
+      panelLoaders?: BrowsePanelLoaders;
     };
   };
 }

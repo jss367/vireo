@@ -8,22 +8,47 @@ function setup() {
   const elements = new Map();
   const pending = [];
   const rendered = [];
+  const renderedCounts = [];
   const opened = [];
+  const document = {activeElement: null};
+  class Element {
+    constructor(tag = 'div') {
+      this.tag = tag;
+      this.children = [];
+      this.attributes = new Map();
+      this.listeners = [];
+      this._html = '';
+      this._text = '';
+    }
+    set innerHTML(value) { this._html = value; this._text = ''; this.children = []; }
+    get innerHTML() { return this._html + this._text + this.children.map(child => child.outerHTML).join(''); }
+    get outerHTML() { return '<' + this.tag + '>' + this.innerHTML + '</' + this.tag + '>'; }
+    set textContent(value) { this._html = ''; this._text = value; this.children = []; }
+    get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
+    setAttribute(key, value) { this.attributes.set(key, value); }
+    appendChild(child) { child.parent = this; this.children.push(child); }
+    contains(element) { return element === this || this.children.some(child => child.contains(element)); }
+    addEventListener(name, handler) { this.listeners.push(handler); }
+    closest() { return this instanceof HTMLButtonElement && this.attributes.has('data-panel-retry') ? this : null; }
+    focus() { document.activeElement = this; }
+  }
+  class HTMLButtonElement extends Element {
+    constructor() { super('button'); this.disabled = false; }
+  }
+  document.createElement = tag => tag === 'button' ? new HTMLButtonElement() : new Element(tag);
+  document.getElementById = function(id) {
+    if (!elements.has(id)) {
+      const classes = new Set(['hidden']);
+      const element = new Element();
+      element.classList = {
+        add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name),
+      };
+      elements.set(id, element);
+    }
+    return elements.get(id);
+  };
   const ctx = vm.createContext({
-    document: {getElementById(id) {
-      if (!elements.has(id)) {
-        const classes = new Set(['hidden']);
-        elements.set(id, {
-          innerHTML: '', textContent: '',
-          classList: {
-            add: name => classes.add(name),
-            remove: name => classes.delete(name),
-            contains: name => classes.has(name),
-          },
-        });
-      }
-      return elements.get(id);
-    }},
+    document, Element, HTMLButtonElement,
     VireoBrowseCompare: {create: () => ({})},
     safeFetch: (url, options) => new Promise((resolve, reject) => {
       pending.push({url, options, resolve, reject});
@@ -33,17 +58,24 @@ function setup() {
     _batchToggleMixed() {},
     browseSelectionStackNote: () => '',
     openLightbox: (...args) => opened.push(args),
+    getBrowseSelection: () => ctx._activeSelection || [],
+    getActiveSelection: () => ctx._vireoNativeMenuPhotoIdsOverride || ctx._activeSelection || [],
   });
   ctx.window = ctx;
-  for (const file of ['panel-requests.js', 'selection-panel-state.js', 'selection-panel.js', 'prediction-panels.js']) {
+  vm.runInContext(fs.readFileSync('vireo/static/vireo-panel-loader.js', 'utf8'), ctx);
+  for (const file of ['panel-requests.js', 'selection-panel-state.js', 'selection-panel.js', 'prediction-panels.js', 'panel-loaders.js']) {
     vm.runInContext(fs.readFileSync('vireo/static/browse/' + file, 'utf8'), ctx);
   }
   // Rendering is independent of network ownership; record which responses
   // reach it while executing the real loaders and their failure paths.
-  ctx.renderSelectionKeywordSuggestions = rows => rendered.push(rows);
-  ctx.renderSelectionPredictions = rows => rendered.push(rows);
+  ctx.renderSelectionKeywordSuggestions = (rows, count) => { rendered.push(rows); renderedCounts.push(count); };
+  ctx.renderSelectionPredictions = (rows, count) => { rendered.push(rows); renderedCounts.push(count); };
   ctx.renderDetailPredictions = rows => rendered.push(rows);
-  return {ctx, elements, pending, rendered, opened, lanes: ctx.Vireo.browse.panelRequests};
+  for (const name of ['loadSelectionKeywordSuggestions', 'loadSelectionPredictions']) {
+    const load = ctx[name];
+    ctx[name] = ids => { ctx._activeSelection = ids.slice(); return load(ids); };
+  }
+  return {ctx, elements, pending, rendered, renderedCounts, opened, lanes: ctx.Vireo.browse.panelRequests};
 }
 
 for (const [loader, responseField, elementId] of [
@@ -98,6 +130,116 @@ for (const [loader, responseField, elementId] of [
     assert.equal(pending.length, 1);
     pending[0].resolve({[responseField]: []});
     await first;
+  });
+
+  test(loader + ': Retry recovers repeatedly without duplicate requests', async () => {
+    const {ctx, elements, pending, rendered} = setup();
+    const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
+    const controller = ctx.Vireo.browse.panelLoaders[kind];
+    const first = ctx[loader]([1, 2]);
+    pending[0].reject(new Error('offline'));
+    await first;
+    const panel = elements.get(elementId);
+    const button = panel.children[0].children[0];
+    assert.equal(button.textContent, 'Retry');
+    assert.match(button.attributes.get('aria-label'), /Retry loading/);
+    button.focus();
+    const retry = controller.retry();
+    await controller.retry();
+    assert.equal(pending.length, 2);
+    assert.equal(ctx.document.activeElement, panel);
+    assert.match(panel.textContent, /Checking/);
+    // A click on the retired button cannot bubble into the new request.
+    for (const listener of panel.listeners) listener({target: button});
+    assert.equal(pending.length, 2);
+    pending[1].reject(new Error('still offline'));
+    await retry;
+    assert.match(panel.textContent, /Could not load/);
+    const recovered = controller.retry();
+    pending[2].resolve({[responseField]: ['recovered']});
+    await recovered;
+    assert.deepEqual(rendered, [['recovered']]);
+  });
+
+  test(loader + ': an invalidated failure cannot retry the departed selection', async () => {
+    const {ctx, lanes, pending} = setup();
+    const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
+    const first = ctx[loader]([1, 2]);
+    pending[0].reject(new Error('offline'));
+    await first;
+    lanes[kind].invalidate();
+    await ctx.Vireo.browse.panelLoaders[kind].retry();
+    assert.equal(pending.length, 1);
+  });
+
+  test(loader + ': Retry checks the active selection even without another request', async () => {
+    const {ctx, pending} = setup();
+    const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
+    const first = ctx[loader]([1, 2]);
+    pending[0].reject(new Error('offline'));
+    await first;
+    ctx._activeSelection = [3, 4];
+    await ctx.Vireo.browse.panelLoaders[kind].retry();
+    assert.equal(pending.length, 1);
+  });
+
+  test(loader + ': retry input is a private snapshot', async () => {
+    const {ctx, pending, rendered} = setup();
+    const ids = [1, 2];
+    const first = ctx[loader](ids);
+    ids.splice(0, 2, 3, 4);
+    pending[0].reject(new Error('offline'));
+    await first;
+    const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
+    const retry = ctx.Vireo.browse.panelLoaders[kind].retry();
+    assert.deepEqual(JSON.parse(pending[1].options.body).photo_ids, [1, 2]);
+    pending[1].resolve({[responseField]: ['original selection']});
+    await retry;
+    assert.deepEqual(rendered, [['original selection']]);
+  });
+
+  test(loader + ': server-reported zero selection count is preserved', async () => {
+    const {ctx, pending, renderedCounts} = setup();
+    const first = ctx[loader]([1, 2]);
+    pending[0].resolve({[responseField]: [], selected_count: 0});
+    await first;
+    assert.deepEqual(renderedCounts, [0]);
+  });
+
+  test(loader + ': a late caller cannot claim the current panel for old ids', async () => {
+    const {ctx, pending, rendered} = setup();
+    const current = ctx[loader]([3, 4]);
+    const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
+    const stale = ctx.Vireo.browse.panelLoaders[kind].load([1, 2]);
+    assert.equal(pending.length, 1);
+    pending[0].resolve({[responseField]: ['current']});
+    await Promise.all([current, stale]);
+    assert.deepEqual(rendered, [['current']]);
+  });
+
+  test(loader + ': a native-menu action override cannot discard the visible selection response', async () => {
+    const {ctx, pending, rendered} = setup();
+    const current = ctx[loader]([1, 2]);
+    ctx._vireoNativeMenuPhotoIdsOverride = [9];
+    pending[0].resolve({[responseField]: ['visible selection']});
+    await current;
+    assert.deepEqual(rendered, [['visible selection']]);
+    await ctx[loader]([2, 1]);
+    assert.equal(pending.length, 1);
+  });
+
+  test(loader + ': failures and Retry stay with the grid while menu actions target another photo', async () => {
+    const {ctx, pending, rendered} = setup();
+    ctx._vireoNativeMenuPhotoIdsOverride = [9];
+    const current = ctx[loader]([1, 2]);
+    pending[0].reject(new Error('offline'));
+    await current;
+    const kind = responseField === 'keywords' ? 'keywords' : 'predictions';
+    const retry = ctx.Vireo.browse.panelLoaders[kind].retry();
+    assert.deepEqual(JSON.parse(pending[1].options.body).photo_ids, [1, 2]);
+    pending[1].resolve({[responseField]: ['recovered']});
+    await retry;
+    assert.deepEqual(rendered, [['recovered']]);
   });
 }
 
@@ -203,6 +345,22 @@ for (const failure of [false, true]) {
     assert.deepEqual(rendered, []);
   });
 }
+
+test('detail prediction Retry works before the first successful render and retires on departure', async () => {
+  const {ctx, pending, rendered} = setup();
+  ctx._detailPhotoId = 1;
+  const first = ctx.loadDetailPredictions(1);
+  pending[0].reject(new Error('offline'));
+  await first;
+  const retry = ctx.Vireo.browse.panelLoaders.detailPredictions.retry();
+  assert.match(pending[1].url, /photo_ids=1/);
+  ctx._detailPhotoId = 2;
+  pending[1].resolve({predictions: ['old photo']});
+  await retry;
+  assert.deepEqual(rendered, []);
+  await ctx.Vireo.browse.panelLoaders.detailPredictions.retry();
+  assert.equal(pending.length, 2);
+});
 
 test('clearing wildlife state prevents a late response from restoring batch controls', async () => {
   const {ctx, elements, pending} = setup();

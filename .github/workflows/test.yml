@@ -431,12 +431,13 @@ jobs:
           tests/e2e/test_settings.py::test_settings_system_info_renders
           tests/e2e/test_browser_security.py::test_browser_transport_authenticates_internal_mutations
           tests/e2e/test_dialog_accessibility.py
+          tests/e2e/test_browse_panel_retry.py
 
-      - name: Verify Mac dialog keyboard navigation
+      - name: Verify Mac frontend controls
         if: needs.changes.outputs.python == 'true' && matrix.browser == 'webkit'
         run: >-
           python -m pytest -o addopts='' -q
-          tests/e2e/test_dialog_accessibility.py --browser webkit
+          tests/e2e/test_dialog_accessibility.py tests/e2e/test_browse_panel_retry.py --browser webkit
           --reruns 2 --reruns-delay 1
 
   rust:

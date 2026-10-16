@@ -6,6 +6,8 @@ const checkedControllers = [
   'vireo/static/browse/selection-panel-state.js',
   'vireo/static/browse/selection-panel-events.js',
   'vireo/static/vireo-dialog.js',
+  'vireo/static/vireo-panel-loader.js',
+  'vireo/static/browse/panel-loaders.js',
 ];
 
 export default [
@@ -31,6 +33,19 @@ export default [
     rules: {
       'no-undef': 'error',
       'no-unused-vars': 'error',
+    },
+  },
+  {
+    files: ['vireo/static/browse/panel-loaders.js'],
+    languageOptions: {
+      globals: {
+        getBrowseSelection: 'readonly',
+        selectionIdsKey: 'readonly',
+        safeFetch: 'readonly',
+        renderSelectionKeywordSuggestions: 'readonly',
+        renderSelectionPredictions: 'readonly',
+        renderDetailPredictions: 'readonly',
+      },
     },
   },
   {

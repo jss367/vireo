@@ -12,6 +12,9 @@
   "files": [
     "types/frontend.d.ts",
     "types/dialogs.d.ts",
+    "types/panel-loaders.d.ts",
+    "vireo/static/vireo-panel-loader.js",
+    "vireo/static/browse/panel-loaders.js",
     "vireo/static/vireo-dialog.js",
     "vireo/static/browse/panel-requests.js",
     "vireo/static/browse/selection-panel-state.js",
