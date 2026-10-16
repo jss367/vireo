@@ -18,7 +18,7 @@ runs the selected process in the archive instead of staging.
 
 | File | Responsibility |
 | --- | --- |
-| `state.js` | Shared page state: `activeJobs`, `historyJobs`, the selection (`selectedJobId`, `selectedSource`, `currentView`), the SSE stream, leaf buffers, collapsed steps, optimistic cancels, and workspace names |
+| `state.js` | Shared page state: `activeJobs`, `historyJobs`, the selection (`selectedJobId`, `selectedSource`, `currentView`), the SSE stream, leaf buffers, collapsed steps, optimistic cancels, workspace names, and per-list refresh ownership/status |
 | `format.js` | Escaping, elapsed time and "ago" text, status icons, live-status checks, progress percentages, `jobConfig`, and `plural` |
 | `move-route.js` | The move-folder route: From/To paths, and the capture-date folder note built from the plan or the finished result |
 | `source-cleanup.js` | Original-folder cleanup after a date-organized move (`sourceCleanupReviews`), and the confirm checkbox listener |
@@ -37,7 +37,7 @@ passive state, so their relative order does not matter at load time. The
 three listeners that the inline script attached at load are wrapped in
 `bindJobListClicks()` (`list.js`), `bindSourceCleanupConfirm()`
 (`source-cleanup.js`) and `bindDetailPaneActions()` (`actions.js`). Boot calls
-them in that order, then runs `fetchJobs()`, `fetchHistory()`, the 2 s
+them in that order, binds the polling Retry button, then runs `fetchJobs()`, `fetchHistory()`, the 2 s
 `fetchJobs` poller (kept in `pollTimer`) and the 10 s `fetchHistory` poller,
 as the inline script did. Adding a script requires an explicit template tag
 before boot. These are not ES modules and need no bundler.
@@ -48,13 +48,21 @@ with that in mind.
 
 Keep these request-ordering rules intact when changing this code:
 
-- There are no request sequence numbers. `fetchJobs()` and `fetchHistory()`
-  replace `activeJobs` / `historyJobs` wholesale, so whichever response lands
-  last wins, and the next poll corrects a stale one.
+- Active jobs and history have separate request generations. Explicit refreshes
+  abort and retire older requests; regular polls skip an occupied lane. HTTP,
+  JSON and list-shape failures preserve the last successful list. Requests time
+  out after 15 seconds so a stalled connection cannot block future refreshes.
+- The sidebar warning identifies which list failed and whether saved data is
+  being shown. An unsuccessful first load stays unavailable rather than claiming
+  there are no jobs. Each lane clears only its own error after a valid response.
+  Polls retry automatically; the keyboard-accessible Retry now button retries
+  failed idle lanes without duplicating pending work.
 - A selected active job that leaves `activeJobs` is looked up in
-  `historyJobs`; if it is not there yet, `fetchHistory(true)` moves the
-  selection to its history row, or back to the Active overview if the row
-  never appears.
+  `historyJobs`; if it is not there yet, `fetchHistory(true, true)` records
+  that selection and starts a fresh history snapshot once. Further polls
+  reuse the pending request, and the next successful response reconciles it. Failure or replacement preserves the intent; a changed selection
+  or a job that became active again is left alone. A valid history response
+  moves it to its history row, or back to Active if the row is absent.
 - Only one SSE stream is open at a time. Changing the selection or the view
   closes `sseSource` first, and the stream handlers only redraw the detail
   pane while their job is still selected. The `complete` event refetches both
@@ -88,3 +96,8 @@ Keep these request-ordering rules intact when changing this code:
   across redraws; a later run's `config.restarted_from` replaces the button
   with a link. The server serializes admission and rejects duplicate restarts,
   including requests from another tab, with the existing child's job id.
+
+`tests/frontend/jobs-polling.test.mjs` covers response ordering, late errors,
+timeouts, invalid payloads, retained data and selection handoff.
+`tests/e2e/test_jobs_polling.py` covers the real page, keyboard Retry,
+non-overlapping scheduled polls and automatic recovery in Chromium and WebKit.
