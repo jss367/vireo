@@ -52,6 +52,246 @@ import json
 from keyword_normalization import keyword_match_key
 
 
+# ``get_highlights(eligible_only=True)``: the joins and filter that keep only
+# highlights whose photo is reachable, not rejected and still in the bucket.
+_HIGHLIGHT_ELIGIBILITY_JOINS = """
+                   JOIN photos p ON p.id = sh.photo_id
+                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+                    AND wf.workspace_id = sh.workspace_id
+                   JOIN folders f ON f.id = p.folder_id
+                    AND f.status IN ('ok', 'partial')"""
+# Two-branch species eligibility. Accepted keyword compares
+# exact: same-NOCASE homonyms preserved by the migration
+# (legacy general ``Robin`` alongside taxonomy ``robin``) are
+# genuinely different species — a stored highlight for
+# ``Robin`` must not become eligible for a photo whose
+# accepted keyword resolves to ``robin``. The taxon-linked
+# fallback below (mirroring
+# :meth:`get_species_representative_lists`) preserves that
+# boundary: it only matches when a photo keyword's
+# ``taxon_id`` links back to a root species keyword whose
+# name equals ``sh.species``, so a photo carrying only
+# ``robin`` still cannot satisfy a ``Robin`` highlight
+# unless the two keywords share a taxon. It rescues the
+# case where the retired duplicate-species repair detached
+# the redundant root and the surviving hierarchical leaf
+# has a different stored spelling from the canonical root
+# (``verdin`` vs ``Verdin``), so a preserved highlight
+# under ``Verdin`` still applies to that photo. Prediction
+# fallback compares NOCASE: the classifier emits an
+# external vocabulary spelling (e.g. ``Common Waxbill``)
+# while sh.species stores the canonical keyword spelling
+# (``Common waxbill``), so an exact compare would drop
+# every highlight starred from an unconfirmed bucket.
+# Applying NOCASE only to the fallback keeps the
+# ambiguous-homonym boundary intact.
+# The prediction subquery also routes ``pr.species`` through
+# the same hierarchy-alias → root canonicalization
+# ``resolve_species_display_name`` applies, so a highlight
+# saved from a canonicalized prediction bucket (leaf
+# ``Desert Verdin`` bucketed under root ``Verdin`` when the
+# linked taxon has a top-level row) still matches on
+# reload. ``COALESCE`` falls back to the raw prediction
+# spelling whenever the alias has no linked species-rank
+# root, mirroring ``add_species_highlight`` /
+# ``collect_highlight_buckets``.
+# The accepted-keyword branch mirrors
+# :meth:`get_species_representative_lists`: restrict to
+# species-rank taxonomy rows so a genus/family keyword named
+# identically to a species curation key (e.g. a genus `Puma`
+# row named `Puma`) does not satisfy a species highlight —
+# sibling species queries already exclude that photo from the
+# species bucket via `(t.rank = 'species' OR t.rank IS NULL)`.
+# The prediction-fallback branch below applies the same
+# `(t.rank = 'species' OR t.rank IS NULL)` filter to the
+# NOT EXISTS condition: a photo carrying only a higher-rank
+# taxonomy keyword (e.g. genus/family) is no longer part of
+# any species accepted bucket, and get_highlights_candidates
+# / collect_highlight_buckets will place it in a prediction
+# bucket (bp.species is NULL). Without the rank filter here,
+# the saved highlight would vanish on reload because the
+# NOT EXISTS still sees the higher-rank taxonomy row.
+_HIGHLIGHT_ELIGIBILITY_FILTER = """
+                 AND COALESCE(p.flag, 'none') != 'rejected'
+                 AND (
+                     EXISTS (
+                         SELECT 1
+                         FROM photo_keywords pk
+                         JOIN keywords k ON k.id = pk.keyword_id
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                         LEFT JOIN taxa t ON t.id = k.taxon_id
+                         WHERE pk.photo_id = sh.photo_id
+                           AND (t.rank = 'species' OR t.rank IS NULL)
+                           AND (
+                               k.name = sh.species
+                               OR (
+                                   k.taxon_id IS NOT NULL
+                                   AND EXISTS (
+                                       SELECT 1 FROM keywords root
+                                       WHERE root.parent_id IS NULL
+                                         AND (root.is_species = 1
+                                              OR root.type = 'taxonomy')
+                                         AND root.taxon_id = k.taxon_id
+                                         AND root.name = sh.species
+                                   )
+                               )
+                           )
+                     )
+                     OR (
+                         NOT EXISTS (
+                             SELECT 1
+                             FROM photo_keywords pk
+                             JOIN keywords k ON k.id = pk.keyword_id
+                              AND (k.is_species = 1 OR k.type = 'taxonomy')
+                             LEFT JOIN taxa t ON t.id = k.taxon_id
+                             WHERE pk.photo_id = sh.photo_id
+                               AND (t.rank = 'species' OR t.rank IS NULL)
+                         )
+                         AND sh.species = (
+                             SELECT COALESCE(
+                                 (
+                                     -- Root-first, exact spelling:
+                                     -- mirror ``resolve_species_display_name``'s
+                                     -- case 2 preference for an
+                                     -- exact-spelling same-name top-level
+                                     -- species row. Keeps intentional
+                                     -- ASCII/typography homonyms (e.g.
+                                     -- general ``Robin`` +
+                                     -- taxonomy ``robin``) routed to
+                                     -- their own stored spelling instead
+                                     -- of collapsing them onto one.
+                                     -- (SQLite doesn't support
+                                     -- correlated column references in a
+                                     -- subquery ORDER BY, so the exact
+                                     -- preference is expressed as its
+                                     -- own subquery rather than an
+                                     -- ORDER BY key on a NOCASE match.)
+                                     SELECT root_exact.name
+                                     FROM keywords root_exact
+                                     WHERE root_exact.name = pr.species
+                                       AND root_exact.parent_id IS NULL
+                                       AND (
+                                           root_exact.is_species = 1
+                                           OR root_exact.type = 'taxonomy'
+                                       )
+                                     ORDER BY (root_exact.type = 'taxonomy') DESC,
+                                              root_exact.id ASC
+                                     LIMIT 1
+                                 ),
+                                 (
+                                     -- Root-first, NOCASE fallback:
+                                     -- mirror
+                                     -- ``resolve_species_display_name``'s
+                                     -- case 1 — when a single same-name
+                                     -- top-level species row exists,
+                                     -- ``add_species_highlight`` stored
+                                     -- the highlight under its stored
+                                     -- spelling regardless of the
+                                     -- caller's casing. Without this
+                                     -- branch, the hierarchy-alias
+                                     -- canonicalization below could pick
+                                     -- a different-taxon leaf sharing
+                                     -- the label (e.g. root ``Robin``
+                                     -- for one taxon plus a hierarchy
+                                     -- leaf ``Robin`` under a different
+                                     -- taxon), canonicalize to that
+                                     -- leaf's root spelling, and drop
+                                     -- the saved highlight on reload.
+                                     SELECT root_direct.name
+                                     FROM keywords root_direct
+                                     WHERE root_direct.name = pr.species COLLATE NOCASE
+                                       AND root_direct.parent_id IS NULL
+                                       AND (
+                                           root_direct.is_species = 1
+                                           OR root_direct.type = 'taxonomy'
+                                       )
+                                     ORDER BY (root_direct.type = 'taxonomy') DESC,
+                                              root_direct.id ASC
+                                     LIMIT 1
+                                 ),
+                                 (
+                                     -- Hierarchy-alias fallback:
+                                     -- canonicalize only when the raw
+                                     -- prediction label resolves to a
+                                     -- unique linked taxon. When multiple
+                                     -- hierarchy leaves share the label
+                                     -- but point at different taxa, keep
+                                     -- the raw ``pr.species`` so buckets
+                                     -- key on the ambiguous label instead
+                                     -- of an arbitrary root.
+                                     -- Ambiguity count and the target-leaf
+                                     -- restriction here must mirror
+                                     -- ``resolve_species_display_name`` — the
+                                     -- canonicalizer ``add_species_highlight``
+                                     -- and ``collect_highlight_buckets`` use
+                                     -- when writing ``sh.species``. That
+                                     -- helper considers all linked hierarchy
+                                     -- taxa regardless of rank. If this
+                                     -- subquery restricted the count to
+                                     -- species-rank taxa, a mixed
+                                     -- species+higher-rank alias (e.g.
+                                     -- species ``Puma`` and genus ``Puma``)
+                                     -- would count as 1 here and canonicalize
+                                     -- to the species root while
+                                     -- ``add_species_highlight`` kept the raw
+                                     -- ``pr.species`` — the eligibility
+                                     -- compare below would then drop the
+                                     -- highlight on reload.
+                                     SELECT root.name
+                                     FROM keywords k_pred
+                                     JOIN keywords root
+                                       ON root.parent_id IS NULL
+                                      AND root.taxon_id = k_pred.taxon_id
+                                      AND (
+                                          root.is_species = 1
+                                          OR root.type = 'taxonomy'
+                                      )
+                                     WHERE k_pred.name = pr.species COLLATE NOCASE
+                                       AND k_pred.parent_id IS NOT NULL
+                                       AND k_pred.taxon_id IS NOT NULL
+                                       AND (
+                                           k_pred.is_species = 1
+                                           OR k_pred.type = 'taxonomy'
+                                       )
+                                       AND (
+                                           SELECT COUNT(DISTINCT k2.taxon_id)
+                                           FROM keywords k2
+                                           WHERE k2.name = pr.species COLLATE NOCASE
+                                             AND k2.parent_id IS NOT NULL
+                                             AND k2.taxon_id IS NOT NULL
+                                             AND (
+                                                 k2.is_species = 1
+                                                 OR k2.type = 'taxonomy'
+                                             )
+                                       ) = 1
+                                     ORDER BY root.id
+                                     LIMIT 1
+                                 ),
+                                 pr.species
+                             )
+                             FROM detections d
+                             JOIN predictions pr ON pr.detection_id = d.id
+                             LEFT JOIN prediction_review pr_rev
+                              ON pr_rev.prediction_id = pr.id
+                             AND pr_rev.workspace_id = sh.workspace_id
+                             WHERE d.photo_id = sh.photo_id
+                               AND pr.species IS NOT NULL
+                               AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                               AND pr.labels_fingerprint = (
+                                   SELECT pr2.labels_fingerprint
+                                   FROM predictions pr2
+                                   WHERE pr2.detection_id = pr.detection_id
+                                     AND pr2.classifier_model = pr.classifier_model
+                                   ORDER BY pr2.created_at DESC, pr2.id DESC
+                                   LIMIT 1
+                               )
+                             ORDER BY pr.confidence DESC, pr.id DESC
+                             LIMIT 1
+                         ) COLLATE NOCASE
+                     )
+                 )"""
+
+
 class SpeciesCurationRepository:
     def __init__(
         self,
@@ -150,6 +390,22 @@ class SpeciesCurationRepository:
             tp_params = (photo_id,)
             kw_filter = "WHERE pk.photo_id = ?"
             kw_params = (photo_id,)
+        return self._highlight_candidate_rows(
+            ws, min_quality, folder_filter, folder_params,
+            (
+                photo_filter, photo_params, bp_filter, bp_params,
+                tp_filter, tp_params, kw_filter, kw_params,
+            ),
+        )
+
+    def _highlight_candidate_rows(
+        self, ws, min_quality, folder_filter, folder_params, photo_filters,
+    ):
+        """Run the ``get_highlights_candidates`` query over a resolved scope."""
+        (
+            photo_filter, photo_params, bp_filter, bp_params,
+            tp_filter, tp_params, kw_filter, kw_params,
+        ) = photo_filters
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
@@ -954,242 +1210,8 @@ class SpeciesCurationRepository:
         eligibility_joins = ""
         eligibility_filter = ""
         if eligible_only:
-            eligibility_joins = """
-                   JOIN photos p ON p.id = sh.photo_id
-                   JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                    AND wf.workspace_id = sh.workspace_id
-                   JOIN folders f ON f.id = p.folder_id
-                    AND f.status IN ('ok', 'partial')"""
-            # Two-branch species eligibility. Accepted keyword compares
-            # exact: same-NOCASE homonyms preserved by the migration
-            # (legacy general ``Robin`` alongside taxonomy ``robin``) are
-            # genuinely different species — a stored highlight for
-            # ``Robin`` must not become eligible for a photo whose
-            # accepted keyword resolves to ``robin``. The taxon-linked
-            # fallback below (mirroring
-            # :meth:`get_species_representative_lists`) preserves that
-            # boundary: it only matches when a photo keyword's
-            # ``taxon_id`` links back to a root species keyword whose
-            # name equals ``sh.species``, so a photo carrying only
-            # ``robin`` still cannot satisfy a ``Robin`` highlight
-            # unless the two keywords share a taxon. It rescues the
-            # case where the retired duplicate-species repair detached
-            # the redundant root and the surviving hierarchical leaf
-            # has a different stored spelling from the canonical root
-            # (``verdin`` vs ``Verdin``), so a preserved highlight
-            # under ``Verdin`` still applies to that photo. Prediction
-            # fallback compares NOCASE: the classifier emits an
-            # external vocabulary spelling (e.g. ``Common Waxbill``)
-            # while sh.species stores the canonical keyword spelling
-            # (``Common waxbill``), so an exact compare would drop
-            # every highlight starred from an unconfirmed bucket.
-            # Applying NOCASE only to the fallback keeps the
-            # ambiguous-homonym boundary intact.
-            # The prediction subquery also routes ``pr.species`` through
-            # the same hierarchy-alias → root canonicalization
-            # ``resolve_species_display_name`` applies, so a highlight
-            # saved from a canonicalized prediction bucket (leaf
-            # ``Desert Verdin`` bucketed under root ``Verdin`` when the
-            # linked taxon has a top-level row) still matches on
-            # reload. ``COALESCE`` falls back to the raw prediction
-            # spelling whenever the alias has no linked species-rank
-            # root, mirroring ``add_species_highlight`` /
-            # ``collect_highlight_buckets``.
-            # The accepted-keyword branch mirrors
-            # :meth:`get_species_representative_lists`: restrict to
-            # species-rank taxonomy rows so a genus/family keyword named
-            # identically to a species curation key (e.g. a genus `Puma`
-            # row named `Puma`) does not satisfy a species highlight —
-            # sibling species queries already exclude that photo from the
-            # species bucket via `(t.rank = 'species' OR t.rank IS NULL)`.
-            # The prediction-fallback branch below applies the same
-            # `(t.rank = 'species' OR t.rank IS NULL)` filter to the
-            # NOT EXISTS condition: a photo carrying only a higher-rank
-            # taxonomy keyword (e.g. genus/family) is no longer part of
-            # any species accepted bucket, and get_highlights_candidates
-            # / collect_highlight_buckets will place it in a prediction
-            # bucket (bp.species is NULL). Without the rank filter here,
-            # the saved highlight would vanish on reload because the
-            # NOT EXISTS still sees the higher-rank taxonomy row.
-            eligibility_filter = """
-                 AND COALESCE(p.flag, 'none') != 'rejected'
-                 AND (
-                     EXISTS (
-                         SELECT 1
-                         FROM photo_keywords pk
-                         JOIN keywords k ON k.id = pk.keyword_id
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')
-                         LEFT JOIN taxa t ON t.id = k.taxon_id
-                         WHERE pk.photo_id = sh.photo_id
-                           AND (t.rank = 'species' OR t.rank IS NULL)
-                           AND (
-                               k.name = sh.species
-                               OR (
-                                   k.taxon_id IS NOT NULL
-                                   AND EXISTS (
-                                       SELECT 1 FROM keywords root
-                                       WHERE root.parent_id IS NULL
-                                         AND (root.is_species = 1
-                                              OR root.type = 'taxonomy')
-                                         AND root.taxon_id = k.taxon_id
-                                         AND root.name = sh.species
-                                   )
-                               )
-                           )
-                     )
-                     OR (
-                         NOT EXISTS (
-                             SELECT 1
-                             FROM photo_keywords pk
-                             JOIN keywords k ON k.id = pk.keyword_id
-                              AND (k.is_species = 1 OR k.type = 'taxonomy')
-                             LEFT JOIN taxa t ON t.id = k.taxon_id
-                             WHERE pk.photo_id = sh.photo_id
-                               AND (t.rank = 'species' OR t.rank IS NULL)
-                         )
-                         AND sh.species = (
-                             SELECT COALESCE(
-                                 (
-                                     -- Root-first, exact spelling:
-                                     -- mirror ``resolve_species_display_name``'s
-                                     -- case 2 preference for an
-                                     -- exact-spelling same-name top-level
-                                     -- species row. Keeps intentional
-                                     -- ASCII/typography homonyms (e.g.
-                                     -- general ``Robin`` +
-                                     -- taxonomy ``robin``) routed to
-                                     -- their own stored spelling instead
-                                     -- of collapsing them onto one.
-                                     -- (SQLite doesn't support
-                                     -- correlated column references in a
-                                     -- subquery ORDER BY, so the exact
-                                     -- preference is expressed as its
-                                     -- own subquery rather than an
-                                     -- ORDER BY key on a NOCASE match.)
-                                     SELECT root_exact.name
-                                     FROM keywords root_exact
-                                     WHERE root_exact.name = pr.species
-                                       AND root_exact.parent_id IS NULL
-                                       AND (
-                                           root_exact.is_species = 1
-                                           OR root_exact.type = 'taxonomy'
-                                       )
-                                     ORDER BY (root_exact.type = 'taxonomy') DESC,
-                                              root_exact.id ASC
-                                     LIMIT 1
-                                 ),
-                                 (
-                                     -- Root-first, NOCASE fallback:
-                                     -- mirror
-                                     -- ``resolve_species_display_name``'s
-                                     -- case 1 — when a single same-name
-                                     -- top-level species row exists,
-                                     -- ``add_species_highlight`` stored
-                                     -- the highlight under its stored
-                                     -- spelling regardless of the
-                                     -- caller's casing. Without this
-                                     -- branch, the hierarchy-alias
-                                     -- canonicalization below could pick
-                                     -- a different-taxon leaf sharing
-                                     -- the label (e.g. root ``Robin``
-                                     -- for one taxon plus a hierarchy
-                                     -- leaf ``Robin`` under a different
-                                     -- taxon), canonicalize to that
-                                     -- leaf's root spelling, and drop
-                                     -- the saved highlight on reload.
-                                     SELECT root_direct.name
-                                     FROM keywords root_direct
-                                     WHERE root_direct.name = pr.species COLLATE NOCASE
-                                       AND root_direct.parent_id IS NULL
-                                       AND (
-                                           root_direct.is_species = 1
-                                           OR root_direct.type = 'taxonomy'
-                                       )
-                                     ORDER BY (root_direct.type = 'taxonomy') DESC,
-                                              root_direct.id ASC
-                                     LIMIT 1
-                                 ),
-                                 (
-                                     -- Hierarchy-alias fallback:
-                                     -- canonicalize only when the raw
-                                     -- prediction label resolves to a
-                                     -- unique linked taxon. When multiple
-                                     -- hierarchy leaves share the label
-                                     -- but point at different taxa, keep
-                                     -- the raw ``pr.species`` so buckets
-                                     -- key on the ambiguous label instead
-                                     -- of an arbitrary root.
-                                     -- Ambiguity count and the target-leaf
-                                     -- restriction here must mirror
-                                     -- ``resolve_species_display_name`` — the
-                                     -- canonicalizer ``add_species_highlight``
-                                     -- and ``collect_highlight_buckets`` use
-                                     -- when writing ``sh.species``. That
-                                     -- helper considers all linked hierarchy
-                                     -- taxa regardless of rank. If this
-                                     -- subquery restricted the count to
-                                     -- species-rank taxa, a mixed
-                                     -- species+higher-rank alias (e.g.
-                                     -- species ``Puma`` and genus ``Puma``)
-                                     -- would count as 1 here and canonicalize
-                                     -- to the species root while
-                                     -- ``add_species_highlight`` kept the raw
-                                     -- ``pr.species`` — the eligibility
-                                     -- compare below would then drop the
-                                     -- highlight on reload.
-                                     SELECT root.name
-                                     FROM keywords k_pred
-                                     JOIN keywords root
-                                       ON root.parent_id IS NULL
-                                      AND root.taxon_id = k_pred.taxon_id
-                                      AND (
-                                          root.is_species = 1
-                                          OR root.type = 'taxonomy'
-                                      )
-                                     WHERE k_pred.name = pr.species COLLATE NOCASE
-                                       AND k_pred.parent_id IS NOT NULL
-                                       AND k_pred.taxon_id IS NOT NULL
-                                       AND (
-                                           k_pred.is_species = 1
-                                           OR k_pred.type = 'taxonomy'
-                                       )
-                                       AND (
-                                           SELECT COUNT(DISTINCT k2.taxon_id)
-                                           FROM keywords k2
-                                           WHERE k2.name = pr.species COLLATE NOCASE
-                                             AND k2.parent_id IS NOT NULL
-                                             AND k2.taxon_id IS NOT NULL
-                                             AND (
-                                                 k2.is_species = 1
-                                                 OR k2.type = 'taxonomy'
-                                             )
-                                       ) = 1
-                                     ORDER BY root.id
-                                     LIMIT 1
-                                 ),
-                                 pr.species
-                             )
-                             FROM detections d
-                             JOIN predictions pr ON pr.detection_id = d.id
-                             LEFT JOIN prediction_review pr_rev
-                              ON pr_rev.prediction_id = pr.id
-                             AND pr_rev.workspace_id = sh.workspace_id
-                             WHERE d.photo_id = sh.photo_id
-                               AND pr.species IS NOT NULL
-                               AND COALESCE(pr_rev.status, 'pending') != 'rejected'
-                               AND pr.labels_fingerprint = (
-                                   SELECT pr2.labels_fingerprint
-                                   FROM predictions pr2
-                                   WHERE pr2.detection_id = pr.detection_id
-                                     AND pr2.classifier_model = pr.classifier_model
-                                   ORDER BY pr2.created_at DESC, pr2.id DESC
-                                   LIMIT 1
-                               )
-                             ORDER BY pr.confidence DESC, pr.id DESC
-                             LIMIT 1
-                         ) COLLATE NOCASE
-                     )
-                 )"""
+            eligibility_joins = _HIGHLIGHT_ELIGIBILITY_JOINS
+            eligibility_filter = _HIGHLIGHT_ELIGIBILITY_FILTER
         if species:
             rows = self.conn.execute(
                 f"""SELECT sh.species, sh.photo_id, sh.rank
@@ -1461,6 +1483,63 @@ class SpeciesCurationRepository:
             self.conn.commit()
         return moved
 
+    def _highlight_rename_scopes(self, old_species, photo_workspace_pairs):
+        """``[(workspace_id, photo_ids or None)]`` a highlight rename visits."""
+        if photo_workspace_pairs is not None:
+            by_ws = {}
+            seen = set()
+            for photo_id, workspace_id in photo_workspace_pairs:
+                key = (photo_id, workspace_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                by_ws.setdefault(workspace_id, []).append(photo_id)
+            workspace_scopes = list(by_ws.items())
+        else:
+            workspace_ids = [
+                r["workspace_id"] for r in self.conn.execute(
+                    """SELECT DISTINCT workspace_id
+                       FROM species_highlights
+                       WHERE species = ?""",
+                    (old_species,),
+                ).fetchall()
+            ]
+            workspace_scopes = [(ws, None) for ws in workspace_ids]
+        return workspace_scopes
+
+    def _highlight_rename_source_rows(self, workspace_id, photo_ids, old_species):
+        """The old bucket's rows to move, in their bucket order."""
+        if photo_ids is None:
+            src_rows = self.conn.execute(
+                """SELECT photo_id
+                       FROM species_highlights
+                       WHERE workspace_id = ? AND species = ?
+                       ORDER BY rank, created_at, photo_id""",
+                (workspace_id, old_species),
+            ).fetchall()
+        else:
+            # Chunk the IN(...) clause: photo_ids can carry every photo
+            # tagged with the renamed keyword in this workspace, which on
+            # legacy SQLite builds (SQLITE_MAX_VARIABLE_NUMBER=999) blows
+            # the parameter cap once a species passes ~997 tagged photos.
+            # Chunk in memory then re-sort so the rebucket order matches
+            # the single-query path.
+            raw_rows = []
+            for chunk in self._chunks(photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                raw_rows.extend(self.conn.execute(
+                    f"""SELECT photo_id, rank, created_at
+                            FROM species_highlights
+                            WHERE workspace_id = ? AND species = ?
+                              AND photo_id IN ({placeholders})""",
+                    (workspace_id, old_species, *chunk),
+                ).fetchall())
+            raw_rows.sort(
+                key=lambda r: (r["rank"], r["created_at"], r["photo_id"])
+            )
+            src_rows = raw_rows
+        return src_rows
+
     def rename_highlights(
         self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
     ):
@@ -1487,58 +1566,15 @@ class SpeciesCurationRepository:
         if not old_species or not new_species or old_species == new_species:
             return 0
 
-        if photo_workspace_pairs is not None:
-            by_ws = {}
-            seen = set()
-            for photo_id, workspace_id in photo_workspace_pairs:
-                key = (photo_id, workspace_id)
-                if key in seen:
-                    continue
-                seen.add(key)
-                by_ws.setdefault(workspace_id, []).append(photo_id)
-            workspace_scopes = list(by_ws.items())
-        else:
-            workspace_ids = [
-                r["workspace_id"] for r in self.conn.execute(
-                    """SELECT DISTINCT workspace_id
-                       FROM species_highlights
-                       WHERE species = ?""",
-                    (old_species,),
-                ).fetchall()
-            ]
-            workspace_scopes = [(ws, None) for ws in workspace_ids]
+        workspace_scopes = self._highlight_rename_scopes(
+            old_species, photo_workspace_pairs,
+        )
 
         moved = 0
         for workspace_id, photo_ids in workspace_scopes:
-            if photo_ids is None:
-                src_rows = self.conn.execute(
-                    """SELECT photo_id
-                       FROM species_highlights
-                       WHERE workspace_id = ? AND species = ?
-                       ORDER BY rank, created_at, photo_id""",
-                    (workspace_id, old_species),
-                ).fetchall()
-            else:
-                # Chunk the IN(...) clause: photo_ids can carry every photo
-                # tagged with the renamed keyword in this workspace, which on
-                # legacy SQLite builds (SQLITE_MAX_VARIABLE_NUMBER=999) blows
-                # the parameter cap once a species passes ~997 tagged photos.
-                # Chunk in memory then re-sort so the rebucket order matches
-                # the single-query path.
-                raw_rows = []
-                for chunk in self._chunks(photo_ids):
-                    placeholders = ",".join("?" for _ in chunk)
-                    raw_rows.extend(self.conn.execute(
-                        f"""SELECT photo_id, rank, created_at
-                            FROM species_highlights
-                            WHERE workspace_id = ? AND species = ?
-                              AND photo_id IN ({placeholders})""",
-                        (workspace_id, old_species, *chunk),
-                    ).fetchall())
-                raw_rows.sort(
-                    key=lambda r: (r["rank"], r["created_at"], r["photo_id"])
-                )
-                src_rows = raw_rows
+            src_rows = self._highlight_rename_source_rows(
+                workspace_id, photo_ids, old_species,
+            )
             if not src_rows:
                 continue
             existing = {
