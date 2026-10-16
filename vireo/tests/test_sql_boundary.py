@@ -17,16 +17,14 @@ active-workspace state:
   (``conn = db.conn``) to get under the cap defeats the point: the SQL still
   runs outside the data layer.
 
-- Nothing anywhere (tests and the harness included, ``vireo/db.py`` itself
-  and the auxiliary tools under ``tools/`` included) closes a catalog handle
-  with ``<expr>.conn.close()``. ``Database.close()`` is the one place that
-  closes the connection; its implementation calls ``.close()`` on a local
-  alias of ``self.conn`` so the matcher below does not fire there, and the
-  data layer needs no exemption. The rule holds for the data layer too — a
-  future ``self.conn.close()`` elsewhere in ``db.py`` would trip the test.
-  ``Database.close()`` also drops ``conn`` and makes ``db.closed`` true, so
-  a raw close leaves a ``Database`` that claims to be open while every call
-  raises ``sqlite3.ProgrammingError``.
+- Nothing in the repository closes a catalog handle through the raw
+  connection: not ``<expr>.conn.close()``, and not ``conn.close()`` on a local
+  name assigned from ``<expr>.conn``. ``Database.close()`` is the one method
+  that does (its body is the only exemption): it also drops ``conn`` and
+  makes ``db.closed`` true, so a raw close leaves a ``Database`` that claims
+  to be open while every call raises ``sqlite3.ProgrammingError``. This rule
+  scans every first-party Python file, including tests, the harness, ``db.py``
+  itself, ``tools/`` and root-level modules.
 
 ``canonical_schema.py`` is part of the data layer, and ``vireo/testing/`` is
 the test harness, so neither is scanned for the first two rules.
@@ -96,36 +94,71 @@ CONN_USE_LIMITS = {
 
 
 REPO = VIREO.parent
-# Every Python file this repository authors. ``Database.close`` owns the
-# connection it closes, but that implementation calls ``.close()`` on a local
-# alias of ``self.conn``, so the raw-close matcher below does not fire there
-# and the data layer needs no exemption. A future ``self.conn.close()`` added
-# to ``Database.close`` or any other method in ``db.py`` would trip the test,
-# which is the point: the rule holds for the data layer too.
-RAW_CLOSE_TREES = ("vireo", "tests", "scripts", "tools", "docs")
+# Directory names that never hold first-party code.
+RAW_CLOSE_SKIPPED_DIRS = {"node_modules", "build", "dist", "__pycache__"}
 
 
 def _every_module():
-    for top in RAW_CLOSE_TREES:
-        for path in sorted((REPO / top).rglob("*.py")):
-            rel = path.relative_to(REPO).as_posix()
-            yield rel, ast.parse(path.read_text(encoding="utf-8"))
-    for path in sorted(REPO.glob("*.py")):
-        rel = path.relative_to(REPO).as_posix()
-        yield rel, ast.parse(path.read_text(encoding="utf-8"))
+    """Every first-party Python file in the repository, ``db.py`` included."""
+    for path in sorted(REPO.rglob("*.py")):
+        rel = path.relative_to(REPO)
+        if any(part.startswith(".") or part in RAW_CLOSE_SKIPPED_DIRS for part in rel.parts):
+            continue
+        yield rel.as_posix(), ast.parse(path.read_text(encoding="utf-8"))
 
 
-def _raw_connection_closes(tree):
-    """Line numbers of ``<expr>.conn.close()`` calls."""
-    return [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "close"
-        and isinstance(node.func.value, ast.Attribute)
-        and node.func.value.attr == "conn"
-    ]
+def _is_conn_read(node):
+    """``<expr>.conn`` or ``getattr(<expr>, "conn", ...)``."""
+    if isinstance(node, ast.Attribute) and node.attr == "conn":
+        return True
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "conn"
+    )
+
+
+def _raw_connection_closes(tree, *, exempt=()):
+    """Line numbers of raw connection closes.
+
+    Flags ``<expr>.conn.close()`` and, within one function, ``name.close()``
+    where ``name`` was last assigned from ``<expr>.conn`` or
+    ``getattr(<expr>, "conn", ...)``. The alias tracking is syntactic and
+    per function: a name rebound to anything else stops being an alias.
+    ``exempt`` names ``Class.method`` qualnames whose bodies are skipped.
+    """
+    offenders = []
+
+    def visit(node, aliases, qualname):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            inner = f"{qualname}.{node.name}" if qualname else node.name
+            if inner in exempt:
+                return
+            aliases = set() if not isinstance(node, ast.ClassDef) else aliases
+            for child in ast.iter_child_nodes(node):
+                visit(child, aliases, inner)
+            return
+        if isinstance(node, ast.Assign):
+            names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            (aliases.update if _is_conn_read(node.value) else aliases.difference_update)(names)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "close"
+            and (
+                _is_conn_read(node.func.value)
+                or (isinstance(node.func.value, ast.Name) and node.func.value.id in aliases)
+            )
+        ):
+            offenders.append(node.lineno)
+        for child in ast.iter_child_nodes(node):
+            visit(child, aliases, qualname)
+
+    visit(tree, set(), "")
+    return offenders
 
 
 def _modules():
@@ -191,7 +224,9 @@ def test_connections_close_through_database_close():
     offenders = {
         name: lines
         for name, tree in _every_module()
-        if (lines := _raw_connection_closes(tree))
+        if (lines := _raw_connection_closes(
+            tree, exempt=("Database.close",) if name == "vireo/db.py" else (),
+        ))
     }
     assert not offenders, (
         "A catalog connection was closed through its raw handle "
