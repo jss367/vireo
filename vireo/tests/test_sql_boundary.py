@@ -19,7 +19,8 @@ active-workspace state:
 
 - Nothing in the repository closes a catalog handle through the raw
   connection: not ``<expr>.conn.close()``, and not ``conn.close()`` on a local
-  name assigned from ``<expr>.conn``. ``Database.close()`` is the one method
+  name assigned (plain or annotated, on any earlier path of the function)
+  from ``<expr>.conn``. ``Database.close()`` is the one method
   that does (its body is the only exemption): it also drops ``conn`` and
   makes ``db.closed`` true, so a raw close leaves a ``Database`` that claims
   to be open while every call raises ``sqlite3.ProgrammingError``. This rule
@@ -125,10 +126,13 @@ def _raw_connection_closes(tree, *, exempt=()):
     """Line numbers of raw connection closes.
 
     Flags ``<expr>.conn.close()`` and, within one function, ``name.close()``
-    where ``name`` was last assigned from ``<expr>.conn`` or
-    ``getattr(<expr>, "conn", ...)``. The alias tracking is syntactic and
-    per function: a name rebound to anything else stops being an alias.
-    ``exempt`` names ``Class.method`` qualnames whose bodies are skipped.
+    where ``name`` was assigned (plain or annotated) from ``<expr>.conn`` or
+    ``getattr(<expr>, "conn", ...)`` anywhere earlier in that function. The
+    tracking is syntactic and fails closed: a later rebinding does not clear
+    the alias, because a rebinding inside one branch would otherwise hide a
+    close on the other path. Use a different name for a different
+    connection. ``exempt`` names ``Class.method`` qualnames whose bodies are
+    skipped.
     """
     offenders = []
 
@@ -141,9 +145,10 @@ def _raw_connection_closes(tree, *, exempt=()):
             for child in ast.iter_child_nodes(node):
                 visit(child, aliases, inner)
             return
-        if isinstance(node, ast.Assign):
-            names = {t.id for t in node.targets if isinstance(t, ast.Name)}
-            (aliases.update if _is_conn_read(node.value) else aliases.difference_update)(names)
+        if isinstance(node, ast.Assign) and _is_conn_read(node.value):
+            aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and _is_conn_read(node.value):
+            aliases.add(node.target.id)
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
