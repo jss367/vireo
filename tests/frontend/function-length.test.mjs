@@ -585,11 +585,13 @@ if (argv[0] === '--write-baseline') {
       fs.writeFileSync(baselinePath, original);
       const globalConfig = path.join(tmp, 'git-global-config');
       fs.writeFileSync(globalConfig, '');
+      const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
+      Object.assign(gitEnv, {GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: globalConfig});
       const git = args => {
         const result = spawnSync('git', ['-c', `core.hooksPath=${empty}`, '-c', 'commit.gpgsign=false',
           '-c', 'user.name=Ratchet fixture', '-c', 'user.email=ratchet@example.invalid', ...args], {
           cwd: tmp, encoding: 'utf8',
-          env: {...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: globalConfig},
+          env: gitEnv,
         });
         assert.equal(result.status, 0, `${result.error || ''}\n${result.stdout}\n${result.stderr}`);
       };
@@ -597,7 +599,7 @@ if (argv[0] === '--write-baseline') {
       git(['add', 'vireo/static/a.js', 'tests/frontend/function_length_baseline.json']);
       git(['commit', '--quiet', '-m', 'Synthetic original function']);
       fs.writeFileSync(sourcePath, short + long);
-      const accepted = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+      const accepted = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
       assert.equal(accepted.status, 0, `${accepted.stdout}\n${accepted.stderr}`);
       assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), {'vireo/static/a.js:render#2': 110});
       // A changed new body, duplicate copies, and a still-long old key cannot
@@ -605,21 +607,21 @@ if (argv[0] === '--write-baseline') {
       for (const source of [short + long.replace('{', '{/* changed */'), short + long + long, long + long]) {
         fs.writeFileSync(baselinePath, original);
         fs.writeFileSync(sourcePath, source);
-        const rejected = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+        const rejected = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
         assert.equal(rejected.status, 1, `${rejected.stdout}\n${rejected.stderr}`);
         assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
       }
       // Identical code in a different file must not bypass the survivor guard.
       fs.writeFileSync(sourcePath, short);
       fs.writeFileSync(path.join(staticDir, 'b.js'), long);
-      const crossFile = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+      const crossFile = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
       assert.equal(crossFile.status, 1, `${crossFile.stdout}\n${crossFile.stderr}`);
       assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
       fs.unlinkSync(path.join(staticDir, 'b.js'));
       // Without the tracked identity proof, even the harmless case fails closed.
       fs.renameSync(path.join(tmp, '.git'), path.join(tmp, 'saved-git'));
       fs.writeFileSync(sourcePath, short + long);
-      const unproved = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+      const unproved = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8', env: gitEnv});
       assert.equal(unproved.status, 1, `${unproved.stdout}\n${unproved.stderr}`);
       assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
     } finally {
