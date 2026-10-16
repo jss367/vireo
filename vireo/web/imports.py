@@ -1040,6 +1040,225 @@ class _ImportFullRun:
         return result
 
 
+def _send_request_body(raw):
+    """The send request's JSON object body: ``(body, error message)``."""
+    # ``get_json(silent=True)`` returns None for both an absent body and a
+    # parse failure, and ``or {}`` would additionally swallow the falsy
+    # literals false / 0 / [] / "". Any of those would start the one-way
+    # transfer as a plain send for a request that never asked for one.
+    if raw and raw.strip():
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return None, "Request body must be valid JSON"
+        if not isinstance(body, dict):
+            return None, "Request body must be a JSON object"
+    else:
+        body = {}
+    return body, None
+
+
+def _send_archive_steps(runner, job, archive, sync_first):
+    """The send-to-NAS job's step tree (with the metadata sync step first)."""
+    remote = json.loads(archive["target_json"]).get("transport") != "mounted"
+    return MoveSteps(
+        runner, job,
+        ([{"id": "sync", "label": "Write metadata to sidecars"}] if sync_first else [])
+        + folder_move_steps(remote=remote, verify_contents=not remote),
+        phases={**FOLDER_MOVE_PHASES,
+                "Waiting for current XMP sync": "sync",
+                "Writing metadata to sidecars": "sync"},
+    )
+
+
+def _send_archive_progress(runner, job, steps):
+    """The send-to-NAS progress callback: job counters, step and SSE event."""
+
+    def progress(current, total, filename, phase="Sending to NAS"):
+        job["progress"].update(current=current, total=total, current_file=filename)
+        if not steps.report(current, total, filename, phase):
+            return
+        runner.push_event(job["id"], "progress", {
+            "current": current, "total": total, "current_file": filename, "phase": phase,
+            # The count belongs to this phase, not the whole
+            # transfer; label it so nothing reads it as "Overall".
+            "phase_current": current, "phase_total": total, "phase_label": phase,
+        })
+    return progress
+
+
+def _with_metadata_sync_summary(result, synced, residual):
+    """The send result with the pre-transfer metadata sync folded in."""
+    summary = result["summary"]
+    if synced:
+        summary = (
+            f"Synced metadata for {synced} photo"
+            f"{'' if synced == 1 else 's'}. {summary}"
+        )
+    if residual is None:
+        # The re-read failed, not the transfer. Saying
+        # nothing here would read as "nothing missed
+        # the transfer" -- the one claim this job
+        # cannot make.
+        summary += (
+            ". Could not re-check the sync queue "
+            "afterwards, so whether any edit was "
+            "queued during the transfer is unknown"
+        )
+    elif residual:
+        summary += (
+            f". {residual} edit{'' if residual == 1 else 's'} "
+            "queued during the transfer and still need a "
+            "sync, now over the NAS connection"
+        )
+    return {
+        **result, "metadata_synced": synced,
+        "metadata_queued_during_transfer": residual,
+        "summary": summary,
+    }
+
+
+def _finish_send_steps(steps, result, archive, sync_first, synced, residual):
+    """Close the send job's steps with the outcomes each one produced."""
+    # A stepped job's panel shows only its steps, so the
+    # outcomes that need the user's attention go on the
+    # step they came from.
+    steps.finish()
+    if sync_first:
+        steps.finish("sync", summary=(
+            f"{synced} photo{'' if synced == 1 else 's'}"
+        ), error=(
+            "Could not re-check the sync queue afterwards, so whether any "
+            "edit was queued during the transfer is unknown"
+            if residual is None else
+            f"{residual} edit{'' if residual == 1 else 's'} queued during the "
+            "transfer and still need a sync, now over the NAS connection"
+            if residual else None))
+    if result.get("cleanup_error"):
+        steps.finish("cleanup", error=(
+            f"Local cleanup needs attention at {archive['staging_destination']}: "
+            f"{result['cleanup_error']}"))
+
+
+def _snapshot_preview_roots(root_paths):
+    """``(root path, display name)`` pairs, longest path first."""
+    # Build unique display names across roots by taking the shortest
+    # trailing path segments that are unique — so /mnt/cardA/DCIM and
+    # /mnt/cardB/DCIM become cardA/DCIM and cardB/DCIM rather than
+    # colliding on "DCIM". Mirrors folder-preview's disambiguation.
+    root_names = {}
+    if len(root_paths) > 1:
+        parts = [Path(rp).parts for rp in root_paths]
+        for depth in range(1, max(len(p) for p in parts) + 1):
+            suffixes = [str(Path(*p[-depth:])) for p in parts]
+            if len(set(suffixes)) == len(suffixes):
+                for rp, suffix in zip(root_paths, suffixes, strict=True):
+                    root_names[rp] = suffix
+                break
+        else:
+            for rp in root_paths:
+                root_names[rp] = rp
+    else:
+        for rp in root_paths:
+            root_names[rp] = os.path.basename(rp.rstrip("/")) or rp
+
+    roots = sorted(
+        [(rp, root_names[rp]) for rp in root_paths],
+        key=lambda pn: len(pn[0]),
+        reverse=True,
+    )
+    return roots
+
+
+def _snapshot_subfolder(roots, path):
+    """The preview subfolder label for ``path`` under its deepest root."""
+    for root_path, root_name in roots:
+        try:
+            rel = Path(path).parent.relative_to(root_path)
+        except ValueError:
+            continue
+        rel_str = str(rel)
+        return root_name if rel_str == "." else os.path.join(root_name, rel_str)
+    return os.path.dirname(path) or "."
+
+
+def _template_managed_archives(db, result, archive_photo_count):
+    """Tracked archives the previewed folders land in, with their coverage.
+
+    Returns ``(managed_archives, managed_archive)``; ``managed_archive`` is
+    set only when one archive covers every generated folder.
+    """
+    from move import _tracked_destination_ancestor
+
+    # The destination itself may sit above every tracked archive while
+    # the folder template still maps generated files into one — e.g.
+    # destination /Photography with a tracked root /Photography/2026
+    # and template 2026/%Y-%m-%d lands every file inside the managed
+    # /Photography/2026 archive. Checking only the destination's
+    # ancestors leaves managed_archive None even though the import IS
+    # a merge into a tracked archive. Walk the concrete full_path
+    # values from preview_destination() so we catch that case, while
+    # still avoiding the sibling-folder false positive the
+    # destination-only guard was written to prevent (a broad mount
+    # whose tracked archive is a sibling of the generated folders
+    # never becomes an ancestor of any full_path).
+    #
+    # Do NOT collapse mixed coverage to a single archive. A source
+    # spanning multiple date-templated folders can split so that some
+    # generated folders land inside a tracked archive and others land
+    # outside it, or land in DIFFERENT tracked archives — for example
+    # files from 2025 and 2026 with destination /Photography, template
+    # %Y/%Y-%m-%d, and only /Photography/2026 tracked (2025 files land
+    # outside the archive), or the same source but with both
+    # /Photography/2025 and /Photography/2026 tracked (each subset
+    # lands in a different archive). Breaking at the first match and
+    # asserting "this import lands inside archive X" for the whole
+    # preview lies about the other subsets. Aggregate the matches and
+    # expose partial/multiple overlaps distinctly.
+    managed_archives = []
+    managed_archive = None
+    folder_entries = result.get("folders") or []
+    per_archive = {}  # archive_path -> matched_folder_count
+    unmatched = 0
+    considered = 0
+    for entry in folder_entries:
+        full_path = entry.get("full_path")
+        if not full_path:
+            continue
+        considered += 1
+        candidate = _tracked_destination_ancestor(db, -1, full_path)
+        if candidate is None:
+            unmatched += 1
+        else:
+            key = candidate["path"]
+            per_archive[key] = per_archive.get(key, 0) + 1
+    for archive_path, matched in per_archive.items():
+        # A single archive covers "all" generated folders only when it
+        # matched every considered entry AND nothing landed outside a
+        # tracked archive AND no other tracked archive claimed any
+        # folder. Anything else is a partial overlap for that archive.
+        full = (
+            unmatched == 0
+            and len(per_archive) == 1
+            and matched == considered
+            and considered > 0
+        )
+        managed_archives.append({
+            "path": archive_path,
+            "photo_count": archive_photo_count(archive_path),
+            "coverage": "full" if full else "partial",
+        })
+    if (
+        len(managed_archives) == 1
+        and managed_archives[0]["coverage"] == "full"
+    ):
+        managed_archive = {
+            "path": managed_archives[0]["path"],
+            "photo_count": managed_archives[0]["photo_count"],
+        }
+    return managed_archives, managed_archive
+
+
 def create_imports_blueprint(
     get_db,
     json_error,
@@ -1162,6 +1381,103 @@ def create_imports_blueprint(
             db.pending_archives.delete(archive_id)
         return jsonify({"ok": True})
 
+    def _transfer_pending_archive(thread_db, runner, job, archive, sync_first,
+                                  progress, send_pending_archive):
+        """Sync staged metadata (when asked), then send the archive to NAS.
+
+        Returns ``(result, synced, residual)``; ``residual`` counts edits
+        queued during the transfer (None when the re-read failed, or when
+        ``sync_first`` is off).
+        """
+        residual = None
+        folder_ids = _staging_folder_ids(
+            thread_db, archive["staging_destination"]) if sync_first else []
+        # Photo ids are captured before the move so the
+        # post-transfer residual check still finds late edits
+        # after a tracked-merge reparent onto the destination
+        # folder ids. See _residual_staged_changes.
+        staged_photo_ids = (
+            _staged_photo_ids(thread_db, folder_ids)
+            if sync_first else []
+        )
+        if sync_first and not sync_job_lock.acquire(blocking=False):
+            # Cancellably: the wait can be minutes if another
+            # workspace's XMP sync holds the lock, and nothing
+            # on disk has been touched yet. Mirrors the
+            # /api/jobs/sync route's own acquire.
+            progress(0, 0, "", "Waiting for current XMP sync")
+            while not sync_job_lock.acquire(timeout=0.1):
+                if runner.is_cancelled(job["id"]):
+                    raise ValueError(
+                        "Transfer cancelled before it started. "
+                        "Local originals are retained.")
+        try:
+            # Only now: the lock is in hand and the next step
+            # touches files.
+            if not runner.begin_uncancellable(job["id"]):
+                raise ValueError("Transfer cancelled before it started. Local originals are retained.")
+
+            # Before the move, while the sidecars are still on
+            # local disk. Recomputed here rather than trusting
+            # the count the banner showed, so edits queued
+            # between the click and the job travel too.
+            synced, undeliverable = _sync_staged_metadata(
+                thread_db, progress, sync_job_lock,
+                folder_ids) if sync_first else (0, set())
+
+            # Transfer preflight can fail before move_folder's
+            # first callback. The successful sync is already over.
+            progress(0, 0, "", "Checking destination")
+            result = send_pending_archive(
+                thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
+                guard_folder=guard_move_folder, progress_cb=progress,
+            )
+            if sync_first:
+                # Unconditionally, not just when something
+                # synced: a queue holding only changes this
+                # workspace declines to write syncs nothing,
+                # and an edit made during the copy would then
+                # go unreported.
+                #
+                # ``preserved_off_staging_identities`` covers
+                # edits the tracked-merge path remapped onto
+                # a survivor NOT in ``staged_photo_ids`` --
+                # the archive-side row of a byte-identical
+                # real collision, whose id the by-photo
+                # residual re-read below cannot see. The
+                # phantom-target and intra-staged cases
+                # leave the survivor inside
+                # ``staged_photo_ids`` and the residual
+                # re-read finds them on its own; adding the
+                # full ``preserved_edit_count`` here would
+                # double-count those. See
+                # merge_staged_tree_into_archive.
+                #
+                # Reported as identities, not a raw
+                # rowcount: filtering ``undeliverable``
+                # here keeps rows the pre-transfer drain
+                # deliberately did not write (a flag under
+                # ``sync_flags_to_xmp`` off) out of the
+                # "queued during transfer" count -- they
+                # predate the transfer and were considered
+                # by the sync. Sibling-workspace edits are
+                # already dropped upstream by
+                # ``merge_staged_tree_into_archive``.
+                residual = _residual_staged_changes(
+                    thread_db, staged_photo_ids, undeliverable)
+                off_staging = result.get(
+                    "preserved_off_staging_identities", []) or []
+                off_staging_residual = sum(
+                    1 for ident in off_staging
+                    if ident not in undeliverable
+                )
+                if residual is not None:
+                    residual += off_staging_residual
+        finally:
+            if sync_first:
+                sync_job_lock.release()
+        return result, synced, residual
+
     @blueprint.post("/api/import/pending-archives/<archive_id>/send")
     def api_send_pending_archive(archive_id):
         from pending_archives import active_archive_jobs, get_pending_archive, send_pending_archive
@@ -1169,19 +1485,9 @@ def create_imports_blueprint(
         runner = get_runner()
         workspace_id = db.require_workspace_id()
         raw = request.get_data(cache=True, as_text=True)
-        # ``get_json(silent=True)`` returns None for both an absent body and a
-        # parse failure, and ``or {}`` would additionally swallow the falsy
-        # literals false / 0 / [] / "". Any of those would start the one-way
-        # transfer as a plain send for a request that never asked for one.
-        if raw and raw.strip():
-            try:
-                body = json.loads(raw)
-            except ValueError:
-                return json_error("Request body must be valid JSON")
-            if not isinstance(body, dict):
-                return json_error("Request body must be a JSON object")
-        else:
-            body = {}
+        body, body_error = _send_request_body(raw)
+        if body_error is not None:
+            return json_error(body_error)
         sync_first = body.get("sync_first", False)
         # Not coerced: bool("false") is True, and this option writes sidecars
         # and can fail a transfer.
@@ -1221,160 +1527,16 @@ def create_imports_blueprint(
                     thread_db.pending_archives.set_state(archive_id, "sending")
                     steps = None
                     try:
-                        remote = json.loads(archive["target_json"]).get("transport") != "mounted"
-                        steps = MoveSteps(
-                            runner, job,
-                            ([{"id": "sync", "label": "Write metadata to sidecars"}] if sync_first else [])
-                            + folder_move_steps(remote=remote, verify_contents=not remote),
-                            phases={**FOLDER_MOVE_PHASES,
-                                    "Waiting for current XMP sync": "sync",
-                                    "Writing metadata to sidecars": "sync"},
-                        )
+                        steps = _send_archive_steps(runner, job, archive, sync_first)
                         steps.start()
-
-                        def progress(current, total, filename, phase="Sending to NAS"):
-                            job["progress"].update(current=current, total=total, current_file=filename)
-                            if not steps.report(current, total, filename, phase):
-                                return
-                            runner.push_event(job["id"], "progress", {
-                                "current": current, "total": total, "current_file": filename, "phase": phase,
-                                # The count belongs to this phase, not the whole
-                                # transfer; label it so nothing reads it as "Overall".
-                                "phase_current": current, "phase_total": total, "phase_label": phase,
-                            })
-
-                        folder_ids = _staging_folder_ids(
-                            thread_db, archive["staging_destination"]) if sync_first else []
-                        # Photo ids are captured before the move so the
-                        # post-transfer residual check still finds late edits
-                        # after a tracked-merge reparent onto the destination
-                        # folder ids. See _residual_staged_changes.
-                        staged_photo_ids = (
-                            _staged_photo_ids(thread_db, folder_ids)
-                            if sync_first else []
+                        progress = _send_archive_progress(runner, job, steps)
+                        result, synced, residual = _transfer_pending_archive(
+                            thread_db, runner, job, archive, sync_first,
+                            progress, send_pending_archive,
                         )
-                        if sync_first and not sync_job_lock.acquire(blocking=False):
-                            # Cancellably: the wait can be minutes if another
-                            # workspace's XMP sync holds the lock, and nothing
-                            # on disk has been touched yet. Mirrors the
-                            # /api/jobs/sync route's own acquire.
-                            progress(0, 0, "", "Waiting for current XMP sync")
-                            while not sync_job_lock.acquire(timeout=0.1):
-                                if runner.is_cancelled(job["id"]):
-                                    raise ValueError(
-                                        "Transfer cancelled before it started. "
-                                        "Local originals are retained.")
-                        try:
-                            # Only now: the lock is in hand and the next step
-                            # touches files.
-                            if not runner.begin_uncancellable(job["id"]):
-                                raise ValueError("Transfer cancelled before it started. Local originals are retained.")
-
-                            # Before the move, while the sidecars are still on
-                            # local disk. Recomputed here rather than trusting
-                            # the count the banner showed, so edits queued
-                            # between the click and the job travel too.
-                            synced, undeliverable = _sync_staged_metadata(
-                                thread_db, progress, sync_job_lock,
-                                folder_ids) if sync_first else (0, set())
-
-                            # Transfer preflight can fail before move_folder's
-                            # first callback. The successful sync is already over.
-                            progress(0, 0, "", "Checking destination")
-                            result = send_pending_archive(
-                                thread_db, archive, vireo_dir=os.path.dirname(config["THUMB_CACHE_DIR"]),
-                                guard_folder=guard_move_folder, progress_cb=progress,
-                            )
-                            if sync_first:
-                                # Unconditionally, not just when something
-                                # synced: a queue holding only changes this
-                                # workspace declines to write syncs nothing,
-                                # and an edit made during the copy would then
-                                # go unreported.
-                                #
-                                # ``preserved_off_staging_identities`` covers
-                                # edits the tracked-merge path remapped onto
-                                # a survivor NOT in ``staged_photo_ids`` --
-                                # the archive-side row of a byte-identical
-                                # real collision, whose id the by-photo
-                                # residual re-read below cannot see. The
-                                # phantom-target and intra-staged cases
-                                # leave the survivor inside
-                                # ``staged_photo_ids`` and the residual
-                                # re-read finds them on its own; adding the
-                                # full ``preserved_edit_count`` here would
-                                # double-count those. See
-                                # merge_staged_tree_into_archive.
-                                #
-                                # Reported as identities, not a raw
-                                # rowcount: filtering ``undeliverable``
-                                # here keeps rows the pre-transfer drain
-                                # deliberately did not write (a flag under
-                                # ``sync_flags_to_xmp`` off) out of the
-                                # "queued during transfer" count -- they
-                                # predate the transfer and were considered
-                                # by the sync. Sibling-workspace edits are
-                                # already dropped upstream by
-                                # ``merge_staged_tree_into_archive``.
-                                residual = _residual_staged_changes(
-                                    thread_db, staged_photo_ids, undeliverable)
-                                off_staging = result.get(
-                                    "preserved_off_staging_identities", []) or []
-                                off_staging_residual = sum(
-                                    1 for ident in off_staging
-                                    if ident not in undeliverable
-                                )
-                                if residual is not None:
-                                    residual += off_staging_residual
-                        finally:
-                            if sync_first:
-                                sync_job_lock.release()
                         if sync_first:
-                            summary = result["summary"]
-                            if synced:
-                                summary = (
-                                    f"Synced metadata for {synced} photo"
-                                    f"{'' if synced == 1 else 's'}. {summary}"
-                                )
-                            if residual is None:
-                                # The re-read failed, not the transfer. Saying
-                                # nothing here would read as "nothing missed
-                                # the transfer" -- the one claim this job
-                                # cannot make.
-                                summary += (
-                                    ". Could not re-check the sync queue "
-                                    "afterwards, so whether any edit was "
-                                    "queued during the transfer is unknown"
-                                )
-                            elif residual:
-                                summary += (
-                                    f". {residual} edit{'' if residual == 1 else 's'} "
-                                    "queued during the transfer and still need a "
-                                    "sync, now over the NAS connection"
-                                )
-                            result = {
-                                **result, "metadata_synced": synced,
-                                "metadata_queued_during_transfer": residual,
-                                "summary": summary,
-                            }
-                        # A stepped job's panel shows only its steps, so the
-                        # outcomes that need the user's attention go on the
-                        # step they came from.
-                        steps.finish()
-                        if sync_first:
-                            steps.finish("sync", summary=(
-                                f"{synced} photo{'' if synced == 1 else 's'}"
-                            ), error=(
-                                "Could not re-check the sync queue afterwards, so whether any "
-                                "edit was queued during the transfer is unknown"
-                                if residual is None else
-                                f"{residual} edit{'' if residual == 1 else 's'} queued during the "
-                                "transfer and still need a sync, now over the NAS connection"
-                                if residual else None))
-                        if result.get("cleanup_error"):
-                            steps.finish("cleanup", error=(
-                                f"Local cleanup needs attention at {archive['staging_destination']}: "
-                                f"{result['cleanup_error']}"))
+                            result = _with_metadata_sync_summary(result, synced, residual)
+                        _finish_send_steps(steps, result, archive, sync_first, synced, residual)
                         thread_db.pending_archives.set_state(archive_id, "complete")
                         try:
                             invalidate_missing_originals()
@@ -1470,41 +1632,10 @@ def create_imports_blueprint(
             )
         ]
 
-        # Build unique display names across roots by taking the shortest
-        # trailing path segments that are unique — so /mnt/cardA/DCIM and
-        # /mnt/cardB/DCIM become cardA/DCIM and cardB/DCIM rather than
-        # colliding on "DCIM". Mirrors folder-preview's disambiguation.
-        root_names = {}
-        if len(root_paths) > 1:
-            parts = [Path(rp).parts for rp in root_paths]
-            for depth in range(1, max(len(p) for p in parts) + 1):
-                suffixes = [str(Path(*p[-depth:])) for p in parts]
-                if len(set(suffixes)) == len(suffixes):
-                    for rp, suffix in zip(root_paths, suffixes, strict=True):
-                        root_names[rp] = suffix
-                    break
-            else:
-                for rp in root_paths:
-                    root_names[rp] = rp
-        else:
-            for rp in root_paths:
-                root_names[rp] = os.path.basename(rp.rstrip("/")) or rp
-
-        roots = sorted(
-            [(rp, root_names[rp]) for rp in root_paths],
-            key=lambda pn: len(pn[0]),
-            reverse=True,
-        )
+        roots = _snapshot_preview_roots(root_paths)
 
         def _subfolder_for(path):
-            for root_path, root_name in roots:
-                try:
-                    rel = Path(path).parent.relative_to(root_path)
-                except ValueError:
-                    continue
-                rel_str = str(rel)
-                return root_name if rel_str == "." else os.path.join(root_name, rel_str)
-            return os.path.dirname(path) or "."
+            return _snapshot_subfolder(roots, path)
 
         files = []
         type_breakdown = {}
@@ -1768,70 +1899,9 @@ def create_imports_blueprint(
             }
             managed_archives = [dict(managed_archive, coverage="full")]
         else:
-            # The destination itself may sit above every tracked archive while
-            # the folder template still maps generated files into one — e.g.
-            # destination /Photography with a tracked root /Photography/2026
-            # and template 2026/%Y-%m-%d lands every file inside the managed
-            # /Photography/2026 archive. Checking only the destination's
-            # ancestors leaves managed_archive None even though the import IS
-            # a merge into a tracked archive. Walk the concrete full_path
-            # values from preview_destination() so we catch that case, while
-            # still avoiding the sibling-folder false positive the
-            # destination-only guard was written to prevent (a broad mount
-            # whose tracked archive is a sibling of the generated folders
-            # never becomes an ancestor of any full_path).
-            #
-            # Do NOT collapse mixed coverage to a single archive. A source
-            # spanning multiple date-templated folders can split so that some
-            # generated folders land inside a tracked archive and others land
-            # outside it, or land in DIFFERENT tracked archives — for example
-            # files from 2025 and 2026 with destination /Photography, template
-            # %Y/%Y-%m-%d, and only /Photography/2026 tracked (2025 files land
-            # outside the archive), or the same source but with both
-            # /Photography/2025 and /Photography/2026 tracked (each subset
-            # lands in a different archive). Breaking at the first match and
-            # asserting "this import lands inside archive X" for the whole
-            # preview lies about the other subsets. Aggregate the matches and
-            # expose partial/multiple overlaps distinctly.
-            folder_entries = result.get("folders") or []
-            per_archive = {}  # archive_path -> matched_folder_count
-            unmatched = 0
-            considered = 0
-            for entry in folder_entries:
-                full_path = entry.get("full_path")
-                if not full_path:
-                    continue
-                considered += 1
-                candidate = _tracked_destination_ancestor(db, -1, full_path)
-                if candidate is None:
-                    unmatched += 1
-                else:
-                    key = candidate["path"]
-                    per_archive[key] = per_archive.get(key, 0) + 1
-            for archive_path, matched in per_archive.items():
-                # A single archive covers "all" generated folders only when it
-                # matched every considered entry AND nothing landed outside a
-                # tracked archive AND no other tracked archive claimed any
-                # folder. Anything else is a partial overlap for that archive.
-                full = (
-                    unmatched == 0
-                    and len(per_archive) == 1
-                    and matched == considered
-                    and considered > 0
-                )
-                managed_archives.append({
-                    "path": archive_path,
-                    "photo_count": _archive_photo_count(archive_path),
-                    "coverage": "full" if full else "partial",
-                })
-            if (
-                len(managed_archives) == 1
-                and managed_archives[0]["coverage"] == "full"
-            ):
-                managed_archive = {
-                    "path": managed_archives[0]["path"],
-                    "photo_count": managed_archives[0]["photo_count"],
-                }
+            managed_archives, managed_archive = _template_managed_archives(
+                db, result, _archive_photo_count,
+            )
 
         result["managed_archive"] = managed_archive
         # ``managed_archives`` is the authoritative list — the UI should
