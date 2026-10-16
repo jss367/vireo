@@ -314,12 +314,12 @@ def inventory(cache_dir=None, models_dir=None):
     }
 
 
-def _prune_empty_dirs(path, stop):
+def _prune_empty_dirs(cache_dir, path, stop):
     """Remove empty directories from ``path`` up to (not including) ``stop``."""
     stop = os.path.realpath(stop)
     while os.path.realpath(path) != stop and os.path.isdir(path):
         try:
-            os.rmdir(path)
+            _rmdir_within(cache_dir, path)
         except OSError:
             return
         path = os.path.dirname(path)
@@ -373,26 +373,28 @@ def _rmdir_tree_of_known_shape(repo_dir):
     anything new has appeared, in which case the repository is left in place
     and the caller reports that honestly.
     """
+    cache_dir = os.path.dirname(repo_dir)
+
     def unlink_files_in(directory):
         if os.path.islink(directory) or not os.path.isdir(directory):
             return
         for name in os.listdir(directory):
             path = os.path.join(directory, name)
             if os.path.isfile(path) and not os.path.islink(path):
-                _unlink_within(directory, path)
-        os.rmdir(directory)
+                _unlink_within(cache_dir, path)
+        _rmdir_within(cache_dir, directory)
 
     for sub in ("snapshots", "blobs"):
         path = os.path.join(repo_dir, sub)
         if os.path.lexists(path):
-            os.rmdir(path)
+            _rmdir_within(cache_dir, path)
     unlink_files_in(os.path.join(repo_dir, "refs"))
     no_exist = os.path.join(repo_dir, ".no_exist")
     if os.path.isdir(no_exist) and not os.path.islink(no_exist):
         for rev in os.listdir(no_exist):
             unlink_files_in(os.path.join(no_exist, rev))
-        os.rmdir(no_exist)
-    os.rmdir(repo_dir)
+        _rmdir_within(cache_dir, no_exist)
+    _rmdir_within(cache_dir, repo_dir)
 
 
 def _remove_repo_if_empty(repo_dir):
@@ -416,26 +418,28 @@ def _remove_repo_if_empty(repo_dir):
 
 
 _DIR_FD_UNLINK = (
-    {os.open, os.unlink} <= os.supports_dir_fd
+    {os.open, os.unlink, os.rmdir} <= os.supports_dir_fd
     and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
 )
 
 
-def _unlink_within(root, path):
-    """Unlink ``path`` beneath ``root`` without following a symlinked directory.
+def _remove_within(root, path, remove, remove_at):
+    """Remove ``path`` beneath ``root`` without following a symlinked directory.
 
-    On POSIX this opens ``root`` and each intermediate directory with
-    ``O_NOFOLLOW`` and unlinks by name relative to that descriptor, so a
-    directory swapped for a symlink after the pathname checks cannot redirect
-    the unlink outside the cache. ``path`` itself may be a symlink (a snapshot
+    ``root`` is the hub cache directory, so the walk covers the repository
+    directory as well as ``snapshots``/``blobs``. On POSIX this opens ``root``
+    and each intermediate directory with ``O_NOFOLLOW`` and removes by name
+    relative to that descriptor (``remove_at(name, dir_fd)``), so a directory
+    swapped for a symlink after the pathname checks cannot redirect the
+    removal outside the cache. ``path`` itself may be a symlink (a snapshot
     entry); only the link is removed.
     """
     rel = os.path.relpath(path, root)
     parts = rel.split(os.sep)
-    if os.path.isabs(rel) or ".." in parts or "" in parts:
+    if os.path.isabs(rel) or ".." in parts or "" in parts or parts == ["."]:
         raise OSError(f"{path} is not inside {root}")
     if not _DIR_FD_UNLINK:
-        _unlink_without_dir_fd(root, parts)
+        _remove_without_dir_fd(root, parts, remove)
         return
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(root, flags)
@@ -444,14 +448,22 @@ def _unlink_within(root, path):
             next_fd = os.open(part, flags, dir_fd=fd)
             os.close(fd)
             fd = next_fd
-        os.unlink(parts[-1], dir_fd=fd)
+        remove_at(parts[-1], fd)
     finally:
         os.close(fd)
 
 
-def _unlink_without_dir_fd(root, parts):
+def _unlink_within(root, path):
+    _remove_within(root, path, os.unlink, lambda name, fd: os.unlink(name, dir_fd=fd))
+
+
+def _rmdir_within(root, path):
+    _remove_within(root, path, os.rmdir, lambda name, fd: os.rmdir(name, dir_fd=fd))
+
+
+def _remove_without_dir_fd(root, parts, remove):
     """Windows fallback: no ``dir_fd``, so re-check every ancestor for a
-    reparse point (junction or symlink) immediately before unlinking by name.
+    reparse point (junction or symlink) immediately before removing by name.
     Narrower than the descriptor walk, and the best the platform offers."""
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     current = root
@@ -463,12 +475,13 @@ def _unlink_without_dir_fd(root, parts):
             reparse and getattr(st, "st_file_attributes", 0) & reparse
         ):
             raise OSError(f"{current} is not a plain directory")
-    os.unlink(os.path.join(current, parts[-1]))
+    remove(os.path.join(current, parts[-1]))
 
 
 def _unlink_snapshot_files(group, failures):
     """Unlink a group's snapshot entries; return the plain-file bytes freed."""
     freed = 0
+    cache_dir = os.path.dirname(group["repo_dir"])
     snapshots = os.path.join(group["repo_dir"], "snapshots")
     for path in group["files"]:
         if not _within(path, snapshots) or (os.path.isdir(path) and not os.path.islink(path)):
@@ -477,13 +490,13 @@ def _unlink_snapshot_files(group, failures):
             continue
         try:
             size = 0 if os.path.islink(path) else os.lstat(path).st_size
-            _unlink_within(snapshots, path)
+            _unlink_within(cache_dir, path)
             freed += size
         except OSError as exc:
             log.warning("Could not remove HF cache entry %s: %s", path, exc)
             failures.append({"key": group["key"], "path": path, "error": str(exc)})
             continue
-        _prune_empty_dirs(os.path.dirname(path), snapshots)
+        _prune_empty_dirs(cache_dir, os.path.dirname(path), snapshots)
     return freed
 
 
@@ -500,6 +513,25 @@ def _delete_groups(groups):
     try:
         with _holding_hub_locks(dict.fromkeys(g["repo_dir"] for g in groups)):
             return _delete_groups_locked(groups)
+    finally:
+        DOWNLOAD_LOCK.release()
+
+
+def _delete_selected(cache_dir, models_dir, select):
+    """Take the locks, then collect, select and delete, so the state deleted
+    is the state observed under the same synchronization a download uses.
+
+    ``select(found)`` returns the groups to delete and may raise ``KeyError``
+    or ``ValueError`` for a request the fresh state no longer supports.
+    """
+    if not DOWNLOAD_LOCK.acquire(blocking=False):
+        raise DownloadInProgress("a model download is in progress")
+    try:
+        with _holding_hub_locks([d for _n, d in _repo_dirs(cache_dir)]):
+            _total, found = _collect(cache_dir, models_dir)
+            groups = select(found)
+            freed, failures = _delete_groups_locked(groups)
+            return _result(groups, freed, failures)
     finally:
         DOWNLOAD_LOCK.release()
 
@@ -522,12 +554,12 @@ def _delete_groups_locked(groups):
                 owners.add(group["key"])
     for repo_dir, blobs in candidate_blobs.items():
         _groups, still_referenced = _scan_repo(repo_dir, onnx=True)
-        blobs_root = os.path.realpath(os.path.join(repo_dir, "blobs"))
+        cache_root = os.path.realpath(os.path.dirname(repo_dir))  # blobs are realpaths
         for blob, (owners, size) in blobs.items():
             if blob in still_referenced or not os.path.isfile(blob):
                 continue
             try:
-                _unlink_within(blobs_root, blob)
+                _unlink_within(cache_root, blob)
                 freed += size
             except OSError as exc:
                 log.warning("Could not remove HF cache blob %s: %s", blob, exc)
@@ -551,30 +583,34 @@ def remove(keys, cache_dir=None, models_dir=None):
     """Remove the entries named by ``keys``.
 
     Unknown keys raise ``KeyError``; a key whose entry backs an installed
-    model raises ``ValueError``, rechecked here rather than trusted from the
-    page, which may have inventoried before the install finished.
+    model raises ``ValueError``. Both are decided on state collected under
+    the download locks, not on what the page inventoried earlier.
     """
-    _total, found = _collect(_cache_dir(cache_dir), _models_dir(models_dir))
-    missing = [k for k in keys if k not in found]
-    if missing:
-        raise KeyError(missing[0])
-    groups = [found[k] for k in dict.fromkeys(keys)]
-    installed = [g["key"] for g in groups if g["installed"]]
-    if installed:
-        raise ValueError(installed[0])
-    freed, failures = _delete_groups(groups)
-    log.info("Removed HF cache entries %s (%d bytes, %d failures)", list(keys), freed, len(failures))
-    return _result(groups, freed, failures)
+    def select(found):
+        missing = [k for k in keys if k not in found]
+        if missing:
+            raise KeyError(missing[0])
+        groups = [found[k] for k in dict.fromkeys(keys)]
+        installed = [g["key"] for g in groups if g["installed"]]
+        if installed:
+            raise ValueError(installed[0])
+        return groups
+
+    result = _delete_selected(_cache_dir(cache_dir), _models_dir(models_dir), select)
+    log.info("Removed HF cache entries %s (%d bytes, %d failures)",
+             list(keys), result["freed"], len(result["failed"]))
+    return result
 
 
 def remove_unused(cache_dir=None, models_dir=None):
     """Remove every entry that backs no installed model."""
-    _total, found = _collect(_cache_dir(cache_dir), _models_dir(models_dir))
-    groups = [g for g in found.values() if not g["installed"]]
-    freed, failures = _delete_groups(groups)
+    result = _delete_selected(
+        _cache_dir(cache_dir), _models_dir(models_dir),
+        lambda found: [g for g in found.values() if not g["installed"]],
+    )
     log.info("Removed %d unused HF cache entries (%d bytes, %d failures)",
-             len(groups), freed, len(failures))
-    return _result(groups, freed, failures)
+             len(result["removed"]) + len(result["failed"]), result["freed"], len(result["failed"]))
+    return result
 
 
 def purge_subfolder(subfolder, cache_dir=None, models_dir=None):

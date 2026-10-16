@@ -546,3 +546,43 @@ def test_unlink_within_does_not_follow_a_directory_swapped_for_a_symlink(tmp_pat
     with pytest.raises(OSError):
         hf_cache._unlink_within(str(root), str(root / "rev" / "sam2-small" / "model.onnx"))
     assert victim.exists()
+
+
+def test_rmdir_within_removes_only_an_empty_directory_inside_the_root(tmp_path):
+    from services import hf_cache
+
+    root = tmp_path / "hub"
+    (root / "repo" / "snapshots").mkdir(parents=True)
+    hf_cache._rmdir_within(str(root), str(root / "repo" / "snapshots"))
+    assert not (root / "repo" / "snapshots").exists()
+    (root / "repo" / "blobs").mkdir()
+    (root / "repo" / "blobs" / "x").write_bytes(b"x")
+    with pytest.raises(OSError):
+        hf_cache._rmdir_within(str(root), str(root / "repo" / "blobs"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with pytest.raises(OSError):
+        hf_cache._rmdir_within(str(root), str(outside))
+    with pytest.raises(OSError):
+        hf_cache._rmdir_within(str(root), str(root))
+    assert outside.exists() and root.exists()
+
+
+def test_remove_decides_on_state_collected_under_the_locks(hub, tmp_path, monkeypatch):
+    """An install that lands between the page's inventory and the click is seen."""
+    from services import hf_cache
+
+    blob = hub.add("dinov2-vit-b14/model.onnx", b"d" * 300)
+    assert not _entries(hf_cache.inventory())["jss367/vireo-onnx-models/dinov2-vit-b14"]["installed"]
+    real_collect = hf_cache._collect
+
+    def collect_after_install(cache_dir, models_dir):
+        # Simulate the model directory appearing just before the locked collection.
+        (tmp_path / "models" / "dinov2-vit-b14").mkdir(parents=True, exist_ok=True)
+        return real_collect(cache_dir, models_dir)
+
+    monkeypatch.setattr(hf_cache, "_collect", collect_after_install)
+    with pytest.raises(ValueError):
+        hf_cache.remove(["jss367/vireo-onnx-models/dinov2-vit-b14"])
+    assert hf_cache.remove_unused()["removed"] == []
+    assert blob.exists()
