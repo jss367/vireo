@@ -140,6 +140,12 @@ Both pull-request and main workflows run this command. The pull-request `test`
 gate requires the frontend job to pass. The individual commands are
 `lint:frontend`, `typecheck:frontend`, and `test:frontend-checks`.
 
+`test:frontend-checks` also runs `tests/frontend/function-length.test.mjs`,
+the JavaScript twin of the Python function-length ratchet: every function in a
+first-party script under `vireo/static` is capped at 100 lines, the ones
+already over it are listed with their exact length in
+`tests/frontend/function_length_baseline.json`, and that list only shrinks.
+
 ESLint checks first-party JavaScript under `vireo/static`, excluding vendor and
 minified files. Classic scripts still share page globals and expose inline-handler
 functions, so `no-undef` and `no-unused-vars` are enabled only for the encapsulated
