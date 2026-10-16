@@ -14,6 +14,7 @@
     "types/dialogs.d.ts",
     "types/panel-loaders.d.ts",
     "types/navbar.d.ts",
+    "types/shared-controllers.d.ts",
     "vireo/static/vireo-panel-loader.js",
     "vireo/static/browse/panel-loaders.js",
     "vireo/static/vireo-dialog.js",
@@ -24,6 +25,9 @@
     "vireo/static/pipeline-messages.js",
     "vireo/static/map-focus.js",
     "vireo/static/vireo-export-job.js",
+    "vireo/static/vireo-visible-poll.js",
+    "vireo/static/vireo-thumbnail-queue.js",
+    "vireo/static/vireo-predictions.js",
     "tests/frontend/type-contracts.ts"
   ]
 }

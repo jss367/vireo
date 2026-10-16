@@ -15,6 +15,9 @@ const checkedControllers = [
   'vireo/static/pipeline-messages.js',
   'vireo/static/map-focus.js',
   'vireo/static/vireo-export-job.js',
+  'vireo/static/vireo-visible-poll.js',
+  'vireo/static/vireo-thumbnail-queue.js',
+  'vireo/static/vireo-predictions.js',
 ];
 
 export default [
