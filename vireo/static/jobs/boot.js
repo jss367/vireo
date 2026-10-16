@@ -6,9 +6,10 @@
 bindJobListClicks();
 bindSourceCleanupConfirm();
 bindDetailPaneActions();
+document.getElementById('retryJobsPolling').addEventListener('click', retryJobsPolling);
 
 // Initial load
 fetchJobs();
 fetchHistory();
-pollTimer = setInterval(fetchJobs, 2000);
-setInterval(fetchHistory, 10000);
+pollTimer = setInterval(function() { fetchJobs(true); }, 2000);
+setInterval(function() { fetchHistory(false, true); }, 10000);

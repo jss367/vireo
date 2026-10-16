@@ -35,6 +35,11 @@ function renderMainPane() {
 
 function renderActiveOverview() {
   var pane = document.getElementById('jobDetailPane');
+  if (!jobsPollState.active.loaded) {
+    pane.innerHTML = '<div class="jobs-overview-empty">' +
+      (jobsPollState.active.error ? 'Active jobs could not be loaded. Retrying automatically.' : 'Loading active jobs…') + '</div>';
+    return;
+  }
   var running = activeJobs.filter(function(j) {
     return isLiveStatus(j.status);
   });
@@ -77,6 +82,11 @@ function renderActiveOverview() {
 
 function renderHistoryOverview() {
   var pane = document.getElementById('jobDetailPane');
+  if (!jobsPollState.history.loaded) {
+    pane.innerHTML = '<div class="jobs-overview-empty">' +
+      (jobsPollState.history.error ? 'Job history could not be loaded. Retrying automatically.' : 'Loading job history…') + '</div>';
+    return;
+  }
   var typeFilter = document.getElementById('filterType').value;
   var statusFilter = document.getElementById('filterStatus').value;
 
