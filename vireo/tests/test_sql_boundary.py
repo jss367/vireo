@@ -111,9 +111,11 @@ def _every_module():
 
 
 def _is_conn_read(node):
-    """``<expr>.conn`` or ``getattr(<expr>, "conn", ...)``."""
+    """``<expr>.conn``, ``getattr(<expr>, "conn", ...)`` or a walrus of either."""
     if isinstance(node, ast.Attribute) and node.attr == "conn":
         return True
+    if isinstance(node, ast.NamedExpr):
+        return _is_conn_read(node.value)
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -246,9 +248,11 @@ def _raw_connection_closes(tree, *, exempt=()):
                 for child in node.body:
                     visit(child, class_aliases, inner, enclosing)
                 return
-            aliases = enclosing - _scope_bindings(node)
-            # ``global conn`` reaches past every enclosing function to the
-            # module binding, which is an alias only if the module made it one.
+            bindings = _scope_bindings(node)
+            # Module aliases are visible from any function body that does not
+            # shadow them, with or without a ``global`` declaration, and
+            # resolve at call time (hence the module pre-pass).
+            aliases = (enclosing | module_aliases) - bindings
             aliases |= _declared_globals(node) & module_aliases
             body = node.body if isinstance(node.body, list) else [node.body]
             for child in body:
@@ -422,6 +426,9 @@ def test_raw_close_scan_includes_docs_prototypes(tmp_path, monkeypatch):
     ("conn = db.conn\n[x for x in conn.close()]", [2]),
     ("class Outer:\n conn = db.conn\n class Inner:\n  conn.close()", []),
     ("class Outer:\n conn = db.conn\n class Inner(consume(conn.close())):\n  pass", [3]),
+    ("def cleanup():\n conn.close()\nconn = db.conn", [2]),
+    ("def cleanup():\n conn = other\n conn.close()\nconn = db.conn", []),
+    ("(conn := db.conn).close()", [1]),
     ("conn = sqlite3.connect(path)\nconn.close()", []),
     ("db.close()\nother.close()", []),
 ])
