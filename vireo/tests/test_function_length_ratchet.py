@@ -136,9 +136,15 @@ def test_baseline_has_no_stale_entries():
 
 
 def write_baseline() -> int:
-    """Rewrite the baseline from the tree; refuse to raise or add any entry."""
+    """Rewrite the baseline from the tree; refuse to raise or add any entry.
+
+    With no baseline file yet (a first run, or reuse of this ratchet in a
+    fresh tree) every over-cap function is written, since there is nothing
+    to ratchet against.
+    """
     current = over_cap(function_lengths())
-    previous = load_baseline() if BASELINE_PATH.exists() else {}
+    bootstrapping = not BASELINE_PATH.exists()
+    previous = {} if bootstrapping else load_baseline()
     grown = sorted(key for key in current if key in previous and current[key] > previous[key])
     if grown:
         print("Refusing to raise baseline entries; shorten these functions instead:")
@@ -146,7 +152,7 @@ def write_baseline() -> int:
             print(f"  {key}: {previous[key]} -> {current[key]} lines")
         return 1
     new = sorted(key for key in current if key not in previous)
-    if new:
+    if new and not bootstrapping:
         print(
             "Refusing to add baseline entries; split these functions instead "
             "(a moved or renamed long function keeps its entry by renaming "
