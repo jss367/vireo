@@ -143,7 +143,8 @@ browser tests.
 TypeScript checks those controllers' JavaScript with `checkJs`, strict types,
 DOM types, and no output files. `types/frontend.d.ts` describes Browse state,
 selection data, and legacy action dependencies; `types/dialogs.d.ts` describes the
-shared dialog lifecycle. It checks implementation and
+shared dialog lifecycle. `types/panel-loaders.d.ts` covers the panel loader inputs,
+selection responses, and renderer dependencies. It checks implementation and
 call contracts; it does not validate server responses at runtime or check the
 implementation of legacy actions outside the selected files.
 

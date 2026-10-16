@@ -8,13 +8,15 @@ async function lint(code, filePath) {
   return (await eslint.lintText(code, {filePath}))[0].messages;
 }
 
-test('strict controllers reject undefined names and unused variables', async () => {
-  const messages = await lint(
-    '(function() { const unused = 1; misspelledPanelAction(); })();',
-    'vireo/static/browse/panel-requests.js',
-  );
-  assert.deepEqual(messages.map(message => message.ruleId).sort(), ['no-undef', 'no-unused-vars']);
-});
+for (const file of ['browse/panel-requests.js', 'browse/panel-loaders.js', 'vireo-panel-loader.js']) {
+  test(file + ': strict controllers reject undefined names and unused variables', async () => {
+    const messages = await lint(
+      '(function() { const unused = 1; misspelledPanelAction(); })();',
+      'vireo/static/' + file,
+    );
+    assert.deepEqual(messages.map(message => message.ruleId).sort(), ['no-undef', 'no-unused-vars']);
+  });
+}
 
 test('classic scripts accept shared globals but still reject correctness errors', async () => {
   const messages = await lint(

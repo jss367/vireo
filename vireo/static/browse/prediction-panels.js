@@ -221,21 +221,7 @@ function asciiCaseFoldKey(name) {
 }
 
 async function loadDetailPredictions(photoId) {
-  var list = document.getElementById('detailPredictions');
-  if (!list) return;
-  var request = Vireo.browse.panelRequests.detailPredictions.begin();
-  list.innerHTML = '<div class="selection-empty">Loading predictions...</div>';
-  try {
-    var data = await safeFetch(
-      '/api/predictions?photo_ids=' + encodeURIComponent(photoId), {}, { toast: false },
-    );
-    if (!request.isCurrent() || window._detailPhotoId !== photoId) return;
-    renderDetailPredictions(data, photoId);
-  } catch(e) {
-    if (request.fail() && window._detailPhotoId === photoId) {
-      list.innerHTML = '<div class="selection-empty">Could not load predictions.</div>';
-    }
-  }
+  return Vireo.browse.panelLoaders.detailPredictions.load(photoId);
 }
 
 function toggleDetailPredictions() {
@@ -843,28 +829,7 @@ async function refreshPredictionConfidenceBadges(photoIds) {
 }
 
 async function loadSelectionPredictions(ids) {
-  var list = document.getElementById('selectionPredictions');
-  if (!list) return;
-  if (ids.length > 1000) return;
-  var request = Vireo.browse.panelRequests.predictions.begin(selectionIdsKey(ids));
-  if (!request) return;
-  Vireo.browse.selectionPanel.predictions.reset();
-  list.innerHTML = '<div class="selection-empty">Checking predictions...</div>';
-  try {
-    var data = await safeFetch('/api/selection/prediction-suggestions', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: ids}),
-    }, { toast: false });
-    if (!request.isCurrent()) return;
-    renderSelectionPredictions(
-      data.predictions || [], data.selected_count || ids.length, data,
-    );
-  } catch(e) {
-    if (request.fail()) {
-      list.innerHTML = '<div class="selection-empty">Could not load predictions.</div>';
-    }
-  }
+  return Vireo.browse.panelLoaders.predictions.load(ids);
 }
 
 function toggleSelectionPredictions() {

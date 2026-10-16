@@ -32,6 +32,28 @@ rendering; they do not cancel writes or server-side work.
 Request races are tested against the actual controllers in
 `vireo/tests/browse_panel_requests.cjs`, run by pytest's browser state tests.
 
+## Panel loading and Retry
+
+`/static/vireo-panel-loader.js` owns the read lifecycle; `panel-loaders.js` wires
+typed instances for selection keywords, selection predictions, and single-photo
+predictions into `Vireo.browse.panelLoaders`. It loads after the legacy renderers
+and before `boot.js`. Existing `loadSelectionKeywordSuggestions`,
+`loadSelectionPredictions`, and `loadDetailPredictions` entry points forward to
+these instances so their callers retain the same API.
+
+A current failure shows a named Retry button inside that panel. The controller
+owns a private copy of the failed input and an observation of its request lane
+after failure. Retrying requires both that observation and the current selection
+or photo to match; changing or invalidating the panel retires its retry. Starting
+a retry immediately removes the old action, paints loading, and clears stale
+row state. Keyboard focus moves to the container while it loads, without a late
+response moving focus back from another control.
+
+The loader and its Browse wiring use strict type, undefined-name, and unused-name
+checks. The selection response fields are typed; nested detail prediction payloads
+remain opaque at the legacy renderer boundary. Browser recovery tests in
+`tests/e2e/test_browse_panel_retry.py` run in Chromium and Mac WebKit CI.
+
 ## Releasing local originals
 
 The photo selection menu and folder context menu offer **Release Local
