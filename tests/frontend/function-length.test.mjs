@@ -187,10 +187,13 @@ function sortedObject(object) {
 // functions whose lengths are the previous lengths in another order is a
 // reordering (ordinals follow source order), not growth; then a key that is
 // new to the baseline may continue a stale entry with the same name and
-// length from another file (a move). A function whose key is already in the
-// baseline and whose group is not a pure reordering is compared to its own
-// entry, so a deleted sibling's budget can never transfer to a growing
-// function. Each old entry is consumed at most once.
+// length from another file (a move) — only if that stale key is actually
+// gone from the current tree, so a surviving same-key function cannot lend
+// its old length to a new over-cap sibling that just happens to match it.
+// A function whose key is already in the baseline and whose group is not a
+// pure reordering is compared to its own entry, so a deleted sibling's
+// budget can never transfer to a growing function. Each old entry is
+// consumed at most once.
 function reconcileBaseline(current, previous, allowNew = [], bootstrapping = false) {
   const remaining = new Set(Object.keys(previous));
   const matched = new Set();
@@ -224,7 +227,7 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
     }
   }
   for (const key of keys.filter(key => !matched.has(key) && !(key in previous))) {
-    const from = [...remaining].find(old => nameOf(old) === nameOf(key) && previous[old] === current[key]);
+    const from = [...remaining].find(old => !(old in current) && nameOf(old) === nameOf(key) && previous[old] === current[key]);
     if (from !== undefined) {
       remaining.delete(from);
       matched.add(key);
@@ -321,6 +324,28 @@ if (argv[0] === '--write-baseline') {
       'b.js:render': 105, 'b.js:render#2': 105,
     }, {'a.js:render': 105}).added, ['b.js:render#2']);
     assert.deepEqual(reconcileBaseline({'a.js:render': 111}, previous, ['a.js:']).grown, ['a.js:render']);
+  });
+
+  test('a surviving same-key function cannot lend its length to a new over-cap sibling', () => {
+    // previous has one over-cap `a.js:render` (110). It shrinks to 105 and
+    // a new `b.js:render` appears at 110. The move rule must not consume
+    // the still-present `a.js:render` as the source for the new key: the
+    // new key is an addition.
+    const previous = {'a.js:render': 110};
+    assert.deepEqual(
+      reconcileBaseline({'a.js:render': 105, 'b.js:render': 110}, previous),
+      {grown: [], added: ['b.js:render'], moves: []},
+    );
+    // Same shape with an ordinal: `a.js:render#2` is still present at a
+    // smaller length and the new `b.js:render` at its former length is an
+    // addition, not a move.
+    assert.deepEqual(
+      reconcileBaseline(
+        {'a.js:render': 105, 'a.js:render#2': 101, 'b.js:render': 110},
+        {'a.js:render': 105, 'a.js:render#2': 110},
+      ),
+      {grown: [], added: ['b.js:render'], moves: []},
+    );
   });
 
   test('a deleted sibling cannot lend its budget to a same-named function that grew', () => {
