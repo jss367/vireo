@@ -267,6 +267,237 @@ def _pipeline_never_started(row):
             and row.get("duration") is None and "_start_time" not in row)
 
 
+def _takeover_descendants(parent_id, rows):
+    """Finished import rows that continue ``parent_id``, never-started excluded."""
+    children = {}
+    candidates = []
+    for row in rows or []:
+        if row.get("type") != "import" or row.get("id") == parent_id:
+            continue
+        if row.get("status") not in ("completed", "failed", "cancelled"):
+            continue
+        cfg = _json_dict(row.get("config"))
+        result = _json_dict(row.get("result"))
+        entry = {
+            "id": row.get("id"),
+            "status": row.get("status"),
+            "started_at": row.get("started_at") or "",
+            "result": result,
+            "config": cfg,
+            "parent": cfg.get("parent_import_job_id"),
+            "root": cfg.get("root_import_job_id"),
+        }
+        candidates.append(entry)
+        children.setdefault(entry["parent"], []).append(entry)
+    descendants = {e["id"]: e for e in candidates if e["root"] == parent_id}
+    frontier = [parent_id, *descendants]
+    while frontier:
+        for child in children.get(frontier.pop(), []):
+            if child["id"] not in descendants:
+                descendants[child["id"]] = child
+                frontier.append(child["id"])
+    # Traverse through never-started ancestors, then ignore their own marks.
+    descendants = [e for e in descendants.values() if not e["result"].get("never_started")]
+    return descendants
+
+
+def _mark_takeover_descendant(e, rows, never_started_processes):
+    """Record what descendant ``e`` did: its tag, chain and Retry marks."""
+    result = e["result"]
+    if (
+        "tags_applied" in result or "chained" in result
+        or result.get("interrupted")
+    ):
+        tags = bool(result.get("tags_applied"))
+        chain_step = bool(result.get("chained"))
+    else:
+        # Finished before the marks were kept on the final row. Only a
+        # run that passed its tag pass and reached the chain after a
+        # clean import records an import collection.
+        tag_only_completed = (
+            e["status"] == "completed"
+            and result.get("after_import_skipped")
+            == "chain already ran on the interrupted parent"
+            and not (result.get("tagging") or {}).get("errors")
+        )
+        tags = tag_only_completed or (
+            result.get("collection_id") is not None
+            and not (result.get("tagging") or {}).get("errors")
+        )
+        skipped = result.get("after_import_skipped")
+        chain_step = tag_only_completed or (
+            not result.get("cancelled") and (
+                result.get("process_job_id") is not None
+                or skipped in ("import-only", "no new photos")
+            )
+        )
+    e["tags_applied"] = tags
+    # The chain step also runs, and marks, after a failed import, but
+    # then skips the collection and processing: that debt moves to the
+    # run's own Retry instead of being paid.
+    e["chain_process_job_ids"] = _chain_process_job_ids(e["config"], result, rows, e["id"])
+    e["chained"] = (
+        bool(e["config"].get("chain_already_ran"))
+        or (chain_step and result.get("ok") is not False
+            and result.get("process_job_id") not in never_started_processes)
+    ) and not _chain_invalidated(e["config"], result, rows, e["id"], never_started_processes)
+    e["resumable"] = (
+        e["status"] == "failed"
+        and bool(result.get("interrupted"))
+        and isinstance(result.get("photo_ids"), list)
+        and not (tags and e["chained"])
+    )
+    e["has_failed_files"] = _has_failed_files(result)
+
+
+# What a Resume of the parent replays: its own marks plus what
+# descendants paid (``_interrupted_parent_resume``).
+def _takeover_tag_scope(config, result):
+    scope, identities = set(), {}
+    fingerprints = {}
+    for value in (config.get("carry_photo_fingerprints"),
+                  result.get("photo_fingerprints"), result.get("carried_photo_fingerprints")):
+        if isinstance(value, dict):
+            fingerprints.update(value)
+    for values in (result.get("photo_ids"), result.get("carried_photo_ids"),
+                   result.get("recovered_photo_ids"), config.get("carry_photo_ids"),
+                   config.get("untagged_photo_ids")):
+        for pid in values or []:
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                fp = fingerprints.get(str(pid)) or fingerprints.get(pid)
+                identity = fp.rsplit("|s=", 1)[-1] if isinstance(fp, str) else ""
+                token = ("photo", pid, identity)
+                scope.add(token)
+                identities[pid] = token
+    for value in (config.get("recover_landed_files"), result.get("landed_files")):
+        if isinstance(value, dict):
+            for path, identity in value.items():
+                if isinstance(identity, list) and len(identity) >= 3:
+                    scope.add(("file", identity[2] or path))
+    return scope, identities
+
+
+def _takeover_paid_carried_scope(config, identities):
+    paid = set()
+    carried = set(config.get("carry_photo_ids") or [])
+    carried -= set(config.get("untagged_photo_ids") or [])
+    carried |= set(config.get("paid_tag_photo_ids") or [])
+    for pid in carried:
+        if pid not in identities:
+            continue
+        token = identities[pid]
+        paid.add(token)
+        if "|h=" in token[2] and token[2].rsplit("|h=", 1)[1]:
+            paid.add(("file", token[2].rsplit("|h=", 1)[1]))
+    return paid
+
+
+def _takeover_tag_payment(parent_id, parent_config, parent_result, descendants):
+    """Which tag scope the parent and its descendants paid.
+
+    Returns ``(all_scope, unpaid_scope, tags_applied, paid_tag_ids,
+    unpaid_tag_ids)``.
+    """
+    parent_scope, tag_identities = _takeover_tag_scope(parent_config, parent_result)
+    paid_scope = set(parent_scope) if parent_result.get("tags_applied") else set()
+    paid_scope |= _takeover_paid_carried_scope(parent_config, tag_identities)
+    all_scope = set(parent_scope)
+    inherited_scopes = {parent_id: parent_scope}
+    for entry in sorted(descendants, key=lambda e: e["started_at"]):
+        scope, identities = _takeover_tag_scope(entry["config"], entry["result"])
+        scope |= inherited_scopes.get(entry["parent"], inherited_scopes.get(entry["root"], set()))
+        inherited_scopes[entry["id"]] = scope
+        tag_identities.update(identities)
+        all_scope |= scope
+        if entry["tags_applied"]:
+            paid_scope |= scope
+        paid_scope |= _takeover_paid_carried_scope(entry["config"], identities)
+    unpaid_scope = all_scope - paid_scope
+    tags_applied = (bool(parent_result.get("tags_applied")) or any(
+        e["tags_applied"] for e in descendants
+    )) and not unpaid_scope
+    paid_tag_ids = sorted(pid for pid, token in tag_identities.items() if token in paid_scope)
+    unpaid_tag_ids = sorted(pid for pid, token in tag_identities.items() if token not in paid_scope)
+    return all_scope, unpaid_scope, tags_applied, paid_tag_ids, unpaid_tag_ids
+
+
+def _takeover_chain(parent_id, parent_config, parent_result, rows, descendants,
+                    never_started_processes, all_scope):
+    """Whether the chain ran, and the process-job groups that paid it.
+
+    Returns ``(chained, chain_process_job_groups, chain_process_job_ids)``.
+    """
+    if all_scope:
+        for entry in descendants:
+            if entry["result"].get("after_import_skipped") == "no new photos":
+                entry["chained"] = False
+    # The parent's chain step marks after a failed import too, but then
+    # skips the collection and processing; apply the same ``ok`` filter to
+    # the parent's own mark as to a descendant's
+    # (``_mark_takeover_descendant``) so a crash between that checkpoint
+    # and the terminal row can't make the resume believe the chain already
+    # ran and skip processing on recovery. That is also why a failed-files
+    # parent still owes processing to its Retry.
+    parent_chain_ids = _chain_process_job_ids(parent_config, parent_result, rows, parent_id)
+    parent_chained = (
+        bool(parent_config.get("chain_already_ran"))
+        or (bool(parent_result.get("chained")) and parent_result.get("ok") is not False)
+        or ("chain_already_ran" not in parent_config and _import_failed_before_start(parent_result)
+            and bool(parent_chain_ids))
+    ) and not _chain_invalidated(parent_config, parent_result, rows, parent_id, never_started_processes)
+    if all_scope and parent_result.get("after_import_skipped") == "no new photos":
+        parent_chained = False
+    chained = parent_chained or any(e["chained"] for e in descendants)
+    chain_process_job_groups = list(_chain_process_job_groups(parent_config, parent_result, rows, parent_id)) if parent_chained else []
+    for e in descendants:
+        if e["chained"]:
+            chain_process_job_groups.extend(_chain_process_job_groups(e["config"], e["result"], rows, e["id"]))
+    chain_process_job_groups = [list(group) for group in sorted({tuple(sorted(set(group))) for group in chain_process_job_groups})]
+    chain_process_job_ids = {pid for group in chain_process_job_groups for pid in group}
+    return chained, chain_process_job_groups, chain_process_job_ids
+
+
+def _takeover_successor(descendants, tags_paid, chained):
+    """The descendant that took over and how (``"done"``, ``"resume"``, ``"retry"``)."""
+    marked = [e for e in descendants if e["tags_applied"] or e["chained"]]
+    # A descendant that failed files after its tag pass offers its own
+    # Retry, which carries the parent's photos to processing. One that was
+    # cancelled or crashed before its tag pass did none of the work, so
+    # the parent stays the place to continue from.
+    next_steps = [
+        e for e in descendants
+        if e["resumable"] or (e["has_failed_files"] and e["tags_applied"])
+    ]
+
+    def newest(entries):
+        return max(entries, key=lambda e: e["started_at"])
+
+    by, kind = None, None
+    if marked and tags_paid and chained:
+        by, kind = newest(marked), "done"
+    elif next_steps:
+        by = newest(next_steps)
+        kind = "resume" if by["resumable"] else "retry"
+    return by, kind
+
+
+def _takeover_descendant_landings(descendants):
+    """The landed files and photo fingerprints recorded by descendants."""
+    descendant_landings = {}
+    descendant_fingerprints = {}
+    for entry in sorted(descendants, key=lambda e: e["started_at"]):
+        for value in (entry["config"].get("carry_photo_fingerprints"),
+                      entry["result"].get("photo_fingerprints"),
+                      entry["result"].get("carried_photo_fingerprints")):
+            if isinstance(value, dict):
+                descendant_fingerprints.update(value)
+        for value in (entry["config"].get("recover_landed_files"),
+                      entry["result"].get("landed_files")):
+            if isinstance(value, dict):
+                descendant_landings.update(value)
+    return descendant_landings, descendant_fingerprints
+
+
 def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
     """Whether a later run took over an import's Resume or Retry.
 
@@ -320,204 +551,22 @@ def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
         row.get("id") for row in rows or []
         if _pipeline_never_started(row)
     }
-    children = {}
-    candidates = []
-    for row in rows or []:
-        if row.get("type") != "import" or row.get("id") == parent_id:
-            continue
-        if row.get("status") not in ("completed", "failed", "cancelled"):
-            continue
-        cfg = _json_dict(row.get("config"))
-        result = _json_dict(row.get("result"))
-        entry = {
-            "id": row.get("id"),
-            "status": row.get("status"),
-            "started_at": row.get("started_at") or "",
-            "result": result,
-            "config": cfg,
-            "parent": cfg.get("parent_import_job_id"),
-            "root": cfg.get("root_import_job_id"),
-        }
-        candidates.append(entry)
-        children.setdefault(entry["parent"], []).append(entry)
-    descendants = {e["id"]: e for e in candidates if e["root"] == parent_id}
-    frontier = [parent_id, *descendants]
-    while frontier:
-        for child in children.get(frontier.pop(), []):
-            if child["id"] not in descendants:
-                descendants[child["id"]] = child
-                frontier.append(child["id"])
-    # Traverse through never-started ancestors, then ignore their own marks.
-    descendants = [e for e in descendants.values() if not e["result"].get("never_started")]
-
+    descendants = _takeover_descendants(parent_id, rows)
     for e in descendants:
-        result = e["result"]
-        if (
-            "tags_applied" in result or "chained" in result
-            or result.get("interrupted")
-        ):
-            tags = bool(result.get("tags_applied"))
-            chain_step = bool(result.get("chained"))
-        else:
-            # Finished before the marks were kept on the final row. Only a
-            # run that passed its tag pass and reached the chain after a
-            # clean import records an import collection.
-            tag_only_completed = (
-                e["status"] == "completed"
-                and result.get("after_import_skipped")
-                == "chain already ran on the interrupted parent"
-                and not (result.get("tagging") or {}).get("errors")
-            )
-            tags = tag_only_completed or (
-                result.get("collection_id") is not None
-                and not (result.get("tagging") or {}).get("errors")
-            )
-            skipped = result.get("after_import_skipped")
-            chain_step = tag_only_completed or (
-                not result.get("cancelled") and (
-                    result.get("process_job_id") is not None
-                    or skipped in ("import-only", "no new photos")
-                )
-            )
-        e["tags_applied"] = tags
-        # The chain step also runs, and marks, after a failed import, but
-        # then skips the collection and processing: that debt moves to the
-        # run's own Retry instead of being paid.
-        e["chain_process_job_ids"] = _chain_process_job_ids(e["config"], result, rows, e["id"])
-        e["chained"] = (
-            bool(e["config"].get("chain_already_ran"))
-            or (chain_step and result.get("ok") is not False
-                and result.get("process_job_id") not in never_started_processes)
-        ) and not _chain_invalidated(e["config"], result, rows, e["id"], never_started_processes)
-        e["resumable"] = (
-            e["status"] == "failed"
-            and bool(result.get("interrupted"))
-            and isinstance(result.get("photo_ids"), list)
-            and not (tags and e["chained"])
-        )
-        e["has_failed_files"] = _has_failed_files(result)
-
-    # What a Resume of the parent replays: its own marks plus what
-    # descendants paid (``_interrupted_parent_resume``).
-    def tag_scope(config, result):
-        scope, identities = set(), {}
-        fingerprints = {}
-        for value in (config.get("carry_photo_fingerprints"),
-                      result.get("photo_fingerprints"), result.get("carried_photo_fingerprints")):
-            if isinstance(value, dict):
-                fingerprints.update(value)
-        for values in (result.get("photo_ids"), result.get("carried_photo_ids"),
-                       result.get("recovered_photo_ids"), config.get("carry_photo_ids"),
-                       config.get("untagged_photo_ids")):
-            for pid in values or []:
-                if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-                    fp = fingerprints.get(str(pid)) or fingerprints.get(pid)
-                    identity = fp.rsplit("|s=", 1)[-1] if isinstance(fp, str) else ""
-                    token = ("photo", pid, identity)
-                    scope.add(token)
-                    identities[pid] = token
-        for value in (config.get("recover_landed_files"), result.get("landed_files")):
-            if isinstance(value, dict):
-                for path, identity in value.items():
-                    if isinstance(identity, list) and len(identity) >= 3:
-                        scope.add(("file", identity[2] or path))
-        return scope, identities
-
-    def paid_carried_scope(config, identities):
-        paid = set()
-        carried = set(config.get("carry_photo_ids") or [])
-        carried -= set(config.get("untagged_photo_ids") or [])
-        carried |= set(config.get("paid_tag_photo_ids") or [])
-        for pid in carried:
-            if pid not in identities:
-                continue
-            token = identities[pid]
-            paid.add(token)
-            if "|h=" in token[2] and token[2].rsplit("|h=", 1)[1]:
-                paid.add(("file", token[2].rsplit("|h=", 1)[1]))
-        return paid
+        _mark_takeover_descendant(e, rows, never_started_processes)
 
     parent_config = parent_config or {}
-    parent_scope, tag_identities = tag_scope(parent_config, parent_result)
-    paid_scope = set(parent_scope) if parent_result.get("tags_applied") else set()
-    paid_scope |= paid_carried_scope(parent_config, tag_identities)
-    all_scope = set(parent_scope)
-    inherited_scopes = {parent_id: parent_scope}
-    for entry in sorted(descendants, key=lambda e: e["started_at"]):
-        scope, identities = tag_scope(entry["config"], entry["result"])
-        scope |= inherited_scopes.get(entry["parent"], inherited_scopes.get(entry["root"], set()))
-        inherited_scopes[entry["id"]] = scope
-        tag_identities.update(identities)
-        all_scope |= scope
-        if entry["tags_applied"]:
-            paid_scope |= scope
-        paid_scope |= paid_carried_scope(entry["config"], identities)
-    unpaid_scope = all_scope - paid_scope
-    if all_scope:
-        for entry in descendants:
-            if entry["result"].get("after_import_skipped") == "no new photos":
-                entry["chained"] = False
-    tags_applied = (bool(parent_result.get("tags_applied")) or any(
-        e["tags_applied"] for e in descendants
-    )) and not unpaid_scope
-    paid_tag_ids = sorted(pid for pid, token in tag_identities.items() if token in paid_scope)
-    unpaid_tag_ids = sorted(pid for pid, token in tag_identities.items() if token not in paid_scope)
-    # The parent's chain step marks after a failed import too, but then
-    # skips the collection and processing; apply the same ``ok`` filter to
-    # the parent's own mark as to a descendant's (above) so a crash between
-    # that checkpoint and the terminal row can't make the resume believe
-    # the chain already ran and skip processing on recovery. That is also
-    # why a failed-files parent still owes processing to its Retry.
-    parent_chain_ids = _chain_process_job_ids(parent_config, parent_result, rows, parent_id)
-    parent_chained = (
-        bool(parent_config.get("chain_already_ran"))
-        or (bool(parent_result.get("chained")) and parent_result.get("ok") is not False)
-        or ("chain_already_ran" not in parent_config and _import_failed_before_start(parent_result)
-            and bool(parent_chain_ids))
-    ) and not _chain_invalidated(parent_config, parent_result, rows, parent_id, never_started_processes)
-    if all_scope and parent_result.get("after_import_skipped") == "no new photos":
-        parent_chained = False
-    chained = parent_chained or any(e["chained"] for e in descendants)
-    chain_process_job_groups = list(_chain_process_job_groups(parent_config, parent_result, rows, parent_id)) if parent_chained else []
-    for e in descendants:
-        if e["chained"]:
-            chain_process_job_groups.extend(_chain_process_job_groups(e["config"], e["result"], rows, e["id"]))
-    chain_process_job_groups = [list(group) for group in sorted({tuple(sorted(set(group))) for group in chain_process_job_groups})]
-    chain_process_job_ids = {pid for group in chain_process_job_groups for pid in group}
+    all_scope, unpaid_scope, tags_applied, paid_tag_ids, unpaid_tag_ids = (
+        _takeover_tag_payment(parent_id, parent_config, parent_result, descendants))
+    chained, chain_process_job_groups, chain_process_job_ids = _takeover_chain(
+        parent_id, parent_config, parent_result, rows, descendants,
+        never_started_processes, all_scope)
     # A Retry of a parent that was not interrupted replays no tags, so only
     # processing is owed there.
     tags_paid = (tags_applied or not parent_interrupted) and not unpaid_scope
-    marked = [e for e in descendants if e["tags_applied"] or e["chained"]]
-    # A descendant that failed files after its tag pass offers its own
-    # Retry, which carries the parent's photos to processing. One that was
-    # cancelled or crashed before its tag pass did none of the work, so
-    # the parent stays the place to continue from.
-    next_steps = [
-        e for e in descendants
-        if e["resumable"] or (e["has_failed_files"] and e["tags_applied"])
-    ]
-
-    def newest(entries):
-        return max(entries, key=lambda e: e["started_at"])
-
-    descendant_landings = {}
-    descendant_fingerprints = {}
-    for entry in sorted(descendants, key=lambda e: e["started_at"]):
-        for value in (entry["config"].get("carry_photo_fingerprints"),
-                      entry["result"].get("photo_fingerprints"),
-                      entry["result"].get("carried_photo_fingerprints")):
-            if isinstance(value, dict):
-                descendant_fingerprints.update(value)
-        for value in (entry["config"].get("recover_landed_files"),
-                      entry["result"].get("landed_files")):
-            if isinstance(value, dict):
-                descendant_landings.update(value)
-    by, kind = None, None
-    if marked and tags_paid and chained:
-        by, kind = newest(marked), "done"
-    elif next_steps:
-        by = newest(next_steps)
-        kind = "resume" if by["resumable"] else "retry"
+    by, kind = _takeover_successor(descendants, tags_paid, chained)
+    descendant_landings, descendant_fingerprints = (
+        _takeover_descendant_landings(descendants))
     return {
         "tags_applied": tags_applied,
         "chained": chained,
@@ -675,6 +724,29 @@ class ImportService:
             workspace_id=workspace_id, _commit=commit,
         )
 
+    @staticmethod
+    def _import_tag_cancel_check(result, job, runner):
+        """The import tag pass's cancellation check, sticky on ``result``."""
+
+        def cancel_requested(*, pause_safe=True):
+            runner_check = None
+            if job is not None and runner is not None:
+                runner_check = (
+                    runner.is_cancelled
+                    if pause_safe
+                    else runner.cancellation_requested
+                )
+            cancelled = result.get("cancelled") or (
+                runner_check is not None and runner_check(job["id"])
+            )
+            if cancelled:
+                # The cancellation may arrive after the importer itself has
+                # returned a successful result. Persist it on the shared
+                # result so downstream after-import chaining also stops.
+                result["cancelled"] = True
+            return cancelled
+        return cancel_requested
+
     def _apply_import_tags(
         self,     workspace_id, photo_ids, tags, location_from_gps, result,
         *, job=None, runner=None,
@@ -700,24 +772,7 @@ class ImportService:
         }
         result["tagging"] = summary
 
-        def cancel_requested(*, pause_safe=True):
-            runner_check = None
-            if job is not None and runner is not None:
-                runner_check = (
-                    runner.is_cancelled
-                    if pause_safe
-                    else runner.cancellation_requested
-                )
-            cancelled = result.get("cancelled") or (
-                runner_check is not None and runner_check(job["id"])
-            )
-            if cancelled:
-                # The cancellation may arrive after the importer itself has
-                # returned a successful result. Persist it on the shared
-                # result so downstream after-import chaining also stops.
-                result["cancelled"] = True
-            return cancelled
-
+        cancel_requested = self._import_tag_cancel_check(result, job, runner)
         if cancel_requested():
             summary["skipped"] = "import cancelled"
             return
@@ -742,6 +797,21 @@ class ImportService:
 
         thread_db = Database(self.db_path)
         thread_db.set_active_workspace(workspace_id)
+        self._add_import_tag_keywords(
+            thread_db, workspace_id, photo_ids, tags, summary, cancel_requested)
+        tagging_cancelled = cancel_requested()
+
+        if location_from_gps and not tagging_cancelled:
+            self._add_import_gps_locations(
+                thread_db, photo_ids, summary, cancel_requested)
+        elif location_from_gps:
+            summary["skipped"] = "import cancelled"
+        thread_db.close()
+
+    def _add_import_tag_keywords(
+        self, thread_db, workspace_id, photo_ids, tags, summary, cancel_requested,
+    ):
+        """Tag every imported photo with each requested keyword."""
         tagged_photo_ids = set()
 
         for requested_name in tags:
@@ -795,96 +865,95 @@ class ImportService:
                     f'Could not add tag "{requested_name}": {exc}'
                 )
         summary["tagged_photos"] = len(tagged_photo_ids)
-        tagging_cancelled = cancel_requested()
 
-        if location_from_gps and not tagging_cancelled:
-            unresolved = 0
-            skipped = 0
-            added = 0
-            cancelled_during_gps = False
-            # Resolve imports in bounded chunks to limit each payload's memory
-            # use and give cancellation a chance between large batches while
-            # sharing the persistent ~110 m geocode cache.
-            for photo_chunk in self._gps_location_chunks(photo_ids, size=10000):
-                if cancel_requested():
+    def _add_import_gps_locations(
+        self, thread_db, photo_ids, summary, cancel_requested,
+    ):
+        """Assign each imported photo the location its EXIF GPS resolves to."""
+        unresolved = 0
+        skipped = 0
+        added = 0
+        cancelled_during_gps = False
+        # Resolve imports in bounded chunks to limit each payload's memory
+        # use and give cancellation a chance between large batches while
+        # sharing the persistent ~110 m geocode cache.
+        for photo_chunk in self._gps_location_chunks(photo_ids, size=10000):
+            if cancel_requested():
+                cancelled_during_gps = True
+                break
+            try:
+                payload, error = self.bulk_gps_location_payload(
+                    thread_db, {"photo_ids": photo_chunk},
+                    cancel_check=cancel_requested,
+                )
+                if error is not None:
+                    raise RuntimeError("location resolution was rejected")
+                if payload.pop("cancelled", False) or cancel_requested():
                     cancelled_during_gps = True
                     break
-                try:
-                    payload, error = self.bulk_gps_location_payload(
-                        thread_db, {"photo_ids": photo_chunk},
-                        cancel_check=cancel_requested,
-                    )
-                    if error is not None:
-                        raise RuntimeError("location resolution was rejected")
-                    if payload.pop("cancelled", False) or cancel_requested():
+                details_by_place_id = payload.pop(
+                    "_details_by_place_id", {}
+                )
+                unresolved += len(payload["unresolved"])
+                skipped += len(payload["skipped"])
+                for group in payload["groups"]:
+                    if cancel_requested(pause_safe=False):
                         cancelled_during_gps = True
                         break
-                    details_by_place_id = payload.pop(
-                        "_details_by_place_id", {}
-                    )
-                    unresolved += len(payload["unresolved"])
-                    skipped += len(payload["skipped"])
-                    for group in payload["groups"]:
-                        if cancel_requested(pause_safe=False):
-                            cancelled_during_gps = True
-                            break
-                        details = details_by_place_id.get(group["place_id"])
-                        if not details:
-                            unresolved += len(group["photo_ids"])
-                            continue
-                        try:
-                            leaf_id = thread_db.upsert_place_chain(details)
-                        except Exception as exc:
-                            log.exception(
-                                "Failed to create GPS import location %s",
-                                group["place_id"],
+                    details = details_by_place_id.get(group["place_id"])
+                    if not details:
+                        unresolved += len(group["photo_ids"])
+                        continue
+                    try:
+                        leaf_id = thread_db.upsert_place_chain(details)
+                    except Exception as exc:
+                        log.exception(
+                            "Failed to create GPS import location %s",
+                            group["place_id"],
+                        )
+                        summary["errors"].append(
+                            f"Could not create location "
+                            f"{group.get('summary') or group['place_id']}: "
+                            f"{exc}"
+                        )
+                        unresolved += len(group["photo_ids"])
+                        continue
+                    from services.edit_history import change_photo_location
+                    with thread_db._commits_held():
+                        location_items = []
+                        for photo_id in group["photo_ids"]:
+                            if cancel_requested(pause_safe=False):
+                                cancelled_during_gps = True
+                                break
+                            item = change_photo_location(thread_db, photo_id, leaf_id)
+                            if item is not None:
+                                location_items.append(item)
+                        added += len(location_items)
+                        if location_items:
+                            thread_db.record_edit(
+                                "photo_location",
+                                f"Added GPS location during import to "
+                                f"{len(location_items)} photos",
+                                "from_exif", location_items,
+                                is_batch=True, _commit=False,
                             )
-                            summary["errors"].append(
-                                f"Could not create location "
-                                f"{group.get('summary') or group['place_id']}: "
-                                f"{exc}"
-                            )
-                            unresolved += len(group["photo_ids"])
-                            continue
-                        from services.edit_history import change_photo_location
-                        with thread_db._commits_held():
-                            location_items = []
-                            for photo_id in group["photo_ids"]:
-                                if cancel_requested(pause_safe=False):
-                                    cancelled_during_gps = True
-                                    break
-                                item = change_photo_location(thread_db, photo_id, leaf_id)
-                                if item is not None:
-                                    location_items.append(item)
-                            added += len(location_items)
-                            if location_items:
-                                thread_db.record_edit(
-                                    "photo_location",
-                                    f"Added GPS location during import to "
-                                    f"{len(location_items)} photos",
-                                    "from_exif", location_items,
-                                    is_batch=True, _commit=False,
-                                )
-                    thread_db.commit()
-                    if cancel_requested():
-                        cancelled_during_gps = True
-                    if cancelled_during_gps:
-                        break
-                except Exception as exc:
-                    thread_db.rollback()
-                    log.exception("Failed to add GPS locations during import")
-                    summary["errors"].append(
-                        f"Could not add GPS locations: {exc}"
-                    )
-                    unresolved += len(photo_chunk)
-            summary["locations_added"] = added
-            summary["locations_unresolved"] = unresolved
-            summary["locations_skipped"] = skipped
-            if cancelled_during_gps:
-                summary["skipped"] = "import cancelled"
-        elif location_from_gps:
+                thread_db.commit()
+                if cancel_requested():
+                    cancelled_during_gps = True
+                if cancelled_during_gps:
+                    break
+            except Exception as exc:
+                thread_db.rollback()
+                log.exception("Failed to add GPS locations during import")
+                summary["errors"].append(
+                    f"Could not add GPS locations: {exc}"
+                )
+                unresolved += len(photo_chunk)
+        summary["locations_added"] = added
+        summary["locations_unresolved"] = unresolved
+        summary["locations_skipped"] = skipped
+        if cancelled_during_gps:
             summary["skipped"] = "import cancelled"
-        thread_db.close()
 
     def _prepare_import_workspace(self, db, body):
         """Return the workspace id an import should write to.
@@ -1174,126 +1243,18 @@ class ImportService:
         transfer scope. Falls through to job_history when the runner
         has already pruned the finished job.
         """
-        runner = self.get_runner()
-        parent = runner.get(parent_id)
-        parent_config = None
-        parent_result = None
-        parent_workspace = None
-        parent_type = None
-        parent_status = None
-        if parent is not None:
-            parent_config = parent.get("config") or {}
-            parent_result = parent.get("result") or {}
-            parent_workspace = parent.get("workspace_id")
-            parent_type = parent.get("type")
-            parent_status = parent.get("status")
-        else:
-            row = db.job_history.parent_import_row(parent_id)
-            if row is None:
-                return None, None, None, None, None, ImportFailure(
-                    "parent_import_job_id not found — the original import "
-                    "may have aged out of history; start a new import",
-                    404,
-                )
-            parent_type = row["type"]
-            parent_status = row["status"]
-            parent_workspace = row["workspace_id"]
-            try:
-                parent_config = json.loads(row["config"] or "{}") or {}
-            except (json.JSONDecodeError, TypeError):
-                parent_config = {}
-            try:
-                parent_result = json.loads(row["result"] or "{}") or {}
-            except (json.JSONDecodeError, TypeError):
-                parent_result = {}
-        if parent_type != "import":
-            return None, None, None, None, None, ImportFailure(
-                "parent_import_job_id must reference an import job "
-                f"(got type {parent_type!r})"
-            )
-        if parent_status not in {"completed", "failed", "cancelled"}:
-            return None, None, None, None, None, ImportFailure(
-                "parent_import_job_id is still active "
-                f"(status {parent_status!r}); wait for the original import "
-                "to finish before retrying",
-                409,
-            )
-        if parent_workspace != active_ws:
-            return None, None, None, None, None, ImportFailure(
-                "parent_import_job_id belongs to a different workspace "
-                "than the active one; switch workspaces or start a new "
-                "import instead of retrying"
-            )
-        allowed_ids = set()
-        for source in (
-            parent_result.get("photo_ids") or [],
-            parent_result.get("carried_photo_ids") or [],
-            parent_result.get("recovered_photo_ids") or [],
-            parent_config.get("carry_photo_ids") or [],
-        ):
-            for pid in source:
-                if (
-                    isinstance(pid, int)
-                    and not isinstance(pid, bool)
-                    and pid > 0
-                ):
-                    allowed_ids.add(pid)
-        # Stable-identity map so the retry can verify each carried ID
-        # still points at the same file. ``photos.id`` is a bare
-        # ``INTEGER PRIMARY KEY`` — SQLite is free to reuse the numeric
-        # ID after a delete, so an ID that legitimately named one of the
-        # parent's imports can later name an unrelated photo. Merges
-        # every fingerprint hop persisted alongside the ID sources
-        # above; missing keys just fall through the verify step below
-        # (legacy parents from before this fix keep working with the
-        # same integer-ID trust).
-        allowed_fingerprints = {}
-        for source in (
-            parent_result.get("photo_fingerprints") or {},
-            parent_result.get("carried_photo_fingerprints") or {},
-            parent_config.get("carry_photo_fingerprints") or {},
-        ):
-            if not isinstance(source, dict):
-                continue
-            for key, value in source.items():
-                try:
-                    pid = int(key)
-                except (TypeError, ValueError):
-                    continue
-                if pid <= 0 or not isinstance(value, str) or not value:
-                    continue
-                allowed_fingerprints.setdefault(pid, value)
-        parent_source_snapshots = parent_result.get("source_snapshots")
-        if not isinstance(parent_source_snapshots, dict):
-            parent_source_snapshots = None
-        if not parent_source_snapshots and _import_failed_before_start(parent_result):
-            for ancestor in self._import_recovery_ancestors(db, parent_config, parent_workspace):
-                snapshot = ancestor["result"].get("source_snapshots")
-                if isinstance(snapshot, dict) and snapshot:
-                    parent_source_snapshots = snapshot
-                    break
-        takeover = None
-        resume_rows = []
-        if parent_result.get("interrupted") or _has_retryable_import_failure(parent_result):
-            resume_rows = self._import_resume_rows(
-                db, parent_id, parent_config, parent_workspace,
-            )
-            takeover = import_resume_takeover(
-                parent_id, parent_result, resume_rows, parent_config,
-            )
-            if takeover["by"] is not None:
-                return None, None, None, None, None, ImportFailure(
-                    self._resume_takeover_message(takeover), 409,
-                    details={
-                        "code": (
-                            "import_already_resumed"
-                            if takeover["parent_interrupted"]
-                            else "import_already_retried"
-                        ),
-                        "taken_over_by_job_id": takeover["by"],
-                        "takeover": takeover["kind"],
-                    },
-                )
+        (parent_config, parent_result, parent_workspace, parent_status,
+         error) = self._load_parent_import_job(parent_id, active_ws, db)
+        if error is not None:
+            return None, None, None, None, None, error
+        allowed_ids, allowed_fingerprints = self._parent_carry_scope(
+            parent_config, parent_result)
+        parent_source_snapshots = self._parent_source_snapshots(
+            db, parent_config, parent_result, parent_workspace)
+        takeover, error = self._parent_import_takeover(
+            db, parent_id, parent_config, parent_result, parent_workspace)
+        if error is not None:
+            return None, None, None, None, None, error
         if snapshot_out is not None:
             # Freeze the cheap evidence before any disk-based path recovery.
             snapshot_out.update({
@@ -1337,6 +1298,153 @@ class ImportService:
             parent_resume,
             None,
         )
+
+    def _load_parent_import_job(self, parent_id, active_ws, db):
+        """Read a retry's parent import from the runner or job_history.
+
+        Returns ``(parent_config, parent_result, parent_workspace,
+        parent_status, None)``, or ``(None, None, None, None, error)`` when
+        the parent is not a finished import in the active workspace.
+        """
+        runner = self.get_runner()
+        parent = runner.get(parent_id)
+        parent_config = None
+        parent_result = None
+        parent_workspace = None
+        parent_type = None
+        parent_status = None
+        if parent is not None:
+            parent_config = parent.get("config") or {}
+            parent_result = parent.get("result") or {}
+            parent_workspace = parent.get("workspace_id")
+            parent_type = parent.get("type")
+            parent_status = parent.get("status")
+        else:
+            row = db.job_history.parent_import_row(parent_id)
+            if row is None:
+                return None, None, None, None, ImportFailure(
+                    "parent_import_job_id not found — the original import "
+                    "may have aged out of history; start a new import",
+                    404,
+                )
+            parent_type = row["type"]
+            parent_status = row["status"]
+            parent_workspace = row["workspace_id"]
+            try:
+                parent_config = json.loads(row["config"] or "{}") or {}
+            except (json.JSONDecodeError, TypeError):
+                parent_config = {}
+            try:
+                parent_result = json.loads(row["result"] or "{}") or {}
+            except (json.JSONDecodeError, TypeError):
+                parent_result = {}
+        if parent_type != "import":
+            return None, None, None, None, ImportFailure(
+                "parent_import_job_id must reference an import job "
+                f"(got type {parent_type!r})"
+            )
+        if parent_status not in {"completed", "failed", "cancelled"}:
+            return None, None, None, None, ImportFailure(
+                "parent_import_job_id is still active "
+                f"(status {parent_status!r}); wait for the original import "
+                "to finish before retrying",
+                409,
+            )
+        if parent_workspace != active_ws:
+            return None, None, None, None, ImportFailure(
+                "parent_import_job_id belongs to a different workspace "
+                "than the active one; switch workspaces or start a new "
+                "import instead of retrying"
+            )
+        return parent_config, parent_result, parent_workspace, parent_status, None
+
+    @staticmethod
+    def _parent_carry_scope(parent_config, parent_result):
+        """The photo ids a retry may carry, and their recorded fingerprints."""
+        allowed_ids = set()
+        for source in (
+            parent_result.get("photo_ids") or [],
+            parent_result.get("carried_photo_ids") or [],
+            parent_result.get("recovered_photo_ids") or [],
+            parent_config.get("carry_photo_ids") or [],
+        ):
+            for pid in source:
+                if (
+                    isinstance(pid, int)
+                    and not isinstance(pid, bool)
+                    and pid > 0
+                ):
+                    allowed_ids.add(pid)
+        # Stable-identity map so the retry can verify each carried ID
+        # still points at the same file. ``photos.id`` is a bare
+        # ``INTEGER PRIMARY KEY`` — SQLite is free to reuse the numeric
+        # ID after a delete, so an ID that legitimately named one of the
+        # parent's imports can later name an unrelated photo. Merges
+        # every fingerprint hop persisted alongside the ID sources
+        # above; missing keys just fall through the verify step below
+        # (legacy parents from before this fix keep working with the
+        # same integer-ID trust).
+        allowed_fingerprints = {}
+        for source in (
+            parent_result.get("photo_fingerprints") or {},
+            parent_result.get("carried_photo_fingerprints") or {},
+            parent_config.get("carry_photo_fingerprints") or {},
+        ):
+            if not isinstance(source, dict):
+                continue
+            for key, value in source.items():
+                try:
+                    pid = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if pid <= 0 or not isinstance(value, str) or not value:
+                    continue
+                allowed_fingerprints.setdefault(pid, value)
+        return allowed_ids, allowed_fingerprints
+
+    def _parent_source_snapshots(self, db, parent_config, parent_result, parent_workspace):
+        """The source snapshots a retry's sources must still match."""
+        parent_source_snapshots = parent_result.get("source_snapshots")
+        if not isinstance(parent_source_snapshots, dict):
+            parent_source_snapshots = None
+        if not parent_source_snapshots and _import_failed_before_start(parent_result):
+            for ancestor in self._import_recovery_ancestors(db, parent_config, parent_workspace):
+                snapshot = ancestor["result"].get("source_snapshots")
+                if isinstance(snapshot, dict) and snapshot:
+                    parent_source_snapshots = snapshot
+                    break
+        return parent_source_snapshots
+
+    def _parent_import_takeover(
+        self, db, parent_id, parent_config, parent_result, parent_workspace,
+    ):
+        """The parent's Resume/Retry takeover; ``(takeover, error)``.
+
+        The error refuses a parent a descendant has already taken over.
+        """
+        takeover = None
+        resume_rows = []
+        if parent_result.get("interrupted") or _has_retryable_import_failure(parent_result):
+            resume_rows = self._import_resume_rows(
+                db, parent_id, parent_config, parent_workspace,
+            )
+            takeover = import_resume_takeover(
+                parent_id, parent_result, resume_rows, parent_config,
+            )
+            if takeover["by"] is not None:
+                return None, ImportFailure(
+                    self._resume_takeover_message(takeover), 409,
+                    details={
+                        "code": (
+                            "import_already_resumed"
+                            if takeover["parent_interrupted"]
+                            else "import_already_retried"
+                        ),
+                        "taken_over_by_job_id": takeover["by"],
+                        "takeover": takeover["kind"],
+                    },
+                )
+        return takeover, None
 
     def _chained_job_exists(self, db, parent_id):
         """Whether any job records ``parent_id`` as the import it was
@@ -1689,6 +1797,18 @@ class ImportService:
                     if error is not None:
                         return None, error
             return snapshot, None
+        target, error = self._after_process_move_target(value, after_import)
+        if error is not None:
+            return None, error
+        return self._check_after_process_move_placement(
+            target, destination, folder_template)
+
+    def _after_process_move_target(self, value, after_import):
+        """Resolve the remote target an after_process_move spec names.
+
+        Returns ``(target, error)``; the target must have a local archive
+        root and an absolute local mount path.
+        """
         if not isinstance(value, dict):
             return None, ImportFailure(
                 "after_process_move must be an object or null, got "
@@ -1736,6 +1856,17 @@ class ImportService:
                 "path relative to the server's working directory and photos "
                 "would appear missing. Set an absolute mount path under "
                 "Settings → Remote targets")
+        return target, None
+
+    @staticmethod
+    def _check_after_process_move_placement(target, destination, folder_template):
+        """Check where the import lands relative to the target's root and mount.
+
+        Returns ``(target_snapshot, error)``; the snapshot respells the
+        archive root when the destination reaches it only via an alias.
+        """
+        root = (target.get("local_archive_root") or "").strip()
+        mount = (target.get("mount_path") or "").strip()
         # Containment goes through move.py's alias-folding helper, not a raw
         # commonpath: on the default case-insensitive macOS/Windows volumes a
         # destination typed with different casing than the saved root (e.g.
@@ -1763,6 +1894,43 @@ class ImportService:
                 f"({mount}) — the import would land directly on the NAS and "
                 "the chained move would duplicate it under the remote path; "
                 "pick a local archive folder outside the mount")
+        error = ImportService._template_mount_overlap_error(
+            folder_template, dest_real, mount)
+        if error is not None:
+            return None, error
+        dest_is_root = _path_equal_or_descends(root, destination)
+        # Root-level import with a folder template that resolves to "." lands
+        # photos on the local_archive_root itself. The chained move
+        # deliberately skips the root (moving it would sweep unrelated shoots
+        # into the transfer), so the chain would accept the request and later
+        # silently move nothing. Reject up front instead. Empty and "." both
+        # produce a rel of "." in the import job's ``or "."`` fallback.
+        template_stripped = (folder_template or "").strip()
+        if dest_is_root and template_stripped in ("", "."):
+            return None, ImportFailure(
+                "after_process_move requires a folder_template when the "
+                "destination is the target's local archive root — a template "
+                "that resolves to \".\" would land photos on the root itself, "
+                "which the chained move deliberately skips")
+        if not (dest_real == root_real
+                or dest_real.startswith(root_real.rstrip(os.sep) + os.sep)):
+            # The destination reaches the root only via an alias (case fold
+            # on a case-insensitive volume). The catalog folders this import
+            # creates will be spelled like the DESTINATION, and
+            # minimal_move_set compares them byte-wise against the snapshot
+            # root at chain time — so respell the snapshot root as the
+            # destination's own prefix (same component count; realpath has
+            # already folded symlinks on both sides, leaving case as the
+            # only difference).
+            n = len(root_real.rstrip(os.sep).split(os.sep))
+            target = dict(target)
+            target["local_archive_root"] = os.sep.join(
+                dest_real.split(os.sep)[:n])
+        return target, None
+
+    @staticmethod
+    def _template_mount_overlap_error(folder_template, dest_real, mount):
+        """Reject a folder template whose renders overlap the NAS mount."""
         # The rendered template can still put the import folder in the same
         # tree as the mount even when ``destination`` itself is safely
         # outside. Two overlapping failure modes:
@@ -1808,6 +1976,42 @@ class ImportService:
             c for c in normalized_template.split(os.sep)
             if c and c != "."
         ]
+        mount_rel = ImportService._template_overlap_with_mount(
+            template_components, dest_real, mount)
+        if mount_rel is None:
+            return None
+        if template_components:
+            detail = (
+                f"the components in \"{folder_template}\" can "
+                f"produce a path matching \"{mount_rel}\" under "
+                "the destination, so some renders would land on "
+                "the NAS or wrap the mount"
+            )
+        else:
+            detail = (
+                f"the folder template (\"{folder_template}\") "
+                "leaves the import at the destination itself, "
+                f"and the mount sits at \"{mount_rel}\" under "
+                "it — the mount ends up inside the import "
+                "source tree"
+            )
+        return ImportFailure(
+            "folder_template can render the import into the "
+            f"same tree as the target's NAS mount ({mount}) — "
+            f"{detail} and the chained move would either "
+            "duplicate them under the remote path or be refused "
+            "as a destination inside the source; pick a "
+            "template or destination that stays outside the "
+            "mount")
+
+    @staticmethod
+    def _template_overlap_with_mount(template_components, dest_real, mount):
+        """The mount's path under ``dest_real`` when some render overlaps it.
+
+        ``None`` when no render of ``template_components`` can land on,
+        under, or around the mount.
+        """
+        from move import _path_equal_or_descends
         # Test the template's reach against the mount via
         # ``_path_equal_or_descends`` on a constructed candidate path,
         # not a byte-wise ``os.path.normcase`` compare of the leaf
@@ -1887,58 +2091,8 @@ class ImportService:
                 if all_percent_reachable and (
                         _path_equal_or_descends(candidate, mount_real)
                         or _path_equal_or_descends(mount_real, candidate)):
-                    if template_components:
-                        detail = (
-                            f"the components in \"{folder_template}\" can "
-                            f"produce a path matching \"{mount_rel}\" under "
-                            "the destination, so some renders would land on "
-                            "the NAS or wrap the mount"
-                        )
-                    else:
-                        detail = (
-                            f"the folder template (\"{folder_template}\") "
-                            "leaves the import at the destination itself, "
-                            f"and the mount sits at \"{mount_rel}\" under "
-                            "it — the mount ends up inside the import "
-                            "source tree"
-                        )
-                    return None, ImportFailure(
-                        "folder_template can render the import into the "
-                        f"same tree as the target's NAS mount ({mount}) — "
-                        f"{detail} and the chained move would either "
-                        "duplicate them under the remote path or be refused "
-                        "as a destination inside the source; pick a "
-                        "template or destination that stays outside the "
-                        "mount")
-        dest_is_root = _path_equal_or_descends(root, destination)
-        # Root-level import with a folder template that resolves to "." lands
-        # photos on the local_archive_root itself. The chained move
-        # deliberately skips the root (moving it would sweep unrelated shoots
-        # into the transfer), so the chain would accept the request and later
-        # silently move nothing. Reject up front instead. Empty and "." both
-        # produce a rel of "." in the import job's ``or "."`` fallback.
-        template_stripped = (folder_template or "").strip()
-        if dest_is_root and template_stripped in ("", "."):
-            return None, ImportFailure(
-                "after_process_move requires a folder_template when the "
-                "destination is the target's local archive root — a template "
-                "that resolves to \".\" would land photos on the root itself, "
-                "which the chained move deliberately skips")
-        if not (dest_real == root_real
-                or dest_real.startswith(root_real.rstrip(os.sep) + os.sep)):
-            # The destination reaches the root only via an alias (case fold
-            # on a case-insensitive volume). The catalog folders this import
-            # creates will be spelled like the DESTINATION, and
-            # minimal_move_set compares them byte-wise against the snapshot
-            # root at chain time — so respell the snapshot root as the
-            # destination's own prefix (same component count; realpath has
-            # already folded symlinks on both sides, leaving case as the
-            # only difference).
-            n = len(root_real.rstrip(os.sep).split(os.sep))
-            target = dict(target)
-            target["local_archive_root"] = os.sep.join(
-                dest_real.split(os.sep)[:n])
-        return target, None
+                    return mount_rel
+        return None
 
     def _validate_import_metadata_dependency(self, body):
         """Require working metadata extraction unless explicitly overridden.

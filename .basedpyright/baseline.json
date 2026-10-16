@@ -260,14 +260,6 @@
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 31,
-                    "endColumn": 38,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
                     "startColumn": 25,
                     "endColumn": 47,
                     "lineCount": 1
@@ -304,14 +296,6 @@
                 "range": {
                     "startColumn": 26,
                     "endColumn": 47,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 35,
-                    "endColumn": 55,
                     "lineCount": 1
                 }
             }
