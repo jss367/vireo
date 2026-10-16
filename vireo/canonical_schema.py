@@ -87,6 +87,8 @@ JOB_HISTORY_LATER_COLUMNS = (
     ("summary", "TEXT DEFAULT ''"),
     ("resource_wait_seconds", "REAL DEFAULT 0"),
     ("resource_wait_count", "INTEGER DEFAULT 0"),
+    # Last checkpointed job["progress"] (plus checkpoint_at) for live rows;
+    # the runner's startup sweep folds it into interrupted rows.
     ("progress", "TEXT"),
 )
 
