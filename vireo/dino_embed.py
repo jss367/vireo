@@ -76,6 +76,84 @@ def dinov2_status(variant):
     }
 
 
+def _fetch_dinov2_pair(variant, tmp_path, tmp_data_path, progress_callback):
+    """Download the DINOv2 graph and sidecar into their ``.download`` paths."""
+    import shutil
+
+    from huggingface_hub import HfApi, hf_hub_download
+    from models import ONNX_REPO
+
+    # Resolve a pinned revision upfront so BOTH fetches target the
+    # same commit.  Without this, a push to jss367/vireo-onnx-models
+    # between the graph and sidecar fetches could produce a
+    # mismatched pair that ONNX Runtime refuses to load.  Network
+    # failure here is non-fatal — fall back to the repo's default
+    # branch and accept the (tiny) race window; this is no worse
+    # than the pre-fix behaviour.
+    try:
+        pinned_rev = HfApi().model_info(ONNX_REPO).sha
+    except Exception as e:  # noqa: BLE001
+        log.info(
+            "Could not resolve HF revision for %s (%s); "
+            "falling back to default branch",
+            ONNX_REPO, e,
+        )
+        pinned_rev = None
+
+    cached_graph = hf_hub_download(
+        repo_id=ONNX_REPO,
+        filename="model.onnx",
+        subfolder=f"dinov2-{variant}",
+        revision=pinned_rev,
+    )
+    shutil.copy2(cached_graph, tmp_path)
+
+    if progress_callback:
+        progress_callback(
+            f"Downloading DINOv2 {variant} weights sidecar...", 1, 2,
+        )
+
+    cached_data = hf_hub_download(
+        repo_id=ONNX_REPO,
+        filename="model.onnx.data",
+        subfolder=f"dinov2-{variant}",
+        revision=pinned_rev,
+    )
+    shutil.copy2(cached_data, tmp_data_path)
+
+
+def _promote_dinov2_pair(
+    model_path, data_path, tmp_path, tmp_data_path,
+    data_backup_path, had_prior_sidecar,
+):
+    """Move a downloaded graph/sidecar pair into place as a pair."""
+    import contextlib
+
+    # Promote the pair atomically *as a pair*.  Sidecar goes first
+    # so ONNX Runtime never sees a graph that references a
+    # not-yet-written sidecar.  If the graph replace then fails
+    # (e.g. Windows file lock on the existing `model.onnx`),
+    # roll the sidecar back so we don't leave a new-sidecar /
+    # old-graph mismatch on disk that the noop check would
+    # short-circuit on the next run.
+    if had_prior_sidecar:
+        replace_file(data_path, data_backup_path)
+    try:
+        replace_file(tmp_data_path, data_path)
+        replace_file(tmp_path, model_path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(data_path)
+        if had_prior_sidecar:
+            with contextlib.suppress(OSError):
+                replace_file(data_backup_path, data_path)
+        raise
+    else:
+        if had_prior_sidecar:
+            with contextlib.suppress(OSError):
+                os.unlink(data_backup_path)
+
+
 def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
     """Ensure DINOv2 ONNX weights for ``variant`` are on disk.
 
@@ -137,73 +215,11 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
         data_backup_path = data_path + ".prev"
         had_prior_sidecar = os.path.isfile(data_path)
         try:
-            import contextlib
-            import shutil
-
-            from huggingface_hub import HfApi, hf_hub_download
-            from models import ONNX_REPO
-
-            # Resolve a pinned revision upfront so BOTH fetches target the
-            # same commit.  Without this, a push to jss367/vireo-onnx-models
-            # between the graph and sidecar fetches could produce a
-            # mismatched pair that ONNX Runtime refuses to load.  Network
-            # failure here is non-fatal — fall back to the repo's default
-            # branch and accept the (tiny) race window; this is no worse
-            # than the pre-fix behaviour.
-            try:
-                pinned_rev = HfApi().model_info(ONNX_REPO).sha
-            except Exception as e:  # noqa: BLE001
-                log.info(
-                    "Could not resolve HF revision for %s (%s); "
-                    "falling back to default branch",
-                    ONNX_REPO, e,
-                )
-                pinned_rev = None
-
-            cached_graph = hf_hub_download(
-                repo_id=ONNX_REPO,
-                filename="model.onnx",
-                subfolder=f"dinov2-{variant}",
-                revision=pinned_rev,
+            _fetch_dinov2_pair(variant, tmp_path, tmp_data_path, progress_callback)
+            _promote_dinov2_pair(
+                model_path, data_path, tmp_path, tmp_data_path,
+                data_backup_path, had_prior_sidecar,
             )
-            shutil.copy2(cached_graph, tmp_path)
-
-            if progress_callback:
-                progress_callback(
-                    f"Downloading DINOv2 {variant} weights sidecar...", 1, 2,
-                )
-
-            cached_data = hf_hub_download(
-                repo_id=ONNX_REPO,
-                filename="model.onnx.data",
-                subfolder=f"dinov2-{variant}",
-                revision=pinned_rev,
-            )
-            shutil.copy2(cached_data, tmp_data_path)
-
-            # Promote the pair atomically *as a pair*.  Sidecar goes first
-            # so ONNX Runtime never sees a graph that references a
-            # not-yet-written sidecar.  If the graph replace then fails
-            # (e.g. Windows file lock on the existing `model.onnx`),
-            # roll the sidecar back so we don't leave a new-sidecar /
-            # old-graph mismatch on disk that the noop check would
-            # short-circuit on the next run.
-            if had_prior_sidecar:
-                replace_file(data_path, data_backup_path)
-            try:
-                replace_file(tmp_data_path, data_path)
-                replace_file(tmp_path, model_path)
-            except Exception:
-                with contextlib.suppress(OSError):
-                    os.unlink(data_path)
-                if had_prior_sidecar:
-                    with contextlib.suppress(OSError):
-                        replace_file(data_backup_path, data_path)
-                raise
-            else:
-                if had_prior_sidecar:
-                    with contextlib.suppress(OSError):
-                        os.unlink(data_backup_path)
         except Exception as e:
             import contextlib
 
