@@ -34,15 +34,8 @@ from web.location_edits import (
 from xmp import read_sync_preview_metadata
 
 
-def _location_review_groups(photos, cluster_radius_m=750.0):
-    """Cluster photos by their observed coordinates for human review.
-
-    Reverse-geocoded place ids are deliberately not involved: they are
-    suggestions for the reviewer, not the identity of a coordinate group.
-    A small spatial hash keeps the neighbor search close to O(n) for large
-    libraries while connected components allow a photographed route to
-    remain one reviewable area.
-    """
+def _review_coordinates(photos):
+    """``(valid, unresolved)``: photos with usable GPS, and the rest with why."""
     valid = []
     unresolved = []
     for order, photo in enumerate(photos):
@@ -78,15 +71,17 @@ def _location_review_groups(photos, cluster_radius_m=750.0):
             "lat": lat,
             "lng": lng,
         })
+    return valid, unresolved
 
-    if not valid:
-        return [], unresolved
 
+def _review_components(valid, cluster_radius_m, reference_lat, reference_lng):
+    """Connected components of points within ``cluster_radius_m``.
+
+    Projects each item onto a local plane (setting its ``x`` and ``y``)
+    and unions neighbors found through a spatial hash. Returns the
+    components keyed by root index.
+    """
     earth_radius_m = 6_371_000.0
-    reference_lat = math.radians(
-        sum(item["lat"] for item in valid) / len(valid)
-    )
-    reference_lng = valid[0]["lng"]
 
     def projected(item):
         lng_delta = ((item["lng"] - reference_lng + 180.0) % 360.0) - 180.0
@@ -133,64 +128,123 @@ def _location_review_groups(photos, cluster_radius_m=750.0):
     components = {}
     for index, item in enumerate(valid):
         components.setdefault(find(index), []).append(item)
+    return components
+
+
+def _review_group(group_index, items, reference_lng):
+    """The review payload for one coordinate group."""
+    center_lat = sum(item["lat"] for item in items) / len(items)
+    # Longitudes were normalized around the first input point;
+    # use the same frame so groups around the antimeridian do not get
+    # a center near Greenwich.
+    lng_deltas = [
+        ((item["lng"] - reference_lng + 180.0) % 360.0) - 180.0
+        for item in items
+    ]
+    center_lng = (
+        reference_lng + sum(lng_deltas) / len(lng_deltas) + 180.0
+    ) % 360.0 - 180.0
+    center_x = sum(item["x"] for item in items) / len(items)
+    center_y = sum(item["y"] for item in items) / len(items)
+    spread_m = max(
+        math.hypot(item["x"] - center_x, item["y"] - center_y)
+        for item in items
+    )
+    timestamps = sorted(
+        item["photo"]["timestamp"]
+        for item in items
+        if item["photo"]["timestamp"]
+    )
+    photo_data = [{
+        "id": item["photo"]["id"],
+        "filename": item["photo"]["filename"],
+        "companion_path": item["photo"]["companion_path"],
+        "timestamp": item["photo"]["timestamp"],
+        "latitude": item["lat"],
+        "longitude": item["lng"],
+    } for item in sorted(items, key=lambda item: item["order"])]
+    return {
+        "id": f"group-{group_index}",
+        "count": len(photo_data),
+        "photo_ids": [photo["id"] for photo in photo_data],
+        "photos": photo_data,
+        "sample_filenames": [
+            photo["filename"] for photo in photo_data[:3]
+        ],
+        "center": {"lat": center_lat, "lng": center_lng},
+        "bounds": {
+            "south": min(item["lat"] for item in items),
+            "west": min(item["lng"] for item in items),
+            "north": max(item["lat"] for item in items),
+            "east": max(item["lng"] for item in items),
+        },
+        "spread_m": round(spread_m, 1),
+        "captured_from": timestamps[0] if timestamps else None,
+        "captured_to": timestamps[-1] if timestamps else None,
+    }
+
+
+def _location_review_groups(photos, cluster_radius_m=750.0):
+    """Cluster photos by their observed coordinates for human review.
+
+    Reverse-geocoded place ids are deliberately not involved: they are
+    suggestions for the reviewer, not the identity of a coordinate group.
+    A small spatial hash keeps the neighbor search close to O(n) for large
+    libraries while connected components allow a photographed route to
+    remain one reviewable area.
+    """
+    valid, unresolved = _review_coordinates(photos)
+
+    if not valid:
+        return [], unresolved
+
+    reference_lat = math.radians(
+        sum(item["lat"] for item in valid) / len(valid)
+    )
+    reference_lng = valid[0]["lng"]
+    components = _review_components(
+        valid, cluster_radius_m, reference_lat, reference_lng,
+    )
 
     ordered = sorted(
         components.values(),
         key=lambda items: min(item["order"] for item in items),
     )
-    groups = []
-    for group_index, items in enumerate(ordered, start=1):
-        center_lat = sum(item["lat"] for item in items) / len(items)
-        # Longitudes were normalized around the first input point above;
-        # use the same frame so groups around the antimeridian do not get
-        # a center near Greenwich.
-        lng_deltas = [
-            ((item["lng"] - reference_lng + 180.0) % 360.0) - 180.0
-            for item in items
-        ]
-        center_lng = (
-            reference_lng + sum(lng_deltas) / len(lng_deltas) + 180.0
-        ) % 360.0 - 180.0
-        center_x = sum(item["x"] for item in items) / len(items)
-        center_y = sum(item["y"] for item in items) / len(items)
-        spread_m = max(
-            math.hypot(item["x"] - center_x, item["y"] - center_y)
-            for item in items
-        )
-        timestamps = sorted(
-            item["photo"]["timestamp"]
-            for item in items
-            if item["photo"]["timestamp"]
-        )
-        photo_data = [{
-            "id": item["photo"]["id"],
-            "filename": item["photo"]["filename"],
-            "companion_path": item["photo"]["companion_path"],
-            "timestamp": item["photo"]["timestamp"],
-            "latitude": item["lat"],
-            "longitude": item["lng"],
-        } for item in sorted(items, key=lambda item: item["order"])]
-        groups.append({
-            "id": f"group-{group_index}",
-            "count": len(photo_data),
-            "photo_ids": [photo["id"] for photo in photo_data],
-            "photos": photo_data,
-            "sample_filenames": [
-                photo["filename"] for photo in photo_data[:3]
-            ],
-            "center": {"lat": center_lat, "lng": center_lng},
-            "bounds": {
-                "south": min(item["lat"] for item in items),
-                "west": min(item["lng"] for item in items),
-                "north": max(item["lat"] for item in items),
-                "east": max(item["lng"] for item in items),
-            },
-            "spread_m": round(spread_m, 1),
-            "captured_from": timestamps[0] if timestamps else None,
-            "captured_to": timestamps[-1] if timestamps else None,
-        })
-    return groups, unresolved
+    return [
+        _review_group(group_index, items, reference_lng)
+        for group_index, items in enumerate(ordered, start=1)
+    ], unresolved
 
+
+def _record_place_link(db, keyword_id, details, result):
+    """Audit a keyword-to-place link and queue its photos' location sync."""
+    # Audit log: this action isn't tied to a single photo (it operates on
+    # a keyword), so we omit the per-photo items list. ``photo_id`` in
+    # ``edit_history_items`` is FK-constrained to ``photos.id``, so a
+    # placeholder like 0 would IntegrityError. The ``new_value`` column on
+    # the parent ``edit_history`` row carries the canonical keyword id;
+    # the ``description`` carries the place name and the source-id pair.
+    db.record_edit(
+        'location_link',
+        (
+            f"linked keyword {keyword_id} to place: "
+            f"{details.get('name', 'unknown')} "
+            f"(canonical keyword_id={result['keyword_id']}, "
+            f"merged={result['merged']})"
+        ),
+        str(result['keyword_id']),
+        [],
+    )
+
+    photo_rows = db.get_photo_workspaces_with_keyword(result["keyword_id"])
+    for row in photo_rows:
+        queue_location_sync_if_enabled(
+            db, row["photo_id"],
+            workspace_id=row["workspace_id"],
+            _commit=False,
+        )
+    if photo_rows:
+        db.commit()
 
 def _serialize_keyword(db, keyword_id):
     """Return a summary dict for a single ``type='location'`` keyword row.
@@ -592,33 +646,7 @@ def create_locations_blueprint(
             # (name, parent_id). Surface the message for debugging.
             return location_name_conflict_response(err)
 
-        # Audit log: this action isn't tied to a single photo (it operates on
-        # a keyword), so we omit the per-photo items list. ``photo_id`` in
-        # ``edit_history_items`` is FK-constrained to ``photos.id``, so a
-        # placeholder like 0 would IntegrityError. The ``new_value`` column on
-        # the parent ``edit_history`` row carries the canonical keyword id;
-        # the ``description`` carries the place name and the source-id pair.
-        db.record_edit(
-            'location_link',
-            (
-                f"linked keyword {keyword_id} to place: "
-                f"{details.get('name', 'unknown')} "
-                f"(canonical keyword_id={result['keyword_id']}, "
-                f"merged={result['merged']})"
-            ),
-            str(result['keyword_id']),
-            [],
-        )
-
-        photo_rows = db.get_photo_workspaces_with_keyword(result["keyword_id"])
-        for row in photo_rows:
-            queue_location_sync_if_enabled(
-                db, row["photo_id"],
-                workspace_id=row["workspace_id"],
-                _commit=False,
-            )
-        if photo_rows:
-            db.commit()
+        _record_place_link(db, keyword_id, details, result)
 
         return jsonify({
             "keyword": _serialize_keyword(db, result["keyword_id"]),

@@ -157,8 +157,6 @@
   "web/local_folder.py:create_local_folder_blueprint.sync_local_folders.work": 153,
   "web/local_workspace.py:create_local_workspace_blueprint.stage_local_workspace": 101,
   "web/local_workspace.py:create_local_workspace_blueprint.sync_local_workspace": 128,
-  "web/locations.py:_location_review_groups": 156,
-  "web/locations.py:create_locations_blueprint.api_link_keyword_to_place": 104,
   "web/media.py:create_media_blueprint._serve_preview": 286,
   "web/media.py:create_media_blueprint.serve_crop_preview": 124,
   "web/media.py:create_media_blueprint.serve_edit_mask_preview": 134,
