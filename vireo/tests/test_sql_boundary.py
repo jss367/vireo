@@ -66,7 +66,7 @@ CONN_USE_LIMITS = {
     "pipeline_stages/detection.py": 4,
     "pipeline_stages/features.py": 4,
     "pipeline_stages/media.py": 2,
-    "pipeline_stages/scanning.py": 2,
+    "pipeline_stages/scanning.py": 1,
     "preview_cache.py": 5,
     "render_source.py": 2,
     "scanner.py": 96,
