@@ -7,14 +7,20 @@ source in place. ``_ScanPass`` holds the state those phases share (the
 worker DB, the roots fed to the scanner and the progress accumulators).
 """
 
+from __future__ import annotations
+
 import contextlib
 import json
 import logging
 import os
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from pipeline_stages.context import PipelineRun
+
+if TYPE_CHECKING:
+    from db import Database
 
 log = logging.getLogger(__name__)
 
@@ -251,7 +257,7 @@ class _ScanPass:
         # rows incrementally, so even a mid-scan failure needs
         # invalidation.
         self.scanned_roots: list[str] = []
-        self.thread_db = None
+        self.thread_db: Database | None = None
         # Accumulator so multi-folder scans (repair loop, scan-in-place
         # with sources=[...]) don't rewind the overall progress at each
         # folder boundary. scan() reports (current, total) local to the
@@ -266,6 +272,12 @@ class _ScanPass:
         # Directories already reported by _on_permission_denied.
         self.denied_seen: set[str] = set()
 
+    def _db(self) -> Database:
+        """The worker connection ``run_all`` opened for this pass."""
+        if self.thread_db is None:
+            raise RuntimeError("scan pass used before run_all opened its database")
+        return self.thread_db
+
     # -- the run -----------------------------------------------------
 
     def run_all(self, cfg, do_scan, scan_cancelled):
@@ -273,10 +285,11 @@ class _ScanPass:
         self.do_scan = do_scan
         self.scan_cancelled = scan_cancelled
 
-        self.thread_db = run.database_factory(run.db_path)
-        self.thread_db.set_active_workspace(run.workspace_id)
+        thread_db = run.database_factory(run.db_path)
+        thread_db.set_active_workspace(run.workspace_id)
+        self.thread_db = thread_db
 
-        self.effective_cfg = self.thread_db.get_effective_config(cfg.load())
+        self.effective_cfg = thread_db.get_effective_config(cfg.load())
         self.pipeline_cfg = self.effective_cfg.get("pipeline", {})
 
         if self.skip_scan:
@@ -584,7 +597,7 @@ class _ScanPass:
         nothing's broken, we keep the historical "Skipped" summary.
         """
         run = self.run
-        coll_photos = self.thread_db.get_collection_photos(
+        coll_photos = self._db().get_collection_photos(
             run.collection_id, per_page=999999,
         )
         # Respect the user's preview-time exclusions: photos removed
@@ -1255,7 +1268,7 @@ class _ScanPass:
         )
         dest_ci_root = _case_insensitive_root(root)
         indexed: set[str] = set()
-        rows = self.thread_db.conn.execute(
+        rows = self._db().conn.execute(
             """SELECT f.path, p.filename
                  FROM photos p
                  JOIN folders f ON f.id = p.folder_id"""
@@ -1544,21 +1557,19 @@ class _ScanPass:
         # re-surfaced by a later banner probe). Skipping it at
         # scan time keeps it uncataloged so the next probe
         # rediscovers it.
-        snapshot_files_set = (
-            set(self.snapshot_paths) if self.snapshot_paths is not None else None
-        )
+        snapshot_paths = self.snapshot_paths
         for src_folder in sources:
             self.scanned_roots.append(src_folder)
             snapshot_restrict_dirs = None
             snapshot_restrict_files = None
-            if snapshot_files_set is not None:
+            if snapshot_paths is not None:
                 src_norm = os.path.normpath(src_folder)
                 prefix = (
                     src_norm if src_norm.endswith(os.sep)
                     else src_norm + os.sep
                 )
                 files_under_src = [
-                    p for p in self.snapshot_paths
+                    p for p in snapshot_paths
                     if os.path.normpath(p).startswith(prefix)
                 ]
                 snapshot_restrict_files = set(files_under_src)
@@ -1635,30 +1646,16 @@ def _collection_stage_body(
     # snapshot and pipeline run) is logged so an unexpectedly small
     # collection is auditable.
     if snapshot_paths is not None:
-        resolver_db = run.database_factory(run.db_path)
-        resolver_db.set_active_workspace(run.workspace_id)
-        # Split each snapshot path into (dirname, basename) and match on
-        # the two columns directly. Concatenating with a hardcoded '/'
-        # would mismatch Windows paths captured via os.path.join, where
-        # both the snapshot and folders.path use backslash separators.
-        pairs = [os.path.split(p) for p in snapshot_paths]
-        resolved: set[int] = set()
-        # 2 placeholders per pair; cap below SQLite's default 999-param
-        # limit (pre-3.32) with headroom.
-        _CHUNK = 400
-        for i in range(0, len(pairs), _CHUNK):
-            chunk = pairs[i : i + _CHUNK]
-            values = ",".join("(?, ?)" for _ in chunk)
-            flat_params = tuple(v for pair in chunk for v in pair)
-            rows = resolver_db.conn.execute(
-                f"""SELECT p.id
-                      FROM photos p
-                      JOIN folders f ON f.id = p.folder_id
-                     WHERE (f.path, p.filename) IN (VALUES {values})""",
-                flat_params,
-            ).fetchall()
-            resolved.update(r["id"] for r in rows)
-        snapshot_photo_ids = resolved
+        # ``get_photo_ids_at_paths`` matches each snapshot path on the
+        # (dirname, basename) pair of the catalog's two columns, so Windows
+        # paths captured via os.path.join match the folder rows that use
+        # the same backslash separators. The lookup leaves a transaction
+        # open on its connection, so this throwaway one is closed here.
+        with run.database_factory(run.db_path) as resolver_db:
+            resolver_db.set_active_workspace(run.workspace_id)
+            snapshot_photo_ids = set(
+                resolver_db.get_photo_ids_at_paths(snapshot_paths)
+            )
 
         missing = len(snapshot_paths) - len(snapshot_photo_ids)
         log.info(

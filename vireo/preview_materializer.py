@@ -387,5 +387,12 @@ def materialize_preview(
         result = preview_artifact_flights.run(
             os.path.abspath(cache_path), produce, consume_published,
         )
-        return result.value
+        materialized = result.value
+        if materialized is None:
+            # Only ``join=False`` flights come back skipped without a
+            # value; this one joins, so a missing value is a producer bug.
+            raise PreviewMaterializationError(
+                f"preview flight for {cache_path!r} finished without a result"
+            )
+        return materialized
     return produce()
