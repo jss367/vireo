@@ -51,23 +51,27 @@ function _showHfCacheError(msg) {
 function _hfCacheRow(entry) {
   var li = document.createElement('li');
   li.className = 'file-item';
-  var label = document.createElement('label');
+  li.style.padding = '8px 0';
+  var label = document.createElement('div');
   label.style.flex = '1';
-  var strong = document.createElement('strong');
+  label.style.minWidth = '0';
+  var strong = document.createElement('div');
   strong.style.color = 'var(--text-primary)';
+  strong.style.fontWeight = '600';
   strong.textContent = entry.name;
   label.appendChild(strong);
-  var meta = document.createElement('span');
-  meta.style.color = 'var(--text-dim)';
-  var files = entry.file_count === 1 ? '1 file' : entry.file_count + ' files';
-  meta.textContent = ' - ' + files + ' - ' + storageFormatBytes(entry.size);
-  label.appendChild(meta);
+  var meta = document.createElement('div');
+  meta.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:3px;color:var(--text-dim);';
+  var files = document.createElement('span');
+  files.textContent = (entry.file_count === 1 ? '1 file' : entry.file_count + ' files') +
+    ' · ' + storageFormatBytes(entry.size);
+  meta.appendChild(files);
   var tag = document.createElement('span');
   tag.className = 'stat-kind ' + (entry.installed ? 'keep' : 'safe');
-  tag.style.marginLeft = '8px';
   tag.textContent = entry.installed ? 'Backs installed model' : 'No installed model uses this';
   if (entry.installed && entry.install_path) tag.title = entry.install_path;
-  label.appendChild(tag);
+  meta.appendChild(tag);
+  label.appendChild(meta);
   li.appendChild(label);
   var btn = document.createElement('button');
   btn.className = 'btn-danger';
