@@ -479,6 +479,39 @@ def _source_offline_reason(
     return "folder", f"folder {folder_path} is unreadable"
 
 
+def _preflight_mask_detections(
+    thread_db, photo_id, contextual_weak_ids, weak_detection_confidence,
+    detector_confidence,
+):
+    """Return the detections the mask loop would consider for ``photo_id``."""
+    # Mirror ``extract_masks_stage``'s per-photo detection lookup: a
+    # weak-rescued photo takes the lower floor with the MDv6/animal
+    # filter, everyone else takes the strict floor with the full-image
+    # filter. Applying only the lower floor to every photo would count
+    # unrelated sub-threshold detections as at-risk, inflating outages
+    # for photos the loop would never open.
+    if (
+        photo_id in contextual_weak_ids
+        and weak_detection_confidence is not None
+    ):
+        dets = [
+            d for d in thread_db.get_detections(
+                photo_id,
+                min_conf=weak_detection_confidence,
+                detector_model="megadetector-v6",
+            )
+            if d["category"] == "animal"
+        ]
+    else:
+        dets = [
+            d for d in thread_db.get_detections(
+                photo_id, min_conf=detector_confidence,
+            )
+            if d["detector_model"] != "full-image"
+        ]
+    return dets
+
+
 def _preflight_mask_outcomes(
     thread_db, dropped_photos, sam2_variant, dinov2_variant,
     detector_confidence, contextual_weak_ids=None,
@@ -522,31 +555,10 @@ def _preflight_mask_outcomes(
     at_risk: set = set()
     for photo in dropped_photos:
         photo_id = photo["id"]
-        # Mirror ``extract_masks_stage``'s per-photo detection lookup: a
-        # weak-rescued photo takes the lower floor with the MDv6/animal
-        # filter, everyone else takes the strict floor with the full-image
-        # filter. Applying only the lower floor to every photo would count
-        # unrelated sub-threshold detections as at-risk, inflating outages
-        # for photos the loop would never open.
-        if (
-            photo_id in contextual_weak_ids
-            and weak_detection_confidence is not None
-        ):
-            dets = [
-                d for d in thread_db.get_detections(
-                    photo_id,
-                    min_conf=weak_detection_confidence,
-                    detector_model="megadetector-v6",
-                )
-                if d["category"] == "animal"
-            ]
-        else:
-            dets = [
-                d for d in thread_db.get_detections(
-                    photo_id, min_conf=detector_confidence,
-                )
-                if d["detector_model"] != "full-image"
-            ]
+        dets = _preflight_mask_detections(
+            thread_db, photo_id, contextual_weak_ids,
+            weak_detection_confidence, detector_confidence,
+        )
         if not dets:
             continue
         primary = dets[0]
@@ -1236,6 +1248,81 @@ def _record_unattempted_cache_hit(
     return True
 
 
+def _projected_uncached_work(
+    *, total, seen, cached_estimate, cache_hits, cache_overcount,
+    unclassifiable_estimate, unclassifiable_seen,
+):
+    """Return ``(remaining_uncached, expected_uncached)`` for the ETA.
+
+    Takes the already-clamped inputs of ``_classification_eta_progress``.
+    """
+    # Project future cache hits from the observed success rate of preflight
+    # cache predictions. ``cache_hits + cache_overcount`` is the count of
+    # preflight-expected cache attempts we've observed; ``cache_hits`` is
+    # the subset where the runtime cache-hit predicate actually fired.
+    # Scaling ``cached_estimate`` by this rate corrects the preflight for
+    # the run-key-without-predictions case without waiting for the whole
+    # collection to be visited — a collection dominated by these rows
+    # converges to zero projected cache hits within a single batch.
+    observed_cache_attempts = cache_hits + cache_overcount
+    if observed_cache_attempts > 0:
+        hit_success_rate = cache_hits / observed_cache_attempts
+    else:
+        # No preflight-expected cache observations yet — trust preflight
+        # so early ETAs don't collapse before any evidence has arrived.
+        hit_success_rate = 1.0
+    corrected_cached_estimate = int(cached_estimate * hit_success_rate)
+    remaining_photos = max(total - seen, 0)
+    expected_future_cache_hits = max(
+        corrected_cached_estimate - cache_hits, 0,
+    )
+    expected_future_unclassifiable = max(
+        unclassifiable_estimate - unclassifiable_seen, 0,
+    )
+    remaining_uncached = max(
+        remaining_photos
+        - expected_future_cache_hits
+        - expected_future_unclassifiable,
+        0,
+    )
+    expected_uncached = max(
+        total - corrected_cached_estimate - unclassifiable_estimate, 0,
+    )
+    return remaining_uncached, expected_uncached
+
+
+def _resolve_classification_eta_state(
+    fields, *, total, seen, expected_uncached, inference_attempts,
+    min_attempts, elapsed, remaining_uncached,
+):
+    """Fill the ETA state into ``fields`` once the inputs are projected."""
+    if seen >= total:
+        fields["eta_state"] = "finishing"
+        fields["eta_seconds"] = 0
+        return fields
+    # When preflight determines every remaining photo is cached or
+    # unclassifiable (expected_uncached collapses to zero), no inference
+    # batch will ever fire — the "Estimating after the first uncached
+    # batch…" state below would then never resolve and the Jobs page
+    # would linger on that message throughout a fully cached or fully
+    # skipped traversal. Return the finishing signal directly instead
+    # (Codex #1468 P2).
+    if expected_uncached <= 0:
+        fields["eta_state"] = "finishing"
+        fields["eta_seconds"] = 0
+        return fields
+    if inference_attempts < min_attempts or elapsed <= 0:
+        return fields
+
+    rate_per_sec = inference_attempts / elapsed
+    if rate_per_sec <= 0:
+        return fields
+    fields["eta_state"] = "ready"
+    fields["eta_rate_per_min"] = round(rate_per_sec * 60, 1)
+    fields["eta_seconds"] = round(remaining_uncached / rate_per_sec)
+    return fields
+
+
 def _classification_eta_progress(
     *, total, seen, cached_estimate, cache_hits, inference_attempts,
     classified, elapsed, cache_overcount=0,
@@ -1299,37 +1386,14 @@ def _classification_eta_progress(
         max(int(unclassifiable_seen or 0), 0), unclassifiable_estimate,
     )
 
-    # Project future cache hits from the observed success rate of preflight
-    # cache predictions. ``cache_hits + cache_overcount`` is the count of
-    # preflight-expected cache attempts we've observed; ``cache_hits`` is
-    # the subset where the runtime cache-hit predicate actually fired.
-    # Scaling ``cached_estimate`` by this rate corrects the preflight for
-    # the run-key-without-predictions case without waiting for the whole
-    # collection to be visited — a collection dominated by these rows
-    # converges to zero projected cache hits within a single batch.
-    observed_cache_attempts = cache_hits + cache_overcount
-    if observed_cache_attempts > 0:
-        hit_success_rate = cache_hits / observed_cache_attempts
-    else:
-        # No preflight-expected cache observations yet — trust preflight
-        # so early ETAs don't collapse before any evidence has arrived.
-        hit_success_rate = 1.0
-    corrected_cached_estimate = int(cached_estimate * hit_success_rate)
-    remaining_photos = max(total - seen, 0)
-    expected_future_cache_hits = max(
-        corrected_cached_estimate - cache_hits, 0,
-    )
-    expected_future_unclassifiable = max(
-        unclassifiable_estimate - unclassifiable_seen, 0,
-    )
-    remaining_uncached = max(
-        remaining_photos
-        - expected_future_cache_hits
-        - expected_future_unclassifiable,
-        0,
-    )
-    expected_uncached = max(
-        total - corrected_cached_estimate - unclassifiable_estimate, 0,
+    remaining_uncached, expected_uncached = _projected_uncached_work(
+        total=total,
+        seen=seen,
+        cached_estimate=cached_estimate,
+        cache_hits=cache_hits,
+        cache_overcount=cache_overcount,
+        unclassifiable_estimate=unclassifiable_estimate,
+        unclassifiable_seen=unclassifiable_seen,
     )
     min_attempts = min(
         _CLASSIFICATION_ETA_MIN_ATTEMPTS,
@@ -1346,31 +1410,16 @@ def _classification_eta_progress(
         "inference_attempts": inference_attempts,
         "remaining_uncached": remaining_uncached,
     }
-    if seen >= total:
-        fields["eta_state"] = "finishing"
-        fields["eta_seconds"] = 0
-        return fields
-    # When preflight determines every remaining photo is cached or
-    # unclassifiable (expected_uncached collapses to zero), no inference
-    # batch will ever fire — the "Estimating after the first uncached
-    # batch…" state below would then never resolve and the Jobs page
-    # would linger on that message throughout a fully cached or fully
-    # skipped traversal. Return the finishing signal directly instead
-    # (Codex #1468 P2).
-    if expected_uncached <= 0:
-        fields["eta_state"] = "finishing"
-        fields["eta_seconds"] = 0
-        return fields
-    if inference_attempts < min_attempts or elapsed <= 0:
-        return fields
-
-    rate_per_sec = inference_attempts / elapsed
-    if rate_per_sec <= 0:
-        return fields
-    fields["eta_state"] = "ready"
-    fields["eta_rate_per_min"] = round(rate_per_sec * 60, 1)
-    fields["eta_seconds"] = round(remaining_uncached / rate_per_sec)
-    return fields
+    return _resolve_classification_eta_state(
+        fields,
+        total=total,
+        seen=seen,
+        expected_uncached=expected_uncached,
+        inference_attempts=inference_attempts,
+        min_attempts=min_attempts,
+        elapsed=elapsed,
+        remaining_uncached=remaining_uncached,
+    )
 
 
 def _stage_fraction(info):
@@ -2296,6 +2345,99 @@ def _raise_if_stages_failed(job, result, stages, errors, cancellation_requested)
         raise RuntimeError(first_error)
 
 
+def _stamp_job_start(job, computation_cache_dir):
+    """Record the run's start time and configured computation-cache root."""
+    job["_start_time"] = time.time()
+    # Stash the job's configured cache root so downstream helpers
+    # (``publish_detection_artifact`` inside ``_detect_batch``,
+    # ``promote_and_publish_classifier_run`` inside the per-model publish
+    # pass) write freshly computed artifacts into the SAME cache the
+    # status / export / catalog-reapplication paths use when
+    # ``COMPUTATION_CACHE_DIR`` is overridden. Without this the publishers
+    # fall back to the default ``~/.vireo/computation-cache`` and the
+    # artifacts disappear from the configured cache as soon as the backing
+    # database rows are removed. The path (not an ``ArtifactStore``
+    # instance) is stashed so ``jsonify(job)`` on the /api/jobs/<id> route
+    # keeps working — the helpers reconstruct the wrapper on demand.
+    job["_computation_cache_dir"] = computation_cache_dir
+
+
+def _reject_retired_import_mode(params):
+    """Refuse the removed pipeline import/archive mode up front."""
+    if params.destination or params.local_processing or params.remote_target_id:
+        raise RuntimeError(
+            "Pipeline import/archive mode has been removed. Use the Import "
+            "page or /api/jobs/import-photos to copy photos into the archive, "
+            "then run Process on the imported workspace photos."
+        )
+
+
+def _publish_pipeline_steps(runner, job, params):
+    """Resolve the run's models and publish its step tree to the runner.
+
+    Returns ``(effective_model_ids, resolved_specs, resolution_error)``.
+    """
+    effective_model_ids = _effective_model_ids(params)
+    resolved_specs, resolution_error = _resolve_model_specs(
+        params, effective_model_ids,
+    )
+    runner.set_steps(job["id"], _pipeline_step_defs(
+        params, effective_model_ids, resolved_specs, resolution_error,
+    ))
+    return effective_model_ids, resolved_specs, resolution_error
+
+
+def _mark_unused_import_stages(stages, params):
+    # Mark ingest as skipped when not in copy mode so SSE events
+    # don't show a perpetually-pending stage.
+    if not params.destination:
+        stages["ingest"]["status"] = "skipped"
+    if not params.local_processing:
+        stages["storage"]["status"] = "skipped"
+        stages["archive"]["status"] = "skipped"
+
+
+def _retired_archive_stage(params):
+    """Retired import/archive path guard.
+
+    Importing photos now runs through import_job.py and
+    /api/jobs/import-photos. The old local-processing archive stage
+    intentionally has no cleanup/deindex path left here: orphaned
+    staging folders are reconciled by staging_recovery.py before any
+    deletion is offered.
+    """
+    if params.local_processing or params.destination:
+        raise RuntimeError(
+            "Pipeline import/archive mode has been removed. Use the "
+            "Import page or /api/jobs/import-photos to copy photos "
+            "into the archive."
+        )
+    return
+
+
+def _finish_pipeline_result(job, result, stages, errors, run, control):
+    """Stamp the result's duration, errors and notes and decide its verdict."""
+    elapsed = time.time() - job["_start_time"]
+    result["duration"] = round(elapsed, 1)
+    result["errors"] = list(errors)
+    result["notes"] = list(run.notes)
+
+    _raise_if_stages_failed(
+        job, result, stages, errors, control.cancellation_requested,
+    )
+    # No stage failed, so the run's own verdict decides the status
+    # instead of the runner's any-error rollup. ``errors`` also carries
+    # notes that explain a benign skip (no detections to mask, an
+    # optional weight download that failed); those keep the run green.
+    # Anything else recorded there still failed it, e.g. a directory
+    # the scan was refused, which leaves the scan stage "completed".
+    # The notes stay in ``errors`` (and ``result["notes"]`` names them)
+    # so the Process page and Jobs details keep showing them.
+    noted = set(run.notes)
+    result["ok"] = all(e in noted for e in errors)
+    return result
+
+
 def run_pipeline_job(job, runner, db_path, workspace_id, params,
                      thumb_cache_dir=None,
                      missing_originals_invalidator=None,
@@ -2328,28 +2470,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     Returns:
         dict with stage results, duration, and errors
     """
-    job["_start_time"] = time.time()
-    # Stash the job's configured cache root so downstream helpers
-    # (``publish_detection_artifact`` inside ``_detect_batch``,
-    # ``promote_and_publish_classifier_run`` inside the per-model publish
-    # pass) write freshly computed artifacts into the SAME cache the
-    # status / export / catalog-reapplication paths use when
-    # ``COMPUTATION_CACHE_DIR`` is overridden. Without this the publishers
-    # fall back to the default ``~/.vireo/computation-cache`` and the
-    # artifacts disappear from the configured cache as soon as the backing
-    # database rows are removed. The path (not an ``ArtifactStore``
-    # instance) is stashed so ``jsonify(job)`` on the /api/jobs/<id> route
-    # keeps working — the helpers reconstruct the wrapper on demand.
-    job["_computation_cache_dir"] = computation_cache_dir
+    _stamp_job_start(job, computation_cache_dir)
     control = _RunControl(runner, job)
 
     errors = job["errors"]  # shared list, append is thread-safe
-    if params.destination or params.local_processing or params.remote_target_id:
-        raise RuntimeError(
-            "Pipeline import/archive mode has been removed. Use the Import "
-            "page or /api/jobs/import-photos to copy photos into the archive, "
-            "then run Process on the imported workspace photos."
-        )
+    _reject_retired_import_mode(params)
 
     effective_thumb_cache_dir, effective_vireo_dir = _effective_cache_dirs(
         db_path, thumb_cache_dir,
@@ -2363,43 +2488,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         snapshot_paths = _scope_to_source_snapshot(params, db_path, workspace_id)
         cancel_watcher_stop = control.start_cancel_watcher()
         stages = _initial_stages()
-        effective_model_ids = _effective_model_ids(params)
-        resolved_specs, resolution_error = _resolve_model_specs(
-            params, effective_model_ids,
+        effective_model_ids, resolved_specs, resolution_error = (
+            _publish_pipeline_steps(runner, job, params)
         )
-        runner.set_steps(job["id"], _pipeline_step_defs(
-            params, effective_model_ids, resolved_specs, resolution_error,
-        ))
 
         result = {"stages": {}}
         collection_id = params.collection_id
         shared = _StageState(params, control)
         skip_scan = collection_id is not None
 
-        # Mark ingest as skipped when not in copy mode so SSE events
-        # don't show a perpetually-pending stage.
-        if not params.destination:
-            stages["ingest"]["status"] = "skipped"
-        if not params.local_processing:
-            stages["storage"]["status"] = "skipped"
-            stages["archive"]["status"] = "skipped"
-
-        def archive_stage():
-            """Retired import/archive path guard.
-
-            Importing photos now runs through import_job.py and
-            /api/jobs/import-photos. The old local-processing archive stage
-            intentionally has no cleanup/deindex path left here: orphaned
-            staging folders are reconciled by staging_recovery.py before any
-            deletion is offered.
-            """
-            if params.local_processing or params.destination:
-                raise RuntimeError(
-                    "Pipeline import/archive mode has been removed. Use the "
-                    "Import page or /api/jobs/import-photos to copy photos "
-                    "into the archive."
-                )
-            return
+        _mark_unused_import_stages(stages, params)
+        archive_stage = partial(_retired_archive_stage, params)
 
         run = PipelineRun(
             job=job, runner=runner, db_path=db_path,
@@ -2434,25 +2533,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         cancel_watcher_stop.set()
 
-        elapsed = time.time() - job["_start_time"]
-        result["duration"] = round(elapsed, 1)
-        result["errors"] = list(errors)
-        result["notes"] = list(run.notes)
-
-        _raise_if_stages_failed(
-            job, result, stages, errors, control.cancellation_requested,
-        )
-        # No stage failed, so the run's own verdict decides the status
-        # instead of the runner's any-error rollup. ``errors`` also carries
-        # notes that explain a benign skip (no detections to mask, an
-        # optional weight download that failed); those keep the run green.
-        # Anything else recorded there still failed it, e.g. a directory
-        # the scan was refused, which leaves the scan stage "completed".
-        # The notes stay in ``errors`` (and ``result["notes"]`` names them)
-        # so the Process page and Jobs details keep showing them.
-        noted = set(run.notes)
-        result["ok"] = all(e in noted for e in errors)
-        return result
+        return _finish_pipeline_result(job, result, stages, errors, run, control)
     finally:
         if archive_destination_reserved:
             release_archive_destination(final_destination)
