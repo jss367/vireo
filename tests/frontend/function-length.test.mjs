@@ -190,15 +190,18 @@ function sortedObject(object) {
 // length from another file (a move) — only if that stale key is actually
 // gone from the current tree, so a surviving same-key function cannot lend
 // its old length to a new over-cap sibling that just happens to match it.
-// A function whose key is already in the baseline and whose group is not a
-// pure reordering is compared to its own entry, so a deleted sibling's
-// budget can never transfer to a growing function. Each old entry is
-// consumed at most once.
-function reconcileBaseline(current, previous, allowNew = [], bootstrapping = false) {
+// `surviving` is every current function key, including those under the cap,
+// so a key that shrank below the cap is still recognised as present and
+// cannot be consumed as a move. A function whose key is already in the
+// baseline and whose group is not a pure reordering is compared to its own
+// entry, so a deleted sibling's budget can never transfer to a growing
+// function. Each old entry is consumed at most once.
+function reconcileBaseline(current, previous, allowNew = [], bootstrapping = false, surviving = null) {
   const remaining = new Set(Object.keys(previous));
   const matched = new Set();
   const moves = [];
   const keys = Object.keys(current).sort();
+  const survivingKeys = surviving ?? new Set(Object.keys(current));
   const groupOf = key => `${key.slice(0, key.indexOf(':'))}:${nameOf(key)}`;
   const sortedLengths = (object, list) => list.map(key => object[key]).sort((a, b) => a - b);
 
@@ -227,7 +230,7 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
     }
   }
   for (const key of keys.filter(key => !matched.has(key) && !(key in previous))) {
-    const from = [...remaining].find(old => !(old in current) && nameOf(old) === nameOf(key) && previous[old] === current[key]);
+    const from = [...remaining].find(old => !survivingKeys.has(old) && nameOf(old) === nameOf(key) && previous[old] === current[key]);
     if (from !== undefined) {
       remaining.delete(from);
       matched.add(key);
@@ -248,10 +251,12 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
 }
 
 export function writeBaseline(allowNew = []) {
-  const current = overCap(functionLengths());
+  const lengths = functionLengths();
+  const current = overCap(lengths);
   const bootstrapping = !fs.existsSync(BASELINE_PATH);
   const previous = bootstrapping ? {} : loadBaseline();
-  const {grown, added, moves} = reconcileBaseline(current, previous, allowNew, bootstrapping);
+  const surviving = new Set(lengths.keys());
+  const {grown, added, moves} = reconcileBaseline(current, previous, allowNew, bootstrapping, surviving);
   if (grown.length) {
     console.log('Refusing to raise baseline entries; shorten these functions instead:');
     for (const key of grown) console.log(`  ${key}: ${previous[key]} -> ${current[key]} lines`);
@@ -345,6 +350,38 @@ if (argv[0] === '--write-baseline') {
         {'a.js:render': 105, 'a.js:render#2': 110},
       ),
       {grown: [], added: ['b.js:render'], moves: []},
+    );
+  });
+
+  test('a surviving function that shrank below the cap cannot lend its length to a new over-cap sibling', () => {
+    // previous had one over-cap `a.js:render` (110). It shrinks to 100
+    // (now under the cap, so overCap drops it from `current`) and a new
+    // `b.js:render` appears at 110. The move rule must consult surviving
+    // keys, not just the over-cap subset, or it would consume the still
+    // present `a.js:render` as the source for the new key.
+    const previous = {'a.js:render': 110};
+    const surviving = new Set(['a.js:render', 'b.js:render']);
+    assert.deepEqual(
+      reconcileBaseline({'b.js:render': 110}, previous, [], false, surviving),
+      {grown: [], added: ['b.js:render'], moves: []},
+    );
+    // Same shape with an ordinal that shrank below the cap and so is
+    // missing from the over-cap `current`.
+    assert.deepEqual(
+      reconcileBaseline(
+        {'b.js:render': 110},
+        {'a.js:render#2': 110},
+        [], false,
+        new Set(['a.js:render', 'a.js:render#2', 'b.js:render']),
+      ),
+      {grown: [], added: ['b.js:render'], moves: []},
+    );
+    // The move rule still fires when the old key is truly gone from the tree.
+    assert.deepEqual(
+      reconcileBaseline(
+        {'b.js:render': 110}, previous, [], false, new Set(['b.js:render']),
+      ),
+      {grown: [], added: [], moves: [['a.js:render', 'b.js:render']]},
     );
   });
 
