@@ -35,8 +35,10 @@
 // in source order, so each keeps its own length; literal `%`, `#` and `.` in a
 // source name are percent-escaped before adding ordinals, so an embedded `.`
 // (a callback whose callee is a member chain like `document.addEventListener`)
-// cannot collide with the structural `.` that joins stack elements. The writer's
-// move rule ignores the ordinal, so a sibling inserted before an over-cap function
+// cannot collide with the structural `.` that joins stack elements. Callee member
+// components are escaped before joining, retaining computed literal boundaries.
+// The writer's move rule ignores the ordinal, so a sibling inserted before an
+// over-cap function
 // does not count as growth.
 
 import assert from 'node:assert/strict';
@@ -86,11 +88,18 @@ function keyName(node) {
   return null;
 }
 
+function escapeName(name) {
+  return name.replace(/[%#.]/g, char => char === '%' ? '%25' : char === '#' ? '%23' : '%2E');
+}
+
+// Reserve source-component boundaries before joining member chains. The walk's
+// final escape then distinguishes a literal dot (%252E) from a member dot (%2E).
 function calleeName(callee) {
-  if (callee.type === 'Identifier') return callee.name;
+  if (callee.type === 'Identifier') return escapeName(callee.name);
   if (callee.type === 'MemberExpression') {
     const object = calleeName(callee.object);
-    const property = keyName(callee.property);
+    const rawProperty = keyName(callee.property);
+    const property = rawProperty === null ? null : escapeName(rawProperty);
     return object && property ? `${object}.${property}` : property;
   }
   return null;
@@ -131,7 +140,7 @@ function walk(node, parent, stack, rel, lengths, seen) {
   let pushed = false;
   if (FUNCTION_TYPES.has(node.type)) {
     if (!isIife(node, parent)) {
-      const name = contextName(node, parent).replace(/[%#.]/g, char => char === '%' ? '%25' : char === '#' ? '%23' : '%2E');
+      const name = escapeName(contextName(node, parent));
       const base = [...stack, name].join('.');
       const ordinal = (seen.get(base) || 0) + 1;
       seen.set(base, ordinal);
@@ -311,6 +320,22 @@ if (argv[0] === '--write-baseline') {
     assert.notEqual(nameOf('fixture.js:render#2'), nameOf('fixture.js:render%232'));
   });
 
+  test('callee components preserve literal dots, percent escapes and member boundaries', () => {
+    const callback = lines => `function () {${'\n'.repeat(lines - 1)}}`;
+    const lengths = sourceLengths(`
+      obj['outer.inner'](${callback(105)});
+      obj.outer.inner(${callback(110)});
+      obj['outer%2Einner'](${callback(106)});
+      obj['outer#2.inner'](${callback(107)});
+    `);
+    assert.equal(lengths.size, 4);
+    assert.equal(lengths.get('fixture.js:obj%2Eouter%252Einner()'), 105);
+    assert.equal(lengths.get('fixture.js:obj%2Eouter%2Einner()'), 110);
+    assert.equal(lengths.get('fixture.js:obj%2Eouter%25252Einner()'), 106);
+    assert.equal(lengths.get('fixture.js:obj%2Eouter%25232%252Einner()'), 107);
+    assert.notEqual(nameOf('fixture.js:obj%2Eouter%252Einner()'), nameOf('fixture.js:obj%2Eouter%2Einner()'));
+  });
+
   test('embedded dots in source names cannot collide with structural qualification', () => {
     // A literal method named `outer.inner` and a function `inner` nested
     // inside a function `outer` would both land at base `outer.inner` without
@@ -442,7 +467,7 @@ if (argv[0] === '--write-baseline') {
     assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, {}, [], true).added, []);
   });
 
-  test('CLI writer scans under-cap survivors and refuses to reuse their budgets', () => {
+  test('CLI writer preserves budgets through source scanning and member-name encoding', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ratchet-cli-'));
     try {
       const tests = path.join(tmp, 'tests', 'frontend');
@@ -475,6 +500,20 @@ if (argv[0] === '--write-baseline') {
       const moved = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
       assert.equal(moved.status, 0, `${moved.error || ''}\n${moved.stdout}\n${moved.stderr}`);
       assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), {'vireo/static/b.js:render': 110});
+      // Run the full parser-to-writer path: these different callees must not
+      // become ordinal siblings whose exchanged lengths hide callback growth.
+      fs.unlinkSync(path.join(staticDir, 'b.js'));
+      const callbacks = (literal, chain) => `
+        obj['outer.inner'](function () {${'\n'.repeat(literal - 1)}});
+        obj.outer.inner(function () {${'\n'.repeat(chain - 1)}});
+      `;
+      const starting = JSON.stringify(overCap(sourceLengths(callbacks(105, 110), 'vireo/static/callbacks.js')), null, 2) + '\n';
+      fs.writeFileSync(baselinePath, starting);
+      fs.writeFileSync(path.join(staticDir, 'callbacks.js'), callbacks(110, 105));
+      const grown = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+      assert.equal(grown.status, 1, `${grown.error || ''}\n${grown.stdout}\n${grown.stderr}`);
+      assert.match(grown.stdout, /Refusing to raise baseline entries/);
+      assert.equal(fs.readFileSync(baselinePath, 'utf8'), starting);
     } finally {
       fs.rmSync(tmp, {recursive: true, force: true});
     }
