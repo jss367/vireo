@@ -115,8 +115,6 @@
   "repositories/collections.py:CollectionRepository._browse_stack_query_parts": 147,
   "repositories/collections.py:CollectionRepository.collapse_browse_stack_photo_ids": 106,
   "repositories/collections.py:CollectionRepository.get_filter_field_values": 150,
-  "repositories/edit_history.py:EditHistoryRepository.reapply_relabel_curation": 119,
-  "repositories/edit_history.py:EditHistoryRepository.restore_relabel_curation": 159,
   "repositories/masks_features.py:MasksFeaturesRepository.list_photos_for_eye_keypoint_stage": 117,
   "repositories/model_runs.py:ModelRunsRepository.get_unclassifiable_photos": 148,
   "repositories/photos.py:PhotoRepository.delete": 106,
