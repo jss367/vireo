@@ -24,6 +24,53 @@ import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
+# Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
+_UNCLASSIFIABLE_CHUNK = 500
+
+
+def _fresh_has_animal_above(
+    fresh_detections_by_photo: Mapping[int, Sequence[Mapping[str, Any]]],
+    photo_id: int, floor: float, *, contextual_weak: bool = False,
+) -> bool:
+    """Whether a photo's fresh detections hold an animal at ``floor`` or above."""
+    dets = fresh_detections_by_photo.get(photo_id) or ()
+    for d in dets:
+        if d.get("category", "animal") != "animal":
+            continue
+        if (
+            contextual_weak
+            and d.get("detector_model") != "megadetector-v6"
+        ):
+            continue
+        conf = d.get("confidence", d.get("detector_confidence", 0))
+        try:
+            if float(conf or 0) >= floor:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _fresh_has_confident_non_animal(
+    fresh_detections_by_photo: Mapping[int, Sequence[Mapping[str, Any]]],
+    photo_id: int, min_conf: float,
+) -> bool:
+    """Whether a photo's fresh detections hold a confident non-animal."""
+    for detection in fresh_detections_by_photo.get(photo_id) or ():
+        if detection.get("detector_model") == "full-image":
+            continue
+        if detection.get("category", "animal") == "animal":
+            continue
+        confidence = detection.get(
+            "confidence", detection.get("detector_confidence", 0),
+        )
+        try:
+            if float(confidence or 0) >= min_conf:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
 
 class ModelRunsRepository:
     def __init__(
@@ -522,73 +569,6 @@ class ModelRunsRepository:
         weak_conf = (
             float(weak_confidence) if weak_confidence is not None else min_conf
         )
-        # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
-        CHUNK = 500
-
-        def _fresh_has_animal_above(photo_id, floor, *, contextual_weak=False):
-            dets = fresh_detections_by_photo.get(photo_id) or ()
-            for d in dets:
-                if d.get("category", "animal") != "animal":
-                    continue
-                if (
-                    contextual_weak
-                    and d.get("detector_model") != "megadetector-v6"
-                ):
-                    continue
-                conf = d.get("confidence", d.get("detector_confidence", 0))
-                try:
-                    if float(conf or 0) >= floor:
-                        return True
-                except (TypeError, ValueError):
-                    continue
-            return False
-
-        def _fresh_has_confident_non_animal(photo_id):
-            for detection in fresh_detections_by_photo.get(photo_id) or ():
-                if detection.get("detector_model") == "full-image":
-                    continue
-                if detection.get("category", "animal") == "animal":
-                    continue
-                confidence = detection.get(
-                    "confidence", detection.get("detector_confidence", 0),
-                )
-                try:
-                    if float(confidence or 0) >= min_conf:
-                        return True
-                except (TypeError, ValueError):
-                    continue
-            return False
-
-        def _db_unclassifiable(pool, floor, out, *, contextual_weak=False):
-            animal_model_predicate = (
-                "d2.detector_model = 'megadetector-v6'"
-                if contextual_weak
-                else "d2.detector_model != 'full-image'"
-            )
-            for i in range(0, len(pool), CHUNK):
-                chunk = pool[i:i + CHUNK]
-                if not chunk:
-                    continue
-                placeholders = ",".join("?" * len(chunk))
-                rows = self.conn.execute(
-                    f"""SELECT DISTINCT d.photo_id
-                          FROM detections d
-                         WHERE d.detector_model != 'full-image'
-                           AND d.category != 'animal'
-                           AND d.detector_confidence >= ?
-                           AND d.photo_id IN ({placeholders})
-                           AND NOT EXISTS (
-                                 SELECT 1 FROM detections d2
-                                  WHERE d2.photo_id = d.photo_id
-                                    AND {animal_model_predicate}
-                                    AND d2.category = 'animal'
-                                    AND d2.detector_confidence >= ?
-                               )""",
-                    [min_conf, *chunk, floor],
-                ).fetchall()
-                for r in rows:
-                    out.add(r["photo_id"])
-
         unclassifiable: set = set()
         normal_ids = [pid for pid in photo_ids if pid not in weak_photo_ids]
         weak_ids = [pid for pid in photo_ids if pid in weak_photo_ids]
@@ -598,8 +578,8 @@ class ModelRunsRepository:
                 (normal_ids, min_conf, False),
                 (weak_ids, weak_conf, True),
             ):
-                _db_unclassifiable(
-                    pool, floor, unclassifiable, contextual_weak=is_weak,
+                self._db_unclassifiable(
+                    pool, floor, unclassifiable, min_conf, contextual_weak=is_weak,
                 )
             return unclassifiable
 
@@ -636,7 +616,8 @@ class ModelRunsRepository:
                     and (
                         not is_weak
                         or _fresh_has_animal_above(
-                            pid, floor, contextual_weak=True,
+                            fresh_detections_by_photo, pid, floor,
+                            contextual_weak=True,
                         )
                     )
                 ]
@@ -644,17 +625,54 @@ class ModelRunsRepository:
             for pid in fresh_pool:
                 if (
                     not _fresh_has_animal_above(
-                        pid, floor, contextual_weak=is_weak,
+                        fresh_detections_by_photo, pid, floor,
+                        contextual_weak=is_weak,
                     )
-                    and _fresh_has_confident_non_animal(pid)
+                    and _fresh_has_confident_non_animal(
+                        fresh_detections_by_photo, pid, min_conf,
+                    )
                 ):
                     unclassifiable.add(pid)
             if db_pool:
-                _db_unclassifiable(
-                    db_pool, floor, unclassifiable,
+                self._db_unclassifiable(
+                    db_pool, floor, unclassifiable, min_conf,
                     contextual_weak=is_weak,
                 )
         return unclassifiable
+
+    def _db_unclassifiable(
+        self, pool: Sequence[int], floor: float, out: set, min_conf: float, *,
+        contextual_weak: bool = False,
+    ) -> None:
+        """Add the photos in ``pool`` the DB shows as non-animal-only to ``out``."""
+        animal_model_predicate = (
+            "d2.detector_model = 'megadetector-v6'"
+            if contextual_weak
+            else "d2.detector_model != 'full-image'"
+        )
+        for i in range(0, len(pool), _UNCLASSIFIABLE_CHUNK):
+            chunk = pool[i:i + _UNCLASSIFIABLE_CHUNK]
+            if not chunk:
+                continue
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"""SELECT DISTINCT d.photo_id
+                          FROM detections d
+                         WHERE d.detector_model != 'full-image'
+                           AND d.category != 'animal'
+                           AND d.detector_confidence >= ?
+                           AND d.photo_id IN ({placeholders})
+                           AND NOT EXISTS (
+                                 SELECT 1 FROM detections d2
+                                  WHERE d2.photo_id = d.photo_id
+                                    AND {animal_model_predicate}
+                                    AND d2.category = 'animal'
+                                    AND d2.detector_confidence >= ?
+                               )""",
+                [min_conf, *chunk, floor],
+            ).fetchall()
+            for r in rows:
+                out.add(r["photo_id"])
 
     def get_labels_fingerprints(self) -> list[dict[str, Any]]:
         """Return all rows from the labels_fingerprints sidecar, sources decoded.
