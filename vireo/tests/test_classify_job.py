@@ -4699,6 +4699,53 @@ def test_store_grouped_predictions_folds_case_for_burst_consensus():
 # ── Task 6: run_classify_job full pipeline test ───────────────────────────────
 
 
+@pytest.mark.parametrize("outcome", ["success", "load-error", "finish-error"])
+def test_classify_cleanup_reports_closed_and_releases_owned_handle(tmp_path, monkeypatch, outcome):
+    import sqlite3
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import classify_job
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    db_path = str(tmp_path / "classifier-lifecycle.db")
+    owned = Database(db_path)
+    workspace = owned.ensure_default_workspace()
+    connection = owned.conn
+    released = Mock()
+
+    def phase(name):
+        assert not owned.closed
+        if outcome == name + "-error":
+            raise RuntimeError("synthetic " + name + " failure")
+        return {"total": 0}
+
+    phases = SimpleNamespace(
+        total=0,
+        classifier_cache_handle=SimpleNamespace(release=released),
+        load_photos=lambda: phase("load"),
+        finish_without_photos=lambda: phase("finish"),
+    )
+    monkeypatch.setattr(classify_job, "Database", lambda _path: owned)
+    monkeypatch.setattr(classify_job, "_ClassifyJobRun", lambda *_args: phases)
+    params = ClassifyParams("empty", None, None, None, None, 10, 0.85, False)
+    try:
+        if outcome == "success":
+            assert run_classify_job(_make_job(), FakeRunner(), db_path, workspace, params) == {"total": 0}
+        else:
+            with pytest.raises(RuntimeError, match="synthetic"):
+                run_classify_job(_make_job(), FakeRunner(), db_path, workspace, params)
+        released.assert_called_once_with()
+        assert owned.closed
+        assert not hasattr(owned, "conn")
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+        owned.close()  # Cleanup remains idempotent after the classifier returns.
+    finally:
+        owned.close()
+
+
 def test_run_classify_job_full_pipeline(tmp_path):
     """run_classify_job orchestrates all phases end-to-end."""
     from unittest.mock import MagicMock, patch

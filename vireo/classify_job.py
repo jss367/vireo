@@ -3841,7 +3841,7 @@ def run_classify_job(
     finally:
         if classify.classifier_cache_handle is not None:
             classify.classifier_cache_handle.release()
-        thread_db.conn.close()
+        thread_db.close()
 
 
 def _empty_classify_result(total, detected=0):
