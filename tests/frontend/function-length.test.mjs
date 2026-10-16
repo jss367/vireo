@@ -37,9 +37,9 @@
 // (a callback whose callee is a member chain like `document.addEventListener`)
 // cannot collide with the structural `.` that joins stack elements. Callee member
 // components are escaped before joining, retaining computed literal boundaries.
-// The writer's move rule ignores the ordinal, so a sibling inserted before an
-// over-cap function
-// does not count as growth.
+// A short sibling inserted before a long function may shift its ordinal. The
+// writer accepts this only with an identical tracked HEAD implementation; without
+// that proof, surviving keys keep their budgets and the ambiguous shift fails.
 
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -135,7 +135,7 @@ function isIife(node, parent) {
   return parent && parent.type === 'CallExpression' && parent.callee === node;
 }
 
-function walk(node, parent, stack, rel, lengths, seen) {
+function walk(node, parent, stack, rel, lengths, seen, identities, source) {
   if (!node || typeof node.type !== 'string') return;
   let pushed = false;
   if (FUNCTION_TYPES.has(node.type)) {
@@ -146,30 +146,32 @@ function walk(node, parent, stack, rel, lengths, seen) {
       seen.set(base, ordinal);
       stack.push(ordinal === 1 ? name : `${name}#${ordinal}`);
       pushed = true;
-      lengths.set(`${rel}:${stack.join('.')}`, node.loc.end.line - node.loc.start.line + 1);
+      const key = `${rel}:${stack.join('.')}`;
+      lengths.set(key, node.loc.end.line - node.loc.start.line + 1);
+      identities?.set(key, source.slice(node.start, node.end).replace(/\r\n/g, '\n'));
     }
   }
   for (const value of Object.values(node)) {
     if (Array.isArray(value)) {
-      for (const child of value) if (child && typeof child.type === 'string') walk(child, node, stack, rel, lengths, seen);
+      for (const child of value) if (child && typeof child.type === 'string') walk(child, node, stack, rel, lengths, seen, identities, source);
     } else if (value && typeof value.type === 'string' && value !== node.loc) {
-      walk(value, node, stack, rel, lengths, seen);
+      walk(value, node, stack, rel, lengths, seen, identities, source);
     }
   }
   if (pushed) stack.pop();
 }
 
-function sourceLengths(source, rel = 'fixture.js') {
+function sourceLengths(source, rel = 'fixture.js', identities = null) {
   const lengths = new Map();
-  walk(parseScript(source, rel), null, [], rel, lengths, new Map());
+  walk(parseScript(source, rel), null, [], rel, lengths, new Map(), identities, source);
   return lengths;
 }
 
-export function functionLengths() {
+export function functionLengths(identities = null) {
   const lengths = new Map();
   for (const file of sourceFiles()) {
     const rel = path.relative(ROOT, file).split(path.sep).join('/');
-    for (const [key, length] of sourceLengths(fs.readFileSync(file, 'utf8'), rel)) lengths.set(key, length);
+    for (const [key, length] of sourceLengths(fs.readFileSync(file, 'utf8'), rel, identities)) lengths.set(key, length);
   }
   return lengths;
 }
@@ -185,8 +187,7 @@ export function loadBaseline() {
 }
 
 // The qualified name without its file, and without collision ordinals, so a
-// function that moved files or gained an earlier same-named sibling still
-// matches its old entry.
+// function can match a moved entry or a separately verified ordinal shift.
 function nameOf(key) {
   return key.slice(key.indexOf(':') + 1).replace(/#\d+(?=\.|$)/g, '');
 }
@@ -205,11 +206,12 @@ function sortedObject(object) {
 // its old length to a new over-cap sibling that just happens to match it.
 // `surviving` is every current function key, including those under the cap,
 // so a key that shrank below the cap is still recognised as present and
-// cannot be consumed as a move. A function whose key is already in the
+// cannot be consumed as a move without separate tracked-source identity proof.
+// A function whose key is already in the
 // baseline and whose group is not a pure reordering is compared to its own
 // entry, so a deleted sibling's budget can never transfer to a growing
 // function. Each old entry is consumed at most once.
-function reconcileBaseline(current, previous, allowNew = [], bootstrapping = false, surviving = null) {
+function reconcileBaseline(current, previous, allowNew = [], bootstrapping = false, surviving = null, verifiedMoves = new Map()) {
   const remaining = new Set(Object.keys(previous));
   const matched = new Set();
   const moves = [];
@@ -243,7 +245,8 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
     }
   }
   for (const key of keys.filter(key => !matched.has(key) && !(key in previous))) {
-    const from = [...remaining].find(old => !survivingKeys.has(old) && nameOf(old) === nameOf(key) && previous[old] === current[key]);
+    const from = [...remaining].find(old => (!survivingKeys.has(old) || verifiedMoves.get(key)?.has(old))
+      && nameOf(old) === nameOf(key) && previous[old] === current[key]);
     if (from !== undefined) {
       remaining.delete(from);
       matched.add(key);
@@ -263,13 +266,56 @@ function reconcileBaseline(current, previous, allowNew = [], bootstrapping = fal
   return {grown, added, moves};
 }
 
+// Lengths cannot identify an inserted short sibling versus a shrunk survivor.
+// Only override that ambiguity for an unchanged implementation proved against
+// this checkout's tracked HEAD. Missing Git/source/identity evidence fails closed.
+function verifiedOrdinalMoves(current, previous, lengths, identities) {
+  const verified = new Map();
+  const tracked = new Map();
+  const candidates = Object.keys(current).filter(key => !(key in previous) && identities.has(key));
+  const sameFile = (a, b) => a.slice(0, a.indexOf(':')) === b.slice(0, b.indexOf(':'));
+  let trackedHead = null;
+  for (const key of candidates) {
+    const oldKeys = Object.keys(previous).filter(old => lengths.has(old) && lengths.get(old) <= MAX_FUNCTION_LINES
+      && previous[old] === current[key] && sameFile(old, key) && nameOf(old) === nameOf(key));
+    if (!oldKeys.length) continue;
+    if (trackedHead === null) {
+      const repo = spawnSync('git', ['-C', ROOT, 'rev-parse', '--show-toplevel'], {encoding: 'utf8'});
+      if (repo.status !== 0 || fs.realpathSync(repo.stdout.trim()) !== fs.realpathSync(ROOT)) return verified;
+      const head = spawnSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], {encoding: 'utf8'});
+      if (head.status !== 0 || !/^[0-9a-f]{40,64}$/.test(head.stdout.trim())) return verified;
+      trackedHead = head.stdout.trim();
+    }
+    const file = key.slice(0, key.indexOf(':'));
+    if (!tracked.has(file)) {
+      const result = spawnSync('git', ['-C', ROOT, 'cat-file', 'blob', `${trackedHead}:${file}`], {encoding: 'utf8', maxBuffer: 8 * 1024 * 1024});
+      const priorIdentities = new Map();
+      let priorLengths = new Map();
+      if (result.status === 0) {
+        try { priorLengths = sourceLengths(result.stdout, file, priorIdentities); } catch { /* No reliable prior parse. */ }
+      }
+      tracked.set(file, {priorLengths, priorIdentities});
+    }
+    const {priorLengths, priorIdentities} = tracked.get(file);
+    for (const old of oldKeys) {
+      if (priorLengths.get(old) === previous[old] && priorIdentities.get(old) === identities.get(key)) {
+        if (!verified.has(key)) verified.set(key, new Set());
+        verified.get(key).add(old);
+      }
+    }
+  }
+  return verified;
+}
+
 export function writeBaseline(allowNew = [], {lengths = null, baselinePath = BASELINE_PATH} = {}) {
-  const effectiveLengths = lengths ?? functionLengths();
+  const identities = new Map();
+  const effectiveLengths = lengths ?? functionLengths(identities);
   const current = overCap(effectiveLengths);
   const bootstrapping = !fs.existsSync(baselinePath);
   const previous = bootstrapping ? {} : JSON.parse(fs.readFileSync(baselinePath, 'utf8'));
   const surviving = new Set(effectiveLengths.keys());
-  const {grown, added, moves} = reconcileBaseline(current, previous, allowNew, bootstrapping, surviving);
+  const verifiedMoves = verifiedOrdinalMoves(current, previous, effectiveLengths, identities);
+  const {grown, added, moves} = reconcileBaseline(current, previous, allowNew, bootstrapping, surviving, verifiedMoves);
   if (grown.length) {
     console.log('Refusing to raise baseline entries; shorten these functions instead:');
     for (const key of grown) console.log(`  ${key}: ${previous[key]} -> ${current[key]} lines`);
@@ -514,6 +560,68 @@ if (argv[0] === '--write-baseline') {
       assert.equal(grown.status, 1, `${grown.error || ''}\n${grown.stdout}\n${grown.stderr}`);
       assert.match(grown.stdout, /Refusing to raise baseline entries/);
       assert.equal(fs.readFileSync(baselinePath, 'utf8'), starting);
+    } finally {
+      fs.rmSync(tmp, {recursive: true, force: true});
+    }
+  });
+
+  test('CLI writer requires tracked source identity for an ordinal shift', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ratchet-identity-'));
+    try {
+      const tests = path.join(tmp, 'tests', 'frontend');
+      const staticDir = path.join(tmp, 'vireo', 'static');
+      const empty = path.join(tmp, 'empty');
+      for (const dir of [tests, staticDir, empty]) fs.mkdirSync(dir, {recursive: true});
+      const script = path.join(tests, 'function-length.test.mjs');
+      fs.copyFileSync(fileURLToPath(import.meta.url), script);
+      fs.cpSync(path.dirname(fileURLToPath(import.meta.resolve('acorn/package.json'))),
+        path.join(tmp, 'node_modules', 'acorn'), {recursive: true});
+      const baselinePath = path.join(tests, 'function_length_baseline.json');
+      const sourcePath = path.join(staticDir, 'a.js');
+      const original = JSON.stringify({'vireo/static/a.js:render': 110}, null, 2) + '\n';
+      const long = `function render() {${'\n'.repeat(109)}}\n`;
+      const short = 'function render() {}\n';
+      fs.writeFileSync(sourcePath, long);
+      fs.writeFileSync(baselinePath, original);
+      const globalConfig = path.join(tmp, 'git-global-config');
+      fs.writeFileSync(globalConfig, '');
+      const git = args => {
+        const result = spawnSync('git', ['-c', `core.hooksPath=${empty}`, '-c', 'commit.gpgsign=false',
+          '-c', 'user.name=Ratchet fixture', '-c', 'user.email=ratchet@example.invalid', ...args], {
+          cwd: tmp, encoding: 'utf8',
+          env: {...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: globalConfig},
+        });
+        assert.equal(result.status, 0, `${result.error || ''}\n${result.stdout}\n${result.stderr}`);
+      };
+      git(['init', '--quiet', `--template=${empty}`]);
+      git(['add', 'vireo/static/a.js', 'tests/frontend/function_length_baseline.json']);
+      git(['commit', '--quiet', '-m', 'Synthetic original function']);
+      fs.writeFileSync(sourcePath, short + long);
+      const accepted = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+      assert.equal(accepted.status, 0, `${accepted.stdout}\n${accepted.stderr}`);
+      assert.deepEqual(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), {'vireo/static/a.js:render#2': 110});
+      // A changed new body, duplicate copies, and a still-long old key cannot
+      // reuse the old entry even when the names and lengths would match.
+      for (const source of [short + long.replace('{', '{/* changed */'), short + long + long, long + long]) {
+        fs.writeFileSync(baselinePath, original);
+        fs.writeFileSync(sourcePath, source);
+        const rejected = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+        assert.equal(rejected.status, 1, `${rejected.stdout}\n${rejected.stderr}`);
+        assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
+      }
+      // Identical code in a different file must not bypass the survivor guard.
+      fs.writeFileSync(sourcePath, short);
+      fs.writeFileSync(path.join(staticDir, 'b.js'), long);
+      const crossFile = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+      assert.equal(crossFile.status, 1, `${crossFile.stdout}\n${crossFile.stderr}`);
+      assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
+      fs.unlinkSync(path.join(staticDir, 'b.js'));
+      // Without the tracked identity proof, even the harmless case fails closed.
+      fs.renameSync(path.join(tmp, '.git'), path.join(tmp, 'saved-git'));
+      fs.writeFileSync(sourcePath, short + long);
+      const unproved = spawnSync(process.execPath, [script, '--write-baseline'], {encoding: 'utf8'});
+      assert.equal(unproved.status, 1, `${unproved.stdout}\n${unproved.stderr}`);
+      assert.equal(fs.readFileSync(baselinePath, 'utf8'), original);
     } finally {
       fs.rmSync(tmp, {recursive: true, force: true});
     }
