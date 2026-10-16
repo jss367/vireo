@@ -130,7 +130,6 @@
   "taxonomy.py:download_taxonomy": 213,
   "taxonomy.py:load_taxa_from_file": 116,
   "taxonomy.py:populate_taxa_db_from_json": 210,
-  "thumbnails.py:generate_all": 174,
   "timm_classifier.py:TimmClassifier.__init__": 133,
   "tone.py:apply_adjustments": 152,
   "web/app_hooks.py:register_app_hooks": 309,
