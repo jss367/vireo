@@ -70,7 +70,6 @@
   "import_job.py:_stamp_landed_and_validate_catalog": 188,
   "import_job.py:copy_and_hash_verify": 148,
   "import_job.py:run_import_job": 116,
-  "importer.py:execute_import": 184,
   "ingest.py:discover_source_files": 168,
   "jobs.py:JobRunner._run_job": 167,
   "jobs.py:JobRunner._try_promote_queued": 153,
