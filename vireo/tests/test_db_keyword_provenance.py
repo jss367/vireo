@@ -941,8 +941,8 @@ def test_moved_writers_reach_each_other_only_through_the_facade():
     assert not _self_references_to(repository_class, exposed)
     expected = {
         "merge_keyword_into": "_merge_keyword_into",
-        "upsert_one_keyword": "_merge_keyword_into",
-        "accept_prediction": "tag_photo",
+        "_claim_location_component_for_place": "_merge_keyword_into",
+        "_accept_target_row": "tag_photo",
     }
     for name, facade_name in expected.items():
         assert (name, facade_name) in _self_references_to(

@@ -77,12 +77,13 @@ PROVENANCE_FOLD_SYMBOLS = {
 #
 # ``Database.tag_photo``, ``_merge_keyword_into`` and ``link_keyword_to_place``
 # are one-line wrappers; their writes live in ``KeywordProvenanceRepository``
-# under the names keyed here.
+# under the names keyed here (``link_keyword_to_place``'s in its
+# ``_absorb_into_canonical_place`` helper).
 _PROVENANCE_MODULE = "repositories/keyword_provenance.py"
 PROVENANCE_CONVERGENCE_POINTS = {
     (_PROVENANCE_MODULE, "tag"): "re-tag folds against the row already there",
     (_PROVENANCE_MODULE, "merge_keyword_into"): "keyword merge repoints rows onto dst",
-    (_PROVENANCE_MODULE, "link_keyword_to_place"): "place link repoints rows onto canonical",
+    (_PROVENANCE_MODULE, "_absorb_into_canonical_place"): "place link repoints rows onto canonical",
     ("scanner.py", "_transfer_companion_keywords"): "pairing copies companion keywords",
     ("repositories/folders.py", "merge_into_existing"): "folder merge carries loser's keywords onto the survivor",
     ("repositories/moves_merge.py", "_carry_embedded_keyword_associations"): "staged merge preserves embedded association stamps",
