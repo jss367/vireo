@@ -169,7 +169,7 @@ dialog.modal-overlay::backdrop { background: transparent; }
     </div>
     <div class="storage-sort">
       <label for="storageSort">Sort by</label>
-      <select id="storageSort" onchange="renderStorageCards()">
+      <select id="storageSort" onchange="renderStorageCards()" disabled>
         <option value="size-desc">Storage: largest first</option>
         <option value="size-asc">Storage: smallest first</option>
         <option value="name">Name: A–Z</option>
@@ -787,7 +787,7 @@ async function loadStoragePanel() {
     // so a stale zero can't skip the eviction confirmation.
     _workingCopySizeBytes = null;
     updateWorkingCopyLimitState();
-    document.getElementById('storageGrid').innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load storage info</span>';
+    showStorageLoadError();
   }
   await loadMasksCard(s && s.masks);
 }

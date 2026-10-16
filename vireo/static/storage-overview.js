@@ -1,8 +1,10 @@
 /* Storage category cards share the selected ordering across data refreshes. */
-var storageOverviewCategories = [];
+var storageOverviewCategories = null;
 
 function renderStorageCards(categories) {
   if (categories) storageOverviewCategories = categories;
+  if (!storageOverviewCategories) return;
+  document.getElementById('storageSort').disabled = false;
   var order = document.getElementById('storageSort').value;
   var sorted = storageOverviewCategories.slice().sort(function(a, b) {
     var byName = a.name.localeCompare(b.name);
@@ -30,4 +32,10 @@ function renderStorageCards(categories) {
     html += '</div>';
   });
   document.getElementById('storageGrid').innerHTML = html || '<span style="color:var(--text-ghost);font-size:13px;">No generated storage yet.</span>';
+}
+
+function showStorageLoadError() {
+  storageOverviewCategories = null;
+  document.getElementById('storageSort').disabled = true;
+  document.getElementById('storageGrid').innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load storage info</span>';
 }

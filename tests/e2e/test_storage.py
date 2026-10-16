@@ -117,3 +117,41 @@ def test_workspace_delete_explains_shared_analysis_and_removes_saved_results(liv
     expect(page.locator('#workspaceDeleteDialog')).to_have_count(0)
     expect(row).to_have_count(0)
     assert not result.exists()
+
+
+def test_storage_sort_preserves_load_errors_and_recovers(live_server, page):
+    fail_storage = True
+
+    def storage_route(route):
+        if fail_storage:
+            route.fulfill(status=503, json={"error": "Storage unavailable"})
+        else:
+            route.continue_()
+
+    page.route("**/api/storage", storage_route)
+    page.goto(f"{live_server['url']}/storage")
+    grid = page.locator("#storageGrid")
+    sort = page.get_by_label("Sort by", exact=True)
+    expect(grid).to_have_text("Failed to load storage info")
+    expect(sort).to_be_disabled()
+    page.evaluate("renderStorageCards()")
+    expect(grid).to_have_text("Failed to load storage info")
+
+    fail_storage = False
+    page.evaluate("loadStoragePanel()")
+    expect(sort).to_be_enabled()
+    expect(grid.locator(".stat-card").first).to_be_visible()
+    sort.select_option("name")
+
+    fail_storage = True
+    page.evaluate("loadStoragePanel()")
+    expect(sort).to_be_disabled()
+    page.evaluate("renderStorageCards()")
+    expect(grid).to_have_text("Failed to load storage info")
+    expect(grid.locator(".stat-card")).to_have_count(0)
+
+    fail_storage = False
+    page.evaluate("loadStoragePanel()")
+    expect(sort).to_be_enabled()
+    expect(sort).to_have_value("name")
+    expect(grid.locator(".stat-card").first).to_be_visible()
