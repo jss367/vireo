@@ -123,8 +123,6 @@
   "services/local_workspace.py:_walk_entries": 126,
   "services/local_workspace.py:stage_workspace": 104,
   "services/local_workspace.py:sync_back": 218,
-  "services/missing_originals.py:MissingOriginals.start_scan": 198,
-  "services/missing_originals.py:MissingOriginals.start_scan.work": 106,
   "services/pipeline_launch.py:PipelineChain.chain_after_move": 131,
   "services/pipeline_launch.py:PipelineChain.enqueue_process_job": 146,
   "services/prediction_ambiguity.py:effective_category_resolver": 138,
