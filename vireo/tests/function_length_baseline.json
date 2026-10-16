@@ -124,7 +124,6 @@
   "repositories/model_runs.py:ModelRunsRepository.get_unclassifiable_photos": 148,
   "repositories/photos.py:PhotoRepository.delete": 106,
   "repositories/photos.py:PhotoRepository.get_browse_summary": 110,
-  "repositories/workspace_folders.py:WorkspaceFolderRepository.move_folders": 215,
   "review_server.py:create_app": 279,
   "scanner.py:_ScanRun._attach_companion": 155,
   "scanner.py:_ScanRun._write_photo_columns": 146,
