@@ -32,4 +32,17 @@ function verifyFrontendContracts() {
   window.VireoDialog.create(document.createElement('div'), {onDismiss: 'close'});
   // @ts-expect-error Focus returns to an element, not a selector string.
   dialog.open('#opener');
+
+  const loaders = window.Vireo?.browse?.panelLoaders;
+  if (loaders) {
+    loaders.keywords.load([1, 2]);
+    loaders.detailPredictions.load(1);
+    loaders.predictions.retry();
+    // @ts-expect-error Photo ids cannot be strings.
+    loaders.keywords.load(['1', '2']);
+    // @ts-expect-error The detail panel loads a single photo id.
+    loaders.detailPredictions.load([1, 2]);
+    // @ts-expect-error Retry uses its owned snapshot, not caller-supplied ids.
+    loaders.predictions.retry([3, 4]);
+  }
 }

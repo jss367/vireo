@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import json
 import os
 import sys
@@ -12,6 +13,49 @@ import numpy as np
 import pytest
 from page_scripts import page_with_scripts
 from testing.waits import synchronization_timeout
+
+
+def observe_flight_waiters(monkeypatch):
+    """Count the equal-key requests parked behind an artifact producer.
+
+    The single-flight tests block a producer, submit the requests that must
+    share its outcome, and only then release it. A fixed ``time.sleep(0.1)``
+    used to stand in for "they have joined by now"; a loaded Windows worker
+    can take longer than that to schedule the second request, and a request
+    that arrives after the producer finished claims a fresh flight of its
+    own (a 200 where the test expects the shared 500, or a second decode).
+    Waiters block in ``_Flight.event.wait``, so counting those calls proves
+    the join before the producer is released.
+    """
+    import artifact_flight
+
+    class Waiters:
+        def __init__(self):
+            self._count = 0
+            self._changed = threading.Condition()
+
+        def joined(self):
+            with self._changed:
+                self._count += 1
+                self._changed.notify_all()
+
+        def wait_for(self, count, timeout):
+            with self._changed:
+                return self._changed.wait_for(lambda: self._count >= count, timeout)
+
+    waiters = Waiters()
+
+    class ObservedEvent(threading.Event):
+        def wait(self, timeout=None):
+            waiters.joined()
+            return super().wait(timeout)
+
+    @dataclasses.dataclass
+    class ObservedFlight(artifact_flight._Flight):
+        event: threading.Event = dataclasses.field(default_factory=ObservedEvent)
+
+    monkeypatch.setattr(artifact_flight, "_Flight", ObservedFlight)
+    return waiters
 
 
 def test_api_photos_default(app_and_db):
@@ -2090,6 +2134,7 @@ def test_concurrent_preview_cache_misses_decode_once(
             response = client.get(f"/photos/{photo_id}/preview?size=1920")
             return response.status_code, response.data
 
+    waiters = observe_flight_waiters(monkeypatch)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(request_preview)
         assert started.wait(synchronization_timeout(5)), "preview producer did not start"
@@ -2100,7 +2145,7 @@ def test_concurrent_preview_cache_misses_decode_once(
         assert speculative.status_code == 204
         assert speculative.headers["Cache-Control"] == "no-store"
         second = pool.submit(request_preview)
-        time.sleep(0.1)
+        assert waiters.wait_for(1, synchronization_timeout(5)), "equal-key request never joined the flight"
         assert call_count == 1
         release.set()
         first_result = first.result(timeout=5)
@@ -2165,11 +2210,12 @@ def test_failed_preview_flight_wakes_waiter_and_next_request_retries(
                 f"/photos/{photo_id}/preview?size=1920"
             ).status_code
 
+    waiters = observe_flight_waiters(monkeypatch)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(request_status)
         assert started.wait(synchronization_timeout(5)), "failed preview producer did not start"
         second = pool.submit(request_status)
-        time.sleep(0.1)
+        assert waiters.wait_for(1, synchronization_timeout(5)), "equal-key request never joined the flight"
         release.set()
         assert first.result(timeout=5) == 500
         assert second.result(timeout=5) == 500
@@ -2550,11 +2596,12 @@ def test_concurrent_original_cache_misses_extract_once(
             response = client.get(f"/photos/{photo_id}/original")
             return response.status_code, response.data
 
+    waiters = observe_flight_waiters(monkeypatch)
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(request_original)
         assert producer_started.wait(timeout=synchronization_timeout(5))
         second = executor.submit(request_original)
-        time.sleep(0.1)
+        assert waiters.wait_for(1, synchronization_timeout(5)), "equal-key request never joined the flight"
         assert calls == 1
         release_producer.set()
         first_result = first.result(timeout=5)
@@ -2654,12 +2701,13 @@ def test_concurrent_noncacheable_original_waiters_use_private_renditions(
             response = client.get(f"/photos/{photo_id}/original")
             return response.status_code, response.data
 
+    waiters = observe_flight_waiters(monkeypatch)
     with ThreadPoolExecutor(max_workers=3) as executor:
         first = executor.submit(request_original)
         assert producer_started.wait(timeout=synchronization_timeout(5))
         second = executor.submit(request_original)
         third = executor.submit(request_original)
-        time.sleep(0.1)
+        assert waiters.wait_for(2, synchronization_timeout(5)), "equal-key requests never joined the flight"
         assert calls == 1
         release_producer.set()
         results = [
@@ -2731,11 +2779,12 @@ def test_failed_original_flight_releases_waiters_and_allows_retry(
         with app.test_client() as client:
             return client.get(f"/photos/{photo_id}/original").status_code
 
+    waiters = observe_flight_waiters(monkeypatch)
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(request_original)
         assert producer_started.wait(timeout=synchronization_timeout(5))
         second = executor.submit(request_original)
-        time.sleep(0.1)
+        assert waiters.wait_for(1, synchronization_timeout(5)), "equal-key request never joined the flight"
         release_producer.set()
         assert first.result(timeout=5) == 500
         assert second.result(timeout=5) == 500
@@ -5862,11 +5911,12 @@ def test_paired_raw_original_shares_decode_across_warmup_and_visible(
             )
             return response.status_code, response.data
 
+    waiters = observe_flight_waiters(monkeypatch)
     with ThreadPoolExecutor(max_workers=2) as pool:
         warmup = pool.submit(fetch, "&prefetch=1")
         assert started.wait(synchronization_timeout(5)), "paired RAW producer did not start"
         visible = pool.submit(fetch, "")
-        time.sleep(0.1)
+        assert waiters.wait_for(1, synchronization_timeout(5)), "equal-key request never joined the flight"
         assert call_count == 1
         release.set()
         warmup_result = warmup.result(timeout=5)
@@ -7548,6 +7598,9 @@ def test_interactive_preview_joins_background_warmer(
         return Image.new("RGB", (800, 600), "purple")
 
     monkeypatch.setattr(image_loader, "load_image", blocking_load_image)
+    # Installed before the warmer starts: the visible request joins the
+    # flight the job created, so that flight must carry the observed event.
+    waiters = observe_flight_waiters(monkeypatch)
 
     response = client.post(
         "/api/jobs/previews", json={"photo_ids": [photo_id]},
@@ -7565,7 +7618,7 @@ def test_interactive_preview_joins_background_warmer(
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         visible_future = executor.submit(request_visible_preview)
-        time.sleep(0.1)
+        assert waiters.wait_for(1, synchronization_timeout(5)), "equal-key request never joined the flight"
         assert calls == 1
         release_producer.set()
         visible_status, visible_data = visible_future.result(timeout=5)

@@ -233,11 +233,32 @@ jobs:
           --shard ${{ matrix.shard }}/4
           -n 2 -v --tb=short --timeout=120 --timeout-method=thread
 
+      # Windows gets the same bounded rerun as the post-merge full suite
+      # (see test-main.yml): one retry per failing test, with every test that
+      # passed only on its rerun surfaced as a warning annotation.
       - name: Run full suite
         if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'full'
+        shell: bash
         run: >-
           python -m pytest tests/ vireo/tests/ --shard ${{ matrix.shard }}/4
           -n 2 -v --tb=short --timeout=120 --timeout-method=thread
+          ${{ runner.os == 'Windows' && '--reruns 1 --reruns-delay 2' || '' }}
+          2>&1 | tee pytest-output.txt
+
+      # A test that only passed on its rerun keeps the job green but must not
+      # disappear: list each one as a warning annotation so the run summary
+      # shows what flaked. Tests that failed again are left to the FAILED
+      # lines main-health.yml already parses; a fixture that errored on both
+      # attempts ends as ERROR rather than FAILED, so that is excluded too.
+      - name: Surface tests that passed only on rerun
+        if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'full' && runner.os == 'Windows' && !cancelled()
+        shell: bash
+        run: |
+          grep -oE 'RERUN [^ ]+::[^ ]+' pytest-output.txt | sed 's/^RERUN //' | sort -u > reruns.txt || true
+          grep -oE '(FAILED|ERROR) [^ ]+::[^ ]+' pytest-output.txt | sed -E 's/^(FAILED|ERROR) //' | sort -u > failed.txt || true
+          comm -23 reruns.txt failed.txt | while read -r test; do
+            echo "::warning title=Passed only on rerun (Windows)::$test"
+          done
 
       - name: No unit tests exercise this change
         if: needs.changes.outputs.python == 'true' && steps.select.outputs.mode == 'none'
@@ -410,12 +431,13 @@ jobs:
           tests/e2e/test_settings.py::test_settings_system_info_renders
           tests/e2e/test_browser_security.py::test_browser_transport_authenticates_internal_mutations
           tests/e2e/test_dialog_accessibility.py
+          tests/e2e/test_browse_panel_retry.py
 
-      - name: Verify Mac dialog keyboard navigation
+      - name: Verify Mac frontend controls
         if: needs.changes.outputs.python == 'true' && matrix.browser == 'webkit'
         run: >-
           python -m pytest -o addopts='' -q
-          tests/e2e/test_dialog_accessibility.py --browser webkit
+          tests/e2e/test_dialog_accessibility.py tests/e2e/test_browse_panel_retry.py --browser webkit
           --reruns 2 --reruns-delay 1
 
   rust:

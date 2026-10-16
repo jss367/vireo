@@ -216,26 +216,7 @@ function findBrowsePhoto(id) {
 }
 
 async function loadSelectionKeywordSuggestions(ids) {
-  if (ids.length > 1000) return;
-  var request = Vireo.browse.panelRequests.keywords.begin(selectionIdsKey(ids));
-  if (!request) return;
-  Vireo.browse.selectionPanel.keywords.reset();
-  var list = document.getElementById('selectionKeywordSuggestions');
-  if (list) list.innerHTML = '<div class="selection-empty">Checking selected keywords...</div>';
-
-  try {
-    var data = await safeFetch('/api/selection/keyword-suggestions', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: ids}),
-    }, { toast: false });
-    if (!request.isCurrent()) return;
-    renderSelectionKeywordSuggestions(data.keywords || [], data.selected_count || ids.length);
-  } catch(e) {
-    if (request.fail() && list) {
-      list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
-    }
-  }
+  return Vireo.browse.panelLoaders.keywords.load(ids);
 }
 
 function renderSelectionKeywordSuggestions(keywords, selectedCount) {

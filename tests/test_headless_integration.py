@@ -36,11 +36,12 @@ def _wait_for_runtime(runtime_path: Path, timeout: float = 60.0) -> dict:
     timeout = synchronization_timeout(timeout)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if runtime_path.exists():
-            try:
-                return json.loads(runtime_path.read_text())
-            except json.JSONDecodeError:
-                pass
+        try:
+            return json.loads(runtime_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            # Startup deletes a stale runtime.json before publishing the new
+            # one by rename, so the name can be absent between two polls.
+            pass
         time.sleep(0.1)
     raise TimeoutError(f"{runtime_path} never appeared")
 
@@ -195,14 +196,16 @@ def test_stale_runtime_json_is_replaced(headless_home, tmp_path):
         deadline = time.monotonic() + 60.0
         data = None
         while time.monotonic() < deadline:
-            if runtime.exists():
-                try:
-                    candidate = json.loads(runtime.read_text())
-                    if candidate.get("port") == port:
-                        data = candidate
-                        break
-                except json.JSONDecodeError:
-                    pass
+            try:
+                candidate = json.loads(runtime.read_text())
+                if candidate.get("port") == port:
+                    data = candidate
+                    break
+            except (FileNotFoundError, json.JSONDecodeError):
+                # The stale file is deleted before the fresh one is renamed
+                # into place: an exists() check here raced that window on
+                # main (#1877).
+                pass
             time.sleep(0.1)
         assert data is not None, "runtime.json was not refreshed"
         assert data["pid"] == proc.pid
