@@ -32,7 +32,8 @@
 // `<callee>(<first string argument>)`, so `addEventListener('click', ...)`
 // is `addEventListener('click')`. When two functions in the same scope would
 // share a key, the second and later ones get an ordinal suffix (`render#2`),
-// in source order, so each keeps its own length; the writer's move rule
+// in source order, so each keeps its own length; literal `%` and `#` in a
+// source name are percent-escaped before adding ordinals. The writer's move rule
 // ignores the ordinal, so a sibling inserted before an over-cap function
 // does not count as growth.
 
@@ -126,10 +127,11 @@ function walk(node, parent, stack, rel, lengths, seen) {
   let pushed = false;
   if (FUNCTION_TYPES.has(node.type)) {
     if (!isIife(node, parent)) {
-      const base = [...stack, contextName(node, parent)].join('.');
+      const name = contextName(node, parent).replace(/[%#]/g, char => char === '%' ? '%25' : '%23');
+      const base = [...stack, name].join('.');
       const ordinal = (seen.get(base) || 0) + 1;
       seen.set(base, ordinal);
-      stack.push(ordinal === 1 ? contextName(node, parent) : `${contextName(node, parent)}#${ordinal}`);
+      stack.push(ordinal === 1 ? name : `${name}#${ordinal}`);
       pushed = true;
       lengths.set(`${rel}:${stack.join('.')}`, node.loc.end.line - node.loc.start.line + 1);
     }
@@ -144,12 +146,17 @@ function walk(node, parent, stack, rel, lengths, seen) {
   if (pushed) stack.pop();
 }
 
+function sourceLengths(source, rel = 'fixture.js') {
+  const lengths = new Map();
+  walk(parseScript(source, rel), null, [], rel, lengths, new Map());
+  return lengths;
+}
+
 export function functionLengths() {
   const lengths = new Map();
   for (const file of sourceFiles()) {
     const rel = path.relative(ROOT, file).split(path.sep).join('/');
-    const tree = parseScript(fs.readFileSync(file, 'utf8'), rel);
-    walk(tree, null, [], rel, lengths, new Map());
+    for (const [key, length] of sourceLengths(fs.readFileSync(file, 'utf8'), rel)) lengths.set(key, length);
   }
   return lengths;
 }
@@ -175,28 +182,48 @@ function sortedObject(object) {
   return Object.fromEntries(Object.entries(object).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
+// Match unchanged lengths before consulting source-order keys: ordinals can
+// change when same-named siblings are reordered. Consume each old entry once.
+function reconcileBaseline(current, previous, allowNew = [], bootstrapping = false) {
+  const remaining = new Set(Object.keys(previous));
+  const matched = new Set();
+  const moves = [];
+  const keys = Object.keys(current).sort();
+  for (const key of keys) {
+    if (current[key] === previous[key]) {
+      remaining.delete(key);
+      matched.add(key);
+    }
+  }
+  for (const key of keys.filter(key => !matched.has(key))) {
+    const from = [...remaining].find(old => nameOf(old) === nameOf(key) && previous[old] === current[key]);
+    if (from !== undefined) {
+      remaining.delete(from);
+      matched.add(key);
+      moves.push([from, key]);
+    }
+  }
+  const grown = [];
+  const added = [];
+  for (const key of keys.filter(key => !matched.has(key))) {
+    if (key in previous && current[key] > previous[key]) grown.push(key);
+    else if (remaining.has(key)) remaining.delete(key); // A shorter existing function.
+    else if (!bootstrapping && !allowNew.some(prefix => key.startsWith(prefix))) added.push(key);
+  }
+  return {grown, added, moves};
+}
+
 export function writeBaseline(allowNew = []) {
   const current = overCap(functionLengths());
   const bootstrapping = !fs.existsSync(BASELINE_PATH);
   const previous = bootstrapping ? {} : loadBaseline();
-  const grown = Object.keys(current).filter(key => key in previous && current[key] > previous[key]).sort();
+  const {grown, added, moves} = reconcileBaseline(current, previous, allowNew, bootstrapping);
   if (grown.length) {
     console.log('Refusing to raise baseline entries; shorten these functions instead:');
     for (const key of grown) console.log(`  ${key}: ${previous[key]} -> ${current[key]} lines`);
     return 1;
   }
-  const stale = Object.keys(previous).filter(key => !(key in current));
-  const moved = new Set();
-  const added = [];
-  for (const key of Object.keys(current).filter(key => !(key in previous)).sort()) {
-    const from = stale.find(old => !moved.has(old) && nameOf(old) === nameOf(key) && previous[old] === current[key]);
-    if (from) {
-      moved.add(from);
-      console.log(`  moved: ${from} -> ${key}`);
-    } else if (!bootstrapping && !allowNew.some(prefix => key.startsWith(prefix))) {
-      added.push(key);
-    }
-  }
+  for (const [from, key] of moves) console.log(`  moved: ${from} -> ${key}`);
   if (added.length) {
     console.log(
       'Refusing to add baseline entries; split these functions instead '
@@ -224,6 +251,57 @@ if (argv[0] === '--write-baseline') {
   process.exit(writeBaseline(allowNew));
 } else {
   const {test} = await import('node:test');
+
+  test('literal ordinal-like names cannot hide an over-cap function', () => {
+    const longBody = '\n'.repeat(104);
+    const lengths = sourceLengths(`const actions = {
+      'render#2'() {${longBody}},
+      render() {${longBody}},
+      render() {},
+      'render%232'() {},
+    };`);
+    assert.equal(lengths.size, 4);
+    assert.equal(lengths.get('fixture.js:render#2'), 1);
+    assert.equal(lengths.get('fixture.js:render%25232'), 1);
+    assert.ok(overCap(lengths)['fixture.js:render']);
+    assert.ok(overCap(lengths)['fixture.js:render%232']);
+    assert.notEqual(nameOf('fixture.js:render#2'), nameOf('fixture.js:render%232'));
+  });
+
+  test('same-named sibling permutations retain their individual length budgets', () => {
+    const fixture = lengths => lengths.map(length => `{ function render() {${'\n'.repeat(length - 1)}} }`).join('\n');
+    const previous = overCap(sourceLengths(fixture([105, 110]), 'a.js'));
+    const current = overCap(sourceLengths(fixture([110, 105]), 'a.js'));
+    assert.deepEqual(previous, {'a.js:render': 105, 'a.js:render#2': 110});
+    assert.deepEqual(current, {'a.js:render': 110, 'a.js:render#2': 105});
+    const result = reconcileBaseline(current, previous);
+    assert.deepEqual(result.grown, []);
+    assert.deepEqual(result.added, []);
+    assert.equal(result.moves.length, 2);
+  });
+
+  test('reconciliation refuses growth, new entries and reuse of one old entry', () => {
+    const previous = {'a.js:render': 105, 'a.js:render#2': 110};
+    assert.deepEqual(reconcileBaseline({'a.js:render': 111}, previous).grown, ['a.js:render']);
+    assert.deepEqual(reconcileBaseline({'a.js:render': 106, 'a.js:render#2': 110}, previous).grown, ['a.js:render']);
+    assert.deepEqual(reconcileBaseline({...previous, 'a.js:render#3': 105}, previous).added, ['a.js:render#3']);
+    assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, previous).added, ['b.js:newName']);
+    assert.deepEqual(reconcileBaseline({
+      'b.js:render': 105, 'b.js:render#2': 105,
+    }, {'a.js:render': 105}).added, ['b.js:render#2']);
+    assert.deepEqual(reconcileBaseline({'a.js:render': 111}, previous, ['a.js:']).grown, ['a.js:render']);
+  });
+
+  test('writer reconciliation still permits shrinking, removal, moves and approved extraction', () => {
+    const previous = {'a.js:render': 110, 'a.js:obsolete': 120};
+    for (const current of [{}, {'a.js:render': 105}, {'b.js:render': 110}]) {
+      const result = reconcileBaseline(current, previous);
+      assert.deepEqual(result.grown, []);
+      assert.deepEqual(result.added, []);
+    }
+    assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, previous, ['b.js:']).added, []);
+    assert.deepEqual(reconcileBaseline({'b.js:newName': 105}, {}, [], true).added, []);
+  });
 
   test(`no static script function crosses or grows past ${MAX_FUNCTION_LINES} lines`, () => {
     const baseline = loadBaseline();
