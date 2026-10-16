@@ -280,6 +280,72 @@ def _move_folder_landing(
     )
 
 
+def _scan_roots_from_body(body):
+    """Read and check the scan roots a ``/api/jobs/scan`` body names.
+
+    Returns ``(roots_list, error)``; ``error`` is the message to refuse
+    the request with, or None.
+    """
+    # Normalize inputs. Prefer the explicit plural form when both are
+    # provided; a caller who sends ``roots`` has opted into the new API.
+    if "roots" in body:
+        roots_in = body.get("roots")
+        if not isinstance(roots_in, list) or not roots_in:
+            return None, "roots must be a non-empty list"
+        roots_list = [str(r) for r in roots_in if r]
+        if not roots_list:
+            return None, "roots must be a non-empty list"
+    else:
+        root = body.get("root", "")
+        if not root:
+            return None, "root path required"
+        roots_list = [root]
+
+    from image_loader import is_excluded_scan_path
+
+    for r in roots_list:
+        # Reject other-app data bundles (Apple Photos / Aperture / Photo
+        # Booth) before any stat: ``os.path.isdir`` on a ``.photoslibrary``
+        # path — or a symlink to one — itself trips the macOS
+        # "access data from other apps" TCC prompt, defeating the guards
+        # inside scan().
+        if is_excluded_scan_path(r):
+            return None, (
+                f"path is inside a macOS app-managed library and cannot "
+                f"be scanned: {r}"
+            )
+        if not os.path.isdir(r):
+            return None, f"directory not found: {r}"
+    return roots_list, None
+
+
+def _remember_scan_roots(roots_list):
+    """Remember scan roots in ``config.json`` (skip temp directories from tests)."""
+    import tempfile
+
+    import config as cfg
+
+    tmp_prefix = os.path.realpath(tempfile.gettempdir())
+    # Lock + raw read-modify-write so a concurrent settings PATCH isn't
+    # reverted and we don't pin every DEFAULTS value into the user's
+    # file (see api_pipeline_save_grouping_defaults).
+    with settings_write_lock:
+        raw = read_raw_config_file()
+        saved_roots = raw.get("scan_roots")
+        if not isinstance(saved_roots, list):
+            saved_roots = []
+        changed = False
+        for r in roots_list:
+            if os.path.realpath(r).startswith(tmp_prefix):
+                continue
+            if r not in saved_roots:
+                saved_roots.insert(0, r)
+                changed = True
+        if changed:
+            raw["scan_roots"] = saved_roots
+            cfg.save(raw)
+
+
 def create_job_launchers_blueprint(
     get_db,
     json_error,
@@ -659,61 +725,11 @@ def create_job_launchers_blueprint(
         body = request.get_json(silent=True) or {}
         incremental = body.get("incremental", False)
 
-        # Normalize inputs. Prefer the explicit plural form when both are
-        # provided; a caller who sends ``roots`` has opted into the new API.
-        if "roots" in body:
-            roots_in = body.get("roots")
-            if not isinstance(roots_in, list) or not roots_in:
-                return json_error("roots must be a non-empty list")
-            roots_list = [str(r) for r in roots_in if r]
-            if not roots_list:
-                return json_error("roots must be a non-empty list")
-        else:
-            root = body.get("root", "")
-            if not root:
-                return json_error("root path required")
-            roots_list = [root]
+        roots_list, err = _scan_roots_from_body(body)
+        if err is not None:
+            return json_error(err)
 
-        from image_loader import is_excluded_scan_path
-
-        for r in roots_list:
-            # Reject other-app data bundles (Apple Photos / Aperture / Photo
-            # Booth) before any stat: ``os.path.isdir`` on a ``.photoslibrary``
-            # path — or a symlink to one — itself trips the macOS
-            # "access data from other apps" TCC prompt, defeating the guards
-            # inside scan().
-            if is_excluded_scan_path(r):
-                return json_error(
-                    f"path is inside a macOS app-managed library and cannot "
-                    f"be scanned: {r}"
-                )
-            if not os.path.isdir(r):
-                return json_error(f"directory not found: {r}")
-
-        # Remember scan roots (skip temp directories from tests)
-        import tempfile
-
-        import config as cfg
-
-        tmp_prefix = os.path.realpath(tempfile.gettempdir())
-        # Lock + raw read-modify-write so a concurrent settings PATCH isn't
-        # reverted and we don't pin every DEFAULTS value into the user's
-        # file (see api_pipeline_save_grouping_defaults).
-        with settings_write_lock:
-            raw = read_raw_config_file()
-            saved_roots = raw.get("scan_roots")
-            if not isinstance(saved_roots, list):
-                saved_roots = []
-            changed = False
-            for r in roots_list:
-                if os.path.realpath(r).startswith(tmp_prefix):
-                    continue
-                if r not in saved_roots:
-                    saved_roots.insert(0, r)
-                    changed = True
-            if changed:
-                raw["scan_roots"] = saved_roots
-                cfg.save(raw)
+        _remember_scan_roots(roots_list)
 
         # A workspace with active local state has its folder paths rebased
         # into the managed copy; scanner.scan() calls
@@ -1704,108 +1720,18 @@ def create_job_launchers_blueprint(
         dng_converter_bin = body.get("dng_converter_bin") or cfg.get("dng_converter_bin") or ""
         width = body.get("width")
 
+        settings = SimpleNamespace(
+            binary=binary,
+            style=style,
+            output_format=output_format,
+            output_dir=output_dir,
+            auto_convert_dng=auto_convert_dng,
+            dng_converter_bin=dng_converter_bin,
+            width=width,
+        )
+
         def work(job):
-            from develop import develop_photo, output_path_for_photo
-            from export import developed_folder_key
-
-            thread_db = ctx.thread_db()
-
-            photos = []
-            for pid in photo_ids:
-                p = thread_db.get_photo(pid, verify_workspace=True)
-                if p:
-                    photos.append(p)
-
-            if not photos:
-                return {"developed": 0, "errors": 0, "total": 0}
-
-            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-            total = len(photos)
-            developed = 0
-            errors = 0
-            job["_start_time"] = time.time()
-
-            for i, photo in enumerate(photos):
-                if ctx.runner.is_cancelled(job["id"]):
-                    break
-                folder_path = folders.get(photo["folder_id"])
-                if not folder_path:
-                    errors += 1
-                    continue
-                input_path = os.path.join(folder_path, photo["filename"])
-
-                # Determine output directory. The per-folder "developed/" default
-                # is naturally disambiguated (one dir per source folder). The
-                # globally configured dir is flat, so nest each photo under a
-                # stable key derived from the source folder's path (not its row
-                # id — SQLite reuses those after deletion, which would silently
-                # cross-wire new folders onto stale developed files left on
-                # disk by a previously-deleted folder).
-                if output_dir:
-                    out_dir = os.path.join(output_dir, developed_folder_key(folder_path))
-                else:
-                    out_dir = os.path.join(folder_path, "developed")
-                out_path = output_path_for_photo(photo["filename"], out_dir, output_format)
-
-                try:
-                    photo_metadata = json.loads(photo["exif_data"]) if photo["exif_data"] else None
-                except (TypeError, json.JSONDecodeError):
-                    photo_metadata = None
-
-                result = develop_photo(
-                    darktable_bin=binary,
-                    input_path=input_path,
-                    output_path=out_path,
-                    style=style if style else None,
-                    width=width,
-                    auto_convert_dng=bool(auto_convert_dng),
-                    dng_converter_bin=dng_converter_bin,
-                    metadata=photo_metadata,
-                )
-
-                if result["success"]:
-                    developed += 1
-                else:
-                    errors += 1
-                    job["errors"].append(f'{photo["filename"]}: {result["error"]}')
-                    log.warning("Failed to develop %s: %s", photo["filename"], result["error"])
-
-                ctx.runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": i + 1,
-                        "total": total,
-                        "current_file": photo["filename"],
-                        "rate": round(
-                            (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
-                        ),
-                        "phase": "Developing photos",
-                    },
-                )
-
-            result = {"developed": developed, "errors": errors, "total": total}
-            if errors > 0:
-                # Rollup rule: if any per-photo develop failed, the overall
-                # job is failed (not completed). Stash the counts on the job
-                # so _persist_job (jobs.py ~L197-210) merges them with the
-                # primary error message, then raise so _run_job records
-                # status="failed".
-                #
-                # Re-raise with an existing entry in job["errors"] so
-                # _run_job's dedup guard (err_str not in job["errors"])
-                # skips the append — otherwise a novel exception string
-                # gets tacked on as a synthetic extra error, inflating
-                # error_count by 1. Keep the nicer "N/M failed: <err>"
-                # summary on job["_fatal_error"], which _persist_job
-                # prefers over errors[0] when building the result row.
-                job["result"] = result
-                first_err = job["errors"][0]
-                job["_fatal_error"] = (
-                    f"{errors}/{total} develop operations failed: {first_err}"
-                )
-                raise RuntimeError(first_err)
-            return result
+            return _run_develop(ctx, job, photo_ids, settings)
 
         return ctx.start(
             "develop",
@@ -2972,3 +2898,121 @@ class _PreviewWarmup:
                 self.generated += 1
             else:
                 self.skipped += 1
+
+
+def _run_develop(ctx, job, photo_ids, settings):
+    """The ``/api/jobs/develop`` work function.
+
+    ``settings`` carries the darktable binary and the request's resolved
+    style, output and conversion options.
+    """
+    from develop import develop_photo, output_path_for_photo
+    from export import developed_folder_key
+
+    thread_db = ctx.thread_db()
+
+    photos = []
+    for pid in photo_ids:
+        p = thread_db.get_photo(pid, verify_workspace=True)
+        if p:
+            photos.append(p)
+
+    if not photos:
+        return {"developed": 0, "errors": 0, "total": 0}
+
+    folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+    total = len(photos)
+    developed = 0
+    errors = 0
+    job["_start_time"] = time.time()
+
+    for i, photo in enumerate(photos):
+        if ctx.runner.is_cancelled(job["id"]):
+            break
+        folder_path = folders.get(photo["folder_id"])
+        if not folder_path:
+            errors += 1
+            continue
+        input_path = os.path.join(folder_path, photo["filename"])
+
+        # Determine output directory. The per-folder "developed/" default
+        # is naturally disambiguated (one dir per source folder). The
+        # globally configured dir is flat, so nest each photo under a
+        # stable key derived from the source folder's path (not its row
+        # id — SQLite reuses those after deletion, which would silently
+        # cross-wire new folders onto stale developed files left on
+        # disk by a previously-deleted folder).
+        if settings.output_dir:
+            out_dir = os.path.join(settings.output_dir, developed_folder_key(folder_path))
+        else:
+            out_dir = os.path.join(folder_path, "developed")
+        out_path = output_path_for_photo(
+            photo["filename"], out_dir, settings.output_format,
+        )
+
+        try:
+            photo_metadata = json.loads(photo["exif_data"]) if photo["exif_data"] else None
+        except (TypeError, json.JSONDecodeError):
+            photo_metadata = None
+
+        result = develop_photo(
+            darktable_bin=settings.binary,
+            input_path=input_path,
+            output_path=out_path,
+            style=settings.style if settings.style else None,
+            width=settings.width,
+            auto_convert_dng=bool(settings.auto_convert_dng),
+            dng_converter_bin=settings.dng_converter_bin,
+            metadata=photo_metadata,
+        )
+
+        if result["success"]:
+            developed += 1
+        else:
+            errors += 1
+            job["errors"].append(f'{photo["filename"]}: {result["error"]}')
+            log.warning("Failed to develop %s: %s", photo["filename"], result["error"])
+
+        ctx.runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": i + 1,
+                "total": total,
+                "current_file": photo["filename"],
+                "rate": round(
+                    (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                ),
+                "phase": "Developing photos",
+            },
+        )
+
+    result = {"developed": developed, "errors": errors, "total": total}
+    if errors > 0:
+        _fail_develop_job(job, result, errors, total)
+    return result
+
+
+def _fail_develop_job(job, result, errors, total):
+    """Raise so a develop run with any per-photo failure ends "failed".
+
+    Rollup rule: if any per-photo develop failed, the overall
+    job is failed (not completed). Stash the counts on the job
+    so _persist_job (jobs.py ~L197-210) merges them with the
+    primary error message, then raise so _run_job records
+    status="failed".
+
+    Re-raise with an existing entry in job["errors"] so
+    _run_job's dedup guard (err_str not in job["errors"])
+    skips the append — otherwise a novel exception string
+    gets tacked on as a synthetic extra error, inflating
+    error_count by 1. Keep the nicer "N/M failed: <err>"
+    summary on job["_fatal_error"], which _persist_job
+    prefers over errors[0] when building the result row.
+    """
+    job["result"] = result
+    first_err = job["errors"][0]
+    job["_fatal_error"] = (
+        f"{errors}/{total} develop operations failed: {first_err}"
+    )
+    raise RuntimeError(first_err)
