@@ -219,8 +219,7 @@ async function nativeMenuSetRating(rating) {
       return;
     }
     if (typeof setReviewRating === 'function') {
-      setReviewRating(ids[0], rating);
-      nativeMenuInfo('Rating updated');
+      await setReviewRating(ids[0], rating);
       return;
     }
   }
@@ -229,8 +228,7 @@ async function nativeMenuSetRating(rating) {
     return;
   }
   if (ids.length === 1 && typeof setReviewRating === 'function') {
-    setReviewRating(ids[0], rating);
-    nativeMenuInfo('Rating updated');
+    await setReviewRating(ids[0], rating);
     return;
   }
   await nativeMenuBatch('/api/batch/rating', {photo_ids: ids, rating: rating}, 'Rating updated');
@@ -246,7 +244,6 @@ async function nativeMenuSetFlag(flag) {
     }
     if (typeof setReviewFlag === 'function') {
       await setReviewFlag(ids[0], flag);
-      nativeMenuInfo('Flag updated');
       return;
     }
   }
@@ -256,7 +253,6 @@ async function nativeMenuSetFlag(flag) {
   }
   if (ids.length === 1 && typeof setReviewFlag === 'function') {
     await setReviewFlag(ids[0], flag);
-    nativeMenuInfo('Flag updated');
     return;
   }
   await nativeMenuBatch('/api/batch/flag', {photo_ids: ids, flag: flag}, 'Flag updated');
