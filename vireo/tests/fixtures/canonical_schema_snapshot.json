@@ -985,18 +985,6 @@
    null
   ],
   [
-   "index",
-   "idx_job_history_workspace",
-   "job_history",
-   "CREATE INDEX idx_job_history_workspace ON job_history(workspace_id)"
-  ],
-  [
-   "trigger",
-   "job_history_require_workspace",
-   "job_history",
-   "CREATE TRIGGER job_history_require_workspace\n        BEFORE INSERT ON job_history\n        WHEN NEW.workspace_id IS NOT NULL AND NOT EXISTS\n             (SELECT 1 FROM workspaces WHERE id=NEW.workspace_id)\n        BEGIN SELECT RAISE(IGNORE); END"
-  ],
-  [
    "table",
    "preview_cache_invalidations",
    "preview_cache_invalidations",
@@ -1019,6 +1007,18 @@
    "idx_taxa_common_names_name_nocase",
    "taxa_common_names",
    "CREATE INDEX idx_taxa_common_names_name_nocase\n        ON taxa_common_names(name COLLATE NOCASE)"
+  ],
+  [
+   "index",
+   "idx_job_history_workspace",
+   "job_history",
+   "CREATE INDEX idx_job_history_workspace ON job_history(workspace_id)"
+  ],
+  [
+   "trigger",
+   "job_history_require_workspace",
+   "job_history",
+   "CREATE TRIGGER job_history_require_workspace\n        BEFORE INSERT ON job_history\n        WHEN NEW.workspace_id IS NOT NULL AND NOT EXISTS\n             (SELECT 1 FROM workspaces WHERE id=NEW.workspace_id)\n        BEGIN SELECT RAISE(IGNORE); END"
   ],
   [
    "table",

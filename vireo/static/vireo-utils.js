@@ -90,9 +90,11 @@ var VireoViewPreferences = (function() {
   // and checkbox controls save on change.
   document.addEventListener('input', onPreferenceEvent, true);
   document.addEventListener('change', onPreferenceEvent, true);
-  // Restore controls already parsed (notably shared navbar controls). Pages
-  // restore their own controls before bootstrap so page-specific validation
-  // can run afterward without a second late restore undoing it.
+  // Restore controls already parsed. This script is the navbar's first, so
+  // on a navbar page that is nothing yet: navbar-shared-helpers.js, loaded
+  // after the navbar markup, restores the navbar's own controls, and pages
+  // restore theirs before bootstrap so page-specific validation can run
+  // afterward without a second late restore undoing it.
   restoreAll(document);
 
   return {

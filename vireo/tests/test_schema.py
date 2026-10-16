@@ -465,9 +465,11 @@ def test_version_16_catalog_backfills_grouping_snapshot_byte_counts(tmp_path):
 
 
 def test_version_17_catalog_gains_the_formerly_lazy_tables_and_keeps_job_history(tmp_path):
-    """A catalog whose job runner created ``job_history`` before some of its
-    columns existed, and that never wrote a preview-cache marker or an
-    identity repair, comes out with every table and column and its rows."""
+    """A catalog whose job runner created ``job_history`` before
+    ``workspace_id`` (and every later column) existed, and that never wrote
+    a preview-cache marker or an identity repair, opens without error (the
+    index and trigger on ``workspace_id`` wait for the column) and comes out
+    with every table, column and row."""
     db_path = str(tmp_path / 'vireo.db')
     schema.ensure_schema(db_path)
     with Database(db_path, initialize_schema=False) as db:
@@ -477,15 +479,16 @@ def test_version_17_catalog_gains_the_formerly_lazy_tables_and_keeps_job_history
         db.conn.execute("""CREATE TABLE job_history (
             id TEXT PRIMARY KEY, type TEXT, status TEXT, started_at TEXT,
             finished_at TEXT, duration REAL, result TEXT,
-            error_count INTEGER DEFAULT 0, config TEXT, workspace_id INTEGER
+            error_count INTEGER DEFAULT 0, config TEXT
         )""")
         db.conn.execute(
-            "INSERT INTO job_history (id, type, status, started_at, workspace_id) "
-            "VALUES ('old', 'scan', 'completed', '2026-01-01T00:00:00', ?)",
-            (db.active_workspace_id,),
+            "INSERT INTO job_history (id, type, status, started_at) "
+            "VALUES ('old', 'scan', 'completed', '2026-01-01T00:00:00')",
         )
         db.conn.execute('PRAGMA user_version = 17')
         db.commit()
+    # Plain opens (create_tables) must not trip over the missing column.
+    Database(db_path).close()
     schema.ensure_schema(db_path)
     with Database(db_path, initialize_schema=False) as db:
         assert db.conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
@@ -497,6 +500,7 @@ def test_version_17_catalog_gains_the_formerly_lazy_tables_and_keeps_job_history
         assert set(columns) >= {'tree', 'summary', 'resource_wait_seconds',
                                 'resource_wait_count', 'progress'}
         assert db.job_history.get('old')['summary'] == ''
+        assert db.job_history.get('old')['workspace_id'] is None
         objects = {
             row[0] for row in db.conn.execute(
                 "SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger')"

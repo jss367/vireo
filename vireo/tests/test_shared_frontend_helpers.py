@@ -115,3 +115,24 @@ def test_navbar_loads_shared_helpers_before_every_other_script():
                       (TEMPLATES / "_navbar.html").read_text(encoding="utf-8"))
     assert srcs[:2] == ["vireo-api.js", "vireo-utils.js"]
     assert srcs.count("vireo-utils.js") == 1
+
+
+def test_navbar_persisted_controls_are_restored_after_they_are_parsed():
+    """``vireo-utils.js`` restores ``[data-view-preference]`` controls when it
+    loads, which on a navbar page is before any navbar markup exists. The
+    navbar's own persisted controls are therefore restored by the first
+    navbar script after its markup."""
+    html = (TEMPLATES / "_navbar.html").read_text(encoding="utf-8")
+    last_control = max(m.end() for m in re.finditer(r"data-view-preference=", html))
+    scripts_after = re.findall(
+        r'<script src="/static/([^"]+)"></script>', html[last_control:]
+    )
+    restorers = [
+        name for name in scripts_after
+        if "VireoViewPreferences.restoreAll(document)" in
+        (STATIC / name).read_text(encoding="utf-8")
+    ]
+    assert restorers, (
+        "no navbar script after the navbar's persisted controls restores them; "
+        "navbar-shared-helpers.js used to"
+    )

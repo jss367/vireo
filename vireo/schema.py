@@ -21,7 +21,9 @@ from dataclasses import dataclass
 from canonical_schema import (
     FORMERLY_LAZY_OBJECTS,
     JOB_HISTORY_LATER_COLUMNS,
+    JOB_HISTORY_WORKSPACE_OBJECTS,
     create_formerly_lazy_objects,
+    job_history_columns,
 )
 from db import Database, IncompatibleDatabaseError
 from file_replace import replace_file
@@ -126,13 +128,15 @@ def _add_formerly_lazy_tables(conn):
     index (the identity repair) were each created by the code that first
     wrote them, with ``job_history`` gaining columns one ``ALTER`` at a time. They are part of the canonical
     schema now; a catalog that already has them keeps its rows, and a
-    ``job_history`` that predates one of its columns gains it here.
+    ``job_history`` that predates one of its columns gains it here, before
+    the index and trigger on ``workspace_id`` are created.
     """
     create_formerly_lazy_objects(conn)
-    present = {row[1] for row in conn.execute("PRAGMA table_info(job_history)")}
+    present = job_history_columns(conn)
     for column, definition in JOB_HISTORY_LATER_COLUMNS:
         if column not in present:
             conn.execute(f"ALTER TABLE job_history ADD COLUMN {column} {definition}")
+    create_formerly_lazy_objects(conn)
 
 
 def _validate_formerly_lazy_tables(conn):
@@ -141,11 +145,11 @@ def _validate_formerly_lazy_tables(conn):
             "SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger')"
         )
     }
-    for statement in FORMERLY_LAZY_OBJECTS:
+    for statement in FORMERLY_LAZY_OBJECTS + JOB_HISTORY_WORKSPACE_OBJECTS:
         name = statement.split("IF NOT EXISTS", 1)[1].split()[0].split("(")[0]
         if name not in tables:
             raise RuntimeError(f"{name} is missing")
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(job_history)")}
+    columns = job_history_columns(conn)
     missing = [column for column, _ in JOB_HISTORY_LATER_COLUMNS if column not in columns]
     if missing:
         raise RuntimeError(f"job_history is missing {', '.join(missing)}")

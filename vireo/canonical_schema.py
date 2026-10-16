@@ -47,15 +47,6 @@ FORMERLY_LAZY_OBJECTS = (
         summary     TEXT DEFAULT '',
         progress    TEXT
     )""",
-    "CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id)",
-    # A catalog-independent download may finish after its workspace was
-    # deleted. Its final INSERT OR REPLACE must not resurrect history for an
-    # owner that no longer exists. NULL is global maintenance.
-    """CREATE TRIGGER IF NOT EXISTS job_history_require_workspace
-        BEFORE INSERT ON job_history
-        WHEN NEW.workspace_id IS NOT NULL AND NOT EXISTS
-             (SELECT 1 FROM workspaces WHERE id=NEW.workspace_id)
-        BEGIN SELECT RAISE(IGNORE); END""",
     # The durable "do not adopt this preview" marker web.media's _serve_preview
     # consults: an on-disk preview that outlived its owner would otherwise be
     # adopted and re-registered verbatim.
@@ -78,6 +69,22 @@ FORMERLY_LAZY_OBJECTS = (
         ON taxa_common_names(name COLLATE NOCASE)""",
 )
 
+# The objects on ``job_history.workspace_id``. A lazily created
+# ``job_history`` may predate that column, so these are created only once it
+# exists: on a fresh catalog by ``create_tables``, on an older one by
+# migration 18 after its ``ALTER``s.
+JOB_HISTORY_WORKSPACE_OBJECTS = (
+    "CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id)",
+    # A catalog-independent download may finish after its workspace was
+    # deleted. Its final INSERT OR REPLACE must not resurrect history for an
+    # owner that no longer exists. NULL is global maintenance.
+    """CREATE TRIGGER IF NOT EXISTS job_history_require_workspace
+        BEFORE INSERT ON job_history
+        WHEN NEW.workspace_id IS NOT NULL AND NOT EXISTS
+             (SELECT 1 FROM workspaces WHERE id=NEW.workspace_id)
+        BEGIN SELECT RAISE(IGNORE); END""",
+)
+
 # Columns ``job_history`` gained one ``ALTER`` at a time while the job runner
 # owned its DDL. ``create_tables`` creates the table with all of them; the
 # ``ALTER`` for a catalog still missing one is migration 18's, in schema.py.
@@ -93,10 +100,21 @@ JOB_HISTORY_LATER_COLUMNS = (
 )
 
 
+def job_history_columns(conn):
+    return {row[1] for row in conn.execute("PRAGMA table_info(job_history)")}
+
+
 def create_formerly_lazy_objects(conn):
-    """Create ``FORMERLY_LAZY_OBJECTS`` (``IF NOT EXISTS``: idempotent)."""
+    """Create ``FORMERLY_LAZY_OBJECTS`` (``IF NOT EXISTS``: idempotent), and
+    ``JOB_HISTORY_WORKSPACE_OBJECTS`` once ``job_history`` has the column they
+    reference. Never ``ALTER``s: on a catalog whose lazily created
+    ``job_history`` lacks ``workspace_id`` this leaves the index and trigger
+    to migration 18, instead of failing startup on ``no such column``."""
     for statement in FORMERLY_LAZY_OBJECTS:
         conn.execute(statement)
+    if "workspace_id" in job_history_columns(conn):
+        for statement in JOB_HISTORY_WORKSPACE_OBJECTS:
+            conn.execute(statement)
 
 
 class CanonicalSchema:
