@@ -15,17 +15,26 @@ function duplicateFileTrashIsPending(photoId) {
 function updateDuplicateFileTrashCard(photoId, currentCard) {
   var state = _duplicateFileTrashState.get(photoId);
   var card = currentCard || document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
-  if (!state || !card) return;
+  if (!card) return;
+  var keepPending = _duplicateKeepPending.has(photoId);
+  var fileBusy = keepPending || !!(state && (state.pending || state.terminal));
+  var keep = card.querySelector(/** @type {'button'} */ ('.keep-btn'));
+  if (keep) {
+    // A bulk cleanup in flight decides which copies go, so no switching then;
+    // single-file Trash retries stay available while it runs.
+    keep.disabled = fileBusy || _duplicateTrashActive;
+    keep.textContent = keepPending ? 'Switching...' : 'Keep this copy instead';
+  }
   var button = card.querySelector(/** @type {'button'} */ ('.trash-btn'));
   if (!button) return;
-  button.disabled = state.pending || state.terminal;
+  button.disabled = fileBusy;
   var status = card.querySelector(/** @type {'div'} */ ('[data-trash-status]'));
-  if (status) status.textContent = state.message;
+  if (status && state) status.textContent = state.message;
 }
 
 /** @param {number[]} photoIds @param {object} owner */
 function prepareDuplicateTrashBatch(photoIds, owner) {
-  if (photoIds.some(duplicateFileTrashIsPending)) {
+  if (photoIds.some(function(id) { return duplicateFileTrashIsPending(id) || _duplicateKeepPending.has(id); })) {
     throw new Error('Some files are already being cleaned up. Wait for that cleanup to finish.');
   }
   photoIds.forEach(function(id) {
@@ -68,7 +77,7 @@ function releasePausedDuplicateTrashBatch(photoIds, owner) {
 
 /** @param {number} photoId */
 async function trashOneLoserFile(photoId) {
-  if (duplicateFileTrashIsPending(photoId)) return;
+  if (duplicateFileTrashIsPending(photoId) || duplicateKeepBlocksTrash()) return;
   var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
   if (!card || !card.querySelector(/** @type {'button'} */ ('.trash-btn'))) return;
   var state = {pending: true, terminal: false, message: 'Moving to Trash...'};
@@ -114,6 +123,86 @@ async function trashOneLoserFile(photoId) {
   }
 }
 
+// Same words as ``KEPT_ANOTHER_COPY_REASON`` in duplicate_scan.py.
+var KEPT_ANOTHER_COPY_REASON = 'kept another copy instead';
+/** @type {Set<number>} */ var _duplicateKeepPending = new Set();
+
+function duplicateKeepBlocksTrash() {
+  if (!_duplicateKeepPending.size) return false;
+  showToast('Wait for the switch to finish before moving files to Trash.', 'info');
+  return true;
+}
+
+// Re-point a resolved group at the copy the server now keeps: every other
+// copy shown is rejected, the ones it just rejected saying why.
+/** @param {DuplicateProposal} proposal @param {DuplicateKeepResponse} data */
+function applyKeptDuplicateCopy(proposal, data) {
+  var members = [proposal.winner].concat(proposal.other_kept || [], proposal.losers || []);
+  var chosen = members.find(function(m) { return m.id === data.winner_id; });
+  if (!chosen) return false;
+  var replaced = new Set(data.loser_ids);
+  /** @type {DuplicatePhoto} */ var winner = Object.assign({}, chosen, {
+    rating: data.rating, exists: true, volume_offline: false,
+  });
+  delete winner.rejected;
+  delete winner.reason;
+  proposal.winner = winner;
+  proposal.other_kept = [];
+  proposal.losers = members.filter(function(m) { return m !== chosen; }).map(function(m) {
+    return replaced.has(m.id) ? Object.assign({}, m, {rejected: true, reason: KEPT_ANOTHER_COPY_REASON}) : m;
+  });
+  return true;
+}
+
+/** @param {number} photoId */
+async function keepDuplicateCopy(photoId) {
+  if (_scanInProgress || !_lastScanResult || _duplicateKeepPending.has(photoId) || duplicateFileTrashIsPending(photoId)) return;
+  if (_duplicateTrashActive) {
+    showToast('Wait for the cleanup to finish before choosing another copy to keep.', 'info');
+    return;
+  }
+  var proposal = (_proposals || []).find(function(p) {
+    return p.status === 'resolved' && (p.losers || []).some(function(l) { return l.id === photoId; });
+  });
+  if (!proposal) return;
+  var pendingIds = [proposal.winner].concat(proposal.other_kept || [], proposal.losers || []).map(function(member) { return member.id; });
+  if (pendingIds.some(function(id) { return _duplicateKeepPending.has(id) || duplicateFileTrashIsPending(id); })) return;
+  pendingIds.forEach(function(id) { _duplicateKeepPending.add(id); updateDuplicateFileTrashCard(id); });
+  var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
+  var button = card && card.querySelector(/** @type {'button'} */ ('.keep-btn'));
+  if (button) { button.disabled = true; button.textContent = 'Switching...'; }
+  var pendingGroup = card && card.closest(/** @type {'div'} */ ('.dup-group'));
+  if (pendingGroup) {
+    pendingGroup.querySelectorAll(/** @type {'button'} */ ('.trash-btn, .keep-btn')).forEach(function(b) { b.disabled = true; });
+  }
+  try {
+    /** @type {DuplicateKeepResponse} */ var data = await safeFetch('/api/duplicates/keep', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_id: photoId}),
+    });
+    if (!_lastScanResult || _scanInProgress || _proposals.indexOf(proposal) === -1) return;
+    if (!applyKeptDuplicateCopy(proposal, data)) return;
+    var kept = proposal.winner.filename || 'this copy';
+    var rejected = data.loser_ids.length;
+    showToast('Now keeping ' + kept + (rejected
+      ? '; rejected ' + rejected + ' other ' + (rejected === 1 ? 'copy' : 'copies') : '') + '.', 'success');
+  } catch (_caught) {
+    // safeFetch already showed the server's reason.
+  } finally {
+    pendingIds.forEach(function(id) { _duplicateKeepPending.delete(id); updateDuplicateFileTrashCard(id); });
+    // A rescan or restore that replaced the results meanwhile owns the page.
+    if (_lastScanResult && !_scanInProgress && _proposals.indexOf(proposal) !== -1) {
+      var group = document.querySelector('.dup-group[data-hash="' + proposal.file_hash + '"]');
+      if (group && groupMatchesFilter(proposal)) {
+        group.outerHTML = renderResolvedGroup(proposal);
+        refreshDuplicateSummaries();
+      } else {
+        renderResults(_lastScanResult);
+      }
+    }
+  }
+}
+
 /** @param {Element} card @param {number} bi */
 function pinDuplicateBucketOperation(card, bi) {
   var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
@@ -151,7 +240,7 @@ function refreshDuplicateTrashControls() {
 }
 
 async function trashAllLoserFiles() {
-  if (_duplicateTrashActive) return;
+  if (_duplicateTrashActive || duplicateKeepBlocksTrash()) return;
   // ``groupMatchesFilter`` restricts to groups the filter actually
   // surfaced. Without it, an active filter shrinks the rendered
   // resolved section and the button label (both driven by the

@@ -3380,11 +3380,14 @@ class Database:
             "rejected": len(loser_ids),
         }
 
-    def _apply_winner_loser_merge(self, winner_id, loser_ids):
+    def _apply_winner_loser_merge(self, winner_id, loser_ids, winner_flag=None):
         """Merge rating/keywords from losers onto winner, then flag losers
         as rejected. Single transaction. Shared between the resolver-based
         ``apply_duplicate_resolution`` and the user-driven
-        ``bulk_resolve_by_folder``.
+        ``bulk_resolve_by_folder`` and ``keep_duplicate_copy``.
+
+        ``winner_flag``, when given, is written to the winner in the same
+        transaction (``keep_duplicate_copy`` un-rejects the copy it keeps).
         """
         from duplicates import merge_metadata
 
@@ -3394,6 +3397,8 @@ class Database:
         merge = merge_metadata(winner_meta, loser_metas)
 
         with repo.transaction():
+            if winner_flag is not None:
+                repo.set_flag(winner_id, winner_flag)
             if merge.new_rating != winner_meta.rating:
                 repo.set_rating(winner_id, merge.new_rating)
             # Carry every loser's durable provenance onto the winner,
@@ -3431,6 +3436,51 @@ class Database:
             winner_id,
             loser_ids,
         )
+
+    def keep_duplicate_copy(self, photo_id):
+        """Make ``photo_id`` the one kept copy of its duplicate group.
+
+        The user's override of a decision the resolver (or an earlier choice)
+        made: the chosen copy is un-rejected if needed, every other kept copy
+        of the same file is rejected, and their rating and keywords merge
+        onto the chosen copy, all in one transaction. Copies already rejected
+        stay rejected. Refuses a copy that is missing on disk or on an
+        offline volume (see ``DuplicatesRepository.keep_copy_refusal``).
+
+        The plan is read under SQLite's writer lock and applied in the same
+        transaction, so two concurrent keeps in one group can't each reject
+        the old keeper and leave both chosen copies kept; the later one sees
+        the earlier one's keeper and rejects it. The disk checks run before
+        the lock, since a stat on a network volume can be slow.
+
+        Returns ``{"file_hash", "winner_id", "loser_ids", "rating", "flag"}``
+        or ``{"error": reason}``.
+        """
+        repo = self._duplicates_repository()
+        reason = repo.keep_copy_refusal(photo_id)
+        if reason is not None:
+            return {"error": reason}
+        self.begin_immediate()
+        try:
+            plan, reason = repo.keep_copy_plan(photo_id)
+            if reason is not None:
+                self.rollback()
+                return {"error": reason}
+            # Commits the transaction opened above.
+            self._apply_winner_loser_merge(
+                photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"],
+            )
+        except BaseException:
+            if self.in_transaction:
+                self.rollback()
+            raise
+        return {
+            "file_hash": plan["file_hash"],
+            "winner_id": photo_id,
+            "loser_ids": plan["loser_ids"],
+            "rating": repo.photo_metadata(photo_id).rating,
+            "flag": plan["winner_flag"],
+        }
 
     def bulk_resolve_by_folder(self, file_hashes, keep_folder):
         """Force-resolve many duplicate groups by keeping the photo whose

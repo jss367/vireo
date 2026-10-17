@@ -993,6 +993,7 @@ DUPLICATE_METHODS = [
     "check_and_resolve_duplicates_for_hash",
     "apply_duplicate_resolution",
     "_apply_winner_loser_merge",
+    "keep_duplicate_copy",
     "bulk_resolve_by_folder",
 ]
 
@@ -1032,7 +1033,8 @@ def test_facade_signatures_are_unchanged():
     expected = {
         "check_and_resolve_duplicates_for_hash": "(self, file_hash: str) -> dict | None",
         "apply_duplicate_resolution": "(self, photo_ids)",
-        "_apply_winner_loser_merge": "(self, winner_id, loser_ids)",
+        "_apply_winner_loser_merge": "(self, winner_id, loser_ids, winner_flag=None)",
+        "keep_duplicate_copy": "(self, photo_id)",
         "bulk_resolve_by_folder": "(self, file_hashes, keep_folder)",
     }
     for name, sig in expected.items():
