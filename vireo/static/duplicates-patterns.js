@@ -165,6 +165,13 @@ function forgetCleanedDuplicateCopies(photoIds) {
   });
   // Keep completion messages visible until the next category/filter change,
   // but update the pattern counts now and never resurrect cleaned-up cards.
+  refreshDuplicateSummaries();
+}
+
+// Re-render the category counts and summary bar from ``_lastScanResult``
+// without rebuilding the group list.
+function refreshDuplicateSummaries() {
+  if (!_lastScanResult) return;
   var categories = DuplicateCategories.summarize(_lastScanResult.proposals.filter(groupMatchesPhotoFilter));
   if (_duplicateCategory !== 'all' && !categories.some(function(c) { return c.id === _duplicateCategory; })) {
     categories.push({id: _duplicateCategory, label: DuplicateCategories.label(_duplicateCategory),

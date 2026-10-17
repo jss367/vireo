@@ -7190,12 +7190,13 @@ def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     fid = db.add_folder("/photos")
     pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
     parent = db.add_keyword("Penduline tits")
     nested = db.add_keyword("Verdin", parent_id=parent)
     stale = db.add_keyword("Sparrow", is_species=True)
+    _top_level_species_twin(db, "Verdin", taxa["Verdin"])
     db.tag_photo(pid, nested)
     db.tag_photo(pid, stale)
     detection_id = db.save_detections(
@@ -18629,6 +18630,21 @@ def _seed_taxa(db, rows):
     return out
 
 
+def _top_level_species_twin(db, name, taxon_id=None):
+    """A top-level species row beside a same-name row filed in the tree.
+
+    ``add_keyword`` reuses the placed row now, so the twins older catalogs
+    hold (and the ones the startup repair leaves) are inserted directly.
+    """
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES (?, NULL, 1, 'taxonomy', ?)",
+        (name, taxon_id),
+    ).lastrowid
+    db.conn.commit()
+    return kid
+
+
 def test_update_keyword_rename_general_to_matching_taxon_auto_retypes(tmp_path):
     """Renaming a 'general' keyword to a name matching a taxon retypes it
     as 'taxonomy' and links taxon_id. This is the typo-fix path."""
@@ -18762,7 +18778,7 @@ def test_equivalent_species_matches_unlinked_legacy_hierarchy_by_name(tmp_path):
     )
     parent = db.add_keyword("Penduline tits")
     nested = db.add_keyword("Verdin", parent_id=parent)
-    root = db.add_keyword("Verdin", is_species=True)
+    root = _top_level_species_twin(db, "Verdin", taxa["Verdin"])
     db.conn.execute(
         "UPDATE keywords SET taxon_id = NULL, is_species = 1, "
         "type = 'taxonomy' WHERE id = ?",
@@ -18957,7 +18973,7 @@ def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path)
         "WHERE id = ?",
         (taxa["Verdin"], nested),
     )
-    db.add_keyword("Verdin", is_species=True)
+    _top_level_species_twin(db, "Verdin", taxa["Verdin"])
     db.conn.commit()
     db.tag_photo(pid, nested)
 
@@ -19027,7 +19043,7 @@ def test_species_keywords_preserves_unlinked_case_variant_spellings(tmp_path):
         "taxon_id = NULL WHERE id = ?",
         (nested,),
     )
-    root = db.add_keyword("Foo", is_species=True)
+    root = _top_level_species_twin(db, "Foo")
     db.conn.execute(
         "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
     )
@@ -19067,7 +19083,7 @@ def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
         "WHERE id = ?",
         (taxa["Verdin"], nested),
     )
-    db.add_keyword("Verdin", is_species=True)
+    _top_level_species_twin(db, "Verdin", taxa["Verdin"])
     db.conn.commit()
     db.tag_photo(pid, nested)
 
@@ -19215,7 +19231,7 @@ def test_photo_life_list_species_preserves_unlinked_case_variants(tmp_path):
         "taxon_id = NULL WHERE id = ?",
         (nested,),
     )
-    root = db.add_keyword("Foo", is_species=True)
+    root = _top_level_species_twin(db, "Foo")
     db.conn.execute(
         "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
     )

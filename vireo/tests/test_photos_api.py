@@ -13590,6 +13590,9 @@ def _seed_browse_summary_analysis(db):
     db.save_detections(photos["bird3.jpg"], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1.0, "category": "animal"},
     ], detector_model="full-image")
+    db.model_runs.record_detector_run(photos["bird1.jpg"], "MDV6", 2)
+    db.model_runs.record_detector_run(photos["bird2.jpg"], "MDV6", 2)
+    db.model_runs.record_detector_run(photos["bird3.jpg"], "full-image", 1)
     db.conn.execute(
         "UPDATE photos SET subject_tenengrad = 12.5, eye_tenengrad = 3.0, "
         "miss_computed_at = '2026-10-17T00:00:00' WHERE id = ?",
@@ -13612,7 +13615,7 @@ def test_api_browse_summary_reports_analysis_coverage(app_and_db):
     data = client.get('/api/browse/summary').get_json()
     assert data["filtered_total"] == 3
     assert data["analysis"] == {
-        "with_detection": 0, "with_quality": 0, "with_eye": 0, "with_misses": 0,
+        "with_detection": 0, "with_detection_run": 0, "with_quality": 0, "with_eye": 0, "with_misses": 0,
     }
 
     _seed_browse_summary_analysis(db)
@@ -13622,7 +13625,7 @@ def test_api_browse_summary_reports_analysis_coverage(app_and_db):
     # bird1 counts once despite two boxes; bird2's person and 0.05 boxes
     # and bird3's full-image row are not detections.
     assert data["analysis"] == {
-        "with_detection": 1, "with_quality": 2, "with_eye": 1, "with_misses": 1,
+        "with_detection": 1, "with_detection_run": 2, "with_quality": 2, "with_eye": 1, "with_misses": 1,
     }
 
 
@@ -13635,7 +13638,7 @@ def test_api_browse_summary_analysis_respects_folder_scope(app_and_db):
     data = client.get(f'/api/browse/summary?folder_id={jan["id"]}').get_json()
     assert data["filtered_total"] == 1
     assert data["analysis"] == {
-        "with_detection": 0, "with_quality": 1, "with_eye": 0, "with_misses": 0,
+        "with_detection": 0, "with_detection_run": 1, "with_quality": 1, "with_eye": 0, "with_misses": 0,
     }
 
 

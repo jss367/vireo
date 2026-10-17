@@ -18,6 +18,11 @@ _EMPTY_FILE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b78
 # Sized below 999 to leave headroom for additional bound parameters.
 _SQL_PARAM_CHUNK = 900
 
+# Why a copy is rejected when the copy the resolver would pick is not the one
+# kept: "Keep this copy instead" (or a flag edit) chose another.
+# ``duplicates-cleanup.js`` shows the same words after an in-page switch.
+KEPT_ANOTHER_COPY_REASON = "kept another copy instead"
+
 
 def _fetch_photo_rows(db, photo_ids, columns, where_extra=""):
     """Run ``SELECT {columns} FROM photos p LEFT JOIN folders f WHERE p.id IN (...) {where_extra}``
@@ -69,7 +74,7 @@ def revalidate_scan_result(db, result):
     })
     rows = _fetch_photo_rows(
         db, photo_ids,
-        columns="p.id, p.filename, p.file_hash, f.path AS folder_path",
+        columns="p.id, p.filename, p.file_hash, p.flag, p.rating, p.file_size, f.path AS folder_path",
     )
     live = {
         r["id"]: (
@@ -78,6 +83,9 @@ def revalidate_scan_result(db, result):
         )
         for r in rows
     }
+    rejected_ids = {r["id"] for r in rows if r["flag"] == "rejected"}
+    metadata = {r["id"]: {"filename": r["filename"], "rating": r["rating"] or 0,
+                           "file_size": r["file_size"]} for r in rows}
 
     def current(entry, file_hash):
         return live.get(entry.get("id")) == (entry.get("path"), file_hash)
@@ -92,7 +100,14 @@ def revalidate_scan_result(db, result):
         ]
         if not current(winner, file_hash) or not losers:
             continue
-        kept.append(dict(p, losers=losers))
+        # Flags can promote a cached loser after its rating/keywords merged.
+        # Overlay current catalog fields before reorientation; never probe paths.
+        winner = dict(winner, **metadata[winner["id"]])
+        losers = [dict(loser, **metadata[loser["id"]]) for loser in losers]
+        p = dict(p, winner=winner, losers=losers)
+        if p.get("status") == "resolved":
+            p = _reorient_resolved_proposal(p, rejected_ids, {pid: values["rating"] for pid, values in metadata.items()})
+        kept.append(p)
 
     new_group_count, changed_group_count = _changes_since_scan(
         db, proposals, kept,
@@ -115,6 +130,39 @@ def revalidate_scan_result(db, result):
         new_group_count=new_group_count,
         changed_group_count=changed_group_count,
     )
+
+
+def _reorient_resolved_proposal(proposal, rejected_ids, ratings):
+    """Show a resolved group with the copy the catalog keeps now as KEEP.
+
+    "Keep this copy instead" (or a flag edit) can swap which copy of a
+    resolved group is kept after the scan stored it. When exactly one shown
+    copy is still kept and it isn't the stored winner, that copy becomes the
+    winner and the rest are rejected losers; the copy it replaced says so.
+    The switch merged the old keeper's rating onto the new one, so every
+    copy shows its rating from ``ratings`` (id to the catalog's rating now)
+    rather than the scan's. Otherwise the proposal is returned unchanged.
+    """
+    winner = proposal["winner"]
+    members = [winner] + proposal["losers"]
+    kept = [m for m in members if m.get("id") not in rejected_ids]
+    if len(kept) != 1 or kept[0] is winner:
+        return proposal
+
+    def live(entry, **changes):
+        entry = dict(entry, **changes)
+        if entry.get("id") in ratings:
+            entry["rating"] = ratings[entry["id"]]
+        return entry
+
+    new_winner = live({
+        k: v for k, v in kept[0].items() if k not in ("rejected", "reason")
+    })
+    replaced = live(winner, rejected=True, reason=KEPT_ANOTHER_COPY_REASON)
+    losers = [replaced] + [
+        live(m) for m in proposal["losers"] if m is not kept[0]
+    ]
+    return dict(proposal, winner=new_winner, losers=losers)
 
 
 def _group_state(status, photo_ids, winner_id):
@@ -476,13 +524,17 @@ def _build_resolved_proposal(db, group):
         return _build_unresolved_proposal(db, group)
 
     candidates = [_candidate(r, info_by_id[r["id"]]) for r in rows]
-    _winner_id, losers_with_reasons = resolve_duplicates(candidates)
+    resolver_winner_id, losers_with_reasons = resolve_duplicates(candidates)
     reasons = dict(losers_with_reasons)
 
     losers = []
     for r in rejected:
         linfo = dict(info_by_id[r["id"]])
-        linfo["reason"] = reasons.get(r["id"], "auto-resolved")
+        # The resolver would keep this copy, so another one was chosen.
+        linfo["reason"] = (
+            KEPT_ANOTHER_COPY_REASON if r["id"] == resolver_winner_id
+            else reasons.get(r["id"], "auto-resolved")
+        )
         linfo["rejected"] = True
         losers.append(linfo)
     # See ``_build_unresolved_proposal`` for why offline volumes are unknown

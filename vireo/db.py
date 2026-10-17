@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from repositories.edit_history import EditHistoryRepository
     from repositories.edits import EditsRepository
     from repositories.exif_search import ExifSearchRepository
+    from repositories.imports import ImportRepository
     from repositories.inat import InatRepository
     from repositories.job_history import JobHistoryRepository
     from repositories.keywords import KeywordRepository
@@ -3379,11 +3380,14 @@ class Database:
             "rejected": len(loser_ids),
         }
 
-    def _apply_winner_loser_merge(self, winner_id, loser_ids):
+    def _apply_winner_loser_merge(self, winner_id, loser_ids, winner_flag=None):
         """Merge rating/keywords from losers onto winner, then flag losers
         as rejected. Single transaction. Shared between the resolver-based
         ``apply_duplicate_resolution`` and the user-driven
-        ``bulk_resolve_by_folder``.
+        ``bulk_resolve_by_folder`` and ``keep_duplicate_copy``.
+
+        ``winner_flag``, when given, is written to the winner in the same
+        transaction (``keep_duplicate_copy`` un-rejects the copy it keeps).
         """
         from duplicates import merge_metadata
 
@@ -3393,6 +3397,8 @@ class Database:
         merge = merge_metadata(winner_meta, loser_metas)
 
         with repo.transaction():
+            if winner_flag is not None:
+                repo.set_flag(winner_id, winner_flag)
             if merge.new_rating != winner_meta.rating:
                 repo.set_rating(winner_id, merge.new_rating)
             # Carry every loser's durable provenance onto the winner,
@@ -3430,6 +3436,51 @@ class Database:
             winner_id,
             loser_ids,
         )
+
+    def keep_duplicate_copy(self, photo_id):
+        """Make ``photo_id`` the one kept copy of its duplicate group.
+
+        The user's override of a decision the resolver (or an earlier choice)
+        made: the chosen copy is un-rejected if needed, every other kept copy
+        of the same file is rejected, and their rating and keywords merge
+        onto the chosen copy, all in one transaction. Copies already rejected
+        stay rejected. Refuses a copy that is missing on disk or on an
+        offline volume (see ``DuplicatesRepository.keep_copy_refusal``).
+
+        The plan is read under SQLite's writer lock and applied in the same
+        transaction, so two concurrent keeps in one group can't each reject
+        the old keeper and leave both chosen copies kept; the later one sees
+        the earlier one's keeper and rejects it. The disk checks run before
+        the lock, since a stat on a network volume can be slow.
+
+        Returns ``{"file_hash", "winner_id", "loser_ids", "rating", "flag"}``
+        or ``{"error": reason}``.
+        """
+        repo = self._duplicates_repository()
+        reason = repo.keep_copy_refusal(photo_id)
+        if reason is not None:
+            return {"error": reason}
+        self.begin_immediate()
+        try:
+            plan, reason = repo.keep_copy_plan(photo_id)
+            if reason is not None:
+                self.rollback()
+                return {"error": reason}
+            # Commits the transaction opened above.
+            self._apply_winner_loser_merge(
+                photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"],
+            )
+        except BaseException:
+            if self.in_transaction:
+                self.rollback()
+            raise
+        return {
+            "file_hash": plan["file_hash"],
+            "winner_id": photo_id,
+            "loser_ids": plan["loser_ids"],
+            "rating": repo.photo_metadata(photo_id).rating,
+            "flag": plan["winner_flag"],
+        }
 
     def bulk_resolve_by_folder(self, file_hashes, keep_folder):
         """Force-resolve many duplicate groups by keeping the photo whose
@@ -5770,6 +5821,26 @@ class Database:
             keyword_id, allow_leaf=allow_leaf,
         )
 
+    def merge_taxonomy_root_twins(self):
+        """Fold each top-level species twin into the row filed in the tree.
+
+        The pairs are ``KeywordRepository.taxonomy_root_twins``. Both rows
+        carry the same name, so the sidecars already hold the survivor's
+        flat keyword and the merge queues no XMP change. All-or-nothing;
+        returns the number of rows merged away.
+        """
+        merged = 0
+        with self.transaction():
+            if not self.in_transaction:
+                self.begin_immediate()
+            for root_id, placed_id in self.keywords.taxonomy_root_twins():
+                merged += self._merge_keyword_into(
+                    root_id, placed_id, pending_source_only=True,
+                )
+        if merged:
+            log.info("merged %d top-level species keyword twin(s)", merged)
+        return merged
+
     def repair_misclassified_location_ancestors(self):
         """Restore every location-tree node damaged by legacy taxonomy marking.
 
@@ -6421,7 +6492,7 @@ class Database:
         return self._keyword_repository().name_of(keyword_id)
 
     def get_top_level_species_keyword(self, name):
-        """The top-level keyword row (``id``, ``name``) ``add_keyword(name, is_species=True)`` matches, or None.
+        """The keyword row (``id``, ``name``) ``add_keyword(name, is_species=True)`` matches, or None.
 
         Taxonomy or general rows only, matched case-insensitively, taxonomy
         first, then lowest id.
@@ -10591,6 +10662,26 @@ class Database:
         set, and ``set_state`` works by id in any workspace.
         """
         return self._pending_archive_repository()
+
+    # -- Import job catalog reads --
+
+    def _imports_repository(self):
+        """Build the (catalog-wide) import-job repository on this connection."""
+        from repositories.imports import ImportRepository
+
+        return ImportRepository(self.conn)
+
+    @property
+    def imports(self) -> ImportRepository:
+        """The import job's catalog SQL: ``db.imports.photo_hash_row(folder, name)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_imports_repository``. Nothing in it is scoped to
+        a workspace, and its writes run in the caller's transaction (the
+        import job commits or rolls back through ``db.commit()`` /
+        ``db.rollback()``).
+        """
+        return self._imports_repository()
 
     @property
     def storage(self):

@@ -964,40 +964,45 @@ class PhotoRepository:
                 ORDER BY count DESC"""
         ).fetchall()
 
-        # Analysis coverage (within filter): how many of these photos each
-        # analysis has actually reached, so an empty result ("no misses
-        # flagged") is distinguishable from an analysis that never ran.
-        # Detections count a photo once however many qualifying boxes it has;
-        # the full-image placeholder row is not a detection.
-        analysis = self.conn.execute(
-            """SELECT
-                 SUM(EXISTS (
-                     SELECT 1 FROM detections det
-                      WHERE det.photo_id = s.id
-                        AND det.category = 'animal'
-                        AND det.detector_model != 'full-image'
-                        AND det.detector_confidence >= ?)) AS with_detection,
-                 SUM(p.subject_tenengrad IS NOT NULL) AS with_quality,
-                 SUM(p.eye_tenengrad IS NOT NULL) AS with_eye,
-                 SUM(p.miss_computed_at IS NOT NULL) AS with_misses
-               FROM _browse_summary_ids s
-               JOIN photos p ON p.id = s.id""",
-            (min_conf,),
-        ).fetchone()
-
         return {
             "filtered_total": filtered_total,
             "classified": classified,
             "unclassified": filtered_total - classified,
             "top_species": [{"species": r["species"], "count": r["count"]} for r in top_species],
             "folder_counts": [{"folder_id": r["folder_id"], "name": r["name"], "count": r["count"]} for r in folder_counts],
-            "analysis": {
-                "with_detection": int(analysis["with_detection"] or 0),
-                "with_quality": int(analysis["with_quality"] or 0),
-                "with_eye": int(analysis["with_eye"] or 0),
-                "with_misses": int(analysis["with_misses"] or 0),
-            },
+            "analysis": self._browse_analysis_coverage(min_conf),
         }
+
+    def _browse_analysis_coverage(self, min_conf):
+        """Recorded runs and results over this request's filtered TEMP ids.
+
+        A consistent run follows the existing model-run cache gate: an empty
+        result or at least one remaining detection for the recorded model.
+        Qualifying animal boxes are a separate, threshold-dependent metric.
+        """
+        row = self.conn.execute(
+            """SELECT
+                 SUM(EXISTS (
+                     SELECT 1 FROM detections det
+                      WHERE det.photo_id = s.id AND det.category = 'animal'
+                        AND det.detector_model != 'full-image'
+                        AND det.detector_confidence >= ?)) AS with_detection,
+                 SUM(EXISTS (
+                     SELECT 1 FROM detector_runs dr
+                      WHERE dr.photo_id = s.id AND dr.detector_model != 'full-image'
+                        AND (dr.box_count = 0 OR EXISTS (
+                            SELECT 1 FROM detections d
+                             WHERE d.photo_id = dr.photo_id
+                               AND d.detector_model = dr.detector_model)))) AS with_detection_run,
+                 SUM(p.subject_tenengrad IS NOT NULL) AS with_quality,
+                 SUM(p.eye_tenengrad IS NOT NULL) AS with_eye,
+                 SUM(p.miss_computed_at IS NOT NULL) AS with_misses
+               FROM _browse_summary_ids s JOIN photos p ON p.id = s.id""",
+            (min_conf,),
+        ).fetchone()
+        return {key: int(row[key] or 0) for key in (
+            "with_detection", "with_detection_run", "with_quality", "with_eye", "with_misses",
+        )}
 
     # -- companions and deletion ---------------------------------------------
 

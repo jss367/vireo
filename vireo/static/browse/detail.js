@@ -435,10 +435,9 @@ async function loadSummary() {
   }
 }
 
-// One line saying how much of the summarized scope each analysis has
-// actually reached, so "no misses flagged" never reads like "misses never
-// computed". A zero count on a non-empty scope says "never computed"; a
-// partial count says "K of N"; a complete misses pass says "checked on N".
+// Recorded completed runs and qualifying results are distinct: no animal
+// box does not imply the detector never ran. Missing run coverage on an
+// older response is unknown, rather than zero.
 // Empty when the scope has no photos or the server sent no coverage.
 function analysisCoverageText(/** @type {BrowseSummary} */ summary) {
   var total = Number(summary && summary.filtered_total) || 0;
@@ -457,12 +456,17 @@ function analysisCoverageText(/** @type {BrowseSummary} */ summary) {
   var missesSegment = misses === 0 ? 'misses never computed'
     : misses === total ? 'misses checked on ' + totalText
     : 'misses checked on ' + misses.toLocaleString() + ' of ' + totalText;
+  var detected = count(analysis.with_detection);
   var text = [
-    dataSegment('detections', 'on', analysis.with_detection),
+    analysis.with_detection_run == null ? '' : count(analysis.with_detection_run) === 0
+      ? 'no completed detection runs recorded'
+      : 'detection checked on ' + count(analysis.with_detection_run).toLocaleString() + ' of ' + totalText,
+    detected === 0 ? 'no qualifying animal detections recorded'
+      : 'animal detections recorded on ' + detected.toLocaleString() + ' of ' + totalText,
     dataSegment('quality data', 'for', analysis.with_quality),
     dataSegment('eye focus', 'for', analysis.with_eye),
     missesSegment,
-  ].join(' · ');
+  ].filter(Boolean).join(' · ');
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 

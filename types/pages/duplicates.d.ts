@@ -1,4 +1,5 @@
-interface DuplicatePhoto {id:number;filename?:string;path?:string;exists?:boolean;volume_offline?:boolean;workspaces?:string[];rating?:number;file_size?:number}
+interface DuplicatePhoto {id:number;filename?:string;path?:string;exists?:boolean;volume_offline?:boolean;workspaces?:string[];rating?:number;file_size?:number;rejected?:boolean;reason?:string}
+interface DuplicateKeepResponse {file_hash:string;winner_id:number;loser_ids:number[];rating:number;flag:string}
 interface DuplicateProposal {file_hash:string;winner:DuplicatePhoto;other_kept?:DuplicatePhoto[];losers:DuplicatePhoto[];status:string;empty_file_group?:boolean}
 interface DuplicateBucket {file_hashes:string[];folders:string[];group_count:number}
 interface DuplicateScan {proposals:DuplicateProposal[];buckets?:DuplicateBucket[];catalog_cleanup?:boolean;stale_group_count?:number;new_group_count?:number;changed_group_count?:number}
@@ -28,6 +29,7 @@ declare function showToast(message:string,kind:string):void;
 declare function showRevealFeedback(data:unknown):void;
 declare function openContextMenu(event:MouseEvent,items:Array<{label:string;onClick:()=>void}>):void;
 declare function renderResults(result:DuplicateScan):void;
+declare function renderResolvedGroup(group:DuplicateProposal):string;
 declare function visibleBucket(bucket:DuplicateBucket|undefined):DuplicateBucket|null;
 declare function isBulkTrashProtected(proposal:DuplicateProposal):boolean;
 declare function updateTrashProgress(container:HTMLElement|null,progress:DuplicateTrashProgress):void;
