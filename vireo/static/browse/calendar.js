@@ -5,11 +5,11 @@
 /* ---------- Calendar Heatmap ---------- */
 function toggleTimelineMode() {
   timelineMode = !timelineMode;
-  var btn = document.getElementById('calToggle');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('calToggle'));
   btn.style.color = timelineMode ? 'var(--accent)' : 'var(--text-muted)';
   btn.style.borderColor = timelineMode ? 'var(--accent)' : 'var(--border-secondary)';
 
-  var container = document.getElementById('calendarContainer');
+  var container = /** @type {HTMLElement} */ (document.getElementById('calendarContainer'));
   if (timelineMode) {
     container.classList.add('active');
     loadCalendarData();
@@ -21,13 +21,13 @@ function toggleTimelineMode() {
 
 function buildCalendarParams() {
   var params = new URLSearchParams();
-  params.set('year', calendarYear);
-  if (activeFolderId) params.set('folder_id', activeFolderId);
+  params.set('year', String(calendarYear));
+  if (activeFolderId) params.set('folder_id', String(activeFolderId));
   // Dashboard-scoped Browse composes the collection with active filters —
   // without this the calendar shows counts from the whole workspace/folder
   // and a day-click applies a date chip based on photos not in the collection.
   if (activeCollectionId && dashboardCollectionScope) {
-    params.set('collection_id', activeCollectionId);
+    params.set('collection_id', String(activeCollectionId));
   }
   // Strip any root-level `timestamp` rule from the calendar's own request.
   // selectCalendarDay adds/replaces exactly such a rule, and the filter
@@ -47,7 +47,7 @@ function reconcileCalendarLoadRenders() {
   while (gen > calendarRenderDecisionGen) {
     var state = calendarDataLoadStates[gen];
     if (!state || state.status === 'pending') return;
-    if (state.status === 'success') {
+    if (state.status === 'success' && state.data) {
       var currentKey = buildCalendarParams().toString();
       calendarRenderDecisionGen = gen;
       if (state.key === currentKey) {
@@ -73,7 +73,7 @@ async function loadCalendarData() {
 
   try {
     var data = await safeFetch('/api/photos/calendar?' + params.toString(), {
-      headers: Vireo.api.searchLaneHeaders(
+      headers: Vireo?.api?.searchLaneHeaders(
         'calendar', searchLaneSeq(calendarLane, params.toString())),
     });
     var state = calendarDataLoadStates[gen];
@@ -105,9 +105,9 @@ function getBrowseRulesWithoutTimestamp() {
 function renderCalendar() {
   if (!calendarData) return;
 
-  document.getElementById('calYearLabel').textContent = calendarData.year;
-  document.getElementById('calYearPrev').disabled = calendarData.year <= calendarData.min_year;
-  document.getElementById('calYearNext').disabled = calendarData.year >= calendarData.max_year;
+  /** @type {HTMLElement} */ (document.getElementById('calYearLabel')).textContent = String(calendarData.year);
+  /** @type {HTMLButtonElement} */ (document.getElementById('calYearPrev')).disabled = calendarData.year <= calendarData.min_year;
+  /** @type {HTMLButtonElement} */ (document.getElementById('calYearNext')).disabled = calendarData.year >= calendarData.max_year;
 
   // Compute intensity thresholds from data
   var counts = Object.values(calendarData.days);
@@ -116,7 +116,7 @@ function renderCalendar() {
   var t2 = Math.max(2, Math.ceil(maxCount * 0.40));
   var t3 = Math.max(3, Math.ceil(maxCount * 0.70));
 
-  function getLevel(count) {
+  function getLevel(/** @type {number} */ count) {
     if (!count) return 0;
     if (count <= t1) return 1;
     if (count <= t2) return 2;
@@ -126,20 +126,20 @@ function renderCalendar() {
 
   // Build month labels
   var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  var monthLabels = document.getElementById('calMonthLabels');
+  var monthLabels = /** @type {HTMLElement} */ (document.getElementById('calMonthLabels'));
   monthLabels.innerHTML = months.map(function(m) { return '<span>' + m + '</span>'; }).join('');
 
   // Build grid: 53 weeks x 7 days
-  var grid = document.getElementById('calGrid');
+  var grid = /** @type {HTMLElement} */ (document.getElementById('calGrid'));
   grid.innerHTML = '';
 
   var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   for (var d = 0; d < 7; d++) {
     var label = document.createElement('div');
     label.className = 'day-label';
-    label.textContent = (d % 2 === 1) ? dayNames[d].charAt(0) : '';
-    label.style.gridRow = (d + 1);
-    label.style.gridColumn = 1;
+    label.textContent = (d % 2 === 1) ? (dayNames[d] || '').charAt(0) : '';
+    label.style.gridRow = String(d + 1);
+    label.style.gridColumn = '1';
     grid.appendChild(label);
   }
 
@@ -161,25 +161,25 @@ function renderCalendar() {
     var cell = document.createElement('div');
     cell.className = 'day-cell' + (level ? ' level-' + level : ' empty') +
         (selectedDay === dateStr ? ' selected' : '');
-    cell.style.gridRow = (dow + 1);
-    cell.style.gridColumn = (weekNum + 2);
+    cell.style.gridRow = String(dow + 1);
+    cell.style.gridColumn = String(weekNum + 2);
     cell.dataset.date = dateStr;
-    cell.dataset.count = count;
+    cell.dataset.count = String(count);
 
     cell.addEventListener('click', function() {
-      var d = this.dataset.date;
+      var d = this.dataset.date || '';
       if (selectedDay === d) {
         clearCalendarSelection();
       } else {
-        selectCalendarDay(d, parseInt(this.dataset.count));
+        selectCalendarDay(d, parseInt(this.dataset.count || '0'));
       }
     });
 
     cell.addEventListener('mouseenter', function(e) {
-      var tip = document.getElementById('dayTooltip');
+      var tip = /** @type {HTMLElement} */ (document.getElementById('dayTooltip'));
       var dateObj = new Date(this.dataset.date + 'T12:00:00');
       var formatted = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-      var c = parseInt(this.dataset.count);
+      var c = parseInt(this.dataset.count || '0');
       tip.textContent = formatted + ' \u2014 ' + c + ' photo' + (c !== 1 ? 's' : '');
       tip.style.display = 'block';
       tip.style.left = (e.clientX + 10) + 'px';
@@ -187,20 +187,20 @@ function renderCalendar() {
     });
 
     cell.addEventListener('mousemove', function(e) {
-      var tip = document.getElementById('dayTooltip');
+      var tip = /** @type {HTMLElement} */ (document.getElementById('dayTooltip'));
       tip.style.left = (e.clientX + 10) + 'px';
       tip.style.top = (e.clientY - 30) + 'px';
     });
 
     cell.addEventListener('mouseleave', function() {
-      document.getElementById('dayTooltip').style.display = 'none';
+      /** @type {HTMLElement} */ (document.getElementById('dayTooltip')).style.display = 'none';
     });
 
     grid.appendChild(cell);
   }
 }
 
-function selectCalendarDay(dateStr, count) {
+function selectCalendarDay(/** @type {string} */ dateStr, /** @type {number} */ count) {
   // /api/photos/calendar can resolve before VireoFilter.init() has
   // loaded /api/filters/fields, so a click that lands in that window
   // would reach addRule -> makeRule with state.fields still null and
@@ -212,8 +212,8 @@ function selectCalendarDay(dateStr, count) {
   selectedDay = dateStr;
   var dateObj = new Date(dateStr + 'T12:00:00');
   var formatted = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-  document.getElementById('calSelectionText').textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
-  document.getElementById('calSelection').classList.add('active');
+  /** @type {HTMLElement} */ (document.getElementById('calSelectionText')).textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
+  /** @type {HTMLElement} */ (document.getElementById('calSelection')).classList.add('active');
 
   // Day selection is a capture-date rule in the filter bar (single-day
   // between; the backend pads the upper bound to end-of-day).
@@ -243,13 +243,13 @@ function clearCalendarSelection() {
   // and back off would otherwise silently clear their date filter.
   var hadSelection = selectedDay !== null;
   selectedDay = null;
-  document.getElementById('calSelection').classList.remove('active');
+  /** @type {HTMLElement} */ (document.getElementById('calSelection')).classList.remove('active');
   if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
   if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
   if (calendarData) renderCalendar();
 }
 
-function calendarChangeYear(delta) {
+function calendarChangeYear(/** @type {number} */ delta) {
   if (delta < 0 && calendarData && calendarYear <= calendarData.min_year) return;
   if (delta > 0 && calendarData && calendarYear >= calendarData.max_year) return;
   calendarYear += delta;
@@ -262,7 +262,7 @@ function calendarChangeYear(delta) {
   // would silently clear the user's date filter.
   var hadSelection = selectedDay !== null;
   selectedDay = null;
-  document.getElementById('calSelection').classList.remove('active');
+  /** @type {HTMLElement} */ (document.getElementById('calSelection')).classList.remove('active');
   if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
   if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
   loadCalendarData();

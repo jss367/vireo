@@ -52,20 +52,20 @@ function updateFilterSummary() {
   updateScrollPosition();
 }
 
-function updateThumbSize(val) {
-  document.getElementById('grid').style.setProperty('--thumb-size', val + 'px');
+function updateThumbSize(/** @type {string | number} */ val) {
+  /** @type {HTMLElement} */ (document.getElementById('grid')).style.setProperty('--thumb-size', val + 'px');
   updateGridTail();
 }
 
 function toggleDetectionBoxes() {
   showDetectionBoxes = !showDetectionBoxes;
-  var btn = document.getElementById('detBoxToggle');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('detBoxToggle'));
   btn.style.color = showDetectionBoxes ? 'var(--accent)' : 'var(--text-muted)';
   btn.style.borderColor = showDetectionBoxes ? 'var(--accent)' : 'var(--border-secondary)';
   renderGrid();
 }
 
-function appendVisualScopeParams(params) {
+function appendVisualScopeParams(/** @type {URLSearchParams} */ params) {
   // Summary/calendar/typeahead counts must describe the same photos the
   // visually-filtered grid shows; the backend narrows to the matched set
   // when the clause is healthy and leaves rules untouched otherwise.
@@ -73,17 +73,17 @@ function appendVisualScopeParams(params) {
   if (visual) params.set('visual', JSON.stringify(visual));
 }
 
-function reloadBrowseResults(options) {
+function reloadBrowseResults(/** @type {BrowseReloadOptions | undefined} */ options = undefined) {
   resetAndLoad(options);
 }
 
 function updateScrollPosition() {
-  var el = document.getElementById('filterSummary');
+  var el = /** @type {HTMLElement} */ (document.getElementById('filterSummary'));
   var positionOffset = loadedWindowOffset();
   var stackedTotals = totalPhotos.toLocaleString() + ' items · '
     + totalBrowseStacks.toLocaleString() + (totalBrowseStacks === 1 ? ' stack · ' : ' stacks · ')
     + totalUnderlyingPhotos.toLocaleString() + ' photos';
-  var resultLabel = function(position) {
+  var resultLabel = function(/** @type {number | string} */ position) {
     if (browseStacksEnabled()) {
       return position + ' of ' + stackedTotals;
     }
@@ -96,24 +96,24 @@ function updateScrollPosition() {
     return;
   }
   // Find which cards are visible in the viewport
-  var cards = document.querySelectorAll('.grid-card');
+  var cards = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.grid-card'));
   if (cards.length === 0) {
     el.textContent = browseStacksEnabled()
       ? stackedTotals
       : totalPhotos.toLocaleString() + ' photos';
     return;
   }
-  var container = document.getElementById('gridContainer');
+  var container = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
   var scrollTop = container.scrollTop;
   var viewHeight = container.clientHeight;
 
   // Viewport entirely below every loaded card (placeholder territory):
   // reporting the loaded range would be a lie, so estimate within the
   // bounded runway represented by the rendered skeleton cells.
-  var lastCard = cards[cards.length - 1];
+  var lastCard = cards[cards.length - 1]; if (!lastCard) return;
   if (lastCard.offsetTop + lastCard.offsetHeight < scrollTop) {
     var frac = Math.min(1, (scrollTop + viewHeight / 2) / Math.max(1, container.scrollHeight));
-    var skeletonCount = document.querySelectorAll('#gridTail .skel-card').length;
+    var skeletonCount = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#gridTail .skel-card')).length;
     var representedPhotos = Math.min(
       totalPhotos - positionOffset,
       photos.length + skeletonCount
@@ -129,13 +129,15 @@ function updateScrollPosition() {
   var first = 1;
   var last = cards.length;
   for (var i = 0; i < cards.length; i++) {
-    if (cards[i].offsetTop + cards[i].offsetHeight > scrollTop) {
+    var card = cards[i]; if (!card) continue;
+    if (card.offsetTop + card.offsetHeight > scrollTop) {
       first = i + 1;
       break;
     }
   }
   for (i = cards.length - 1; i >= 0; i--) {
-    if (cards[i].offsetTop < scrollTop + viewHeight) {
+    var endCard = cards[i]; if (!endCard) continue;
+    if (endCard.offsetTop < scrollTop + viewHeight) {
       last = i + 1;
       break;
     }

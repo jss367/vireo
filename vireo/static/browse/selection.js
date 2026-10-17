@@ -3,7 +3,7 @@
    browse/*.js files in dependency order. */
 
 /* ---------- Photo Selection & Detail ---------- */
-function selectPhoto(e, id, idx, opts) {
+function selectPhoto(/** @type {Pick<MouseEvent, "shiftKey" | "metaKey" | "ctrlKey"> & Partial<Pick<MouseEvent, "detail">>} */ e, /** @type {number} */ id, /** @type {number} */ idx, /** @type {{stackAware?: boolean}} */ opts = {}) {
   // Snapshot the pre-click selection so the grid dblclick handler can tell
   // "these clicks made the selection" from "these clicks reaffirmed an
   // existing one" — the two produce identical ``selectedPhotos`` when the
@@ -12,7 +12,7 @@ function selectPhoto(e, id, idx, opts) {
   // ``event.detail`` (1 for the first, 2 for the second of a dblclick), so
   // detail > 1 preserves the pre-first-click snapshot through the second.
   // Codex P2 on PR #1672.
-  if (!(e && e.detail > 1)) {
+  if (!(e && (e.detail || 0) > 1)) {
     browseSelectionBeforeStackDblClickStart = new Set(selectedPhotos);
   }
   anchorRestoreEpoch++;
@@ -29,11 +29,11 @@ function selectPhoto(e, id, idx, opts) {
       var start = Math.min(selectedIndex, idx);
       var end = Math.max(selectedIndex, idx);
       for (var i = start; i <= end; i++) {
-        if (photos[i] && (!photos[i].folder_status ||
-            photos[i].folder_status === 'ok' || photos[i].folder_status === 'partial')) {
+        var photo = photos[i]; if (photo && (!photo.folder_status ||
+            photo.folder_status === 'ok' || photo.folder_status === 'partial')) {
           // Each card in the range contributes what clicking it would: a
           // stack card contributes its frames, not just its cover.
-          browseSelectionIdsForClick(photos[i].id).forEach(function(rangeId) {
+          browseSelectionIdsForClick(photo.id).forEach(function(rangeId) {
             selectedPhotos.add(rangeId);
           });
         }
@@ -91,10 +91,10 @@ function selectPhoto(e, id, idx, opts) {
         && (selectedPhotos.size > 0 || clickIds.indexOf(selectedPhotoId) !== -1)) {
       selectedPhotoId = null;
       selectedIndex = -1;
-      var detail = document.getElementById('detailContent');
+      var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
       if (detail && detail.classList.contains('visible')) {
         detail.classList.remove('visible');
-        var summary = document.getElementById('summaryPanel');
+        var summary = /** @type {HTMLElement} */ (document.getElementById('summaryPanel'));
         if (summary) summary.classList.remove('hidden');
         loadSummary();
       }
@@ -171,14 +171,14 @@ function buildBrowseIdsRequest() {
     // stack's quality-ranked cover isn't the earliest member under the
     // sort (Codex P2 on PR #1561).
     var idsParams = new URLSearchParams();
-    idsParams.set('sort', document.getElementById('sortSelect').value);
+    idsParams.set('sort', /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value);
     if (browseStacksEnabled()) idsParams.set('stacks', 'true');
     url = '/api/collections/' + activeCollectionId + '/photo-ids?' + idsParams.toString();
   } else {
     url = '/api/photos/query';
-    var idsBody = {
+    /** @type {BrowseQueryBody} */ var idsBody = {
       rules: getBrowseRules() || [],
-      sort: document.getElementById('sortSelect').value,
+      sort: /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value,
       ids_only: true,
     };
     // Mirror the grid's Stacks projection on the general query path as
@@ -213,7 +213,7 @@ async function selectAllMatchingPhotos() {
 
   showToast('Selecting all matching photos...', 'info');
   try {
-    var data = await safeFetch(request.url, request.options, { toast: false });
+    /** @type {BrowseIdsResponse} */ var data = await safeFetch(request.url, request.options, { toast: false });
     if (requestSeq !== selectAllRequestSeq || selectionEpoch !== anchorRestoreEpoch || !windowIsCurrent()) return;
     selectedPhotos.clear();
     (data.photo_ids || data.ids || []).forEach(function(id) { selectedPhotos.add(id); });
@@ -225,32 +225,32 @@ async function selectAllMatchingPhotos() {
       'success'
     );
   } catch(e) {
-    showToast('Could not select all photos: ' + (e.message || e), 'error');
+    showToast('Could not select all photos: ' + ((e instanceof Error && e.message) || e), 'error');
   }
 }
 
-function selectionIdsKey(ids) {
+function selectionIdsKey(/** @type {readonly number[]} */ ids) {
   return ids.slice().sort(function(a, b) { return a - b; }).join(',');
 }
 
-function updateCompareButton(ids) {
-  var btn = document.getElementById('compareBtn');
+function updateCompareButton(/** @type {number[]} */ ids) {
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('compareBtn'));
   if (!btn) return;
   var canCompare = ids.length >= 2;
   btn.style.display = canCompare ? '' : 'none';
   btn.disabled = !canCompare;
 }
 
-function updateBestBatchButton(ids) {
-  var btn = document.getElementById('bestBatchBtn');
+function updateBestBatchButton(/** @type {number[]} */ ids) {
+  var btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('bestBatchBtn'));
   if (!btn) return;
   var canFind = ids.length >= 1;
   btn.style.display = canFind ? '' : 'none';
   btn.disabled = !canFind;
 }
 
-function updateBurstReviewButton(ids) {
-  var btn = document.getElementById('burstReviewBtn');
+function updateBurstReviewButton(/** @type {number[]} */ ids) {
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('burstReviewBtn'));
   if (!btn) return;
   var canReview = ids.length >= 2;
   btn.style.display = canReview ? '' : 'none';
@@ -267,8 +267,8 @@ function detailMatchesSelectedPhoto() {
 // selection without paying the full selectPhoto side-effects.
 function refreshCardSelectionVisuals() {
   var byId = new Map(photos.map(function(photo) { return [photo.id, photo]; }));
-  document.querySelectorAll('.grid-card, .browse-stack-member').forEach(function(el) {
-    var cardId = parseInt(el.dataset.id, 10);
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.grid-card, .browse-stack-member')).forEach(function(el) {
+    var cardId = parseInt(el.dataset.id || '', 10);
     // Tray members are single photos even when their cover is a stack card,
     // so they never take the stack-wide rule: address them by id only.
     var state = el.classList.contains('browse-stack-member')
@@ -311,10 +311,10 @@ function clearSelection() {
   // If the detail panel is still open after clearing, its actions (setFlag,
   // setColorLabel, addKeyword, etc.) early-return on the null selectedPhotoId
   // and silently do nothing. Hide it so there is no ghost UI to interact with.
-  var detail = document.getElementById('detailContent');
+  var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
   if (detail && detail.classList.contains('visible')) {
     detail.classList.remove('visible');
-    var summary = document.getElementById('summaryPanel');
+    var summary = /** @type {HTMLElement} */ (document.getElementById('summaryPanel'));
     if (summary) summary.classList.remove('hidden');
     loadSummary();
   }

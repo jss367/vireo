@@ -2,11 +2,11 @@
    Classic script sharing page globals; browse.html loads the
    browse/*.js files in dependency order. */
 
-function updateSelectionPanel(ids) {
-  var panel = document.getElementById('selectionPanel');
+function updateSelectionPanel(/** @type {number[]} */ ids) {
+  var panel = /** @type {HTMLElement} */ (document.getElementById('selectionPanel'));
   if (!panel) return;
   if (ids.length <= 1) {
-    var dc = document.getElementById('detailContent');
+    var dc = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
     if (dc) dc.classList.remove('batch-mode');
     // Clear batch-only Mixed markers immediately so they can't linger while the
     // single-photo detail fetch is in flight.
@@ -15,23 +15,23 @@ function updateSelectionPanel(ids) {
     _batchToggleMixed('colorMixed', false);
     var wasVisible = !panel.classList.contains('hidden');
     panel.classList.add('hidden');
-    Vireo.browse.panelRequests.keywords.invalidate();
-    Vireo.browse.selectionPanel.keywords.reset();
-    var list = document.getElementById('selectionKeywordSuggestions');
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.reset();
+    var list = /** @type {HTMLElement} */ (document.getElementById('selectionKeywordSuggestions'));
     if (list) list.innerHTML = '';
     // Same teardown for the prediction rows — invalidation drops any
     // in-flight selection response so it can't paint into the panel the user
     // has just collapsed back to a single photo.
-    Vireo.browse.panelRequests.predictions.invalidate();
-    Vireo.browse.selectionPanel.predictions.reset();
-    var predList = document.getElementById('selectionPredictions');
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.predictions.invalidate();
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.reset();
+    var predList = /** @type {HTMLElement} */ (document.getElementById('selectionPredictions'));
     if (predList) predList.innerHTML = '';
     renderSelectionWildlifeState([]);
     if (wasVisible && selectedPhotoId) {
       loadDetail(selectedPhotoId);
     } else if (wasVisible) {
-      var detail = document.getElementById('detailContent');
-      var summary = document.getElementById('summaryPanel');
+      var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
+      var summary = /** @type {HTMLElement} */ (document.getElementById('summaryPanel'));
       if (detail) detail.classList.remove('visible');
       if (summary) summary.classList.remove('hidden');
       loadSummary();
@@ -39,9 +39,9 @@ function updateSelectionPanel(ids) {
     return;
   }
 
-  Vireo.browse.panelRequests.detailPredictions.invalidate();
-  detail = document.getElementById('detailContent');
-  summary = document.getElementById('summaryPanel');
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.detailPredictions.invalidate();
+  detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
+  summary = /** @type {HTMLElement} */ (document.getElementById('summaryPanel'));
   if (summary) summary.classList.add('hidden');
   // Reuse the detail panel as a batch inspector for the whole selection:
   // Rating/Flag/Color/Location act on all selected photos, single-photo-only
@@ -51,7 +51,7 @@ function updateSelectionPanel(ids) {
     detail.classList.add('batch-mode');
   }
   panel.classList.remove('hidden');
-  document.getElementById('selectionCount').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('selectionCount')).textContent =
     ids.length.toLocaleString() + ' photos selected' + browseSelectionStackNote(ids);
   updatePasteEditSection(ids);
   renderSelectionWildlifeState(ids);
@@ -60,17 +60,17 @@ function updateSelectionPanel(ids) {
   // designed way to apply one suggestion to many photos.
   renderBatchInspector(ids, { preserveExifSuggestion: true });
   if (ids.length > 1000) {
-    Vireo.browse.panelRequests.keywords.invalidate();
-    Vireo.browse.selectionPanel.keywords.reset();
-    list = document.getElementById('selectionKeywordSuggestions');
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.reset();
+    list = /** @type {HTMLElement} */ (document.getElementById('selectionKeywordSuggestions'));
     if (list) {
       list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
     }
     // Say the cap out loud here too, rather than leaving an empty
     // Predictions box that reads as "nothing predicted".
-    Vireo.browse.panelRequests.predictions.invalidate();
-    Vireo.browse.selectionPanel.predictions.reset();
-    predList = document.getElementById('selectionPredictions');
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.predictions.invalidate();
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.reset();
+    predList = /** @type {HTMLElement} */ (document.getElementById('selectionPredictions'));
     if (predList) {
       predList.innerHTML = '<div class="selection-empty">Predictions are available for selections of 1,000 photos or fewer.</div>';
     }
@@ -80,9 +80,9 @@ function updateSelectionPanel(ids) {
   loadSelectionPredictions(ids);
 }
 
-function updatePasteEditSection(ids) {
-  var section = document.getElementById('pasteEditSection');
-  var hint = document.getElementById('pasteEditHint');
+function updatePasteEditSection(/** @type {number[]} */ ids) {
+  var section = /** @type {HTMLElement} */ (document.getElementById('pasteEditSection'));
+  var hint = /** @type {HTMLElement} */ (document.getElementById('pasteEditHint'));
   if (!section) return;
   var copied = window.vireoEditNav ? window.vireoEditNav.getCopiedRecipe() : null;
   if (!copied || !copied.recipe) {
@@ -98,7 +98,7 @@ function updatePasteEditSection(ids) {
   }
 }
 
-function _browseHasDevelopmentSettings(recipe) {
+function _browseHasDevelopmentSettings(/** @type {Record<string, unknown> | null | undefined} */ recipe) {
   return !!(recipe && typeof recipe === 'object' && Object.keys(recipe).some(function(key) {
     return key !== 'version';
   }));
@@ -106,7 +106,7 @@ function _browseHasDevelopmentSettings(recipe) {
 
 var _browseDevelopmentCopySeq = 0;
 
-async function copyDevelopmentSettingsFromPhoto(photoId) {
+async function copyDevelopmentSettingsFromPhoto(/** @type {number} */ photoId) {
   var photo = photos.find(function(candidate) { return candidate.id === Number(photoId); });
   if (!photoId || !window.vireoEditNav) return;
   var copySeq = ++_browseDevelopmentCopySeq;
@@ -116,7 +116,7 @@ async function copyDevelopmentSettingsFromPhoto(photoId) {
   try {
     // Fetch the authoritative recipe so a long-lived Browse tab cannot copy
     // settings that were changed in another surface since its last refresh.
-    var data = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false});
+    var data = await /** @type {Promise<{recipe?: Record<string, unknown> | null}>} */ (safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false}));
     if (copySeq !== _browseDevelopmentCopySeq) return;
     if (
       copyToken &&
@@ -155,13 +155,13 @@ async function copyDevelopmentSettingsFromPhoto(photoId) {
     if (typeof window.vireoEditNav.cancelCopiedRecipe === 'function') {
       if (!await window.vireoEditNav.cancelCopiedRecipe(copyToken)) return;
     }
-    showToast(e.message || 'Could not copy development settings', 'error');
+    showToast((e instanceof Error && e.message) || 'Could not copy development settings', 'error');
   }
 }
 
 async function openBatchDevelopmentEditor() {
   try { await VireoBatchEdits.open(getActiveSelection().slice()); }
-  catch (error) { showToast(error.message || 'Could not open batch editor', 'error'); }
+  catch (error) { showToast((error instanceof Error && error.message) || 'Could not open batch editor', 'error'); }
 }
 
 var _browseDevelopmentPasteInFlight = false;
@@ -178,14 +178,14 @@ async function pasteEditSettingsToSelection() {
     showToast('Copy development settings from a photo first.', 'error');
     return;
   }
-  var btn = document.getElementById('pasteEditBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('pasteEditBtn'));
   _browseDevelopmentPasteInFlight = true;
   if (btn) btn.disabled = true;
   try {
     var data = await VireoBatchEdits.paste(ids.slice());
     if (data) showToast(VireoBatchEdits.resultMessage(data), data.skipped.length ? 'warning' : 'success');
   } catch (e) {
-    showToast(e.message || 'Could not paste development settings', 'error');
+    showToast((e instanceof Error && e.message) || 'Could not paste development settings', 'error');
   } finally {
     _browseDevelopmentPasteInFlight = false;
     if (btn) btn.disabled = false;
@@ -202,12 +202,13 @@ function openBrowseCompare() {
   return browseCompare.open(getActiveSelection());
 }
 
-function findBrowsePhoto(id) {
+function findBrowsePhoto(/** @type {number} */ id) {
   var topLevel = photos.find(function(p) { return p.id === id; });
   if (topLevel) return topLevel;
   var coverIds = Object.keys(browseStackMembers);
   for (var i = 0; i < coverIds.length; i++) {
-    var member = (browseStackMembers[coverIds[i]] || []).find(function(p) {
+    var coverKey = coverIds[i]; if (!coverKey) continue;
+    var member = (browseStackMembers[coverKey] || []).find(function(p) {
       return p.id === id;
     });
     if (member) return member;
@@ -215,21 +216,21 @@ function findBrowsePhoto(id) {
   return null;
 }
 
-async function loadSelectionKeywordSuggestions(ids) {
-  return Vireo.browse.panelLoaders.keywords.load(ids);
+async function loadSelectionKeywordSuggestions(/** @type {number[]} */ ids) {
+  return /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelLoaders.keywords.load(ids);
 }
 
-function renderSelectionKeywordSuggestions(keywords, selectedCount) {
-  var list = document.getElementById('selectionKeywordSuggestions');
+function renderSelectionKeywordSuggestions(/** @type {SelectionKeywordSuggestion[]} */ keywords, /** @type {number} */ selectedCount) {
+  var list = /** @type {HTMLElement} */ (document.getElementById('selectionKeywordSuggestions'));
   if (!list) return;
   if (!keywords.length) {
-    Vireo.browse.selectionPanel.keywords.reset();
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.reset();
     list.innerHTML = '<div class="selection-empty">No keywords on selected photos.</div>';
     return;
   }
 
   var html = '';
-  Vireo.browse.selectionPanel.keywords.replace(keywords);
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.replace(keywords);
   var groupDefinitions = [
     { type: 'taxonomy', label: 'Species' },
     { type: 'location', label: 'Locations' },
@@ -237,13 +238,13 @@ function renderSelectionKeywordSuggestions(keywords, selectedCount) {
     { type: 'genre', label: 'Genres' },
     { type: 'general', label: 'Keywords' }
   ];
-  var keywordsByType = {};
+  /** @type {Record<string, SelectionKeywordSuggestion[]>} */ var keywordsByType = {};
   keywords.forEach(function(k) {
     var type = k.type || 'general';
     if (!keywordsByType[type]) keywordsByType[type] = [];
-    keywordsByType[type].push(k);
+    (keywordsByType[type] || (keywordsByType[type] = [])).push(k);
   });
-  function renderKeywordRow(k) {
+  function renderKeywordRow(/** @type {SelectionKeywordSuggestion} */ k) {
     var missing = k.missing_count || 0;
     var count = k.count || 0;
     var actions = '';
@@ -276,12 +277,12 @@ function renderSelectionKeywordSuggestions(keywords, selectedCount) {
   list.innerHTML = html;
 }
 
-async function renderSelectionWildlifeState(ids) {
-  var status = document.getElementById('selectionWildlifeStatus');
-  var actions = document.getElementById('selectionWildlifeActions');
+async function renderSelectionWildlifeState(/** @type {number[]} */ ids) {
+  var status = /** @type {HTMLElement} */ (document.getElementById('selectionWildlifeStatus'));
+  var actions = /** @type {HTMLElement} */ (document.getElementById('selectionWildlifeActions'));
   if (!status || !actions) return;
   if (!ids || !ids.length) {
-    Vireo.browse.panelRequests.wildlife.invalidate();
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.wildlife.invalidate();
     status.textContent = '';
     actions.innerHTML = '';
     return;
@@ -290,7 +291,7 @@ async function renderSelectionWildlifeState(ids) {
   // "Select all matching" can include off-page photos that are absent from
   // ``photos``, and filtering client-side would omit them from the counts
   // and hide batch controls that should still be available.
-  var request = Vireo.browse.panelRequests.wildlife.begin();
+  var request = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.wildlife.begin(); if (!request) return;
   var data;
   try {
     data = await safeFetch('/api/selection/wildlife-state', {
@@ -343,7 +344,7 @@ async function renderSelectionWildlifeState(ids) {
   actions.innerHTML = html;
 }
 
-async function setSelectionWildlifeExcluded(excluded) {
+async function setSelectionWildlifeExcluded(/** @type {boolean} */ excluded) {
   var ids = getActiveSelection();
   if (!ids.length) return;
   var data;
@@ -379,8 +380,8 @@ async function setSelectionWildlifeExcluded(excluded) {
   showUndoToast();
 }
 
-async function applySelectionKeyword(keywordId) {
-  var row = Vireo.browse.selectionPanel.keywords.get(keywordId);
+async function applySelectionKeyword(/** @type {number} */ keywordId) {
+  var row = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.get(keywordId);
   var ids = row ? row.missingPhotoIds : [];
   if (!ids.length) return;
   try {
@@ -391,7 +392,7 @@ async function applySelectionKeyword(keywordId) {
     });
   } catch(e) { return; }
   await _refreshBrowseKeywordState(ids);
-  Vireo.browse.panelRequests.keywords.invalidate();
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();
@@ -400,11 +401,11 @@ async function applySelectionKeyword(keywordId) {
   showUndoToast();
 }
 
-async function removeSelectionKeyword(keywordId) {
-  var row = Vireo.browse.selectionPanel.keywords.get(keywordId);
+async function removeSelectionKeyword(/** @type {number} */ keywordId) {
+  var row = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.get(keywordId);
   var ids = row ? row.presentPhotoIds : [];
   if (!ids.length) return;
-  var removedName = row.name || null;
+  var removedName = row ? row.name || null : null;
   try {
     await safeFetch('/api/batch/keyword-remove', {
       method: 'POST',
@@ -414,7 +415,7 @@ async function removeSelectionKeyword(keywordId) {
   } catch(e) { return; }
   await _refreshBrowseKeywordState(ids);
   _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
-  Vireo.browse.panelRequests.keywords.invalidate();
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();

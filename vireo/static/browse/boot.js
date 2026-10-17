@@ -17,9 +17,9 @@
 // re-fetch. Initialize here so the pre-await snapshot reads the same ``0``
 // the rest of the script sees (Codex review r3686317674).
 var folderHealthRefreshSeq = 0;
-Vireo.browse.selectionPanel.bindActions();
-VireoViewPreferences.restoreAll(document.querySelector('.browse-view-controls'));
-updateThumbSize(document.getElementById('thumbSizeSlider').value);
+/** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.bindActions();
+VireoViewPreferences.restoreAll(/** @type {HTMLElement | null} */ (document.querySelector('.browse-view-controls')));
+updateThumbSize(/** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider')).value);
 bootstrapBrowse();
 
 // Subscribe to folder-health changes (dispatched from the navbar's polling)
@@ -35,7 +35,7 @@ document.addEventListener('vireo:folder-health-changed', function(event) {
 // ``loading`` mutex, so the observer's first callback cannot start a
 // competing page load ahead of bootstrap (the observer itself is built in
 // scroll.js).
-observer.observe(document.getElementById('scrollSentinel'));
+observer.observe(/** @type {HTMLElement} */ (document.getElementById('scrollSentinel')));
 
 async function bootstrapBrowse() {
   // If deep-linking to a specific photo, skip normal bootstrap — the deep-link handler takes over
@@ -81,9 +81,9 @@ async function bootstrapBrowse() {
   // ``?folder_id=N`` in the URL (Codex review r3686605296). Assigning here
   // means any concurrent refresh sees the right scope.
   var pageParams = new URLSearchParams(window.location.search);
-  var initialFolderId = parseInt(pageParams.get('folder_id'), 10);
+  var initialFolderId = parseInt(pageParams.get('folder_id') || '', 10);
   if (!isNaN(initialFolderId)) activeFolderId = initialFolderId;
-  var initialCollectionId = parseInt(pageParams.get('collection_id'), 10);
+  var initialCollectionId = parseInt(pageParams.get('collection_id') || '', 10);
   if (!isNaN(initialCollectionId)) {
     activeCollectionId = initialCollectionId;
     dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
@@ -95,15 +95,15 @@ async function bootstrapBrowse() {
     // reloads through /api/photos/query — the bootstrap endpoint is
     // scope-only (Phase 5 removed its legacy filter params).
     var initParams = new URLSearchParams();
-    initParams.set('sort', document.getElementById('sortSelect').value);
+    initParams.set('sort', /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value);
     if (browseStacksEnabled()) initParams.set('stacks', '1');
-    if (activeFolderId) initParams.set('folder_id', activeFolderId);
+    if (activeFolderId) initParams.set('folder_id', String(activeFolderId));
     // Collection-only deep links keep their historical endpoint behavior,
     // while Dashboard links opt into composable filters via dashboard_scope.
     // The combined init endpoint still needs the collection id for first paint
     // in either case.
-    if (activeCollectionId) initParams.set('collection_id', activeCollectionId);
-    initParams.set('per_page', perPage);
+    if (activeCollectionId) initParams.set('collection_id', String(activeCollectionId));
+    initParams.set('per_page', String(perPage));
     var missingSnapshotVersionAtInitStart =
       typeof _missingFoldersSnapshotVersion !== 'undefined'
         ? _missingFoldersSnapshotVersion
@@ -168,7 +168,7 @@ async function bootstrapBrowse() {
     }
     refreshPendingSyncBanner();
 
-    document.getElementById('loadingState').style.display = 'none';
+    /** @type {HTMLElement} */ (document.getElementById('loadingState')).style.display = 'none';
     // Lazy-load collection photo counts to avoid N+1 on init. Skip this
     // when the health refresh already ran — it issued its own
     // loadCollectionCounts() and repeating the call here would just fire
@@ -276,7 +276,7 @@ async function bootstrapBrowse() {
       // saved rules + visual expression loads correctly; the URL filter
       // chips are cleared because loadExpression() replaces state.root, so
       // surface a toast so the drop isn't silent.
-      var deepLinkedCollection = collectionLink ? collectionsById[activeCollectionId] : null;
+      var deepLinkedCollection = collectionLink && activeCollectionId != null ? collectionsById[activeCollectionId] : null;
       var deepLinkedIsVisual = !!(deepLinkedCollection && deepLinkedCollection.visual_json);
       if (collectionLink && hasExplicitFilterParams && !dashboardCollectionScope) {
         if (deepLinkedIsVisual) {
@@ -343,7 +343,7 @@ async function bootstrapBrowse() {
     // page-1 request against the same ``loadEpoch``
     // (Codex review r3686191138).
     healthChangedDuringInit = folderHealthRefreshSeq !== bootstrapHealthSeq;
-    document.getElementById('loadingState').textContent = 'Error loading.';
+    /** @type {HTMLElement} */ (document.getElementById('loadingState')).textContent = 'Error loading.';
   }
   // If a folder-health event fired while /api/browse/init was in flight,
   // refreshBrowseAfterFolderHealthChange() has already taken over the load
@@ -373,10 +373,10 @@ async function bootstrapBrowse() {
 // interruptions, fall through to whatever refreshBrowseAfterFolderHealthChange
 // last rendered rather than deep-link forever (Codex review r3686778061).
 var _DEEP_LINK_MAX_RETRIES = 5;
-async function _runPhotoDeepLink(photoId) {
+async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // A focused deep link must expose the requested photo as a top-level card.
   // Disable stacks for this view so its later lazy pages use the same shape.
-  var stackToggle = document.getElementById('browseStacksToggle');
+  var stackToggle = /** @type {HTMLInputElement} */ (document.getElementById('browseStacksToggle'));
   if (stackToggle) stackToggle.checked = false;
   // Snapshot the health-refresh generation BEFORE any await. If a
   // vireo:folder-health-changed event fires while this loader is awaiting
@@ -401,7 +401,7 @@ async function _runPhotoDeepLink(photoId) {
   // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
   loading = true;
   var deepLinkLoaded = false;
-  var isDeepLinkDatasetCurrent = null;
+  var isDeepLinkDatasetCurrent = function() { return false; };
   try {
     applyBrowseConfig(await _cfgPromise);
     if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
@@ -444,7 +444,7 @@ async function _runPhotoDeepLink(photoId) {
     selectedPhotoId = null;
     selectedIndex = -1;
     closeDetail();
-    document.getElementById('grid').innerHTML = '';
+    /** @type {HTMLElement} */ (document.getElementById('grid')).innerHTML = '';
 
     // A folder click, sort change, or filter edit calls resetAndLoad(), which
     // advances loadEpoch (and scope changes also advance browseScopeGen).
@@ -452,12 +452,12 @@ async function _runPhotoDeepLink(photoId) {
     // later user selection cannot be overwritten by this deep-link response.
     var deepLinkScopeGen = browseScopeGen;
     var deepLinkFolderId = photo.folder_id;
-    var deepLinkSort = document.getElementById('sortSelect').value;
+    var deepLinkSort = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value;
     isDeepLinkDatasetCurrent = function() {
       return deepLinkWindowIsCurrent() &&
         browseScopeGen === deepLinkScopeGen &&
         activeFolderId === deepLinkFolderId &&
-        document.getElementById('sortSelect').value === deepLinkSort;
+        /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value === deepLinkSort;
     };
 
     // bootstrapBrowse was skipped, so load the target folder's first page and
@@ -468,9 +468,9 @@ async function _runPhotoDeepLink(photoId) {
         : null;
     var initParams = new URLSearchParams();
     initParams.set('folder_id', photo.folder_id);
-    initParams.set('per_page', perPage);
+    initParams.set('per_page', String(perPage));
     initParams.set('sort', deepLinkSort);
-    initParams.set('focus_photo_id', photoId);
+    initParams.set('focus_photo_id', String(photoId));
     var initData = await safeFetch('/api/browse/init?' + initParams.toString(), {}, { toast: false });
     if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
     if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
@@ -517,7 +517,7 @@ async function _runPhotoDeepLink(photoId) {
       renderGrid();
       updatePreviousPhotosButton();
       browseDatasetReady = true;
-      document.getElementById('loadingState').style.display = 'none';
+      /** @type {HTMLElement} */ (document.getElementById('loadingState')).style.display = 'none';
       deepLinkLoaded = true;
       hydrateColorLabelsForRenderedPage(function() {
         return isDeepLinkHealthCurrent() && isDeepLinkDatasetCurrent();
@@ -543,18 +543,18 @@ async function _runPhotoDeepLink(photoId) {
     if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
 
     // Update folder tree active state
-    document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
-      el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
+    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item')).forEach(function(el) {
+      el.classList.toggle('active', parseInt(el.dataset.folderId || '') === activeFolderId);
     });
 
     // Scroll to and highlight the target photo
-    if (el) {
+    if (el) { const highlighted = el;
       el.scrollIntoView({ behavior: preferredScrollBehavior(), block: 'center' });
       el.style.outline = '3px solid var(--accent)';
       el.style.outlineOffset = '2px';
       setTimeout(function() {
-        el.style.outline = '';
-        el.style.outlineOffset = '';
+        highlighted.style.outline = '';
+        highlighted.style.outlineOffset = '';
       }, 2000);
     }
 
@@ -607,9 +607,9 @@ async function _runPhotoDeepLink(photoId) {
 
 (async function() {
   var params = new URLSearchParams(window.location.search);
-  var photoId = params.get('photo_id');
-  if (!photoId) return;
-  photoId = parseInt(photoId, 10);
+  var rawPhotoId = params.get('photo_id');
+  if (!rawPhotoId) return;
+  var photoId = parseInt(rawPhotoId, 10);
   if (isNaN(photoId)) return;
 
   // If a folder-health refresh interrupts us, wait for it to finish and

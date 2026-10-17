@@ -7,11 +7,11 @@ function invalidateKeywordAutocompleteCache() {
   keywordAutocompletePromise = null;
 }
 
-async function loadKeywordAutocompleteOptions(force) {
+async function loadKeywordAutocompleteOptions(/** @type {boolean | undefined} */ force = undefined) {
   if (!force && keywordAutocompleteCache !== null) return keywordAutocompleteCache;
   if (!force && keywordAutocompletePromise) return keywordAutocompletePromise;
   keywordAutocompletePromise = safeFetch('/api/keywords/all', {}, { toast: false })
-    .then(function(rows) {
+    .then(function(/** @type {BrowseKeyword[]} */ rows) {
       keywordAutocompleteCache = (rows || [])
         .filter(function(k) { return k && k.name; })
         .map(function(k) {
@@ -27,7 +27,7 @@ async function loadKeywordAutocompleteOptions(force) {
         .sort(function(a, b) {
           return a.search.localeCompare(b.search) || a.id - b.id;
         });
-      return keywordAutocompleteCache;
+      return keywordAutocompleteCache || [];
     })
     .catch(function() {
       return [];
@@ -38,7 +38,7 @@ async function loadKeywordAutocompleteOptions(force) {
   return keywordAutocompletePromise;
 }
 
-function getKeywordAutocompleteState(inputId) {
+function getKeywordAutocompleteState(/** @type {string} */ inputId) {
   if (!keywordAutocompleteStates[inputId]) {
     keywordAutocompleteStates[inputId] = {
       matches: [],
@@ -51,7 +51,7 @@ function getKeywordAutocompleteState(inputId) {
   return keywordAutocompleteStates[inputId];
 }
 
-function keywordMatchScore(search, query) {
+function keywordMatchScore(/** @type {string} */ search, /** @type {string} */ query) {
   if (search === query) return 0;
   if (search.indexOf(query) === 0) return 1;
   if (search.split(/[\s\-_/]+/).some(function(part) { return part.indexOf(query) === 0; })) return 2;
@@ -59,9 +59,9 @@ function keywordMatchScore(search, query) {
   return idx === -1 ? 99 : 3 + idx / 1000;
 }
 
-function hideKeywordSuggestions(inputId) {
+function hideKeywordSuggestions(/** @type {string} */ inputId) {
   var state = getKeywordAutocompleteState(inputId);
-  var dropdown = document.getElementById(state.dropdownId);
+  const dropdown = document.getElementById(state.dropdownId);
   if (dropdown) {
     dropdown.classList.remove('open');
     dropdown.innerHTML = '';
@@ -70,10 +70,10 @@ function hideKeywordSuggestions(inputId) {
   state.activeIndex = -1;
 }
 
-function renderKeywordSuggestions(inputId) {
-  var input = document.getElementById(inputId);
+function renderKeywordSuggestions(/** @type {string} */ inputId) {
+  const input = /** @type {HTMLInputElement | null} */ (document.getElementById(inputId));
   var state = getKeywordAutocompleteState(inputId);
-  var dropdown = document.getElementById(state.dropdownId);
+  const dropdown = document.getElementById(state.dropdownId);
   if (!input || !dropdown) return;
   var query = input.value.trim().toLowerCase();
   state.selectedKeyword = null;
@@ -110,8 +110,8 @@ function renderKeywordSuggestions(inputId) {
   dropdown.classList.add('open');
 }
 
-function chooseKeywordSuggestion(inputId, index) {
-  var input = document.getElementById(inputId);
+function chooseKeywordSuggestion(/** @type {string} */ inputId, /** @type {number} */ index) {
+  const input = /** @type {HTMLInputElement | null} */ (document.getElementById(inputId));
   var state = getKeywordAutocompleteState(inputId);
   var keyword = state.matches[index];
   if (!input || !keyword) return;
@@ -123,9 +123,9 @@ function chooseKeywordSuggestion(inputId, index) {
   }
 }
 
-function bindKeywordAutocomplete(inputId, dropdownId, submitFn) {
-  var input = document.getElementById(inputId);
-  var dropdown = document.getElementById(dropdownId);
+function bindKeywordAutocomplete(/** @type {string} */ inputId, /** @type {string} */ dropdownId, /** @type {(keyword: BrowseKeywordOption | null) => void} */ submitFn) {
+  const input = /** @type {HTMLInputElement | null} */ (document.getElementById(inputId));
+  const dropdown = document.getElementById(dropdownId);
   if (!input || !dropdown) return;
   var state = getKeywordAutocompleteState(inputId);
   state.dropdownId = dropdownId;
@@ -169,9 +169,9 @@ function bindKeywordAutocomplete(inputId, dropdownId, submitFn) {
     setTimeout(function() { hideKeywordSuggestions(inputId); }, 120);
   });
   dropdown.addEventListener('mousedown', function(e) {
-    var option = e.target.closest('.keyword-suggestion-option');
+    var option = e.target instanceof Element ? /** @type {HTMLElement | null} */ (/** @type {HTMLElement | null} */ (e.target.closest('.keyword-suggestion-option'))) : null;
     if (!option) return;
     e.preventDefault();
-    chooseKeywordSuggestion(inputId, parseInt(option.dataset.index, 10));
+    chooseKeywordSuggestion(inputId, parseInt(option.dataset.index || '', 10));
   });
 }
