@@ -306,6 +306,64 @@ def summarize_photo(match_rows, config=None, unscored_current_runs=None):
     scored — the caller can pass either the DB rows verbatim or a
     pre-filtered list without changing the result.
     """
+    best, runs, seen_runs, unscored_assessments = _assess_current_rows(match_rows, config)
+    for row in unscored_current_runs or []:
+        model = row.get("classifier_model")
+        detection_id = row.get("detection_id")
+        fingerprint = row.get("labels_fingerprint")
+        # De-dupe against scored rows in the same call. Some callers hand us
+        # the DB row list plus this parallel set; a pair that already has a
+        # scored row must not also generate a blocking unavailable one.
+        if (detection_id, model, fingerprint) in seen_runs:
+            continue
+        assessment = _unmeasured_assessment(
+            model,
+            "Predictions from this model were carried over from before "
+            "match scoring existed; the run was never judged against a "
+            "floor.",
+        )
+        runs.append(_run_entry(assessment, row, detection_id, model, fingerprint))
+        # Every unscored run must feed the rollup, not just those whose model
+        # has no scored run: a scored failing run on one detection and an
+        # unscored run on a different detection of the same model are two
+        # separate pieces of evidence. The scored one may say "no label
+        # matches", but the unscored one was never judged — the blanket
+        # verdict must stay blocked over the panel that still displays it
+        # (Codex P1 on f074d0c).
+        unscored_assessments.append(assessment)
+    summary = summarize(
+        [assessment for _score, assessment in best.values()]
+        + unscored_assessments
+    )
+    summary["runs"] = runs
+    # The failures that the photo-level rollup is allowed to outvote but the
+    # UI is not allowed to drop. Empty unless a run was positively judged
+    # unlisted — uncalibrated and unavailable runs never appear here, because
+    # absence of a verdict is not a verdict.
+    summary["unlisted_runs"] = [r for r in runs if r["state"] == UNLISTED]
+    return summary
+
+
+def _run_entry(assessment, row, detection_id, model, fingerprint):
+    """One per-run verdict, tagged with the run it judges."""
+    return {
+        **assessment,
+        "detection_id": detection_id,
+        "classifier_model": model,
+        "labels_fingerprint": fingerprint,
+        "top_species": row.get("top_species"),
+        "detector_model": row.get("detector_model"),
+    }
+
+
+def _assess_current_rows(match_rows, config):
+    """Assess each current-fingerprint match row for ``summarize_photo``.
+
+    Returns ``(best, runs, seen_runs, unscored_assessments)``: each model's
+    best scored ``(score, assessment)``, the per-run verdicts, the
+    ``(detection, model, fingerprint)`` triples seen, and the unmeasured
+    assessments of current rows that carry no score.
+    """
     best = {}
     runs = []
     seen_runs = set()
@@ -333,14 +391,7 @@ def summarize_photo(match_rows, config=None, unscored_current_runs=None):
                 "This run recorded no match strength, so it was never judged "
                 "against a floor.",
             )
-            runs.append({
-                **assessment,
-                "detection_id": detection_id,
-                "classifier_model": model,
-                "labels_fingerprint": row.get("labels_fingerprint"),
-                "top_species": row.get("top_species"),
-                "detector_model": row.get("detector_model"),
-            })
+            runs.append(_run_entry(assessment, row, detection_id, model, row.get("labels_fingerprint")))
             unscored_assessments.append(assessment)
             continue
         assessment = assess(
@@ -350,58 +401,10 @@ def summarize_photo(match_rows, config=None, unscored_current_runs=None):
             row.get("match_margin"),
             config,
         )
-        runs.append({
-            **assessment,
-            "detection_id": detection_id,
-            "classifier_model": model,
-            "labels_fingerprint": row.get("labels_fingerprint"),
-            "top_species": row.get("top_species"),
-            "detector_model": row.get("detector_model"),
-        })
+        runs.append(_run_entry(assessment, row, detection_id, model, row.get("labels_fingerprint")))
         if model not in best or score > best[model][0]:
             best[model] = (score, assessment)
-    for row in unscored_current_runs or []:
-        model = row.get("classifier_model")
-        detection_id = row.get("detection_id")
-        fingerprint = row.get("labels_fingerprint")
-        # De-dupe against scored rows in the same call. Some callers hand us
-        # the DB row list plus this parallel set; a pair that already has a
-        # scored row must not also generate a blocking unavailable one.
-        if (detection_id, model, fingerprint) in seen_runs:
-            continue
-        assessment = _unmeasured_assessment(
-            model,
-            "Predictions from this model were carried over from before "
-            "match scoring existed; the run was never judged against a "
-            "floor.",
-        )
-        runs.append({
-            **assessment,
-            "detection_id": detection_id,
-            "classifier_model": model,
-            "labels_fingerprint": fingerprint,
-            "top_species": row.get("top_species"),
-            "detector_model": row.get("detector_model"),
-        })
-        # Every unscored run must feed the rollup, not just those whose model
-        # has no scored run: a scored failing run on one detection and an
-        # unscored run on a different detection of the same model are two
-        # separate pieces of evidence. The scored one may say "no label
-        # matches", but the unscored one was never judged — the blanket
-        # verdict must stay blocked over the panel that still displays it
-        # (Codex P1 on f074d0c).
-        unscored_assessments.append(assessment)
-    summary = summarize(
-        [assessment for _score, assessment in best.values()]
-        + unscored_assessments
-    )
-    summary["runs"] = runs
-    # The failures that the photo-level rollup is allowed to outvote but the
-    # UI is not allowed to drop. Empty unless a run was positively judged
-    # unlisted — uncalibrated and unavailable runs never appear here, because
-    # absence of a verdict is not a verdict.
-    summary["unlisted_runs"] = [r for r in runs if r["state"] == UNLISTED]
-    return summary
+    return best, runs, seen_runs, unscored_assessments
 
 
 def is_unlisted(assessment):
