@@ -840,13 +840,19 @@ def create_models_blueprint(
         request. A prefix check alone let ``sam2-large/../..`` resolve to the
         parent of the models directory and rmtree the whole Vireo data dir.
 
-        No ``@cache_access`` guard: ``purge_subfolder`` acquires
-        ``DOWNLOAD_LOCK`` non-blocking inside ``_delete_selected`` and
-        reports ``DownloadInProgress`` (409) if a download is in flight.
-        The install dir removal above is unrelated to the hub cache and
-        does not need the guard either.
+        Hold ``DOWNLOAD_LOCK`` across the install rmtree and the cache purge:
+        ``/api/models/pipeline/download`` writes into the same ``model_dir``
+        under this lock, so without it an overlapping delete could erase an
+        in-progress install (making its remaining copies fail), or a new
+        download could land in the gap after rmtree but before the purge
+        begins and recreate files the response just claimed to have deleted.
+        On a non-blocking miss, answer 409 — ``purge_outcome`` would
+        otherwise fold ``DownloadInProgress`` into an ``ok: false`` HTTP 200
+        payload, hiding the conflict.
         """
         import shutil
+
+        from services.hf_cache_lock import DOWNLOAD_LOCK
 
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
@@ -856,39 +862,51 @@ def create_models_blueprint(
         if spec is None:
             return json_error(f"Unknown pipeline model: {model_id}", status=404)
 
-        model_dir = os.path.join(pipeline_models_dir(), spec["subfolder"])
-        removed = []
-        if os.path.isdir(model_dir):
-            shutil.rmtree(model_dir)
-            removed.append(model_dir)
-        # The download left a copy in the Hugging Face cache that only an
-        # installed model benefits from; take it along so it does not sit
-        # invisibly in Storage as "Hugging Face Cache".
         try:
-            from services.hf_cache import purge_outcome, purge_subfolder
-            cache = purge_outcome(purge_subfolder, spec["subfolder"])
-        except Exception as exc:  # pragma: no cover - cleanup must not fail the delete
-            log.warning("Could not purge HF cache for %s: %s", model_id, exc)
-            cache = {"ok": False, "cache_cleanup": {"freed": 0, "failed": [
-                {"key": model_id, "error": str(exc)},
-            ]}}
+            acquired = DOWNLOAD_LOCK.acquire(blocking=False)
+        except (ImportError, OSError) as exc:
+            return json_error(
+                f"Cannot establish the download guard: {exc}", status=503)
+        if not acquired:
+            return json_error(
+                "A model download is in progress; try again shortly", status=409)
+        try:
+            model_dir = os.path.join(pipeline_models_dir(), spec["subfolder"])
+            removed = []
+            if os.path.isdir(model_dir):
+                shutil.rmtree(model_dir)
+                removed.append(model_dir)
+            # The download left a copy in the Hugging Face cache that only an
+            # installed model benefits from; take it along so it does not sit
+            # invisibly in Storage as "Hugging Face Cache". The lock is held
+            # here, so ``_delete_selected``'s re-entrant acquire succeeds.
+            try:
+                from services.hf_cache import purge_outcome, purge_subfolder
+                cache = purge_outcome(purge_subfolder, spec["subfolder"])
+            except Exception as exc:  # pragma: no cover - cleanup must not fail the delete
+                log.warning("Could not purge HF cache for %s: %s", model_id, exc)
+                cache = {"ok": False, "cache_cleanup": {"freed": 0, "failed": [
+                    {"key": model_id, "error": str(exc)},
+                ]}}
 
-        # Clear the cached session singletons so the next use reloads (or
-        # reports the model as missing) instead of serving stale weights.
-        if model_id == "megadetector-v6":
-            import detector
-            detector._session = None
-        elif model_id.startswith("sam2-"):
-            import masking
-            masking._encoder_session = None
-            masking._decoder_session = None
-            masking._sam2_variant_loaded = None
-        elif model_id.startswith("vit-"):
-            import dino_embed as dinov2_mod
-            dinov2_mod._session = None
-            dinov2_mod._variant_loaded = None
+            # Clear the cached session singletons so the next use reloads (or
+            # reports the model as missing) instead of serving stale weights.
+            if model_id == "megadetector-v6":
+                import detector
+                detector._session = None
+            elif model_id.startswith("sam2-"):
+                import masking
+                masking._encoder_session = None
+                masking._decoder_session = None
+                masking._sam2_variant_loaded = None
+            elif model_id.startswith("vit-"):
+                import dino_embed as dinov2_mod
+                dinov2_mod._session = None
+                dinov2_mod._variant_loaded = None
 
-        return jsonify({"deleted": removed, "count": len(removed), "model_id": model_id, **cache})
+            return jsonify({"deleted": removed, "count": len(removed), "model_id": model_id, **cache})
+        finally:
+            DOWNLOAD_LOCK.release()
 
     @blueprint.route("/api/classify/readiness")
     def api_classify_readiness():

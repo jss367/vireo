@@ -681,7 +681,11 @@ class SharedGuardTests(unittest.TestCase):
                 removed_paths = []
                 fake_os = S(path=S(join=posixpath.join, isdir=lambda _p: True))
                 fake_shutil = S(rmtree=lambda path, _paths=removed_paths: _paths.append(path))
-                modules = {"services.hf_cache": service_module, "shutil": fake_shutil, "masking": S()}
+                fake_lock = S(acquire=lambda blocking=True: True, release=lambda: None)
+                lock_module = S(DOWNLOAD_LOCK=fake_lock)
+                modules = {"services.hf_cache": service_module,
+                           "services.hf_cache_lock": lock_module,
+                           "shutil": fake_shutil, "masking": S()}
 
                 def importer(name, *_args, _modules=modules, **_kwargs):
                     if name not in _modules:

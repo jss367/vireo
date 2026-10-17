@@ -68,6 +68,48 @@ def test_delete_of_absent_registered_model_is_a_noop(app_and_db, models_root):
     assert resp.get_json() == {"deleted": [], "count": 0, "model_id": "sam2-tiny"}
 
 
+def test_delete_refuses_while_a_download_holds_the_guard(
+    app_and_db, models_root, monkeypatch,
+):
+    """A concurrent download holds ``DOWNLOAD_LOCK`` across each file copy; a
+    delete that proceeded through its non-blocking acquire miss would erase an
+    in-progress install, or recreate files the response just claimed to have
+    removed. The route must answer 409 and leave the install dir alone."""
+    from services import hf_cache_lock
+    # A fresh lock keyed off the test tmp path so holding it in this thread
+    # doesn't leak into other tests, and so the file lives inside the tmp HOME.
+    lock = hf_cache_lock.SharedDownloadLock(
+        str(models_root.parent / "hf-cache-access.lock"))
+    monkeypatch.setattr(hf_cache_lock, "DOWNLOAD_LOCK", lock)
+
+    import threading
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        lock.acquire()
+        try:
+            held.set()
+            release.wait(timeout=10)
+        finally:
+            lock.release()
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        held.wait(timeout=10)
+        app, _ = app_and_db
+        resp = _post(app, {"model_id": "sam2-large"})
+        assert resp.status_code == 409
+        assert "download" in resp.get_json()["error"].lower()
+        # The install dir must survive: nothing was removed.
+        assert (models_root / "models" / "sam2-large" / "image_encoder.onnx").exists()
+    finally:
+        release.set()
+        thread.join(timeout=10)
+
+
 def test_delete_purges_the_models_hugging_face_cache_entry(
     app_and_db, models_root, tmp_path, monkeypatch,
 ):
