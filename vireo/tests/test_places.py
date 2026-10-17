@@ -232,7 +232,8 @@ def test_reverse_geocode_parses_response(monkeypatch):
     [
         # Browse reads the preference in config.js and loads Maps in location.js.
         ("static/browse/config.js", "static/browse/location.js"),
-        ("templates/keywords.html",),
+        # Keywords loads Maps (and reads the preference) in link-place.js.
+        ("static/keywords/link-place.js",),
         # Location Review loads Maps (and reads the preference) in map.js.
         ("static/location-review/map.js",),
     ],

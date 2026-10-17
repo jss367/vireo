@@ -46,7 +46,7 @@ CONN_USE_LIMITS = {
     "export.py": 2,
     "file_identity.py": 2,
     "import_dedup.py": 7,
-    "import_job.py": 20,
+    "import_job.py": 18,
     "importer.py": 1,
     "ingest.py": 2,
     "jobs.py": 6,
