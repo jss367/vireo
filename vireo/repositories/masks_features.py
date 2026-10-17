@@ -114,6 +114,28 @@ class MasksFeaturesRepository:
         ).fetchone()
         return row["mask_path"] if row else None
 
+    def active_prompt_detection(self, photo_id: int) -> sqlite3.Row | None:
+        """The exact detection that authored the active, denormalized mask.
+
+        A validated contextual rescue may activate a below-floor prompt. Do
+        not lower the normal floor or substitute an arbitrary weak box: match
+        the active variant, path, detector model and all prompt coordinates.
+        The media caller has already checked workspace visibility.
+        """
+        return self.conn.execute(
+            """SELECT d.* FROM photos p
+               JOIN photo_masks pm ON pm.photo_id = p.id
+                AND pm.variant = p.active_mask_variant AND pm.path = p.mask_path
+               JOIN detections d ON d.photo_id = p.id
+                AND d.detector_model = pm.detector_model
+                AND d.box_x = pm.prompt_x AND d.box_y = pm.prompt_y
+                AND d.box_w = pm.prompt_w AND d.box_h = pm.prompt_h
+               WHERE p.id = ? AND d.category = 'animal'
+                 AND d.detector_model != 'full-image'
+               LIMIT 1""",
+            (photo_id,),
+        ).fetchone()
+
     def photo_mask_state(self, photo_id: int) -> sqlite3.Row | None:
         """Row (``active_mask_variant``, ``dino_embedding_variant``,
         ``quality_input_recipe``) of the photo's mask-derived state, or None.
