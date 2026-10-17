@@ -316,6 +316,31 @@ function clearBrowseLoadedWindow() {
   updatePreviousPhotosButton();
 }
 
+/** @param {BrowseFilterChange | undefined} info */
+function onBrowseFilterChange(info) {
+  if (timelineMode) loadCalendarData();
+  if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
+  // Any user-driven change to the filter chips means the bar no
+  // longer represents the saved collection verbatim — drop the
+  // handle so a later membership refresh doesn't silently revert
+  // the user's edits back to the collection's saved expression.
+  // Our own filterByCollection() → loadExpression() fires onChange
+  // with reason 'expressionLoaded' (opening) or 'expressionRefreshed'
+  // (membership-change refresh); both paths set openedCollectionId
+  // above, so leave it alone.
+  if (openedCollectionId && info &&
+      info.reason !== 'expressionLoaded' &&
+      info.reason !== 'expressionRefreshed') {
+    openedCollectionId = null;
+    clearOfflineCollectionState();
+  }
+  resetAndLoad(browseFilterReloadOptions(info));
+  // Summary panel (photo count, classified, top species) is a separate
+  // endpoint from the grid; without this the filter changes the grid
+  // but leaves the summary showing pre-filter numbers.
+  loadSummary();
+}
+
 /* Leave collection mode when applying non-collection filters (sort, rating,
    date, keyword, folder) so the summary stays in sync with the visible grid.
    Dashboard-scoped collections are the exception: there the collection is an

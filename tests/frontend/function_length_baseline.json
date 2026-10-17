@@ -1,7 +1,7 @@
 {
   "vireo/static/browse/batch-actions.js:batchDelete": 115,
-  "vireo/static/browse/boot.js:_runPhotoDeepLink": 228,
-  "vireo/static/browse/boot.js:bootstrapBrowse": 329,
+  "vireo/static/browse/boot.js:_runPhotoDeepLink": 223,
+  "vireo/static/browse/boot.js:bootstrapBrowse": 307,
   "vireo/static/browse/boot.js:bootstrapBrowse.@call:[[\"member\",[\"identifier\",\"browseFilterInitPromise\"],[\"property\",\"Identifier\",\"then\"],false],null]": 104,
   "vireo/static/browse/collection-editor.js:renderRuleValueInput": 110,
   "vireo/static/browse/collection-editor.js:saveCollection": 119,
