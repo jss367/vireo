@@ -7,28 +7,28 @@
  * endpoints so they don't depend on helpers that only exist on browse.html.
  */
 
-function buildReviewCardContextMenu(pred) {
+/** @param {ReviewPrediction} pred */ function buildReviewCardContextMenu(pred) {
   var photoId = pred.photo_id;
   var predId = pred.id;
   var species = pred.group_id ? getConsensusSpecies(pred) : pred.species;
   var speciesLabel = species || 'species';
   var pending = pred.status === 'pending';
 
-  var rateChip = function(n) {
+  /** @param {number} n */ var rateChip = function(n) {
     return {
       label: n === 0 ? '\u2606' : String(n),
       title: n === 0 ? 'No rating' : 'Rate ' + n,
       onClick: function() { setReviewRating(photoId, n); },
     };
   };
-  var flagChip = function(f, icon, title) {
+  /** @param {string} f @param {string} icon @param {string} title */ var flagChip = function(f, icon, title) {
     return {
       label: icon, title: title,
       onClick: function() { setReviewFlag(photoId, f); },
     };
   };
 
-  var items = [];
+  /** @type {ReviewMenuItem[]} */ var items = [];
   items.push({
     label: 'Accept as "' + speciesLabel + '"',
     disabled: !pending,
@@ -76,14 +76,15 @@ function buildReviewCardContextMenu(pred) {
 
 function bindReviewCardContextMenu() {
   document.addEventListener('contextmenu', function(e) {
-    var card = e.target.closest('.card[data-pred-id]');
+    if (!(e.target instanceof Element)) return;
+    var card = e.target.closest(/** @type {'div'} */ ('.card[data-pred-id]'));
     if (!card) return;
     // Only hijack contextmenu for cards that live inside the review grid —
     // the burst-group modal and other surfaces handle their own menus.
-    var grid = document.getElementById('grid');
+    var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
     if (!grid || !grid.contains(card)) return;
     e.preventDefault();
-    var predId = parseInt(card.dataset.predId, 10);
+    var predId = parseInt(card.dataset.predId || '', 10);
     var pred = predictions.find(function(p) { return p.id === predId; });
     if (!pred) return;
     if (typeof openContextMenu !== 'function') return;
@@ -102,21 +103,21 @@ function bindReviewCardContextMenu() {
  * card is already part of a multi-selection, preserve that set so drag
  * alignment state and batch actions are not lost.
  */
-function buildBurstGroupContextMenu(photoId, filename) {
-  var rateChip = function(n) {
+/** @param {number} photoId @param {string} filename */ function buildBurstGroupContextMenu(photoId, filename) {
+  /** @param {number} n */ var rateChip = function(n) {
     return {
       label: n === 0 ? '\u2606' : String(n),
       title: n === 0 ? 'No rating' : 'Rate ' + n,
       onClick: function() { setReviewRating(photoId, n); },
     };
   };
-  var flagChip = function(f, icon, title) {
+  /** @param {string} f @param {string} icon @param {string} title */ var flagChip = function(f, icon, title) {
     return {
       label: icon, title: title,
       onClick: function() { setReviewFlag(photoId, f); },
     };
   };
-  return [
+  return /** @type {ReviewMenuItem[]} */ ([
     { label: '\u2B06  Move to Picks',      onClick: function() { grmMovePick(); } },
     { label: '\u2B07  Move to Rejects',    onClick: function() { grmMoveReject(); } },
     { label: '\u2423  Move to Candidates', onClick: function() { grmMoveCandidate(); } },
@@ -129,7 +130,7 @@ function buildBurstGroupContextMenu(photoId, filename) {
     ] },
     { separator: true },
     { label: 'Open in Lightbox',        onClick: function() { openReviewLightbox(photoId, filename); } },
-  ].concat(
+  ]).concat(
     typeof window.buildSpeciesHighlightMenuItems === 'function'
       ? window.buildSpeciesHighlightMenuItems([photoId], { showFetchFallback: true })
       : []
@@ -189,15 +190,16 @@ function buildBurstGroupContextMenu(photoId, filename) {
 
 function bindBurstGroupContextMenu() {
   document.addEventListener('contextmenu', function(e) {
-    var card = e.target.closest('.grm-card[data-photo-id]');
+    if (!(e.target instanceof Element)) return;
+    var card = e.target.closest(/** @type {'div'} */ ('.grm-card[data-photo-id]'));
     if (!card) return;
     // Only fire when the burst modal is actually open — the handler is on
     // document and grm-cards never exist outside #grmOverlay, but belt-and-
     // suspenders against any future render path that reuses the class.
-    var overlay = document.getElementById('grmOverlay');
+    var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
     if (!overlay || !overlay.classList.contains('open')) return;
     e.preventDefault();
-    var photoId = parseInt(card.dataset.photoId, 10);
+    var photoId = parseInt(card.dataset.photoId || '', 10);
     if (!photoId) return;
     var item = grmState.items.find(function(it) { return it.photo_id === photoId; });
     var filename = item ? item.filename : '';
