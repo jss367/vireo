@@ -149,6 +149,7 @@ GET          /api/sync/location-writes
 GET          /api/sync/preview
 GET          /api/sync/status
 GET          /api/system/info
+GET          /api/system/mcp-config
 GET          /api/taxonomy/info
 GET          /api/undo/status
 GET          /api/v1/collections

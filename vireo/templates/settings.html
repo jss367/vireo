@@ -971,6 +971,34 @@
     </div>
   </div>
 
+  <!-- Claude and other MCP clients -->
+  <div class="section" id="mcpConnectSection">
+    <div class="section-title">Claude and AI assistants</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      Vireo is a Model Context Protocol (MCP) server. Claude Code, Claude Desktop and other MCP clients can search this catalog, look at photos, read burst rankings, and set flags, ratings and keywords through the same routes the app uses, on the subscription you already have. Each change they make is one Undo step here. Vireo must be running while the assistant works, and nothing leaves this computer unless the assistant you are talking to sends it.
+    </p>
+    <div class="setting-row" style="align-items:flex-start;">
+      <div class="setting-label">
+        Claude Code
+        <small>Run once in a terminal; Claude Code then starts the server itself whenever it needs Vireo.</small>
+      </div>
+      <div style="display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1;">
+        <code id="mcpClaudeCodeCommand" style="flex:1;min-width:0;font-size:12px;white-space:pre-wrap;word-break:break-all;background:var(--bg-input);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;user-select:all;">Loading&hellip;</code>
+        <button type="button" class="btn-sm" onclick="copyMcpSnippet('mcpClaudeCodeCommand')">Copy</button>
+      </div>
+    </div>
+    <div class="setting-row" style="align-items:flex-start;">
+      <div class="setting-label">
+        Claude Desktop
+        <small>Add to <code>claude_desktop_config.json</code> (Settings &rarr; Developer &rarr; Edit Config), then restart Claude Desktop.</small>
+      </div>
+      <div style="display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1;">
+        <pre id="mcpClaudeDesktopJson" style="flex:1;min-width:0;margin:0;font-size:12px;white-space:pre-wrap;word-break:break-all;background:var(--bg-input);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 8px;user-select:all;">Loading&hellip;</pre>
+        <button type="button" class="btn-sm" onclick="copyMcpSnippet('mcpClaudeDesktopJson')">Copy</button>
+      </div>
+    </div>
+  </div>
+
   <!-- External Editors -->
   <div class="section">
     <div class="section-title">External Editors</div>

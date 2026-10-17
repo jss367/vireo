@@ -161,6 +161,9 @@ def main():
         "--hidden-import", "text_encoder",
         "--hidden-import", "xmp",
         "--hidden-import", "catalog",
+        # ``vireo-server --mcp``: the MCP server and the SDK it is built on.
+        "--hidden-import", "mcp_server",
+        "--collect-submodules", "mcp",
         # ONNX Runtime and related libraries
         "--hidden-import", "onnx_runtime",
         "--hidden-import", "onnxruntime",

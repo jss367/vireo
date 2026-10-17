@@ -2392,6 +2392,13 @@ def _parse_main_args():
              "from scripts or agents.",
     )
     parser.add_argument(
+        "--mcp",
+        action="store_true",
+        help="Serve the Model Context Protocol over stdio for Claude Code, "
+             "Claude Desktop and other MCP clients, talking to the running "
+             "Vireo through its API. Does not start a Vireo instance.",
+    )
+    parser.add_argument(
         "--load-taxonomy",
         action="store_true",
         help="Download and import the iNaturalist taxonomy, then exit",
@@ -2562,6 +2569,13 @@ def main():
     _setup_file_logging()
 
     args = _parse_main_args()
+
+    if args.mcp:
+        # Not an instance: no port, no runtime.json, no single-instance
+        # guard. The MCP client owns this process's lifetime.
+        from mcp_server import main as serve_mcp
+        serve_mcp()
+        return
 
     if args.check_exiftool:
         _check_exiftool_and_exit()

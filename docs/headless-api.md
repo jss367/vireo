@@ -4,6 +4,47 @@ Vireo is primarily a desktop app, but its Flask server also exposes a small
 stable HTTP API for scripts and agents. This page documents what callers can
 rely on.
 
+## Using Vireo from Claude (MCP)
+
+Vireo is also a [Model Context Protocol](https://modelcontextprotocol.io)
+server, so Claude Code, Claude Desktop and other MCP clients can work on the
+catalog on the subscription you already have: search photos, look at them,
+read burst rankings, and set flags, ratings and keywords. Every write goes
+through the same routes the app uses and is one Undo step in Vireo.
+
+The server runs as a subprocess of the client and talks to the running Vireo
+over the API below, so Vireo must be open (or started headless) while the
+assistant works. It never starts an instance itself.
+
+Settings shows the exact command for your install under **Claude and AI
+assistants**, with a Copy button. From a checkout it is:
+
+```bash
+claude mcp add vireo -- python /path/to/vireo/app.py --mcp
+```
+
+and from the packaged app it is the sidecar binary, for example
+`/Applications/Vireo.app/Contents/MacOS/vireo-server --mcp`. For Claude
+Desktop, paste the JSON from the same Settings section into
+`claude_desktop_config.json`.
+
+`GET /api/system/mcp-config` returns the command, the Claude Code one-liner
+and the Claude Desktop JSON for the running install.
+
+Tools: `vireo_status`, `list_workspaces`, `activate_workspace`,
+`list_folders`, `list_collections`, `search_keywords`, `search_photos`,
+`find_photos_by_text`, `get_photo`, `view_photo` (the preview, the
+thumbnail or the detected subject as an image), `burst`, `set_flag`,
+`set_rating`, `add_keyword` and `remove_keyword`. `set_flag` accepts optional
+`source` (who decided, up to 60 characters) and `reason` (why, up to 300);
+`get_photo` returns the current `flag_note` with only flag, source, reason,
+description and timestamp fields. The server reads `runtime.json` on every call;
+`VIREO_URL` and `VIREO_TOKEN` override it for tests and second instances
+(both required, and restricted to numeric `http://127.0.0.1` or `http://[::1]`
+origins). URL names, user-info, paths, queries and fragments are refused. HTTP
+redirects and environment proxies are disabled. Status does not read or report
+a default-instance catalog path. Design: `docs/plans/2026-10-17-mcp-server-design.md`.
+
 ## Discovering a running instance
 
 When the Vireo sidecar starts (either as part of the Tauri GUI or directly
