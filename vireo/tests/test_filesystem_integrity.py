@@ -906,7 +906,7 @@ def test_import_job_exact_match_does_not_adopt_slot_that_splits_pair(tmp_path):
 
 
 def test_slot_for_tries_anchor_first_then_walks_the_rest():
-    from import_job import _slot_for
+    from import_job.siblings import _slot_for
 
     assert [_slot_for(c, None) for c in range(4)] == [0, 1, 2, 3]
     assert [_slot_for(c, 0) for c in range(4)] == [0, 1, 2, 3]
@@ -921,7 +921,8 @@ def test_sibling_blocks_slot_blocks_same_hash_claim_without_checker(tmp_path):
     when ``checker is None`` a same-hash claim blocks, so the RAW advances
     with its sibling instead of anchoring at a slot the JPEG walk will refuse.
     """
-    from import_job import _ImportBatchState, _sibling_blocks_slot
+    from import_job.siblings import _sibling_blocks_slot
+    from import_job.state import _ImportBatchState
 
     card = tmp_path / "card"
     card.mkdir()
@@ -959,7 +960,8 @@ def test_sibling_blocks_slot_allows_same_hash_claim_with_checker(tmp_path):
     duplicate, so the pair still settles at this slot and the RAW may
     anchor here.
     """
-    from import_job import _ImportBatchState, _sibling_blocks_slot
+    from import_job.siblings import _sibling_blocks_slot
+    from import_job.state import _ImportBatchState
 
     card = tmp_path / "card"
     card.mkdir()
@@ -1617,7 +1619,8 @@ def test_sibling_blocks_slot_rejects_source_backed_candidate(tmp_path):
     entry and leave the archive dependent on the card. ``_sibling_blocks_slot``
     must apply the same guard.
     """
-    from import_job import _ImportBatchState, _sibling_blocks_slot
+    from import_job.siblings import _sibling_blocks_slot
+    from import_job.state import _ImportBatchState
 
     card = tmp_path / "card"
     card.mkdir()

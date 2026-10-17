@@ -111,10 +111,13 @@ class EditHistoryRepository:
     def record(
         self, action_type: str, description: str, new_value: str | None,
         items: Iterable[Mapping[str, Any]], is_batch: bool = False, _commit: bool = True,
+        *, source: str | None = None, reason: str | None = None,
     ) -> int:
         """Insert an edit and its per-photo items; see ``Database.record_edit``.
 
-        The façade runs the history prune after a committed record.
+        ``source`` and ``reason`` are the edit's provenance when the caller
+        stated it (who decided, and why); the user's own clicks leave both
+        NULL. The façade runs the history prune after a committed record.
         """
         ws = self.workspace_id
         # Clear redo stack — new edit invalidates undone entries
@@ -123,8 +126,10 @@ class EditHistoryRepository:
             (ws,),
         )
         cur = self.conn.execute(
-            "INSERT INTO edit_history (workspace_id, action_type, description, new_value, is_batch) VALUES (?, ?, ?, ?, ?)",
-            (ws, action_type, description, new_value, 1 if is_batch else 0),
+            """INSERT INTO edit_history
+                   (workspace_id, action_type, description, new_value, is_batch, source, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ws, action_type, description, new_value, 1 if is_batch else 0, source, reason),
         )
         edit_id = cur.lastrowid
         for item in items:

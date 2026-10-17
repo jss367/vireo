@@ -68,9 +68,9 @@ def _add_photos(db, n):
 
 def _detector_patches(detect):
     return [
-        patch("classify_job.detect_animals", detect),
-        patch("classify_job.get_primary_detection", lambda dets: dets[0]),
-        patch("classify_job.compute_sharpness", None),
+        patch("classify_job.detection.detect_animals", detect),
+        patch("classify_job.detection.get_primary_detection", lambda dets: dets[0]),
+        patch("classify_job.detection.compute_sharpness", None),
         patch("detector.ensure_megadetector_weights",
               lambda progress_callback=None: "/weights"),
         patch("computation_cache.megadetector_runtime_fingerprint",
@@ -119,7 +119,8 @@ def test_cancelled_reclassify_keeps_unreached_photos_predictions(db, tmp_path):
     on every photo up front; its cascade wiped all predictions (every model,
     every workspace) before the classify loop rebuilt any of them.
     """
-    from classify_job import _classify_photos, _detect_subjects
+    from classify_job.classify_pass import _classify_photos
+    from classify_job.detection import _detect_subjects
 
     photos = _add_photos(db, 2)
     for photo in photos:
@@ -151,7 +152,7 @@ def test_cancelled_reclassify_keeps_unreached_photos_predictions(db, tmp_path):
         calls["n"] += 1
         return calls["n"] >= 2
 
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                lambda *a, **k: (MagicMock(info={}), str(tmp_path), "x")):
         _classify_photos(
             photos, folders, detection_map, set(), _sparrow_clf(), "bioclip",
@@ -170,7 +171,7 @@ def test_summary_counts_match_score_skips_without_going_negative(db, tmp_path):
     """Skips backed only by a match-score record raise ``skipped_existing``
     without a ``raw_results`` row; the summary once showed "-3 classified".
     """
-    from classify_job import _classify_photos, _classify_summary_parts
+    from classify_job.classify_pass import _classify_photos, _classify_summary_parts
 
     photos = _add_photos(db, 3)
     detection_map = {}
@@ -207,7 +208,8 @@ def test_fresh_detection_classifies_only_confident_animal_boxes(db, tmp_path):
     animal boxes at or above ``detector_confidence``. Noise and person boxes
     once got species predictions on the first pass only.
     """
-    from classify_job import _classify_photos, _detect_subjects
+    from classify_job.classify_pass import _classify_photos
+    from classify_job.detection import _detect_subjects
 
     photos = _add_photos(db, 2)
     animal_photo, person_photo = photos
@@ -242,7 +244,7 @@ def test_fresh_detection_classifies_only_confident_animal_boxes(db, tmp_path):
     assert job["_non_animal_photo_ids"] == {person_photo["id"]}
 
     clf = _sparrow_clf()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                lambda *a, **k: (MagicMock(info={}), str(tmp_path), "x")):
         raw, _, _ = _classify_photos(
             photos, folders, detection_map, set(), clf, "bioclip", "BioCLIP",
@@ -266,7 +268,8 @@ def test_stop_during_detection_keeps_committed_boxes(db, tmp_path):
     boxes already committed, sending those photos to full-image
     classification alongside their real detections.
     """
-    from classify_job import _classify_photos, _detect_subjects
+    from classify_job.classify_pass import _classify_photos
+    from classify_job.detection import _detect_subjects
 
     photos = _add_photos(db, 2)
     state = {"cancel": False}
@@ -294,7 +297,7 @@ def test_stop_during_detection_keeps_committed_boxes(db, tmp_path):
 
     processed = set(job["_detect_processed_ids"]) | set(detection_map)
     todo = [p for p in photos if p["id"] in processed]
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                lambda *a, **k: (MagicMock(info={}), str(tmp_path), "x")):
         raw, _, _ = _classify_photos(
             todo, folders, detection_map, set(), _sparrow_clf(), "bioclip",
@@ -321,7 +324,7 @@ def test_stop_during_subject_analysis_keeps_in_flight_photo(db, tmp_path):
     return, so the in-flight photo was missing from the processed set and
     the reclassify cancel recovery never rebuilt its predictions.
     """
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     photos = _add_photos(db, 2)
     state = {"cancel": False}
@@ -355,7 +358,7 @@ def test_stop_during_subject_analysis_keeps_in_flight_photo(db, tmp_path):
 def test_stop_during_detector_setup_returns_empty_map(db, tmp_path):
     """A Stop raised before the detection loop starts must still reach the
     cancel arm with a defined (empty) result."""
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     photos = _add_photos(db, 1)
 
@@ -384,7 +387,8 @@ def test_failed_redetection_reclassifies_stored_boxes(db, tmp_path):
     wiping the box predictions (other fingerprints included) the detection
     path had deliberately left intact.
     """
-    from classify_job import _classify_photos, _detect_subjects
+    from classify_job.classify_pass import _classify_photos
+    from classify_job.detection import _detect_subjects
 
     photos = _add_photos(db, 2)
     stored = {}
@@ -419,7 +423,7 @@ def test_failed_redetection_reclassifies_stored_boxes(db, tmp_path):
     assert job["_detect_processed_ids"] == set()
     assert job["_detect_reused_ids"] == set(stored)
 
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                lambda *a, **k: (MagicMock(info={}), str(tmp_path), "x")):
         raw, failed, _ = _classify_photos(
             photos, folders, detection_map, set(), _sparrow_clf(), "bioclip",
@@ -471,7 +475,7 @@ def test_classify_photos_stops_cleanly_on_cancel_during_flush(db, tmp_path):
     no failures or classifier runs for the batch, and marks the run
     cancelled."""
     import classify_job
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     photos = _add_photos(db, classify_job._BATCH_SIZE + 3)
     detection_map = {}
@@ -492,7 +496,7 @@ def test_classify_photos_stops_cleanly_on_cancel_during_flush(db, tmp_path):
         return MagicMock(info={}), str(tmp_path), "x"
 
     job = _job()
-    with patch("classify_job._prepare_image", prepare):
+    with patch("classify_job.classify_pass._prepare_image", prepare):
         raw, failed, skipped = _classify_photos(
             photos, {db.folder_id: str(tmp_path)}, detection_map, set(), clf,
             "bioclip", "BioCLIP", _Runner(), job, db,
@@ -516,7 +520,8 @@ def test_non_animal_skip_retires_stale_full_image_prediction(db, tmp_path):
     cascaded species predictions stayed intact and reads returned them under
     the newest fingerprint per detection.
     """
-    from classify_job import _classify_photos, _detect_subjects
+    from classify_job.classify_pass import _classify_photos
+    from classify_job.detection import _detect_subjects
 
     photos = _add_photos(db, 1)
     photo = photos[0]
@@ -546,7 +551,7 @@ def test_non_animal_skip_retires_stale_full_image_prediction(db, tmp_path):
     assert _prediction_count(db, photo["id"], "BioCLIP") == 1
 
     clf = _sparrow_clf()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                lambda *a, **k: (MagicMock(info={}), str(tmp_path), "x")):
         raw, _, _ = _classify_photos(
             photos, folders, detection_map, set(), clf, "bioclip", "BioCLIP",

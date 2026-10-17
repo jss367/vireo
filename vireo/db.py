@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from repositories.audit import AuditRepository
     from repositories.caches import CachesRepository
     from repositories.collections import CollectionRepository
+    from repositories.companion_pairing import CompanionPairingRepository
     from repositories.detections import DetectionsRepository
     from repositories.duplicates import DuplicatesRepository
     from repositories.edit_history import EditHistoryRepository
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from repositories.imports import ImportRepository
     from repositories.inat import InatRepository
     from repositories.job_history import JobHistoryRepository
+    from repositories.keyword_provenance import KeywordProvenanceRepository
     from repositories.keywords import KeywordRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.local_workspaces import LocalWorkspaceRepository
@@ -39,10 +41,13 @@ if TYPE_CHECKING:
     from repositories.photo_labels import PhotoLabelRepository
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
+    from repositories.photos import PhotoRepository
     from repositories.predictions import PredictionRepository
     from repositories.processes import ProcessesRepository
+    from repositories.scanning import ScanningRepository
     from repositories.stats import StatsRepository
     from repositories.sync import SyncRepository
+    from repositories.working_copies import WorkingCopyRepository
     from repositories.workspace_folders import WorkspaceFolderRepository
     from repositories.workspaces import WorkspaceRepository
 
@@ -565,7 +570,7 @@ def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
 # keyword (see ``vireo/catalog.py``) and the classifier already treats
 # ancestor tags as "broader labels for the same taxon" rather than
 # separate identifications (see ``_can_auto_accept_detection_prediction``
-# in ``vireo/classify_job.py``). Without a hierarchy filter, a normal
+# in ``vireo/classify_job/store_predictions.py``). Without a hierarchy filter, a normal
 # species-tagged robin would also inflate ``Turdus`` / ``Turdidae`` /
 # ``Aves`` Life List buckets on those catalogs.
 #
@@ -3219,6 +3224,23 @@ class Database:
 
     # -- Photos --
 
+    @property
+    def photos(self) -> PhotoRepository:
+        """Workspace-scoped photo rows: ``db.photos.best_batch_rows_by_ids(ids)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_photos_repository`` for the active
+        workspace (raising when none is active), so never hold one across
+        ``set_active_workspace``. Serves the simple reads that need no
+        coordination: the Best Batch scope rows (``best_batch_rows_by_ids``,
+        ``best_batch_sequence_rows``, ``best_batch_folder_rows``,
+        ``count_folder_photos``) and ``analysis_evidence_rows``. The older
+        photo methods still reach the repository through forwarding
+        wrappers (``get_photo``, ``get_photos`` ...); composition such as
+        ``add_photo`` stays on ``Database``.
+        """
+        return self._photos_repository()
+
     def _photos_repository(self, *, scoped=True):
         """Build the core photo-row repository on this connection.
 
@@ -3608,13 +3630,6 @@ class Database:
         nothing instead of raising.
         """
         return self._photos_repository(scoped=False).file_in_workspace(photo_id, workspace_id)
-
-    def get_best_batch_rows_by_ids(self, photo_ids):
-        """Best Batch rows for the named workspace photos in online folders, unordered.
-
-        One unchunked statement, so the caller bounds ``photo_ids``.
-        """
-        return self._photos_repository().best_batch_rows_by_ids(photo_ids)
 
     def get_photo_flags_ratings_and_eyes(self, photo_ids):
         """``{photo_id: Row}`` with ``id``, ``flag``, ``rating``, ``eye_x``, ``eye_y``, ``eye_conf``, ``eye_tenengrad``."""
@@ -5172,6 +5187,67 @@ class Database:
         """
         return self._caches_repository()
 
+    # -- Scanner catalog pass, companion pairing, working copies --
+
+    def _scanning_repository(self):
+        """Build the scanner's catalog-pass repository on this connection.
+
+        A scan catalogs photos globally, so it takes no workspace id.
+        """
+        from repositories.scanning import ScanningRepository
+
+        return ScanningRepository(self.conn)
+
+    @property
+    def scanning(self) -> ScanningRepository:
+        """The scanner's per-file and per-folder catalog SQL: ``db.scanning.update_photo(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_scanning_repository``. Do not hold the returned
+        repository across a connection swap.
+        """
+        return self._scanning_repository()
+
+    def _companion_pairing_repository(self):
+        """Build the RAW+JPEG companion-pairing repository on this connection.
+
+        Pairing is catalog-wide, so it takes no workspace id.
+        """
+        from repositories.companion_pairing import CompanionPairingRepository
+
+        return CompanionPairingRepository(self.conn)
+
+    @property
+    def companion_pairing(self) -> CompanionPairingRepository:
+        """RAW+JPEG pairing: ``db.companion_pairing.claim_companion(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_companion_pairing_repository``. Do not hold the
+        returned repository across a connection swap.
+        """
+        return self._companion_pairing_repository()
+
+    def _working_copy_repository(self):
+        """Build the working-copy extraction repository on this connection.
+
+        The ``working_copy_*`` columns are catalog-wide, so it takes no
+        workspace id. ``commit_with_retry`` is read from this module at call
+        time so a test that patches ``db.commit_with_retry`` still applies.
+        """
+        from repositories.working_copies import WorkingCopyRepository
+
+        return WorkingCopyRepository(self.conn, commit_with_retry=commit_with_retry)
+
+    @property
+    def working_copies(self) -> WorkingCopyRepository:
+        """The working-copy extraction pass: ``db.working_copies.set_working_copy(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_working_copy_repository``. Do not hold the
+        returned repository across a connection swap.
+        """
+        return self._working_copy_repository()
+
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""
         self._photos_repository(scoped=False).update_sharpness(photo_id, sharpness)
@@ -5532,6 +5608,17 @@ class Database:
             decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
             facade=self,
         )
+
+    @property
+    def keyword_provenance(self) -> KeywordProvenanceRepository:
+        """The ``photo_keywords`` writers without a ``Database`` wrapper: ``db.keyword_provenance.carry_companion_keywords(...)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_keyword_provenance_repository``, which resolves
+        the active workspace only when a method needs it. Do not hold the
+        returned repository across ``set_active_workspace``.
+        """
+        return self._keyword_provenance_repository()
 
     def detect_keyword_case_convention(self):
         """Detect the casing convention used by existing species keywords.
@@ -8844,7 +8931,10 @@ class Database:
         """
         return self._edit_history_repository()
 
-    def record_edit(self, action_type, description, new_value, items, is_batch=False, _commit=True):
+    def record_edit(
+        self, action_type, description, new_value, items, is_batch=False, _commit=True,
+        *, source=None, reason=None,
+    ):
         """Record an edit action with per-photo before/after values.
 
         Clears the redo stack (any undone entries) since a new action invalidates them.
@@ -8853,10 +8943,12 @@ class Database:
             _commit: If False, skip the internal commit and the history prune
                      (caller is responsible for committing the transaction;
                      prune can be run later).
+            source, reason: the edit's provenance when the caller stated it
+                     (who decided, and why); None for the user's own clicks.
         """
         edit_id = self._edit_history_repository().record(
             action_type, description, new_value, items,
-            is_batch=is_batch, _commit=_commit,
+            is_batch=is_batch, _commit=_commit, source=source, reason=reason,
         )
         if _commit:
             self._prune_edit_history()
@@ -9487,6 +9579,10 @@ class Database:
         if not pred_id:
             return
         self.update_prediction_status(int(pred_id), "rejected", _commit=False)
+
+    def prune_edit_history(self):
+        """Apply the configured history bound after a caller-owned edit transaction commits."""
+        return self._prune_edit_history()
 
     def _prune_edit_history(self):
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""

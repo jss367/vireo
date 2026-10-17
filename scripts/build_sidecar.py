@@ -125,6 +125,9 @@ def main():
         "--hidden-import", "scanner",
         "--hidden-import", "classifier",
         "--hidden-import", "classify_job",
+        # A package: collect every submodule, including ones only tests and
+        # function-local imports reach.
+        "--collect-submodules", "classify_job",
         "--hidden-import", "thumbnails",
         "--hidden-import", "pipeline",
         "--hidden-import", "audit",

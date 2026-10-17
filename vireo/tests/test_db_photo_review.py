@@ -145,7 +145,7 @@ def test_photo_review_signatures_unchanged():
     ]
     assert params("set_flags") == [
         ("self", empty, False), ("photo_ids", empty, False), ("flag", empty, False),
-        ("verify_workspace", True, True),
+        ("verify_workspace", True, True), ("_commit", True, True),
     ]
 
 

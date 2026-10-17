@@ -10,6 +10,7 @@ from testing.waits import synchronization_timeout
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from db import Database
+from import_job_patching import patch_import_job
 from PIL import Image
 from scanner import ScanOptions
 
@@ -79,12 +80,8 @@ def test_catalog_scan_preservation_pause_publishes_paused_without_cancelling(
     """
     from unittest.mock import MagicMock
 
-    from import_job import (
-        _catalog_scan_and_prescan,
-        _ImportBatchState,
-        _ImportRunState,
-        _LandedFile,
-    )
+    from import_job.cataloging import _catalog_scan_and_prescan
+    from import_job.state import _ImportBatchState, _ImportRunState, _LandedFile
 
     scan_calls = {"cancel_check": None, "pause_check": None, "n": 0}
 
@@ -224,7 +221,7 @@ def _unsafe_reason(result, path):
 
 def test_import_eta_waits_for_a_completed_transfer_batch():
     """Fast duplicate-only work must not seed the transfer ETA."""
-    from import_job import _ImportEtaEstimator
+    from import_job.progress import _ImportEtaEstimator
 
     now = [0.0]
     eta = _ImportEtaEstimator(clock=lambda: now[0])
@@ -253,7 +250,7 @@ def test_import_eta_waits_for_a_completed_transfer_batch():
 
 def test_import_eta_does_not_count_an_active_prepared_batch_as_settled():
     """Queuing the next batch must not make its ETA disappear early."""
-    from import_job import _ImportEtaEstimator
+    from import_job.progress import _ImportEtaEstimator
 
     now = [0.0]
     eta = _ImportEtaEstimator(clock=lambda: now[0])
@@ -270,7 +267,7 @@ def test_import_eta_does_not_count_an_active_prepared_batch_as_settled():
 
 def test_import_eta_uses_preview_new_count_for_a_mixed_boundary_batch():
     """A mostly-duplicate batch must not look like 200 fast transfers."""
-    from import_job import _ImportEtaEstimator
+    from import_job.progress import _ImportEtaEstimator
 
     now = [0.0]
     eta = _ImportEtaEstimator(clock=lambda: now[0], expected_new=100)
@@ -296,7 +293,7 @@ def test_import_eta_uses_preview_new_count_for_a_mixed_boundary_batch():
 
 def test_import_eta_no_preview_measures_only_copied_files_in_mixed_batch():
     """A no-preview mixed batch must not dilute one transfer over 200 files."""
-    from import_job import _ImportEtaEstimator
+    from import_job.progress import _ImportEtaEstimator
 
     now = [0.0]
     eta = _ImportEtaEstimator(clock=lambda: now[0])
@@ -792,7 +789,7 @@ def test_catalog_never_references_missing_files(tmp_path, monkeypatch):
             with open(d, "r+b") as f:
                 f.write(b"CORRUPT")
 
-    monkeypatch.setattr("import_job.shutil.copy2", flaky_copy2)
+    monkeypatch.setattr("import_job.copy_verify.shutil.copy2", flaky_copy2)
     db, ws_id, result = _run_import(tmp_path, ImportParams(
         sources=[str(card)], destination=str(archive),
     ))
@@ -1347,7 +1344,7 @@ def test_copy_and_hash_verify_detects_corruption(tmp_path, monkeypatch):
         with open(d, "r+b") as f:
             f.write(b"BAD")
 
-    monkeypatch.setattr("import_job.shutil.copy2", corrupting_copy2)
+    monkeypatch.setattr("import_job.copy_verify.shutil.copy2", corrupting_copy2)
     ok, file_hash = copy_and_hash_verify(str(src), str(dst))
     assert ok is False
     assert file_hash is None
@@ -1385,7 +1382,8 @@ def test_deferred_working_copy_progress_preserves_import_total(
     from types import SimpleNamespace
 
     import scanner
-    from import_job import _extract_deferred_working_copies, _ImportRunState
+    from import_job.cataloging import _extract_deferred_working_copies
+    from import_job.state import _ImportRunState
 
     captured = {}
 
@@ -2066,7 +2064,7 @@ def test_wc_extraction_deferred_to_after_last_batch(tmp_path, monkeypatch):
     import import_job
     import scanner
 
-    monkeypatch.setattr(import_job, "IMPORT_BATCH_SIZE", 1)
+    monkeypatch.setattr(import_job.planning, "IMPORT_BATCH_SIZE", 1)
 
     # Track extraction call order. ``extract_working_copy`` is invoked
     # once per candidate row; we care that when the RAW is processed the
@@ -2136,9 +2134,9 @@ def test_planner_keeps_companion_group_in_one_batch(tmp_path, monkeypatch):
     the scan would then pair the JPEG with an unrelated same-stem RAW.
     """
     import import_job
-    from import_job import _companion_key
+    from import_job.siblings import _companion_key
 
-    monkeypatch.setattr(import_job, "IMPORT_BATCH_SIZE", 2)
+    monkeypatch.setattr(import_job.planning, "IMPORT_BATCH_SIZE", 2)
 
     card = tmp_path / "card"
     card.mkdir()
@@ -2172,9 +2170,9 @@ def test_planner_keeps_companion_group_in_one_batch(tmp_path, monkeypatch):
         sources=[str(card)], destination=str(tmp_path / "archive"),
         vireo_dir=str(tmp_path / "vireo"),
     )
-    plan = import_job._plan_import(
+    plan = import_job.planning._plan_import(
         db, params, emit=lambda *_a, **_kw: None,
-        state=import_job._ImportRunState(log_label="test"),
+        state=import_job.state._ImportRunState(log_label="test"),
     )
 
     # The plan must not put the two ``PAIR.*`` files in different batches.
@@ -2989,7 +2987,7 @@ def test_copy_and_hash_verify_falls_back_when_hardlinks_unsupported(
     def unsupported_link(a, b):
         raise OSError(errno_mod.EPERM, "operation not permitted")
 
-    monkeypatch.setattr("import_job.os.link", unsupported_link)
+    monkeypatch.setattr("import_job.copy_verify.os.link", unsupported_link)
 
     ok, file_hash = copy_and_hash_verify(str(src), str(dst))
     assert ok is True
@@ -3019,7 +3017,7 @@ def test_copy_and_hash_verify_fallback_still_refuses_to_overwrite(
     def unsupported_link(a, b):
         raise OSError(errno_mod.EPERM, "operation not permitted")
 
-    monkeypatch.setattr("import_job.os.link", unsupported_link)
+    monkeypatch.setattr("import_job.copy_verify.os.link", unsupported_link)
 
     ok, file_hash = copy_and_hash_verify(str(src), str(dst))
     assert ok is False
@@ -3057,8 +3055,8 @@ def test_copy_and_hash_verify_fallback_leaves_no_placeholder_at_dst_on_promote_f
     def failing_rename(a, b):
         raise OSError(errno_mod.EIO, "simulated FS I/O error during promote")
 
-    monkeypatch.setattr("import_job.os.link", unsupported_link)
-    monkeypatch.setattr("import_job.os.rename", failing_rename)
+    monkeypatch.setattr("import_job.copy_verify.os.link", unsupported_link)
+    monkeypatch.setattr("import_job.copy_verify.os.rename", failing_rename)
 
     ok, file_hash = copy_and_hash_verify(str(src), str(dst))
     assert ok is False
@@ -3095,7 +3093,7 @@ def test_copy_and_hash_verify_fallback_serializes_via_directory_flock(
     def unsupported_link(a, b):
         raise OSError(errno_mod.EPERM, "operation not permitted")
 
-    monkeypatch.setattr("import_job.os.link", unsupported_link)
+    monkeypatch.setattr("import_job.copy_verify.os.link", unsupported_link)
 
     flock_calls = []
 
@@ -3108,7 +3106,7 @@ def test_copy_and_hash_verify_fallback_serializes_via_directory_flock(
             flock_calls.append((fd, op))
             return real_flock(fd, op)
 
-        monkeypatch.setattr("import_job.fcntl.flock", spy_flock)
+        monkeypatch.setattr("import_job.copy_verify.fcntl.flock", spy_flock)
     except ImportError:  # pragma: no cover - Windows
         pass
 
@@ -6257,8 +6255,8 @@ def test_remote_import_rejects_dest_folder_under_source(
             "should have rejected the batch before this call"
         )
 
-    orig_hash = _ij.compute_file_hash
-    monkeypatch.setattr(_ij, "compute_file_hash", _refuse_hash)
+    orig_hash = _ij.copy_verify.compute_file_hash
+    patch_import_job(monkeypatch, "compute_file_hash", _refuse_hash)
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -6271,7 +6269,7 @@ def test_remote_import_rejects_dest_folder_under_source(
         ),
     )
     # Restore hash for any later use in this test.
-    monkeypatch.setattr(_ij, "compute_file_hash", orig_hash)
+    patch_import_job(monkeypatch, "compute_file_hash", orig_hash)
     monkeypatch.setattr(_move, "_run_rsync_streamed", lambda *a, **kw: (
         (_ for _ in ()).throw(AssertionError("rsync should not run"))
     ))
@@ -7346,7 +7344,7 @@ def test_each_resume_scope_publish_is_flushed_before_the_next_batch(
 
     # Force multiple batches so we see the pre-batch publish AND at least
     # one post-batch publish inside ``run_import_job``.
-    monkeypatch.setattr(import_job, "IMPORT_BATCH_SIZE", 1)
+    monkeypatch.setattr(import_job.planning, "IMPORT_BATCH_SIZE", 1)
 
     card = _make_card(tmp_path, [
         ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
@@ -7356,7 +7354,7 @@ def test_each_resume_scope_publish_is_flushed_before_the_next_batch(
     archive = tmp_path / "archive"
 
     interleaving = []
-    real_publish = import_job._publish_resume_scope
+    real_publish = import_job.resume._publish_resume_scope
 
     def spy_publish(job, db_, state, source_snapshots, runner=None, **kw):
         # Before the publish: how many syncs the fake runner has seen.
@@ -7371,7 +7369,7 @@ def test_each_resume_scope_publish_is_flushed_before_the_next_batch(
         })
         return published
 
-    monkeypatch.setattr(import_job, "_publish_resume_scope", spy_publish)
+    patch_import_job(monkeypatch, "_publish_resume_scope", spy_publish)
 
     runner = FakeRunner()
     _run_import(tmp_path, ImportParams(
@@ -7539,7 +7537,7 @@ def test_remote_import_links_case_only_twin_folder(tmp_path, monkeypatch):
     # test host filesystem (Linux ext4 is case-sensitive). This is the
     # module-level constant _dest_ci consults; sys.platform monkeypatch
     # wouldn't work because the constant is bound at import time.
-    monkeypatch.setattr(_ij, "_CASE_INSENSITIVE_PLATFORM", True)
+    monkeypatch.setattr(_ij.destination, "_CASE_INSENSITIVE_PLATFORM", True)
 
     # Build the remote archive rooted under a case-neutral parent so we can
     # spell the destination and the twin's DB path with a differently-cased
@@ -7935,7 +7933,7 @@ def test_remote_import_case_only_basename_collision_on_ci_destination(
     # test host filesystem (Linux ext4 is case-sensitive). The module-
     # level constant _dest_ci consults; sys.platform monkeypatch wouldn't
     # work because the constant is bound at import time.
-    monkeypatch.setattr(_ij, "_CASE_INSENSITIVE_PLATFORM", True)
+    monkeypatch.setattr(_ij.destination, "_CASE_INSENSITIVE_PLATFORM", True)
 
     ra = _remote_archive_for(tmp_path)
     calls = _remote_calls(ra)
@@ -11631,14 +11629,14 @@ def test_local_import_takes_mount_baseline_before_discovery(
     )
 
     # The share drops WHILE discovery is running.
-    real_discover = _ij.discover_source_files
+    real_discover = _ij.planning.discover_source_files
 
     def discover_then_detach(*a, **kw):
         result = list(real_discover(*a, **kw))
         state["mounted"] = False
         return result
 
-    monkeypatch.setattr(_ij, "discover_source_files", discover_then_detach)
+    monkeypatch.setattr(_ij.planning, "discover_source_files", discover_then_detach)
 
     db, ws_id, result = _run_import(tmp_path, ImportParams(
         sources=[str(card)], destination=dest,
@@ -11684,14 +11682,14 @@ def test_remote_import_takes_mount_baseline_before_discovery(
         lambda p: state["mounted"] if str(p) == mount_base else real_ismount(p),
     )
 
-    real_discover = _ij.discover_source_files
+    real_discover = _ij.planning.discover_source_files
 
     def discover_then_detach(*a, **kw):
         result = list(real_discover(*a, **kw))
         state["mounted"] = False
         return result
 
-    monkeypatch.setattr(_ij, "discover_source_files", discover_then_detach)
+    monkeypatch.setattr(_ij.planning, "discover_source_files", discover_then_detach)
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -11977,10 +11975,10 @@ def test_local_import_invalidates_duplicate_skips_when_mount_detaches(
             return rows
         return wrapper
 
-    monkeypatch.setattr(
-        _ij, "_key_twin_rows", _detach_after(_ij._key_twin_rows))
-    monkeypatch.setattr(
-        _ij, "_hash_twin_rows", _detach_after(_ij._hash_twin_rows))
+    patch_import_job(
+        monkeypatch, "_key_twin_rows", _detach_after(_ij.twins._key_twin_rows))
+    patch_import_job(
+        monkeypatch, "_hash_twin_rows", _detach_after(_ij.twins._hash_twin_rows))
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id, ImportParams(
@@ -12158,10 +12156,10 @@ def test_remote_import_invalidates_duplicate_skips_when_mount_detaches(
             return rows
         return wrapper
 
-    monkeypatch.setattr(
-        _ij, "_key_twin_rows", _detach_after(_ij._key_twin_rows))
-    monkeypatch.setattr(
-        _ij, "_hash_twin_rows", _detach_after(_ij._hash_twin_rows))
+    patch_import_job(
+        monkeypatch, "_key_twin_rows", _detach_after(_ij.twins._key_twin_rows))
+    patch_import_job(
+        monkeypatch, "_hash_twin_rows", _detach_after(_ij.twins._hash_twin_rows))
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id, ImportParams(
@@ -12497,7 +12495,7 @@ class CancelOnImportingRunner(FakeRunner):
 
 def test_hash_dest_file_matches_compute_file_hash(tmp_path):
     from import_dedup import compute_file_hash
-    from import_job import _hash_dest_file
+    from import_job.copy_verify import _hash_dest_file
 
     f = tmp_path / "a.jpg"
     f.write_bytes(b"some destination bytes" * 1000)
@@ -12521,7 +12519,8 @@ def test_hash_dest_file_cancel_interrupts_blocked_read(tmp_path):
     import threading
     import time
 
-    from import_job import DestReadCancelled, _hash_dest_file
+    from import_job import DestReadCancelled
+    from import_job.copy_verify import _hash_dest_file
 
     fifo = tmp_path / "stuck.NEF"
     os.mkfifo(str(fifo))
@@ -12548,7 +12547,8 @@ def test_hash_dest_file_cancel_pending_never_opens(tmp_path):
     """Stop already requested → raise before touching the file at all: on
     a dead mount the ``open()`` itself blocks, so returning at all proves
     the open was skipped (a FIFO reader with no writer never returns)."""
-    from import_job import DestReadCancelled, _hash_dest_file
+    from import_job import DestReadCancelled
+    from import_job.copy_verify import _hash_dest_file
 
     fifo = tmp_path / "stuck.NEF"
     os.mkfifo(str(fifo))
@@ -12564,7 +12564,8 @@ def test_hash_dest_file_stall_raises_plain_oserror(tmp_path):
     """No Stop in flight — a read that produces no data for stall_timeout
     is an unreadable file, the same OSError shape every call site already
     handles (NOT a cancellation)."""
-    from import_job import DestReadCancelled, _hash_dest_file
+    from import_job import DestReadCancelled
+    from import_job.copy_verify import _hash_dest_file
 
     fifo = tmp_path / "stuck.NEF"
     os.mkfifo(str(fifo))
@@ -12821,14 +12822,14 @@ def test_remote_import_cancel_interrupts_stuck_collision_hash(
     # the same dead mount before the outer ``if cancelled: break`` check
     # fires.
     import import_job as _ij
-    real_hash_dest_file = _ij._hash_dest_file
+    real_hash_dest_file = _ij.copy_verify._hash_dest_file
     hashed_paths = []
 
     def spy_hash_dest_file(path, cancel_check, **kw):
         hashed_paths.append(path)
         return real_hash_dest_file(path, cancel_check, **kw)
 
-    monkeypatch.setattr(_ij, "_hash_dest_file", spy_hash_dest_file)
+    patch_import_job(monkeypatch, "_hash_dest_file", spy_hash_dest_file)
 
     runner = CancelOnImportingRunner()
     job = _make_job()
@@ -13249,7 +13250,7 @@ def test_local_import_hash_watchdog_does_not_block_on_pause(
     # Mark the job paused for exactly the window in which the watchdog's
     # ``cancel_check`` runs. Covers both the pre-open probe (line 788) and
     # every mid-read chunk boundary (line 817).
-    real_hash_dest_file = _ij._hash_dest_file
+    real_hash_dest_file = _ij.copy_verify._hash_dest_file
 
     def spy_hash_dest_file(path, cancel_check, **kw):
         runner.paused_ids.add(job["id"])
@@ -13258,7 +13259,7 @@ def test_local_import_hash_watchdog_does_not_block_on_pause(
         finally:
             runner.paused_ids.discard(job["id"])
 
-    monkeypatch.setattr(_ij, "_hash_dest_file", spy_hash_dest_file)
+    patch_import_job(monkeypatch, "_hash_dest_file", spy_hash_dest_file)
 
     # No AssertionError ⇒ the closure probed with the nonblocking method.
     # The twin's real bytes hash cleanly so the import lands the file as
@@ -13306,7 +13307,7 @@ def test_remote_import_hash_watchdog_does_not_block_on_pause(
     runner = _PauseWhileHashingRunner()
     job = _make_job()
 
-    real_hash_dest_file = _ij._hash_dest_file
+    real_hash_dest_file = _ij.copy_verify._hash_dest_file
 
     def spy_hash_dest_file(path, cancel_check, **kw):
         runner.paused_ids.add(job["id"])
@@ -13315,7 +13316,7 @@ def test_remote_import_hash_watchdog_does_not_block_on_pause(
         finally:
             runner.paused_ids.discard(job["id"])
 
-    monkeypatch.setattr(_ij, "_hash_dest_file", spy_hash_dest_file)
+    patch_import_job(monkeypatch, "_hash_dest_file", spy_hash_dest_file)
 
     result = run_import_job(
         job, runner, db_path, ws_id,
@@ -14002,7 +14003,7 @@ def test_local_cancel_during_primary_candidate_hash_is_a_cancel(
     collision = dest_dir / "IMG_0300.jpg"
     collision.write_bytes(_same_size_filler(card / "IMG_0300.jpg"))
 
-    real_hash = _ij._hash_dest_file
+    real_hash = _ij.copy_verify._hash_dest_file
     hashed = []
 
     def cancelling_hash(path, cancel_check, **kw):
@@ -14011,7 +14012,7 @@ def test_local_cancel_during_primary_candidate_hash_is_a_cancel(
             raise DestReadCancelled(f"import cancelled reading {path}")
         return real_hash(path, cancel_check, **kw)
 
-    monkeypatch.setattr(_ij, "_hash_dest_file", cancelling_hash)
+    patch_import_job(monkeypatch, "_hash_dest_file", cancelling_hash)
 
     db, ws_id, result = _run_import(tmp_path, ImportParams(
         sources=[str(card)], destination=str(archive),
@@ -14050,14 +14051,14 @@ def test_local_cancel_during_suffix_candidate_hash_is_a_cancel(
     suffix_cand = dest_dir / "IMG_0300_1.jpg"
     suffix_cand.write_bytes(filler)
 
-    real_hash = _ij._hash_dest_file
+    real_hash = _ij.copy_verify._hash_dest_file
 
     def cancelling_hash(path, cancel_check, **kw):
         if str(path) == str(suffix_cand):
             raise DestReadCancelled(f"import cancelled reading {path}")
         return real_hash(path, cancel_check, **kw)
 
-    monkeypatch.setattr(_ij, "_hash_dest_file", cancelling_hash)
+    patch_import_job(monkeypatch, "_hash_dest_file", cancelling_hash)
 
     db, ws_id, result = _run_import(tmp_path, ImportParams(
         sources=[str(card)], destination=str(archive),
@@ -14114,7 +14115,8 @@ def test_remote_zero_byte_twin_at_primary_adopts_with_checker(
     advance — transferring a second empty file to ``IMG_0001_1.jpg`` and
     cataloging two rows for one card photo.
     """
-    from import_job import EMPTY_FILE_SHA256, ImportParams, run_import_job
+    from import_job import ImportParams, run_import_job
+    from scanner import EMPTY_FILE_SHA256
 
     ra = _remote_archive_for(tmp_path)
     calls = _remote_calls(ra)
@@ -14220,14 +14222,14 @@ def test_remote_size_mismatched_candidate_not_hashed(tmp_path, monkeypatch):
         (card / "IMG_0001.jpg").read_bytes() + b"\x00" * 512)
     assert collision.stat().st_size != (card / "IMG_0001.jpg").stat().st_size
 
-    real_hash = _ij._hash_dest_file
+    real_hash = _ij.copy_verify._hash_dest_file
     hashed = []
 
     def counting_hash(path, cancel_check, **kw):
         hashed.append(str(path))
         return real_hash(path, cancel_check, **kw)
 
-    monkeypatch.setattr(_ij, "_hash_dest_file", counting_hash)
+    patch_import_job(monkeypatch, "_hash_dest_file", counting_hash)
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -14284,14 +14286,14 @@ def _delegating_stat_raiser(monkeypatch, bad_path, errno_msg="stale"):
 def _delegating_hash_raiser(monkeypatch, bad_path):
     """Make ``_hash_dest_file`` raise OSError for exactly ``bad_path``."""
     import import_job as _ij
-    real = _ij._hash_dest_file
+    real = _ij.copy_verify._hash_dest_file
 
     def fake(path, cancel_check, **kw):
         if str(path) == str(bad_path):
             raise OSError("unreadable destination candidate")
         return real(path, cancel_check, **kw)
 
-    monkeypatch.setattr(_ij, "_hash_dest_file", fake)
+    patch_import_job(monkeypatch, "_hash_dest_file", fake)
 
 
 def test_local_unreadable_primary_candidate_advances(tmp_path, monkeypatch):
@@ -14986,7 +14988,9 @@ def test_resume_recovers_a_raw_through_its_recorded_companion(
     """Recovery looks rows up by the parent's recorded landing paths, so
     a RAW whose only recorded landing was its merged-in JPEG companion is
     still the parent's photo."""
-    from import_job import ImportParams, _ImportRunState, _recover_parent_landings
+    from import_job import ImportParams
+    from import_job.resume import _recover_parent_landings
+    from import_job.state import _ImportRunState
 
     _stub_extractor(monkeypatch, lambda src: True)
     card = tmp_path / "card"
@@ -15087,7 +15091,7 @@ def test_stop_while_waiting_before_planning_skips_the_card_walk(
     ])
     planned = []
     monkeypatch.setattr(
-        import_job, "_plan_import",
+        import_job.run, "_plan_import",
         lambda *a, **kw: planned.append(True),
     )
 
@@ -15107,12 +15111,14 @@ def test_landing_whose_stat_fails_stays_in_the_record(tmp_path, monkeypatch):
     """A just-landed file whose stat fails is still recorded (by its
     verified hash), so a resume can recover its cataloged row."""
     import import_job
-    from import_job import ImportParams, _ImportRunState, _recover_parent_landings
+    from import_job import ImportParams
+    from import_job.resume import _recover_parent_landings
+    from import_job.state import _ImportRunState
 
     card = _make_card(tmp_path, [
         ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
     ])
-    monkeypatch.setattr(import_job, "_landed_identity", lambda path: None)
+    monkeypatch.setattr(import_job.resume, "_landed_identity", lambda path: None)
     db, _ws, result = _run_import(tmp_path, ImportParams(
         sources=[str(card)], destination=str(tmp_path / "archive"),
     ))
@@ -15130,7 +15136,7 @@ def test_landing_whose_stat_fails_stays_in_the_record(tmp_path, monkeypatch):
 def test_companion_recorded_without_stat_matches_by_current_hash(tmp_path):
     """A merged JPEG companion recorded without a stat is matched by
     hashing the file; replaced bytes don't match."""
-    from import_job import _is_parent_landing
+    from import_job.resume import _is_parent_landing
     from scanner import compute_file_hash
 
     jpeg = tmp_path / "DSC_0001.jpg"
@@ -15142,7 +15148,7 @@ def test_companion_recorded_without_stat_matches_by_current_hash(tmp_path):
 
 
 def test_rejected_landing_leaves_the_resume_record():
-    from import_job import _ImportRunState, _LandedFile, _reclassify_landed_failed
+    from import_job.state import _ImportRunState, _LandedFile, _reclassify_landed_failed
 
     state = _ImportRunState(log_label="test")
     # Keyed the way _record_landed_files writes it (normpath: "\\arch\\a.jpg"

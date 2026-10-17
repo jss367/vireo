@@ -12,11 +12,15 @@ flows that call those writers in the middle of their own transaction:
   may repoint its associations onto the canonical place row;
 - the flows that call a writer mid-flight: ``upsert_one_keyword`` (merges
   through ``Database._merge_keyword_into``) and ``accept_prediction`` (tags through
-  ``Database.tag_photo``, then queues the sidecar change).
+  ``Database.tag_photo``, then queues the sidecar change);
+- ``carry_companion_keywords``: RAW/JPEG companion pairing, which copies the
+  JPEG row's associations onto its RAW before the JPEG row is deleted. It
+  has no ``Database`` wrapper; ``scanner`` reaches it through the
+  ``db.keyword_provenance`` accessor.
 
 ``test_keyword_provenance_contract`` keys the convergence points to this
 module by their method names here (``tag``, ``merge_keyword_into``,
-``link_keyword_to_place``); the only writer outside it is the RAW/JPEG companion pairing in ``scanner.py``.
+``link_keyword_to_place``, ``carry_companion_keywords``).
 ``Database._apply_winner_loser_merge`` and ``set_photo_location`` stay on
 ``Database`` and re-tag through ``Database.tag_photo``.
 
@@ -66,7 +70,11 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
-from keyword_identity import free_sibling_name, keywords_claim_different_taxa
+from keyword_identity import (
+    embedded_keyword_associations_for_merge,
+    free_sibling_name,
+    keywords_claim_different_taxa,
+)
 from keyword_normalization import keyword_match_key, normalize_keyword_display
 
 log = logging.getLogger(__name__)
@@ -1043,6 +1051,27 @@ class KeywordProvenanceRepository:
         )
         if _commit:
             self.conn.commit()
+
+    def carry_companion_keywords(self, companion_id, primary_id):
+        """Copy a companion row's keyword associations onto its primary.
+
+        Joins the caller's transaction and does not commit. Moved from
+        ``scanner._transfer_companion_keywords``.
+        """
+        companion_keywords = embedded_keyword_associations_for_merge(
+            self.conn, companion_id, primary_id, include_non_embedded=True,
+        )
+        for kw in companion_keywords:
+            # Move the association's provenance with it: pairing a RAW with
+            # its camera JPEG must not turn the user's hand-added keywords
+            # into "unknown" rows a retirement pass would treat as generated.
+            # The shared conflict clause keeps whichever side's claim is
+            # stronger when the primary already carries the keyword.
+            self.conn.execute(
+                "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
+                "VALUES (?, ?, ?) " + self.KEYWORD_SOURCE_CONFLICT_SQL,
+                (primary_id, kw["id"], kw["source"]),
+            )
 
     def merge_keyword_into(self, src_id, dst_id, *, pending_source_only=False):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.

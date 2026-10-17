@@ -48,7 +48,6 @@ PRIVATE_WORKSPACE_ATTRS = {"_active_workspace_id", "_ws_id"}
 CONN_USE_LIMITS = {
     "app.py": 8,
     "audit.py": 10,
-    "best_batch.py": 2,
     "capture_time.py": 7,
     "card_cleanup.py": 4,
     "computation_cache.py": 37,
@@ -79,7 +78,6 @@ CONN_USE_LIMITS = {
     "pipeline_stages/scanning.py": 1,
     "preview_cache.py": 4,
     "render_source.py": 2,
-    "scanner.py": 96,
     "schema.py": 1,
     "site_export.py": 3,
     "species_identity.py": 5,
