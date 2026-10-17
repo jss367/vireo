@@ -91,6 +91,338 @@ def _inventory_subtotal(pairs):
     }
 
 
+def _inventory_label_sets():
+    """Usable saved label sets (deduped by fingerprint) and unusable ones.
+
+    Returns ``(label_sets, unusable_label_sets)``.
+    """
+    from labels import get_saved_labels, load_label_set
+    from labels_fingerprint import compute_fingerprint
+
+    # Available label sets: read each saved .txt and recompute fingerprint
+    # so the inventory's identity matches what the classify job would use.
+    label_sets = []
+    unusable_label_sets = []
+    seen_paths = set()
+    for ls in get_saved_labels():
+        path = ls.get("labels_file", "")
+        if not path or not os.path.exists(path) or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        try:
+            species = load_label_set(path, ls)
+        except OSError:
+            continue
+        name = ls.get("name") or os.path.splitext(os.path.basename(path))[0]
+        if not species:
+            # ``compute_fingerprint([])`` is the ToL sentinel, so an
+            # empty set would claim Tree of Life's row: its counts
+            # would be double-billed under the set's own name, and a
+            # non-ToL model would show an impossible regional pair.
+            # It classifies nothing — name it as unusable instead.
+            unusable_label_sets.append({
+                "name": name,
+                "filename": os.path.basename(path),
+                "skipped": len(getattr(species, "dropped_ambiguous", ())),
+            })
+            continue
+        label_sets.append({
+            "name": name,
+            "path": path,
+            "filename": os.path.basename(path),
+            "fingerprint": compute_fingerprint(species),
+        })
+
+    # Dedupe by fingerprint: duplicate-content files (rename/copy) share a
+    # fingerprint and the same db_pair stats. Emitting both rows would
+    # double-count subtotals and inflate pending coverage. Keep the
+    # alphabetically-first name as the canonical representative.
+    deduped_by_fp = {}
+    for ls in sorted(label_sets, key=lambda x: x["name"].lower()):
+        deduped_by_fp.setdefault(ls["fingerprint"], ls)
+    label_sets = list(deduped_by_fp.values())
+    return label_sets, unusable_label_sets
+
+
+def _inventory_model_entry(m, model_name, label_sets, db_pairs, total_dets,
+                           seen_keys):
+    """One registry model's inventory entry: a pair per label set it uses."""
+    from labels_fingerprint import TOL_SENTINEL
+    from models import supports_tree_of_life
+
+    # Capability question — does this model TYPE ship ToL text
+    # embeddings? Ask supports_tree_of_life(model_str), not the raw
+    # `files` manifest: bioclip-2.5's ToL artifacts are declared
+    # under `optional_files` so a straight `"tol_embeddings.npy" in
+    # m.get("files", [])` would drop ToL coverage from this
+    # inventory entirely — no current-pair emit and no stale-row
+    # for prior ToL runs, because TOL_SENTINEL is always in
+    # current_fps for the model.
+    supports_tol = supports_tree_of_life(m.get("model_str", ""))
+    is_closed_set = m.get("model_type") == "timm"
+
+    pairs = []
+    if is_closed_set:
+        key = (model_name, TOL_SENTINEL)
+        pairs.append(_inventory_pair(
+            label_set="(intrinsic)", label_set_path=None,
+            fingerprint=TOL_SENTINEL, is_tol=False, is_intrinsic=True,
+            db_pair=db_pairs.get(key, {}), total=total_dets,
+        ))
+        seen_keys.add(key)
+    else:
+        for ls in sorted(label_sets, key=lambda x: x["name"].lower()):
+            key = (model_name, ls["fingerprint"])
+            pairs.append(_inventory_pair(
+                label_set=ls["name"], label_set_path=ls["filename"],
+                fingerprint=ls["fingerprint"], is_tol=False,
+                is_intrinsic=False,
+                db_pair=db_pairs.get(key, {}), total=total_dets,
+            ))
+            seen_keys.add(key)
+        if supports_tol:
+            key = (model_name, TOL_SENTINEL)
+            pairs.append(_inventory_pair(
+                label_set="Tree of Life", label_set_path=None,
+                fingerprint=TOL_SENTINEL, is_tol=True,
+                is_intrinsic=False,
+                db_pair=db_pairs.get(key, {}), total=total_dets,
+            ))
+            seen_keys.add(key)
+
+    return {
+        "id": m.get("id"),
+        "name": model_name,
+        "supports_tol": supports_tol,
+        "downloaded": bool(m.get("downloaded")),
+        "legacy": False,
+        "subtotal": _inventory_subtotal(pairs),
+        "pairs": pairs,
+    }
+
+
+def _inventory_legacy_models(db_pairs, registry_names, total_dets, seen_keys):
+    """Inventory entries for models in the DB but not in the registry."""
+    from labels_fingerprint import TOL_SENTINEL
+
+    # Legacy: a (model, fp) in the DB whose model isn't in the current
+    # registry. Group those rows under one entry per legacy model name.
+    models_out = []
+    legacy_groups = {}
+    for (model_name, fp), p in db_pairs.items():
+        if model_name in registry_names:
+            continue
+        legacy_groups.setdefault(model_name, []).append((fp, p))
+    for model_name, fp_pairs in sorted(legacy_groups.items()):
+        pairs = []
+        for fp, p in sorted(fp_pairs, key=lambda x: x[0]):
+            pairs.append(_inventory_pair(
+                label_set=("Tree of Life" if fp == TOL_SENTINEL
+                           else "fp:" + fp[:8]),
+                label_set_path=None, fingerprint=fp,
+                is_tol=(fp == TOL_SENTINEL), is_intrinsic=False,
+                db_pair=p, total=total_dets,
+            ))
+            seen_keys.add((model_name, fp))
+        models_out.append({
+            "id": None,
+            "name": model_name,
+            "supports_tol": False,
+            "downloaded": False,
+            "legacy": True,
+            "subtotal": _inventory_subtotal(pairs),
+            "pairs": pairs,
+        })
+    return models_out
+
+
+def _inventory_stale(db, db_pairs, registry_names, label_sets):
+    """Rows from current models whose label fingerprint is no longer on disk."""
+    from labels import load_merged_labels
+    from labels_fingerprint import TOL_SENTINEL, compute_fingerprint
+
+    # Stale: a (current model, fingerprint) in the DB whose fingerprint
+    # is not currently on disk and isn't TOL. Single-file fingerprints
+    # come from the label_sets above; merged-set fingerprints come from
+    # the labels_fingerprints sidecar (one row per distinct merge the
+    # classify job has ever produced). A merged row is current if all
+    # its sources still exist and re-merging them reproduces the same
+    # fingerprint; otherwise the contents drifted and it's stale.
+    current_fps = {ls["fingerprint"] for ls in label_sets} | {TOL_SENTINEL}
+    for row in db.model_runs.get_labels_fingerprints():
+        sources = row.get("sources") or []
+        if len(sources) <= 1:
+            continue  # single-file already covered by label_sets
+        if not all(os.path.exists(s) for s in sources):
+            continue
+        try:
+            merged = load_merged_labels([{"labels_file": source} for source in sources])
+        except OSError:
+            continue
+        if compute_fingerprint(merged) == row["fingerprint"]:
+            current_fps.add(row["fingerprint"])
+    stale = []
+    for (model_name, fp), p in db_pairs.items():
+        if model_name not in registry_names:
+            continue  # legacy, already grouped
+        if fp in current_fps:
+            continue
+        # The stale UI labels this column "Predictions", so report rows
+        # from `predictions` (one per species) rather than distinct
+        # detection IDs from `classifier_runs`. A top-k run with k species
+        # per detection would otherwise undercount stale work.
+        stale.append({
+            "model": model_name,
+            "fingerprint": fp,
+            "stale_count": p.get("predictions_count", 0),
+            "last_run": p.get("last_run"),
+        })
+    return stale
+
+
+def _new_images_walk_compute(db_path, ws_id, walk_result, walk_error):
+    """The cache worker's compute: one full new-images walk of ``ws_id``.
+
+    Records the result, or the exception, in the holders the recorded job
+    reads once the walk ends.
+    """
+    import dir_listing_cache
+    from db import Database
+    from new_images import count_new_images_for_workspace
+
+    def compute(progress_callback=None):
+        # Close explicitly: this connection lives for the whole walk
+        # (minutes on large volumes), and connections left to __del__
+        # accumulate and exhaust the per-process fd limit.
+        wdb = Database(db_path)
+        try:
+            wdb.set_active_workspace(ws_id)
+            # Reuse the listing of every folder unchanged since the last
+            # walk; "Check again" clears the cache so a recheck reads all.
+            result = count_new_images_for_workspace(
+                wdb, ws_id, sample_limit=None,
+                progress_callback=progress_callback,
+                listing_cache=dir_listing_cache.get_shared(),
+            )
+            walk_result["result"] = result
+            return result
+        except Exception as e:
+            walk_error["exc"] = e
+            raise
+        finally:
+            wdb.close()
+
+    return compute
+
+
+def _new_images_walk_job_payload(progress_state, result):
+    """The recorded new-images job's result: final totals and caveats."""
+    payload = {
+        "files_checked": progress_state["checked"],
+        "new_count": progress_state["found"],
+        # Which folders this walk read from disk and which it
+        # reused unchanged since the last look.
+        "folders_read": result.get("folders_read", 0),
+        "folders_unchanged": result.get("folders_unchanged", 0),
+    }
+    # An offline volume is a completed walk with a caveat, not
+    # a failure: name the roots that were skipped so the Jobs
+    # panel tells the same story as the banner.
+    unreachable = result.get("unreachable_roots") or []
+    if unreachable:
+        payload["unreachable_roots"] = list(unreachable)
+        payload["phase"] = (
+            f"{len(unreachable)} folder(s) offline, not checked"
+        )
+    # Staged local-copy sources were left out on purpose; the
+    # banner names them, and so does the job.
+    local_copies = result.get("local_copy_excluded") or []
+    if local_copies:
+        payload["local_copy_excluded"] = list(local_copies)
+    return payload
+
+
+def _new_images_walk_progress_callback(runner, job_id, progress_state):
+    """Mirror walk progress into ``progress_state`` and the job's events."""
+
+    def progress_callback(files_checked, new_found):
+        progress_state["checked"] = files_checked
+        progress_state["found"] = new_found
+        runner.push_event(
+            job_id,
+            "progress",
+            {
+                "current": files_checked,
+                "total": 0,
+                "phase": (
+                    f"{files_checked:,} checked, {new_found:,} new"
+                ),
+                "files_checked": files_checked,
+                "new_count": new_found,
+            },
+        )
+
+    return progress_callback
+
+
+def _move_folders_local_copy_guard(db, ws_id, folder_ids):
+    """Refuse a move that would abandon a local session; map descendant roots.
+
+    Returns ``(descendant_root_ids_by_folder, error message)``.
+    """
+    # Match the folder-unlink route: block moves that would abandon a
+    # local session and, for the ancestor case, remember descendant
+    # roots so we can sweep their rebased workspace_folders rows over
+    # to the target after the move. move_folders_to_workspace uses a
+    # folders.path subtree walk, so a rebased descendant hides from
+    # it and would otherwise be orphaned on the source workspace.
+    descendant_root_ids_by_folder: dict[int, list[int]] = {}
+    for fid in folder_ids:
+        local_root_id = local_root_for_folder(db, fid)
+        if local_root_id is not None:
+            linked_workspaces = local_folder_workspace_ids(db, local_root_id)
+            if linked_workspaces == [ws_id]:
+                return None, (
+                    "This is the last workspace linked to a local folder. "
+                    "Sync or discard its local copy before moving it."
+                )
+        descendant_ids = local_roots_under_folder(db, fid)
+        descendant_root_ids_by_folder[fid] = descendant_ids
+        for descendant_id in descendant_ids:
+            linked_workspaces = local_folder_workspace_ids(db, descendant_id)
+            if linked_workspaces == [ws_id]:
+                return None, (
+                    "This workspace is the last one linked to a subfolder's "
+                    "local copy. Sync or discard the local copy before "
+                    "moving this folder."
+                )
+    return descendant_root_ids_by_folder, None
+
+
+def _new_workspace_move_error(db, ws_id, folder_ids):
+    """Why the selected folders cannot seed a new workspace, or None."""
+    if not db.workspaces.get(ws_id):
+        return f"Source workspace {ws_id} not found"
+    source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
+    for fid in folder_ids:
+        if fid not in source_folder_ids:
+            return f"Folder {fid} does not belong to source workspace {ws_id}"
+    from db import _path_for_subtree_match
+
+    source_folders = db.get_workspace_folders(ws_id)
+    selected = set(folder_ids)
+    remaining_paths = [_path_for_subtree_match(f["path"]) for f in source_folders
+                       if f["id"] not in selected and f["path"]]
+    if any(_path_for_subtree_match(f["path"]).startswith(parent + "/")
+           for f in source_folders if f["id"] in selected and f["path"]
+           for parent in remaining_paths):
+        return (
+            "Cannot move a folder that is covered by another source workspace folder; "
+            "move the covering folder or remove it first"
+        )
+    return None
+
+
 def create_workspace_blueprint(
     get_db,
     json_error,
@@ -645,57 +977,18 @@ def create_workspace_blueprint(
                     409,
                 )
 
-            # Match the folder-unlink route: block moves that would abandon a
-            # local session and, for the ancestor case, remember descendant
-            # roots so we can sweep their rebased workspace_folders rows over
-            # to the target after the move. move_folders_to_workspace uses a
-            # folders.path subtree walk, so a rebased descendant hides from
-            # it and would otherwise be orphaned on the source workspace.
-            descendant_root_ids_by_folder: dict[int, list[int]] = {}
-            for fid in folder_ids:
-                local_root_id = local_root_for_folder(db, fid)
-                if local_root_id is not None:
-                    linked_workspaces = local_folder_workspace_ids(db, local_root_id)
-                    if linked_workspaces == [ws_id]:
-                        return json_error(
-                            "This is the last workspace linked to a local folder. "
-                            "Sync or discard its local copy before moving it.",
-                            409,
-                        )
-                descendant_ids = local_roots_under_folder(db, fid)
-                descendant_root_ids_by_folder[fid] = descendant_ids
-                for descendant_id in descendant_ids:
-                    linked_workspaces = local_folder_workspace_ids(db, descendant_id)
-                    if linked_workspaces == [ws_id]:
-                        return json_error(
-                            "This workspace is the last one linked to a subfolder's "
-                            "local copy. Sync or discard the local copy before "
-                            "moving this folder.",
-                            409,
-                        )
+            descendant_root_ids_by_folder, guard_error = (
+                _move_folders_local_copy_guard(db, ws_id, folder_ids)
+            )
+            if guard_error is not None:
+                return json_error(guard_error, 409)
 
             # Validate source workspace and folder ownership before creating a
             # new workspace to avoid orphans if the move would fail.
             if new_ws_name:
-                if not db.workspaces.get(ws_id):
-                    return json_error(f"Source workspace {ws_id} not found")
-                source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
-                for fid in folder_ids:
-                    if fid not in source_folder_ids:
-                        return json_error(f"Folder {fid} does not belong to source workspace {ws_id}")
-                from db import _path_for_subtree_match
-
-                source_folders = db.get_workspace_folders(ws_id)
-                selected = set(folder_ids)
-                remaining_paths = [_path_for_subtree_match(f["path"]) for f in source_folders
-                                   if f["id"] not in selected and f["path"]]
-                if any(_path_for_subtree_match(f["path"]).startswith(parent + "/")
-                       for f in source_folders if f["id"] in selected and f["path"]
-                       for parent in remaining_paths):
-                    return json_error(
-                        "Cannot move a folder that is covered by another source workspace folder; "
-                        "move the covering folder or remove it first"
-                    )
+                move_error = _new_workspace_move_error(db, ws_id, folder_ids)
+                if move_error is not None:
+                    return json_error(move_error)
                 try:
                     target_ws_id = db.create_workspace(new_ws_name)
                 except Exception as e:
@@ -904,10 +1197,6 @@ def create_workspace_blueprint(
         panel and mirrors its progress into ``new_images_walk_progress``
         so pending API responses can report live totals.
         """
-        import dir_listing_cache
-        from db import Database
-        from new_images import count_new_images_for_workspace
-
         db_path = db._db_path
         # Shared holder for the cache worker's exception (if any), read by
         # the recorded job's work_fn after the cache event fires. Without
@@ -919,27 +1208,7 @@ def create_workspace_blueprint(
         walk_result = {"result": None}
         spawn_state = {"spawned": False}
 
-        def compute(progress_callback=None):
-            # Close explicitly: this connection lives for the whole walk
-            # (minutes on large volumes), and connections left to __del__
-            # accumulate and exhaust the per-process fd limit.
-            wdb = Database(db_path)
-            try:
-                wdb.set_active_workspace(ws_id)
-                # Reuse the listing of every folder unchanged since the last
-                # walk; "Check again" clears the cache so a recheck reads all.
-                result = count_new_images_for_workspace(
-                    wdb, ws_id, sample_limit=None,
-                    progress_callback=progress_callback,
-                    listing_cache=dir_listing_cache.get_shared(),
-                )
-                walk_result["result"] = result
-                return result
-            except Exception as e:
-                walk_error["exc"] = e
-                raise
-            finally:
-                wdb.close()
+        compute = _new_images_walk_compute(db_path, ws_id, walk_result, walk_error)
 
         # Surface the walk as a recorded job so the user can see it in the
         # bottom panel rather than wondering why their workspace is silent.
@@ -968,29 +1237,7 @@ def create_workspace_blueprint(
                 if walk_error["exc"] is not None:
                     raise walk_error["exc"]
                 result = walk_result["result"] or {}
-                payload = {
-                    "files_checked": progress_state["checked"],
-                    "new_count": progress_state["found"],
-                    # Which folders this walk read from disk and which it
-                    # reused unchanged since the last look.
-                    "folders_read": result.get("folders_read", 0),
-                    "folders_unchanged": result.get("folders_unchanged", 0),
-                }
-                # An offline volume is a completed walk with a caveat, not
-                # a failure: name the roots that were skipped so the Jobs
-                # panel tells the same story as the banner.
-                unreachable = result.get("unreachable_roots") or []
-                if unreachable:
-                    payload["unreachable_roots"] = list(unreachable)
-                    payload["phase"] = (
-                        f"{len(unreachable)} folder(s) offline, not checked"
-                    )
-                # Staged local-copy sources were left out on purpose; the
-                # banner names them, and so does the job.
-                local_copies = result.get("local_copy_excluded") or []
-                if local_copies:
-                    payload["local_copy_excluded"] = list(local_copies)
-                return payload
+                return _new_images_walk_job_payload(progress_state, result)
 
             job_id = runner.start(
                 "new_images_walk",
@@ -1001,24 +1248,7 @@ def create_workspace_blueprint(
                 config={"workspace_name": ws_name},
             )
 
-            def progress_callback(files_checked, new_found):
-                progress_state["checked"] = files_checked
-                progress_state["found"] = new_found
-                runner.push_event(
-                    job_id,
-                    "progress",
-                    {
-                        "current": files_checked,
-                        "total": 0,
-                        "phase": (
-                            f"{files_checked:,} checked, {new_found:,} new"
-                        ),
-                        "files_checked": files_checked,
-                        "new_count": new_found,
-                    },
-                )
-
-            return progress_callback
+            return _new_images_walk_progress_callback(runner, job_id, progress_state)
 
         return compute, on_spawn, (lambda: spawn_state["spawned"])
 
@@ -1286,8 +1516,6 @@ def create_workspace_blueprint(
         ``docs/plans/2026-05-06-classification-inventory-design.md``.
         """
         import config as cfg
-        from labels import get_saved_labels, load_label_set, load_merged_labels
-        from labels_fingerprint import TOL_SENTINEL, compute_fingerprint
         from models import get_models
 
         db = get_db()
@@ -1306,53 +1534,11 @@ def create_workspace_blueprint(
             for p in db_inv["pairs"]
         }
 
-        # Available label sets: read each saved .txt and recompute fingerprint
-        # so the inventory's identity matches what the classify job would use.
-        label_sets = []
-        unusable_label_sets = []
-        seen_paths = set()
-        for ls in get_saved_labels():
-            path = ls.get("labels_file", "")
-            if not path or not os.path.exists(path) or path in seen_paths:
-                continue
-            seen_paths.add(path)
-            try:
-                species = load_label_set(path, ls)
-            except OSError:
-                continue
-            name = ls.get("name") or os.path.splitext(os.path.basename(path))[0]
-            if not species:
-                # ``compute_fingerprint([])`` is the ToL sentinel, so an
-                # empty set would claim Tree of Life's row: its counts
-                # would be double-billed under the set's own name, and a
-                # non-ToL model would show an impossible regional pair.
-                # It classifies nothing — name it as unusable instead.
-                unusable_label_sets.append({
-                    "name": name,
-                    "filename": os.path.basename(path),
-                    "skipped": len(getattr(species, "dropped_ambiguous", ())),
-                })
-                continue
-            label_sets.append({
-                "name": name,
-                "path": path,
-                "filename": os.path.basename(path),
-                "fingerprint": compute_fingerprint(species),
-            })
-
-        # Dedupe by fingerprint: duplicate-content files (rename/copy) share a
-        # fingerprint and the same db_pair stats. Emitting both rows would
-        # double-count subtotals and inflate pending coverage. Keep the
-        # alphabetically-first name as the canonical representative.
-        deduped_by_fp = {}
-        for ls in sorted(label_sets, key=lambda x: x["name"].lower()):
-            deduped_by_fp.setdefault(ls["fingerprint"], ls)
-        label_sets = list(deduped_by_fp.values())
+        label_sets, unusable_label_sets = _inventory_label_sets()
 
         # Keep the full registry for identifying legacy and stale results.
         # Custom models without an explicit model_type default to bioclip
         # (same as classify/pipeline).
-        from models import supports_tree_of_life
         all_models = [
             m for m in get_models()
             if m.get("model_type", "bioclip") in ("bioclip", "timm")
@@ -1368,121 +1554,15 @@ def create_workspace_blueprint(
             # pending work and should not inflate inventory coverage totals.
             if not m.get("downloaded") and model_name not in used_model_names:
                 continue
-            # Capability question — does this model TYPE ship ToL text
-            # embeddings? Ask supports_tree_of_life(model_str), not the raw
-            # `files` manifest: bioclip-2.5's ToL artifacts are declared
-            # under `optional_files` so a straight `"tol_embeddings.npy" in
-            # m.get("files", [])` would drop ToL coverage from this
-            # inventory entirely — no current-pair emit and no stale-row
-            # for prior ToL runs, because TOL_SENTINEL is always in
-            # current_fps for the model.
-            supports_tol = supports_tree_of_life(m.get("model_str", ""))
-            is_closed_set = m.get("model_type") == "timm"
+            models_out.append(_inventory_model_entry(
+                m, model_name, label_sets, db_pairs, total_dets, seen_keys,
+            ))
 
-            pairs = []
-            if is_closed_set:
-                key = (model_name, TOL_SENTINEL)
-                pairs.append(_inventory_pair(
-                    label_set="(intrinsic)", label_set_path=None,
-                    fingerprint=TOL_SENTINEL, is_tol=False, is_intrinsic=True,
-                    db_pair=db_pairs.get(key, {}), total=total_dets,
-                ))
-                seen_keys.add(key)
-            else:
-                for ls in sorted(label_sets, key=lambda x: x["name"].lower()):
-                    key = (model_name, ls["fingerprint"])
-                    pairs.append(_inventory_pair(
-                        label_set=ls["name"], label_set_path=ls["filename"],
-                        fingerprint=ls["fingerprint"], is_tol=False,
-                        is_intrinsic=False,
-                        db_pair=db_pairs.get(key, {}), total=total_dets,
-                    ))
-                    seen_keys.add(key)
-                if supports_tol:
-                    key = (model_name, TOL_SENTINEL)
-                    pairs.append(_inventory_pair(
-                        label_set="Tree of Life", label_set_path=None,
-                        fingerprint=TOL_SENTINEL, is_tol=True,
-                        is_intrinsic=False,
-                        db_pair=db_pairs.get(key, {}), total=total_dets,
-                    ))
-                    seen_keys.add(key)
-
-            models_out.append({
-                "id": m.get("id"),
-                "name": model_name,
-                "supports_tol": supports_tol,
-                "downloaded": bool(m.get("downloaded")),
-                "legacy": False,
-                "subtotal": _inventory_subtotal(pairs),
-                "pairs": pairs,
-            })
-
-        # Legacy: a (model, fp) in the DB whose model isn't in the current
-        # registry. Group those rows under one entry per legacy model name.
         registry_names = {m.get("name") or m.get("id") for m in all_models}
-        legacy_groups = {}
-        for (model_name, fp), p in db_pairs.items():
-            if model_name in registry_names:
-                continue
-            legacy_groups.setdefault(model_name, []).append((fp, p))
-        for model_name, fp_pairs in sorted(legacy_groups.items()):
-            pairs = []
-            for fp, p in sorted(fp_pairs, key=lambda x: x[0]):
-                pairs.append(_inventory_pair(
-                    label_set=("Tree of Life" if fp == TOL_SENTINEL
-                               else "fp:" + fp[:8]),
-                    label_set_path=None, fingerprint=fp,
-                    is_tol=(fp == TOL_SENTINEL), is_intrinsic=False,
-                    db_pair=p, total=total_dets,
-                ))
-                seen_keys.add((model_name, fp))
-            models_out.append({
-                "id": None,
-                "name": model_name,
-                "supports_tol": False,
-                "downloaded": False,
-                "legacy": True,
-                "subtotal": _inventory_subtotal(pairs),
-                "pairs": pairs,
-            })
-
-        # Stale: a (current model, fingerprint) in the DB whose fingerprint
-        # is not currently on disk and isn't TOL. Single-file fingerprints
-        # come from the label_sets above; merged-set fingerprints come from
-        # the labels_fingerprints sidecar (one row per distinct merge the
-        # classify job has ever produced). A merged row is current if all
-        # its sources still exist and re-merging them reproduces the same
-        # fingerprint; otherwise the contents drifted and it's stale.
-        current_fps = {ls["fingerprint"] for ls in label_sets} | {TOL_SENTINEL}
-        for row in db.model_runs.get_labels_fingerprints():
-            sources = row.get("sources") or []
-            if len(sources) <= 1:
-                continue  # single-file already covered by label_sets
-            if not all(os.path.exists(s) for s in sources):
-                continue
-            try:
-                merged = load_merged_labels([{"labels_file": source} for source in sources])
-            except OSError:
-                continue
-            if compute_fingerprint(merged) == row["fingerprint"]:
-                current_fps.add(row["fingerprint"])
-        stale = []
-        for (model_name, fp), p in db_pairs.items():
-            if model_name not in registry_names:
-                continue  # legacy, already grouped
-            if fp in current_fps:
-                continue
-            # The stale UI labels this column "Predictions", so report rows
-            # from `predictions` (one per species) rather than distinct
-            # detection IDs from `classifier_runs`. A top-k run with k species
-            # per detection would otherwise undercount stale work.
-            stale.append({
-                "model": model_name,
-                "fingerprint": fp,
-                "stale_count": p.get("predictions_count", 0),
-                "last_run": p.get("last_run"),
-            })
+        models_out.extend(_inventory_legacy_models(
+            db_pairs, registry_names, total_dets, seen_keys,
+        ))
+        stale = _inventory_stale(db, db_pairs, registry_names, label_sets)
 
         # Grand total: classified across all rows (including stale/legacy);
         # pending across the current cross-product only (forward-looking work).

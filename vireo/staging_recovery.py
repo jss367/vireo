@@ -245,9 +245,8 @@ def _walk_staging_files(source_root: str, pause_callback=None):
         yield from sorted(files)
 
 
-def verify_orphaned_staging(db, vireo_dir: str, cleanup_root: str, pause_callback=None) -> dict:
-    """Reconcile a staging folder against the catalog and archive filesystem."""
-    entry = _resolve_entry(vireo_dir, cleanup_root, pause_callback=pause_callback)
+def _staged_files(entry, pause_callback) -> list[tuple[str, str, int]]:
+    """``(path, path relative to the staging root, size)`` per staged file."""
     files: list[tuple[str, str, int]] = []
     for path in _walk_staging_files(entry.source_root, pause_callback):
         if pause_callback:
@@ -260,6 +259,13 @@ def verify_orphaned_staging(db, vireo_dir: str, cleanup_root: str, pause_callbac
             continue
         rel = os.path.relpath(path, entry.source_root)
         files.append((path, rel, st.st_size))
+    return files
+
+
+def verify_orphaned_staging(db, vireo_dir: str, cleanup_root: str, pause_callback=None) -> dict:
+    """Reconcile a staging folder against the catalog and archive filesystem."""
+    entry = _resolve_entry(vireo_dir, cleanup_root, pause_callback=pause_callback)
+    files = _staged_files(entry, pause_callback)
 
     result = {
         "path": entry.cleanup_root,
