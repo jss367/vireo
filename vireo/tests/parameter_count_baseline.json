@@ -10,8 +10,6 @@
   "ingest.py:ingest": 13,
   "move.py:_FolderMove.__init__": 13,
   "move.py:move_folder": 13,
-  "new_images.py:_root_walk_worker": 13,
-  "new_images.py:_walk_root_bounded": 16,
   "pipeline_stages/classification.py:classify_stage": 13,
   "pipeline_stages/media.py:thumbnail_stage": 13,
   "pipeline_stages/scanning.py:_ScanPass.__init__": 15,
