@@ -88,10 +88,56 @@ Current stable set:
 | GET  | `/api/v1/keywords` | Keyword tree. |
 | POST | `/api/v1/photos/<id>/flag` | Set one photo's flag: `{"flag": "none"\|"flagged"\|"rejected", "source"?: str, "reason"?: str}`. `source` (≤ 60 chars) is who decided, `reason` (≤ 300) why; both land in edit history and a durable current note. The Undo panel retains the audit text; `flag_note` describes only the current attributed write. Any later flag write, including Undo/Redo, conservatively clears the current note. |
 | POST | `/api/v1/batch/flag` | The same for `{"photo_ids": [...], "flag": ..., "source"?, "reason"?}`; one undoable edit. IDs must be positive integers below `2**63`. |
+| GET  | `/api/v1/photos/<id>/burst-evidence` | The burst around a photo as an evidence pack: ranked frames, feature coverage, ambiguity reasons, 1:1 crop URLs. `margin`, `focus_size`, `gap_seconds`, `max_photos`. |
+| POST | `/api/v1/photos/burst-evidence` | The same pack for an explicit `{"photo_ids": [...]}` selection (2–500 ids). |
+| GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
+| GET  | `/api/v1/folders/<id>/bursts` | Every burst in one folder with coverage, the scorer's pick and ambiguity; folder-level coverage too. `margin` (relative sharpness gap for a close call, default 0.10). Folders over 5000 photos answer 400. |
 
 Request/response shapes mirror the internal `/api/*` endpoints — see source
 or open `/api/v1/<path>` with the token in your browser's dev tools for
 concrete examples.
+
+### Burst adjudication
+
+Numeric query values must be finite and within their documented ranges; malformed
+values return 400. `gap_seconds` accepts 0–120 and `max_photos` accepts 2–500.
+Each pack's `scoring.weights` and `scoring.rejection_thresholds` include the
+scorer defaults with effective workspace overrides and nested pipeline precedence.
+Each card's `focus_crop_scale` describes decoded-raster pixels; the response's
+`X-Vireo-Focus-Original-Scale` header gives the real ratio once the image is
+decoded. Auto crops use an eye only when eye scoring is enabled
+and an eye measurement exists; `basis=eye` explicitly requests a recorded eye.
+Without eye detection the subject crop is centred on the detection box, which
+on a perched bird is usually the body. `center=x,y` refers explicitly to the
+unedited upright source raster (the returned `X-Vireo-Focus-Raster-Size`),
+not the recipe-rendered `preview_url`. Locate the point on an unedited upright
+reference of that source; preview coordinates require undoing its crop/rotation
+recipe first. The endpoint does not perform that coordinate mapping.
+Subject crops first use the exact detection prompt of the current active mask,
+including a validated weak detection below the normal threshold; other weak
+boxes do not lower the workspace threshold.
+
+Folder entries include `scope_method` and a representative `seed_photo_id`.
+Capture-time fallback scopes can overlap filename runs, matching Best Batch's
+seed rules; `photos_in_bursts` counts distinct photos across the full burst chains. Each
+entry scores the same default 120-frame window as its seed endpoint;
+`scope_max_photos` records that limit and `burst_photo_count` reports the full
+chain size. Counts, coverage, flags and the selected best photo inside an entry
+refer to that scored window.
+
+The burst endpoints exist so a reviewer that is not Vireo's UI (a script, an
+agent) can second-guess the cull scorer without re-implementing it. Walk a
+folder with `/api/v1/folders/<id>/bursts`; every burst carries `coverage`
+(how many frames have detection, mask, quality and eye features) and
+`ambiguity` (`needs_review` plus reasons: `unanalyzed_frames`, `close_call`,
+`no_eye_located`, `subject_touches_edge`, `multiple_subjects`,
+`all_rejected`). A burst with `unanalyzed_frames` has not been fully
+processed; run Process on the folder before judging it, because the ranking
+is the evidence and it is missing. For an ambiguous burst, fetch its pack and
+look at each card's `focus_crop_url` (and `focus_crop_mask_url`) at 1:1
+before deciding. Record decisions through the normal flag endpoints so they
+show up in, and can be reversed from, the Undo panel. Design:
+`docs/plans/2026-10-17-burst-evidence-adjudication-design.md`.
 
 ## Worked example
 

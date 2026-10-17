@@ -2302,6 +2302,15 @@ _V1_ALIASES = [
     # ``reason`` so a decision records who made it and why.
     ("/api/v1/photos/<int:photo_id>/flag", "photo_review.set_flag", ["POST"]),
     ("/api/v1/batch/flag", "photo_review.set_flags", ["POST"]),
+    # Burst adjudication for headless reviewers: the evidence pack around a
+    # photo or for an explicit selection, the 1:1 focus crop it links to,
+    # and every burst in a folder with its coverage and ambiguity.
+    ("/api/v1/photos/<int:photo_id>/burst-evidence",
+     "photos.api_photo_burst_evidence", ["GET"]),
+    ("/api/v1/photos/burst-evidence",
+     "photos.api_selected_photos_burst_evidence", ["POST"]),
+    ("/api/v1/photos/<int:photo_id>/focus-crop", "media.serve_focus_crop", ["GET"]),
+    ("/api/v1/folders/<int:folder_id>/bursts", "folders.api_folder_bursts", ["GET"]),
 ]
 
 
