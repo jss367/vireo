@@ -28,7 +28,8 @@ interface BrowseCalendar {year: number; min_year: number; max_year: number; days
 interface BrowseLoadState<T> {status: 'pending' | 'success' | 'failure'; data?: T; key?: string; shouldRender?: () => boolean}
 interface BrowseFolder {id: number; path: string; name?: string; parent_id?: number | null; photo_count?: number; children?: BrowseFolder[]; status?: string; workspace_id?: number}
 interface BrowseFolderResponse {folders: BrowseFolder[]; workspace_id?: number | null}
-interface BrowseSummary {total: number; filtered_total: number; classified: number; unclassified: number; top_species?: {species: string, count: number}[]}
+interface BrowseAnalysisCoverage {with_detection_run?: number; with_detection: number; with_quality: number; with_eye: number; with_misses: number}
+interface BrowseSummary {total: number; filtered_total: number; classified: number; unclassified: number; top_species?: {species: string, count: number}[]; analysis?: BrowseAnalysisCoverage}
 interface BrowseBestBatchCard {id: number; filename?: string; role?: string; rank?: number; reasons?: string[]; quality_pct?: number; focus?: number; sharpness?: number}
 interface BrowseBestBatch {photo_ids: number[]; best_photo_id?: number; suggested_reject_ids?: number[]; count: number; cards: BrowseBestBatchCard[]; sequence_range?: number[]; best_reasons?: string[]}
 interface BrowseTotals {total?: number; underlying_total?: number; stack_count?: number}

@@ -2,6 +2,26 @@
 // Classic page script; load boot.js after all definitions.
 
 /** @param {ImportResult} res @param {string} status */
+function snapshotImportSummary(res, status) {
+  const parts = [
+    (res.requested || 0) + ' requested',
+    (res.imported || 0) + ' imported',
+  ];
+  if (res.already_cataloged) {
+    parts.push(res.already_cataloged + ' already cataloged');
+  }
+  if (res.missing) parts.push(res.missing + ' missing');
+  if (res.unreadable) parts.push(res.unreadable + ' unreadable');
+  if (res.unindexed) parts.push(res.unindexed + ' not indexed');
+  if (res.excluded) {
+    parts.push(res.excluded + ' left out (' + res.excluded_folders + ' folder' +
+      (res.excluded_folders === 1 ? '' : 's') + ')');
+  }
+  if (status && status !== 'completed') parts.push('job ' + status);
+  return parts.join(' · ');
+}
+
+/** @param {ImportResult} res @param {string} status */
 function renderResult(res, status) {
   /** @type {HTMLElement} */ (document.getElementById('resultCard')).style.display = '';
   const retryRow = /** @type {HTMLElement} */ (document.getElementById('retryImportRow'));
@@ -60,18 +80,8 @@ function renderResult(res, status) {
       unsafe.style.display = unsafe.children.length ? '' : 'none';
     }
     if (res.source_snapshot_id != null) {
-      const parts = [
-        (res.requested || 0) + ' requested',
-        (res.imported || 0) + ' imported',
-      ];
-      if (res.already_cataloged) {
-        parts.push(res.already_cataloged + ' already cataloged');
-      }
-      if (res.missing) parts.push(res.missing + ' missing');
-      if (res.unreadable) parts.push(res.unreadable + ' unreadable');
-      if (res.unindexed) parts.push(res.unindexed + ' not indexed');
-      if (status && status !== 'completed') parts.push('job ' + status);
-      /** @type {HTMLElement} */ (document.getElementById('resultSummary')).textContent = parts.join(' · ');
+      /** @type {HTMLElement} */ (document.getElementById('resultSummary')).textContent =
+        snapshotImportSummary(res, status);
     } else {
       /** @type {HTMLElement} */ (document.getElementById('resultSummary')).textContent =
         (res.indexed || res.discovered || 0) + ' indexed' +
