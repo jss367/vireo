@@ -176,6 +176,24 @@ def test_save_detections_writes_content_addressed_rows_and_commits(db, monkeypat
     assert _run_row(db, pid) is None
 
 
+def test_promote_full_image_runtime_stamps_only_full_image_rows_without_committing(db):
+    pid = _photo(db)
+    other = _photo(db, "b.jpg")
+    _raw_det(db, pid, model="full-image", conf=0.0)
+    _raw_det(db, pid, model=MODEL)
+    _raw_det(db, other, model="full-image", conf=0.0)
+    db.detections.promote_full_image_runtime(pid, "rt-full")
+    assert db.in_transaction
+    assert [r["runtime_fingerprint"] for r in _reader(db).execute(
+        "SELECT runtime_fingerprint FROM detections WHERE photo_id = ?", (pid,),
+    )] == ["legacy", "legacy"]
+    db.commit()
+    assert [(r["detector_model"], r["runtime_fingerprint"]) for r in _det_rows(db, pid)] == [
+        ("full-image", "rt-full"), (MODEL, "legacy"),
+    ]
+    assert [r["runtime_fingerprint"] for r in _det_rows(db, other)] == ["legacy"]
+
+
 def test_save_detections_defaults_runtime_fingerprint_to_legacy(db):
     pid = _photo(db)
     db.save_detections(pid, [_d()], MODEL)

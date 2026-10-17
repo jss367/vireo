@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from repositories.photo_labels import PhotoLabelRepository
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
+    from repositories.predictions import PredictionRepository
     from repositories.processes import ProcessesRepository
     from repositories.stats import StatsRepository
     from repositories.sync import SyncRepository
@@ -7243,6 +7244,20 @@ class Database:
             top_prediction_confidence_expr=_TOP_PREDICTION_CONFIDENCE_EXPR,
             facade=self,
         )
+
+    @property
+    def predictions(self) -> PredictionRepository:
+        """Classifier predictions: ``db.predictions.id_for_key(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_prediction_repository``, so the connection, the
+        lazily resolved workspace and the module's ``commit_with_retry`` are
+        read per use. New simple prediction operations go here. The existing
+        prediction methods keep their ``Database`` wrappers until the domain
+        migrates (the decision mutators last, since ``test_route_contract``
+        looks them up by their ``Database`` names).
+        """
+        return self._prediction_repository()
 
     def add_prediction(
         self,
