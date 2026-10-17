@@ -501,12 +501,19 @@ def test_get_top_level_species_keyword_prefers_taxonomy_then_lowest_id(db):
     assert db.get_top_level_species_keyword("Robin") is None
     general = _raw_kw(db, "robin", None, "general")
     _raw_kw(db, "Robin", None, "individual")
-    parent = _raw_kw(db, "Birds")
-    _raw_kw(db, "Robin", parent, "taxonomy", 1)
-    # Only the top-level general row qualifies: other types and nested rows
-    # never match.
+    _raw_kw(db, "Robin", _raw_kw(db, "Birds"), "general")
+    # Only the top-level general row qualifies: other types and nested
+    # non-taxonomy rows never match.
     row = db.get_top_level_species_keyword("ROBIN")
     assert (row["id"], row["name"]) == (general, "robin")
+    # The one taxonomy row filed in the tree stands in for the general row,
+    # as it does for add_keyword; a second one leaves the name ambiguous.
+    placed = _raw_kw(db, "Robin", _raw_kw(db, "Thrushes"), "taxonomy", 1)
+    row = db.get_top_level_species_keyword("robin")
+    assert (row["id"], row["name"]) == (placed, "Robin")
+    assert db.add_keyword("robin", is_species=True) == placed
+    _raw_kw(db, "Robin", _raw_kw(db, "Garden birds"), "taxonomy", 1)
+    assert db.get_top_level_species_keyword("robin")["id"] == general
     _raw_kw(db, "Robin", None, "general")
     taxonomy = _raw_kw(db, "ROBIN", None, "taxonomy", 1)
     row = db.get_top_level_species_keyword("robin")
@@ -1607,10 +1614,13 @@ def test_add_source_species_keyword_ambiguous_placed_rows_mint_top_level(db, lib
 def test_merge_taxonomy_root_twins_folds_top_level_rows_into_tree(db, lib):
     p0, p1, p2 = lib["p"][:3]
     _parent, placed = _placed_robin(db)
-    twin = _raw_kw(db, "American robin", kw_type="taxonomy", is_species=1, taxon_id=3)
+    twin = _raw_kw(db, "American Robin", kw_type="taxonomy", is_species=1, taxon_id=3)
     db.conn.execute("UPDATE keywords SET source_taxon_id = 12727 WHERE id = ?", (twin,))
     # Not twins: a top-level row with children, one whose placed row claims
-    # another iNat id, and one whose only same-name row is another taxon.
+    # another iNat id, one whose only same-name row is another taxon, and
+    # one spelled in another case.
+    case_variant = _raw_kw(db, "Cougar cub", kw_type="taxonomy", taxon_id=5)
+    _raw_kw(db, "Cougar Cub", _raw_kw(db, "Young"), kw_type="taxonomy", taxon_id=5)
     parent_root = _raw_kw(db, "Cougar", kw_type="taxonomy", is_species=1, taxon_id=5)
     _raw_kw(db, "Cougar", _raw_kw(db, "Cats"), kw_type="taxonomy", is_species=1, taxon_id=5)
     _raw_kw(db, "Cougar kitten", parent_root)
@@ -1639,7 +1649,7 @@ def test_merge_taxonomy_root_twins_folds_top_level_rows_into_tree(db, lib):
     assert _kw(db, placed)[4:] == (3, 12727)
     # Same flat keyword in every sidecar: the merge queues no XMP change.
     assert _visible(db, "SELECT photo_id, change_type, value FROM pending_changes") == pending
-    for kept in (parent_root, conflicting, other_taxon):
+    for kept in (parent_root, conflicting, other_taxon, case_variant):
         assert _kw(db, kept) is not None
     assert db.merge_taxonomy_root_twins() == 0
 

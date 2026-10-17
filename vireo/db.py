@@ -6439,7 +6439,7 @@ class Database:
         return self._keyword_repository().name_of(keyword_id)
 
     def get_top_level_species_keyword(self, name):
-        """The top-level keyword row (``id``, ``name``) ``add_keyword(name, is_species=True)`` matches, or None.
+        """The keyword row (``id``, ``name``) ``add_keyword(name, is_species=True)`` matches, or None.
 
         Taxonomy or general rows only, matched case-insensitively, taxonomy
         first, then lowest id.

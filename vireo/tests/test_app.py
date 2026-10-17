@@ -1993,8 +1993,9 @@ def test_encounter_species_confirm(app_and_db):
 
 
 def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
-    """Confirming Verdin must not attach a top-level duplicate to a photo
-    that already carries the hierarchical Verdin taxon."""
+    """Confirming Verdin tags every photo with the Verdin filed in the tree:
+    no top-level duplicate is minted, and only the photo that lacked it
+    queues an XMP addition."""
     app, db = app_and_db
     client = app.test_client()
     db.conn.execute(
@@ -2018,15 +2019,12 @@ def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
         json={"species": "Verdin", "photo_ids": photo_ids},
     )
     assert resp.status_code == 200
-    root = db.conn.execute(
+    assert db.conn.execute(
         "SELECT id FROM keywords WHERE name = 'Verdin' AND parent_id IS NULL"
-    ).fetchone()["id"]
+    ).fetchone() is None
 
-    nested_ids = {row["id"] for row in db.get_photo_keywords(nested_photo)}
-    untagged_ids = {row["id"] for row in db.get_photo_keywords(untagged_photo)}
-    assert nested in nested_ids
-    assert root not in nested_ids
-    assert root in untagged_ids
+    for photo_id in photo_ids:
+        assert nested in {row["id"] for row in db.get_photo_keywords(photo_id)}
     species_by_photo = db.get_species_keywords_for_photos(photo_ids)
     assert species_by_photo[nested_photo].count("Verdin") == 1
     assert species_by_photo[untagged_photo].count("Verdin") == 1
@@ -2035,6 +2033,43 @@ def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
         if row["change_type"] == "keyword_add" and row["value"] == "Verdin"
     ]
     assert [row["photo_id"] for row in additions] == [untagged_photo]
+
+
+def test_batch_species_keyword_reuses_hierarchical_taxon(app_and_db):
+    """Confirm species on a Browse selection posts the bare name. A photo
+    already carrying the Verdin filed in the tree must not gain a top-level
+    duplicate or queue an XMP add of a keyword its sidecar holds."""
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    nested_photo, untagged_photo = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos ORDER BY id LIMIT 2"
+        ).fetchall()
+    ]
+    family = db.add_keyword("Penduline tits", parent_id=db.add_keyword("1Birds"))
+    nested = db.add_keyword("Verdin", parent_id=family)
+    db.tag_photo(nested_photo, nested)
+
+    resp = client.post("/api/batch/keyword", json={
+        "photo_ids": [nested_photo, untagged_photo],
+        "name": "Verdin", "type": "taxonomy",
+    })
+
+    assert resp.status_code == 200
+    assert db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Verdin' AND parent_id IS NULL"
+    ).fetchone() is None
+    assert nested in {row["id"] for row in db.get_photo_keywords(untagged_photo)}
+    additions = [
+        row["photo_id"] for row in db.pending_changes.list_all()
+        if row["change_type"] == "keyword_add" and row["value"] == "Verdin"
+    ]
+    assert additions == [untagged_photo]
 
 
 def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
@@ -2605,7 +2640,12 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
     parent = db.add_keyword("Penduline tits")
     nested = db.add_keyword("Verdin", parent_id=parent)
     db.tag_photo(photo_id, nested)
-    root = db.add_keyword("Verdin", is_species=True)
+    # A top-level twin from before add_keyword reused the placed row.
+    root = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Verdin', NULL, 1, 'taxonomy', 2912)"
+    ).lastrowid
+    db.conn.commit()
     assert db.get_photos_with_equivalent_species([photo_id], root) == {photo_id}
     detection_id = db.save_detections(
         photo_id,
@@ -2695,7 +2735,12 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
     parent = db.add_keyword("Penduline tits")
     nested = db.add_keyword("Verdin", parent_id=parent)
     db.tag_photo(photo_id, nested)
-    root = db.add_keyword("Verdin", is_species=True)
+    # A top-level twin from before add_keyword reused the placed row.
+    root = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Verdin', NULL, 1, 'taxonomy', 2912)"
+    ).lastrowid
+    db.conn.commit()
     detection_id = db.save_detections(
         photo_id,
         [{

@@ -1138,11 +1138,13 @@ class KeywordRepository:
         """``(top_level_id, placed_id)`` pairs naming one taxon twice.
 
         A pair is a childless top-level taxonomy row and the single
-        taxonomy row of the same name and taxon filed below a parent,
+        taxonomy row of the same spelling and taxon filed below a parent,
         with no conflicting iNaturalist ids. Older top-level adds minted
         the top-level row beside the user's own (see
         ``_find_add_candidate``). A row with two placed twins, or whose
-        twin differs in name or taxon, is left for a reviewed merge.
+        twin differs in taxon or even only in case (merging would change
+        the displayed name, and the sidecars keep the old spelling), is
+        left for a reviewed merge on the Keywords page.
         """
         return [
             (row["root_id"], row["placed_id"]) for row in self.conn.execute(
@@ -1150,8 +1152,7 @@ class KeywordRepository:
                    FROM keywords r
                    JOIN keywords p
                      ON p.type = 'taxonomy' AND p.parent_id IS NOT NULL
-                    AND p.taxon_id = r.taxon_id
-                    AND p.name = r.name COLLATE NOCASE
+                    AND p.taxon_id = r.taxon_id AND p.name = r.name
                    WHERE r.type = 'taxonomy' AND r.parent_id IS NULL
                      AND r.taxon_id IS NOT NULL
                      AND NOT EXISTS (
@@ -1383,19 +1384,20 @@ class KeywordRepository:
         return row["name"] if row else None
 
     def top_level_species_keyword(self, name):
-        """The top-level species keyword ``add_keyword(name, is_species=True)`` matches.
+        """The species keyword ``add_keyword(name, is_species=True)`` matches.
 
         A row (``id``, ``name``) or None: a ``parent_id IS NULL`` taxonomy
         or general keyword named ``name`` case-insensitively, taxonomy
-        first, then lowest id. Other types (individual, location, genre)
-        never match, so a homonym of another kind is not mistaken for the
-        species.
+        first, then lowest id, unless the one taxonomy row of that name
+        filed in the tree stands in for it (see ``_find_add_candidate``).
+        Other types (individual, location, genre) never match, so a
+        homonym of another kind is not mistaken for the species.
         """
+        row = self._find_add_candidate(name, None, 'taxonomy')
+        if row is None:
+            return None
         return self.conn.execute(
-            "SELECT id, name FROM keywords WHERE name = ? COLLATE NOCASE "
-            "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
-            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
-            (name,),
+            "SELECT id, name FROM keywords WHERE id = ?", (row["id"],),
         ).fetchone()
 
     def get_row(self, keyword_id):
