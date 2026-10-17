@@ -20,7 +20,7 @@ def forbidden(*args, **kwargs):
 
 
 def load(file, ns, methods=None, functions=None):
-    tree = ast.parse((ROOT / file).read_text())
+    tree = ast.parse((ROOT / file).read_text(encoding="utf-8"))
     nodes = []
     for n in tree.body:
         if isinstance(n, ast.FunctionDef) and (functions is None or n.name in functions):
