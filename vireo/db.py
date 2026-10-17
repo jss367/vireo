@@ -9493,6 +9493,10 @@ class Database:
             return
         self.update_prediction_status(int(pred_id), "rejected", _commit=False)
 
+    def prune_edit_history(self):
+        """Apply the configured history bound after a caller-owned edit transaction commits."""
+        return self._prune_edit_history()
+
     def _prune_edit_history(self):
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""
         import config as cfg

@@ -160,7 +160,7 @@ class EditHistoryRepository:
         return entries
 
     def latest_flag_note(self, photo_id: int) -> dict[str, Any] | None:
-        """Attribute only the latest live flag write, across workspace history.
+        """Historical inspection only; current attribution uses ``photo_review.current_flag_note``.
 
         Flags belong to the photo globally. A newer write in another workspace
         or a pipeline grouping flag edit supersedes this workspace's provenance,

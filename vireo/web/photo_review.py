@@ -39,6 +39,12 @@ def flag_provenance(body):
     return tuple(values), None
 
 
+
+def _valid_flag_photo_id(photo_id):
+    """SQLite photo keys are positive signed 64-bit integers, never booleans."""
+    return isinstance(photo_id, int) and not isinstance(photo_id, bool) and 0 < photo_id < 2**63
+
+
 def create_photo_review_blueprint(get_db, json_error):
     blueprint = Blueprint("photo_review", __name__)
 
@@ -61,6 +67,8 @@ def create_photo_review_blueprint(get_db, json_error):
 
     @blueprint.post("/api/photos/<int:photo_id>/flag")
     def set_flag(photo_id):
+        if not _valid_flag_photo_id(photo_id):
+            return json_error("photo_id must be a positive signed 64-bit integer")
         body = request.get_json(silent=True) or {}
         flag = body.get("flag", "none")
         if flag not in VALID_FLAGS:
@@ -105,9 +113,9 @@ def create_photo_review_blueprint(get_db, json_error):
         if not photo_ids:
             return json_error("photo_ids required")
         if not isinstance(photo_ids, list) or any(
-            isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 for pid in photo_ids
+            not _valid_flag_photo_id(pid) for pid in photo_ids
         ):
-            return json_error("photo_ids must be a list of positive integer IDs")
+            return json_error("photo_ids must be a list of positive signed 64-bit integer IDs")
         provenance, message = flag_provenance(body)
         if message:
             return json_error(message)

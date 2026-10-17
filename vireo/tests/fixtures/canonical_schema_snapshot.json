@@ -1022,6 +1022,18 @@
   ],
   [
    "table",
+   "current_flag_attribution",
+   "current_flag_attribution",
+   "CREATE TABLE current_flag_attribution (\n        photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,\n        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n        flag TEXT NOT NULL,\n        source TEXT,\n        reason TEXT,\n        description TEXT NOT NULL,\n        created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  ],
+  [
+   "trigger",
+   "invalidate_current_flag_attribution",
+   "photos",
+   "CREATE TRIGGER invalidate_current_flag_attribution\n    AFTER UPDATE OF flag ON photos\n    BEGIN\n        DELETE FROM current_flag_attribution WHERE photo_id = NEW.id;\n    END"
+  ],
+  [
+   "table",
    "photo_exif_search_text",
    "photo_exif_search_text",
    "CREATE TABLE photo_exif_search_text (\n            photo_id   INTEGER PRIMARY KEY\n                REFERENCES photos(id) ON DELETE CASCADE ON UPDATE CASCADE,\n            value_text TEXT NOT NULL\n        )"

@@ -377,6 +377,42 @@ test('_batchUnanimous reports a shared value only when every id agrees', () => {
   assert.equal(unset.value, undefined);
 });
 
+test('analysisCoverageText says what each analysis reached, not just what it found', () => {
+  const {analysisCoverageText} = load({'detail.js': ['analysisCoverageText']});
+  const summary = (filtered_total, analysis) => ({total: 1000, filtered_total, classified: 0, unclassified: 0, analysis});
+  // An empty scope has nothing to report; so does a response without coverage.
+  assert.equal(analysisCoverageText(summary(0, {with_detection: 0, with_quality: 0, with_eye: 0, with_misses: 0})), '');
+  assert.equal(analysisCoverageText({total: 5, filtered_total: 5, classified: 0, unclassified: 5}), '');
+  // 0 of N is "never computed", never a silent "0 of N".
+  assert.equal(
+    analysisCoverageText(summary(377, {with_detection: 0, with_quality: 0, with_eye: 0, with_misses: 0})),
+    'No qualifying animal detections recorded · quality data never computed · eye focus never computed · misses never computed');
+  // Partial coverage names both numbers.
+  assert.equal(
+    analysisCoverageText(summary(377, {with_detection: 12, with_quality: 73, with_eye: 20, with_misses: 0})),
+    'Animal detections recorded on 12 of 377 · quality data for 73 of 377 · eye focus for 20 of 377 · misses never computed');
+  assert.equal(
+    analysisCoverageText(summary(377, {with_detection: 377, with_quality: 377, with_eye: 377, with_misses: 50})),
+    'Animal detections recorded on 377 of 377 · quality data for 377 of 377 · eye focus for 377 of 377 · misses checked on 50 of 377');
+  // A complete misses pass is "checked on N".
+  assert.equal(
+    analysisCoverageText(summary(377, {with_detection: 377, with_quality: 377, with_eye: 377, with_misses: 377})),
+    'Animal detections recorded on 377 of 377 · quality data for 377 of 377 · eye focus for 377 of 377 · misses checked on 377');
+  // Missing or over-range counts are clamped rather than thrown.
+  assert.equal(
+    analysisCoverageText(summary(3, {with_detection: 9, with_misses: 3})),
+    'Animal detections recorded on 3 of 3 · quality data never computed · eye focus never computed · misses checked on 3');
+});
+
+test('analysisCoverageText separates completed runs from animal results', () => {
+  const {analysisCoverageText} = load({'detail.js': ['analysisCoverageText']});
+  const summary = {filtered_total: 3, analysis: {with_detection_run: 3, with_detection: 0}};
+  assert(analysisCoverageText(summary).startsWith('Detection checked on 3 of 3 · no qualifying animal detections recorded'));
+  summary.analysis = {with_detection_run: 0, with_detection: 1};
+  assert(analysisCoverageText(summary).startsWith('No completed detection runs recorded · animal detections recorded on 1 of 3'));
+  assert(!analysisCoverageText(summary).includes('Detections never computed'));
+});
+
 let failed = 0;
 for (const [name, body] of tests) {
   try {

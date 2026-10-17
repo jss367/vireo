@@ -11,7 +11,7 @@ import pytest
 import schema
 from canonical_schema import SCHEMA_VERSION
 from db import Database
-from services.photo_review import flag_description, flag_note
+from services.photo_review import PhotoReviewService, flag_description, flag_note
 
 
 def _photo(db, name="bird1.jpg"):
@@ -106,11 +106,7 @@ def test_flag_note_requires_a_live_edit_matching_the_current_flag_with_provenanc
     )
     # A hand flag: history, but nothing to attribute.
     assert flag_note(db, a, "rejected") is None
-    db.record_edit(
-        "flag", "Set flag to rejected — agent: soft", "rejected",
-        [{"photo_id": a, "old_value": "rejected", "new_value": "rejected"}],
-        source="agent", reason="soft",
-    )
+    PhotoReviewService(db).set_flag(a, "rejected", source="agent", reason="soft")
     note = flag_note(db, a, "rejected")
     assert note["flag"] == "rejected" and note["source"] == "agent" and note["reason"] == "soft"
     assert note["description"] == "Set flag to rejected — agent: soft"

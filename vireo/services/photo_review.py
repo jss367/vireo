@@ -27,29 +27,11 @@ def flag_description(flag, *, count=None, source=None, reason=None):
 
 
 def flag_note(db, photo_id, current_flag):
-    """Who set this photo's current flag and why, when that was recorded.
-
-    The newest live ``flag`` edit covering the photo, as ``{"flag",
-    "source", "reason", "description", "at"}``, provided it set the flag the
-    photo carries now (a flag changed since without history, by a pipeline
-    apply for example, has no trustworthy note) and carries a source or a
-    reason (a hand click has neither, and showing "Rejected" twice says
-    nothing). None otherwise.
-    """
-    note = db.edit_history.latest_flag_note(photo_id)
-    if not note:
+    """Only durable current attribution, never a guess from retained undo history."""
+    note = db.photo_review.current_flag_note(photo_id)
+    if note is None or (note["flag"] or "none") != (current_flag or "none"):
         return None
-    if (note["new_value"] or "none") != (current_flag or "none"):
-        return None
-    if not note["source"] and not note["reason"]:
-        return None
-    return {
-        "flag": note["new_value"] or "none",
-        "source": note["source"],
-        "reason": note["reason"],
-        "description": note["description"],
-        "at": note["created_at"],
-    }
+    return note
 
 
 class PhotoReviewService:
@@ -73,22 +55,7 @@ class PhotoReviewService:
         )
 
     def set_flag(self, photo_id, flag, *, source=None, reason=None):
-        old = self.db.get_photo(photo_id)
-        old_flag = old["flag"] if old else "none"
-        self.db.photo_review.set_flag(photo_id, flag)
-        self.db.queue_flag_change_if_enabled(photo_id, flag)
-        self.db.record_edit(
-            "flag",
-            flag_description(flag, source=source, reason=reason),
-            flag,
-            [{
-                "photo_id": photo_id,
-                "old_value": old_flag,
-                "new_value": flag,
-            }],
-            source=source,
-            reason=reason,
-        )
+        self._write_flags([photo_id], flag, source=source, reason=reason, is_batch=False)
 
     def set_ratings(self, photo_ids, rating):
         photos_map = self.db.get_photos_by_ids(photo_ids)
@@ -119,37 +86,31 @@ class PhotoReviewService:
         return len(old_values)
 
     def set_flags(self, photo_ids, flag, *, source=None, reason=None):
-        photos_map = self.db.get_photos_by_ids(photo_ids)
-        old_values = {
-            photo_id: photos_map[photo_id]["flag"]
-            for photo_id in photo_ids
-            if photo_id in photos_map
-        }
-        valid_ids = list(old_values)
-        if not valid_ids:
-            return 0
-        self.db.photo_review.set_flags(valid_ids, flag)
-        for index, photo_id in enumerate(valid_ids):
-            self.db.queue_flag_change_if_enabled(
-                photo_id,
-                flag,
-                _commit=index == len(valid_ids) - 1,
+        return self._write_flags(photo_ids, flag, source=source, reason=reason, is_batch=True)
+
+    def _write_flags(self, photo_ids, flag, *, source, reason, is_batch):
+        with self.db.photo_review.flag_write() as owns_transaction:
+            photos = self.db.get_photos_by_ids(photo_ids)
+            old_values = {pid: photos[pid]["flag"] for pid in photo_ids if pid in photos}
+            if not old_values:
+                if not is_batch:
+                    raise ValueError("Photo not in active workspace")
+                return 0
+            valid_ids = list(old_values)
+            description = flag_description(
+                flag, count=len(photo_ids) if is_batch else None, source=source, reason=reason,
             )
-        items = [
-            {
-                "photo_id": photo_id,
-                "old_value": old_values[photo_id],
-                "new_value": flag,
-            }
-            for photo_id in old_values
-        ]
-        self.db.record_edit(
-            "flag",
-            flag_description(flag, count=len(photo_ids), source=source, reason=reason),
-            flag,
-            items,
-            is_batch=True,
-            source=source,
-            reason=reason,
-        )
+            self.db.photo_review.set_flags(valid_ids, flag, _commit=False)
+            for pid in valid_ids:
+                self.db.queue_flag_change_if_enabled(pid, flag, _commit=False)
+            self.db.record_edit(
+                "flag", description, flag,
+                [{"photo_id": pid, "old_value": old, "new_value": flag} for pid, old in old_values.items()],
+                is_batch=is_batch, source=source, reason=reason, _commit=False,
+            )
+            self.db.photo_review.set_current_flag_note(
+                valid_ids, flag, description, source=source, reason=reason,
+            )
+        if owns_transaction:
+            self.db.prune_edit_history()
         return len(old_values)

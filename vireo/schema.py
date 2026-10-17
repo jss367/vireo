@@ -22,6 +22,7 @@ from canonical_schema import (
     FORMERLY_LAZY_OBJECTS,
     JOB_HISTORY_LATER_COLUMNS,
     JOB_HISTORY_WORKSPACE_OBJECTS,
+    create_current_flag_attribution,
     create_formerly_lazy_objects,
     job_history_columns,
 )
@@ -181,6 +182,18 @@ def _validate_edit_history_provenance(conn):
         raise RuntimeError(f"edit_history is missing {', '.join(missing)}")
 
 
+
+def _validate_current_flag_attribution(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(current_flag_attribution)")}
+    expected = {"photo_id", "workspace_id", "flag", "source", "reason", "description", "created_at"}
+    if not expected <= columns:
+        raise RuntimeError("current_flag_attribution is missing required columns")
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='invalidate_current_flag_attribution'"
+    ).fetchone() is None:
+        raise RuntimeError("current flag attribution invalidation trigger is missing")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -200,6 +213,10 @@ MIGRATIONS = (
     Migration(
         19, "edit_history_provenance",
         _add_edit_history_provenance, _validate_edit_history_provenance,
+    ),
+    Migration(
+        20, "current_flag_attribution",
+        create_current_flag_attribution, _validate_current_flag_attribution,
     ),
 )
 
