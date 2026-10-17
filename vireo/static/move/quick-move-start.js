@@ -3,7 +3,7 @@
 
 async function startQuickMove() {
   if (quickMoveBusy) return;
-  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var fid = parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('quickFolderSelect')).value);
   if (!fid) return;
   var remoteId = quickRemoteTargetId();
   var nameResult = quickFolderNameResult();
@@ -20,7 +20,7 @@ async function startQuickMove() {
   // Build the destination half of the request body — a local path or a
   // remote target + optional subpath. The same shape is reused for both the
   // preflight and the move so they can't disagree.
-  var destBody;
+  /** @type {MoveDestination} */ var destBody;
   if (remoteId) {
     if (!quickRsyncAvailable) {
       showToast('No GNU rsync found for remote moves. ' + rsyncInstallHint(), 'error');
@@ -32,7 +32,7 @@ async function startQuickMove() {
     // after the user has clicked "Move", which is a worse UX than refusing
     // here with the same error string the preview surfaces.
     var subResult = normalizeRemoteSubpath(
-      document.getElementById('quickSubpathInput').value);
+      /** @type {HTMLInputElement} */ (document.getElementById('quickSubpathInput')).value);
     if (subResult.error) {
       showToast(subResult.error, 'error');
       return;
@@ -43,7 +43,7 @@ async function startQuickMove() {
       destination_name: nameResult.value,
     };
   } else {
-    var dest = document.getElementById('quickDestInput').value.trim();
+    var dest = /** @type {HTMLInputElement} */ (document.getElementById('quickDestInput')).value.trim();
     if (!dest) return;
     destBody = quickUsesDateFolders()
       ? {destination: dest, folder_template: templateResult.value}
@@ -56,7 +56,7 @@ async function startQuickMove() {
 
   // Ask the backend for the resolved destination and whether it already
   // exists, so we can offer merge/resume instead of failing on collision.
-  var pf;
+  /** @type {MovePreflight} */ var pf;
   setQuickMoveBusy(true);
   try {
     // mode:'preview' also reports how many source files would actually copy
@@ -97,9 +97,9 @@ async function startQuickMove() {
       });
       affected = (visibility.workspaces || []).map(function(ws) { return ws.name + ' (' + ws.photo_count + ' photos)'; });
     } catch (e) { return; }
-    var keepVisible = document.getElementById('moveKeepVisible').checked;
+    var keepVisible = /** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible')).checked;
     destBody.keep_visible = keepVisible;
-    document.getElementById('moveAffectedWorkspaces').textContent = 'Affected workspaces: ' + (affected.join(', ') || 'none');
+    /** @type {HTMLElement} */ (document.getElementById('moveAffectedWorkspaces')).textContent = 'Affected workspaces: ' + (affected.join(', ') || 'none');
     var dateSummary = 'Move ' + pf.photo_count.toLocaleString() + ' photo' +
       (pf.photo_count !== 1 ? 's' : '') + ' into ' +
       pf.destination_count.toLocaleString() + ' capture-date folder' +
@@ -152,6 +152,7 @@ async function startQuickMove() {
   }
 }
 
+/** @param {MoveDestination} body */
 async function executeQuickMove(body) {
   try {
     var resp = await safeFetch('/api/jobs/move-folder', {
