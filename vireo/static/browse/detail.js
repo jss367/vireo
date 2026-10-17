@@ -98,9 +98,8 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   }
   /** @type {HTMLElement} */ (document.getElementById('detailRating')).innerHTML = ratingHtml;
 
-  // Flags, and who set the current one and why when a reviewer said so.
-  updateDetailFlagButtons(photo.flag);
-  renderDetailFlagNote(photo.flag, photo.flag_note);
+  // Flags
+  updateDetailFlagButtons(photo.flag, photo.flag_note);
 
   // Color labels
   updateDetailColors();
@@ -216,13 +215,20 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   renderMetadataGroups(photo.metadata);
 }
 
-function updateDetailFlagButtons(/** @type {string | null | undefined} */ flag) {
+// Also renders the note under the buttons saying who set the flag and why,
+// when the detail payload carried one. Callers that only know the flag (a
+// hand click, the batch inspector) pass no note, and a hand flag has none.
+function updateDetailFlagButtons(
+  /** @type {string | null | undefined} */ flag,
+  /** @type {BrowseFlagNote | null | undefined} */ note = null,
+) {
   /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.detail-flag-btn')).forEach(function(btn) {
     btn.className = 'detail-flag-btn';
   });
   var flagBtns = /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.detail-flag-btn'));
   if (flag === 'flagged') flagBtns[1]?.classList.add('active-flag');
   else if (flag === 'rejected') flagBtns[2]?.classList.add('active-reject');
+  renderDetailFlagNote(flag, note);
 }
 
 // The line under the flag buttons: "Rejected — claude-fable-5-1: eye soft at
