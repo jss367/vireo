@@ -142,10 +142,10 @@
   "web/photos.py": 2,
   "web/pipeline.py": 2,
   "web/predictions.py": 7,
-  "web/settings.py": 2,
+  "web/settings.py": 1,
   "web/species.py": 1,
   "web/sync.py": 2,
   "web/system.py": 10,
-  "web/workspaces.py": 4,
+  "web/workspaces.py": 3,
   "working_copy_cache.py": 2
 }

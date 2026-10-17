@@ -984,7 +984,7 @@ def create_job_launchers_blueprint(
             if int(result.get("moved") or 0) > 0:
                 try:
                     invalidate_missing_originals()
-                except Exception:
+                except Exception:  # broad: cache invalidation is best-effort; the move already finished
                     log.exception(
                         "Failed to invalidate missing-originals cache "
                         "after move-photos job",
@@ -1727,7 +1727,7 @@ class _MaskExtractionRun:
                     "extract-masks cancelled while waiting for inference resources",
                 )
                 break
-            except Exception:
+            except Exception:  # broad: per-photo boundary; the failure is counted and listed in the job errors
                 self.failed += 1
                 log.warning(
                     "Mask extraction failed for photo %s", photo_id, exc_info=True
@@ -2248,7 +2248,7 @@ class _FullResolutionPreparation:
                 # photo ready prematurely.
                 if error is None and self.preview_sizes:
                     error = self._evicted_tier_error(photo_id, photo, is_pair)
-        except Exception as exc:
+        except Exception as exc:  # broad: per-photo boundary; the error is recorded for this photo
             thread_db.rollback()
             error = str(exc) or exc.__class__.__name__
             if self.photo_source_matches(photo, thread_db.get_photo(photo_id)):
@@ -2820,7 +2820,7 @@ def _run_offline_cache(ctx, job, photo_ids, vireo_dir):
                     job["errors"].append(
                         f'{photo["filename"]}: {result["status"]}'
                     )
-            except Exception as exc:
+            except Exception as exc:  # broad: per-photo boundary; the failure is counted and listed in the job errors
                 thread_db.rollback()
                 failed += 1
                 job["errors"].append(f'{photo["filename"]}: {exc}')
@@ -3046,7 +3046,7 @@ def _embedding_precompute_offer(load_label_set, labels_path):
                     "model_name": active_model["name"],
                     "labels_file": labels_path,
                 }
-        except Exception:
+        except Exception:  # broad: advisory check; the label download already succeeded
             log.warning(
                 "Could not inspect embedding cache after label download",
                 exc_info=True,

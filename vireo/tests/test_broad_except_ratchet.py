@@ -47,20 +47,7 @@ SKIPPED_DIRS = {"tests", "testing"}
 # Paths relative to vireo/ (a directory ends in "/") whose broad handlers must
 # re-raise, log the traceback, or say why they are broad. Extend it as areas
 # are cleaned; never remove an entry.
-DOCUMENTED_ROOTS: tuple[str, ...] = (
-    "web/caches.py",
-    "web/encounters.py",
-    "web/highlights.py",
-    "web/history.py",
-    "web/inat.py",
-    "web/keywords.py",
-    "web/locations.py",
-    "web/media.py",
-    "web/photo_edit_recipes.py",
-    "web/photos.py",
-    "web/predictions.py",
-    "web/species.py",
-)
+DOCUMENTED_ROOTS: tuple[str, ...] = ("web/",)
 
 BROAD_NAMES = {"Exception", "BaseException"}
 LOG_METHODS = {"debug", "info", "warning", "warn", "error", "critical", "exception", "log"}

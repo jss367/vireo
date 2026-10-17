@@ -320,7 +320,7 @@ def create_audit_blueprint(
             finally:
                 try:
                     invalidate_missing_originals()
-                except Exception:
+                except Exception:  # broad: cache invalidation is best-effort; the import already committed
                     log.exception(
                         "Failed to invalidate missing-originals cache after audit import"
                     )
