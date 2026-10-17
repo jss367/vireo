@@ -19,6 +19,93 @@ from photo_payload import attach_edit_recipes, attach_species_representatives
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
 
 
+def _filter_value(values, name):
+    raw = values.get(name)
+    return None if raw in (None, "") else raw
+
+
+def _filter_integer(values, name, minimum=None, maximum=None):
+    raw = _filter_value(values, name)
+    if raw is None:
+        return None
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer") from None
+    if minimum is not None and parsed < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return parsed
+
+
+def _filter_boolean(values, name):
+    raw = _filter_value(values, name)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _rules_only_collection_photo_ids(db, collection_id):
+    """Return a collection's rules-only photo ids, refusing visual collections."""
+    valid = {c["id"]: c for c in db.get_collections()}
+    if collection_id not in valid:
+        raise ValueError("collection not found")
+    if valid[collection_id]["visual_json"] is not None:
+        raise ValueError(
+            "visual collections have no rules-only expansion; "
+            "open the collection from Browse instead"
+        )
+    return db.collection_photo_ids(collection_id)
+
+
+def _miss_legacy_photo_ids(db, values, collection_id):
+    """Resolve the legacy scalar Browse parameters to a photo set (or None)."""
+    folder_id = _filter_integer(values, "folder_id", minimum=1)
+    rating_min = _filter_integer(values, "rating_min", minimum=1, maximum=5)
+    keyword = _filter_value(values, "keyword")
+    date_from = _filter_value(values, "date_from")
+    date_to = _filter_value(values, "date_to")
+    color_label = _filter_value(values, "color_label")
+    if color_label not in (None, "red", "yellow", "green", "blue", "purple"):
+        raise ValueError("invalid color_label")
+    flag = _filter_value(values, "flag")
+    if flag not in (None, "none", "flagged", "rejected"):
+        raise ValueError("invalid flag")
+
+    has_browse_filters = any((
+        folder_id, rating_min, keyword, date_from, date_to, color_label, flag,
+    ))
+    photo_ids = None
+    if has_browse_filters:
+        photo_ids = set(db.get_photo_ids(
+            folder_id=folder_id,
+            rating_min=rating_min,
+            date_from=date_from,
+            date_to=date_to,
+            keyword=keyword,
+            keyword_match_case=_filter_boolean(values, "keyword_match_case"),
+            keyword_whole_word=_filter_boolean(values, "keyword_whole_word"),
+            color_label=color_label,
+            flag=flag,
+        ))
+    if collection_id is not None:
+        # ``collection_photo_ids`` (like ``get_collection_photos``)
+        # evaluates ``rules`` only. Refuse a visual-only collection
+        # here so a legacy Misses API caller does not silently widen its
+        # scope to every metadata match. The shared-bar page sends the
+        # collection's rules + visual clause instead of collection_id.
+        collection_ids = _rules_only_collection_photo_ids(db, collection_id)
+        photo_ids = (
+            collection_ids
+            if photo_ids is None
+            else photo_ids & collection_ids
+        )
+    return photo_ids
+
+
 def create_misses_blueprint(
     get_db,
     json_error,
@@ -158,141 +245,64 @@ def create_misses_blueprint(
         ``/api/photos/query`` so the shared bar can surface visual-search
         fallback states instead of silently widening the result set.
         """
-        def value(name):
-            raw = values.get(name)
-            return None if raw in (None, "") else raw
+        collection_id = _filter_integer(values, "collection_id", minimum=1)
 
-        def integer(name, minimum=None, maximum=None):
-            raw = value(name)
-            if raw is None:
-                return None
-            try:
-                parsed = int(raw)
-            except (TypeError, ValueError):
-                raise ValueError(f"{name} must be an integer") from None
-            if minimum is not None and parsed < minimum:
-                raise ValueError(f"{name} must be at least {minimum}")
-            if maximum is not None and parsed > maximum:
-                raise ValueError(f"{name} must be at most {maximum}")
-            return parsed
-
-        collection_id = integer("collection_id", minimum=1)
-
-        rules_raw = value("rules")
-        visual_raw = value("visual")
+        rules_raw = _filter_value(values, "rules")
+        visual_raw = _filter_value(values, "visual")
         if rules_raw is not None or visual_raw is not None:
-            collection_ids = None
-            if collection_id is not None:
-                # Validate before rules/visual resolution so both paths can
-                # safely use the collection as their candidate scope while
-                # preserving the friendlier legacy error messages.
-                valid = {c["id"]: c for c in db.get_collections()}
-                if collection_id not in valid:
-                    raise ValueError("collection not found")
-                if valid[collection_id]["visual_json"] is not None:
-                    raise ValueError(
-                        "visual collections have no rules-only expansion; "
-                        "open the collection from Browse instead"
-                    )
-                collection_ids = db.collection_photo_ids(collection_id)
-            try:
-                rules = (
-                    json.loads(rules_raw)
-                    if isinstance(rules_raw, str)
-                    else rules_raw
-                )
-                visual_value = (
-                    json.loads(visual_raw)
-                    if isinstance(visual_raw, str)
-                    else visual_raw
-                )
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise ValueError("rules and visual must be valid JSON") from exc
+            return _miss_expression_photo_ids(
+                db, rules_raw, visual_raw, collection_id,
+            )
+        return _miss_legacy_photo_ids(db, values, collection_id), None
 
-            if rules is None:
-                rules = []
-            rules = inject_active_visual_model(rules)
-            visual = validate_visual_arg(visual_value)
-            visual_info = None
-            photo_ids = None
-            if visual is not None:
-                visual_info, ordered_ids, _ = resolve_visual(
-                    db, rules, visual, collection_id=collection_id,
-                )
-                if ordered_ids is not None:
-                    photo_ids = set(ordered_ids)
-            if photo_ids is None and rules:
-                photo_ids = set(db.query_photo_ids(
-                    rules, collection_id=collection_id,
-                ))
-
-            # ``collection_id`` can still accompany the universal expression
-            # for compatibility with an old composed Misses deep link.
-            if collection_id is not None:
-                photo_ids = (
-                    collection_ids
-                    if photo_ids is None
-                    else photo_ids & collection_ids
-                )
-            return photo_ids, visual_info
-
-        folder_id = integer("folder_id", minimum=1)
-        rating_min = integer("rating_min", minimum=1, maximum=5)
-        keyword = value("keyword")
-        date_from = value("date_from")
-        date_to = value("date_to")
-        color_label = value("color_label")
-        if color_label not in (None, "red", "yellow", "green", "blue", "purple"):
-            raise ValueError("invalid color_label")
-        flag = value("flag")
-        if flag not in (None, "none", "flagged", "rejected"):
-            raise ValueError("invalid flag")
-
-        def boolean(name):
-            raw = value(name)
-            if raw is None:
-                return False
-            if isinstance(raw, bool):
-                return raw
-            return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-        has_browse_filters = any((
-            folder_id, rating_min, keyword, date_from, date_to, color_label, flag,
-        ))
-        photo_ids = None
-        if has_browse_filters:
-            photo_ids = set(db.get_photo_ids(
-                folder_id=folder_id,
-                rating_min=rating_min,
-                date_from=date_from,
-                date_to=date_to,
-                keyword=keyword,
-                keyword_match_case=boolean("keyword_match_case"),
-                keyword_whole_word=boolean("keyword_whole_word"),
-                color_label=color_label,
-                flag=flag,
-            ))
+    def _miss_expression_photo_ids(db, rules_raw, visual_raw, collection_id):
+        """Resolve the shared filter bar's ``rules``/``visual`` expression."""
+        collection_ids = None
         if collection_id is not None:
-            # ``collection_photo_ids`` (like ``get_collection_photos``)
-            # evaluates ``rules`` only. Refuse a visual-only collection
-            # here so a legacy Misses API caller does not silently widen its
-            # scope to every metadata match. The shared-bar page sends the
-            # collection's rules + visual clause instead of collection_id.
-            valid = {c["id"]: c for c in db.get_collections()}
-            if collection_id not in valid:
-                raise ValueError("collection not found")
-            if valid[collection_id]["visual_json"] is not None:
-                raise ValueError(
-                    "visual collections have no rules-only expansion; "
-                    "open the collection from Browse instead"
-                )
-            collection_ids = db.collection_photo_ids(collection_id)
+            # Validate before rules/visual resolution so both paths can
+            # safely use the collection as their candidate scope while
+            # preserving the friendlier legacy error messages.
+            collection_ids = _rules_only_collection_photo_ids(db, collection_id)
+        try:
+            rules = (
+                json.loads(rules_raw)
+                if isinstance(rules_raw, str)
+                else rules_raw
+            )
+            visual_value = (
+                json.loads(visual_raw)
+                if isinstance(visual_raw, str)
+                else visual_raw
+            )
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("rules and visual must be valid JSON") from exc
+
+        if rules is None:
+            rules = []
+        rules = inject_active_visual_model(rules)
+        visual = validate_visual_arg(visual_value)
+        visual_info = None
+        photo_ids = None
+        if visual is not None:
+            visual_info, ordered_ids, _ = resolve_visual(
+                db, rules, visual, collection_id=collection_id,
+            )
+            if ordered_ids is not None:
+                photo_ids = set(ordered_ids)
+        if photo_ids is None and rules:
+            photo_ids = set(db.query_photo_ids(
+                rules, collection_id=collection_id,
+            ))
+
+        # ``collection_id`` can still accompany the universal expression
+        # for compatibility with an old composed Misses deep link.
+        if collection_id is not None:
             photo_ids = (
                 collection_ids
                 if photo_ids is None
                 else photo_ids & collection_ids
             )
-        return photo_ids, None
+        return photo_ids, visual_info
 
     @blueprint.route("/api/misses", methods=["GET", "POST"])
     def api_misses():
