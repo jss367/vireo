@@ -5,7 +5,6 @@
   "app.py:main": 215,
   "audit.py:verify_hashes": 135,
   "auto_tone.py:fit": 101,
-  "capture_time.py:adjust_capture_time": 161,
   "classifier.py:Classifier.__init__": 195,
   "classifier.py:_compute_embeddings_with_progress": 115,
   "classifier.py:_load_or_compute_label_embeddings": 101,
