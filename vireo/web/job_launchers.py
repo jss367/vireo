@@ -129,6 +129,223 @@ def _paired_jpeg_preview_exists(preview_dir, photo, size, db):
     ))
 
 
+def _move_folder_destination(
+    cfg, move_mod, effective_cfg, *, remote_target_id, subpath, destination,
+    folder_template,
+):
+    """Resolve a folder move's remote or local destination.
+
+    Returns ``(target, remote, destination, display_dest, error)``;
+    ``error`` holds the ``json_error`` arguments when the request must be
+    refused, and is None otherwise.
+    """
+    # Remote (SSH) destination vs local path. A remote target carries its
+    # own destination (remote_path + optional subpath), so `destination`
+    # is not required in that case.
+    if remote_target_id:
+        if folder_template:
+            return None, None, destination, None, (
+                "Organizing one folder into capture-date folders is only "
+                "available for local or mounted-drive destinations.",
+            )
+        target, remote, err = _remote_move_spec(
+            cfg, move_mod, effective_cfg, remote_target_id, subpath,
+        )
+        if err is not None:
+            return target, None, destination, None, err
+        # Pass the mount path as `destination` for informational use; the
+        # move uses the SSH base from `remote`.
+        destination = remote["mount_dest_base"]
+        display_dest = move_mod.rsync_dest_spec(
+            target, remote["ssh_dest_base"])
+        return target, remote, destination, display_dest, None
+    if not isinstance(destination, str):
+        return None, None, destination, None, ("destination must be a string",)
+    if not destination:
+        return None, None, destination, None, ("destination required",)
+    if not os.path.isabs(destination):
+        return None, None, destination, None, (
+            "destination must be an absolute path",
+        )
+    return None, None, destination, destination, None
+
+
+def _remote_move_spec(cfg, move_mod, effective_cfg, remote_target_id, subpath):
+    """Validate a move-folder remote (SSH) target and build its move spec.
+
+    Returns ``(target, remote, error)``; ``error`` holds the ``json_error``
+    arguments when the request must be refused, and is None otherwise.
+    """
+    target = cfg.get_remote_target(remote_target_id)
+    if not target:
+        return target, None, ("Remote target not found", 404)
+    mount_path = (target.get("mount_path") or "").strip()
+    if not mount_path:
+        return target, None, (
+            "This remote target has no local mount path, so moved "
+            "photos couldn't stay in your library. Add a mount path "
+            "under Settings → Remote targets.",
+        )
+    # Reject a relative mount path (e.g. saved as "Photos" instead of
+    # "/Volumes/Photos") before any transfer runs. move_folder also
+    # refuses as a defense-in-depth check, but failing here gives the
+    # UI a clean error instead of starting a job that immediately
+    # reports failure.
+    if not os.path.isabs(mount_path):
+        return target, None, (
+            "This remote target's local mount path isn't absolute "
+            f"(\"{mount_path}\"). Moved photos would be repointed "
+            "to a path relative to the server's working directory "
+            "and appear missing. Set an absolute mount path under "
+            "Settings → Remote targets.",
+        )
+    rsync_bin = move_mod.resolve_rsync_bin(
+        effective_cfg.get("rsync_bin", "") or "")
+    if not rsync_bin:
+        return target, None, (
+            "No usable GNU rsync was found for remote moves. Install "
+            "GNU rsync for your platform or set its executable under "
+            "Settings → Paths.",
+        )
+    ssh_bin = move_mod.resolve_ssh_bin(
+        effective_cfg.get("ssh_bin", "") or "")
+    if not ssh_bin:
+        return target, None, (
+            "OpenSSH Client was not found. Install the Windows "
+            "OpenSSH Client optional feature or configure ssh.exe in Settings.",
+        )
+    try:
+        remote = move_mod.build_remote_move_spec(
+            target, subpath, rsync_bin, ssh_bin)
+    except ValueError as exc:
+        return target, None, (str(exc),)
+    return target, remote, None
+
+
+def _plan_date_destinations(
+    move_mod, request_db, folder_id, destination, folder_template,
+):
+    """Plan a date-organized folder move into its per-date destinations.
+
+    Returns ``(date_destinations, error)``; ``error`` is the message to
+    refuse the request with, or None.
+    """
+    try:
+        date_plan = move_mod.plan_folder_date_moves(
+            request_db, folder_id, destination, folder_template,
+        )
+    except ValueError as exc:
+        return None, str(exc)
+    if not date_plan:
+        return None, "No tracked photos found in the source folder"
+    return [
+        {
+            "path": item["destination"],
+            "relative_path": item["relative_path"],
+            "photo_count": item["photo_count"],
+        }
+        for item in date_plan
+    ], None
+
+
+def _move_folder_landing(
+    move_mod, folder, *, folder_template, remote, target, destination,
+    display_dest, destination_name, date_destinations,
+):
+    """The destination a folder move reports as where its photos land."""
+    if folder_template:
+        # A date-organized move fans out into one folder per capture date.
+        # When the plan resolves to a single date folder — the common case
+        # for a one-shoot source folder — that folder *is* where every
+        # photo lands, so show it in full instead of the selected root the
+        # user would otherwise read as the landing path. With several date
+        # folders there is no single landing path; keep the root and let
+        # the jobs panel list the folders underneath it.
+        return (
+            date_destinations[0]["path"] if len(date_destinations) == 1
+            else display_dest
+        )
+    if remote:
+        import posixpath
+
+        landing_name = destination_name or folder["name"] \
+            or os.path.basename(folder["path"].rstrip("/\\"))
+        return move_mod.rsync_dest_spec(
+            target,
+            posixpath.join(remote["ssh_dest_base"], landing_name),
+        )
+    return move_mod.resolve_folder_dest(
+        folder["path"], folder["name"], destination,
+        destination_name,
+    )
+
+
+def _scan_roots_from_body(body):
+    """Read and check the scan roots a ``/api/jobs/scan`` body names.
+
+    Returns ``(roots_list, error)``; ``error`` is the message to refuse
+    the request with, or None.
+    """
+    # Normalize inputs. Prefer the explicit plural form when both are
+    # provided; a caller who sends ``roots`` has opted into the new API.
+    if "roots" in body:
+        roots_in = body.get("roots")
+        if not isinstance(roots_in, list) or not roots_in:
+            return None, "roots must be a non-empty list"
+        roots_list = [str(r) for r in roots_in if r]
+        if not roots_list:
+            return None, "roots must be a non-empty list"
+    else:
+        root = body.get("root", "")
+        if not root:
+            return None, "root path required"
+        roots_list = [root]
+
+    from image_loader import is_excluded_scan_path
+
+    for r in roots_list:
+        # Reject other-app data bundles (Apple Photos / Aperture / Photo
+        # Booth) before any stat: ``os.path.isdir`` on a ``.photoslibrary``
+        # path — or a symlink to one — itself trips the macOS
+        # "access data from other apps" TCC prompt, defeating the guards
+        # inside scan().
+        if is_excluded_scan_path(r):
+            return None, (
+                f"path is inside a macOS app-managed library and cannot "
+                f"be scanned: {r}"
+            )
+        if not os.path.isdir(r):
+            return None, f"directory not found: {r}"
+    return roots_list, None
+
+
+def _remember_scan_roots(roots_list):
+    """Remember scan roots in ``config.json`` (skip temp directories from tests)."""
+    import tempfile
+
+    import config as cfg
+
+    tmp_prefix = os.path.realpath(tempfile.gettempdir())
+    # Lock + raw read-modify-write so a concurrent settings PATCH isn't
+    # reverted and we don't pin every DEFAULTS value into the user's
+    # file (see api_pipeline_save_grouping_defaults).
+    with settings_write_lock:
+        raw = read_raw_config_file()
+        saved_roots = raw.get("scan_roots")
+        if not isinstance(saved_roots, list):
+            saved_roots = []
+        changed = False
+        for r in roots_list:
+            if os.path.realpath(r).startswith(tmp_prefix):
+                continue
+            if r not in saved_roots:
+                saved_roots.insert(0, r)
+                changed = True
+        if changed:
+            raw["scan_roots"] = saved_roots
+            cfg.save(raw)
+
+
 def create_job_launchers_blueprint(
     get_db,
     json_error,
@@ -252,105 +469,7 @@ def create_job_launchers_blueprint(
             return json_error("model_id and labels_file required")
 
         def work(job):
-            from classifier import precompute_label_embeddings
-            from labels import get_saved_labels, load_label_set
-            from models import get_models
-
-            # Find the model
-            models = get_models()
-            model = None
-            for m in models:
-                if m["id"] == model_id:
-                    model = m
-                    break
-            if not model or not model["downloaded"]:
-                raise RuntimeError(f"Model {model_id} not found or not downloaded")
-            if model.get("model_type", "bioclip") == "timm":
-                raise RuntimeError(
-                    f"Model {model['name']} has a fixed class head and does "
-                    "not use per-label embeddings — nothing to precompute."
-                )
-
-            ctx.runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": 0,
-                    "total": 0,
-                    "current_file": f'Loading {model["name"]} and computing embeddings...',
-                    "rate": 0,
-                },
-            )
-
-            # The same list the classify job will load, so the warmed
-            # cache is the one it looks for.
-            saved = {ls.get("labels_file"): ls for ls in get_saved_labels()}
-            labels = load_label_set(labels_file, saved.get(labels_file))
-            if not labels:
-                skipped = len(getattr(labels, "dropped_ambiguous", ()))
-                raise RuntimeError(
-                    f"{os.path.basename(labels_file)} has no usable species"
-                    + (f" — all {skipped:,} of its names are shared by more "
-                       "than one species" if skipped else "")
-                    + ". Download the list again in Settings → Labels to "
-                    "split them by scientific name."
-                )
-
-            log.info(
-                "Pre-computing embeddings: %d labels with %s",
-                len(labels),
-                model["name"],
-            )
-
-            def _progress(current, total):
-                ctx.runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": current,
-                        "total": total,
-                        "current_file": f"Computing embeddings ({current}/{total} labels)…",
-                        "rate": 0,
-                    },
-                )
-
-            from classifier import ClassifierLoadPaused
-
-            def _pause_requested():
-                return ctx.runner.pause_requested(job["id"])
-
-            def _cancelled():
-                # Pure cancel probe: the pause is handled by the retry
-                # loop below, outside the embedding single-flight, so the
-                # producer never parks while equal-key waiters are joined.
-                return ctx.runner.cancellation_requested(job["id"])
-
-            # The shared service loads only the text side and joins an
-            # equal-key pipeline/precompute already doing this work.
-            while True:
-                try:
-                    precompute_label_embeddings(
-                        labels=labels,
-                        model_str=model["model_str"],
-                        pretrained_str=model["weights_path"],
-                        progress_callback=_progress,
-                        cancel_check=_cancelled,
-                        pause_check=_pause_requested,
-                    )
-                    break
-                except ClassifierLoadPaused:
-                    # Progress is checkpointed. Park here with no shared
-                    # lock held; the next attempt resumes from the
-                    # checkpoint. A Cancel during the pause surfaces on
-                    # the retry through the cancel probe.
-                    log.info(
-                        "Pre-computing embeddings paused; parking until "
-                        "Resume",
-                    )
-                    ctx.runner.is_cancelled(job["id"])
-                    continue
-
-            return {"labels": len(labels), "model": model["name"]}
+            return _run_precompute_embeddings(ctx, job, model_id, labels_file)
 
         return ctx.start(
             "precompute-embeddings",
@@ -426,40 +545,7 @@ def create_job_launchers_blueprint(
             thread_db = ctx.thread_db()
             thread_db.set_workspace_active_labels([labels_path])
 
-            precompute = None
-            from models import get_active_model
-
-            active_model = get_active_model()
-            # timm models have a fixed class head — no per-label embeddings.
-            if (
-                active_model
-                and active_model["downloaded"]
-                and active_model.get("model_type", "bioclip") != "timm"
-            ):
-                try:
-                    from classifier import _embedding_is_cached, _resolve_model_dir
-
-                    labels = load_label_set(labels_path)
-                    model_dir = _resolve_model_dir(
-                        active_model["model_str"], active_model.get("weights_path")
-                    )
-                    # Use the shared helper: it validates payload shape and
-                    # dtype rather than accepting any file at the identity
-                    # path, so a truncated or wrong-shape cache no longer
-                    # reports as ready here.
-                    if not _embedding_is_cached(
-                        labels, active_model["model_str"], model_dir
-                    ):
-                        precompute = {
-                            "model_id": active_model["id"],
-                            "model_name": active_model["name"],
-                            "labels_file": labels_path,
-                        }
-                except Exception:
-                    log.warning(
-                        "Could not inspect embedding cache after label download",
-                        exc_info=True,
-                    )
+            precompute = _embedding_precompute_offer(load_label_set, labels_path)
 
             return {
                 "species_count": len(set(species)),
@@ -508,61 +594,11 @@ def create_job_launchers_blueprint(
         body = request.get_json(silent=True) or {}
         incremental = body.get("incremental", False)
 
-        # Normalize inputs. Prefer the explicit plural form when both are
-        # provided; a caller who sends ``roots`` has opted into the new API.
-        if "roots" in body:
-            roots_in = body.get("roots")
-            if not isinstance(roots_in, list) or not roots_in:
-                return json_error("roots must be a non-empty list")
-            roots_list = [str(r) for r in roots_in if r]
-            if not roots_list:
-                return json_error("roots must be a non-empty list")
-        else:
-            root = body.get("root", "")
-            if not root:
-                return json_error("root path required")
-            roots_list = [root]
+        roots_list, err = _scan_roots_from_body(body)
+        if err is not None:
+            return json_error(err)
 
-        from image_loader import is_excluded_scan_path
-
-        for r in roots_list:
-            # Reject other-app data bundles (Apple Photos / Aperture / Photo
-            # Booth) before any stat: ``os.path.isdir`` on a ``.photoslibrary``
-            # path — or a symlink to one — itself trips the macOS
-            # "access data from other apps" TCC prompt, defeating the guards
-            # inside scan().
-            if is_excluded_scan_path(r):
-                return json_error(
-                    f"path is inside a macOS app-managed library and cannot "
-                    f"be scanned: {r}"
-                )
-            if not os.path.isdir(r):
-                return json_error(f"directory not found: {r}")
-
-        # Remember scan roots (skip temp directories from tests)
-        import tempfile
-
-        import config as cfg
-
-        tmp_prefix = os.path.realpath(tempfile.gettempdir())
-        # Lock + raw read-modify-write so a concurrent settings PATCH isn't
-        # reverted and we don't pin every DEFAULTS value into the user's
-        # file (see api_pipeline_save_grouping_defaults).
-        with settings_write_lock:
-            raw = read_raw_config_file()
-            saved_roots = raw.get("scan_roots")
-            if not isinstance(saved_roots, list):
-                saved_roots = []
-            changed = False
-            for r in roots_list:
-                if os.path.realpath(r).startswith(tmp_prefix):
-                    continue
-                if r not in saved_roots:
-                    saved_roots.insert(0, r)
-                    changed = True
-            if changed:
-                raw["scan_roots"] = saved_roots
-                cfg.save(raw)
+        _remember_scan_roots(roots_list)
 
         # A workspace with active local state has its folder paths rebased
         # into the managed copy; scanner.scan() calls
@@ -785,155 +821,13 @@ def create_job_launchers_blueprint(
             return err
 
         def work(job):
-            import contextlib
-
-            import config as cfg
-
-            thread_db = ctx.thread_db()
-            vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-            # Use workspace-effective config so per-workspace preview_max_size
-            # overrides are honored — otherwise precompute warms the wrong
-            # size and /photos/<id>/full (which uses workspace overrides) still
-            # misses on first view.
-            effective = thread_db.get_effective_config(cfg.load())
-            raw_size = effective.get("preview_max_size")
-            if raw_size == 0:
-                # "Full resolution" — /full redirects to /original so
-                # there's no size-suffixed file to warm. Skip precompute
-                # rather than produce untracked {id}.jpg files.
-                job["_start_time"] = time.time()
-                return {"generated": 0, "skipped": 0, "total": 0,
-                        "note": "skipped (preview_max_size=0)"}
-            max_size = int(raw_size or 1920)
-
-            preview_quality = effective.get("preview_quality", 90)
-            preview_dir = os.path.join(vireo_dir, "previews")
-            os.makedirs(preview_dir, exist_ok=True)
-
-            if requested_photo_ids is not None:
-                photos = []
-                for photo_id in requested_photo_ids:
-                    scoped_photo = thread_db.get_photo(
-                        photo_id, verify_workspace=True,
-                    )
-                    if scoped_photo is not None:
-                        photos.append(scoped_photo)
-            elif collection_id:
-                photos = thread_db.get_collection_photos(collection_id, per_page=999999)
-            else:
-                photos = thread_db.get_photos(per_page=999999)
-
-            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-            total = len(photos)
-            generated = 0
-            skipped = 0
-            failed = 0
-            job["_start_time"] = time.time()
-
-            for i, photo in enumerate(photos):
-                if ctx.runner.is_cancelled(job["id"]):
-                    break
-                detail_photo = thread_db.get_photo(photo["id"]) or photo
-                cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
-                recipe = thread_db.get_photo_edit_recipe(photo["id"])
-                if os.path.exists(cache_path):
-                    cache_row = None
-                    try:
-                        cache_row = thread_db.caches.preview_get(photo["id"], max_size)
-                    except sqlite3.Error:
-                        # Treated as untracked: an edited photo's preview is
-                        # then re-rendered rather than trusted.
-                        log.warning(
-                            "Could not read the preview cache row for photo %s",
-                            photo["id"], exc_info=True,
-                        )
-                    if recipe and cache_row is None:
-                        with contextlib.suppress(OSError):
-                            os.remove(cache_path)
-                        if os.path.exists(cache_path):
-                            skipped += 1
-                            log.info(
-                                "Skipping untracked edited preview for photo %s; "
-                                "existing cache file could not be removed",
-                                photo["id"],
-                            )
-                            continue
-                    else:
-                        skipped += 1
-                        # Adopt untracked unedited files so precompute output is
-                        # visible to eviction and /api/preview-cache.
-                        # Best-effort: photo may be deleted mid-job (FK error).
-                        try:
-                            if cache_row is None:
-                                thread_db.caches.preview_insert(
-                                    photo["id"],
-                                    max_size,
-                                    os.path.getsize(cache_path),
-                                )
-                        except (sqlite3.Error, OSError):
-                            log.debug(
-                                "Could not track existing preview for photo %s",
-                                photo["id"], exc_info=True,
-                            )
-                        continue
-
-                if not os.path.exists(cache_path):
-                    folder_path = folders.get(detail_photo["folder_id"])
-                    try:
-                        materialized = materialize_preview(
-                            thread_db,
-                            detail_photo,
-                            folder_path,
-                            size=max_size,
-                            vireo_dir=vireo_dir,
-                            preview_quality=preview_quality,
-                            recipe=recipe,
-                            cache_path=cache_path,
-                        )
-                    except (ArtifactProducerFailed, PreviewMaterializationError) as exc:
-                        # A source we could not read is a failure, not a
-                        # cache hit; counting it as skipped made an
-                        # all-unreadable run look fully cached.
-                        failed += 1
-                        log.info(
-                            "Preview warmup failed for photo %s: %s",
-                            photo["id"], exc,
-                        )
-                    else:
-                        if materialized.generated:
-                            generated += 1
-                        else:
-                            skipped += 1
-
-                ctx.runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": i + 1,
-                        "total": total,
-                        "current_file": photo["filename"],
-                        "rate": round(
-                            (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
-                        ),
-                        "phase": "Generating previews",
-                    },
-                )
-
-            # Park a pause requested during the final iteration before the
-            # eviction pass, which can unlink many previews and rewrite their
-            # database rows. Without this checkpoint the accepted request
-            # would remain ``pausing`` while eviction ran, and a cancel from
-            # that state could leave the cache mid-eviction.
-            if ctx.runner.is_cancelled(job["id"]):
-                return {"generated": generated, "skipped": skipped,
-                        "failed": failed, "total": total}
-
-            # Run a single eviction pass at the end so the batch doesn't
-            # fsync after every photo.
-            evict_preview_cache_if_over_quota(thread_db, vireo_dir)
-
-            return {"generated": generated, "skipped": skipped,
-                    "failed": failed, "total": total}
+            return _PreviewWarmup(
+                ctx,
+                job,
+                config,
+                collection_id=collection_id,
+                requested_photo_ids=requested_photo_ids,
+            ).run()
 
         return ctx.start(
             "previews",
@@ -1162,78 +1056,7 @@ def create_job_launchers_blueprint(
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
 
         def work(job):
-            from offline_cache import cache_photo_original
-
-            thread_db = ctx.thread_db()
-            photos_map = thread_db.get_photos_by_ids(photo_ids)
-            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-
-            cached = 0
-            skipped = 0
-            failed = 0
-            copied_bytes = 0
-            total = len(photo_ids)
-            job["_start_time"] = time.time()
-            job["progress"]["total"] = total
-
-            for i, pid in enumerate(photo_ids):
-                if ctx.runner.is_cancelled(job["id"]):
-                    break
-                photo = photos_map.get(pid)
-                filename = photo["filename"] if photo else ""
-                if not photo:
-                    failed += 1
-                    job["errors"].append(f"Photo {pid}: not found")
-                else:
-                    try:
-                        result = cache_photo_original(
-                            thread_db, photo, vireo_dir, folders
-                        )
-                        if result["status"] == "cached":
-                            cached += 1
-                            copied_bytes += int(result.get("bytes") or 0)
-                        elif result["status"] == "skipped":
-                            skipped += 1
-                        else:
-                            failed += 1
-                            job["errors"].append(
-                                f'{photo["filename"]}: {result["status"]}'
-                            )
-                    except Exception as exc:
-                        thread_db.rollback()
-                        failed += 1
-                        job["errors"].append(f'{photo["filename"]}: {exc}')
-                        log.warning("Offline cache failed for %s: %s", filename, exc, exc_info=True)
-
-                ctx.runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": i + 1,
-                        "total": total,
-                        "current_file": filename,
-                        "rate": round(
-                            (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
-                        ),
-                        "phase": "Caching originals for offline use",
-                    },
-                )
-
-            result = {
-                "cached": cached,
-                "skipped": skipped,
-                "failed": failed,
-                "total": total,
-                "bytes": copied_bytes,
-            }
-            if failed:
-                job["result"] = result
-                first_err = job["errors"][0] if job["errors"] else "offline cache failed"
-                job["_fatal_error"] = (
-                    f"{failed}/{total} photos could not be cached: {first_err}"
-                )
-                raise RuntimeError(first_err)
-            return result
+            return _run_offline_cache(ctx, job, photo_ids, vireo_dir)
 
         return ctx.start(
             "offline-cache",
@@ -1302,42 +1125,7 @@ def create_job_launchers_blueprint(
                             selected_photo=photo,
                         ) if photo is not None else {"status": "not_cached", "bytes": 0}
                     )
-                    status = outcome["status"]
-                    result[status] += 1
-                    result["bytes"] += outcome["bytes"]
-                    result["processed"] += 1
-                    if status in {"kept", "failed"}:
-                        reason = f'{filename}: {outcome["reason"]}'
-                        if status == "kept":
-                            if len(result["kept_reasons"]) < _MAX_KEPT_REASONS:
-                                result["kept_reasons"].append(reason)
-                        else:
-                            if len(result["errors"]) < _MAX_ERROR_REASONS:
-                                # Append to ``job["errors"]`` first so a
-                                # snapshot caught between the two appends
-                                # sees ``snap["errors"]`` at least as long
-                                # as ``snap["result"]["errors"]``.
-                                # ``_error_total(snap)`` reads from
-                                # ``snap["errors"]`` while
-                                # ``_write_checkpoints`` serializes
-                                # ``snap["result"]``, so appending to the
-                                # job-level list first keeps the
-                                # ``error_count`` column from under-reporting
-                                # the serialized result's error details
-                                # before the ``errors_total`` cap branch
-                                # kicks in.
-                                job["errors"].append(reason)
-                                result["errors"].append(reason)
-                            elif result["failed"] > _MAX_ERROR_REASONS:
-                                # Live checkpoints snapshot ``result`` and
-                                # persist ``_error_total`` — publish the
-                                # count the moment it diverges from the
-                                # capped list, not just at the final return,
-                                # so a checkpoint mid-run (and the +1 the
-                                # startup sweep adds to an interrupted row)
-                                # reports the true total.
-                                result["errors_total"] = result["failed"]
-                            result["ok"] = False
+                    _record_release_outcome(job, result, filename, outcome)
                     ctx.runner.push_event(job["id"], "progress", {
                         "current": result["processed"], "total": result["total"],
                         "current_file": filename, "phase": "Releasing local originals",
@@ -1404,315 +1192,18 @@ def create_job_launchers_blueprint(
         flask_app = current_app._get_current_object()
 
         def work(job):
-            import config as cfg
-            from offline_cache import (
-                cache_photo_original,
-                cleanup_preparation_offline_files,
-                original_preparation_guard,
-                photo_source_matches,
-            )
-
-            thread_db = ctx.thread_db()
-
-            def render_through_view(path, view, photo_id, photo, label):
-                """Run a lightbox view in an isolated request context.
-
-                Returns an error string, or None when the view succeeded.
-                """
-                with flask_app.test_request_context(path):
-                    request_db = get_db()
-                    request_db.set_active_workspace(ctx.workspace_id)
-                    response = flask_app.make_response(
-                        view(photo_id, _prepare_source=photo)
-                    )
-                    try:
-                        if 200 <= response.status_code < 300:
-                            return None
-                        response.direct_passthrough = False
-                        detail = response.get_data(as_text=True).strip()
-                        return detail or (
-                            f"{label} render failed with status "
-                            f"{response.status_code}"
-                        )
-                    finally:
-                        response.close()
-
-            try:
-                preview_sizes = lightbox_fit_preview_sizes(
-                    thread_db.get_effective_config(cfg.load()).get(
-                        "preview_max_size",
-                    ),
-                )
-                folders = {
-                    folder["id"]: folder["path"]
-                    for folder in thread_db.get_folder_tree()
-                }
-                ready = 0
-                copied = 0
-                reused = 0
-                failed = 0
-                skipped_deleted = 0
-                copied_bytes = 0
-                # Photos counted ready by the in-loop pass: a final
-                # cross-selection check verifies no later photo's warming
-                # evicted their tiers before the job reports them ready.
-                pending_ready_meta = {}
-                total = len(photo_ids)
-                job["_start_time"] = time.time()
-                job["progress"]["total"] = total
-
-                for index, photo_id in enumerate(photo_ids, start=1):
-                    if ctx.runner.is_cancelled(job["id"]):
-                        break
-                    # The lock must precede database transactions: other
-                    # writers publish files before inserting their cache row.
-                    with original_preparation_guard(vireo_dir, photo_id):
-                        # Re-read each photo: deletion may have run while this
-                        # job was preparing earlier selections.
-                        photo = selected_photos.get(photo_id)
-                        current_photo = thread_db.get_photo(photo_id)
-                        filename = photo["filename"] if photo else f"Photo {photo_id}"
-                        is_pair = _photo_is_raw_jpeg_pair(photo)
-                        error = None
-                        cached = None
-                        attempted = photo_source_matches(photo, current_photo)
-                        if attempted:
-                            try:
-                                cached = cache_photo_original(
-                                    thread_db, photo, vireo_dir, folders,
-                                )
-                                cache_status = cached.get("status")
-                                if cache_status not in ("cached", "skipped"):
-                                    error = cache_status or "source could not be cached"
-
-                                if error is None and photo_source_matches(
-                                    photo, thread_db.get_photo(photo_id),
-                                ):
-                                    # Execute the canonical renderers inside
-                                    # isolated request contexts. This avoids a
-                                    # second implementation drifting from the
-                                    # lightbox's RAW/companion/edit fallbacks.
-                                    # /original backs 1:1 zoom; the previews
-                                    # are what flipping at fit loads.
-                                    error = render_through_view(
-                                        f"/photos/{photo_id}/original",
-                                        serve_original_photo, photo_id, photo,
-                                        "full-resolution",
-                                    )
-                                    for size in preview_sizes:
-                                        if error is not None:
-                                            break
-                                        error = render_through_view(
-                                            f"/photos/{photo_id}/preview?size={size}",
-                                            serve_photo_preview, photo_id, photo,
-                                            f"{size}px preview",
-                                        )
-                                        # RAW+JPEG pairs: the lightbox
-                                        # defaults to the JPEG and appends
-                                        # ?source=jpeg to every render URL,
-                                        # which bypasses the ordinary
-                                        # (photo_id, size) cache. Warm the
-                                        # paired shadow cache too, otherwise
-                                        # the first fit-size request still
-                                        # decodes the companion JPEG.
-                                        if error is None and is_pair:
-                                            error = render_through_view(
-                                                f"/photos/{photo_id}/preview"
-                                                f"?size={size}&source=jpeg",
-                                                serve_photo_preview, photo_id,
-                                                photo,
-                                                f"{size}px paired preview",
-                                            )
-                                    # Eviction can delete a just-warmed
-                                    # preview the moment it is published
-                                    # (preview_cache_max_mb too small for the
-                                    # combined tiers, or 0). _serve_preview
-                                    # still returns 200 from the in-memory
-                                    # bytes, so a successful render alone is
-                                    # not proof that the next lightbox
-                                    # request will be a cache hit — check
-                                    # after warming instead of calling the
-                                    # photo ready prematurely.
-                                    if error is None and preview_sizes:
-                                        preview_dir = os.path.join(
-                                            vireo_dir, "previews",
-                                        )
-                                        for size in preview_sizes:
-                                            cache_file = os.path.join(
-                                                preview_dir,
-                                                f"{photo_id}_{size}.jpg",
-                                            )
-                                            if not (
-                                                thread_db.caches.preview_get(
-                                                    photo_id, size,
-                                                )
-                                                and os.path.exists(cache_file)
-                                            ):
-                                                error = (
-                                                    f"{size}px preview was "
-                                                    "evicted during warming "
-                                                    "(preview_cache_max_mb "
-                                                    "too small for the "
-                                                    "lightbox tiers)"
-                                                )
-                                                break
-                                            # Paired tiers share the preview
-                                            # quota and can be evicted too.
-                                            if (
-                                                is_pair
-                                                and not
-                                                _paired_jpeg_preview_exists(
-                                                    preview_dir, photo, size,
-                                                    thread_db,
-                                                )
-                                            ):
-                                                error = (
-                                                    f"{size}px paired "
-                                                    "preview was not "
-                                                    "written (RAW+JPEG "
-                                                    "companion unavailable "
-                                                    "or preview cache quota too small)"
-                                                )
-                                                break
-                            except Exception as exc:
-                                thread_db.rollback()
-                                error = str(exc) or exc.__class__.__name__
-                                if photo_source_matches(photo, thread_db.get_photo(photo_id)):
-                                    log.warning(
-                                        "Full-resolution preparation failed for %s: %s",
-                                        filename, exc, exc_info=True,
-                                    )
-
-                        # Serialize this final identity check and cache cleanup
-                        # against catalog writers. An import can reuse a deleted
-                        # ID; any cache written by this iteration is then suspect,
-                        # including the offline row attached to that replacement.
-                        # Purge disposable caches only if we actually attempted
-                        # work, leaving replacements found before our turn alone.
-                        with thread_db.transaction():
-                            thread_db.begin_immediate()
-                            current_photo = thread_db.get_photo(photo_id)
-                            if not attempted or not photo_source_matches(photo, current_photo):
-                                from preview_cache import cleanup_cached_files_for_deleted_photos
-
-                                skipped_deleted += 1
-                                if attempted:
-                                    thread_db.caches.offline_original_delete(
-                                        photo_id, _commit=False,
-                                    )
-                                    if current_photo is None:
-                                        cleanup_cached_files_for_deleted_photos(
-                                            config["THUMB_CACHE_DIR"],
-                                            [{"photo_id": photo_id}],
-                                            vireo_dir=vireo_dir,
-                                        )
-                                    else:
-                                        # Other cache families may already
-                                        # belong to the replacement photo.
-                                        cleanup_preparation_offline_files(
-                                            vireo_dir, photo_id,
-                                        )
-                            elif error is None:
-                                ready += 1
-                                cache_bytes = int(cached.get("bytes") or 0)
-                                if cached["status"] == "cached":
-                                    copied += 1
-                                    copied_bytes += cache_bytes
-                                elif cached["status"] == "skipped":
-                                    reused += 1
-                                pending_ready_meta[photo_id] = {
-                                    "filename": filename,
-                                    "cached_status": cached["status"],
-                                    "cached_bytes": cache_bytes,
-                                    "is_pair": is_pair,
-                                }
-                            else:
-                                failed += 1
-                                job["errors"].append(f"{filename}: {error}")
-
-                    progress = {
-                        "current": index,
-                        "total": total,
-                        "current_file": filename,
-                        "rate": round(
-                            index
-                            / max(time.time() - job["_start_time"], 0.01),
-                            1,
-                        ),
-                        "phase": "Preparing full-resolution photos",
-                    }
-                    job["progress"].update(progress)
-                    ctx.runner.push_event(job["id"], "progress", progress)
-
-                # Final cross-selection verification: later photos' warming
-                # may have evicted earlier photos' tiers once the combined
-                # selection exceeds preview_cache_max_mb. The in-loop check
-                # cannot see this — it runs before subsequent photos touch
-                # the cache. Reclassify any photo whose tiers no longer
-                # exist on disk / in the preview_cache table as failed.
-                if preview_sizes and pending_ready_meta:
-                    preview_dir = os.path.join(vireo_dir, "previews")
-                    for photo_id, info in pending_ready_meta.items():
-                        current_photo = thread_db.get_photo(photo_id)
-                        missing_size = None
-                        missing_kind = None
-                        for size in preview_sizes:
-                            cache_file = os.path.join(
-                                preview_dir, f"{photo_id}_{size}.jpg",
-                            )
-                            if not (
-                                thread_db.caches.preview_get(photo_id, size)
-                                and os.path.exists(cache_file)
-                            ):
-                                missing_size = size
-                                missing_kind = "preview"
-                                break
-                            if (
-                                info["is_pair"]
-                                and not _paired_jpeg_preview_exists(
-                                    preview_dir, current_photo, size,
-                                    thread_db,
-                                )
-                            ):
-                                missing_size = size
-                                missing_kind = "paired preview"
-                                break
-                        if missing_size is None:
-                            continue
-                        ready -= 1
-                        failed += 1
-                        if info["cached_status"] == "cached":
-                            copied -= 1
-                            copied_bytes -= info["cached_bytes"]
-                        elif info["cached_status"] == "skipped":
-                            reused -= 1
-                        if missing_kind == "paired preview":
-                            job["errors"].append(
-                                f"{info['filename']}: {missing_size}px "
-                                "paired preview went missing after warming "
-                                "(source changed or preview cache quota too small)"
-                            )
-                        else:
-                            job["errors"].append(
-                                f"{info['filename']}: {missing_size}px "
-                                "preview was evicted during warming "
-                                "(preview_cache_max_mb too small for the "
-                                "lightbox tiers)"
-                            )
-
-                return {
-                    "ok": failed == 0,
-                    "ready": ready,
-                    "copied": copied,
-                    "reused": reused,
-                    "failed": failed,
-                    "skipped_deleted": skipped_deleted,
-                    "total": total,
-                    "bytes": copied_bytes,
-                    "errors": list(job["errors"]),
-                }
-            finally:
-                thread_db.close()
+            return _FullResolutionPreparation(
+                ctx,
+                job,
+                photo_ids=photo_ids,
+                selected_photos=selected_photos,
+                vireo_dir=vireo_dir,
+                flask_app=flask_app,
+                get_db=get_db,
+                config=config,
+                serve_original_photo=serve_original_photo,
+                serve_photo_preview=serve_photo_preview,
+            ).run()
 
         return ctx.start(
             "prepare-full-resolution",
@@ -1772,119 +1263,34 @@ def create_job_launchers_blueprint(
         effective_cfg = request_db.get_effective_config(cfg.load())
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
-        # Remote (SSH) destination vs local path. A remote target carries its
-        # own destination (remote_path + optional subpath), so `destination`
-        # is not required in that case.
-        remote = None
-        if remote_target_id:
-            if folder_template:
-                return json_error(
-                    "Organizing one folder into capture-date folders is only "
-                    "available for local or mounted-drive destinations."
-                )
-            target = cfg.get_remote_target(remote_target_id)
-            if not target:
-                return json_error("Remote target not found", status=404)
-            mount_path = (target.get("mount_path") or "").strip()
-            if not mount_path:
-                return json_error(
-                    "This remote target has no local mount path, so moved "
-                    "photos couldn't stay in your library. Add a mount path "
-                    "under Settings → Remote targets."
-                )
-            # Reject a relative mount path (e.g. saved as "Photos" instead of
-            # "/Volumes/Photos") before any transfer runs. move_folder also
-            # refuses as a defense-in-depth check, but failing here gives the
-            # UI a clean error instead of starting a job that immediately
-            # reports failure.
-            if not os.path.isabs(mount_path):
-                return json_error(
-                    "This remote target's local mount path isn't absolute "
-                    f"(\"{mount_path}\"). Moved photos would be repointed "
-                    "to a path relative to the server's working directory "
-                    "and appear missing. Set an absolute mount path under "
-                    "Settings → Remote targets."
-                )
-            rsync_bin = move_mod.resolve_rsync_bin(
-                effective_cfg.get("rsync_bin", "") or "")
-            if not rsync_bin:
-                return json_error(
-                    "No usable GNU rsync was found for remote moves. Install "
-                    "GNU rsync for your platform or set its executable under "
-                    "Settings → Paths."
-                )
-            ssh_bin = move_mod.resolve_ssh_bin(
-                effective_cfg.get("ssh_bin", "") or "")
-            if not ssh_bin:
-                return json_error(
-                    "OpenSSH Client was not found. Install the Windows "
-                    "OpenSSH Client optional feature or configure ssh.exe in Settings."
-                )
-            try:
-                remote = move_mod.build_remote_move_spec(
-                    target, subpath, rsync_bin, ssh_bin)
-            except ValueError as exc:
-                return json_error(str(exc))
-            # Pass the mount path as `destination` for informational use; the
-            # move uses the SSH base from `remote`.
-            destination = remote["mount_dest_base"]
-            display_dest = move_mod.rsync_dest_spec(
-                target, remote["ssh_dest_base"])
-        else:
-            if not isinstance(destination, str):
-                return json_error("destination must be a string")
-            if not destination:
-                return json_error("destination required")
-            if not os.path.isabs(destination):
-                return json_error("destination must be an absolute path")
-            display_dest = destination
+        target, remote, destination, display_dest, err = _move_folder_destination(
+            cfg, move_mod, effective_cfg,
+            remote_target_id=remote_target_id,
+            subpath=subpath,
+            destination=destination,
+            folder_template=folder_template,
+        )
+        if err is not None:
+            return json_error(*err)
 
-        date_plan = None
         date_destinations = None
         if folder_template:
-            try:
-                date_plan = move_mod.plan_folder_date_moves(
-                    request_db, folder_id, destination, folder_template,
-                )
-            except ValueError as exc:
-                return json_error(str(exc))
-            if not date_plan:
-                return json_error("No tracked photos found in the source folder")
-            date_destinations = [
-                {
-                    "path": item["destination"],
-                    "relative_path": item["relative_path"],
-                    "photo_count": item["photo_count"],
-                }
-                for item in date_plan
-            ]
+            date_destinations, err = _plan_date_destinations(
+                move_mod, request_db, folder_id, destination, folder_template,
+            )
+            if err is not None:
+                return json_error(err)
 
-        if folder_template:
-            # A date-organized move fans out into one folder per capture date.
-            # When the plan resolves to a single date folder — the common case
-            # for a one-shoot source folder — that folder *is* where every
-            # photo lands, so show it in full instead of the selected root the
-            # user would otherwise read as the landing path. With several date
-            # folders there is no single landing path; keep the root and let
-            # the jobs panel list the folders underneath it.
-            resolved_destination = (
-                date_destinations[0]["path"] if len(date_destinations) == 1
-                else display_dest
-            )
-        elif remote:
-            import posixpath
-
-            landing_name = destination_name or folder["name"] \
-                or os.path.basename(folder["path"].rstrip("/\\"))
-            resolved_destination = move_mod.rsync_dest_spec(
-                target,
-                posixpath.join(remote["ssh_dest_base"], landing_name),
-            )
-        else:
-            resolved_destination = move_mod.resolve_folder_dest(
-                folder["path"], folder["name"], destination,
-                destination_name,
-            )
+        resolved_destination = _move_folder_landing(
+            move_mod, folder,
+            folder_template=folder_template,
+            remote=remote,
+            target=target,
+            destination=destination,
+            display_dest=display_dest,
+            destination_name=destination_name,
+            date_destinations=date_destinations,
+        )
 
         job_id = start_move_folder_job(
             ctx.runner, ctx.workspace_id,
@@ -2077,108 +1483,18 @@ def create_job_launchers_blueprint(
         dng_converter_bin = body.get("dng_converter_bin") or cfg.get("dng_converter_bin") or ""
         width = body.get("width")
 
+        settings = SimpleNamespace(
+            binary=binary,
+            style=style,
+            output_format=output_format,
+            output_dir=output_dir,
+            auto_convert_dng=auto_convert_dng,
+            dng_converter_bin=dng_converter_bin,
+            width=width,
+        )
+
         def work(job):
-            from develop import develop_photo, output_path_for_photo
-            from export import developed_folder_key
-
-            thread_db = ctx.thread_db()
-
-            photos = []
-            for pid in photo_ids:
-                p = thread_db.get_photo(pid, verify_workspace=True)
-                if p:
-                    photos.append(p)
-
-            if not photos:
-                return {"developed": 0, "errors": 0, "total": 0}
-
-            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-            total = len(photos)
-            developed = 0
-            errors = 0
-            job["_start_time"] = time.time()
-
-            for i, photo in enumerate(photos):
-                if ctx.runner.is_cancelled(job["id"]):
-                    break
-                folder_path = folders.get(photo["folder_id"])
-                if not folder_path:
-                    errors += 1
-                    continue
-                input_path = os.path.join(folder_path, photo["filename"])
-
-                # Determine output directory. The per-folder "developed/" default
-                # is naturally disambiguated (one dir per source folder). The
-                # globally configured dir is flat, so nest each photo under a
-                # stable key derived from the source folder's path (not its row
-                # id — SQLite reuses those after deletion, which would silently
-                # cross-wire new folders onto stale developed files left on
-                # disk by a previously-deleted folder).
-                if output_dir:
-                    out_dir = os.path.join(output_dir, developed_folder_key(folder_path))
-                else:
-                    out_dir = os.path.join(folder_path, "developed")
-                out_path = output_path_for_photo(photo["filename"], out_dir, output_format)
-
-                try:
-                    photo_metadata = json.loads(photo["exif_data"]) if photo["exif_data"] else None
-                except (TypeError, json.JSONDecodeError):
-                    photo_metadata = None
-
-                result = develop_photo(
-                    darktable_bin=binary,
-                    input_path=input_path,
-                    output_path=out_path,
-                    style=style if style else None,
-                    width=width,
-                    auto_convert_dng=bool(auto_convert_dng),
-                    dng_converter_bin=dng_converter_bin,
-                    metadata=photo_metadata,
-                )
-
-                if result["success"]:
-                    developed += 1
-                else:
-                    errors += 1
-                    job["errors"].append(f'{photo["filename"]}: {result["error"]}')
-                    log.warning("Failed to develop %s: %s", photo["filename"], result["error"])
-
-                ctx.runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": i + 1,
-                        "total": total,
-                        "current_file": photo["filename"],
-                        "rate": round(
-                            (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
-                        ),
-                        "phase": "Developing photos",
-                    },
-                )
-
-            result = {"developed": developed, "errors": errors, "total": total}
-            if errors > 0:
-                # Rollup rule: if any per-photo develop failed, the overall
-                # job is failed (not completed). Stash the counts on the job
-                # so _persist_job (jobs.py ~L197-210) merges them with the
-                # primary error message, then raise so _run_job records
-                # status="failed".
-                #
-                # Re-raise with an existing entry in job["errors"] so
-                # _run_job's dedup guard (err_str not in job["errors"])
-                # skips the append — otherwise a novel exception string
-                # gets tacked on as a synthetic extra error, inflating
-                # error_count by 1. Keep the nicer "N/M failed: <err>"
-                # summary on job["_fatal_error"], which _persist_job
-                # prefers over errors[0] when building the result row.
-                job["result"] = result
-                first_err = job["errors"][0]
-                job["_fatal_error"] = (
-                    f"{errors}/{total} develop operations failed: {first_err}"
-                )
-                raise RuntimeError(first_err)
-            return result
+            return _run_develop(ctx, job, photo_ids, settings)
 
         return ctx.start(
             "develop",
@@ -2775,3 +2091,964 @@ class _MaskExtractionRun:
         return {"masked": self.masked, "skipped": self.skipped,
                 "failed": failed, "unreadable": unreadable, "total": total,
                 "ok": not job_errors, "errors": job_errors}
+
+
+class _FullResolutionPreparation:
+    """The ``/api/jobs/prepare-full-resolution`` work function and its run-wide state."""
+
+    def __init__(
+        self, ctx, job, *, photo_ids, selected_photos, vireo_dir, flask_app,
+        get_db, config, serve_original_photo, serve_photo_preview,
+    ):
+        self.ctx = ctx
+        self.job = job
+        self.photo_ids = photo_ids
+        self.selected_photos = selected_photos
+        self.vireo_dir = vireo_dir
+        self.flask_app = flask_app
+        self.get_db = get_db
+        self.config = config
+        self.serve_original_photo = serve_original_photo
+        self.serve_photo_preview = serve_photo_preview
+        self.preview_dir = os.path.join(vireo_dir, "previews")
+
+    def run(self):
+        import config as cfg
+        from offline_cache import (
+            cache_photo_original,
+            cleanup_preparation_offline_files,
+            original_preparation_guard,
+            photo_source_matches,
+        )
+
+        self.cache_photo_original = cache_photo_original
+        self.cleanup_preparation_offline_files = cleanup_preparation_offline_files
+        self.photo_source_matches = photo_source_matches
+        job = self.job
+
+        thread_db = self.thread_db = self.ctx.thread_db()
+
+        try:
+            self.preview_sizes = lightbox_fit_preview_sizes(
+                thread_db.get_effective_config(cfg.load()).get(
+                    "preview_max_size",
+                ),
+            )
+            self.folders = {
+                folder["id"]: folder["path"]
+                for folder in thread_db.get_folder_tree()
+            }
+            self.ready = 0
+            self.copied = 0
+            self.reused = 0
+            self.failed = 0
+            self.skipped_deleted = 0
+            self.copied_bytes = 0
+            # Photos counted ready by the in-loop pass: a final
+            # cross-selection check verifies no later photo's warming
+            # evicted their tiers before the job reports them ready.
+            self.pending_ready_meta = {}
+            self.total = len(self.photo_ids)
+            job["_start_time"] = time.time()
+            job["progress"]["total"] = self.total
+
+            for index, photo_id in enumerate(self.photo_ids, start=1):
+                if self.ctx.runner.is_cancelled(job["id"]):
+                    break
+                # The lock must precede database transactions: other
+                # writers publish files before inserting their cache row.
+                with original_preparation_guard(self.vireo_dir, photo_id):
+                    filename = self._prepare_photo(photo_id)
+                self._push_progress(index, filename)
+
+            self._verify_ready_tiers()
+            return self._result()
+        finally:
+            thread_db.close()
+
+    def _render_through_view(self, path, view, photo_id, photo, label):
+        """Run a lightbox view in an isolated request context.
+
+        Returns an error string, or None when the view succeeded.
+        """
+        flask_app = self.flask_app
+        with flask_app.test_request_context(path):
+            request_db = self.get_db()
+            request_db.set_active_workspace(self.ctx.workspace_id)
+            response = flask_app.make_response(
+                view(photo_id, _prepare_source=photo)
+            )
+            try:
+                if 200 <= response.status_code < 300:
+                    return None
+                response.direct_passthrough = False
+                detail = response.get_data(as_text=True).strip()
+                return detail or (
+                    f"{label} render failed with status "
+                    f"{response.status_code}"
+                )
+            finally:
+                response.close()
+
+    def _prepare_photo(self, photo_id):
+        """Cache, warm and settle one photo under its preparation lock.
+
+        Returns the filename the progress event reports.
+        """
+        thread_db = self.thread_db
+        # Re-read each photo: deletion may have run while this
+        # job was preparing earlier selections.
+        photo = self.selected_photos.get(photo_id)
+        current_photo = thread_db.get_photo(photo_id)
+        filename = photo["filename"] if photo else f"Photo {photo_id}"
+        is_pair = _photo_is_raw_jpeg_pair(photo)
+        error = None
+        cached = None
+        attempted = self.photo_source_matches(photo, current_photo)
+        if attempted:
+            cached, error = self._cache_and_warm(
+                photo_id, photo, filename, is_pair,
+            )
+        self._settle_photo(
+            photo_id, photo, filename, is_pair, attempted, cached, error,
+        )
+        return filename
+
+    def _cache_and_warm(self, photo_id, photo, filename, is_pair):
+        """Copy the source into the offline cache and warm its renders.
+
+        Returns ``(cached, error)``: the offline-cache result (None when
+        caching raised) and an error string, or None when every tier is
+        ready.
+        """
+        thread_db = self.thread_db
+        cached = None
+        error = None
+        try:
+            cached = self.cache_photo_original(
+                thread_db, photo, self.vireo_dir, self.folders,
+            )
+            cache_status = cached.get("status")
+            if cache_status not in ("cached", "skipped"):
+                error = cache_status or "source could not be cached"
+
+            if error is None and self.photo_source_matches(
+                photo, thread_db.get_photo(photo_id),
+            ):
+                error = self._warm_renders(photo_id, photo, is_pair)
+                # Eviction can delete a just-warmed
+                # preview the moment it is published
+                # (preview_cache_max_mb too small for the
+                # combined tiers, or 0). _serve_preview
+                # still returns 200 from the in-memory
+                # bytes, so a successful render alone is
+                # not proof that the next lightbox
+                # request will be a cache hit — check
+                # after warming instead of calling the
+                # photo ready prematurely.
+                if error is None and self.preview_sizes:
+                    error = self._evicted_tier_error(photo_id, photo, is_pair)
+        except Exception as exc:
+            thread_db.rollback()
+            error = str(exc) or exc.__class__.__name__
+            if self.photo_source_matches(photo, thread_db.get_photo(photo_id)):
+                log.warning(
+                    "Full-resolution preparation failed for %s: %s",
+                    filename, exc, exc_info=True,
+                )
+        return cached, error
+
+    def _warm_renders(self, photo_id, photo, is_pair):
+        """Render /original and every fit-size preview; return the first error."""
+        # Execute the canonical renderers inside
+        # isolated request contexts. This avoids a
+        # second implementation drifting from the
+        # lightbox's RAW/companion/edit fallbacks.
+        # /original backs 1:1 zoom; the previews
+        # are what flipping at fit loads.
+        error = self._render_through_view(
+            f"/photos/{photo_id}/original",
+            self.serve_original_photo, photo_id, photo,
+            "full-resolution",
+        )
+        for size in self.preview_sizes:
+            if error is not None:
+                break
+            error = self._render_through_view(
+                f"/photos/{photo_id}/preview?size={size}",
+                self.serve_photo_preview, photo_id, photo,
+                f"{size}px preview",
+            )
+            # RAW+JPEG pairs: the lightbox
+            # defaults to the JPEG and appends
+            # ?source=jpeg to every render URL,
+            # which bypasses the ordinary
+            # (photo_id, size) cache. Warm the
+            # paired shadow cache too, otherwise
+            # the first fit-size request still
+            # decodes the companion JPEG.
+            if error is None and is_pair:
+                error = self._render_through_view(
+                    f"/photos/{photo_id}/preview"
+                    f"?size={size}&source=jpeg",
+                    self.serve_photo_preview, photo_id,
+                    photo,
+                    f"{size}px paired preview",
+                )
+        return error
+
+    def _missing_tier(self, photo_id, photo, is_pair):
+        """Return ``(size, kind)`` for the first tier missing from the cache.
+
+        ``kind`` is ``"preview"`` or ``"paired preview"``; both are None
+        when every fit-size tier (and its paired twin) is present.
+        """
+        thread_db = self.thread_db
+        for size in self.preview_sizes:
+            cache_file = os.path.join(
+                self.preview_dir, f"{photo_id}_{size}.jpg",
+            )
+            if not (
+                thread_db.caches.preview_get(photo_id, size)
+                and os.path.exists(cache_file)
+            ):
+                return size, "preview"
+            # Paired tiers share the preview
+            # quota and can be evicted too.
+            if (
+                is_pair
+                and not _paired_jpeg_preview_exists(
+                    self.preview_dir, photo, size, thread_db,
+                )
+            ):
+                return size, "paired preview"
+        return None, None
+
+    def _evicted_tier_error(self, photo_id, photo, is_pair):
+        """The in-loop check that this photo's warmed tiers survived."""
+        size, kind = self._missing_tier(photo_id, photo, is_pair)
+        if size is None:
+            return None
+        if kind == "preview":
+            return (
+                f"{size}px preview was "
+                "evicted during warming "
+                "(preview_cache_max_mb "
+                "too small for the "
+                "lightbox tiers)"
+            )
+        return (
+            f"{size}px paired "
+            "preview was not "
+            "written (RAW+JPEG "
+            "companion unavailable "
+            "or preview cache quota too small)"
+        )
+
+    def _settle_photo(
+        self, photo_id, photo, filename, is_pair, attempted, cached, error,
+    ):
+        """Record one photo's outcome, purging caches if its identity changed."""
+        thread_db = self.thread_db
+        # Serialize this final identity check and cache cleanup
+        # against catalog writers. An import can reuse a deleted
+        # ID; any cache written by this iteration is then suspect,
+        # including the offline row attached to that replacement.
+        # Purge disposable caches only if we actually attempted
+        # work, leaving replacements found before our turn alone.
+        with thread_db.transaction():
+            thread_db.begin_immediate()
+            current_photo = thread_db.get_photo(photo_id)
+            if not attempted or not self.photo_source_matches(photo, current_photo):
+                from preview_cache import cleanup_cached_files_for_deleted_photos
+
+                self.skipped_deleted += 1
+                if attempted:
+                    thread_db.caches.offline_original_delete(
+                        photo_id, _commit=False,
+                    )
+                    if current_photo is None:
+                        cleanup_cached_files_for_deleted_photos(
+                            self.config["THUMB_CACHE_DIR"],
+                            [{"photo_id": photo_id}],
+                            vireo_dir=self.vireo_dir,
+                        )
+                    else:
+                        # Other cache families may already
+                        # belong to the replacement photo.
+                        self.cleanup_preparation_offline_files(
+                            self.vireo_dir, photo_id,
+                        )
+            elif error is None:
+                self.ready += 1
+                cache_bytes = int(cached.get("bytes") or 0)
+                if cached["status"] == "cached":
+                    self.copied += 1
+                    self.copied_bytes += cache_bytes
+                elif cached["status"] == "skipped":
+                    self.reused += 1
+                self.pending_ready_meta[photo_id] = {
+                    "filename": filename,
+                    "cached_status": cached["status"],
+                    "cached_bytes": cache_bytes,
+                    "is_pair": is_pair,
+                }
+            else:
+                self.failed += 1
+                self.job["errors"].append(f"{filename}: {error}")
+
+    def _push_progress(self, index, filename):
+        job = self.job
+        progress = {
+            "current": index,
+            "total": self.total,
+            "current_file": filename,
+            "rate": round(
+                index
+                / max(time.time() - job["_start_time"], 0.01),
+                1,
+            ),
+            "phase": "Preparing full-resolution photos",
+        }
+        job["progress"].update(progress)
+        self.ctx.runner.push_event(job["id"], "progress", progress)
+
+    def _verify_ready_tiers(self):
+        """Reclassify ready photos whose tiers a later photo evicted.
+
+        Final cross-selection verification: later photos' warming
+        may have evicted earlier photos' tiers once the combined
+        selection exceeds preview_cache_max_mb. The in-loop check
+        cannot see this — it runs before subsequent photos touch
+        the cache. Reclassify any photo whose tiers no longer
+        exist on disk / in the preview_cache table as failed.
+        """
+        if not (self.preview_sizes and self.pending_ready_meta):
+            return
+        for photo_id, info in self.pending_ready_meta.items():
+            current_photo = self.thread_db.get_photo(photo_id)
+            missing_size, missing_kind = self._missing_tier(
+                photo_id, current_photo, info["is_pair"],
+            )
+            if missing_size is None:
+                continue
+            self.ready -= 1
+            self.failed += 1
+            if info["cached_status"] == "cached":
+                self.copied -= 1
+                self.copied_bytes -= info["cached_bytes"]
+            elif info["cached_status"] == "skipped":
+                self.reused -= 1
+            if missing_kind == "paired preview":
+                self.job["errors"].append(
+                    f"{info['filename']}: {missing_size}px "
+                    "paired preview went missing after warming "
+                    "(source changed or preview cache quota too small)"
+                )
+            else:
+                self.job["errors"].append(
+                    f"{info['filename']}: {missing_size}px "
+                    "preview was evicted during warming "
+                    "(preview_cache_max_mb too small for the "
+                    "lightbox tiers)"
+                )
+
+    def _result(self):
+        return {
+            "ok": self.failed == 0,
+            "ready": self.ready,
+            "copied": self.copied,
+            "reused": self.reused,
+            "failed": self.failed,
+            "skipped_deleted": self.skipped_deleted,
+            "total": self.total,
+            "bytes": self.copied_bytes,
+            "errors": list(self.job["errors"]),
+        }
+
+
+class _PreviewWarmup:
+    """The ``/api/jobs/previews`` work function and its run-wide state."""
+
+    def __init__(self, ctx, job, config, *, collection_id, requested_photo_ids):
+        self.ctx = ctx
+        self.job = job
+        self.config = config
+        self.collection_id = collection_id
+        self.requested_photo_ids = requested_photo_ids
+
+    def run(self):
+        import config as cfg
+
+        job = self.job
+        runner = self.ctx.runner
+        thread_db = self.thread_db = self.ctx.thread_db()
+        vireo_dir = self.vireo_dir = os.path.dirname(self.config["THUMB_CACHE_DIR"])
+        # Use workspace-effective config so per-workspace preview_max_size
+        # overrides are honored — otherwise precompute warms the wrong
+        # size and /photos/<id>/full (which uses workspace overrides) still
+        # misses on first view.
+        effective = thread_db.get_effective_config(cfg.load())
+        raw_size = effective.get("preview_max_size")
+        if raw_size == 0:
+            # "Full resolution" — /full redirects to /original so
+            # there's no size-suffixed file to warm. Skip precompute
+            # rather than produce untracked {id}.jpg files.
+            job["_start_time"] = time.time()
+            return {"generated": 0, "skipped": 0, "total": 0,
+                    "note": "skipped (preview_max_size=0)"}
+        self.max_size = int(raw_size or 1920)
+
+        self.preview_quality = effective.get("preview_quality", 90)
+        self.preview_dir = os.path.join(vireo_dir, "previews")
+        os.makedirs(self.preview_dir, exist_ok=True)
+
+        photos = self._photos()
+
+        self.folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+        total = len(photos)
+        self.generated = 0
+        self.skipped = 0
+        self.failed = 0
+        job["_start_time"] = time.time()
+
+        for i, photo in enumerate(photos):
+            if runner.is_cancelled(job["id"]):
+                break
+            if not self._warm_photo(photo):
+                continue
+
+            runner.push_event(
+                job["id"],
+                "progress",
+                {
+                    "current": i + 1,
+                    "total": total,
+                    "current_file": photo["filename"],
+                    "rate": round(
+                        (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                    ),
+                    "phase": "Generating previews",
+                },
+            )
+
+        # Park a pause requested during the final iteration before the
+        # eviction pass, which can unlink many previews and rewrite their
+        # database rows. Without this checkpoint the accepted request
+        # would remain ``pausing`` while eviction ran, and a cancel from
+        # that state could leave the cache mid-eviction.
+        if runner.is_cancelled(job["id"]):
+            return {"generated": self.generated, "skipped": self.skipped,
+                    "failed": self.failed, "total": total}
+
+        # Run a single eviction pass at the end so the batch doesn't
+        # fsync after every photo.
+        evict_preview_cache_if_over_quota(thread_db, vireo_dir)
+
+        return {"generated": self.generated, "skipped": self.skipped,
+                "failed": self.failed, "total": total}
+
+    def _photos(self):
+        thread_db = self.thread_db
+        if self.requested_photo_ids is not None:
+            photos = []
+            for photo_id in self.requested_photo_ids:
+                scoped_photo = thread_db.get_photo(
+                    photo_id, verify_workspace=True,
+                )
+                if scoped_photo is not None:
+                    photos.append(scoped_photo)
+            return photos
+        if self.collection_id:
+            return thread_db.get_collection_photos(self.collection_id, per_page=999999)
+        return thread_db.get_photos(per_page=999999)
+
+    def _warm_photo(self, photo):
+        """Warm one photo's preview.
+
+        Returns False when the photo is finished without a progress event
+        (an existing preview that is kept).
+        """
+        thread_db = self.thread_db
+        detail_photo = thread_db.get_photo(photo["id"]) or photo
+        cache_path = os.path.join(
+            self.preview_dir, f'{photo["id"]}_{self.max_size}.jpg',
+        )
+        recipe = thread_db.get_photo_edit_recipe(photo["id"])
+        if os.path.exists(cache_path) and self._keep_existing_preview(
+            photo, cache_path, recipe,
+        ):
+            return False
+
+        if not os.path.exists(cache_path):
+            self._render_preview(photo, detail_photo, cache_path, recipe)
+        return True
+
+    def _keep_existing_preview(self, photo, cache_path, recipe):
+        """Settle a preview file already on disk.
+
+        Returns True when it is kept (counted skipped); False when an
+        untracked edited preview was removed and must be re-rendered.
+        """
+        import contextlib
+
+        thread_db = self.thread_db
+        max_size = self.max_size
+        cache_row = None
+        try:
+            cache_row = thread_db.caches.preview_get(photo["id"], max_size)
+        except sqlite3.Error:
+            # Treated as untracked: an edited photo's preview is
+            # then re-rendered rather than trusted.
+            log.warning(
+                "Could not read the preview cache row for photo %s",
+                photo["id"], exc_info=True,
+            )
+        if recipe and cache_row is None:
+            with contextlib.suppress(OSError):
+                os.remove(cache_path)
+            if os.path.exists(cache_path):
+                self.skipped += 1
+                log.info(
+                    "Skipping untracked edited preview for photo %s; "
+                    "existing cache file could not be removed",
+                    photo["id"],
+                )
+                return True
+            return False
+        self.skipped += 1
+        # Adopt untracked unedited files so precompute output is
+        # visible to eviction and /api/preview-cache.
+        # Best-effort: photo may be deleted mid-job (FK error).
+        try:
+            if cache_row is None:
+                thread_db.caches.preview_insert(
+                    photo["id"],
+                    max_size,
+                    os.path.getsize(cache_path),
+                )
+        except (sqlite3.Error, OSError):
+            log.debug(
+                "Could not track existing preview for photo %s",
+                photo["id"], exc_info=True,
+            )
+        return True
+
+    def _render_preview(self, photo, detail_photo, cache_path, recipe):
+        folder_path = self.folders.get(detail_photo["folder_id"])
+        try:
+            materialized = materialize_preview(
+                self.thread_db,
+                detail_photo,
+                folder_path,
+                size=self.max_size,
+                vireo_dir=self.vireo_dir,
+                preview_quality=self.preview_quality,
+                recipe=recipe,
+                cache_path=cache_path,
+            )
+        except (ArtifactProducerFailed, PreviewMaterializationError) as exc:
+            # A source we could not read is a failure, not a
+            # cache hit; counting it as skipped made an
+            # all-unreadable run look fully cached.
+            self.failed += 1
+            log.info(
+                "Preview warmup failed for photo %s: %s",
+                photo["id"], exc,
+            )
+        else:
+            if materialized.generated:
+                self.generated += 1
+            else:
+                self.skipped += 1
+
+
+def _run_develop(ctx, job, photo_ids, settings):
+    """The ``/api/jobs/develop`` work function.
+
+    ``settings`` carries the darktable binary and the request's resolved
+    style, output and conversion options.
+    """
+    from develop import develop_photo, output_path_for_photo
+    from export import developed_folder_key
+
+    thread_db = ctx.thread_db()
+
+    photos = []
+    for pid in photo_ids:
+        p = thread_db.get_photo(pid, verify_workspace=True)
+        if p:
+            photos.append(p)
+
+    if not photos:
+        return {"developed": 0, "errors": 0, "total": 0}
+
+    folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+    total = len(photos)
+    developed = 0
+    errors = 0
+    job["_start_time"] = time.time()
+
+    for i, photo in enumerate(photos):
+        if ctx.runner.is_cancelled(job["id"]):
+            break
+        folder_path = folders.get(photo["folder_id"])
+        if not folder_path:
+            errors += 1
+            continue
+        input_path = os.path.join(folder_path, photo["filename"])
+
+        # Determine output directory. The per-folder "developed/" default
+        # is naturally disambiguated (one dir per source folder). The
+        # globally configured dir is flat, so nest each photo under a
+        # stable key derived from the source folder's path (not its row
+        # id — SQLite reuses those after deletion, which would silently
+        # cross-wire new folders onto stale developed files left on
+        # disk by a previously-deleted folder).
+        if settings.output_dir:
+            out_dir = os.path.join(settings.output_dir, developed_folder_key(folder_path))
+        else:
+            out_dir = os.path.join(folder_path, "developed")
+        out_path = output_path_for_photo(
+            photo["filename"], out_dir, settings.output_format,
+        )
+
+        try:
+            photo_metadata = json.loads(photo["exif_data"]) if photo["exif_data"] else None
+        except (TypeError, json.JSONDecodeError):
+            photo_metadata = None
+
+        result = develop_photo(
+            darktable_bin=settings.binary,
+            input_path=input_path,
+            output_path=out_path,
+            style=settings.style if settings.style else None,
+            width=settings.width,
+            auto_convert_dng=bool(settings.auto_convert_dng),
+            dng_converter_bin=settings.dng_converter_bin,
+            metadata=photo_metadata,
+        )
+
+        if result["success"]:
+            developed += 1
+        else:
+            errors += 1
+            job["errors"].append(f'{photo["filename"]}: {result["error"]}')
+            log.warning("Failed to develop %s: %s", photo["filename"], result["error"])
+
+        ctx.runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": i + 1,
+                "total": total,
+                "current_file": photo["filename"],
+                "rate": round(
+                    (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                ),
+                "phase": "Developing photos",
+            },
+        )
+
+    result = {"developed": developed, "errors": errors, "total": total}
+    if errors > 0:
+        _fail_develop_job(job, result, errors, total)
+    return result
+
+
+def _fail_develop_job(job, result, errors, total):
+    """Raise so a develop run with any per-photo failure ends "failed".
+
+    Rollup rule: if any per-photo develop failed, the overall
+    job is failed (not completed). Stash the counts on the job
+    so _persist_job (jobs.py ~L197-210) merges them with the
+    primary error message, then raise so _run_job records
+    status="failed".
+
+    Re-raise with an existing entry in job["errors"] so
+    _run_job's dedup guard (err_str not in job["errors"])
+    skips the append — otherwise a novel exception string
+    gets tacked on as a synthetic extra error, inflating
+    error_count by 1. Keep the nicer "N/M failed: <err>"
+    summary on job["_fatal_error"], which _persist_job
+    prefers over errors[0] when building the result row.
+    """
+    job["result"] = result
+    first_err = job["errors"][0]
+    job["_fatal_error"] = (
+        f"{errors}/{total} develop operations failed: {first_err}"
+    )
+    raise RuntimeError(first_err)
+
+
+def _run_offline_cache(ctx, job, photo_ids, vireo_dir):
+    """The ``/api/jobs/offline-cache`` work function."""
+    from offline_cache import cache_photo_original
+
+    thread_db = ctx.thread_db()
+    photos_map = thread_db.get_photos_by_ids(photo_ids)
+    folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+
+    cached = 0
+    skipped = 0
+    failed = 0
+    copied_bytes = 0
+    total = len(photo_ids)
+    job["_start_time"] = time.time()
+    job["progress"]["total"] = total
+
+    for i, pid in enumerate(photo_ids):
+        if ctx.runner.is_cancelled(job["id"]):
+            break
+        photo = photos_map.get(pid)
+        filename = photo["filename"] if photo else ""
+        if not photo:
+            failed += 1
+            job["errors"].append(f"Photo {pid}: not found")
+        else:
+            try:
+                result = cache_photo_original(
+                    thread_db, photo, vireo_dir, folders
+                )
+                if result["status"] == "cached":
+                    cached += 1
+                    copied_bytes += int(result.get("bytes") or 0)
+                elif result["status"] == "skipped":
+                    skipped += 1
+                else:
+                    failed += 1
+                    job["errors"].append(
+                        f'{photo["filename"]}: {result["status"]}'
+                    )
+            except Exception as exc:
+                thread_db.rollback()
+                failed += 1
+                job["errors"].append(f'{photo["filename"]}: {exc}')
+                log.warning("Offline cache failed for %s: %s", filename, exc, exc_info=True)
+
+        ctx.runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": i + 1,
+                "total": total,
+                "current_file": filename,
+                "rate": round(
+                    (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                ),
+                "phase": "Caching originals for offline use",
+            },
+        )
+
+    result = {
+        "cached": cached,
+        "skipped": skipped,
+        "failed": failed,
+        "total": total,
+        "bytes": copied_bytes,
+    }
+    if failed:
+        job["result"] = result
+        first_err = job["errors"][0] if job["errors"] else "offline cache failed"
+        job["_fatal_error"] = (
+            f"{failed}/{total} photos could not be cached: {first_err}"
+        )
+        raise RuntimeError(first_err)
+    return result
+
+
+def _record_release_outcome(job, result, filename, outcome):
+    """Tally one photo's release outcome into the job result."""
+    status = outcome["status"]
+    result[status] += 1
+    result["bytes"] += outcome["bytes"]
+    result["processed"] += 1
+    if status in {"kept", "failed"}:
+        reason = f'{filename}: {outcome["reason"]}'
+        if status == "kept":
+            if len(result["kept_reasons"]) < _MAX_KEPT_REASONS:
+                result["kept_reasons"].append(reason)
+        else:
+            if len(result["errors"]) < _MAX_ERROR_REASONS:
+                # Append to ``job["errors"]`` first so a
+                # snapshot caught between the two appends
+                # sees ``snap["errors"]`` at least as long
+                # as ``snap["result"]["errors"]``.
+                # ``_error_total(snap)`` reads from
+                # ``snap["errors"]`` while
+                # ``_write_checkpoints`` serializes
+                # ``snap["result"]``, so appending to the
+                # job-level list first keeps the
+                # ``error_count`` column from under-reporting
+                # the serialized result's error details
+                # before the ``errors_total`` cap branch
+                # kicks in.
+                job["errors"].append(reason)
+                result["errors"].append(reason)
+            elif result["failed"] > _MAX_ERROR_REASONS:
+                # Live checkpoints snapshot ``result`` and
+                # persist ``_error_total`` — publish the
+                # count the moment it diverges from the
+                # capped list, not just at the final return,
+                # so a checkpoint mid-run (and the +1 the
+                # startup sweep adds to an interrupted row)
+                # reports the true total.
+                result["errors_total"] = result["failed"]
+            result["ok"] = False
+
+
+def _run_precompute_embeddings(ctx, job, model_id, labels_file):
+    """The ``/api/jobs/precompute-embeddings`` work function."""
+    from classifier import precompute_label_embeddings
+    from labels import get_saved_labels, load_label_set
+    from models import get_models
+
+    model = _precompute_model(get_models, model_id)
+
+    ctx.runner.push_event(
+        job["id"],
+        "progress",
+        {
+            "current": 0,
+            "total": 0,
+            "current_file": f'Loading {model["name"]} and computing embeddings...',
+            "rate": 0,
+        },
+    )
+
+    labels = _precompute_labels(get_saved_labels, load_label_set, labels_file)
+
+    log.info(
+        "Pre-computing embeddings: %d labels with %s",
+        len(labels),
+        model["name"],
+    )
+
+    def _progress(current, total):
+        ctx.runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": current,
+                "total": total,
+                "current_file": f"Computing embeddings ({current}/{total} labels)…",
+                "rate": 0,
+            },
+        )
+
+    from classifier import ClassifierLoadPaused
+
+    def _pause_requested():
+        return ctx.runner.pause_requested(job["id"])
+
+    def _cancelled():
+        # Pure cancel probe: the pause is handled by the retry
+        # loop below, outside the embedding single-flight, so the
+        # producer never parks while equal-key waiters are joined.
+        return ctx.runner.cancellation_requested(job["id"])
+
+    # The shared service loads only the text side and joins an
+    # equal-key pipeline/precompute already doing this work.
+    while True:
+        try:
+            precompute_label_embeddings(
+                labels=labels,
+                model_str=model["model_str"],
+                pretrained_str=model["weights_path"],
+                progress_callback=_progress,
+                cancel_check=_cancelled,
+                pause_check=_pause_requested,
+            )
+            break
+        except ClassifierLoadPaused:
+            # Progress is checkpointed. Park here with no shared
+            # lock held; the next attempt resumes from the
+            # checkpoint. A Cancel during the pause surfaces on
+            # the retry through the cancel probe.
+            log.info(
+                "Pre-computing embeddings paused; parking until "
+                "Resume",
+            )
+            ctx.runner.is_cancelled(job["id"])
+            continue
+
+    return {"labels": len(labels), "model": model["name"]}
+
+
+def _precompute_model(get_models, model_id):
+    """Find the downloaded embedding model a precompute job runs with."""
+    models = get_models()
+    model = None
+    for m in models:
+        if m["id"] == model_id:
+            model = m
+            break
+    if not model or not model["downloaded"]:
+        raise RuntimeError(f"Model {model_id} not found or not downloaded")
+    if model.get("model_type", "bioclip") == "timm":
+        raise RuntimeError(
+            f"Model {model['name']} has a fixed class head and does "
+            "not use per-label embeddings — nothing to precompute."
+        )
+    return model
+
+
+def _precompute_labels(get_saved_labels, load_label_set, labels_file):
+    """Load the label set a precompute job embeds, refusing an empty one."""
+    # The same list the classify job will load, so the warmed
+    # cache is the one it looks for.
+    saved = {ls.get("labels_file"): ls for ls in get_saved_labels()}
+    labels = load_label_set(labels_file, saved.get(labels_file))
+    if not labels:
+        skipped = len(getattr(labels, "dropped_ambiguous", ()))
+        raise RuntimeError(
+            f"{os.path.basename(labels_file)} has no usable species"
+            + (f" — all {skipped:,} of its names are shared by more "
+               "than one species" if skipped else "")
+            + ". Download the list again in Settings → Labels to "
+            "split them by scientific name."
+        )
+    return labels
+
+
+def _embedding_precompute_offer(load_label_set, labels_path):
+    """The precompute the fetch-labels result offers, or None.
+
+    Offered when the active model uses per-label embeddings and the
+    freshly downloaded list has no valid embedding cache for it yet.
+    """
+    precompute = None
+    from models import get_active_model
+
+    active_model = get_active_model()
+    # timm models have a fixed class head — no per-label embeddings.
+    if (
+        active_model
+        and active_model["downloaded"]
+        and active_model.get("model_type", "bioclip") != "timm"
+    ):
+        try:
+            from classifier import _embedding_is_cached, _resolve_model_dir
+
+            labels = load_label_set(labels_path)
+            model_dir = _resolve_model_dir(
+                active_model["model_str"], active_model.get("weights_path")
+            )
+            # Use the shared helper: it validates payload shape and
+            # dtype rather than accepting any file at the identity
+            # path, so a truncated or wrong-shape cache no longer
+            # reports as ready here.
+            if not _embedding_is_cached(
+                labels, active_model["model_str"], model_dir
+            ):
+                precompute = {
+                    "model_id": active_model["id"],
+                    "model_name": active_model["name"],
+                    "labels_file": labels_path,
+                }
+        except Exception:
+            log.warning(
+                "Could not inspect embedding cache after label download",
+                exc_info=True,
+            )
+    return precompute
