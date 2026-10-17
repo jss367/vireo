@@ -33,7 +33,8 @@ function renderCollectionList(/** @type {BrowseCollection[]} */ collections) {
     var resolveBtn = (c.name === 'GPS Without Location Keyword' && !unavailable)
       ? '<button class="collection-resolve-btn" type="button" title="Review photo locations on a map" onclick="event.stopPropagation(); reviewLocationsForCollection(' + c.id + ')">Review on Map</button>'
       : '';
-    var itemClass = 'tree-item' + (unavailable ? ' unavailable' : '');
+    var itemClass = 'tree-item' + (unavailable ? ' unavailable' : '') +
+      (c.id === highlightedCollectionId() ? ' active' : '');
     var titleAttr = unavailable
       ? ' title="This collection\'s rules could not be resolved. Right-click → Edit Rules to fix it."'
       : '';
@@ -53,6 +54,29 @@ function renderCollectionList(/** @type {BrowseCollection[]} */ collections) {
       trailing + '</div>';
   });
   /** @type {HTMLElement} */ (document.getElementById('collectionList')).innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
+}
+
+/* The collection the grid is showing: one opened into the filter bar, or a
+   Dashboard deep link's collection scope. */
+function highlightedCollectionId() {
+  return openedCollectionId != null ? openedCollectionId : activeCollectionId;
+}
+
+/* Mark the sidebar rows that describe the grid. Every scope switch changes
+   the state variables in more than one tree (opening a collection clears the
+   folder), so all three trees are repainted together; repainting only the
+   tree that was clicked left a cleared folder highlighted over All Photos. */
+function syncSidebarHighlights() {
+  var collectionId = highlightedCollectionId();
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item')).forEach(function(el) {
+    el.classList.toggle('active', parseInt(el.dataset.folderId || '') === activeFolderId);
+  });
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#keywordTree .tree-item')).forEach(function(el) {
+    el.classList.toggle('active', el.dataset.keyword === activeKeyword);
+  });
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#collectionList .tree-item')).forEach(function(el) {
+    el.classList.toggle('active', parseInt(el.dataset.collectionId || '') === collectionId);
+  });
 }
 
 /* ---------- Collections ---------- */
@@ -414,6 +438,7 @@ async function filterByCollection(/** @type {number} */ id, /** @type {{preserve
   // Track which collection is currently loaded so post-membership refresh
   // can pull fresh rules/photo_ids without waiting for a user reopen.
   openedCollectionId = id;
+  syncSidebarHighlights();
   var rules;
   var visual;
   try { rules = typeof collectionMeta.rules === 'string' ? JSON.parse(collectionMeta.rules || '[]') : collectionMeta.rules || []; } catch (e) { rules = []; }

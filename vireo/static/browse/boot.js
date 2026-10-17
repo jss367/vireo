@@ -542,10 +542,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
     if (!datasetIsCurrent()) return wasSuperseded;
 
-    // Update folder tree active state
-    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item')).forEach(function(el) {
-      el.classList.toggle('active', parseInt(el.dataset.folderId || '') === activeFolderId);
-    });
+    syncSidebarHighlights();
 
     // Scroll to and highlight the target photo
     if (el) { const highlighted = el;

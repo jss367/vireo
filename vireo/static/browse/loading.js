@@ -316,6 +316,19 @@ function clearBrowseLoadedWindow() {
   updatePreviousPhotosButton();
 }
 
+/* Leave collection mode when applying non-collection filters (sort, rating,
+   date, keyword, folder) so the summary stays in sync with the visible grid.
+   Dashboard-scoped collections are the exception: there the collection is an
+   explicit composable restriction that filters combine WITH, so it must
+   survive filter-driven reloads (dashboard drill-down deep links). Every
+   reload follows a scope change somewhere (a sidebar click, a chip edit
+   dropping the opened collection, a deleted folder or collection), so the
+   sidebar highlights are repainted here too. */
+function settleSidebarScopeForReload(/** @type {boolean | undefined} */ preserveCollection) {
+  if (!dashboardCollectionScope && !preserveCollection) activeCollectionId = null;
+  syncSidebarHighlights();
+}
+
 async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = {}) {
   // Membership edits keep the current window on screen until its replacement
   // is complete. A reset followed by anchor restoration still paints page 1
@@ -408,12 +421,7 @@ async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = {}) {
   selectedPhotos.clear();
   selectedPhotoId = null;
   selectedIndex = -1;
-  // Leaving collection mode when applying non-collection filters (sort, rating,
-  // date, keyword, folder) so the summary stays in sync with the visible grid.
-  // Dashboard-scoped collections are the exception: there the collection is an
-  // explicit composable restriction that filters combine WITH, so it must
-  // survive filter-driven reloads (dashboard drill-down deep links).
-  if (!dashboardCollectionScope && !preserveCollection) activeCollectionId = null;
+  settleSidebarScopeForReload(preserveCollection);
   var preservedCollectionId = preserveCollection ? activeCollectionId : null;
   if (anchor) hideDetailPanel();
   else closeDetail();
