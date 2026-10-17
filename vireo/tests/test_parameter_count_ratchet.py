@@ -36,12 +36,16 @@ receiver of a method (``self`` or ``cls``: the first parameter of a
 function defined directly in a class body, unless it is a
 ``@staticmethod``) is not counted. Lambdas are not measured. Keys are
 ``<path>:<qualname>`` with ``path`` relative to ``vireo/``, the same as the
-function-length baseline; two functions with the same key keep the larger
-count.
+function-length baseline; duplicate qualified names use ``#<ordinal>-of-<total>`` suffixes. Their
+order and group size identify separate budgets; inserting or removing a
+duplicate fails closed and requires a reviewed baseline-key migration.
+Unique names keep their existing keys.
 """
 
 import ast
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -78,23 +82,32 @@ def parameter_count(node: ast.FunctionDef | ast.AsyncFunctionDef, *, is_method: 
     )
 
 
-def _collect(node, rel_posix: str, stack: list[str], in_class: bool, counts: dict[str, int]) -> None:
+def _collect_nodes(node, rel_posix, stack, in_class, records):
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
             stack.append(child.name)
             key = f"{rel_posix}:{'.'.join(stack)}"
             count = parameter_count(child, is_method=in_class)
-            counts[key] = max(count, counts.get(key, 0))
-            _collect(child, rel_posix, stack, False, counts)
+            records.setdefault(key, []).append(count)
+            _collect_nodes(child, rel_posix, stack, False, records)
             stack.pop()
         elif isinstance(child, ast.ClassDef):
             stack.append(child.name)
-            _collect(child, rel_posix, stack, True, counts)
+            _collect_nodes(child, rel_posix, stack, True, records)
             stack.pop()
         else:
             # Statements such as ``if`` blocks in a class body keep their
             # functions as methods; anything else passes through unchanged.
-            _collect(child, rel_posix, stack, in_class, counts)
+            _collect_nodes(child, rel_posix, stack, in_class, records)
+
+
+def _collect(node, rel_posix: str, stack: list[str], in_class: bool, counts: dict[str, int]) -> None:
+    records = {}
+    _collect_nodes(node, rel_posix, stack, in_class, records)
+    for key, values in records.items():
+        for index, count in enumerate(values, 1):
+            distinct_key = key if len(values) == 1 else f"{key}#{index}-of-{len(values)}"
+            counts[distinct_key] = count
 
 
 def parameter_counts() -> dict[str, int]:
@@ -188,6 +201,34 @@ def test_counting_rules():
         "m.py:C.outer": 0,
         "m.py:C.outer.inner": 2,
     }
+
+
+def test_duplicate_budgets_and_cli_refuse_insertion(tmp_path):
+    """Each duplicate can shrink but cannot borrow a sibling's allowance."""
+    fixture = tmp_path / "vireo"
+    tests = fixture / "tests"
+    tests.mkdir(parents=True)
+    script = tests / Path(__file__).name
+    shutil.copyfile(__file__, script)
+    module = fixture / "invented.py"
+    baseline = tests / "parameter_count_baseline.json"
+    def definitions(*counts):
+        return "".join("def f(" + ",".join(f"a{i}" for i in range(count)) + "): pass\n" for count in counts)
+    module.write_text(definitions(13, 15), encoding="utf-8")
+    expected = {"invented.py:f#1-of-2": 13, "invented.py:f#2-of-2": 15}
+    baseline.write_text(json.dumps(expected), encoding="utf-8")
+    def write():
+        return subprocess.run([sys.executable, str(script), "--write-baseline"], capture_output=True).returncode
+    assert write() == 0
+    previous = baseline.read_bytes()
+    module.write_text(definitions(14, 15), encoding="utf-8")
+    assert write() == 1 and baseline.read_bytes() == previous
+    module.write_text(definitions(12, 15), encoding="utf-8")
+    assert write() == 0
+    assert json.loads(baseline.read_text(encoding="utf-8")) == {"invented.py:f#2-of-2": 15}
+    previous = baseline.read_bytes()
+    module.write_text(definitions(1, 12, 15), encoding="utf-8")
+    assert write() == 1 and baseline.read_bytes() == previous
 
 
 def write_baseline() -> int:
