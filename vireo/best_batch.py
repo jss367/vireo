@@ -11,6 +11,8 @@ import os
 import re
 from datetime import datetime
 
+DEFAULT_BEST_BATCH_MAX_PHOTOS = 120
+
 
 def _filename_sequence_key(filename):
     """Return (prefix, number, width, ext) for names like DSC_3069.NEF."""
@@ -88,7 +90,23 @@ def _filename_sequence_batch(
     return None
 
 
-def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2, max_photos=120):
+def limit_batch_rows(rows, seed_photo_id, max_photos=DEFAULT_BEST_BATCH_MAX_PHOTOS):
+    """The exact seed-centered evidence window shared by folder and photo APIs."""
+    if len(rows) <= max_photos:
+        return rows
+    seed_idx = next(
+        (i for i, row in enumerate(rows) if row["id"] == seed_photo_id),
+        len(rows) // 2,
+    )
+    half = max_photos // 2
+    start = max(0, seed_idx - half)
+    end = min(len(rows), start + max_photos)
+    start = max(0, end - max_photos)
+    return rows[start:end]
+
+
+def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2,
+                     max_photos=DEFAULT_BEST_BATCH_MAX_PHOTOS):
     """Find a likely burst/batch around one seed photo.
 
     The first pass follows same-folder filename sequence numbers, which matches
@@ -105,19 +123,6 @@ def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2,
     seed_ext = (seed["extension"] or os.path.splitext(seed["filename"])[1]).lower()
     db.require_workspace_id()
 
-    def _limited(rows):
-        if len(rows) <= max_photos:
-            return rows
-        seed_idx = next(
-            (i for i, row in enumerate(rows) if row["id"] == seed_photo_id),
-            len(rows) // 2,
-        )
-        half = max_photos // 2
-        start = max(0, seed_idx - half)
-        end = min(len(rows), start + max_photos)
-        start = max(0, end - max_photos)
-        return rows[start:end]
-
     def _time_ok(left, right, require_timestamps=False):
         gap = _time_gap_seconds(left["timestamp"], right["timestamp"])
         if gap is None:
@@ -130,7 +135,7 @@ def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2,
             max_sequence_gap, _time_ok,
         )
         if batch is not None:
-            return _limited(batch), "filename_sequence"
+            return limit_batch_rows(batch, seed_photo_id, max_photos), "filename_sequence"
 
     rows = db.photos.best_batch_folder_rows(folder_id)
     seed_idx = next((i for i, row in enumerate(rows) if row["id"] == seed_photo_id), None)
@@ -151,7 +156,7 @@ def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2,
     batch = rows[left:right + 1]
     if len(batch) < 2:
         return None, "No neighboring batch photos found"
-    return _limited(batch), "capture_time"
+    return limit_batch_rows(batch, seed_photo_id, max_photos), "capture_time"
 
 
 def _quality_rank(photos, key, photo_id):

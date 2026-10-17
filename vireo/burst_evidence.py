@@ -29,7 +29,13 @@ See ``docs/plans/2026-10-17-burst-evidence-adjudication-design.md``.
 import math
 import os
 
-from best_batch import _filename_sequence_key, _time_gap_seconds, build_best_batch_response
+from best_batch import (
+    DEFAULT_BEST_BATCH_MAX_PHOTOS,
+    _filename_sequence_key,
+    _time_gap_seconds,
+    build_best_batch_response,
+    limit_batch_rows,
+)
 from scoring import DEFAULTS as SCORING_DEFAULTS
 from scoring import _normalize_scoring_config
 
@@ -422,15 +428,17 @@ def build_folder_bursts(
     bursts = []
     photos_in_bursts = set()
     for scope in folder_burst_scopes(rows, max_gap_seconds, max_sequence_gap):
-        burst_rows = scope["rows"]
+        burst_rows = limit_batch_rows(scope["rows"], scope["seed_photo_id"])
         pack = build_evidence_pack(
             db, scope["seed_photo_id"], burst_rows,
             effective_cfg=effective_cfg, margin=margin, evidence_rows=evidence_rows,
         )
-        photos_in_bursts.update(r["id"] for r in burst_rows)
+        photos_in_bursts.update(r["id"] for r in scope["rows"])
         bursts.append({
             "seed_photo_id": scope["seed_photo_id"],
             "scope_method": scope["scope_method"],
+            "scope_max_photos": DEFAULT_BEST_BATCH_MAX_PHOTOS,
+            "burst_photo_count": len(scope["rows"]),
             "photo_ids": pack["photo_ids"],
             "count": pack["count"],
             "filenames": [burst_rows[0]["filename"], burst_rows[-1]["filename"]],

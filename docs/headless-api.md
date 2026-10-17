@@ -104,10 +104,17 @@ scorer defaults with effective workspace overrides and nested pipeline precedenc
 Each card's `focus_crop_scale` describes decoded-raster pixels and leaves
 `original_scale` unknown. Auto crops use an eye only when eye scoring is enabled
 and an eye measurement exists; `basis=eye` explicitly requests a recorded eye.
+Subject crops first use the exact detection prompt of the current active mask,
+including a validated weak detection below the normal threshold; other weak
+boxes do not lower the workspace threshold.
 
 Folder entries include `scope_method` and a representative `seed_photo_id`.
 Capture-time fallback scopes can overlap filename runs, matching Best Batch's
-seed rules; `photos_in_bursts` counts distinct photos across those scopes.
+seed rules; `photos_in_bursts` counts distinct photos across the full burst chains. Each
+entry scores the same default 120-frame window as its seed endpoint;
+`scope_max_photos` records that limit and `burst_photo_count` reports the full
+chain size. Counts, coverage, flags and the selected best photo inside an entry
+refer to that scored window.
 
 The burst endpoints exist so a reviewer that is not Vireo's UI (a script, an
 agent) can second-guess the cull scorer without re-implementing it. Walk a

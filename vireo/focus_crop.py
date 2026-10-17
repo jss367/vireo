@@ -3,6 +3,12 @@
 import math
 
 
+def focus_subject_detections(db, photo_id):
+    """Prefer the subject whose active mask supplied the stored quality."""
+    prompt = db.masks_features.active_prompt_detection(photo_id)
+    return [prompt] if prompt is not None else db.get_detections(photo_id)
+
+
 def focus_point(photo, detections, basis, *, eye_enabled):
     """Auto follows the scorer; explicit eye/subject requests remain available."""
     use_eye = basis == "eye" or (basis == "auto" and eye_enabled and photo["eye_tenengrad"] is not None)

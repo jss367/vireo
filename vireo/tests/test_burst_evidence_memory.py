@@ -71,7 +71,9 @@ load(
         "_time_gap_seconds",
         "_filename_sequence_batch",
         "best_batch_scope",
+        "limit_batch_rows",
     },
+    assignments=True,
 )
 load("scoring.py", pure, {"_normalize_scoring_config"})
 scoring_tree = ast.parse((ROOT / "scoring.py").read_text(encoding="utf-8"))
@@ -178,7 +180,7 @@ class Image:
         buf.write(b"fake-jpeg")
 
 
-def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None):
+def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None, detections=None, active_prompt=None):
     events = []
     photo = (
         photo
@@ -241,10 +243,12 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
     }
     db = types.SimpleNamespace(
         get_photo=get_photo,
-        get_detections=lambda pid: boxes,
+        get_detections=lambda pid: boxes if detections is None else detections,
         get_folder=lambda fid: {"path": "/invented"},
         get_effective_config=lambda cfg: cfg,
-        masks_features=types.SimpleNamespace(photo_mask_path=lambda pid: mask_path),
+        masks_features=types.SimpleNamespace(
+            photo_mask_path=lambda pid: mask_path, active_prompt_detection=lambda pid: active_prompt
+        ),
     )
     ns["get_db"] = lambda: db
     nested("web/media.py", ns, {"serve_focus_crop", "_focus_mask_bytes"})
@@ -509,6 +513,100 @@ def pack_checks():
     codes = {r["code"] for r in scored["ambiguity"]["reasons"]}
     assert codes == {"unanalyzed_frames", "no_eye_located", "subject_touches_edge", "multiple_subjects"}
     print("PASS scored/unscored pack coverage, ambiguity and URL attachment with fake scorer")
+
+
+def test_rescued_active_mask_prompt_drives_focus_crop():
+    photo = dict(id=1, folder_id=1, filename="invented.jpg", eye_x=None, eye_y=None, eye_tenengrad=None)
+    weak = dict(
+        id=7,
+        category="animal",
+        detector_model="megadetector-v6",
+        detector_confidence=0.15,
+        box_x=0.6,
+        box_y=0.3,
+        box_w=0.2,
+        box_h=0.2,
+    )
+    for basis in ["auto", "subject"]:
+        result, _ = focus(photo=photo, args={"basis": basis}, detections=[], active_prompt=weak)
+        assert not isinstance(result, tuple), result
+        assert result.headers["X-Vireo-Focus-Basis"] == "subject"
+        assert result.headers["X-Vireo-Focus-Center"] == "0.7000,0.4000"
+    print("PASS rescued active-mask prompt centers auto and subject crops below the normal floor")
+
+
+def test_active_prompt_requires_current_variant_path_model_and_geometry():
+    ns = {}
+    load("repositories/masks_features.py", ns, classes={"MasksFeaturesRepository": {"active_prompt_detection"}})
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    try:
+        c.executescript("""
+        CREATE TABLE photos(id,active_mask_variant,mask_path);
+        CREATE TABLE photo_masks(photo_id,variant,path,detector_model,prompt_x,prompt_y,prompt_w,prompt_h);
+        CREATE TABLE detections(id,photo_id,detector_model,category,detector_confidence,box_x,box_y,box_w,box_h);
+        INSERT INTO photos VALUES(1,'v1','/invented/mask');
+        INSERT INTO photo_masks VALUES(1,'v1','/invented/mask','megadetector-v6',.6,.3,.2,.2);
+        INSERT INTO detections VALUES(7,1,'megadetector-v6','animal',.15,.6,.3,.2,.2),
+            (8,1,'other-model','animal',.9,.6,.3,.2,.2);
+        """)
+        repo = ns["MasksFeaturesRepository"]()
+        repo.conn = c
+        assert repo.active_prompt_detection(1)["id"] == 7
+        assert repo.active_prompt_detection(999) is None
+        for sql in [
+            "UPDATE photos SET active_mask_variant='old'",
+            "UPDATE photos SET mask_path='/invented/other-mask'",
+            "UPDATE photo_masks SET detector_model='missing-model'",
+            "UPDATE photo_masks SET prompt_x=.5",
+            "UPDATE detections SET category='person' WHERE id=7",
+            "UPDATE detections SET detector_model='full-image' WHERE id=7",
+        ]:
+            c.execute(sql)
+            assert repo.active_prompt_detection(1) is None
+            c.rollback()
+    finally:
+        c.close()
+    print("PASS invented SQLite active-mask identity checks reject stale and unrelated weak boxes")
+
+
+def test_long_folder_scope_matches_default_seed_evidence_window():
+    rows = [dict(invented_row(i, f"DSC_{i:04d}.jpg", 0), timestamp=None) for i in range(1, 201)]
+    evidence = {
+        r["id"]: dict(
+            id=r["id"], has_mask=1, has_quality=1, has_eye=0, detection_count=1, crop_complete=1, subject_size=0.1
+        )
+        for r in rows
+    }
+    db = types.SimpleNamespace(
+        get_photo=lambda pid, **kw: rows[pid - 1],
+        require_workspace_id=lambda: 1,
+        photos=types.SimpleNamespace(
+            best_batch_sequence_rows=lambda *a: rows,
+            best_batch_folder_rows=lambda *a, **kw: rows,
+            analysis_evidence_rows=lambda *a: evidence,
+        ),
+    )
+    previous = pure["build_best_batch_response"]
+
+    def ranked(db, seed, selected):
+        return dict(
+            photo_ids=[r["id"] for r in selected], count=len(selected), cards=[], best_photo_id=selected[-1]["id"]
+        ), None
+
+    pure["build_best_batch_response"] = ranked
+    try:
+        selected, _ = pure["best_batch_scope"](db, 1)
+        expected = pure["build_evidence_pack"](db, 1, selected, effective_cfg={})
+        folder = pure["build_folder_bursts"](db, 1, effective_cfg={})
+        entry = folder["bursts"][0]
+        assert entry["photo_ids"] == expected["photo_ids"]
+        assert entry["count"] == 120 and entry["best_photo_id"] == expected["best_photo_id"]
+        assert entry["scope_max_photos"] == 120 and entry["burst_photo_count"] == 200
+        assert folder["photos_in_bursts"] == 200
+    finally:
+        pure["build_best_batch_response"] = previous
+    print("PASS 200-frame folder chain scores the same 120-frame window as its default seed pack")
 
 
 def test_existing_pure_controls():

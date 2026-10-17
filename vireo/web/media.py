@@ -3418,7 +3418,13 @@ def create_media_blueprint(
             MIN_FOCUS_CROP_SIZE,
             numeric_query_arg,
         )
-        from focus_crop import focus_headers, focus_point, focus_window, shade_focus_mask
+        from focus_crop import (
+            focus_headers,
+            focus_point,
+            focus_subject_detections,
+            focus_window,
+            shade_focus_mask,
+        )
         from image_loader import load_working_image
         from PIL import Image
         from scoring import _normalize_scoring_config
@@ -3437,7 +3443,7 @@ def create_media_blueprint(
             return json_error("basis must be auto, eye, subject or frame")
         effective = db.get_effective_config(cfg.load())
         eye_enabled = bool(_normalize_scoring_config(effective).get("eye_detect_enabled", False))
-        boxes = db.get_detections(photo_id) if basis in {"auto", "subject"} else []
+        boxes = focus_subject_detections(db, photo_id) if basis in {"auto", "subject"} else []
         try:
             center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled)
         except ValueError as exc:
