@@ -5742,6 +5742,81 @@ def test_snapshot_mode_suppresses_folder_scan_totals(live_server, page):
     expect(progress).not_to_contain_text("photos found")
 
 
+def test_snapshot_mode_leaves_a_captured_folder_out(live_server, page):
+    """× on a captured folder leaves only that folder's files out.
+
+    The preview, the note's count and the import request all follow the
+    exclusion; Include brings the folder back; leaving out every folder
+    holds Start shut instead of posting an import of nothing.
+    """
+    parent = _files(2, prefix='/tmp/card/DSC_')
+    child = _files(3, prefix='/tmp/card/trip/DSC_')
+    preview_bodies = []
+
+    def preview(route):
+        body = json.loads(route.request.post_data)
+        preview_bodies.append(body)
+        excluded = set(body.get("exclude_folders") or [])
+        files = [f for f in parent + child
+                 if f["path"].rsplit("/", 1)[0] not in excluded]
+        route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({
+                "total_count": len(files), "unavailable_count": 0,
+                "files": files,
+            }))
+
+    page.goto(f"{live_server['url']}/import")  # warm the app before routing
+    page.route(
+        "**/api/volumes",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body="[]"),
+    )
+    page.route(
+        "**/api/workspaces/active/new-images/snapshot/42",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({
+                "snapshot_id": 42, "file_count": 5,
+                "folder_paths": ["/tmp/card", "/tmp/card/trip"],
+                "folder_counts": {"/tmp/card": 2, "/tmp/card/trip": 3},
+            })),
+    )
+    page.route("**/api/import/new-images-preview", preview)
+    page.goto(f"{live_server['url']}/import?new_images=42")
+
+    rows = page.locator("#sourceList .source-item")
+    note = page.locator("#newImagesImportSource")
+    expect(page.locator(".import-preview-thumb")).to_have_count(5)
+    expect(rows.nth(1)).to_contain_text("3 new images")
+    expect(note).to_contain_text("Import will add exactly this list in place.")
+
+    rows.nth(1).get_by_role("button").click()
+    expect(rows.nth(1)).to_contain_text("Left out · 3 new images")
+    expect(rows.nth(1).get_by_role("button")).to_have_text("Include")
+    expect(note).to_contain_text(
+        "5 newly detected images captured from registered folders. "
+        "1 folder (3 new images) left out. "
+        "Import will add the other 2 in place.")
+    expect(page.locator(".import-preview-thumb")).to_have_count(2)
+    assert preview_bodies[-1]["exclude_folders"] == ["/tmp/card/trip"]
+    assert page.evaluate("newImagesImportBody()") == {
+        "source_snapshot_id": 42, "exclude_folders": ["/tmp/card/trip"],
+    }
+
+    rows.nth(0).get_by_role("button").click()
+    expect(note).to_contain_text("Include at least one folder to import.")
+    expect(page.locator("#btnStart")).to_be_disabled()
+
+    rows.nth(1).get_by_role("button").click()
+    expect(rows.nth(1)).to_contain_text("3 new images")
+    expect(rows.nth(1)).not_to_contain_text("Left out")
+    expect(page.locator(".import-preview-thumb")).to_have_count(3)
+    assert page.evaluate("newImagesImportBody()")["exclude_folders"] == [
+        "/tmp/card",
+    ]
+
+
 def test_snapshot_mode_loads_while_import_readiness_is_slow(
         live_server, page):
     """A metadata-repair count must not hold a captured import hostage.

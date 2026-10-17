@@ -35,9 +35,7 @@ async function startImport() {
   }
   const allowMissingExiftool = !!/** @type {HTMLInputElement} */ (document.getElementById('chkAllowMissingExiftool'))?.checked;
   const copyMode = newImagesSnapshotId === null && selectedImportMode() === 'copy';
-  /** @type {ImportRequest} */ const body = newImagesSnapshotId !== null ? {
-    source_snapshot_id: newImagesSnapshotId,
-  } : {
+  /** @type {ImportRequest} */ const body = newImagesSnapshotId !== null ? newImagesImportBody() : {
       sources: sources,
       recursive: /** @type {HTMLInputElement} */ (document.getElementById('chkRecursive')).checked,
     };
