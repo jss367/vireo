@@ -70,7 +70,10 @@ def create_photo_review_blueprint(get_db, json_error):
         if not _valid_flag_photo_id(photo_id):
             return json_error("photo_id must be a positive signed 64-bit integer")
         body = request.get_json(silent=True) or {}
-        flag = body.get("flag", "none")
+        # An explicit flag is required: a missing key must not default to
+        # "none" and silently clear the photo's flag (with an undo entry)
+        # because a client sent a truncated or unparsable body.
+        flag = body.get("flag")
         if flag not in VALID_FLAGS:
             return json_error("flag must be 'none', 'flagged', or 'rejected'")
         provenance, message = flag_provenance(body)
@@ -107,7 +110,8 @@ def create_photo_review_blueprint(get_db, json_error):
     def set_flags():
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
-        flag = body.get("flag", "none")
+        # Explicit flag required, as on the single-photo route.
+        flag = body.get("flag")
         if flag not in VALID_FLAGS:
             return json_error("flag must be 'none', 'flagged', or 'rejected'")
         if not photo_ids:

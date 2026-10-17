@@ -326,3 +326,29 @@ def test_v1_flag_aliases_reject_non_object_json_bodies(app_and_db, body):
         assert resp.status_code == 400, (path, resp.get_json())
         assert resp.get_json()["code"] == "json_body_not_object"
     assert db.get_photo(pid)["flag"] == "none"
+
+
+@pytest.mark.parametrize("path, extra", [
+    ("/api/photos/{pid}/flag", {}),
+    ("/api/batch/flag", {"photo_ids": None}),
+])
+def test_flag_writes_require_an_explicit_flag(app_and_db, path, extra):
+    """A body without ``flag`` (or an unparsable one) is a 400, never a silent clear to ``none``."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = _photo(db)["id"]
+    db.photo_review.set_flag(pid, "flagged")
+    url = path.format(pid=pid)
+    body = {k: v for k, v in extra.items()}
+    if "photo_ids" in body:
+        body["photo_ids"] = [pid]
+    before = len(db.edit_history.list_recent())
+    headers = {"X-Vireo-Token": app.config["API_TOKEN"]}
+
+    assert client.post(url, json=body).status_code == 400
+    assert client.post(url, data="{not json", content_type="application/json").status_code == 400
+    assert client.post(url, json={**body, "flag": None}).status_code == 400
+    assert client.post("/api/v1" + url[4:], json=body, headers=headers).status_code == 400
+
+    assert db.get_photo(pid)["flag"] == "flagged"
+    assert len(db.edit_history.list_recent()) == before
