@@ -109,7 +109,7 @@ def _finalize_cached_only(
     raw_results, resolved_model, resolved_fingerprint = (
         _cached_only_raw_results(
             thread_db, photos, folders, detection_map,
-            classifier_model, labels_fingerprint,
+            classifier_model, labels_fingerprint, detector_confidence,
         )
     )
     reused_results = _cached_only_reused_count(
@@ -248,18 +248,48 @@ def _cached_only_detection_map(thread_db, photo_ids):
     return detection_map
 
 
+def _cached_only_identity(thread_db, photo_ids, classifier_model, labels_fingerprint, detector_confidence):
+    """Resolve the single identity accepted by the caller's coverage gate.
+
+    Predictions outside that gate (for example RAW recipes) cannot choose
+    the identity for normal-image reconstruction, even if they score higher.
+    A vanished or newly mixed identity safely produces no reconstructed rows.
+    """
+    from db import _chunks
+
+    run_filter = _cache_run_filter(
+        thread_db, photo_ids, classifier_model, labels_fingerprint, None, None, "no-tax",
+    )
+    identities = set()
+    for chunk in _chunks(photo_ids):
+        identities.update(
+            (row["m"], row["fp"])
+            for row in thread_db.model_runs.covering_classifier_identities(
+                chunk, run_filter, detector_confidence,
+            )
+        )
+        if len(identities) > 1:
+            return None
+    return next(iter(identities)) if identities else None
+
+
 def _cached_only_raw_results(
     thread_db, photos, folders, detection_map,
-    classifier_model, labels_fingerprint,
+    classifier_model, labels_fingerprint, detector_confidence=0.0,
 ):
     """Rebuild raw classifier results from each detection's cached top-1.
 
     Returns ``(raw_results, resolved_model, resolved_fingerprint)``; one
     raw result per reused prediction.
     """
+    identity = _cached_only_identity(
+        thread_db, [photo["id"] for photo in photos],
+        classifier_model, labels_fingerprint, detector_confidence,
+    )
+    if identity is None:
+        return [], classifier_model, labels_fingerprint
+    resolved_model, resolved_fingerprint = identity
     raw_results = []
-    resolved_model = classifier_model
-    resolved_fingerprint = labels_fingerprint
     for photo in photos:
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
@@ -267,22 +297,13 @@ def _cached_only_raw_results(
         for detection in detection_map.get(photo["id"], []):
             cached = thread_db.get_predictions_for_detection(
                 detection["id"],
-                classifier_model=classifier_model,
-                labels_fingerprint=labels_fingerprint,
+                classifier_model=resolved_model,
+                labels_fingerprint=resolved_fingerprint,
                 min_classifier_conf=0,
             )
             if not cached:
                 continue
             top = cached[0]
-            # When the caller didn't request a specific (model, fp), the
-            # satisfaction check accepts any classifier's cached row.
-            # Adopt the first cached row's identity so the reconcile
-            # UPDATE below hits the same rows we consumed from — passing
-            # None here would leave the reconcile matching zero rows.
-            if resolved_model is None:
-                resolved_model = top["classifier_model"]
-            if resolved_fingerprint is None:
-                resolved_fingerprint = top["labels_fingerprint"]
             raw_results.append({
                 "photo": photo,
                 "detection_id": detection["id"],

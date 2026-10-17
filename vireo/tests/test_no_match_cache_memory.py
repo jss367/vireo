@@ -151,7 +151,7 @@ def test_cached_fingerprint_uses_stored_output():
 
 def test_cached_only_counts_no_match_without_inventing_predictions():
     c, repo, _ = make_repo()
-    names = {"_finalize_cached_only", "_cached_only_raw_results", "_cached_only_reused_count"}
+    names = {"_finalize_cached_only", "_cached_only_raw_results", "_cached_only_reused_count", "_cached_only_identity"}
     nodes = classify_functions(names)
     steps, finalized = ([], [])
 
@@ -232,6 +232,24 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
         )
         assert result["already_classified"] == 1
         assert steps[-1]["summary"] == "1 cached"
+        assert result["predictions_stored"] == 0
+        assert finalized[-1] == []
+        # Resolve both unbound inputs from the accepted run, and preserve a
+        # normal prediction on another detection in the same cached identity.
+        for model in (None, "invented-model"):
+            for ids, expected_ids in (([1], []), ([1, 8], [8])):
+                photos = [dict(id=pid, folder_id=1, filename=f"invented{pid}.jpg") for pid in ids]
+                raw, resolved_model, resolved_fp = ns["_cached_only_raw_results"](
+                    db,
+                    photos,
+                    {1: "/invented"},
+                    {pid: [{"id": pid}] for pid in ids},
+                    model,
+                    None,
+                    0.2,
+                )
+                assert [row["detection_id"] for row in raw] == expected_ids
+                assert (resolved_model, resolved_fp) == ("invented-model", "invented-fp")
         assert c.total_changes == before
     finally:
         c.close()
