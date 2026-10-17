@@ -830,23 +830,8 @@ def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
         if claims is not None and ctx is not None:
             claim_key = ctx.fold_basename(name)
             if claim_key in claims:
-                if checker is None:
-                    # Mirror the ``checker is not None`` gate in
-                    # ``_resolve_dest_collision``: with
-                    # ``skip_duplicates=False`` the sibling's own walk
-                    # refuses to adopt a same-hash claim and advances to
-                    # the next suffix, so this slot would split the pair
-                    # even for byte-identical bytes. Block it.
+                if _claim_blocks_sibling(claims[claim_key], sibling, checker):
                     return True
-                try:
-                    sib_hash = checker.content_hash(sibling)
-                except OSError:
-                    return True
-                if sib_hash is None or claims[claim_key] != sib_hash:
-                    return True
-                # Same-bytes claim under a checker: the sibling's own
-                # collision walk will see the intra-batch duplicate and
-                # skip this slot as one, so the pair still settles here.
                 continue
         path = os.path.join(batch_st.dest_folder, name)
         try:
@@ -879,32 +864,63 @@ def _sibling_blocks_slot(batch_st, source_file, stem, slot, *,
             # Zero-byte↔zero-byte: the sibling walk's zero-byte adopt
             # takes the slot, not a rename. See _resolve_dest_collision.
             continue
-        # Same-sized regular file: settle by content. Only identical
-        # bytes let the sibling's collision walk adopt the slot;
-        # anything else advances it to a numeric suffix and splits the
-        # pair. Use _hash_dest_file for the candidate so a Stop and a
-        # stalled network mount are observed the same way the sibling's
-        # own walk would observe them.
-        try:
-            if stop_requested is not None:
-                cand_hash = _hash_dest_file(path, stop_requested)
-            else:
-                cand_hash = compute_file_hash(path)
-        except DestReadCancelled:
-            raise
-        except OSError:
-            return True
-        try:
-            sib_hash = (
-                checker.content_hash(sibling)
-                if checker is not None
-                else compute_file_hash(str(sibling))
-            )
-        except OSError:
-            return True
-        if sib_hash is None or cand_hash is None or sib_hash != cand_hash:
+        if _sibling_bytes_differ(path, sibling, checker, stop_requested):
             return True
     return False
+
+
+def _claim_blocks_sibling(claimed_hash, sibling, checker):
+    """True if a batch claim on the sibling's slot name would split the pair.
+
+    The rsync half of ``_sibling_blocks_slot``: the claimed name is not
+    on disk yet, so the claim's recorded hash stands in for its bytes.
+    """
+    if checker is None:
+        # Mirror the ``checker is not None`` gate in
+        # ``_resolve_dest_collision``: with
+        # ``skip_duplicates=False`` the sibling's own walk
+        # refuses to adopt a same-hash claim and advances to
+        # the next suffix, so this slot would split the pair
+        # even for byte-identical bytes. Block it.
+        return True
+    try:
+        sib_hash = checker.content_hash(sibling)
+    except OSError:
+        return True
+    # A same-bytes claim under a checker does not block: the sibling's
+    # own collision walk will see the intra-batch duplicate and skip
+    # this slot as one, so the pair still settles here.
+    return sib_hash is None or claimed_hash != sib_hash
+
+
+def _sibling_bytes_differ(path, sibling, checker, stop_requested):
+    """True unless the same-sized regular file at ``path`` holds exactly
+    the sibling's bytes; any read failure counts as differing.
+    """
+    # Same-sized regular file: settle by content. Only identical
+    # bytes let the sibling's collision walk adopt the slot;
+    # anything else advances it to a numeric suffix and splits the
+    # pair. Use _hash_dest_file for the candidate so a Stop and a
+    # stalled network mount are observed the same way the sibling's
+    # own walk would observe them.
+    try:
+        if stop_requested is not None:
+            cand_hash = _hash_dest_file(path, stop_requested)
+        else:
+            cand_hash = compute_file_hash(path)
+    except DestReadCancelled:
+        raise
+    except OSError:
+        return True
+    try:
+        sib_hash = (
+            checker.content_hash(sibling)
+            if checker is not None
+            else compute_file_hash(str(sibling))
+        )
+    except OSError:
+        return True
+    return sib_hash is None or cand_hash is None or sib_hash != cand_hash
 
 
 def _counts(state, rel):
@@ -984,6 +1000,20 @@ def _record_checker(state, checker, source_file, dest_folder, file_hash):
         state.run_verified_hashes[tok] = file_hash
 
 
+def _fail_whole_batch(state, rel, batch, reason):
+    """Book every file of a batch ``_batch_preflight`` refused as failed.
+
+    Each file also counts as emitted: ``emitted`` otherwise only advances
+    inside the per-file loop, which a refused batch skips, and a progress
+    bar frozen at the last copied file reads as "still working" while the
+    rest of the card is quietly failing (spec decision 2). The caller
+    emits the refusal's progress phase.
+    """
+    for source_file in batch:
+        state.emitted += 1
+        _fail(state, rel, source_file, reason)
+
+
 def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
                      missing_root_check):
     """Run the per-batch guard chain; return ``dest_folder`` or ``None``.
@@ -1011,16 +1041,14 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
     # every remaining file rather than risk a stale-cache hit.
     # See PR #1400 review (Codex P2 r3688614624).
     if state.mount_ever_lost:
-        for source_file in batch:
-            state.emitted += 1
-            _fail(
-                state, rel, source_file,
-                f"archive mount root {state.mount_ever_lost} detached "
-                "earlier in this import; the intra-run duplicate "
-                "cache still holds identities for files whose "
-                "archive claim was rolled back, so no further batch "
-                "can be trusted to consult it",
-            )
+        _fail_whole_batch(
+            state, rel, batch,
+            f"archive mount root {state.mount_ever_lost} detached "
+            "earlier in this import; the intra-run duplicate "
+            "cache still holds identities for files whose "
+            "archive claim was rolled back, so no further batch "
+            "can be trusted to consult it",
+        )
         emit(
             f"{rel}: archive unmounted", state.emitted, queued,
         )
@@ -1063,18 +1091,13 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
     # is still the honest verdict for a geometry where EVERY candidate
     # is poisoned rather than just one entry.)
     if ctx.path_under_any_source(dest_folder):
-        for source_file in batch:
-            # Count these as emitted so the progress bar reflects the
-            # rejected batch instead of freezing at the last copied
-            # file — spec decision 2.
-            state.emitted += 1
-            _fail(
-                state, rel, source_file,
-                "destination folder resolves inside a source directory "
-                "(dest_folder would be created under the card being "
-                "imported); formatting the card would erase the archive "
-                "copy",
-            )
+        _fail_whole_batch(
+            state, rel, batch,
+            "destination folder resolves inside a source directory "
+            "(dest_folder would be created under the card being "
+            "imported); formatting the card would erase the archive "
+            "copy",
+        )
         emit(
             f"{rel}: {_counts(state, rel)['copied']} copied · "
             f"{_counts(state, rel)['skipped_duplicate']} already present",
@@ -1109,20 +1132,13 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
     # roots). See PR #1113 review.
     missing_mount_root = missing_root_check()
     if missing_mount_root:
-        for source_file in batch:
-            # Count these as emitted: ``emitted`` otherwise only
-            # advances inside the per-file loop, which this branch
-            # skips, and a progress bar frozen at the last copied
-            # file reads as "still working" while the rest of the
-            # card is quietly failing.
-            state.emitted += 1
-            _fail(
-                state, rel, source_file,
-                f"archive mount root {missing_mount_root} is not "
-                "available (destination drive is not mounted; refusing "
-                "to create a shadow directory tree under it, which "
-                "would prevent the real share from remounting)",
-            )
+        _fail_whole_batch(
+            state, rel, batch,
+            f"archive mount root {missing_mount_root} is not "
+            "available (destination drive is not mounted; refusing "
+            "to create a shadow directory tree under it, which "
+            "would prevent the real share from remounting)",
+        )
         # Specific refusal phase — spec decision 3.
         emit(
             f"{rel}: archive unavailable", state.emitted, queued,
@@ -1143,16 +1159,14 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
     # import lands bytes remotely and catalogs nothing.
     stale_mount_root = _unmounted_since_baseline(ctx.mount_baseline)
     if stale_mount_root:
-        for source_file in batch:
-            state.emitted += 1
-            _fail(
-                state, rel, source_file,
-                f"archive mount root {stale_mount_root} is no longer "
-                "mounted (it was at the start of this import; the "
-                "directory persists but the share has detached, so "
-                "copying here would write to the local disk under a "
-                "stale mount point)",
-            )
+        _fail_whole_batch(
+            state, rel, batch,
+            f"archive mount root {stale_mount_root} is no longer "
+            "mounted (it was at the start of this import; the "
+            "directory persists but the share has detached, so "
+            "copying here would write to the local disk under a "
+            "stale mount point)",
+        )
         emit(
             f"{rel}: archive unmounted", state.emitted, queued,
         )
@@ -1167,12 +1181,10 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
     try:
         os.makedirs(dest_folder, exist_ok=True)
     except OSError as e:
-        for source_file in batch:
-            state.emitted += 1
-            _fail(
-                state, rel, source_file,
-                f"could not create destination folder {dest_folder}: {e}",
-            )
+        _fail_whole_batch(
+            state, rel, batch,
+            f"could not create destination folder {dest_folder}: {e}",
+        )
         emit(
             f"{rel}: destination unavailable", state.emitted, queued,
         )
@@ -1453,58 +1465,101 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
             db, token, source_file, ctx.path_under_any_source,
         )
         if likely_rows:
-            try:
-                new_grants, promoted = db.photo_visibility.grant_verified_twins_tracked(
-                    db.active_workspace_id, likely_rows,
-                )
-                db.conn.commit()
-            except Exception as exc:
-                log.exception("Duplicate photo workspace visibility failed")
-                db.conn.rollback()
-                _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
+            if not _grant_twin_visibility(
+                state, batch_st, db, rel, source_file, likely_rows,
+            ):
                 return _GATE_SKIPPED
-            batch_st.dup_granted_photo_ids.extend(new_grants)
-            batch_st.dup_promoted_folder_ids.extend(promoted)
             state.skipped_duplicate += 1
             state.unverified_duplicate += 1
             _counts(state, rel)["skipped_duplicate"] += 1
             batch_st.dup_skips.append((source_file, True))
             return _GATE_SKIPPED
-    accept = False
-    # verified_twin_rows records only the twin(s) whose
-    # bytes we actually hashed on disk this run and
-    # matched against the source. Both 'hash' and 'key'
-    # tokens can carry stale rows: 'key' is a filename+
-    # size+capture-second bucket where individual rows
-    # may hold unrelated bytes, and 'hash' shares the
-    # token's stored file_hash by construction but that
-    # column reflects the LAST scan — an archive file
-    # deleted or overwritten between scans leaves a stale
-    # hash row. Linking any twin folder we did not
-    # re-hash would pull unrelated/missing archive folders
-    # into the active workspace on a duplicate-only
-    # import. See PR #1107 review.
+    twins = _twin_rows_and_source_hash(
+        state, db, checker, token, rel=rel, source_file=source_file,
+    )
+    if twins is None:
+        return _GATE_SKIPPED
+    twin_rows, src_hash = twins
+    accept = _intra_run_token_proven(state, token, src_hash)
     verified_twin_rows = []
-    if token[0] == "hash":
-        twin_rows = _hash_twin_rows(db, token[1])
-        src_hash = token[1]
-    else:
-        twin_rows = _key_twin_rows(db, token[1])
-        # Hash the current source so a key match can be
-        # confirmed against a cataloged (or intra-run)
-        # twin's actual bytes. Reading a removable-media
-        # source can fail (card yanked mid-check, I/O
-        # error) — same as checker.match() and the copy
-        # path, that must fail JUST this source rather
-        # than escape and kill the whole background job.
-        try:
-            src_hash = checker.content_hash(source_file)
-        except OSError as e:
-            _fail(
-                state, rel, source_file,
-                f"duplicate check failed: {e}",
-            )
+    if not accept:
+        accept, verified_twin_rows = _byte_verified_twins(
+            state, batch_st, ctx, twin_rows, src_hash, stop_requested,
+        )
+    if state.cancelled:
+        # Stop interrupted a twin hash above. Don't let this file fall
+        # through to the adopt/copy path — every further step touches
+        # the same (possibly dead) mount.
+        return _GATE_CANCELLED
+    if accept:
+        if not _grant_twin_visibility(
+            state, batch_st, db, rel, source_file, verified_twin_rows,
+        ):
             return _GATE_SKIPPED
+        state.skipped_duplicate += 1
+        _counts(state, rel)["skipped_duplicate"] += 1
+        batch_st.dup_skips.append((source_file, False))
+        # Existing verified twins receive photo-only membership, including
+        # moved twins outside the current destination. Never share siblings.
+        run_dest = state.run_dest_folders.get(token)
+        if run_dest is not None:
+            batch_st.dup_dirs.add(run_dest)
+        return _GATE_SKIPPED
+    # No byte-identical twin remains on disk — the card file is a
+    # distinct photo; import it normally.
+    return _GATE_PROCEED
+
+
+def _grant_twin_visibility(state, batch_st, db, rel, source_file, rows):
+    """Grant the active workspace the accepted twin ``rows`` and record
+    the new grants and promotions on ``batch_st`` for a mount-loss
+    rollback. Returns False when the grant failed (the file is booked
+    failed and the gate answers ``_GATE_SKIPPED``).
+    """
+    try:
+        new_grants, promoted = db.photo_visibility.grant_verified_twins_tracked(
+            db.active_workspace_id, rows,
+        )
+        db.conn.commit()
+    except Exception as exc:
+        log.exception("Duplicate photo workspace visibility failed")
+        db.conn.rollback()
+        _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
+        return False
+    batch_st.dup_granted_photo_ids.extend(new_grants)
+    batch_st.dup_promoted_folder_ids.extend(promoted)
+    return True
+
+
+def _twin_rows_and_source_hash(state, db, checker, token, *, rel,
+                               source_file):
+    """Cataloged twin rows for ``token`` and the source hash to verify
+    them against, or ``None`` when hashing the source failed (the file is
+    booked failed).
+    """
+    if token[0] == "hash":
+        return _hash_twin_rows(db, token[1]), token[1]
+    twin_rows = _key_twin_rows(db, token[1])
+    # Hash the current source so a key match can be
+    # confirmed against a cataloged (or intra-run)
+    # twin's actual bytes. Reading a removable-media
+    # source can fail (card yanked mid-check, I/O
+    # error) — same as checker.match() and the copy
+    # path, that must fail JUST this source rather
+    # than escape and kill the whole background job.
+    try:
+        src_hash = checker.content_hash(source_file)
+    except OSError as e:
+        _fail(
+            state, rel, source_file,
+            f"duplicate check failed: {e}",
+        )
+        return None
+    return twin_rows, src_hash
+
+
+def _intra_run_token_proven(state, token, src_hash):
+    """True when this run's own landing already proves ``token``'s bytes."""
     # An intra-run token is byte-proven by this session's
     # own copy_and_hash_verify — safe to skip without
     # hitting the archive, but ONLY when the token itself
@@ -1524,91 +1579,85 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
     # would let the card be counted as skipped_duplicate
     # and safe_to_format go green while the card is the
     # only remaining copy of the bytes.
-    if token in state.run_dest_folders:
-        if token[0] == "hash":
-            accept = True
-        else:
-            run_hash = state.run_verified_hashes.get(token)
-            if (
-                src_hash is not None
-                and run_hash is not None
-                and src_hash == run_hash
-            ):
-                accept = True
-    if not accept:
-        for twin in twin_rows:
-            twin_path = os.path.join(
-                twin["folder_path"], twin["filename"],
-            )
-            # A cataloged twin under any import source
-            # root is (or may be) the card file being
-            # imported this run — a stale scan of the
-            # mounted card left a photos row whose path
-            # IS the card. Hashing it just re-reads the
-            # source, which proves nothing about an
-            # archive copy; accepting it as duplicate
-            # proof would flip safe_to_format green
-            # while the card holds the only bytes. Only
-            # an off-card twin can back a duplicate
-            # skip. See PR #1107 review.
-            if ctx.path_under_any_source(twin_path):
-                continue
-            try:
-                twin_hash = _hash_dest_file(
-                    twin_path, stop_requested)
-            except DestReadCancelled:
-                state.cancelled = True
-                batch_st.dest_read_cancelled = True
-                break
-            except OSError:
-                continue
-            if twin_hash is not None and twin_hash == src_hash:
-                accept = True
-                # Keep scanning to collect every
-                # byte-verified twin — for both 'hash'
-                # and 'key' tokens. Breaking at the
-                # first match (or falling back to the
-                # full twin_rows for 'hash') risks
-                # linking a stale/off-destination twin:
-                # _linkable_twin_dirs then either drops
-                # a legitimate destination twin (leaving
-                # the imported photo invisible in the
-                # active workspace) or pulls an
-                # unrelated folder in (if the catalog's
-                # stored hash row no longer describes
-                # the on-disk bytes). See PR #1107
-                # review.
-                verified_twin_rows.append(twin)
-    if state.cancelled:
-        # Stop interrupted a twin hash above. Don't let this file fall
-        # through to the adopt/copy path — every further step touches
-        # the same (possibly dead) mount.
-        return _GATE_CANCELLED
-    if accept:
+    if token not in state.run_dest_folders:
+        return False
+    if token[0] == "hash":
+        return True
+    run_hash = state.run_verified_hashes.get(token)
+    return (
+        src_hash is not None
+        and run_hash is not None
+        and src_hash == run_hash
+    )
+
+
+def _byte_verified_twins(state, batch_st, ctx, twin_rows, src_hash,
+                         stop_requested):
+    """Re-hash each off-card cataloged twin against ``src_hash``.
+
+    Returns ``(accept, verified_twin_rows)``. A Stop that interrupts a
+    twin read sets ``state.cancelled`` and ``dest_read_cancelled`` and
+    ends the walk; the gate then answers ``_GATE_CANCELLED``.
+    """
+    accept = False
+    # verified_twin_rows records only the twin(s) whose
+    # bytes we actually hashed on disk this run and
+    # matched against the source. Both 'hash' and 'key'
+    # tokens can carry stale rows: 'key' is a filename+
+    # size+capture-second bucket where individual rows
+    # may hold unrelated bytes, and 'hash' shares the
+    # token's stored file_hash by construction but that
+    # column reflects the LAST scan — an archive file
+    # deleted or overwritten between scans leaves a stale
+    # hash row. Linking any twin folder we did not
+    # re-hash would pull unrelated/missing archive folders
+    # into the active workspace on a duplicate-only
+    # import. See PR #1107 review.
+    verified_twin_rows = []
+    for twin in twin_rows:
+        twin_path = os.path.join(
+            twin["folder_path"], twin["filename"],
+        )
+        # A cataloged twin under any import source
+        # root is (or may be) the card file being
+        # imported this run — a stale scan of the
+        # mounted card left a photos row whose path
+        # IS the card. Hashing it just re-reads the
+        # source, which proves nothing about an
+        # archive copy; accepting it as duplicate
+        # proof would flip safe_to_format green
+        # while the card holds the only bytes. Only
+        # an off-card twin can back a duplicate
+        # skip. See PR #1107 review.
+        if ctx.path_under_any_source(twin_path):
+            continue
         try:
-            new_grants, promoted = db.photo_visibility.grant_verified_twins_tracked(
-                db.active_workspace_id, verified_twin_rows,
-            )
-            db.conn.commit()
-        except Exception as exc:
-            log.exception("Duplicate photo workspace visibility failed")
-            db.conn.rollback()
-            _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
-            return _GATE_SKIPPED
-        batch_st.dup_granted_photo_ids.extend(new_grants)
-        batch_st.dup_promoted_folder_ids.extend(promoted)
-        state.skipped_duplicate += 1
-        _counts(state, rel)["skipped_duplicate"] += 1
-        batch_st.dup_skips.append((source_file, False))
-        # Existing verified twins receive photo-only membership, including
-        # moved twins outside the current destination. Never share siblings.
-        run_dest = state.run_dest_folders.get(token)
-        if run_dest is not None:
-            batch_st.dup_dirs.add(run_dest)
-        return _GATE_SKIPPED
-    # No byte-identical twin remains on disk — the card file is a
-    # distinct photo; import it normally.
-    return _GATE_PROCEED
+            twin_hash = _hash_dest_file(
+                twin_path, stop_requested)
+        except DestReadCancelled:
+            state.cancelled = True
+            batch_st.dest_read_cancelled = True
+            break
+        except OSError:
+            continue
+        if twin_hash is not None and twin_hash == src_hash:
+            accept = True
+            # Keep scanning to collect every
+            # byte-verified twin — for both 'hash'
+            # and 'key' tokens. Breaking at the
+            # first match (or falling back to the
+            # full twin_rows for 'hash') risks
+            # linking a stale/off-destination twin:
+            # _linkable_twin_dirs then either drops
+            # a legitimate destination twin (leaving
+            # the imported photo invisible in the
+            # active workspace) or pulls an
+            # unrelated folder in (if the catalog's
+            # stored hash row no longer describes
+            # the on-disk bytes). See PR #1107
+            # review.
+            verified_twin_rows.append(twin)
+    return accept, verified_twin_rows
 
 
 def _catalog_scan_and_prescan(state, batch_st, db, params, scan, destination,
@@ -1671,96 +1720,10 @@ def _catalog_scan_and_prescan(state, batch_st, db, params, scan, destination,
         if row is not None:
             pre_scan_hashes[dest_path] = row["file_hash"]
     try:
-        # ``vireo_dir`` / ``thumb_cache_dir`` are threaded through
-        # so ``_pair_raw_jpeg_companions`` has cache context: when
-        # a newly imported RAW pairs with an already-cataloged
-        # JPEG that carries an edit recipe with local-mask
-        # snapshots, pairing only moves those snapshots to the
-        # RAW primary when ``vireo_dir`` is set — passing ``None``
-        # silently loses the local pass. ``skip_working_copies``
-        # keeps the per-batch WC extraction deferred to the
-        # end-of-run pass (per-batch extraction would race
-        # RAW+JPEG pairing across batch boundaries). See PR
-        # #1107 review.
-        #
-        # Deliberately NOT incremental: a landed path is not
-        # necessarily uncataloged — a stale row can survive for a
-        # file deleted off the archive, and if the replacement
-        # bytes land at that path carrying an mtime equal to the
-        # stale row's, the incremental fast path skips it without
-        # comparing size or content. ``file_hash`` then keeps the
-        # stale value, the post-scan cross-check compares the
-        # copy-time hash against it, and a file that transferred
-        # fine is reported failed — with retries unable to refresh
-        # the row. ``restrict_files`` already narrows these batches
-        # to a handful of paths, so incremental buys nothing here
-        # anyway. See PR #1398 review.
-        # Deliberately no cancel_check: the caller's contract is that
-        # this scan runs to completion even after Stop so already-landed
-        # files reach a valid catalog state (run_import_job comment at
-        # ~lines 4422-4425). Passing an already-fired probe would let
-        # ``scan()`` raise ``ScanCancelled``, and the surrounding
-        # handler would reclassify every landed entry as failed while
-        # the bytes remain on disk uncataloged.
-        #
-        # Simply omitting ``cancel_check`` is not enough: ``JobRunner``
-        # binds ``cancellation_requested`` as the process-wide resource
-        # cancel probe, so scanner's ``_claim_worker_count`` still
-        # resolves that probe through ``ResourceLedger.acquire`` and
-        # raises ``ResourceWaitCancelled`` even when permits are
-        # immediately available. Suppress the binding just for this
-        # scan by re-binding to ``None`` — same shape as classify_job's
-        # preservation pass in 4be1fa9b / ccd44bc4. ``JobRunner`` still
-        # owns hard shutdown via its own deadline. The pause probe is
-        # kept, so a user Pause still unwinds the scan pool cleanly.
-        #
-        # ``cancel_check`` is set to a parking callback rather than
-        # ``None`` so the job actually transitions to ``paused`` when a
-        # user pauses mid-scan. ``pause_check`` alone is non-blocking:
-        # scanner releases its pool and then polls ``pause_check``
-        # every 50 ms, leaving the job stuck in ``pausing``. The
-        # parking callback invokes ``wait_if_paused(publish_paused=True)``
-        # to park AND publish the paused status, then returns ``False``
-        # unconditionally — the parking side-effect matters, the
-        # ``cancelled`` return value must be ignored to keep the
-        # preservation contract intact.
-        from resource_ledger import bind_resource_cancel_check
-        scan_pause_check = None
-        scan_park_only_check = None
-        if runner is not None and job is not None:
-            job_id = job["id"]
-
-            def scan_pause_check():
-                return runner.pause_requested(job_id)
-
-            def scan_park_only_check():
-                # Park via wait_if_paused so the job publishes ``paused``
-                # while the scanner is safely at its pause checkpoint.
-                # Discard the cancellation return value — the preservation
-                # contract requires this scan to run to completion.
-                runner.wait_if_paused(job_id, publish_paused=True)
-                return False
-        with bind_resource_cancel_check(None):
-            scan(
-                destination, db,
-                restrict_dirs=[batch_st.dest_folder],
-                restrict_files=landed_paths,
-                vireo_dir=params.vireo_dir,
-                thumb_cache_dir=params.thumb_cache_dir,
-                skip_working_copies=True,
-                cancel_check=scan_park_only_check,
-                pause_check=scan_pause_check,
-                # Preservation contract: this scan runs to completion
-                # regardless of cancel. Passing an always-False pure
-                # cancel probe lets the scanner use ``_check_cancelled_no_park``
-                # inside ``_claim_worker_count`` — without it a Pause
-                # arriving in the race window between the pause probe
-                # and the parking ``scan_park_only_check`` would park
-                # ``wait_if_paused`` while the hashing pool and CPU
-                # permits are still held, blocking unrelated work
-                # until Resume.
-                cancel_only_check=lambda: False,
-            )
+        _run_preservation_scan(
+            scan, destination, db, batch_st, landed_paths, params,
+            runner=runner, job=job,
+        )
     except Exception as e:  # scan failure fails the whole batch
         log.warning("Catalog scan failed for import batch %s", rel, exc_info=True)
         # Each entry was already booked into copied or
@@ -1783,6 +1746,103 @@ def _catalog_scan_and_prescan(state, batch_st, db, params, scan, destination,
         _invalidate_new_images(db, batch_st.dest_folder)
     return pre_scan_hashes
 
+
+def _run_preservation_scan(scan, destination, db, batch_st, landed_paths,
+                           params, *, runner, job):
+    """The restricted per-batch ``scan()`` behind
+    ``_catalog_scan_and_prescan``: runs to completion even after Stop,
+    with only the PAUSE probe wired (see the comments below).
+    """
+    # ``vireo_dir`` / ``thumb_cache_dir`` are threaded through
+    # so ``_pair_raw_jpeg_companions`` has cache context: when
+    # a newly imported RAW pairs with an already-cataloged
+    # JPEG that carries an edit recipe with local-mask
+    # snapshots, pairing only moves those snapshots to the
+    # RAW primary when ``vireo_dir`` is set — passing ``None``
+    # silently loses the local pass. ``skip_working_copies``
+    # keeps the per-batch WC extraction deferred to the
+    # end-of-run pass (per-batch extraction would race
+    # RAW+JPEG pairing across batch boundaries). See PR
+    # #1107 review.
+    #
+    # Deliberately NOT incremental: a landed path is not
+    # necessarily uncataloged — a stale row can survive for a
+    # file deleted off the archive, and if the replacement
+    # bytes land at that path carrying an mtime equal to the
+    # stale row's, the incremental fast path skips it without
+    # comparing size or content. ``file_hash`` then keeps the
+    # stale value, the post-scan cross-check compares the
+    # copy-time hash against it, and a file that transferred
+    # fine is reported failed — with retries unable to refresh
+    # the row. ``restrict_files`` already narrows these batches
+    # to a handful of paths, so incremental buys nothing here
+    # anyway. See PR #1398 review.
+    # Deliberately no cancel_check: the caller's contract is that
+    # this scan runs to completion even after Stop so already-landed
+    # files reach a valid catalog state (run_import_job comment at
+    # ~lines 4422-4425). Passing an already-fired probe would let
+    # ``scan()`` raise ``ScanCancelled``, and the surrounding
+    # handler would reclassify every landed entry as failed while
+    # the bytes remain on disk uncataloged.
+    #
+    # Simply omitting ``cancel_check`` is not enough: ``JobRunner``
+    # binds ``cancellation_requested`` as the process-wide resource
+    # cancel probe, so scanner's ``_claim_worker_count`` still
+    # resolves that probe through ``ResourceLedger.acquire`` and
+    # raises ``ResourceWaitCancelled`` even when permits are
+    # immediately available. Suppress the binding just for this
+    # scan by re-binding to ``None`` — same shape as classify_job's
+    # preservation pass in 4be1fa9b / ccd44bc4. ``JobRunner`` still
+    # owns hard shutdown via its own deadline. The pause probe is
+    # kept, so a user Pause still unwinds the scan pool cleanly.
+    #
+    # ``cancel_check`` is set to a parking callback rather than
+    # ``None`` so the job actually transitions to ``paused`` when a
+    # user pauses mid-scan. ``pause_check`` alone is non-blocking:
+    # scanner releases its pool and then polls ``pause_check``
+    # every 50 ms, leaving the job stuck in ``pausing``. The
+    # parking callback invokes ``wait_if_paused(publish_paused=True)``
+    # to park AND publish the paused status, then returns ``False``
+    # unconditionally — the parking side-effect matters, the
+    # ``cancelled`` return value must be ignored to keep the
+    # preservation contract intact.
+    from resource_ledger import bind_resource_cancel_check
+    scan_pause_check = None
+    scan_park_only_check = None
+    if runner is not None and job is not None:
+        job_id = job["id"]
+
+        def scan_pause_check():
+            return runner.pause_requested(job_id)
+
+        def scan_park_only_check():
+            # Park via wait_if_paused so the job publishes ``paused``
+            # while the scanner is safely at its pause checkpoint.
+            # Discard the cancellation return value — the preservation
+            # contract requires this scan to run to completion.
+            runner.wait_if_paused(job_id, publish_paused=True)
+            return False
+    with bind_resource_cancel_check(None):
+        scan(
+            destination, db,
+            restrict_dirs=[batch_st.dest_folder],
+            restrict_files=landed_paths,
+            vireo_dir=params.vireo_dir,
+            thumb_cache_dir=params.thumb_cache_dir,
+            skip_working_copies=True,
+            cancel_check=scan_park_only_check,
+            pause_check=scan_pause_check,
+            # Preservation contract: this scan runs to completion
+            # regardless of cancel. Passing an always-False pure
+            # cancel probe lets the scanner use ``_check_cancelled_no_park``
+            # inside ``_claim_worker_count`` — without it a Pause
+            # arriving in the race window between the pause probe
+            # and the parking ``scan_park_only_check`` would park
+            # ``wait_if_paused`` while the hashing pool and CPU
+            # permits are still held, blocking unrelated work
+            # until Resume.
+            cancel_only_check=lambda: False,
+        )
 
 
 def _stamp_landed_and_validate_catalog(state, batch_st, db, params, rel, *,
@@ -1823,7 +1883,6 @@ def _stamp_landed_and_validate_catalog(state, batch_st, db, params, rel, *,
     raw_companion_invalidations = set()
     for entry in batch_st.landed:
         dest_path = entry.dest_path
-        verified_hash = entry.verified_hash
         row = db.conn.execute(
             """SELECT p.id, p.file_hash FROM photos p
                JOIN folders f ON f.id = p.folder_id
@@ -1832,147 +1891,183 @@ def _stamp_landed_and_validate_catalog(state, batch_st, db, params, rel, *,
              os.path.basename(dest_path)),
         ).fetchone()
         if row is None:
-            # RAW+JPEG pairing merges the JPEG's photo row into
-            # the RAW primary (companion_path) and deletes the
-            # JPEG's own row, so a landed JPEG whose sibling RAW
-            # was scanned in the same batch legitimately has no
-            # row of its own. Look it up as another row's
-            # companion_path before deciding "not cataloged".
-            # See PR #1107/#1113 reviews.
-            companion = db.conn.execute(
-                """SELECT p.id FROM photos p
-                   JOIN folders f ON f.id = p.folder_id
-                   WHERE f.path = ? AND p.companion_path = ?""",
-                (os.path.dirname(dest_path),
-                 os.path.basename(dest_path)),
-            ).fetchone()
-            if companion is not None:
-                # The paired JPEG's own row is gone by design,
-                # so the row branch below can't cross-check its
-                # bytes. Re-read the destination file here in
-                # BOTH verify modes — paired JPEGs need the same
-                # stale-destination catalog-integrity guard or
-                # after-import processing would enqueue against
-                # the wrong companion. ``None`` from the re-read
-                # unambiguously means unreadable:
-                # ``verified_hash`` is never None (zero-byte
-                # normalizes to ``EMPTY_FILE_SHA256`` at
-                # ``_LandedFile`` construction), so an empty
-                # companion whose file vanished cannot be
-                # confused with a legitimately empty one. See
-                # PR #1107/#1113/#1437 reviews.
-                try:
-                    actual = _rehash_dest_or_none(
-                        dest_path, stop_requested)
-                except DestReadCancelled:
-                    state.cancelled = True
-                    break
-                if actual is not None and actual == verified_hash:
-                    # Invalidate the RAW's derived caches
-                    # regardless of origin: adoption only proves
-                    # the JPEG bytes were already at the dest
-                    # path, NOT that the RAW row already carried
-                    # ``companion_path`` for this JPEG. A prior
-                    # partial run or backfill may have left the
-                    # RAW as RAW-only, and the deferred
-                    # end-of-run ``_extract_working_copies``
-                    # skips rows whose ``working_copy_path IS
-                    # NOT NULL`` — a stale RAW-only cache would
-                    # persist past this import otherwise. See
-                    # PR #1107 review.
-                    raw_companion_invalidations.add(
-                        companion["id"],
-                    )
-                    # The landed JPEG's bytes are represented on
-                    # the RAW primary — that row is what the
-                    # chaining hook should process.
-                    state.imported_photo_ids.add(companion["id"])
-                    continue
-                _reclassify_landed_failed(
-                    state, rel, entry,
-                    f"paired companion {dest_noun} bytes could "
-                    "not be read"
-                    if actual is None else
-                    f"paired companion {dest_noun} bytes do not "
-                    "match the hash this import recorded "
-                    f"({dest_noun} base is likely stale or "
-                    "misconfigured)",
-                    attests_bytes,
-                )
-                batch_st.reclassified_landed_paths.add(dest_path)
-                continue
-            _reclassify_landed_failed(
-                state, rel, entry,
-                "not cataloged after scan (no photo row)",
-                attests_bytes,
-            )
-            batch_st.reclassified_landed_paths.add(dest_path)
+            if not _validate_rowless_landing(
+                state, batch_st, db, rel, entry,
+                raw_companion_invalidations,
+                attests_bytes=attests_bytes, dest_noun=dest_noun,
+                stop_requested=stop_requested,
+            ):
+                break
             continue
-        if row["file_hash"] == verified_hash:
+        if not _stamp_cataloged_landing(
+            state, batch_st, db, rel, entry, row,
+            attests_bytes=attests_bytes, dest_noun=dest_noun,
+            stop_requested=stop_requested,
+        ):
+            break
+    return raw_companion_invalidations
+
+
+def _validate_rowless_landing(state, batch_st, db, rel, entry,
+                              raw_companion_invalidations, *,
+                              attests_bytes, dest_noun, stop_requested):
+    """Validate a landed file that scan() left without a photo row of
+    its own; returns False when a Stop interrupted the destination
+    re-read (``state.cancelled`` is set and the stamping loop ends).
+    """
+    dest_path = entry.dest_path
+    verified_hash = entry.verified_hash
+    # RAW+JPEG pairing merges the JPEG's photo row into
+    # the RAW primary (companion_path) and deletes the
+    # JPEG's own row, so a landed JPEG whose sibling RAW
+    # was scanned in the same batch legitimately has no
+    # row of its own. Look it up as another row's
+    # companion_path before deciding "not cataloged".
+    # See PR #1107/#1113 reviews.
+    companion = db.conn.execute(
+        """SELECT p.id FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           WHERE f.path = ? AND p.companion_path = ?""",
+        (os.path.dirname(dest_path),
+         os.path.basename(dest_path)),
+    ).fetchone()
+    if companion is None:
+        _reclassify_landed_failed(
+            state, rel, entry,
+            "not cataloged after scan (no photo row)",
+            attests_bytes,
+        )
+        batch_st.reclassified_landed_paths.add(dest_path)
+        return True
+    # The paired JPEG's own row is gone by design,
+    # so ``_stamp_cataloged_landing`` can't cross-check its
+    # bytes. Re-read the destination file here in
+    # BOTH verify modes — paired JPEGs need the same
+    # stale-destination catalog-integrity guard or
+    # after-import processing would enqueue against
+    # the wrong companion. ``None`` from the re-read
+    # unambiguously means unreadable:
+    # ``verified_hash`` is never None (zero-byte
+    # normalizes to ``EMPTY_FILE_SHA256`` at
+    # ``_LandedFile`` construction), so an empty
+    # companion whose file vanished cannot be
+    # confused with a legitimately empty one. See
+    # PR #1107/#1113/#1437 reviews.
+    try:
+        actual = _rehash_dest_or_none(
+            dest_path, stop_requested)
+    except DestReadCancelled:
+        state.cancelled = True
+        return False
+    if actual is not None and actual == verified_hash:
+        # Invalidate the RAW's derived caches
+        # regardless of origin: adoption only proves
+        # the JPEG bytes were already at the dest
+        # path, NOT that the RAW row already carried
+        # ``companion_path`` for this JPEG. A prior
+        # partial run or backfill may have left the
+        # RAW as RAW-only, and the deferred
+        # end-of-run ``_extract_working_copies``
+        # skips rows whose ``working_copy_path IS
+        # NOT NULL`` — a stale RAW-only cache would
+        # persist past this import otherwise. See
+        # PR #1107 review.
+        raw_companion_invalidations.add(
+            companion["id"],
+        )
+        # The landed JPEG's bytes are represented on
+        # the RAW primary — that row is what the
+        # chaining hook should process.
+        state.imported_photo_ids.add(companion["id"])
+        return True
+    _reclassify_landed_failed(
+        state, rel, entry,
+        f"paired companion {dest_noun} bytes could "
+        "not be read"
+        if actual is None else
+        f"paired companion {dest_noun} bytes do not "
+        "match the hash this import recorded "
+        f"({dest_noun} base is likely stale or "
+        "misconfigured)",
+        attests_bytes,
+    )
+    batch_st.reclassified_landed_paths.add(dest_path)
+    return True
+
+
+def _stamp_cataloged_landing(state, batch_st, db, rel, entry, row, *,
+                             attests_bytes, dest_noun, stop_requested):
+    """Cross-check a landed file's own photo ``row`` and stamp it; returns
+    False when a Stop interrupted the destination re-read
+    (``state.cancelled`` is set and the stamping loop ends).
+    """
+    dest_path = entry.dest_path
+    verified_hash = entry.verified_hash
+    if row["file_hash"] == verified_hash:
+        if attests_bytes:
+            db.audit.update_photo_hash_check(
+                row["id"], "ok", commit=False,
+            )
+        state.imported_photo_ids.add(row["id"])
+    elif row["file_hash"] is None:
+        # scan() legitimately writes NULL for zero-byte
+        # files (the convention keeps ``EMPTY_FILE_SHA256``
+        # out of ``photos.file_hash``) and can leave NULL
+        # when its own read failed (large files, prior
+        # partial scan, or a suppressed read error). Don't
+        # stamp blind either way: re-read the destination
+        # file as the last-line check so a file that
+        # vanished, changed, or became unreadable between
+        # scan and stamping fails instead of keeping
+        # ``hash_status='ok'`` with ``safe_to_format``
+        # green. See PR #1107/#1113/#1437 reviews.
+        try:
+            actual = _rehash_dest_or_none(
+                dest_path, stop_requested)
+        except DestReadCancelled:
+            state.cancelled = True
+            return False
+        if actual is not None and actual == verified_hash:
+            # Backfill the row hash scan couldn't write
+            # (spec decision 11) — except the zero-byte
+            # case, where ``file_hash=None`` hits
+            # ``update_photo_hash_check``'s status-only arm
+            # and the row keeps scan's NULL (backfilling
+            # EMPTY would recreate the every-empty-file
+            # collision the convention exists to prevent).
             if attests_bytes:
                 db.audit.update_photo_hash_check(
-                    row["id"], "ok", commit=False,
+                    row["id"], "ok",
+                    file_hash=(
+                        verified_hash
+                        if verified_hash != EMPTY_FILE_SHA256
+                        else None
+                    ),
+                    commit=False,
                 )
             state.imported_photo_ids.add(row["id"])
-        elif row["file_hash"] is None:
-            # scan() legitimately writes NULL for zero-byte
-            # files (the convention keeps ``EMPTY_FILE_SHA256``
-            # out of ``photos.file_hash``) and can leave NULL
-            # when its own read failed (large files, prior
-            # partial scan, or a suppressed read error). Don't
-            # stamp blind either way: re-read the destination
-            # file as the last-line check so a file that
-            # vanished, changed, or became unreadable between
-            # scan and stamping fails instead of keeping
-            # ``hash_status='ok'`` with ``safe_to_format``
-            # green. See PR #1107/#1113/#1437 reviews.
-            try:
-                actual = _rehash_dest_or_none(
-                    dest_path, stop_requested)
-            except DestReadCancelled:
-                state.cancelled = True
-                break
-            if actual is not None and actual == verified_hash:
-                # Backfill the row hash scan couldn't write
-                # (spec decision 11) — except the zero-byte
-                # case, where ``file_hash=None`` hits
-                # ``update_photo_hash_check``'s status-only arm
-                # and the row keeps scan's NULL (backfilling
-                # EMPTY would recreate the every-empty-file
-                # collision the convention exists to prevent).
-                if attests_bytes:
-                    db.audit.update_photo_hash_check(
-                        row["id"], "ok",
-                        file_hash=(
-                            verified_hash
-                            if verified_hash != EMPTY_FILE_SHA256
-                            else None
-                        ),
-                        commit=False,
-                    )
-                state.imported_photo_ids.add(row["id"])
-            else:
-                _reclassify_landed_failed(
-                    state, rel, entry,
-                    f"scan wrote no {dest_noun} row hash and a "
-                    f"re-read of the {dest_noun} file disagrees "
-                    "with the hash this import recorded "
-                    f"({dest_noun} file is likely stale, "
-                    "unreadable, or misconfigured)",
-                    attests_bytes,
-                )
-                batch_st.reclassified_landed_paths.add(dest_path)
         else:
             _reclassify_landed_failed(
                 state, rel, entry,
-                f"scanned {dest_noun} row hash does not match "
-                "the hash this import recorded "
-                f"({dest_noun} base is likely stale or "
-                "misconfigured)",
+                f"scan wrote no {dest_noun} row hash and a "
+                f"re-read of the {dest_noun} file disagrees "
+                "with the hash this import recorded "
+                f"({dest_noun} file is likely stale, "
+                "unreadable, or misconfigured)",
                 attests_bytes,
             )
             batch_st.reclassified_landed_paths.add(dest_path)
-    return raw_companion_invalidations
+    else:
+        _reclassify_landed_failed(
+            state, rel, entry,
+            f"scanned {dest_noun} row hash does not match "
+            "the hash this import recorded "
+            f"({dest_noun} base is likely stale or "
+            "misconfigured)",
+            attests_bytes,
+        )
+        batch_st.reclassified_landed_paths.add(dest_path)
+    return True
 
 
 def _invalidate_changed_and_sweep(state, batch_st, db, params,
@@ -2420,31 +2515,7 @@ def _build_destination_context(db, params):
         _record_known_mount_roots,
     )
 
-    # Normalize once — the raw destination string is passed as ``root`` to
-    # both the copy layout (``os.path.normpath(os.path.join(destination,
-    # rel))``) and to ``scan(root, …, restrict_dirs=[dest_folder])``.
-    # ``scanner._ensure_folder`` stops walking the folder chain when the
-    # parent equals the scan root string; a destination like
-    # ``/photos/tmp/../archive`` copies into the normalized
-    # ``/photos/archive/…`` but the restricted scan root would remain the
-    # dot-segment form, so the recursion never reaches root and the scan
-    # loses those files (copied bytes then bucket as catalog failures).
-    #
-    # Also resolve symlinks (``realpath``) so a destination like ``/photos``
-    # symlinked at ``/Volumes/Photos`` matches cataloged twin folders whose
-    # ``folders.path`` was scanned under the real archive root — otherwise
-    # duplicate matching compares paths from prior catalog scans against
-    # this destination. Sources are already ``realpath``-resolved (see
-    # ``_norm_source``); doing the same to destination keeps the two sides
-    # symmetric. See PR #1107 review.
-    #
-    # On the remote (SSH) path ``params.destination`` is the catalog/mount
-    # base — the route sets it to mount_path/subpath — and the same
-    # normalization applies.
-    try:
-        destination = os.path.realpath(os.path.normpath(str(params.destination)))
-    except OSError:
-        destination = os.path.normpath(str(params.destination))
+    destination = _normalize_destination(params)
 
     # Which of the destination's mount-root candidates are live mounts.
     # Captured HERE — immediately after normalization, before discovery,
@@ -2487,11 +2558,57 @@ def _build_destination_context(db, params):
     # the network). Shared by both import paths. See PR #1107 review.
     _path_under_any_source = _build_source_root_guard(params.sources)
 
+    _path_under_destination, _fold_basename = _destination_case_guards(
+        destination)
+
+    return _DestContext(
+        destination=destination,
+        mount_baseline=mount_baseline,
+        path_under_any_source=_path_under_any_source,
+        path_under_destination=_path_under_destination,
+        fold_basename=_fold_basename,
+    )
+
+
+def _normalize_destination(params):
+    """The run's destination: normalized, then ``realpath``-resolved."""
+    # Normalize once — the raw destination string is passed as ``root`` to
+    # both the copy layout (``os.path.normpath(os.path.join(destination,
+    # rel))``) and to ``scan(root, …, restrict_dirs=[dest_folder])``.
+    # ``scanner._ensure_folder`` stops walking the folder chain when the
+    # parent equals the scan root string; a destination like
+    # ``/photos/tmp/../archive`` copies into the normalized
+    # ``/photos/archive/…`` but the restricted scan root would remain the
+    # dot-segment form, so the recursion never reaches root and the scan
+    # loses those files (copied bytes then bucket as catalog failures).
+    #
+    # Also resolve symlinks (``realpath``) so a destination like ``/photos``
+    # symlinked at ``/Volumes/Photos`` matches cataloged twin folders whose
+    # ``folders.path`` was scanned under the real archive root — otherwise
+    # duplicate matching compares paths from prior catalog scans against
+    # this destination. Sources are already ``realpath``-resolved (see
+    # ``_norm_source``); doing the same to destination keeps the two sides
+    # symmetric. See PR #1107 review.
+    #
+    # On the remote (SSH) path ``params.destination`` is the catalog/mount
+    # base — the route sets it to mount_path/subpath — and the same
+    # normalization applies.
+    try:
+        destination = os.path.realpath(os.path.normpath(str(params.destination)))
+    except OSError:
+        destination = os.path.normpath(str(params.destination))
+    return destination
+
+
+def _destination_case_guards(destination):
+    """``(path_under_destination, fold_basename)`` for the normalized
+    ``destination``, case-folded when its filesystem is case-insensitive.
+    """
     # Destination containment for cataloged twin folders. Used to scope
     # ``_linkable_twin_dirs`` to twins under the destination/mount base —
     # an off-destination twin in some other library root is none of this
     # import's business. ``destination`` is already ``realpath``-resolved
-    # above so a symlinked destination like ``/photos`` ->
+    # (``_normalize_destination``) so a symlinked destination like ``/photos`` ->
     # ``/Volumes/Photos`` matches twin folders cataloged under
     # ``/Volumes/Photos/…``. Case-different spellings on case-insensitive
     # mounts (SMB, FAT, HFS+/APFS/exFAT) still need explicit
@@ -2540,13 +2657,7 @@ def _build_destination_context(db, params):
     def _fold_basename(name):
         return name.casefold() if _dest_ci else name
 
-    return _DestContext(
-        destination=destination,
-        mount_baseline=mount_baseline,
-        path_under_any_source=_path_under_any_source,
-        path_under_destination=_path_under_destination,
-        fold_basename=_fold_basename,
-    )
+    return _path_under_destination, _fold_basename
 
 
 def _make_emitter(job, runner, state, eta):
@@ -2635,25 +2746,8 @@ def _plan_import(db, params, emit, state):
     comment at the snapshot call.
     """
     # --- Discover ---------------------------------------------------
-    # Enumeration errors (permission denied, macOS TCC block on a
-    # removable volume, unreadable subtree) get silently swallowed by
-    # os.walk-style callbacks by default. If we ignored them, discovered
-    # would just be smaller than reality and safe_to_format could still
-    # flip green over a card whose contents were never actually visited.
-    # Track them explicitly: each is a bucket-of-its-own failure entry
-    # tied to the source path where it occurred.
     emit("Discovering files", 0, 0)
-    files = []
-
-    def _discovery_onerror(exc):
-        state.discovery_errors.append(exc)
-        log.warning("Import discovery error: %s", exc)
-
-    for src in params.sources:
-        files.extend(discover_source_files(
-            src, params.file_types, recursive=params.recursive,
-            onerror=_discovery_onerror,
-        ))
+    files = _discover_import_files(params, state)
     discovered = len(files)
     # Snapshot the discovered source metadata NOW — before selection filters
     # the copy set, before any copy work, and before duplicate hashing. The
@@ -2707,6 +2801,48 @@ def _plan_import(db, params, emit, state):
         ),
     )
 
+    batches = _batch_by_destination(files, timestamps, params)
+
+    return _ImportPlan(
+        files=files,
+        discovered=discovered,
+        source_snapshots=source_snapshots,
+        include_paths=include_paths,
+        queued=queued,
+        deselected=deselected,
+        vanished_paths=vanished_paths,
+        appeared=appeared,
+        checker=checker,
+        timestamps=timestamps,
+        batches=batches,
+    )
+
+
+def _discover_import_files(params, state):
+    """Enumerate every source; enumeration errors land on ``state``."""
+    # Enumeration errors (permission denied, macOS TCC block on a
+    # removable volume, unreadable subtree) get silently swallowed by
+    # os.walk-style callbacks by default. If we ignored them, discovered
+    # would just be smaller than reality and safe_to_format could still
+    # flip green over a card whose contents were never actually visited.
+    # Track them explicitly: each is a bucket-of-its-own failure entry
+    # tied to the source path where it occurred.
+    files = []
+
+    def _discovery_onerror(exc):
+        state.discovery_errors.append(exc)
+        log.warning("Import discovery error: %s", exc)
+
+    for src in params.sources:
+        files.extend(discover_source_files(
+            src, params.file_types, recursive=params.recursive,
+            onerror=_discovery_onerror,
+        ))
+    return files
+
+
+def _batch_by_destination(files, timestamps, params):
+    """Group ``files`` into ``(rel, batch)`` pairs, in template-folder order."""
     # Group by destination (template) folder, template order, then chunk.
     # Chunking is companion-aware: each ``_ImportBatchState`` holds its own
     # ``companion_siblings`` and ``companion_slots``, so a same-stem RAW/JPEG
@@ -2749,20 +2885,7 @@ def _plan_import(db, params, emit, state):
             batch.extend(companion)
         if batch:
             batches.append((rel, batch))
-
-    return _ImportPlan(
-        files=files,
-        discovered=discovered,
-        source_snapshots=source_snapshots,
-        include_paths=include_paths,
-        queued=queued,
-        deselected=deselected,
-        vanished_paths=vanished_paths,
-        appeared=appeared,
-        checker=checker,
-        timestamps=timestamps,
-        batches=batches,
-    )
+    return batches
 
 
 def _finalize_import(job, runner, db, state, params, *,
@@ -2773,7 +2896,7 @@ def _finalize_import(job, runner, db, state, params, *,
 
     ``remote_unverified`` is the one transport-required term: the remote
     path passes ``not params.verify_by_hash`` (see the honesty-gate
-    comment at its append below); the local path hash-verifies every
+    comment in ``_append_run_unsafe_files``); the local path hash-verifies every
     copy, so it calls with the default ``False`` and every
     ``remote_unverified`` term degenerates to a no-op.
     """
@@ -2790,19 +2913,11 @@ def _finalize_import(job, runner, db, state, params, *,
         summary=summary,
     )
 
-    # Discovery/enumeration errors must flip safe_to_format off — a
-    # permission-denied subtree yields no files (``discovered`` shrinks),
-    # so a naive check of ``copied + skipped_duplicate == discovered``
-    # would still pass and the UI would tell the user it's safe to format
-    # a card whose contents were never verified. Surface each error into
-    # ``unsafe_files`` (path = the enumeration failure's own filename when
-    # available, otherwise ``<discovery>``) so the caller can show what
-    # went unseen.
-    for exc in state.discovery_errors:
-        state.unsafe_files.append({
-            "path": str(getattr(exc, "filename", None) or "<discovery>"),
-            "reason": f"source enumeration failed: {exc}",
-        })
+    _append_run_unsafe_files(
+        state, discovered=discovered, deselected=deselected,
+        vanished_paths=vanished_paths, appeared=appeared,
+        remote_unverified=remote_unverified,
+    )
 
     # Safe to format iff every discovered file reached a verified
     # terminal bucket: hash-verified fresh copy, or duplicate whose bytes
@@ -2821,55 +2936,7 @@ def _finalize_import(job, runner, db, state, params, *,
     # files the pill is expected to cover. A cancelled run leaves
     # unprocessed files, so it is never safe. This pill means exactly
     # what it says.
-    #
-    # A list-form ``file_types`` whose members cover every
-    # ``SUPPORTED_EXTENSIONS`` entry is NOT actually filtered — the
-    # pipeline UI's ``getIngestFileTypes()`` returns exactly this shape
-    # when the user checks every box, and ``discover_source_files``
-    # walks it identically to ``"both"``. Treating it as partial would
-    # leave ``safe_to_format`` permanently false over an unfiltered
-    # import. Normalize to leading-dot lowercase to match how
-    # SUPPORTED_EXTENSIONS is stored; unknown extensions in the list
-    # are ignored (they can't be in SUPPORTED_EXTENSIONS regardless).
-    # See PR #1107 review.
-    partial_scope = not params.recursive
-    if params.file_types != "both":
-        if isinstance(params.file_types, list):
-            normalized_types = {
-                ("." + e.lower().lstrip("."))
-                for e in params.file_types
-                if isinstance(e, str) and e
-            }
-            partial_scope = partial_scope or not SUPPORTED_EXTENSIONS.issubset(
-                normalized_types,
-            )
-        else:
-            partial_scope = True
-
-    # Honesty gate: a remote import is only safe to format when every
-    # discovered file was INDEPENDENTLY hash-confirmed at the destination —
-    # which only happens on the checksum-verification path. Without
-    # verify_by_hash the transfer relied on rsync's own integrity checking,
-    # which we do not surface as a format-the-card guarantee. Report exactly
-    # that with the plan's reason string.
-    if remote_unverified and discovered > 0:
-        state.unsafe_files.append({
-            "path": "<remote>",
-            "reason": "enable verify_by_hash for remote verification",
-        })
-    if state.unverified_duplicate:
-        state.unsafe_files.append({
-            "path": "Likely duplicates",
-            "reason": (
-                f"{state.unverified_duplicate} matched by filename, byte size, "
-                "and capture time but were not compared byte-for-byte"
-            ),
-        })
-    # Selection drift entries.
-    _append_selection_unsafe(
-        state.unsafe_files, deselected=deselected, vanished_paths=vanished_paths,
-        appeared=appeared,
-    )
+    partial_scope = _import_partial_scope(params)
     safe_to_format = (
         not state.cancelled
         and state.failed == 0
@@ -2899,7 +2966,95 @@ def _finalize_import(job, runner, db, state, params, *,
         and not _selection_blocks_format(
             deselected=deselected, vanished_paths=vanished_paths)
     )
-    result = {
+    return _import_result(
+        db, state, params, discovered=discovered,
+        source_snapshots=source_snapshots, safe_to_format=safe_to_format,
+        unverified_duplicates_only=unverified_duplicates_only,
+        vanished_paths=vanished_paths, appeared=appeared,
+    )
+
+
+def _append_run_unsafe_files(state, *, discovered, deselected,
+                             vanished_paths, appeared, remote_unverified):
+    """Append the run-level ``unsafe_files`` entries, in render order:
+    discovery errors, the remote honesty gate, likely duplicates, then
+    selection drift.
+    """
+    # Discovery/enumeration errors must flip safe_to_format off — a
+    # permission-denied subtree yields no files (``discovered`` shrinks),
+    # so a naive check of ``copied + skipped_duplicate == discovered``
+    # would still pass and the UI would tell the user it's safe to format
+    # a card whose contents were never verified. Surface each error into
+    # ``unsafe_files`` (path = the enumeration failure's own filename when
+    # available, otherwise ``<discovery>``) so the caller can show what
+    # went unseen.
+    for exc in state.discovery_errors:
+        state.unsafe_files.append({
+            "path": str(getattr(exc, "filename", None) or "<discovery>"),
+            "reason": f"source enumeration failed: {exc}",
+        })
+
+    # Honesty gate: a remote import is only safe to format when every
+    # discovered file was INDEPENDENTLY hash-confirmed at the destination —
+    # which only happens on the checksum-verification path. Without
+    # verify_by_hash the transfer relied on rsync's own integrity checking,
+    # which we do not surface as a format-the-card guarantee. Report exactly
+    # that with the plan's reason string.
+    if remote_unverified and discovered > 0:
+        state.unsafe_files.append({
+            "path": "<remote>",
+            "reason": "enable verify_by_hash for remote verification",
+        })
+    if state.unverified_duplicate:
+        state.unsafe_files.append({
+            "path": "Likely duplicates",
+            "reason": (
+                f"{state.unverified_duplicate} matched by filename, byte size, "
+                "and capture time but were not compared byte-for-byte"
+            ),
+        })
+    # Selection drift entries.
+    _append_selection_unsafe(
+        state.unsafe_files, deselected=deselected, vanished_paths=vanished_paths,
+        appeared=appeared,
+    )
+
+
+def _import_partial_scope(params):
+    """True when the run's walk covers less than the card's full
+    supported-file set (see ``safe_to_format`` in ``_finalize_import``).
+    """
+    # A list-form ``file_types`` whose members cover every
+    # ``SUPPORTED_EXTENSIONS`` entry is NOT actually filtered — the
+    # pipeline UI's ``getIngestFileTypes()`` returns exactly this shape
+    # when the user checks every box, and ``discover_source_files``
+    # walks it identically to ``"both"``. Treating it as partial would
+    # leave ``safe_to_format`` permanently false over an unfiltered
+    # import. Normalize to leading-dot lowercase to match how
+    # SUPPORTED_EXTENSIONS is stored; unknown extensions in the list
+    # are ignored (they can't be in SUPPORTED_EXTENSIONS regardless).
+    # See PR #1107 review.
+    partial_scope = not params.recursive
+    if params.file_types != "both":
+        if isinstance(params.file_types, list):
+            normalized_types = {
+                ("." + e.lower().lstrip("."))
+                for e in params.file_types
+                if isinstance(e, str) and e
+            }
+            partial_scope = partial_scope or not SUPPORTED_EXTENSIONS.issubset(
+                normalized_types,
+            )
+        else:
+            partial_scope = True
+    return partial_scope
+
+
+def _import_result(db, state, params, *, discovered, source_snapshots,
+                   safe_to_format, unverified_duplicates_only,
+                   vanished_paths, appeared):
+    """The import's result dict, shared by both transports."""
+    return {
         "discovered": discovered,
         "copied": state.copied,
         "verified": state.verified,
@@ -2973,7 +3128,6 @@ def _finalize_import(job, runner, db, state, params, *,
         ),
         "errors": [f"{u['path']}: {u['reason']}" for u in state.unsafe_files],
     }
-    return result
 
 
 def copy_and_hash_verify(src, dst, *, src_hash=None):
@@ -3048,72 +3202,18 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
             # ENOTSUP/EOPNOTSUPP; Windows exFAT can return EACCES).
             # Without a fallback promotion path every file on
             # hardlinkless archives buckets as a copy failure and
-            # imports are unusable on those destinations.
-            #
-            # Fall back to existence-check + os.rename, wrapped in a
-            # directory-level POSIX advisory lock. The verified temp
-            # stays hidden until it moves atomically over to ``dst``.
-            # Do NOT reserve the final path as an O_EXCL placeholder
-            # before renaming — a crash between placeholder creation
-            # and os.replace would leave a zero-byte stray at the
-            # intended archive name, and a retry treats that
-            # placeholder as "existing archive file", suffixes the
-            # real photo to ``name_1.ext``, and orphans the empty
-            # file. That violates the crash-recovery invariant that a
-            # dead run leaves only valid archive copies or hidden
-            # temps.
-            #
-            # A bare check-then-rename loses a concurrent-import race:
-            # two hardlinkless-FS jobs targeting the same
-            # destination/date folder could both pass exists() before
-            # either rename(), and the later rename would silently
-            # overwrite the first job's already-verified archive copy
-            # (its ``safe_to_format`` would still report green after
-            # its bytes are gone). Serialize the critical section on
-            # an exclusive ``fcntl.flock`` of the destination
-            # directory: FD-scoped, so a crash releases it
-            # automatically — no placeholder cleanup burden, and the
-            # zero-byte crash-safety invariant is preserved. On mounts
-            # where flock silently no-ops (some remote FSes mounted
-            # ``nolock``) we degrade to the previous check-then-rename
-            # behavior; per-workspace/per-date destinations make
-            # overlapping runs unusual there. See PR #1107 review.
+            # imports are unusable on those destinations. See
+            # ``_rename_promote_locked`` for the fallback.
             if not _fs_lacks_hardlinks(link_err):
                 raise
             log.info(
                 "os.link unsupported on %s (%s); using rename fallback",
                 dst_dir, link_err,
             )
-            lock_fd = None
-            try:
-                try:
-                    lock_fd = os.open(dst_dir, os.O_RDONLY)
-                except OSError:
-                    lock_fd = None
-                if lock_fd is not None and fcntl is not None:
-                    with contextlib.suppress(OSError):
-                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                if os.path.exists(dst):
-                    log.warning(
-                        "Destination raced during copy "
-                        "(concurrent import?): %s",
-                        dst,
-                    )
-                    return (False, None)
-                try:
-                    os.rename(tmp, dst)
-                except OSError as rep_err:
-                    log.warning(
-                        "Fallback promote failed for %s -> %s: %s",
-                        src, dst, rep_err,
-                    )
-                    return (False, None)
-                tmp = None
-                return (True, copied_hash)
-            finally:
-                if lock_fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(lock_fd)
+            if not _rename_promote_locked(src, tmp, dst, dst_dir):
+                return (False, None)
+            tmp = None
+            return (True, copied_hash)
         os.unlink(tmp)
         tmp = None
         return (True, copied_hash)
@@ -3124,6 +3224,72 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
         if tmp is not None:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
+
+
+def _rename_promote_locked(src, tmp, dst, dst_dir):
+    """Promote the verified ``tmp`` to ``dst`` without a hard link.
+
+    Returns True once ``tmp`` has been renamed onto ``dst`` (the temp no
+    longer exists), False when ``dst`` appeared first or the rename
+    failed (the caller's cleanup removes ``tmp``).
+    """
+    # Fall back to existence-check + os.rename, wrapped in a
+    # directory-level POSIX advisory lock. The verified temp
+    # stays hidden until it moves atomically over to ``dst``.
+    # Do NOT reserve the final path as an O_EXCL placeholder
+    # before renaming — a crash between placeholder creation
+    # and os.replace would leave a zero-byte stray at the
+    # intended archive name, and a retry treats that
+    # placeholder as "existing archive file", suffixes the
+    # real photo to ``name_1.ext``, and orphans the empty
+    # file. That violates the crash-recovery invariant that a
+    # dead run leaves only valid archive copies or hidden
+    # temps.
+    #
+    # A bare check-then-rename loses a concurrent-import race:
+    # two hardlinkless-FS jobs targeting the same
+    # destination/date folder could both pass exists() before
+    # either rename(), and the later rename would silently
+    # overwrite the first job's already-verified archive copy
+    # (its ``safe_to_format`` would still report green after
+    # its bytes are gone). Serialize the critical section on
+    # an exclusive ``fcntl.flock`` of the destination
+    # directory: FD-scoped, so a crash releases it
+    # automatically — no placeholder cleanup burden, and the
+    # zero-byte crash-safety invariant is preserved. On mounts
+    # where flock silently no-ops (some remote FSes mounted
+    # ``nolock``) we degrade to the previous check-then-rename
+    # behavior; per-workspace/per-date destinations make
+    # overlapping runs unusual there. See PR #1107 review.
+    lock_fd = None
+    try:
+        try:
+            lock_fd = os.open(dst_dir, os.O_RDONLY)
+        except OSError:
+            lock_fd = None
+        if lock_fd is not None and fcntl is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if os.path.exists(dst):
+            log.warning(
+                "Destination raced during copy "
+                "(concurrent import?): %s",
+                dst,
+            )
+            return False
+        try:
+            os.rename(tmp, dst)
+        except OSError as rep_err:
+            log.warning(
+                "Fallback promote failed for %s -> %s: %s",
+                src, dst, rep_err,
+            )
+            return False
+        return True
+    finally:
+        if lock_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(lock_fd)
 
 
 # errno values that mean "this filesystem doesn't support hard links",
@@ -3797,55 +3963,21 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
     anchor = batch_st.companion_slots.get(group_key)
     counter = 0
     while True:
-        if counter and stop_requested():
-            # This iteration was reached by ADVANCING past a candidate,
-            # and every advance path — claimed sibling, dangling entry,
-            # source-backed entry, unreadable candidate, size mismatch,
-            # hash mismatch — can run without calling _hash_dest_file,
-            # which is the walk's only other cancellation poll. Without
-            # this a Stop goes unobserved for the whole collision chain
-            # while the walk keeps probing a (possibly slow, possibly
-            # dying) network destination. Codex review of PR #1450;
-            # before flip B the rsync walk got this for free by hashing
-            # every existing candidate, and the local walk — which has
-            # always size-gated — never had it at all.
-            #
-            # Reported as a VERDICT, not as ``DestReadCancelled``: no
-            # destination read was interrupted here, so this must not
-            # set ``dest_read_cancelled`` and suppress the batch's mount
-            # probe and catalog pass. See ``_WALK_CANCELLED``.
-            #
-            # Gated on ``counter`` deliberately: the no-collision fast
-            # path stays unpolled, so a Stop racing the orchestrator's
-            # loop-top check cannot flip an otherwise-clean copy into a
-            # cancellation.
+        if _stopped_while_advancing(counter, stop_requested):
             return _WALK_CANCELLED, None
         # ``slot`` is the numeric suffix this probe tries; ``counter``
         # only counts probes. They differ when a same-stem sibling
         # already landed at a suffix (see ``_slot_for``).
         slot = _slot_for(counter, anchor)
-        candidate = (source_file.name if slot == 0
-                     else f"{stem}_{slot}{suffix}")
+        candidate = source_file.name if slot == 0 else f"{stem}_{slot}{suffix}"
         cand_path = os.path.join(batch_st.dest_folder, candidate)
         if claims is not None:
             candidate_key = ctx.fold_basename(candidate)
             if candidate_key in claims:
-                # Claimed earlier in this batch (a same-basename sibling
-                # already queued). If that sibling has our exact bytes,
-                # skip as an intra-batch duplicate; otherwise advance.
-                # Gated on ``checker``: with ``skip_duplicates=False``
-                # both files must be queued under distinct suffixes
-                # instead of the second being counted as
-                # ``skipped_duplicate`` — which would otherwise let a
-                # verified run report ``safe_to_format=True`` because
-                # ``copied + skipped_duplicate == discovered`` without an
-                # off-card row for it. See PR #1113 review.
-                if checker is not None and claims[candidate_key] == src_hash_fn():
-                    state.skipped_duplicate += 1
-                    _counts(state, rel)["skipped_duplicate"] += 1
-                    batch_st.dup_skips.append((source_file, False))
-                    _record_checker(state, checker, source_file,
-                                    batch_st.dest_folder, src_hash_fn())
+                if _skip_claimed_identical_sibling(
+                    state, batch_st, claims[candidate_key], source_file=source_file,
+                    rel=rel, checker=checker, src_hash_fn=src_hash_fn,
+                ):
                     return _WALK_HANDLED, None
                 counter += 1
                 continue
@@ -3862,174 +3994,21 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
             # of which follows a symlink. Verified before the fix; see
             # spec row 13.) Nothing to adopt either — there are no bytes
             # behind it — so advance.
-            #
-            # ONE stat serves as both the existence probe and the
-            # metadata read: a dangling symlink is ``lexists`` but raises
-            # ENOENT here, so the single ``except OSError`` covers the
-            # dangling case AND a candidate that cannot be stat'd, and
-            # both advance. Merged deliberately — a separate
-            # ``os.path.exists`` would be a second round trip per
-            # candidate on a network archive, and it made the
-            # unreadable-candidate branch untestable by hiding which call
-            # a test had to intercept (Codex review of PR #1450).
-            try:
-                cand_stat = os.stat(cand_path)
-            except OSError:
-                # Unreadable candidate (or a dangling symlink): advance
-                # rather than fail the source file (PR 7b flip C).
-                # Deliberately not folded into the zero-byte test below —
-                # a failed stat must never read as "empty".
-                counter += 1
-                continue
-            # Never hash, and never adopt, a candidate that is really
-            # source media (spec decision 13). The hazard is precise: the
-            # walk would read the CARD's own bytes back through the link,
-            # byte-match them against themselves, book
-            # ``skipped_duplicate``, and let ``safe_to_format`` go green
-            # over bytes that exist nowhere but the card. Unlike the
-            # orchestrator's primary-name guard this ADVANCES rather than
-            # failing the file: one poisoned entry does not poison the
-            # sibling slots, so the photo can still be imported safely.
-            # (At counter 0 the orchestrator's guard has already rejected
-            # this geometry with the same two probes, so this can only
-            # fire from counter 1 on — it is kept unconditional so the
-            # walk does not depend on its caller's ordering.)
-            if _is_source_backed_dest(ctx, source_file, cand_path):
-                log.warning(
-                    "%s: destination candidate %s resolves to source "
-                    "media; skipping it (never adopt bytes the card "
-                    "still owns)", state.log_label, cand_path,
-                )
-                counter += 1
-                continue
-            # Already on disk. Byte-identical -> adopt; different ->
-            # advance to the next suffix. Adopting matters because a
-            # crash-interrupted retry may already have written THIS
-            # source's bytes under an earlier suffix: an earlier run
-            # copied a colliding different file to ``name.ext``, put this
-            # source's bytes at ``name_1.ext``, then died before its
-            # scan. Advancing past ``name_1.ext`` without hashing it
-            # would re-copy identical bytes to ``name_2.ext`` and leave
-            # two archive copies of one source photo. See PR #1107
-            # review.
-            if not stat_mod.S_ISREG(cand_stat.st_mode):
-                # FIFOs, device nodes and sockets all stat as size 0, so
-                # the zero-byte branch below would adopt one as this
-                # source's archive copy without ever reading it. (Today
-                # that ends as a spurious failure rather than a silent
-                # lie — the post-scan validation finds no photo row and
-                # reclassifies the file to failed — but failing a healthy
-                # card file over a stray FIFO is still wrong.) The
-                # size-MATCHED branch needs no such guard: it reads the
-                # candidate, and a blocked FIFO read becomes an OSError
-                # advance via _hash_dest_file's watchdog. A directory at
-                # the candidate name lands here too, and advancing is
-                # equally right for it. CodeRabbit review of PR #1450.
-                counter += 1
-                continue
-            cand_size = cand_stat.st_size
-            if src_size == 0 and cand_size == 0:
-                # Zero-byte twin: identical by definition, but kept out
-                # of the duplicate-identity index (see ingest), so it is
-                # an adopted landing rather than a cataloged twin — a
-                # crash may have left these bytes on disk before any
-                # folder/photo row was committed. Size, not hash: a
-                # checker'd zero-byte source hashes to None by
-                # convention and could never match. Adopts at ANY
-                # candidate position on both transports (PR 7b flip A).
-                #
-                # Re-stat the SOURCE first. ``src_size`` was captured by
-                # ``enqueue``'s opening stat, and this is the one adopt
-                # branch that reads nothing — the size-matched branch
-                # below re-reads the source through ``src_hash_fn`` and
-                # would notice a change. A source still being written to
-                # the card can therefore be empty at that stat and have
-                # real bytes by now, and adopting an empty destination
-                # for it books ``skipped_duplicate`` over bytes that
-                # exist only on the card: the destination validates fine
-                # (it IS empty), and a verified run reports
-                # ``safe_to_format=True``. Formatting then loses them.
-                # If it is no longer empty, this candidate simply is not
-                # a match — advance, and the copy/transfer that follows
-                # moves the real bytes. An OSError here means we cannot
-                # confirm emptiness, so advance for the same reason (the
-                # copy then fails with the real error). Codex review of
-                # PR #1450 (P1); the local primary-name case predates
-                # PR 7b, flip A widened it to the other positions.
-                try:
-                    still_empty = source_file.stat().st_size == 0
-                except OSError:
-                    still_empty = False
-                if not still_empty:
-                    counter += 1
-                    continue
-                adopt = (cand_path, EMPTY_FILE_SHA256, EMPTY_FILE_SHA256)
-            elif cand_size == src_size:
-                # Size pre-check: equal hashes imply equal sizes, so a
-                # mismatch rules out a byte match without reading the
-                # file. The archive is often a network mount.
-                try:
-                    cand_hash = _hash_dest_file(cand_path, stop_requested)
-                except DestReadCancelled:
-                    # MUST come first: DestReadCancelled subclasses
-                    # OSError, so the advance handler below would
-                    # otherwise absorb a Stop and let the run keep
-                    # touching the wedged destination (PR #1423).
-                    raise
-                except OSError:
-                    cand_hash = None
-                src_hash = src_hash_fn()
-                if (cand_hash is not None and src_hash is not None
-                        and cand_hash == src_hash):
-                    # Byte-identical file already at the destination
-                    # (e.g. a previous run died between copy and
-                    # catalog). Treat as landed: catalog + stamp it
-                    # rather than skipping — the designed self-heal for
-                    # crash-shaped interruptions. ``src_hash`` is
-                    # non-None here by the gate, so it serves as both
-                    # the ledger and the raw record hash.
-                    adopt = (cand_path, src_hash, src_hash)
-                else:
-                    adopt = None
-            else:
-                adopt = None
-            if adopt is None:
-                counter += 1
-                continue
-            # A byte-identical file already at this slot is only a valid
-            # adopt if the whole companion group can settle here — same
-            # gate as ``_WALK_PLACED`` below. Without this, adopting the
-            # RAW at slot 0 sets the anchor, and a same-stem sibling
-            # (JPEG) that collides with an unrelated file at slot 0
-            # advances to ``_1``, splitting the pair. The scanner can
-            # then merge the RAW with the unrelated JPEG when their
-            # capture metadata is missing or compatible.
-            if anchor is None and _sibling_blocks_slot(
-                batch_st, source_file, stem, slot,
-                checker=checker, stop_requested=stop_requested,
-                claims=claims, ctx=ctx,
-            ):
-                counter += 1
-                continue
-            dest_path, verified_hash, record_hash = adopt
-            if claims is not None:
-                # Claim with the RAW hash (``None`` for a checker'd
-                # zero-byte source) so a later same-basename sibling
-                # compares against the same convention the queued path
-                # uses.
-                claims[ctx.fold_basename(candidate)] = src_hash_fn()
-            # ``_book_adoption`` folds the file into ``landed`` with
-            # origin "skipped_duplicate" — deliberately NOT ``dup_skips``
-            # — so the restricted scan catalogs it and the rollback
-            # decrements the right counter. See its docstring.
-            _book_adoption(
-                state, batch_st, checker, rel=rel,
-                source_file=source_file, dest_path=dest_path,
-                verified_hash=verified_hash, record_hash=record_hash,
-                src_size=src_size, src_mtime_ns=src_mtime_ns,
+            adopt = _existing_candidate_adoption(
+                state, ctx, source_file=source_file, cand_path=cand_path,
+                src_size=src_size, src_hash_fn=src_hash_fn,
+                stop_requested=stop_requested,
             )
-            batch_st.companion_slots.setdefault(group_key, slot)
-            return _WALK_HANDLED, None
+            if adopt is not None and _settle_adoption(
+                state, batch_st, ctx, adopt, source_file=source_file,
+                rel=rel, checker=checker, src_hash_fn=src_hash_fn,
+                src_size=src_size, src_mtime_ns=src_mtime_ns, claims=claims,
+                stop_requested=stop_requested, slot=slot, anchor=anchor,
+                candidate=candidate,
+            ):
+                return _WALK_HANDLED, None
+            counter += 1
+            continue
         if anchor is None and _sibling_blocks_slot(
             batch_st, source_file, stem, slot,
             checker=checker, stop_requested=stop_requested,
@@ -4044,6 +4023,275 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
             continue
         batch_st.companion_slots.setdefault(group_key, slot)
         return _WALK_PLACED, candidate
+
+
+def _stopped_while_advancing(counter, stop_requested):
+    """The collision walk's cancellation poll; True means return
+    ``_WALK_CANCELLED``.
+    """
+    # Only an iteration reached by ADVANCING past a candidate polls,
+    # and every advance path — claimed sibling, dangling entry,
+    # source-backed entry, unreadable candidate, size mismatch,
+    # hash mismatch — can run without calling _hash_dest_file,
+    # which is the walk's only other cancellation poll. Without
+    # this a Stop goes unobserved for the whole collision chain
+    # while the walk keeps probing a (possibly slow, possibly
+    # dying) network destination. Codex review of PR #1450;
+    # before flip B the rsync walk got this for free by hashing
+    # every existing candidate, and the local walk — which has
+    # always size-gated — never had it at all.
+    #
+    # Reported as a VERDICT, not as ``DestReadCancelled``: no
+    # destination read was interrupted here, so this must not
+    # set ``dest_read_cancelled`` and suppress the batch's mount
+    # probe and catalog pass. See ``_WALK_CANCELLED``.
+    #
+    # Gated on ``counter`` deliberately: the no-collision fast
+    # path stays unpolled, so a Stop racing the orchestrator's
+    # loop-top check cannot flip an otherwise-clean copy into a
+    # cancellation.
+    if not counter:
+        return False
+    return stop_requested()
+
+
+def _skip_claimed_identical_sibling(state, batch_st, claimed_hash, *,
+                                    source_file, rel, checker,
+                                    src_hash_fn):
+    """Book an intra-batch duplicate skip against a claimed basename.
+
+    Returns True when the file was booked (the walk is done), False when
+    the walk must advance past the claimed name.
+    """
+    # Claimed earlier in this batch (a same-basename sibling
+    # already queued). If that sibling has our exact bytes,
+    # skip as an intra-batch duplicate; otherwise advance.
+    # Gated on ``checker``: with ``skip_duplicates=False``
+    # both files must be queued under distinct suffixes
+    # instead of the second being counted as
+    # ``skipped_duplicate`` — which would otherwise let a
+    # verified run report ``safe_to_format=True`` because
+    # ``copied + skipped_duplicate == discovered`` without an
+    # off-card row for it. See PR #1113 review.
+    if checker is not None and claimed_hash == src_hash_fn():
+        state.skipped_duplicate += 1
+        _counts(state, rel)["skipped_duplicate"] += 1
+        batch_st.dup_skips.append((source_file, False))
+        _record_checker(state, checker, source_file,
+                        batch_st.dest_folder, src_hash_fn())
+        return True
+    return False
+
+
+def _existing_candidate_adoption(state, ctx, *, source_file, cand_path,
+                                 src_size, src_hash_fn, stop_requested):
+    """Decide whether the existing entry at ``cand_path`` holds this
+    source's bytes.
+
+    Returns ``(dest_path, verified_hash, record_hash)`` for an adoptable
+    candidate, or ``None`` when the walk must advance past it.
+    """
+    # ONE stat serves as both the existence probe and the
+    # metadata read: a dangling symlink is ``lexists`` but raises
+    # ENOENT here, so the single ``except OSError`` covers the
+    # dangling case AND a candidate that cannot be stat'd, and
+    # both advance. Merged deliberately — a separate
+    # ``os.path.exists`` would be a second round trip per
+    # candidate on a network archive, and it made the
+    # unreadable-candidate branch untestable by hiding which call
+    # a test had to intercept (Codex review of PR #1450).
+    try:
+        cand_stat = os.stat(cand_path)
+    except OSError:
+        # Unreadable candidate (or a dangling symlink): advance
+        # rather than fail the source file (PR 7b flip C).
+        # Deliberately not folded into the zero-byte test below —
+        # a failed stat must never read as "empty".
+        return None
+    # Never hash, and never adopt, a candidate that is really
+    # source media (spec decision 13). The hazard is precise: the
+    # walk would read the CARD's own bytes back through the link,
+    # byte-match them against themselves, book
+    # ``skipped_duplicate``, and let ``safe_to_format`` go green
+    # over bytes that exist nowhere but the card. Unlike the
+    # orchestrator's primary-name guard this ADVANCES rather than
+    # failing the file: one poisoned entry does not poison the
+    # sibling slots, so the photo can still be imported safely.
+    # (At counter 0 the orchestrator's guard has already rejected
+    # this geometry with the same two probes, so this can only
+    # fire from counter 1 on — it is kept unconditional so the
+    # walk does not depend on its caller's ordering.)
+    if _is_source_backed_dest(ctx, source_file, cand_path):
+        log.warning(
+            "%s: destination candidate %s resolves to source "
+            "media; skipping it (never adopt bytes the card "
+            "still owns)", state.log_label, cand_path,
+        )
+        return None
+    # Already on disk. Byte-identical -> adopt; different ->
+    # advance to the next suffix. Adopting matters because a
+    # crash-interrupted retry may already have written THIS
+    # source's bytes under an earlier suffix: an earlier run
+    # copied a colliding different file to ``name.ext``, put this
+    # source's bytes at ``name_1.ext``, then died before its
+    # scan. Advancing past ``name_1.ext`` without hashing it
+    # would re-copy identical bytes to ``name_2.ext`` and leave
+    # two archive copies of one source photo. See PR #1107
+    # review.
+    if not stat_mod.S_ISREG(cand_stat.st_mode):
+        # FIFOs, device nodes and sockets all stat as size 0, so
+        # the zero-byte branch below would adopt one as this
+        # source's archive copy without ever reading it. (Today
+        # that ends as a spurious failure rather than a silent
+        # lie — the post-scan validation finds no photo row and
+        # reclassifies the file to failed — but failing a healthy
+        # card file over a stray FIFO is still wrong.) The
+        # size-MATCHED branch needs no such guard: it reads the
+        # candidate, and a blocked FIFO read becomes an OSError
+        # advance via _hash_dest_file's watchdog. A directory at
+        # the candidate name lands here too, and advancing is
+        # equally right for it. CodeRabbit review of PR #1450.
+        return None
+    return _candidate_bytes_adoption(
+        source_file, cand_path, cand_stat.st_size, src_size=src_size,
+        src_hash_fn=src_hash_fn, stop_requested=stop_requested,
+    )
+
+
+def _candidate_bytes_adoption(source_file, cand_path, cand_size, *,
+                              src_size, src_hash_fn, stop_requested):
+    """Compare a regular-file candidate's bytes with the source's.
+
+    Returns ``(dest_path, verified_hash, record_hash)`` on a match, or
+    ``None`` when the walk must advance.
+    """
+    if src_size == 0 and cand_size == 0:
+        # Zero-byte twin: identical by definition, but kept out
+        # of the duplicate-identity index (see ingest), so it is
+        # an adopted landing rather than a cataloged twin — a
+        # crash may have left these bytes on disk before any
+        # folder/photo row was committed. Size, not hash: a
+        # checker'd zero-byte source hashes to None by
+        # convention and could never match. Adopts at ANY
+        # candidate position on both transports (PR 7b flip A).
+        #
+        # Re-stat the SOURCE first. ``src_size`` was captured by
+        # ``enqueue``'s opening stat, and this is the one adopt
+        # branch that reads nothing — the size-matched branch
+        # below re-reads the source through ``src_hash_fn`` and
+        # would notice a change. A source still being written to
+        # the card can therefore be empty at that stat and have
+        # real bytes by now, and adopting an empty destination
+        # for it books ``skipped_duplicate`` over bytes that
+        # exist only on the card: the destination validates fine
+        # (it IS empty), and a verified run reports
+        # ``safe_to_format=True``. Formatting then loses them.
+        # If it is no longer empty, this candidate simply is not
+        # a match — advance, and the copy/transfer that follows
+        # moves the real bytes. An OSError here means we cannot
+        # confirm emptiness, so advance for the same reason (the
+        # copy then fails with the real error). Codex review of
+        # PR #1450 (P1); the local primary-name case predates
+        # PR 7b, flip A widened it to the other positions.
+        try:
+            still_empty = source_file.stat().st_size == 0
+        except OSError:
+            still_empty = False
+        if not still_empty:
+            return None
+        return (cand_path, EMPTY_FILE_SHA256, EMPTY_FILE_SHA256)
+    # Size pre-check: equal hashes imply equal sizes, so a
+    # mismatch rules out a byte match without reading the
+    # file. The archive is often a network mount.
+    if cand_size != src_size:
+        return None
+    try:
+        cand_hash = _hash_dest_file(cand_path, stop_requested)
+    except DestReadCancelled:
+        # MUST come first: DestReadCancelled subclasses
+        # OSError, so the advance handler below would
+        # otherwise absorb a Stop and let the run keep
+        # touching the wedged destination (PR #1423).
+        raise
+    except OSError:
+        cand_hash = None
+    src_hash = src_hash_fn()
+    if (cand_hash is not None and src_hash is not None
+            and cand_hash == src_hash):
+        # Byte-identical file already at the destination
+        # (e.g. a previous run died between copy and
+        # catalog). Treat as landed: catalog + stamp it
+        # rather than skipping — the designed self-heal for
+        # crash-shaped interruptions. ``src_hash`` is
+        # non-None here by the gate, so it serves as both
+        # the ledger and the raw record hash.
+        return (cand_path, src_hash, src_hash)
+    return None
+
+
+def _settle_adoption(state, batch_st, ctx, adopt, *, source_file, rel,
+                     checker, src_hash_fn, src_size, src_mtime_ns, claims,
+                     stop_requested, slot, anchor, candidate):
+    """Book an adoptable candidate unless its companion group cannot
+    settle at ``slot``; returns True when booked, False to advance.
+    """
+    stem = os.path.splitext(source_file.name)[0]
+    # A byte-identical file already at this slot is only a valid
+    # adopt if the whole companion group can settle here — same
+    # gate as the walk's ``_WALK_PLACED`` path. Without this, adopting the
+    # RAW at slot 0 sets the anchor, and a same-stem sibling
+    # (JPEG) that collides with an unrelated file at slot 0
+    # advances to ``_1``, splitting the pair. The scanner can
+    # then merge the RAW with the unrelated JPEG when their
+    # capture metadata is missing or compatible.
+    if anchor is None and _sibling_blocks_slot(
+        batch_st, source_file, stem, slot,
+        checker=checker, stop_requested=stop_requested,
+        claims=claims, ctx=ctx,
+    ):
+        return False
+    dest_path, verified_hash, record_hash = adopt
+    if claims is not None:
+        # Claim with the RAW hash (``None`` for a checker'd
+        # zero-byte source) so a later same-basename sibling
+        # compares against the same convention the queued path
+        # uses.
+        claims[ctx.fold_basename(candidate)] = src_hash_fn()
+    # ``_book_adoption`` folds the file into ``landed`` with
+    # origin "skipped_duplicate" — deliberately NOT ``dup_skips``
+    # — so the restricted scan catalogs it and the rollback
+    # decrements the right counter. See its docstring.
+    _book_adoption(
+        state, batch_st, checker, rel=rel,
+        source_file=source_file, dest_path=dest_path,
+        verified_hash=verified_hash, record_hash=record_hash,
+        src_size=src_size, src_mtime_ns=src_mtime_ns,
+    )
+    batch_st.companion_slots.setdefault(_companion_key(source_file), slot)
+    return True
+
+
+def _lazy_source_hash(checker, source_file):
+    """Zero-arg callable returning ``source_file``'s hash, read at most once.
+
+    The checker's ``content_hash`` when duplicate skipping is on (``None``
+    for a zero-byte source), else ``compute_file_hash``. A read error
+    propagates from the first call; later calls return None without
+    re-reading.
+    """
+    _sh_cache = [False, None]
+
+    def _src_hash_cached():
+        if not _sh_cache[0]:
+            _sh_cache[0] = True
+            _sh_cache[1] = (
+                checker.content_hash(source_file)
+                if checker is not None
+                else compute_file_hash(str(source_file))
+            )
+        return _sh_cache[1]
+
+    return _src_hash_cached
 
 
 class _LocalTransport:
@@ -4094,19 +4342,7 @@ class _LocalTransport:
             # copy_and_hash_verify src_hash arg. Compute lazily and cache
             # in a small closure so nothing hashes the card twice — and
             # so a run with no collisions never hashes the card at all.
-            _sh_cache = [False, None]
-
-            def _src_hash_cached(
-                _sh_cache=_sh_cache, source_file=source_file,
-            ):
-                if not _sh_cache[0]:
-                    _sh_cache[0] = True
-                    _sh_cache[1] = (
-                        checker.content_hash(source_file)
-                        if checker is not None
-                        else compute_file_hash(str(source_file))
-                    )
-                return _sh_cache[1]
+            _src_hash_cached = _lazy_source_hash(checker, source_file)
 
             # Destination basename + collision handling, shared with
             # the rsync transport (``_resolve_dest_collision``). No
@@ -4172,6 +4408,39 @@ class _LocalTransport:
         # ``batch_st.to_transfer`` is always empty on this transport. The
         # orchestrator calls this unconditionally on both transports.
         return
+
+
+def _skip_queued_identical(state, batch_st, *, source_file, rel, checker,
+                           src_hash):
+    """Book an rsync-transport duplicate skip against a byte-identical
+    file this batch already queued; returns True when booked.
+    """
+    # Intra-batch same-content dedup: an earlier file THIS BATCH
+    # queued a byte-identical source under a different basename
+    # (e.g. ``DSC_0001.jpg`` and ``DSC_0002.jpg`` with the same
+    # bytes). The batch's rsync hasn't happened yet, so the DB
+    # twin lookup and ``checker.match()`` in ``_duplicate_gate`` can't see it —
+    # skip here to match the local path's post-copy behaviour.
+    # Gated on ``checker`` (``skip_duplicates=True``): the local
+    # path only skips same-content/different-name twins through
+    # ``DuplicateChecker``, so when the user disabled duplicate
+    # skipping both files must be rsynced/cataloged under
+    # distinct names instead of the second one being silently
+    # counted as ``skipped_duplicate`` (which would otherwise let
+    # a verified run report ``safe_to_format=True`` because
+    # ``copied + skipped_duplicate == discovered`` without an
+    # off-card row for the second file). See PR #1113 review.
+    if (
+        checker is not None
+        and src_hash is not None
+        and src_hash in batch_st.queued_src_hashes
+    ):
+        state.skipped_duplicate += 1
+        _counts(state, rel)["skipped_duplicate"] += 1
+        batch_st.dup_skips.append((source_file, False))
+        _record_checker(state, checker, source_file, batch_st.dest_folder, src_hash)
+        return True
+    return False
 
 
 class _RsyncTransport:
@@ -4329,30 +4598,10 @@ class _RsyncTransport:
         except OSError as e:
             _fail(state, rel, source_file, str(e))
             return _ENQ_HANDLED
-        # Intra-batch same-content dedup: an earlier file THIS BATCH
-        # queued a byte-identical source under a different basename
-        # (e.g. ``DSC_0001.jpg`` and ``DSC_0002.jpg`` with the same
-        # bytes). The batch's rsync hasn't happened yet, so the DB
-        # twin lookup and ``checker.match()`` above can't see it —
-        # skip here to match the local path's post-copy behaviour.
-        # Gated on ``checker`` (``skip_duplicates=True``): the local
-        # path only skips same-content/different-name twins through
-        # ``DuplicateChecker``, so when the user disabled duplicate
-        # skipping both files must be rsynced/cataloged under
-        # distinct names instead of the second one being silently
-        # counted as ``skipped_duplicate`` (which would otherwise let
-        # a verified run report ``safe_to_format=True`` because
-        # ``copied + skipped_duplicate == discovered`` without an
-        # off-card row for the second file). See PR #1113 review.
-        if (
-            checker is not None
-            and src_hash is not None
-            and src_hash in batch_st.queued_src_hashes
+        if _skip_queued_identical(
+            state, batch_st, source_file=source_file, rel=rel,
+            checker=checker, src_hash=src_hash,
         ):
-            state.skipped_duplicate += 1
-            _counts(state, rel)["skipped_duplicate"] += 1
-            batch_st.dup_skips.append((source_file, False))
-            _record_checker(state, checker, source_file, dest_folder, src_hash)
             return _ENQ_HANDLED
         # Collision parity (FIX 2): rsync lands files flat by basename,
         # so two different card files with the same basename in one batch
@@ -4410,25 +4659,15 @@ class _RsyncTransport:
         return _ENQ_QUEUED
 
     def flush_batch(self, state, batch_st, *, rel, checker):
-        # Local-rebinding shim: the body below is the remote path's
-        # transfer phase, moved verbatim (including its
-        # ``to_transfer``/``cancelled`` guard); these bindings keep its
-        # lines byte-identical to the pre-move text. ``_emit_transfer``
-        # is partially applied with ``state`` so its call sites keep the
-        # pre-move argument layout.
-        job = self._job
-        runner = self._runner
-        params = self._params
+        # The remote path's transfer phase, moved verbatim in PR 7
+        # (including its ``to_transfer``/``cancelled`` guard) and since
+        # split into the ``_transfer_queued`` / ``_book_transferred``
+        # steps below.
         remote = self._remote
-        rsync_bin = self._rsync_bin
-        ssh_base = self._ssh_base
         move_mod = self._move_mod
-        attests_bytes = self.attests_bytes
-        dest_folder = batch_st.dest_folder
-        _emit_transfer = functools.partial(self._emit_transfer, state)
         ssh_dest = (
-            posixpath.join(ssh_base, *rel.split("/")) if rel != "."
-            else ssh_base
+            posixpath.join(self._ssh_base, *rel.split("/")) if rel != "."
+            else self._ssh_base
         )
         # Honor cancellation before any network transfer starts. The break
         # inside the per-file queue-building loop above sets ``cancelled``
@@ -4441,45 +4680,7 @@ class _RsyncTransport:
         # cataloged by the batch-scan block below. See PR #1113
         # review.
         if batch_st.to_transfer and not state.cancelled:
-            # ``--ignore-existing`` protects against basename-race overwrites:
-            # two remote import jobs (or a job racing another writer) that
-            # both passed the earlier mount-side os.path.exists check for
-            # DSC_0001.jpg would otherwise both rsync to the same NAS name
-            # with plain ``rsync -a``, and the second writer would clobber
-            # the first's already-verified bytes. ``--ignore-existing`` tells
-            # rsync's receiver to skip files that already exist there, so
-            # the first landing's bytes stay put. On the verify path, the
-            # subsequent ``rsync -an --checksum`` step then detects the
-            # mismatch between the second writer's card bytes and the
-            # first-writer bytes on the NAS and fails that specific file
-            # honestly; without verification the honesty gate already
-            # reports safe_to_format=False for the whole run, so a masked
-            # race can't quietly flip the pill green. Crash-recovery already
-            # avoids re-transferring files it saw on the mount (hash match
-            # -> skip; hash mismatch -> advance to a suffix that doesn't
-            # exist), so no legitimate flow relies on rsync overwriting an
-            # existing destination file. See PR #1113 review.
-            extra_args = [
-                "-e", move_mod._ssh_rsh_string(remote),
-                "--partial-dir=.rsync-partial",
-                "--ignore-existing",
-                # ``--copy-links`` dereferences symlinked source files so
-                # the NAS receives their referenced bytes instead of a
-                # symlink. The base command is ``rsync -a``, which preserves
-                # symlinks; without ``-L`` a curated card folder that
-                # symlinks to ``/Volumes/Card/DCIM/IMG_0001.JPG`` would send
-                # the symlink itself to the NAS. With ``verify_by_hash``
-                # the mount-side scan follows the symlink through the local
-                # mount, so ``safe_to_format`` can still go green — and
-                # then formatting/unmounting the card breaks the archived
-                # copy. Card-local symlinks aren't legitimately preserved
-                # by an archive of the card contents, and the local path's
-                # ingest reads the referenced file bytes too. See PR #1113
-                # review.
-                "--copy-links",
-            ]
-            if remote.get("bwlimit_kbps"):
-                extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
+            extra_args = self._rsync_extra_args()
             rsync_target = move_mod.rsync_dest_spec(remote, ssh_dest)
             # rsync creates the leaf itself but not intermediate parents.
             ok_mkdir, mkdir_detail = move_mod._remote_mkdir_p(remote, ssh_dest)
@@ -4488,165 +4689,240 @@ class _RsyncTransport:
                     _fail(state, rel, sf,
                           f"remote mkdir failed for {ssh_dest}: {mkdir_detail}")
             else:
-                # Split into the flat fast path (dest basename == card
-                # basename) and collision-renamed files (transferred and
-                # verified individually to an explicit NAS filename, since a
-                # flat --files-from list to one dir can't rename).
-                flat = [
-                    (sf, bn, sh, sz, mt)
-                    for sf, bn, sh, sz, mt in batch_st.to_transfer
-                    if bn == sf.name
-                ]
-                renamed = [
-                    (sf, bn, sh, sz, mt)
-                    for sf, bn, sh, sz, mt in batch_st.to_transfer
-                    if bn != sf.name
-                ]
+                transferred = self._transfer_queued(
+                    state, batch_st, rel=rel, ssh_dest=ssh_dest,
+                    rsync_target=rsync_target, extra_args=extra_args,
+                )
+                self._book_transferred(
+                    state, batch_st, rel=rel, checker=checker,
+                    transferred=transferred, rsync_target=rsync_target,
+                )
 
-                def _do_rsync(src_specs, target, dest_is_dir, extra_args,
-                              progress_cb=None):
-                    try:
-                        rc, stderr, timed_out = move_mod._run_rsync_streamed(
-                            None, target, [], len(src_specs), progress_cb,
-                            rsync_bin=rsync_bin, extra_args=extra_args,
-                            src_specs=src_specs,
-                            src_specs_dest_is_dir=dest_is_dir,
-                            # Stop must reach the subprocess: a slow batch
-                            # can otherwise pin "cancelling" for hours,
-                            # since cancellation is only observed at file/
-                            # batch boundaries the transfer never yields.
-                            # Non-blocking probe: this fires from the rsync
-                            # watchdog thread, and ``is_cancelled`` would
-                            # park it inside ``wait_if_paused`` on Pause,
-                            # disabling both stall detection and Stop until
-                            # the user resumes. Pause is handled at the
-                            # existing batch-boundary check below.
-                            cancel_check=lambda: runner.cancellation_requested(
-                                job["id"]),
-                        )
-                        return rc, stderr, timed_out
-                    except OSError as exc:
-                        return 1, str(exc), False
+    def _rsync_extra_args(self):
+        """The rsync flags every transfer of this run passes."""
+        remote = self._remote
+        # ``--ignore-existing`` protects against basename-race overwrites:
+        # two remote import jobs (or a job racing another writer) that
+        # both passed the earlier mount-side os.path.exists check for
+        # DSC_0001.jpg would otherwise both rsync to the same NAS name
+        # with plain ``rsync -a``, and the second writer would clobber
+        # the first's already-verified bytes. ``--ignore-existing`` tells
+        # rsync's receiver to skip files that already exist there, so
+        # the first landing's bytes stay put. On the verify path, the
+        # subsequent ``rsync -an --checksum`` step then detects the
+        # mismatch between the second writer's card bytes and the
+        # first-writer bytes on the NAS and fails that specific file
+        # honestly; without verification the honesty gate already
+        # reports safe_to_format=False for the whole run, so a masked
+        # race can't quietly flip the pill green. Crash-recovery already
+        # avoids re-transferring files it saw on the mount (hash match
+        # -> skip; hash mismatch -> advance to a suffix that doesn't
+        # exist), so no legitimate flow relies on rsync overwriting an
+        # existing destination file. See PR #1113 review.
+        extra_args = [
+            "-e", self._move_mod._ssh_rsh_string(remote),
+            "--partial-dir=.rsync-partial",
+            "--ignore-existing",
+            # ``--copy-links`` dereferences symlinked source files so
+            # the NAS receives their referenced bytes instead of a
+            # symlink. The base command is ``rsync -a``, which preserves
+            # symlinks; without ``-L`` a curated card folder that
+            # symlinks to ``/Volumes/Card/DCIM/IMG_0001.JPG`` would send
+            # the symlink itself to the NAS. With ``verify_by_hash``
+            # the mount-side scan follows the symlink through the local
+            # mount, so ``safe_to_format`` can still go green — and
+            # then formatting/unmounting the card breaks the archived
+            # copy. Card-local symlinks aren't legitimately preserved
+            # by an archive of the card contents, and the local path's
+            # ingest reads the referenced file bytes too. See PR #1113
+            # review.
+            "--copy-links",
+        ]
+        if remote.get("bwlimit_kbps"):
+            extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
+        return extra_args
 
-                def _rsync_cancelled(rc):
-                    # A Stop mid-transfer kills the subprocess via the
-                    # cancel_check above and surfaces as a nonzero exit.
-                    # That is cancelled work, not a pile of per-file
-                    # failures: queued files stay on the card for the next
-                    # run, and whatever rsync landed before the kill is
-                    # adopted by crash-recovery like any mid-batch stop
-                    # (--partial-dir preserves the interrupted file).
-                    # Non-blocking probe matches the watchdog above; the
-                    # batch-boundary ``is_cancelled`` further down is where
-                    # pause is actually observed.
-                    return rc != 0 and runner.cancellation_requested(
-                        job["id"])
+    def _do_rsync(self, src_specs, target, dest_is_dir, extra_args,
+                  progress_cb=None):
+        """One streamed rsync; returns ``(rc, stderr, timed_out)``."""
+        try:
+            rc, stderr, timed_out = self._move_mod._run_rsync_streamed(
+                None, target, [], len(src_specs), progress_cb,
+                rsync_bin=self._rsync_bin, extra_args=extra_args,
+                src_specs=src_specs,
+                src_specs_dest_is_dir=dest_is_dir,
+                # Stop must reach the subprocess: a slow batch
+                # can otherwise pin "cancelling" for hours,
+                # since cancellation is only observed at file/
+                # batch boundaries the transfer never yields.
+                # Non-blocking probe: this fires from the rsync
+                # watchdog thread, and ``is_cancelled`` would
+                # park it inside ``wait_if_paused`` on Pause,
+                # disabling both stall detection and Stop until
+                # the user resumes. Pause is handled at the
+                # existing batch-boundary check in ``_transfer_queued``.
+                cancel_check=lambda: self._runner.cancellation_requested(
+                    self._job["id"]),
+            )
+            return rc, stderr, timed_out
+        except OSError as exc:
+            return 1, str(exc), False
 
-                transferred = []   # (sf, dest_basename, src_hash, src_size, src_mtime_ns, nas_full_path)
-                batch_size = len(batch_st.to_transfer)
-                # Flat batch: one rsync into the dir. rsync names each file
-                # as it lands; forward that as the batch's honest
-                # actually-crossed-the-network counter next to the
-                # prepared-files counter (which already reads ``emitted``).
-                if flat:
-                    rc, stderr, timed_out = _do_rsync(
-                        [str(sf) for sf, _bn, _sh, _sz, _mt in flat],
-                        rsync_target, True,
-                        extra_args,
-                        progress_cb=lambda done, _tot, name, _label,
-                        _rel=rel, _bs=batch_size:
-                            _emit_transfer(_rel, done, _bs, name))
-                    if timed_out:
-                        for sf, _bn, _sh, _sz, _mt in flat:
-                            _fail(state, rel, sf, "rsync stalled (no progress)")
-                    elif _rsync_cancelled(rc):
-                        state.cancelled = True
-                    elif rc != 0:
-                        for sf, _bn, _sh, _sz, _mt in flat:
-                            _fail(state, rel, sf, f"rsync failed: {stderr.strip()}")
-                    else:
-                        for sf, bn, sh, sz, mt in flat:
-                            transferred.append((
-                                sf, bn, sh, sz, mt,
-                                posixpath.join(ssh_dest, bn)))
-                # Renamed files: one rsync each to the explicit NAS file
-                # path (rsync <card> user@host:/dir/DSC_0001_1.jpg).
-                for sf, bn, sh, sz, mt in renamed:
-                    if state.cancelled or runner.is_cancelled(job["id"]):
-                        state.cancelled = True
-                        break
-                    nas_full = posixpath.join(ssh_dest, bn)
-                    rc, stderr, timed_out = _do_rsync(
-                        [str(sf)],
-                        move_mod.rsync_dest_spec(remote, nas_full), False,
-                        extra_args)
-                    if timed_out:
-                        _fail(state, rel, sf, "rsync stalled (no progress)")
-                    elif _rsync_cancelled(rc):
-                        state.cancelled = True
-                        break
-                    elif rc != 0:
-                        _fail(state, rel, sf, f"rsync failed: {stderr.strip()}")
-                    else:
-                        transferred.append((sf, bn, sh, sz, mt, nas_full))
-                        # ``len(transferred)`` counts only files that truly
-                        # landed, so a failed flat batch can't inflate the
-                        # renamed files' transfer counter.
-                        _emit_transfer(rel, len(transferred), batch_size, bn)
+    def _rsync_cancelled(self, rc):
+        # A Stop mid-transfer kills the subprocess via the
+        # cancel_check in ``_do_rsync`` and surfaces as a nonzero exit.
+        # That is cancelled work, not a pile of per-file
+        # failures: queued files stay on the card for the next
+        # run, and whatever rsync landed before the kill is
+        # adopted by crash-recovery like any mid-batch stop
+        # (--partial-dir preserves the interrupted file).
+        # Non-blocking probe matches the watchdog; the
+        # batch-boundary ``is_cancelled`` in ``_transfer_queued`` is where
+        # pause is actually observed.
+        return rc != 0 and self._runner.cancellation_requested(
+            self._job["id"])
 
-                for sf, bn, src_hash, sz, mt, nas_full in transferred:
-                    dest_path = os.path.join(dest_folder, bn)
-                    # Independent verification (Task 2.7 FIX 1): card -> NAS,
-                    # opt-in behind ``verify_by_hash`` (it reads every NAS
-                    # byte; same knob the local path uses). This compares the
-                    # actual CARD file against its NAS counterpart — the only
-                    # check that confirms the card's bytes landed intact;
-                    # comparing the SMB mount view against the NAS would be
-                    # near-tautological (same physical storage). By default
-                    # the transfer relies on rsync's own integrity checking
-                    # and the run reports ``safe_to_format=False`` (honesty
-                    # gate below) because no independent hash was made.
-                    if params.verify_by_hash:
-                        if bn == sf.name:
-                            v = move_mod.remote_verify_files(
-                                rsync_bin, [str(sf)], rsync_target,
-                                remote, dest_is_dir=True)
-                        else:
-                            # Collision-renamed: verify against the explicit
-                            # NAS name (file->file), not the card basename.
-                            v = move_mod.remote_verify_files(
-                                rsync_bin, [str(sf)],
-                                move_mod.rsync_dest_spec(remote, nas_full),
-                                remote, dest_is_dir=False)
-                        if v is not None:
-                            name, detail = v
-                            reason = (
-                                f"remote verification failed "
-                                f"({detail or name})"
-                                if name == "__ERROR__"
-                                else f"remote verification: '{name}' missing "
-                                     f"or differs at destination"
-                            )
-                            _fail(state, rel, sf, reason)
-                            continue
-                    _book_copied(state, rel, attests_bytes)
-                    batch_st.landed.append(_landed_copied(
-                        sf, dest_path=dest_path,
-                        # checker.content_hash returns None for size-0;
-                        # the ledger convention is EMPTY, scan's row
-                        # convention is NULL — normalize here, once,
-                        # instead of in every consumer. Do NOT
-                        # normalize ``src_hash`` itself: the
-                        # intra-batch dedup maps
-                        # (claimed_basenames/queued_src_hashes), the
-                        # adopt gate, and ``_record_checker`` rely on
-                        # the None convention.
-                        verified_hash=src_hash
-                        if src_hash is not None
-                        else EMPTY_FILE_SHA256,
-                        src_size=sz, src_mtime_ns=mt,
-                    ))
-                    _record_checker(state, checker, sf, dest_folder, src_hash)
+    def _transfer_queued(self, state, batch_st, *, rel, ssh_dest,
+                         rsync_target, extra_args):
+        """Rsync this batch's queued files; return the ones that landed.
+
+        Each returned entry is ``(sf, dest_basename, src_hash, src_size,
+        src_mtime_ns, nas_full_path)``. Failures are booked here; a Stop
+        sets ``state.cancelled`` and books nothing for the files it cut
+        off.
+        """
+        job = self._job
+        runner = self._runner
+        remote = self._remote
+        _emit_transfer = functools.partial(self._emit_transfer, state)
+        # Split into the flat fast path (dest basename == card
+        # basename) and collision-renamed files (transferred and
+        # verified individually to an explicit NAS filename, since a
+        # flat --files-from list to one dir can't rename).
+        flat = [
+            (sf, bn, sh, sz, mt)
+            for sf, bn, sh, sz, mt in batch_st.to_transfer
+            if bn == sf.name
+        ]
+        renamed = [
+            (sf, bn, sh, sz, mt)
+            for sf, bn, sh, sz, mt in batch_st.to_transfer
+            if bn != sf.name
+        ]
+        transferred = []   # (sf, dest_basename, src_hash, src_size, src_mtime_ns, nas_full_path)
+        batch_size = len(batch_st.to_transfer)
+        # Flat batch: one rsync into the dir. rsync names each file
+        # as it lands; forward that as the batch's honest
+        # actually-crossed-the-network counter next to the
+        # prepared-files counter (which already reads ``emitted``).
+        if flat:
+            rc, stderr, timed_out = self._do_rsync(
+                [str(sf) for sf, _bn, _sh, _sz, _mt in flat],
+                rsync_target, True,
+                extra_args,
+                progress_cb=lambda done, _tot, name, _label,
+                _rel=rel, _bs=batch_size:
+                    _emit_transfer(_rel, done, _bs, name))
+            if timed_out:
+                for sf, _bn, _sh, _sz, _mt in flat:
+                    _fail(state, rel, sf, "rsync stalled (no progress)")
+            elif self._rsync_cancelled(rc):
+                state.cancelled = True
+            elif rc != 0:
+                for sf, _bn, _sh, _sz, _mt in flat:
+                    _fail(state, rel, sf, f"rsync failed: {stderr.strip()}")
+            else:
+                for sf, bn, sh, sz, mt in flat:
+                    transferred.append((
+                        sf, bn, sh, sz, mt,
+                        posixpath.join(ssh_dest, bn)))
+        # Renamed files: one rsync each to the explicit NAS file
+        # path (rsync <card> user@host:/dir/DSC_0001_1.jpg).
+        for sf, bn, sh, sz, mt in renamed:
+            if state.cancelled or runner.is_cancelled(job["id"]):
+                state.cancelled = True
+                break
+            nas_full = posixpath.join(ssh_dest, bn)
+            rc, stderr, timed_out = self._do_rsync(
+                [str(sf)],
+                self._move_mod.rsync_dest_spec(remote, nas_full), False,
+                extra_args)
+            if timed_out:
+                _fail(state, rel, sf, "rsync stalled (no progress)")
+            elif self._rsync_cancelled(rc):
+                state.cancelled = True
+                break
+            elif rc != 0:
+                _fail(state, rel, sf, f"rsync failed: {stderr.strip()}")
+            else:
+                transferred.append((sf, bn, sh, sz, mt, nas_full))
+                # ``len(transferred)`` counts only files that truly
+                # landed, so a failed flat batch can't inflate the
+                # renamed files' transfer counter.
+                _emit_transfer(rel, len(transferred), batch_size, bn)
+        return transferred
+
+    def _book_transferred(self, state, batch_st, *, rel, checker,
+                          transferred, rsync_target):
+        """Verify (under ``verify_by_hash``) and book each transferred file."""
+        remote = self._remote
+        rsync_bin = self._rsync_bin
+        move_mod = self._move_mod
+        attests_bytes = self.attests_bytes
+        dest_folder = batch_st.dest_folder
+        for sf, bn, src_hash, sz, mt, nas_full in transferred:
+            dest_path = os.path.join(dest_folder, bn)
+            # Independent verification (Task 2.7 FIX 1): card -> NAS,
+            # opt-in behind ``verify_by_hash`` (it reads every NAS
+            # byte; same knob the local path uses). This compares the
+            # actual CARD file against its NAS counterpart — the only
+            # check that confirms the card's bytes landed intact;
+            # comparing the SMB mount view against the NAS would be
+            # near-tautological (same physical storage). By default
+            # the transfer relies on rsync's own integrity checking
+            # and the run reports ``safe_to_format=False`` (honesty
+            # gate below) because no independent hash was made.
+            if self._params.verify_by_hash:
+                if bn == sf.name:
+                    v = move_mod.remote_verify_files(
+                        rsync_bin, [str(sf)], rsync_target,
+                        remote, dest_is_dir=True)
+                else:
+                    # Collision-renamed: verify against the explicit
+                    # NAS name (file->file), not the card basename.
+                    v = move_mod.remote_verify_files(
+                        rsync_bin, [str(sf)],
+                        move_mod.rsync_dest_spec(remote, nas_full),
+                        remote, dest_is_dir=False)
+                if v is not None:
+                    name, detail = v
+                    reason = (
+                        f"remote verification failed "
+                        f"({detail or name})"
+                        if name == "__ERROR__"
+                        else f"remote verification: '{name}' missing "
+                             f"or differs at destination"
+                    )
+                    _fail(state, rel, sf, reason)
+                    continue
+            _book_copied(state, rel, attests_bytes)
+            batch_st.landed.append(_landed_copied(
+                sf, dest_path=dest_path,
+                # checker.content_hash returns None for size-0;
+                # the ledger convention is EMPTY, scan's row
+                # convention is NULL — normalize here, once,
+                # instead of in every consumer. Do NOT
+                # normalize ``src_hash`` itself: the
+                # intra-batch dedup maps
+                # (claimed_basenames/queued_src_hashes), the
+                # adopt gate, and ``_record_checker`` rely on
+                # the None convention.
+                verified_hash=src_hash
+                if src_hash is not None
+                else EMPTY_FILE_SHA256,
+                src_size=sz, src_mtime_ns=mt,
+            ))
+            _record_checker(state, checker, sf, dest_folder, src_hash)
 
 
 class _ImportBatchLoop:
@@ -4959,25 +5235,7 @@ class _ImportBatchLoop:
         db = self._db
         params = self._params
         attests_bytes = self.attests_bytes
-        if (
-            batch_st.landed and not batch_st.dest_read_cancelled
-            and not _record_landed_files(
-                self._job, db, state, batch_st, self._source_snapshots,
-                self._runner,
-            )
-        ):
-            # Stopped while waiting to record the landings. Never catalog
-            # them unrecorded: book them failed (the bytes are in the
-            # destination, and a retry adopts them) and skip the catalog.
-            state.cancelled = True
-            for entry in batch_st.landed:
-                _reclassify_landed_failed(
-                    state, rel, entry,
-                    "import stopped before this file could be cataloged; "
-                    "it is in the destination, and a retry catalogs it",
-                    attests_bytes,
-                )
-            batch_st.landed = []
+        self._record_landings_or_fail(batch_st, rel)
         if not batch_st.landed or batch_st.dest_read_cancelled:
             return
         pre_scan_hashes = _catalog_scan_and_prescan(
@@ -5041,6 +5299,33 @@ class _ImportBatchLoop:
         # predicate then skips.
         _fill_wc_overrides(state, batch_st, params)
 
+    def _record_landings_or_fail(self, batch_st, rel):
+        """Record this batch's landings for a resume before cataloging them.
+
+        A Stop while waiting to record them books them failed and empties
+        ``landed``, so ``_catalog_batch`` skips the catalog.
+        """
+        state = self._state
+        if (
+            batch_st.landed and not batch_st.dest_read_cancelled
+            and not _record_landed_files(
+                self._job, self._db, state, batch_st, self._source_snapshots,
+                self._runner,
+            )
+        ):
+            # Stopped while waiting to record the landings. Never catalog
+            # them unrecorded: book them failed (the bytes are in the
+            # destination, and a retry adopts them) and skip the catalog.
+            state.cancelled = True
+            for entry in batch_st.landed:
+                _reclassify_landed_failed(
+                    state, rel, entry,
+                    "import stopped before this file could be cataloged; "
+                    "it is in the destination, and a retry catalogs it",
+                    self.attests_bytes,
+                )
+            batch_st.landed = []
+
     def _publish_batch_scope(self, batch_st):
         """Publish the end-of-batch resume scope.
 
@@ -5089,15 +5374,9 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # (normalize → baseline → guards) is load-bearing.
     ctx = _build_destination_context(db, params)
 
-    # Byte transport — the ONLY transport-divergent code. Local: every
-    # file is copied and hash-verified inside ``enqueue``. Rsync (SSH):
-    # ``enqueue`` reserves and queues; ``flush_batch`` moves the batch's
-    # bytes. Everything below runs identically over either.
-    transport = (
-        _RsyncTransport(job, runner, params, ctx)
-        if params.remote_target is not None
-        else _LocalTransport(params, ctx)
-    )
+    # Byte transport — the ONLY transport-divergent code. Everything
+    # below runs identically over either.
+    transport = _make_transport(job, runner, params, ctx)
 
     runner.set_steps(job["id"], [
         {"id": "import", "label": "Copy & catalog"},
@@ -5115,7 +5394,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     # Destructured BY NAME (see ``_ImportPlan``: same-typed field
     # transpositions survive a positional unpack and the parity test).
     # ``plan.files``/``plan.timestamps`` are consumed inside the planner;
-    # the loop below works from ``batches``.
+    # the loop below works from ``plan.batches``.
     # Discovery can take minutes on a large card. Publish an empty scope
     # first, so a restart during it still leaves a resumable row.
     if not _publish_resume_scope(
@@ -5131,25 +5410,15 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             remote_unverified=False,
         )
     plan = _plan_import(db, params, _emit, state)
-    discovered = plan.discovered
-    source_snapshots = plan.source_snapshots
-    include_paths = plan.include_paths
-    deselected = plan.deselected
-    vanished_paths = plan.vanished_paths
-    appeared = plan.appeared
-    batches = plan.batches
     # The source snapshots gate a resume's drift check (a different card
     # at the same path), so they must be on the row before any copy.
     if not _publish_resume_scope(
-        job, db, state, source_snapshots, runner=runner, require_flush=True,
+        job, db, state, plan.source_snapshots, runner=runner,
+        require_flush=True,
     ):
         state.cancelled = True
-        return _finalize_import(
-            job, runner, db, state, params,
-            discovered=discovered, include_paths=include_paths,
-            source_snapshots=source_snapshots, deselected=deselected,
-            vanished_paths=vanished_paths, appeared=appeared,
-            remote_unverified=False,
+        return _finalize_planned(
+            job, runner, db, state, params, plan, remote_unverified=False,
         )
 
     # --- Ledger: see ``_ImportBatchLoop`` for the run-wide buckets.
@@ -5160,7 +5429,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         unmounted_since_baseline=_unmounted_since_baseline,
         missing_root_check=lambda: _missing_archive_mount_root(ctx.destination),
     )
-    loop.run(batches)
+    loop.run(plan.batches)
 
     _recover_parent_landings(state, params, db)
     _add_carried_working_copy_folders(state, params, db)
@@ -5168,14 +5437,37 @@ def run_import_job(job, runner, db_path, workspace_id, params):
 
     # ``remote_unverified`` is the honesty gate — only a transport that
     # independently confirms bytes at the destination may leave it
-    # False; see the append inside ``_finalize_import``. Degenerates to
+    # False; see the append in ``_append_run_unsafe_files``. Degenerates to
     # False on the local transport (every copy is hash-verified),
     # exactly the parameter's old default there. ``attests_bytes`` is
     # the run-constant binding of ``transport.attests_bytes`` above.
+    return _finalize_planned(
+        job, runner, db, state, params, plan,
+        remote_unverified=not loop.attests_bytes,
+    )
+
+
+def _make_transport(job, runner, params, ctx):
+    """Pick the run's byte transport from ``params.remote_target``.
+
+    Local: every file is copied and hash-verified inside ``enqueue``.
+    Rsync (SSH): ``enqueue`` reserves and queues; ``flush_batch`` moves
+    the batch's bytes.
+    """
+    return (
+        _RsyncTransport(job, runner, params, ctx)
+        if params.remote_target is not None
+        else _LocalTransport(params, ctx)
+    )
+
+
+def _finalize_planned(job, runner, db, state, params, plan, *,
+                      remote_unverified):
+    """``_finalize_import`` for a run that got through ``_plan_import``."""
     return _finalize_import(
         job, runner, db, state, params,
-        discovered=discovered, include_paths=include_paths,
-        source_snapshots=source_snapshots, deselected=deselected,
-        vanished_paths=vanished_paths, appeared=appeared,
-        remote_unverified=not loop.attests_bytes,
+        discovered=plan.discovered, include_paths=plan.include_paths,
+        source_snapshots=plan.source_snapshots, deselected=plan.deselected,
+        vanished_paths=plan.vanished_paths, appeared=plan.appeared,
+        remote_unverified=remote_unverified,
     )
