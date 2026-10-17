@@ -10,9 +10,23 @@ function cancelDuplicateLoad() {
   /** @type {HTMLButtonElement} */ (document.getElementById('scanBtn')).disabled = false;
 }
 
+// Keep's response applies to the displayed snapshot. A scan or restore must
+// wait for it so it cannot install a catalog result captured before the switch.
+function duplicateResultsReloadBlocked() {
+  if (!_duplicateKeepPending.size) return false;
+  showToast('Wait for the switch to finish before loading duplicate results.', 'info');
+  return true;
+}
+
+function prepareDuplicateScan() {
+  if (_scanInProgress || duplicateResultsReloadBlocked()) return false;
+  cancelDuplicateLoad();
+  return true;
+}
+
 /** @param {boolean|Event} [forceCleanup] */
 async function tryRestoreLastScan(forceCleanup) {
-  if (_scanInProgress) return;
+  if (_scanInProgress || duplicateResultsReloadBlocked()) return;
   clearDuplicateTrashProgress();
   var epoch = ++_duplicateLoadEpoch;
   function current() { return epoch === _duplicateLoadEpoch && !_scanInProgress; }

@@ -153,7 +153,7 @@ function applyKeptDuplicateCopy(proposal, data) {
 
 /** @param {number} photoId */
 async function keepDuplicateCopy(photoId) {
-  if (_duplicateKeepPending.has(photoId) || duplicateFileTrashIsPending(photoId)) return;
+  if (_scanInProgress || !_lastScanResult || _duplicateKeepPending.has(photoId) || duplicateFileTrashIsPending(photoId)) return;
   if (_duplicateTrashActive) {
     showToast('Wait for the cleanup to finish before choosing another copy to keep.', 'info');
     return;

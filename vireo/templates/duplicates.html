@@ -427,7 +427,7 @@
   }
 
   async function startScan() {
-    cancelDuplicateLoad();
+    if (!prepareDuplicateScan()) return;
     clearDuplicateTrashProgress();
     _excludedDuplicateHashes.clear();
     var scanBtn = document.getElementById('scanBtn');

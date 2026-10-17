@@ -12,7 +12,11 @@ function page() {
     winner: {id: 1, filename: 'one', exists: true},
     losers: [{id: 2, filename: 'two', exists: true, rejected: true},
       {id: 3, filename: 'three', exists: true, rejected: true}]};
-  const requests = [], renders = [], toasts = [], cards = new Map();
+  const requests = [], renders = [], toasts = [], cards = new Map(), elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {style: {}, disabled: false, innerHTML: ''});
+    return elements.get(id);
+  };
   for (const id of [1, 2, 3]) {
     const controls = {'.keep-btn': {}, '.trash-btn': {}, '[data-trash-status]': {}};
     cards.set(id, {controls, querySelector: selector => controls[selector],
@@ -24,7 +28,13 @@ function page() {
     _scanInProgress: false, _duplicateKeepPending: new Set(),
     _duplicateFileTrashState: new Map(), _duplicateTrashActive: false,
     KEPT_ANOTHER_COPY_REASON: 'kept another copy instead',
+    _duplicateLoadEpoch: 0, _excludedDuplicateHashes: new Set(),
+    _filterReady: Promise.resolve(), _pendingFilterRefresh: null,
+    window: {location: {search: ''}}, URLSearchParams,
+    clearDuplicateTrashProgress() {}, hideRestoredBanner() {}, setEmptyVisible() {},
+    showProgress() {}, hideProgress() {}, safeEventSource() {},
     document: {
+      getElementById: element,
       querySelector(selector) {
         if (selector.startsWith('.dup-card')) return cards.get(Number(selector.match(/"(\d+)"/)[1]));
         assert(selector.startsWith('.dup-group'));
@@ -33,8 +43,7 @@ function page() {
       querySelectorAll() { throw new Error('Unexpected DOM enumeration'); },
     },
     safeFetch(url, opts) {
-      assert.equal(url, '/api/duplicates/keep');
-      return new Promise((resolve, reject) => requests.push({body: JSON.parse(opts.body), resolve, reject}));
+      return new Promise((resolve, reject) => requests.push({url, body: opts && JSON.parse(opts.body), resolve, reject}));
     },
     showToast: (...args) => toasts.push(args),
     groupMatchesFilter: () => true,
@@ -48,6 +57,17 @@ function page() {
   for (const n of parse(source, {ecmaVersion: 'latest'}).body) {
     if (n.type === 'FunctionDeclaration' && names.includes(n.id.name)) {
       vm.runInContext(source.slice(n.start, n.end), c);
+    }
+  }
+  const restore = fs.readFileSync(path.join(root, 'vireo/static/duplicates-restore.js'), 'utf8');
+  const template = fs.readFileSync(path.join(root, 'vireo/templates/duplicates.html'), 'utf8');
+  const inline = template.match(/<script>([\s\S]*?)<\/script>/)[1];
+  for (const [text, wanted] of [[restore, ['cancelDuplicateLoad', 'prepareDuplicateScan',
+    'duplicateResultsReloadBlocked', 'tryRestoreLastScan']], [inline, ['startScan']]]) {
+    for (const n of parse(text, {ecmaVersion: 'latest'}).body) {
+      if (n.type === 'FunctionDeclaration' && wanted.includes(n.id.name)) {
+        vm.runInContext(text.slice(n.start, n.end), c);
+      }
     }
   }
   return {c, proposal, requests, renders, toasts, cards};
@@ -112,4 +132,49 @@ test('failed transport releases group state and preserves the old keeper', async
   assert.equal(p.toasts.length, 0);
   assert.equal(p.c._duplicateKeepPending.size, 0);
   for (const card of p.cards.values()) assert.equal(card.controls['.trash-btn'].disabled, false);
+});
+
+
+test('a pending keep prevents a scan from replacing its pre-switch snapshot', async () => {
+  const p = page(), snapshot = p.c._lastScanResult;
+  const keep = p.c.keepDuplicateCopy(2);
+  const scan = p.c.startScan();
+  assert.equal(p.requests.length, 1, 'scan transport must wait until the keep lands');
+  assert.equal(p.c._scanInProgress, false);
+  assert.equal(p.c._lastScanResult, snapshot);
+  p.requests[0].resolve(response(2, [1]));
+  await Promise.all([keep, scan]);
+  assert.equal(p.proposal.winner.id, 2);
+  assert.equal(p.renders.at(-1), '2');
+  const nextScan = p.c.startScan();
+  assert.equal(p.requests[1].url, '/api/duplicates/scan');
+  p.requests[1].resolve({job_id: 'invented'});
+  await nextScan;
+});
+
+test('a pending keep prevents restore or cleanup refresh from replacing its snapshot', async () => {
+  const p = page(), snapshot = p.c._lastScanResult;
+  const keep = p.c.keepDuplicateCopy(2);
+  const restore = p.c.tryRestoreLastScan(true);
+  assert.equal(p.requests.length, 1, 'reload must not request a pre-switch catalog');
+  assert.equal(p.c._lastScanResult, snapshot);
+  assert.equal(p.c._proposals[0], p.proposal);
+  p.requests[0].resolve(response(2, [1]));
+  await Promise.all([keep, restore]);
+  assert.equal(p.proposal.winner.id, 2);
+  assert.equal(p.renders.at(-1), '2');
+});
+
+test('keep refuses a scan already running or a restore with no current snapshot', async () => {
+  const p = page();
+  p.c._scanInProgress = true;
+  const duringScan = p.c.keepDuplicateCopy(2);
+  assert.equal(p.requests.length, 0);
+  await duringScan;
+  p.c._scanInProgress = false;
+  p.c._lastScanResult = null;
+  const duringRestore = p.c.keepDuplicateCopy(2);
+  assert.equal(p.requests.length, 0);
+  await duringRestore;
+  assert.equal(p.c._duplicateKeepPending.size, 0);
 });
