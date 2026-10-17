@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from repositories.edit_history import EditHistoryRepository
     from repositories.edits import EditsRepository
     from repositories.exif_search import ExifSearchRepository
+    from repositories.imports import ImportRepository
     from repositories.inat import InatRepository
     from repositories.job_history import JobHistoryRepository
     from repositories.keywords import KeywordRepository
@@ -10611,6 +10612,26 @@ class Database:
         set, and ``set_state`` works by id in any workspace.
         """
         return self._pending_archive_repository()
+
+    # -- Import job catalog reads --
+
+    def _imports_repository(self):
+        """Build the (catalog-wide) import-job repository on this connection."""
+        from repositories.imports import ImportRepository
+
+        return ImportRepository(self.conn)
+
+    @property
+    def imports(self) -> ImportRepository:
+        """The import job's catalog SQL: ``db.imports.photo_hash_row(folder, name)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_imports_repository``. Nothing in it is scoped to
+        a workspace, and its writes run in the caller's transaction (the
+        import job commits or rolls back through ``db.commit()`` /
+        ``db.rollback()``).
+        """
+        return self._imports_repository()
 
     @property
     def storage(self):
