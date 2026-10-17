@@ -2,7 +2,7 @@
    Classic script sharing page globals; browse.html loads the
    browse/*.js files in dependency order. */
 
-function collectionCountMarkup(collection) {
+function collectionCountMarkup(/** @type {BrowseCollection} */ collection) {
   if (collection.photo_count == null) return '';
   var total = Number(collection.photo_count);
   var offline = Number(collection.offline_photo_count || 0);
@@ -15,7 +15,7 @@ function collectionCountMarkup(collection) {
   return html;
 }
 
-function renderCollectionList(collections) {
+function renderCollectionList(/** @type {BrowseCollection[]} */ collections) {
   collectionsById = {};
   var html = '';
   collections.forEach(function(c) {
@@ -52,7 +52,7 @@ function renderCollectionList(collections) {
       resolveBtn +
       trailing + '</div>';
   });
-  document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
+  /** @type {HTMLElement} */ (document.getElementById('collectionList')).innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
 }
 
 /* ---------- Collections ---------- */
@@ -69,7 +69,7 @@ function reconcileCollectionLoadRenders() {
   while (gen > collectionRenderDecisionGen) {
     var state = collectionLoadStates[gen];
     if (!state || state.status === 'pending') return;
-    if (state.status === 'success') {
+    if (state.status === 'success' && state.data) {
       var shouldRender = !state.shouldRender || state.shouldRender();
       collectionRenderDecisionGen = gen;
       if (shouldRender) renderCollectionList(state.data);
@@ -82,7 +82,7 @@ function reconcileCollectionLoadRenders() {
   }
 }
 
-async function loadCollections(opts) {
+async function loadCollections(/** @type {{shouldRender?: () => boolean} | undefined} */ opts = undefined) {
   var myGen = ++collectionLoadGen;
   collectionLoadStates[myGen] = {
     status: 'pending',
@@ -112,16 +112,16 @@ async function loadCollectionCounts() {
     var data = await safeFetch('/api/collections', {}, { toast: false });
     if (gen !== collectionCountLoadGen) return;
     if (!data) return;
-    var items = document.querySelectorAll('#collectionList .tree-item');
-    var metaById = {};
-    data.forEach(function(c) { metaById[c.id] = c; });
+    var items = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#collectionList .tree-item'));
+    /** @type {Record<string, BrowseCollection>} */ var metaById = {};
+    data.forEach(function(/** @type {BrowseCollection} */ c) { metaById[c.id] = c; });
     items.forEach(function(el) {
-      var id = parseInt(el.dataset.collectionId, 10);
+      var id = parseInt(el.dataset.collectionId || '', 10);
       if (isNaN(id)) {
         // Fallback for any stragglers without data-collection-id.
         var onclick = el.getAttribute('onclick') || '';
         var m = onclick.match(/filterByCollection\((\d+)\)/);
-        if (m) id = parseInt(m[1], 10);
+        if (m) id = parseInt(m[1] || '', 10);
       }
       var meta = !isNaN(id) ? metaById[id] : null;
       if (!meta) return;
@@ -132,7 +132,7 @@ async function loadCollectionCounts() {
       var isUnavailable = !!meta.count_error;
       if (wasUnavailable !== isUnavailable) {
         el.classList.toggle('unavailable', isUnavailable);
-        var trailing = el.querySelector('.count, .collection-unavailable-badge');
+        var trailing = /** @type {HTMLElement | null} */ (el.querySelector('.count, .collection-unavailable-badge'));
         if (trailing) {
           if (isUnavailable) {
             trailing.className = 'collection-unavailable-badge';
@@ -151,7 +151,7 @@ async function loadCollectionCounts() {
           el.removeAttribute('title');
         }
       } else if (!isUnavailable) {
-        var span = el.querySelector('.count');
+        var span = /** @type {HTMLElement | null} */ (el.querySelector('.count'));
         if (span && meta.photo_count != null) {
           span.innerHTML = collectionCountMarkup(meta);
         }
@@ -173,14 +173,14 @@ function hasCollectionAvailabilityScope() {
 }
 
 function renderOfflineCollectionNotice() {
-  var notice = document.getElementById('offlineCollectionNotice');
+  var notice = /** @type {HTMLElement} */ (document.getElementById('offlineCollectionNotice'));
   if (!notice) return;
   if (!hasCollectionAvailabilityScope() || collectionOfflineTotal <= 0) {
     notice.style.display = 'none';
     return;
   }
-  var text = document.getElementById('offlineCollectionText');
-  var toggle = document.getElementById('offlineCollectionToggle');
+  var text = /** @type {HTMLElement} */ (document.getElementById('offlineCollectionText'));
+  var toggle = /** @type {HTMLButtonElement} */ (document.getElementById('offlineCollectionToggle'));
   var available = collectionAvailableTotal.toLocaleString();
   var inventory = collectionInventoryTotal.toLocaleString();
   var offline = collectionOfflineTotal.toLocaleString();
@@ -203,7 +203,7 @@ function clearOfflineCollectionState() {
   renderOfflineCollectionNotice();
 }
 
-function updateOfflineCollectionState(data) {
+function updateOfflineCollectionState(/** @type {BrowseAvailability} */ data) {
   if (!hasCollectionAvailabilityScope()) {
     clearOfflineCollectionState();
     return;
@@ -227,14 +227,14 @@ function updateOfflineCollectionState(data) {
   var collectionId = openedCollectionId != null
     ? openedCollectionId
     : activeCollectionId;
-  var meta = collectionsById[collectionId];
+  var meta = collectionId == null ? undefined : collectionsById[collectionId];
   if (meta && data.inventory_total != null) {
     meta.photo_count = collectionInventoryTotal;
     meta.available_photo_count = collectionAvailableTotal;
     meta.offline_photo_count = collectionOfflineTotal;
-    var row = document.querySelector(
+    var row = /** @type {HTMLElement | null} */ (document.querySelector(
       '#collectionList .tree-item[data-collection-id="' + collectionId + '"] .count'
-    );
+    ));
     if (row) row.innerHTML = collectionCountMarkup(meta);
   }
   if (collectionOfflineTotal <= 0) showOfflineCollectionPhotos = false;
@@ -270,11 +270,11 @@ var PREDICTION_CONFIDENCE_SORTS = ['prediction_confidence',
    badge reads the server's per-card
    ``prediction_confidence_is_stack_lead`` flag instead. */
 function sortSelectRanksOnPredictionConfidence() {
-  var el = document.getElementById('sortSelect');
+  var el = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect'));
   return !!el && PREDICTION_CONFIDENCE_SORTS.indexOf(el.value) !== -1;
 }
 
-function refreshActiveCollectionAfterMembershipChange(mutations) {
+function refreshActiveCollectionAfterMembershipChange(/** @type {string[]} */ mutations) {
   if (activeCollectionId) {
     filterByCollection(activeCollectionId, { preserveAnchor: false });
     return;
@@ -358,7 +358,7 @@ function refreshBrowseSidebarCounts() {
   loadCollectionCounts();
 }
 
-async function filterByCollection(id, options) {
+async function filterByCollection(/** @type {number} */ id, /** @type {{preserveAnchor?: boolean} | undefined} */ options = undefined) {
   // The sidebar collection list is rendered from the initial /photos payload,
   // so a slow /api/filters/fields (or workspace) round-trip leaves clickable
   // collections in the DOM before VireoFilter.init resolves. Without this
@@ -416,7 +416,7 @@ async function filterByCollection(id, options) {
   openedCollectionId = id;
   var rules;
   var visual;
-  try { rules = JSON.parse(collectionMeta.rules || '[]'); } catch (e) { rules = []; }
+  try { rules = typeof collectionMeta.rules === 'string' ? JSON.parse(collectionMeta.rules || '[]') : collectionMeta.rules || []; } catch (e) { rules = []; }
   try {
     visual = collectionMeta.visual_json ? JSON.parse(collectionMeta.visual_json) : null;
   } catch (e) { visual = null; }

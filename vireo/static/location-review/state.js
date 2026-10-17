@@ -2,9 +2,9 @@
 // Classic page script; load boot.js after all definitions.
 'use strict';
 
-var state = {
+/** @type {LocationState} */ var state = {
   source: null,
-  mode: ['time', 'discrepancies'].includes(new URLSearchParams(window.location.search).get('mode')) ? new URLSearchParams(window.location.search).get('mode') : 'coordinates',
+  mode: ['time', 'discrepancies'].includes(new URLSearchParams(window.location.search).get('mode') || '') ? new URLSearchParams(window.location.search).get('mode') || 'coordinates' : 'coordinates',
   minimumDistance: Number(new URLSearchParams(window.location.search).get('minimum_distance_m') || 500),
   includeKept: new URLSearchParams(window.location.search).get('include_reviewed') === 'true',
   selectedGpsPhotos: new Set(),

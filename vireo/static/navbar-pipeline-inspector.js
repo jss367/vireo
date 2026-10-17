@@ -1,23 +1,24 @@
+/** @param {number} photoId */
 function openPipeline(photoId) {
   var alreadyOpen = !!window._pipelineEscToken;
-  if (alreadyOpen) Keymap.popEsc(window._pipelineEscToken);
+  if (alreadyOpen) Keymap.popEsc(window._pipelineEscToken ?? -1);
   window._pipelineEscToken = Keymap.pushEsc(function() { closePipeline(); });
 
-  var overlay = document.getElementById('pipelineOverlay');
-  var content = document.getElementById('pipelineContent');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('pipelineOverlay'));
+  var content = /** @type {HTMLElement} */ (document.getElementById('pipelineContent'));
   overlay.classList.add('active');
   if (!alreadyOpen) Keymap.lockBodyScroll();
   content.innerHTML = '<p style="color:var(--text-dim);">Loading pipeline data...</p>';
 
-  safeFetch('/api/photos/' + photoId + '/pipeline', {}, { toast: false })
-    .then(function(data) { renderPipeline(data, photoId); })
+  /** @type {Promise<NavPipelinePhotoData>} */ (safeFetch('/api/photos/' + photoId + '/pipeline', {}, { toast: false }))
+    .then(function(/** @type {NavPipelinePhotoData} */ data) { renderPipeline(data, photoId); })
     .catch(function(e) { content.innerHTML = '<p style="color:var(--danger);">Failed to load: ' + escapeHtml(e.message) + '</p>'; });
 }
 
 function closePipeline() {
   var wasOpen = !!window._pipelineEscToken;
-  if (wasOpen) { Keymap.popEsc(window._pipelineEscToken); window._pipelineEscToken = null; }
-  document.getElementById('pipelineOverlay').classList.remove('active');
+  if (wasOpen) { Keymap.popEsc(window._pipelineEscToken ?? -1); window._pipelineEscToken = null; }
+  /** @type {HTMLElement} */ (document.getElementById('pipelineOverlay')).classList.remove('active');
   if (wasOpen) Keymap.unlockBodyScroll();
 }
 
@@ -25,6 +26,7 @@ function closePipeline() {
 // cosine similarity (BioCLIP) and an unbounded class logit (iNat21). Render
 // each at the precision its scale deserves; the server already refuses to
 // compare one against a threshold calibrated for the other.
+/** @param {unknown} value @param {string} [scoreKind] */
 function formatMatchScore(value, scoreKind) {
   if (value == null) return '—';
   return scoreKind === 'logit' ? Number(value).toFixed(1) : Number(value).toFixed(3);
@@ -35,7 +37,7 @@ function formatMatchScore(value, scoreKind) {
 // render as neither pass nor fail — no threshold means no verdict, and
 // dressing a missing verdict up as a passing one is the exact failure this
 // whole surface exists to remove.
-var MATCH_SUMMARY_STYLES = {
+/** @type {Record<string,{color: string; label: string}>} */ var MATCH_SUMMARY_STYLES = {
   unlisted:     { color: 'var(--warning)', label: 'No good match in this label list' },
   listed:       { color: 'var(--accent)',  label: 'Matched a label in this list' },
   uncalibrated: { color: 'var(--text-dim)', label: 'Match strength recorded, not judged' },
@@ -47,6 +49,7 @@ var MATCH_SUMMARY_STYLES = {
 // scored by two models — so "matched a label" would sit above a table in which
 // a specific run explicitly matched nothing. Whenever a positively-failing run
 // exists it takes the headline, and the failing runs are named individually.
+/** @param {NavMatchSummary | null | undefined} summary */
 function renderMatchSummary(summary) {
   if (!summary || !summary.state) return '';
   var failures = summary.unlisted_runs || [];
@@ -136,7 +139,7 @@ function renderMatchSummary(summary) {
 // the current list's rows would put a verdict from an abandoned list next to
 // predictions it never produced. `is_current` is set by the same
 // latest-fingerprint rule the predictions table is pinned to.
-var MATCH_RUN_VERDICTS = {
+/** @type {Record<string,{color: string; label: string; title: string}>} */ var MATCH_RUN_VERDICTS = {
   unlisted:     { color: 'var(--warning)',  label: 'no match',
                   title: 'Nothing in this label list matched, by the calibrated floor for this model.' },
   listed:       { color: 'var(--accent)',   label: 'match',
@@ -147,6 +150,7 @@ var MATCH_RUN_VERDICTS = {
                   title: 'No raw score was stored for this run.' },
 };
 
+/** @param {NavMatchRun} row */
 function matchRunVerdict(row) {
   if (row.is_current === 0 || row.is_current === false) {
     return {
@@ -156,7 +160,7 @@ function matchRunVerdict(row) {
     };
   }
   var state = (row.assessment && row.assessment.state) || 'unavailable';
-  return MATCH_RUN_VERDICTS[state] || MATCH_RUN_VERDICTS.unavailable;
+  return MATCH_RUN_VERDICTS[state] || /** @type {{color: string; label: string; title: string}} */ (MATCH_RUN_VERDICTS.unavailable);
 }
 
 // Every recorded run on this photo, including the ones step 4's table cannot
@@ -164,6 +168,7 @@ function matchRunVerdict(row) {
 // threshold. Those are routinely where the species a user is asking about
 // actually came from, so listing them here is the difference between the
 // inspector explaining the photo and quietly omitting the relevant half.
+/** @param {NavMatchRun[] | undefined} rows */
 function renderMatchScoreTable(rows) {
   if (!rows || rows.length === 0) return '';
   var html = '<div style="margin-top:10px;">';
@@ -191,8 +196,9 @@ function renderMatchScoreTable(rows) {
   return html;
 }
 
+/** @param {NavPipelinePhotoData} data @param {number} photoId */
 function renderPipeline(data, photoId) {
-  var c = document.getElementById('pipelineContent');
+  var c = /** @type {HTMLElement} */ (document.getElementById('pipelineContent'));
   var diag = data.classification_diagnostics || {};
   var detectorThreshold = diag.detector_confidence_threshold != null ? diag.detector_confidence_threshold : 0.2;
   var detectorThresholdPct = Math.round(detectorThreshold * 100);
@@ -213,18 +219,18 @@ function renderPipeline(data, photoId) {
     '<div class="pipeline-step-header"><span class="pipeline-step-num">2</span><span class="pipeline-step-title">Subject Detection (MegaDetector)</span></div>';
 
   if (hasDetection) {
-    var db = data.detection_box;
-    var cropBox = data.crop_box || {};
+    var db = /** @type {NavBox} */ (data.detection_box);
+    var cropBox = data.crop_box;
     html += '<div class="pipeline-images">' +
       '<div class="pipeline-img-wrap">' +
         '<img src="/photos/' + photoId + '/full" alt="Detection">' +
         '<div class="pipeline-det-box" style="left:' + (db.x*100) + '%;top:' + (db.y*100) + '%;width:' + (db.w*100) + '%;height:' + (db.h*100) + '%;"></div>' +
-        (cropBox.x != null ? '<div class="pipeline-crop-box" style="left:' + (cropBox.x*100) + '%;top:' + (cropBox.y*100) + '%;width:' + (cropBox.w*100) + '%;height:' + (cropBox.h*100) + '%;"></div>' : '') +
+        (cropBox?.x != null ? '<div class="pipeline-crop-box" style="left:' + (cropBox.x*100) + '%;top:' + (cropBox.y*100) + '%;width:' + (cropBox.w*100) + '%;height:' + (cropBox.h*100) + '%;"></div>' : '') +
         '<div class="pipeline-img-label">Green = detection box, Yellow dashed = crop sent to classifier</div>' +
       '</div>' +
     '</div>' +
     '<div style="margin-top:8px;">' +
-      '<div class="pipeline-stat">Confidence: <b>' + Math.round(data.detection_conf * 100) + '%</b></div>' +
+      '<div class="pipeline-stat">Confidence: <b>' + Math.round(Number(data.detection_conf) * 100) + '%</b></div>' +
       '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +
     '</div>';
   } else if ((diag.hidden_detection_count || 0) > 0) {

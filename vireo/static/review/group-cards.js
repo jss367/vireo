@@ -1,20 +1,20 @@
 // Group Review card pointer handling: pan drags, selection clicks, offset resets, and box sharpness.
 // Classic page script; load boot.js after all definitions.
 
-function grmCardMouseDown(e) {
+/** @param {MouseEvent} e */ function grmCardMouseDown(e) {
   if (e.button !== 0) return;
-  var card = e.currentTarget;
-  var photoId = card.dataset.photoId;
+  var card = /** @type {HTMLDivElement} */ (e.currentTarget);
+  var photoId = card.dataset.photoId || '';
   var selectedIds = _grmEnsureSelectedIds();
   var targetIds = selectedIds.has(parseInt(photoId, 10)) || selectedIds.has(photoId)
     ? Array.from(selectedIds)
     : [photoId];
   var targets = targetIds.map(function(pid) {
-    var targetCard = document.querySelector('.grm-card[data-photo-id="' + pid + '"]');
+    var targetCard = document.querySelector(/** @type {'div'} */ ('.grm-card[data-photo-id="' + pid + '"]'));
     if (!targetCard) return null;
     var cur = _grmOffsets[pid] || { tx: 0, ty: 0 };
     return { card: targetCard, photoId: String(pid), origTx: cur.tx, origTy: cur.ty };
-  }).filter(Boolean);
+  }).filter(function(target) { return target !== null; });
   if (!targets.length) {
     var cur = _grmOffsets[photoId] || { tx: 0, ty: 0 };
     targets = [{ card: card, photoId: String(photoId), origTx: cur.tx, origTy: cur.ty }];
@@ -32,7 +32,7 @@ function grmCardMouseDown(e) {
   e.preventDefault();
 }
 
-function grmCardMouseMove(e) {
+/** @param {MouseEvent} e */ function grmCardMouseMove(e) {
   if (!_grmDragging) return;
   // If the primary button is no longer held (e.g. mouseup fired outside the
   // window and was missed), end the drag instead of continuing to mutate
@@ -62,7 +62,7 @@ function grmCardMouseMove(e) {
   });
 }
 
-function grmCardMouseUp(e) {
+/** @param {MouseEvent} e */ function grmCardMouseUp(e) {
   if (!_grmDragging) return;
   var moved = _grmDragging.moved;
   var card = _grmDragging.card;
@@ -74,13 +74,13 @@ function grmCardMouseUp(e) {
   // card — that's the only case where a `click` will fire on the card and
   // need to be swallowed. Off-card releases produce no card click, so
   // setting the flag would eat the user's next real selection.
-  if (moved && e && e.target && card.contains(e.target)) {
+  if (moved && e && e.target && e.target instanceof Node && card.contains(e.target)) {
     _grmSuppressNextClick = true;
   }
   grmRefreshResetAllVisibility();
 }
 
-function grmCardClick(e, photoId) {
+/** @param {MouseEvent} e @param {number} photoId */ function grmCardClick(e, photoId) {
   if (_grmSuppressNextClick) {
     _grmSuppressNextClick = false;
     return;
@@ -89,9 +89,9 @@ function grmCardClick(e, photoId) {
   grmSelect(photoId, mode);
 }
 
-function grmCardDblClick(e) {
-  var card = e.currentTarget;
-  var photoId = card.dataset.photoId;
+/** @param {MouseEvent} e */ function grmCardDblClick(e) {
+  var card = /** @type {HTMLDivElement} */ (e.currentTarget);
+  var photoId = card.dataset.photoId || '';
   if (!_grmOffsets[photoId]) return;
   delete _grmOffsets[photoId];
   _grmUpdateIndicator(card);
@@ -102,18 +102,18 @@ function grmCardDblClick(e) {
 
 function grmResetAllOffsets() {
   _grmOffsets = {};
-  document.querySelectorAll('.grm-card').forEach(function(card) {
+  document.querySelectorAll(/** @type {'div'} */ ('.grm-card')).forEach(function(card) {
     _grmUpdateIndicator(card);
     _grmApplyCardTransform(card);
   });
   grmRefreshResetAllVisibility();
 }
 
-function grmVisibleRegionForCard(card) {
+/** @param {HTMLElement} card */ function grmVisibleRegionForCard(card) {
   var t = _grmComputeCardTransform(card, _grmLoupeLastX, _grmLoupeLastY, _grmLoupeHovering || _grmLoupeLocked);
   var scale = t.scale || 1;
-  var W = t.w || (parseFloat(card.dataset.natW) || GRM_CARD_W);
-  var H = t.h || (parseFloat(card.dataset.natH) || GRM_CARD_H);
+  var W = t.w || (parseFloat(card.dataset.natW || '') || GRM_CARD_W);
+  var H = t.h || (parseFloat(card.dataset.natH || '') || GRM_CARD_H);
   var left = -t.tx / scale;
   var top = -t.ty / scale;
   var right = left + (GRM_CARD_W / scale);
@@ -125,7 +125,7 @@ function grmVisibleRegionForCard(card) {
   var w = right - x;
   var h = bottom - y;
   return {
-    photo_id: parseInt(card.dataset.photoId, 10),
+    photo_id: parseInt(card.dataset.photoId || '', 10),
     x: x,
     y: y,
     w: Math.max(1, w),
@@ -136,21 +136,21 @@ function grmVisibleRegionForCard(card) {
 }
 
 async function grmCalculateBoxSharpness() {
-  var cards = Array.from(document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]'));
+  var cards = Array.from(document.querySelectorAll(/** @type {'div'} */ ('#grmOverlay .grm-card[data-photo-id]')));
   if (!cards.length) return;
-  var btn = document.getElementById('grmBoxSharpnessBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('grmBoxSharpnessBtn'));
   if (btn) {
     btn.disabled = true;
     btn.textContent = 'Scoring...';
   }
   try {
     var payload = { regions: cards.map(grmVisibleRegionForCard) };
-    var data = await safeFetch('/api/photos/sharpness/regions', {
+    /** @type {{results?:{photo_id:number;sharpness?:number|null}[]}} */ var data = await safeFetch('/api/photos/sharpness/regions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }, { toast: false });
-    var byPhoto = {};
+    /** @type {Record<number,{photo_id:number;sharpness?:number|null}>} */ var byPhoto = {};
     (data.results || []).forEach(function(r) { byPhoto[r.photo_id] = r; });
     grmState.items.forEach(function(item) {
       var r = byPhoto[item.photo_id];
@@ -168,8 +168,8 @@ async function grmCalculateBoxSharpness() {
   }
 }
 
-function _grmUpdateIndicator(card) {
-  var off = _grmOffsets[card.dataset.photoId];
+/** @param {HTMLElement} card */ function _grmUpdateIndicator(card) {
+  var off = _grmOffsets[card.dataset.photoId || ''];
   if (off && (off.tx !== 0 || off.ty !== 0)) {
     card.classList.add('has-offset');
   } else {
@@ -183,6 +183,6 @@ function grmRefreshResetAllVisibility() {
     var o = _grmOffsets[k];
     if (o && (o.tx !== 0 || o.ty !== 0)) { hasAny = true; break; }
   }
-  var btn = document.getElementById('grmResetAllOffsets');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('grmResetAllOffsets'));
   if (btn) btn.classList.toggle('visible', hasAny);
 }

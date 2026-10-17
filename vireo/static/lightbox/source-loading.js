@@ -1,7 +1,7 @@
 
-var _lbDesiredSrcKey = null;
+/** @type {string | null} */ var _lbDesiredSrcKey = null;
 
-function _lbSetPreviewLoading(loading) {
+function _lbSetPreviewLoading(/** @type {boolean} */ loading) {
   _lbPreviewLoading = !!loading;
   _lbRenderDetailStatus();
 }
@@ -21,9 +21,9 @@ var _lbInitialDecodePending = false; // this photo's first bitmap has not decode
 var _lbDetailStatusShown = false;    // chip is on screen (past the show delay)
 var _lbDetailStatusSettled = false;  // showing the Full detail confirmation
 var _lbDetailStatusHold = 0;         // >0 suppresses paints mid-transition
-var _lbDetailShowTimer = null;
-var _lbDetailSettleTimer = null;
-var _lbDetailFadeTimer = null;
+/** @type {number | null} */ var _lbDetailShowTimer = null;
+/** @type {number | null} */ var _lbDetailSettleTimer = null;
+/** @type {number | null} */ var _lbDetailFadeTimer = null;
 
 function _lbDetailSharpeningPending() {
   // Derived rather than read off _lbPreviewLoading: the first drag of a pan
@@ -48,13 +48,13 @@ function _lbDetailStatusPhase() {
   return 'off';
 }
 
-function _lbDetailStatusLabel(phase) {
+function _lbDetailStatusLabel(/** @type {string} */ phase) {
   if (phase === 'loading') return 'Loading\u2026';
   if (phase === 'sharpening') return 'Sharpening\u2026';
   return 'Full detail';
 }
 
-function _lbPaintDetailStatus(phase) {
+function _lbPaintDetailStatus(/** @type {string} */ phase) {
   var el = document.getElementById('lightboxPreviewStatus');
   if (!el) return;
   var text = document.getElementById('lightboxPreviewStatusText');
@@ -143,7 +143,7 @@ function _lbFullPreviewLimit() {
   return _lbPreviewMaxSize || 1920;
 }
 
-function _lbInitialSourceKey(photo, zoom, oneToOne) {
+function _lbInitialSourceKey(/** @type {LightboxPhoto} */ photo, /** @type {number} */ zoom, /** @type {boolean} */ oneToOne) {
   var w = Number(photo.width), h = Number(photo.height);
   if (!w || !h) return oneToOne || zoom > 1.001 ? 'original' : 'full';
   if (_vireoPairKnownByPhoto[String(photo.id)] && _vireoPairSource(photo.id) === 'jpeg') {
@@ -156,6 +156,7 @@ function _lbInitialSourceKey(photo, zoom, oneToOne) {
   var dims = _lbDisplayDimsForRecipe(w, h, photo.edit_recipe);
   var wrap = document.getElementById('lightboxWrap');
   if (!wrap || !wrap.clientWidth || !wrap.clientHeight) return oneToOne || zoom > 1.001 ? 'original' : 'full';
+  if (!dims.w || !dims.h) return oneToOne || zoom > 1.001 ? 'original' : 'full';
   var fit = Math.min(1, wrap.clientWidth / dims.w, wrap.clientHeight / dims.h);
   var needed = oneToOne ? Math.max(dims.w, dims.h)
     : Math.max(dims.w, dims.h) * fit * zoom * (window.devicePixelRatio || 1);
@@ -166,7 +167,7 @@ function _lbInitialSourceKey(photo, zoom, oneToOne) {
   return 'original';
 }
 
-function _lbPickSourceKey(targetZoom) {
+function _lbPickSourceKey(/** @type {number | null | undefined} */ targetZoom = undefined) {
   // Returns 'full' | '2560' | '3840' | 'original' based on current display needs.
   // Fall back to /full at fit and /original when zoomed whenever we can't compute
   // a proper displayed-long-edge (photo dims missing, or nativeZoom not yet
@@ -174,7 +175,7 @@ function _lbPickSourceKey(targetZoom) {
   // initial image load completes).
   var dims = vireoLightboxViewport.layoutDims();
   var zoom = targetZoom != null ? targetZoom : vireoLightboxViewport.zoom();
-  if (!dims || !vireoLightboxViewport.nativeZoom()) {
+  if (!dims || !dims.w || !dims.h || !vireoLightboxViewport.nativeZoom()) {
     return (zoom > 1.001 && !_lbOriginalUnavailable) ? 'original' : 'full';
   }
   var longEdge = Math.max(dims.w, dims.h);
@@ -192,7 +193,7 @@ function _lbPickSourceKey(targetZoom) {
   return _lbOriginalUnavailable ? '3840' : 'original';
 }
 
-function _lbSrcUrl(photoId, key, speculative) {
+function _lbSrcUrl(/** @type {number | null} */ photoId, /** @type {string} */ key, /** @type {boolean | undefined} */ speculative = undefined) {
   var url;
   if (key === 'original') url = '/photos/' + photoId + '/original';
   else if (key === 'full') url = '/photos/' + photoId + '/full';
@@ -208,11 +209,11 @@ function _lbSrcUrl(photoId, key, speculative) {
   // Keep the exact URL of a successfully decoded warmup. Browser caches are
   // URL-keyed, so dropping the prefetch marker here would force a second
   // transfer/decode and throw away the retained Image object's main benefit.
-  if (vireoLightboxSession.hasDecodedSource(photoId, key, speculativeUrl)) return speculativeUrl;
+  if (photoId != null && vireoLightboxSession.hasDecodedSource(photoId, key, speculativeUrl)) return speculativeUrl;
   return url;
 }
 
-function _lbScheduleSourceSwap(targetZoom, immediate) {
+function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZoom = undefined, /** @type {boolean | undefined} */ immediate = undefined) {
   if (!vireoLightboxSession.requestedPhotoId()) return;
   // Was a sharper tier already requested for the displayed bitmap? Read this
   // before retargeting: if the new target is the tier already on screen, that
@@ -247,7 +248,7 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
     if (_lbDesiredSrcKey === _lbCurrentSrcKey) return; // already there
     var photoId = vireoLightboxSession.requestedPhotoId();
     var swapToken = vireoLightboxSession.capture();
-    var key = _lbDesiredSrcKey;
+    var key = _lbDesiredSrcKey; if (photoId == null || key == null) return;
     var url = _lbSrcUrl(photoId, key);
 
     vireoLightboxSession.loadSource(url, function() {
@@ -255,7 +256,7 @@ function _lbScheduleSourceSwap(targetZoom, immediate) {
       if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
       if (!vireoLightboxSession.isCurrent(swapToken)) return;
       if (_lbDesiredSrcKey !== key) return;
-      var img = document.getElementById('lightboxImg');
+      const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
       if (!img) return;
       // After the new source loads, recompute nativeZoom — the aspect ratio is
       // nominally identical across source tiers but subpixel rounding can shift

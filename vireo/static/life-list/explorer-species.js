@@ -3,10 +3,10 @@
 
 // ---------------- Explorer: species leaf (Task 12) ----------------
 
-var explorerLeafData = null;   // last species-leaf payload
-var explorerLeafGenus = null;  // {id,name,rank} of the genus being shown
+/** @type {{species:LifeNode[]}|null} */ var explorerLeafData = null;   // last species-leaf payload
+/** @type {LifeCrumb|null} */ var explorerLeafGenus = null;  // {id,name,rank} of the genus being shown
 
-async function loadExplorerSpecies(node) {
+/** @param {LifeNode} node */ async function loadExplorerSpecies(node) {
   var myReq = ++explorerViewReqId;   // claim the body token; any later navigation bumps it
   explorerLeafGenus = { id: node.id, name: node.common_name || node.name, rank: node.rank };
   // Drop the previous genus's payload now, so a view that returns to this genus
@@ -15,9 +15,9 @@ async function loadExplorerSpecies(node) {
   explorerLeafData = null;
   explorerPath.push(explorerLeafGenus);
   renderSunburst();
-  var body = document.getElementById('explorerBody');
+  var body = /** @type {HTMLElement} */ (document.getElementById('explorerBody'));
   if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Loading species…</div>';
-  var data;
+  /** @type {{species:LifeNode[]}} */ var data;
   try {
     data = await safeFetch('/api/life-list/explorer/species?genus=' + encodeURIComponent(node.id));
   } catch (e) {
@@ -30,8 +30,8 @@ async function loadExplorerSpecies(node) {
   renderExplorerLeaf(false);
 }
 
-function renderExplorerLeaf(missingOnly) {
-  var body = document.getElementById('explorerBody');
+/** @param {boolean} missingOnly */ function renderExplorerLeaf(missingOnly) {
+  var body = /** @type {HTMLElement} */ (document.getElementById('explorerBody'));
   if (!body) return;
   var species = (explorerLeafData && explorerLeafData.species) || [];
   var found = species.filter(function(s) { return s.found; }).length;
@@ -51,11 +51,11 @@ function renderExplorerLeaf(missingOnly) {
   body.innerHTML = html;
 
   // Breadcrumb clicks are handled by the delegated wireBreadcrumb listener; wire the checkbox here.
-  var chk = document.getElementById('explorerMissingOnly');
+  var chk = /** @type {HTMLInputElement} */ (document.getElementById('explorerMissingOnly'));
   if (chk) chk.addEventListener('change', function() { renderExplorerLeaf(chk.checked); });
 }
 
-function renderSpeciesTile(s) {
+/** @param {LifeNode} s */ function renderSpeciesTile(s) {
   var common = (s.common_name && s.common_name !== s.name)
     ? '<div class="ll-sp-common">' + escapeHtml(s.common_name) + '</div>' : '';
   if (s.found) {

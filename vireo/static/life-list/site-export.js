@@ -4,17 +4,17 @@
 var siteExportStarting = false;
 
 function openSiteExportModal() {
-  document.getElementById('siteExportStatus').textContent = '';
-  document.getElementById('siteExportModal').classList.add('open');
-  document.getElementById('siteExportDest').focus();
+  /** @type {HTMLElement} */ (document.getElementById('siteExportStatus')).textContent = '';
+  /** @type {HTMLElement} */ (document.getElementById('siteExportModal')).classList.add('open');
+  /** @type {HTMLInputElement} */ (document.getElementById('siteExportDest')).focus();
 }
 
 function closeSiteExportModal() {
-  if (!siteExportStarting) document.getElementById('siteExportModal').classList.remove('open');
+  if (!siteExportStarting) /** @type {HTMLElement} */ (document.getElementById('siteExportModal')).classList.remove('open');
 }
 
 async function browseSiteExportDest() {
-  var input = document.getElementById('siteExportDest');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('siteExportDest'));
   if (typeof pickDirectory === 'function') {
     var sequence = publishFolderBrowser.sequence;
     try {
@@ -22,7 +22,7 @@ async function browseSiteExportDest() {
         defaultPath: input.value.trim() || undefined,
       });
       if (selected) {
-        input.value = Array.isArray(selected) ? selected[0] : selected;
+        input.value = Array.isArray(selected) ? selected[0] || '' : selected;
         return;
       }
       if (typeof isTauri === 'function' && isTauri()) return;
@@ -39,15 +39,15 @@ async function browseSiteExportDest() {
 
 async function startSiteExport() {
   if (siteExportStarting) return;
-  var status = document.getElementById('siteExportStatus');
-  var destination = document.getElementById('siteExportDest').value.trim();
+  var status = /** @type {HTMLElement} */ (document.getElementById('siteExportStatus'));
+  var destination = /** @type {HTMLInputElement} */ (document.getElementById('siteExportDest')).value.trim();
   if (!destination) {
     status.textContent = 'Destination folder is required.';
     return;
   }
-  var includeLocations = document.getElementById('siteExportLocations').checked;
+  var includeLocations = /** @type {HTMLInputElement} */ (document.getElementById('siteExportLocations')).checked;
   siteExportStarting = true;
-  var controls = document.querySelectorAll('#siteExportModal input, #siteExportModal button');
+  var controls = document.querySelectorAll(/** @type {'input'} */ ('#siteExportModal input, #siteExportModal button'));
   controls.forEach(function(control) { control.disabled = true; });
   status.textContent = 'Starting site export…';
   try {
@@ -59,7 +59,7 @@ async function startSiteExport() {
     closeSiteExportModal();
     if (typeof showToast === 'function') showToast('Site export started. Follow progress in Jobs.', 'info');
   } catch (error) {
-    status.textContent = 'Could not start site export: ' + error.message;
+    status.textContent = 'Could not start site export: ' + (error instanceof Error ? error.message : String(error));
   } finally {
     siteExportStarting = false;
     controls.forEach(function(control) { control.disabled = false; });
@@ -68,7 +68,7 @@ async function startSiteExport() {
 
 function bindSiteExportEscape() {
   document.addEventListener('keydown', function(event) {
-    if (event.key === 'Escape' && !document.getElementById('folderBrowser').classList.contains('open')) {
+    if (event.key === 'Escape' && !/** @type {HTMLElement} */ (document.getElementById('folderBrowser')).classList.contains('open')) {
       closeSiteExportModal();
     }
   });

@@ -11,14 +11,16 @@
 (function (window) {
   'use strict';
 
+  /** @param {string} str */
   function parseShortcut(str) {
     var parts = str.toLowerCase().split('+');
-    var key = parts.pop();
+    var key = parts.pop() || '';
     var mods = { ctrl: false, meta: false, shift: false, alt: false };
-    parts.forEach(function (m) { if (m in mods) mods[m] = true; });
+    parts.forEach(function (m) { if (m === 'ctrl' || m === 'meta' || m === 'shift' || m === 'alt') mods[m] = true; });
     return { key: key, ctrl: mods.ctrl, meta: mods.meta, shift: mods.shift, alt: mods.alt };
   }
 
+  /** @param {KeyboardEvent} e @param {string} shortcutStr */
   function matchesShortcut(e, shortcutStr) {
     if (!shortcutStr) return false;
     var sc = parseShortcut(shortcutStr);
@@ -36,26 +38,31 @@
     if (!el) return false;
     var tag = el.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-    if (el.isContentEditable) return true;
+    if (el instanceof HTMLElement && el.isContentEditable) return true;
     return false;
   }
 
   // scope -> array of shortcut definitions
+  /** @type {Record<string, KeymapShortcut[]>} */
   var _registry = { global: [] };
 
+  /** @param {string} scope @param {KeymapShortcut} shortcut */
   function register(scope, shortcut) {
-    if (!_registry[scope]) _registry[scope] = [];
-    _registry[scope].push(shortcut);
+    var shortcuts = _registry[scope] || (_registry[scope] = []);
+    shortcuts.push(shortcut);
   }
 
+  /** @param {string} scope */
   function shortcutsForScope(scope) {
     var globals = _registry.global || [];
-    if (scope === 'global' || !_registry[scope]) return globals.slice();
-    return _registry[scope].concat(globals);
+    var scoped = _registry[scope];
+    if (scope === 'global' || !scoped) return globals.slice();
+    return scoped.concat(globals);
   }
 
   var _currentScope = 'global';
 
+  /** @param {string} scope */
   function setScope(scope) { _currentScope = scope; }
   function getScope() { return _currentScope; }
 
@@ -78,18 +85,22 @@
 
   // Esc stack — single owner of the Escape key. Handlers push themselves
   // onto the stack; pressing Esc invokes (and removes) the top handler only.
+  /** @type {{token: number, handler: (event: KeyboardEvent) => void}[]} */
   var _escStack = [];
   var _escNextToken = 1;
 
+  /** @param {(event: KeyboardEvent) => void} handler */
   function pushEsc(handler) {
     var token = _escNextToken++;
     _escStack.push({ token: token, handler: handler });
     return token;
   }
 
+  /** @param {number} token */
   function popEsc(token) {
     for (var i = _escStack.length - 1; i >= 0; i--) {
-      if (_escStack[i].token === token) {
+      var entry = _escStack[i];
+      if (entry && entry.token === token) {
         _escStack.splice(i, 1);
         return true;
       }
@@ -97,10 +108,12 @@
     return false;
   }
 
+  /** @param {KeyboardEvent} e */
   function _handleEsc(e) {
     if (e.key !== 'Escape') return false;
     if (_escStack.length === 0) return false;
     var top = _escStack.pop();
+    if (!top) return false;
     e.preventDefault();
     e.stopImmediatePropagation();
     try { top.handler(e); } catch (err) { console.error('Esc handler error', err); }
@@ -113,8 +126,10 @@
   // Both listeners run in the capture phase; this dispatcher is registered at
   // module load and would otherwise win the race.
   var _dispatchPaused = false;
+  /** @type {((event: KeyboardEvent) => void) | null} */
   var _captureKeyHandler = null;
 
+  /** @param {(event: KeyboardEvent) => void} [captureHandler] */
   function pauseDispatch(captureHandler) {
     _dispatchPaused = true;
     _captureKeyHandler = captureHandler || null;
@@ -124,6 +139,7 @@
 
   // Native menu accelerators can consume a key before the webview sees it.
   // Deliver that shortcut directly to the recorder that paused dispatch.
+  /** @param {string} shortcut */
   function captureNativeShortcut(shortcut) {
     if (!_dispatchPaused || !_captureKeyHandler) return false;
     var parsed = parseShortcut(shortcut);
@@ -134,6 +150,7 @@
     return true;
   }
 
+  /** @param {KeyboardEvent} e */
   function _dispatch(e) {
     if (_dispatchPaused) return;
     // Esc runs first — even if focus is in an input, an open modal should
@@ -147,7 +164,7 @@
     var candidates = shortcutsForScope(_currentScope);
     for (var i = 0; i < candidates.length; i++) {
       var sc = candidates[i];
-      if (!matchesShortcut(e, sc.key)) continue;
+      if (!sc || !matchesShortcut(e, sc.key)) continue;
       // Action contract: returning false means "I didn't actually handle this"
       // (e.g. early-return because an overlay is open). In that case we do NOT
       // preventDefault and we continue to the next candidate so another scope

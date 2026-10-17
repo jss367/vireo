@@ -2,7 +2,7 @@
 // Classic page script; load boot.js after all definitions.
 
 function initEditorKeyboard() {
-  function isActivationControl(t, tag) {
+  /** @param {HTMLElement|null} t @param {string} tag */ function isActivationControl(t, tag) {
     var role = t && t.getAttribute ? t.getAttribute('role') : null;
     return tag === 'button' || tag === 'a' || tag === 'summary' || tag === 'label' ||
       role === 'button' || role === 'link' || role === 'menuitem' || role === 'tab';
@@ -14,18 +14,18 @@ function initEditorKeyboard() {
     // Same split for the export-preset save/delete dialog: its own Escape
     // handler dismisses just that dialog and leaves the export modal open.
     if (document.querySelector('.export-preset-dialog-overlay.open')) return;
-    var exportOverlay = document.getElementById('exportOverlay');
+    var exportOverlay = /** @type {HTMLElement} */ (document.getElementById('exportOverlay'));
     if (exportOverlay && exportOverlay.classList.contains('open')) {
       if (e.key === 'Escape') closeExportModal();
       return;
     }
-    var t = e.target;
+    var t = e.target instanceof HTMLElement ? e.target : null;
     var tag = t && t.tagName ? t.tagName.toLowerCase() : '';
     var isTextEntry = tag === 'input' || tag === 'textarea' || tag === 'select' ||
       (t && t.isContentEditable);
-    var cropFieldKey = tag === 'input' && t && {
+    var cropFieldKey = tag === 'input' && t && /** @type {Record<string,keyof EditorCrop>} */ ({
       cropX: 'x', cropY: 'y', cropW: 'w', cropH: 'h'
-    }[t.id];
+    })[t.id];
     if ((e.key === ' ' || e.code === 'Space') && !e.metaKey && !e.ctrlKey && !e.altKey &&
         !isTextEntry && !isActivationControl(t, tag)) {
       // Skip when focus is on a button/link/summary/role="button" so Space
@@ -40,7 +40,7 @@ function initEditorKeyboard() {
       // pending typed value before accepting the crop; relying on change/blur
       // would commit the previous value because keydown fires first.
       e.preventDefault();
-      setCropField(cropFieldKey, t.value);
+      if (t instanceof HTMLInputElement) setCropField(cropFieldKey, t.value);
       commitCropView();
       return;
     }
@@ -56,7 +56,7 @@ function initEditorKeyboard() {
       // reopened crop can still be accepted without writing another history
       // entry; otherwise this is a no-op when there is nothing to save.
       if (isActivationControl(t, tag)) return;
-      var saveBtn = document.getElementById('saveBtn');
+      var saveBtn = /** @type {HTMLButtonElement} */ (document.getElementById('saveBtn'));
       if ((saveBtn && !saveBtn.disabled) ||
           (editorState.cropEditing && recipeForSave(editorState.recipe).crop)) {
         e.preventDefault();

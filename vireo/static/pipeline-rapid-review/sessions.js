@@ -2,8 +2,9 @@
 // and confirmed-species readers the queue filters use.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {RapidResults} results */
 function buildSessions(results) {
-  var sessions = [];
+  var sessions = /** @type {RapidSession[]} */ ([]);
   (results.encounters || []).forEach(function(enc, encIdx) {
     var bursts = enc.bursts && enc.bursts.length ? enc.bursts : [{ photo_ids: enc.photo_ids || [] }];
     bursts.forEach(function(burst, burstIdx) {
@@ -25,32 +26,39 @@ function buildSessions(results) {
   return sessions;
 }
 
+/** @param {RapidSession|null|undefined} session */
 function sessionKey(session) {
   return session ? (session.encIdx + ':' + session.burstIdx) : '';
 }
 
+/** @param {RapidPhoto|null|undefined} p */
 function photoFlag(p) {
   return (p && p.flag) || 'none';
 }
 
+/** @param {RapidPhoto|null|undefined} p */
 function photoSpeciesList(p) {
   if (!p) return [];
   if (Array.isArray(p.confirmed_species_list)) return p.confirmed_species_list.filter(Boolean);
   return p.confirmed_species ? [p.confirmed_species] : [];
 }
 
+/** @param {RapidPhoto|null|undefined} p */
 function photoSpecies(p) {
   return joinSpecies(photoSpeciesList(p));
 }
 
+/** @param {RapidPhoto|null|undefined} p */
 function photoHasSpecies(p) {
   return photoSpeciesList(p).length > 0;
 }
 
+/** @param {RapidSession|null|undefined} session @returns {RapidPhoto[]} */
 function sessionPhotos(session) {
-  return (session ? session.ids : []).map(function(id) { return rapid.photoMap[id]; }).filter(Boolean);
+  return /** @type {RapidPhoto[]} */ ((session ? session.ids : []).map(function(id) { return rapid.photoMap[id]; }).filter(Boolean));
 }
 
+/** @param {RapidSession} session */
 function queueIncludedPhotos(session) {
   var photos = sessionPhotos(session);
   if (!rapid.queue.includeRejected) {

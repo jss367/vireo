@@ -1,14 +1,5 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2022", "DOM"],
-    "allowJs": true,
-    "checkJs": true,
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noEmit": true,
-    "types": []
-  },
+  "extends": "./tsconfig.frontend.base.json",
   "files": [
     "types/frontend.d.ts",
     "types/dialogs.d.ts",

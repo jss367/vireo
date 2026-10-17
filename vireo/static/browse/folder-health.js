@@ -5,35 +5,35 @@
 // ``folderHealthRefreshSeq`` is initialized above the bootstrapBrowse()
 // invocation so the pre-await snapshot inside bootstrap reads ``0`` instead
 // of ``undefined`` (Codex review r3686317674).
-function folderRowsContainScope(rows, folderId, scopeId) {
-  var byId = {};
+function folderRowsContainScope(/** @type {BrowseFolder[]} */ rows, /** @type {number} */ folderId, /** @type {number} */ scopeId) {
+  /** @type {Record<string, BrowseFolder>} */ var byId = {};
   (rows || []).forEach(function(row) { byId[row.id] = row; });
-  var currentId = folderId;
-  var seen = {};
+  /** @type {number | null | undefined} */ var currentId = folderId;
+  /** @type {Record<string, boolean>} */ var seen = {};
   while (currentId != null && !seen[currentId]) {
     if (currentId === scopeId) return true;
     seen[currentId] = true;
-    var row = byId[currentId];
+    /** @type {BrowseFolder | undefined} */ var row = byId[currentId];
     currentId = row ? row.parent_id : null;
   }
   return false;
 }
 
-function folderHealthTouchesActiveScope(detail, beforeRows, afterRows) {
-  if (!activeFolderId) return true;
+function folderHealthTouchesActiveScope(/** @type {BrowseFolderHealthChange | undefined} */ detail, /** @type {BrowseFolder[]} */ beforeRows, /** @type {BrowseFolder[]} */ afterRows) {
+  const scopeId = activeFolderId; if (!scopeId) return true;
   var restored = detail && Array.isArray(detail.restored) ? detail.restored : [];
   var wentMissing = detail && Array.isArray(detail.wentMissing) ? detail.wentMissing : [];
   var changedIds = restored.concat(wentMissing);
   // The null-baseline fallback intentionally carries no ids. Conservatively
   // reload because the server only knows that this workspace changed.
   if (!changedIds.length) return true;
-  return changedIds.some(function(folderId) {
-    return folderRowsContainScope(beforeRows, folderId, activeFolderId) ||
-      folderRowsContainScope(afterRows, folderId, activeFolderId);
+  return changedIds.some(function(/** @type {number} */ folderId) {
+    return folderRowsContainScope(beforeRows, folderId, scopeId) ||
+      folderRowsContainScope(afterRows, folderId, scopeId);
   });
 }
 
-async function refreshBrowseAfterFolderHealthChange(detail) {
+async function refreshBrowseAfterFolderHealthChange(/** @type {BrowseFolderHealthChange | undefined} */ detail) {
   var seq = ++folderHealthRefreshSeq;
   // A health-driven dataset refresh is not a user scope change: bumping
   // browseScopeGen here would make any in-flight sidebar click
@@ -135,7 +135,7 @@ async function refreshBrowseAfterFolderHealthChange(detail) {
   var activeScopeWasAffected = folderHealthTouchesActiveScope(
     detail, beforeFolderRows, currentFolderRows);
   if (activeFolderId &&
-      !currentFolderRows.some(function(folder) { return folder.id === activeFolderId; })) {
+      !currentFolderRows.some(function(/** @type {BrowseFolder} */ folder) { return folder.id === activeFolderId; })) {
     activeFolderId = null;
     activeScopeWasAffected = true;
   }

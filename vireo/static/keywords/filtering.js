@@ -23,7 +23,7 @@ function unlinkedLocationCount() {
   }, 0);
 }
 
-function isActionableUnlinkedLocation(k) {
+/** @param {KeywordRecord} k */ function isActionableUnlinkedLocation(k) {
   return (
     (k.type || 'general') === 'location' &&
     !k.place_id &&
@@ -31,7 +31,7 @@ function isActionableUnlinkedLocation(k) {
   );
 }
 
-function sortList(list) {
+/** @param {KeywordRecord[]} list */ function sortList(list) {
   return list.slice().sort((a, b) => {
     let va, vb;
     switch(sortCol) {

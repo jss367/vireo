@@ -2,12 +2,12 @@
 // script sharing page globals, read after DOMContentLoaded.
 
 var _duplicateCategory = 'all';
-var _excludedDuplicateHashes = new Set();
+/** @type {Set<string>} */ var _excludedDuplicateHashes = new Set();
 var _duplicateApplyInProgress = false;
 var _duplicateApplyMessage = '';
 
 function rememberDuplicateSelections() {
-  document.querySelectorAll('.group-check').forEach(function(cb) {
+  document.querySelectorAll(/** @type {'input'} */ ('.group-check')).forEach(function(cb) {
     var proposal = _proposals[Number(cb.getAttribute('data-gi'))];
     if (!proposal) return;
     if (cb.checked) _excludedDuplicateHashes.delete(proposal.file_hash);
@@ -15,26 +15,30 @@ function rememberDuplicateSelections() {
   });
 }
 
+/** @param {DuplicateProposal} group */
 function groupMatchesPhotoFilter(group) {
   if (!_filterMatchedIds) return true;
   var members = [group.winner].concat(group.other_kept || [], group.losers || []);
   return members.some(function(p) {
-    return p && p.id != null && _filterMatchedIds.has(p.id);
+    return p && p.id != null && _filterMatchedIds?.has(p.id);
   });
 }
 
+/** @param {DuplicateProposal} group */
 function groupMatchesFilter(group) {
   return groupMatchesPhotoFilter(group) &&
     (_duplicateCategory === 'all' || DuplicateCategories.classify(group) === _duplicateCategory);
 }
 
+/** @param {string} id */
 function selectDuplicateCategory(id) {
   _duplicateCategory = id;
   if (_lastScanResult && !_scanInProgress) renderResults(_lastScanResult);
-  var button = document.querySelector('[data-duplicate-category="' + id + '"]');
+  var button = document.querySelector(/** @type {'button'} */ ('[data-duplicate-category="' + id + '"]'));
   if (button) button.focus();
 }
 
+/** @param {DuplicateCategory[]} categories */
 function renderCategorySummary(categories) {
   var total = categories.reduce(function(sum, c) {
     sum.groups += c.groups; sum.extras += c.extras; sum.bytes += c.bytes;
@@ -56,11 +60,13 @@ function renderCategorySummary(categories) {
   return html + '</div></div>';
 }
 
+/** @param {DuplicateProposal} group */
 function renderCategoryBadge(group) {
   return '<span class="category-badge">' +
     escapeHtml(DuplicateCategories.label(DuplicateCategories.classify(group))) + '</span>';
 }
 
+/** @param {DuplicateScan} result @param {DuplicateProposal[]} unresolved @param {DuplicateProposal[]} resolved */
 function renderSummaryBar(result, unresolved, resolved) {
   var extras = unresolved.reduce(function(n, p) { return n + (p.losers || []).length; }, 0);
   var bytes = resolved.reduce(function(n, p) {
@@ -86,6 +92,7 @@ function renderSummaryBar(result, unresolved, resolved) {
   return html + '</div>';
 }
 
+/** @param {Set<number>} photoIds */
 function forgetCleanedDuplicateCopies(photoIds) {
   if (!_lastScanResult) return;
   rememberDuplicateSelections();
@@ -93,11 +100,11 @@ function forgetCleanedDuplicateCopies(photoIds) {
     var card = document.querySelector('.dup-card[data-photo-id="' + id + '"]');
     if (!card) return;
     card.classList.add('trashed');
-    var status = card.querySelector('[data-trash-status]');
+    var status = card.querySelector(/** @type {'div'} */ ('[data-trash-status]'));
     if (status) status.textContent = 'Cleaned up';
   });
-  var emptyHashes = new Set();
-  var changedGroups = [];
+  /** @type {Set<string>} */ var emptyHashes = new Set();
+  /** @type {Array<{proposal:DuplicateProposal;cleaned:number}>} */ var changedGroups = [];
   (_lastScanResult.proposals || []).forEach(function(p) {
     if (p.status !== 'resolved') return;
     var previousCount = (p.losers || []).length;
@@ -106,8 +113,8 @@ function forgetCleanedDuplicateCopies(photoIds) {
     if (!p.losers.length) emptyHashes.add(p.file_hash);
   });
   pruneResolvedHashesFromScan(emptyHashes);
-  var cards = new Map();
-  document.querySelectorAll('.dup-group').forEach(function(card) { cards.set(card.getAttribute('data-hash'), card); });
+  /** @type {Map<string,HTMLElement>} */ var cards = new Map();
+  document.querySelectorAll(/** @type {'div'} */ ('.dup-group')).forEach(function(card) { cards.set(card.getAttribute('data-hash') || '', card); });
   // A pending cleanup may finish after a category switch. Its surviving
   // copies can enter the current category without having a rendered card.
   // Rebuild that view before offering any bulk action, retaining retry text.
@@ -115,19 +122,19 @@ function forgetCleanedDuplicateCopies(photoIds) {
     var p = change.proposal;
     return p.losers.length && groupMatchesFilter(p) && !cards.has(p.file_hash);
   })) {
-    var statuses = new Map();
-    document.querySelectorAll('.dup-card[data-photo-id] [data-trash-status]').forEach(function(status) {
-      var card = status.closest('.dup-card');
-      var button = card.querySelector('.trash-btn');
-      statuses.set(card.getAttribute('data-photo-id'), {text: status.textContent, disabled: button && button.disabled});
+    /** @type {Map<string,{text:string|null;disabled:boolean}>} */ var statuses = new Map();
+    document.querySelectorAll(/** @type {'div'} */ ('.dup-card[data-photo-id] [data-trash-status]')).forEach(function(status) {
+      var card = status.closest(/** @type {'div'} */ ('.dup-card')); if (!card) return;
+      var button = card.querySelector(/** @type {'button'} */ ('.trash-btn'));
+      statuses.set(card.getAttribute('data-photo-id') || '', {text: status.textContent, disabled: !!(button && button.disabled)});
     });
     renderResults(_lastScanResult);
-    document.querySelectorAll('.dup-card[data-photo-id] [data-trash-status]').forEach(function(status) {
-      var card = status.closest('.dup-card');
-      var saved = statuses.get(card.getAttribute('data-photo-id'));
+    document.querySelectorAll(/** @type {'div'} */ ('.dup-card[data-photo-id] [data-trash-status]')).forEach(function(status) {
+      var card = status.closest(/** @type {'div'} */ ('.dup-card')); if (!card) return;
+      var saved = statuses.get(card.getAttribute('data-photo-id') || '');
       if (!saved) return;
       status.textContent = saved.text;
-      var button = card.querySelector('.trash-btn');
+      var button = card.querySelector(/** @type {'button'} */ ('.trash-btn'));
       if (button) button.disabled = saved.disabled;
     });
     return;
@@ -149,9 +156,9 @@ function forgetCleanedDuplicateCopies(photoIds) {
         '\')">View remaining copies</button>';
       card.replaceWith(notice);
     } else {
-      var badge = card.querySelector('.category-badge');
+      var badge = card.querySelector(/** @type {'div'} */ ('.category-badge'));
       if (badge) badge.textContent = DuplicateCategories.label(category);
-      var label = card.querySelector('.dup-group-header label');
+      var label = card.querySelector(/** @type {'div'} */ ('.dup-group-header label'));
       if (label && !p.empty_file_group) label.textContent = p.losers.length + ' extra ' +
         (p.losers.length === 1 ? 'copy' : 'copies') + ' already rejected';
     }
@@ -163,21 +170,22 @@ function forgetCleanedDuplicateCopies(photoIds) {
     categories.push({id: _duplicateCategory, label: DuplicateCategories.label(_duplicateCategory),
       groups: 0, extras: 0, bytes: 0});
   }
-  var summary = document.querySelector('.category-summary');
+  var summary = document.querySelector(/** @type {'div'} */ ('.category-summary'));
   if (summary) summary.outerHTML = renderCategorySummary(categories);
   var visible = _lastScanResult.proposals.filter(groupMatchesFilter);
-  var bar = document.querySelector('.summary-bar');
+  var bar = document.querySelector(/** @type {'div'} */ ('.summary-bar'));
   if (bar) bar.outerHTML = renderSummaryBar(_lastScanResult,
     visible.filter(function(p) { return p.status !== 'resolved'; }),
     visible.filter(function(p) { return p.status === 'resolved'; }));
 }
 
+/** @returns {DuplicateProposal[]} */
 function getCheckedGroups() {
-  var checked = [];
-  document.querySelectorAll('.group-check').forEach(function(cb) {
+  /** @type {DuplicateProposal[]} */ var checked = [];
+  document.querySelectorAll(/** @type {'input'} */ ('.group-check')).forEach(function(cb) {
     if (cb.checked) {
-      var gi = parseInt(cb.getAttribute('data-gi'), 10);
-      if (!isNaN(gi) && _proposals[gi]) checked.push(_proposals[gi]);
+      var gi = parseInt(cb.getAttribute('data-gi') || '', 10);
+      var proposal = _proposals[gi]; if (!isNaN(gi) && proposal) checked.push(proposal);
     }
   });
   return checked;
@@ -188,13 +196,13 @@ function updateApplyCount() {
   var checked = getCheckedGroups();
   var loserCount = 0;
   checked.forEach(function(g) { loserCount += (g.losers || []).length; });
-  var btn = document.getElementById('applyBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('applyBtn'));
   btn.textContent = _duplicateApplyInProgress ? 'Applying...' :
     'Reject ' + loserCount + ' extra ' + (loserCount === 1 ? 'copy' : 'copies');
   btn.disabled = _duplicateApplyInProgress || loserCount === 0;
-  document.getElementById('applyStatus').textContent = _duplicateApplyMessage;
-  document.getElementById('applyBar').style.display =
-    document.querySelector('.group-check') || _duplicateApplyInProgress || _duplicateApplyMessage ? '' : 'none';
+  /** @type {HTMLElement} */ (document.getElementById('applyStatus')).textContent = _duplicateApplyMessage;
+  /** @type {HTMLElement} */ (document.getElementById('applyBar')).style.display =
+    document.querySelector(/** @type {'input'} */ ('.group-check')) || _duplicateApplyInProgress || _duplicateApplyMessage ? '' : 'none';
 }
 
 async function applyRejections() {
@@ -209,7 +217,7 @@ async function applyRejections() {
   updateApplyCount();
 
   try {
-    var data = await safeFetch('/api/duplicates/apply', {
+    /** @type {{rejected_count?:number;deferred_hashes?:string[]}} */ var data = await safeFetch('/api/duplicates/apply', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ hashes: hashes }),
@@ -221,7 +229,7 @@ async function applyRejections() {
     // resolved. Prune only the hashes we asked about that were NOT
     // deferred so the rest of the scan cache stays consistent.
     var deferredSet = new Set(deferred);
-    var resolvedHashes = new Set();
+    /** @type {Set<string>} */ var resolvedHashes = new Set();
     hashes.forEach(function(h) {
       if (!deferredSet.has(h)) resolvedHashes.add(h);
     });
@@ -244,7 +252,7 @@ async function applyRejections() {
     } else {
       renderResults(_lastScanResult);
     }
-  } catch (e) {
+  } catch (caught) { const e = duplicateRequestError(caught);
     showToast(e.message || 'Apply failed', 'error');
     _duplicateApplyMessage = 'Reject failed for your earlier selection: ' + (e.message || 'request failed');
     // safeFetch already shows a toast on failure.

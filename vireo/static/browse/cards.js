@@ -2,7 +2,7 @@
    Classic script sharing page globals; browse.html loads the
    browse/*.js files in dependency order. */
 
-function formatFileSize(bytes) {
+function formatFileSize(/** @type {number | null | undefined} */ bytes = undefined) {
   if (bytes == null) return '';
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
@@ -14,16 +14,16 @@ function formatFileSize(bytes) {
 // the RAW's, with the JPEG in companion_path; label it "NEF + JPG" so a card
 // the extension filter matched by its JPEG says why. The companion's format
 // comes from its basename, as the server's extension filter reads it.
-function cardExtensionLabel(p) {
+function cardExtensionLabel(/** @type {BrowsePhoto} */ p) {
   var label = p.extension ? String(p.extension).replace(/^\./, '').toUpperCase() : '';
-  var base = p.companion_path ? String(p.companion_path).split(/[\\/]/).pop() : '';
+  var base = p.companion_path ? (String(p.companion_path).split(/[\\/]/).pop() || '') : '';
   var m = base.match(/^\.*[^.][\s\S]*(\.[^.]+)$/);
-  var companion = m ? m[1].slice(1).toUpperCase() : '';
+  var companion = m && m[1] ? m[1].slice(1).toUpperCase() : '';
   if (!companion || companion === label) return label;
   return label ? label + ' + ' + companion : companion;
 }
 
-function renderSpeciesBadges(species, inline) {
+function renderSpeciesBadges(/** @type {string[] | undefined} */ species, /** @type {boolean | undefined} */ inline = undefined) {
   if (!Array.isArray(species) || species.length === 0) return '';
   var maxShow = 3;
   var style = inline ? ' style="position:static;padding:0;"' : '';
@@ -37,22 +37,22 @@ function renderSpeciesBadges(species, inline) {
   return html + '</div>';
 }
 
-function renderCardField(field, p) {
+function renderCardField(/** @type {string} */ field, /** @type {BrowsePhoto} */ p) {
   switch (field) {
     case 'filename':
       return '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>';
     case 'location_status':
       var locationStatus = p.location_status || 'none';
-      var locationLabels = {
+      /** @type {Record<'exif' | 'assigned' | 'none', [string, string, string]>} */ var locationLabels = {
         exif: ['📍', 'EXIF GPS', 'Embedded GPS coordinates from the photo'],
         assigned: ['●', 'Assigned map location', 'Map coordinates from an assigned Vireo location'],
         none: ['⊘', 'No coordinates', 'No EXIF GPS or assigned map coordinates']
       };
-      var locationLabel = locationLabels[locationStatus] || locationLabels.none;
+      var locationLabel = locationStatus === 'exif' ? locationLabels.exif : locationStatus === 'assigned' ? locationLabels.assigned : locationLabels.none;
       return '<span class="grid-location-status ' + locationStatus + '" title="' + escapeAttr(locationLabel[2]) + '">' +
         locationLabel[0] + ' ' + locationLabel[1] + '</span>';
     case 'rating':
-      if (p.rating > 0) {
+      if (p.rating != null && p.rating > 0) {
         var stars = '';
         for (var i = 0; i < p.rating; i++) stars += '&#9733;';
         return '<span class="grid-card-rating">' + stars + '</span>';
@@ -140,19 +140,19 @@ function renderCardField(field, p) {
 // row, so the card tint is stamped as an attribute at render time and
 // re-stamped by refreshCardBadgesAndInfo once /api/photos/color_labels
 // resolves or the user edits a label.
-function cardColorLabel(photoId) {
+function cardColorLabel(/** @type {number} */ photoId) {
   var cl = colorLabels[photoId];
   if (!cl) return null;
   if (window.VireoColorLabels && !window.VireoColorLabels.isValid(cl)) return null;
   return cl;
 }
 
-function cardColorLabelAttr(photoId) {
+function cardColorLabelAttr(/** @type {number} */ photoId) {
   var cl = cardColorLabel(photoId);
   return cl ? ' data-color-label="' + escapeAttr(cl) + '"' : '';
 }
 
-function applyCardColorLabel(card, photoId) {
+function applyCardColorLabel(/** @type {HTMLElement} */ card, /** @type {number} */ photoId) {
   var cl = cardColorLabel(photoId);
   if (cl) card.setAttribute('data-color-label', cl);
   else card.removeAttribute('data-color-label');
@@ -166,7 +166,7 @@ function applyCardColorLabel(card, photoId) {
 // those ids. loadPhotos()'s paging path does its own fetch and does not use
 // this. `isCurrent` is the caller's own staleness guard: a sort change or
 // folder click during the fetch means these ids are no longer on screen.
-function hydrateColorLabelsForRenderedPage(isCurrent) {
+function hydrateColorLabelsForRenderedPage(/** @type {() => boolean} */ isCurrent) {
   if (!photos.length) return;
   var ids = photos.map(function(p) { return p.id; });
   return fetchColorLabels(ids).then(function() {
@@ -174,7 +174,7 @@ function hydrateColorLabelsForRenderedPage(isCurrent) {
     refreshGridCards(ids);
     // fetchColorLabels already re-rendered a batch inspector; only the
     // single-photo panel is left to catch up.
-    var detail = document.getElementById('detailContent');
+    var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
     if (selectedPhotoId != null
         && !(detail && detail.classList.contains('batch-mode'))) {
       updateDetailColors();
@@ -182,7 +182,7 @@ function hydrateColorLabelsForRenderedPage(isCurrent) {
   });
 }
 
-function renderCardInfo(p) {
+function renderCardInfo(/** @type {BrowsePhoto} */ p) {
   var infoHtml = '';
   cardFields.forEach(function(field) {
     infoHtml += renderCardField(field, p);
@@ -190,7 +190,7 @@ function renderCardInfo(p) {
   return infoHtml;
 }
 
-function renderDetectionBoxes(p) {
+function renderDetectionBoxes(/** @type {BrowsePhoto} */ p) {
   // Shared by renderPhotoCard and renderBrowseStackMember so overlays and their
   // orientation/RAW-pair hiding stay identical between covers and expanded stack
   // members; toggleDetectionBoxes() rerenders through both paths.
@@ -218,7 +218,7 @@ function renderDetectionBoxes(p) {
   return html;
 }
 
-function renderPhotoCard(p, idx) {
+function renderPhotoCard(/** @type {BrowsePhoto} */ p, /** @type {number} */ idx) {
   var selectedClass = browseCardSelectionClass(p);
   // Offline members render first and unconditionally: they are read-only
   // placeholders with no thumbnail, and the server never lets one join a

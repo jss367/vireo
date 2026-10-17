@@ -1,16 +1,17 @@
+/** @param {number} photoId */
 function findSimilar(photoId) {
   var alreadyOpen = !!window._similarEscToken;
-  if (alreadyOpen) Keymap.popEsc(window._similarEscToken);
+  if (alreadyOpen) Keymap.popEsc(window._similarEscToken ?? -1);
   window._similarEscToken = Keymap.pushEsc(function() { closeSimilar(); });
 
-  var overlay = document.getElementById('similarOverlay');
-  var content = document.getElementById('similarContent');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('similarOverlay'));
+  var content = /** @type {HTMLElement} */ (document.getElementById('similarContent'));
   overlay.classList.add('active');
   if (!alreadyOpen) Keymap.lockBodyScroll();
   content.innerHTML = '<p style="color:var(--text-dim);">Searching for similar photos...</p>';
 
-  safeFetch('/api/photos/' + photoId + '/similar?limit=40', {}, { toast: false })
-    .then(function(data) {
+  /** @type {Promise<{error?: string; total_compared: number; similar: {photo: NavPhoto; similarity: number}[]}>} */ (safeFetch('/api/photos/' + photoId + '/similar?limit=40', {}, { toast: false }))
+    .then(function(/** @type {{error?: string; total_compared: number; similar: {photo: NavPhoto; similarity: number}[]}} */ data) {
       if (data.error) {
         content.innerHTML = '<p style="color:var(--warning);">' + escapeHtml(data.error) + '</p>';
         return;
@@ -77,7 +78,7 @@ function findSimilar(photoId) {
 
 function closeSimilar() {
   var wasOpen = !!window._similarEscToken;
-  if (wasOpen) { Keymap.popEsc(window._similarEscToken); window._similarEscToken = null; }
-  document.getElementById('similarOverlay').classList.remove('active');
+  if (wasOpen) { Keymap.popEsc(window._similarEscToken ?? -1); window._similarEscToken = null; }
+  /** @type {HTMLElement} */ (document.getElementById('similarOverlay')).classList.remove('active');
   if (wasOpen) Keymap.unlockBodyScroll();
 }

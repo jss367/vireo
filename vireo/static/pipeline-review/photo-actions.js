@@ -12,7 +12,7 @@ function getActiveSelection() {
       pipelineReviewUniquePhotoIds(window._vireoNativeMenuPhotoIdsOverride)
     );
   }
-  var overlay = document.getElementById('grmOverlay');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   if (overlay && overlay.classList.contains('open') && grmState) {
     return pipelineReviewUniquePhotoIds(_grmActionTargetIds());
   }
@@ -20,6 +20,7 @@ function getActiveSelection() {
   return photoIdsInReviewScope(pipelineReviewContextPhotoIds.slice());
 }
 
+/** @param {number[]} photoIds @param {number} rating */
 async function setPipelineReviewRating(photoIds, rating) {
   if (isScopedReviewView()) {
     notifyReadOnlyScopedView();
@@ -42,7 +43,7 @@ async function setPipelineReviewRating(photoIds, rating) {
     var photo = findPhotoInResults(id);
     if (photo) photo.rating = rating;
   });
-  if (document.getElementById('grmOverlay').classList.contains('open')) {
+  if (/** @type {HTMLElement} */ (document.getElementById('grmOverlay')).classList.contains('open')) {
     renderGroupModal();
   }
   showToast('Rated ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's') + ' ' + rating, 'success');
@@ -50,14 +51,17 @@ async function setPipelineReviewRating(photoIds, rating) {
   return true;
 }
 
+/** @param {number} photoId @param {number} rating */
 function setRatingFor(photoId, rating) {
   return setPipelineReviewRating([photoId], rating);
 }
 
+/** @param {number} rating */
 function batchSetRating(rating) {
   return setPipelineReviewRating(getActiveSelection(), rating);
 }
 
+/** @param {number} photoId */
 function revealPhoto(photoId) {
   return safeFetch('/api/files/reveal', {
     method: 'POST',
@@ -70,14 +74,13 @@ function revealPhoto(photoId) {
   });
 }
 
+/** @param {number[]} photoIds */
 async function copyPhotoPaths(photoIds) {
   var ids = pipelineReviewUniquePhotoIds(photoIds);
   var settled = await Promise.allSettled(ids.map(function(id) {
-    return safeFetch('/api/photos/' + id, {}, {toast: false});
+    return /** @type {Promise<{path?: string}>} */ (safeFetch('/api/photos/' + id, {}, {toast: false}));
   }));
-  var paths = settled.filter(function(result) {
-    return result.status === 'fulfilled' && result.value && result.value.path;
-  }).map(function(result) { return result.value.path; });
+  var paths = settled.flatMap(result => result.status === 'fulfilled' && result.value.path ? [result.value.path] : []);
   if (!paths.length) {
     showToast('No paths could be copied', 'error');
     return false;
@@ -92,6 +95,7 @@ async function copyPhotoPaths(photoIds) {
   }
 }
 
+/** @param {number} photoId @param {boolean} excluded */
 async function setWildlifeExcludedFor(photoId, excluded) {
   if (isScopedReviewView()) {
     notifyReadOnlyScopedView();
@@ -120,6 +124,7 @@ async function setWildlifeExcludedFor(photoId, excluded) {
   return true;
 }
 
+/** @param {number} photoId */
 function openPipelinePhotoEditor(photoId) {
   if (isScopedReviewView()) {
     notifyReadOnlyScopedView();
@@ -132,7 +137,7 @@ function openPipelinePhotoEditor(photoId) {
     window.vireoEditNav.setLastPhoto(photoId);
   }
   var url = '/edit/' + photoId;
-  var groupOpen = document.getElementById('grmOverlay').classList.contains('open');
+  var groupOpen = /** @type {HTMLElement} */ (document.getElementById('grmOverlay')).classList.contains('open');
   var tauri = typeof isTauri === 'function' && isTauri();
   if (groupOpen && tauri && grmHasPendingUserEdits()) {
     showToast('Apply or close Group Review before leaving this page', 'warning');

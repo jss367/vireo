@@ -3,15 +3,15 @@
 
 // -- Inline rename (double-click) --
 function bindKeywordRename() {
-  document.getElementById('kwBody').addEventListener('dblclick', function(e) {
-    const nameSpan = e.target.closest('.name-text');
+  /** @type {HTMLElement} */ (document.getElementById('kwBody')).addEventListener('dblclick', function(e) {
+    if (!(e.target instanceof Element)) return; const nameSpan = e.target.closest(/** @type {'span'} */ ('.name-text'));
     if (!nameSpan) return;
 
-    const kwId = parseInt(nameSpan.dataset.id);
+    const kwId = parseInt(nameSpan.dataset.id || '');
     const kw = allKeywords.find(k => k.id === kwId);
     if (!kw) return;
 
-    const td = nameSpan.parentElement;
+    const td = nameSpan.parentElement; if (!td) return;
     const oldName = kw.name;
     const input = document.createElement('input');
     input.type = 'text';
@@ -46,7 +46,7 @@ function bindKeywordRename() {
   });
 }
 
-async function renameKeyword(kwId, newName) {
+/** @param {number} kwId @param {string} newName */ async function renameKeyword(kwId, newName) {
   try {
     const resp = await fetch('/api/keywords/' + kwId, {
       method: 'PUT',
@@ -57,7 +57,7 @@ async function renameKeyword(kwId, newName) {
     // peer merges this row into the peer server-side. The requested id is
     // deleted; refetch so allKeywords/parentMap drop the stale entry and
     // pick up the peer's canonical name.
-    const data = await resp.json().catch(() => ({}));
+    /** @type {KeywordMutation} */ const data = await resp.json().catch(() => ({}));
     if (data && data.merged) {
       await loadKeywords();
       return;
@@ -68,7 +68,7 @@ async function renameKeyword(kwId, newName) {
     // The row reverts to the old name on render(); say why, or the rename
     // (e.g. a location name containing '|') just silently undoes itself.
     console.error('Failed to rename', e);
-    showToast('Could not rename keyword: ' + (e.message || 'request failed'), 'error');
+    showToast('Could not rename keyword: ' + (keywordErrorMessage(e) || 'request failed'), 'error');
   }
   render();
 }

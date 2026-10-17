@@ -26,21 +26,21 @@ function initUnloadGuard() {
 function updateNavControls() {
   var ids = editorState.navIds || [];
   var idx = ids.indexOf(Number(editorState.photoId));
-  var prev = document.getElementById('prevBtn');
-  var next = document.getElementById('nextBtn');
-  var pos = document.getElementById('editorNavPos');
+  var prev = /** @type {HTMLButtonElement} */ (document.getElementById('prevBtn'));
+  var next = /** @type {HTMLButtonElement} */ (document.getElementById('nextBtn'));
+  var pos = /** @type {HTMLElement} */ (document.getElementById('editorNavPos'));
   var hasNav = ids.length > 1 && idx !== -1;
   if (prev) { prev.hidden = !hasNav; prev.disabled = !hasNav || idx <= 0; }
   if (next) { next.hidden = !hasNav; next.disabled = !hasNav || idx >= ids.length - 1; }
   if (pos) pos.textContent = hasNav ? (idx + 1) + ' / ' + ids.length : '';
 }
 
-function editorNav(delta) {
+/** @param {number} delta */ function editorNav(delta) {
   var ids = editorState.navIds || [];
   var idx = ids.indexOf(Number(editorState.photoId));
   if (idx === -1) return;
   var newIdx = idx + delta;
   if (newIdx < 0 || newIdx >= ids.length) return;
   if (isEditorDirty() && !window.confirm('Discard unsaved edits to this photo?')) return;
-  loadPhoto(ids[newIdx]);
+  var photoId = ids[newIdx]; if (photoId !== undefined) loadPhoto(photoId);
 }

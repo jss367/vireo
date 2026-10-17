@@ -1,14 +1,14 @@
 // The Group Review loupe: lock, eye crosshair, hover zoom, align drags, card transforms, and strip 1:1.
 // Classic page script; load boot.js after all definitions.
 
-function grmLoupeToggleLock(e) {
+/** @param {MouseEvent} e */ function grmLoupeToggleLock(e) {
   if (_grmSuppressLoupeClick) {
     _grmSuppressLoupeClick = false;
     return;
   }
   _grmLoupeLocked = !_grmLoupeLocked;
-  var ch = document.getElementById('grmCrosshairH');
-  var cv = document.getElementById('grmCrosshairV');
+  var ch = /** @type {HTMLElement} */ (document.getElementById('grmCrosshairH'));
+  var cv = /** @type {HTMLElement} */ (document.getElementById('grmCrosshairV'));
   if (_grmLoupeLocked) {
     ch.style.background = 'rgba(255, 180, 50, 0.7)';
     cv.style.background = 'rgba(255, 180, 50, 0.7)';
@@ -20,14 +20,14 @@ function grmLoupeToggleLock(e) {
 }
 
 function grmHideSelectedEyeCrosshair() {
-  var marker = document.getElementById('grmSelectedEyeCrosshair');
+  var marker = /** @type {HTMLElement} */ (document.getElementById('grmSelectedEyeCrosshair'));
   if (marker) marker.style.display = 'none';
 }
 
 function grmUpdateSelectedEyeCrosshair() {
-  var marker = document.getElementById('grmSelectedEyeCrosshair');
-  var box = document.getElementById('grmLoupeImg');
-  var img = document.getElementById('grmLoupePhoto');
+  var marker = /** @type {HTMLElement} */ (document.getElementById('grmSelectedEyeCrosshair'));
+  var box = /** @type {HTMLElement} */ (document.getElementById('grmLoupeImg'));
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('grmLoupePhoto'));
   if (!marker || !box || !img || !grmState || !grmState.selected) return;
 
   var item = grmState.items.find(function(entry) {
@@ -37,8 +37,8 @@ function grmUpdateSelectedEyeCrosshair() {
     grmHideSelectedEyeCrosshair();
     return;
   }
-  var eyeX = item && Number(item.eye_x);
-  var eyeY = item && Number(item.eye_y);
+  var eyeX = Number(item?.eye_x);
+  var eyeY = Number(item?.eye_y);
   if (!item || item.eye_x == null || item.eye_y == null ||
       !isFinite(eyeX) || !isFinite(eyeY) ||
       eyeX < 0 || eyeX > 1 || eyeY < 0 || eyeY > 1 ||
@@ -64,7 +64,7 @@ function grmUpdateSelectedEyeCrosshair() {
   var originX = (_grmLoupeLastX / 100) * boxW;
   var originY = (_grmLoupeLastY / 100) * boxH;
   var card = document.querySelector(
-    '.grm-card[data-photo-id="' + grmState.selected + '"]'
+    /** @type {'div'} */ ('.grm-card[data-photo-id="' + grmState.selected + '"]')
   );
   var offset = _grmOffsets[String(grmState.selected)] ||
     _grmOffsets[grmState.selected] || { tx: 0, ty: 0 };
@@ -79,11 +79,11 @@ function grmUpdateSelectedEyeCrosshair() {
 }
 
 
-function grmLoupeMove(e) {
+/** @param {MouseEvent} e */ function grmLoupeMove(e) {
   if (_grmLoupeAlignDragging) return;
   if (_grmLoupeLocked) return;
 
-  var rect = e.currentTarget.getBoundingClientRect();
+  var rect = /** @type {HTMLElement} */ (e.currentTarget).getBoundingClientRect();
   var x = ((e.clientX - rect.left) / rect.width) * 100;
   var y = ((e.clientY - rect.top) / rect.height) * 100;
   _grmLoupeLastX = x;
@@ -91,8 +91,8 @@ function grmLoupeMove(e) {
   _grmLoupeHovering = true;
 
   // Update crosshairs
-  document.getElementById('grmCrosshairH').style.top = y + '%';
-  document.getElementById('grmCrosshairV').style.left = x + '%';
+  /** @type {HTMLElement} */ (document.getElementById('grmCrosshairH')).style.top = y + '%';
+  /** @type {HTMLElement} */ (document.getElementById('grmCrosshairV')).style.left = x + '%';
   grmApplyLoupeZoom();
 
   // No upgrade here: plain hover shouldn't trigger a burst of full-res fetches
@@ -101,32 +101,32 @@ function grmLoupeMove(e) {
   _grmApplyAllCardTransforms(x, y);
 }
 
-function _grmCardDisplayedScale(card) {
+/** @param {HTMLElement} card */ function _grmCardDisplayedScale(card) {
   var coverFit = _grmCardCoverFit(card);
   var hovering = _grmLoupeHovering || _grmLoupeLocked;
   return hovering ? Math.max(coverFit, coverFit * _grmZoomLevel) : coverFit;
 }
 
 function _grmSelectedOffsetTargets() {
-  var ids = [];
+  /** @type {(number|string)[]} */ var ids = [];
   if (grmState && grmState.selectedIds && grmState.selectedIds.size) {
     ids = Array.from(grmState.selectedIds);
   } else if (grmState && grmState.selected) {
     ids = [grmState.selected];
   }
-  var seen = {};
+  /** @type {Record<string,boolean>} */ var seen = {};
   return ids.map(function(pid) {
     var key = String(pid);
     if (seen[key]) return null;
     seen[key] = true;
-    var targetCard = document.querySelector('.grm-card[data-photo-id="' + key + '"]');
+    var targetCard = document.querySelector(/** @type {'div'} */ ('.grm-card[data-photo-id="' + key + '"]'));
     if (!targetCard) return null;
     var cur = _grmOffsets[key] || _grmOffsets[pid] || { tx: 0, ty: 0 };
     return { card: targetCard, photoId: key, origTx: cur.tx, origTy: cur.ty };
-  }).filter(Boolean);
+  }).filter(function(target) { return target !== null; });
 }
 
-function grmLoupeMouseDown(e) {
+/** @param {MouseEvent} e */ function grmLoupeMouseDown(e) {
   if (e.button !== 0) return;
   var targets = _grmSelectedOffsetTargets();
   if (!targets.length) return;
@@ -141,7 +141,7 @@ function grmLoupeMouseDown(e) {
   e.preventDefault();
 }
 
-function grmLoupeMouseMove(e) {
+/** @param {MouseEvent} e */ function grmLoupeMouseMove(e) {
   if (!_grmLoupeAlignDragging) return;
   if ((e.buttons & 1) === 0) {
     grmLoupeMouseUp(e);
@@ -151,7 +151,7 @@ function grmLoupeMouseMove(e) {
   var dy = e.clientY - _grmLoupeAlignDragging.startY;
   if (!_grmLoupeAlignDragging.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
     _grmLoupeAlignDragging.moved = true;
-    var loupe = document.getElementById('grmLoupeImg');
+    var loupe = /** @type {HTMLElement} */ (document.getElementById('grmLoupeImg'));
     if (loupe) loupe.classList.add('align-dragging');
     _grmLoupeAlignDragging.targets.forEach(function(target) {
       target.card.classList.add('dragging');
@@ -170,13 +170,13 @@ function grmLoupeMouseMove(e) {
   e.preventDefault();
 }
 
-function grmLoupeMouseUp(e) {
+/** @param {MouseEvent} e */ function grmLoupeMouseUp(e) {
   if (!_grmLoupeAlignDragging) return;
   var moved = _grmLoupeAlignDragging.moved;
   _grmLoupeAlignDragging.targets.forEach(function(target) {
     target.card.classList.remove('dragging');
   });
-  var loupe = document.getElementById('grmLoupeImg');
+  var loupe = /** @type {HTMLElement} */ (document.getElementById('grmLoupeImg'));
   if (loupe) loupe.classList.remove('align-dragging');
   document.removeEventListener('mousemove', grmLoupeMouseMove);
   document.removeEventListener('mouseup', grmLoupeMouseUp);
@@ -185,15 +185,15 @@ function grmLoupeMouseUp(e) {
   grmRefreshResetAllVisibility();
 }
 
-function _grmCardCoverFit(card) {
-  var W = parseFloat(card.dataset.natW) || GRM_CARD_W;
-  var H = parseFloat(card.dataset.natH) || GRM_CARD_H;
+/** @param {HTMLElement} card */ function _grmCardCoverFit(card) {
+  var W = parseFloat(card.dataset.natW || '') || GRM_CARD_W;
+  var H = parseFloat(card.dataset.natH || '') || GRM_CARD_H;
   return Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
 }
 
-function _grmComputeCardTransform(card, hoverX, hoverY, hovering) {
-  var W = parseFloat(card.dataset.natW) || GRM_CARD_W;
-  var H = parseFloat(card.dataset.natH) || GRM_CARD_H;
+/** @param {HTMLElement} card @param {number} hoverX @param {number} hoverY @param {boolean} hovering */ function _grmComputeCardTransform(card, hoverX, hoverY, hovering) {
+  var W = parseFloat(card.dataset.natW || '') || GRM_CARD_W;
+  var H = parseFloat(card.dataset.natH || '') || GRM_CARD_H;
   var coverFit = Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
   var s = coverFit;
   if (hovering) {
@@ -203,7 +203,7 @@ function _grmComputeCardTransform(card, hoverX, hoverY, hovering) {
   var hy = hovering ? (hoverY / 100) : 0.5;
   var baseTx = hx * (GRM_CARD_W - W * s);
   var baseTy = hy * (GRM_CARD_H - H * s);
-  var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
+  var off = _grmOffsets[card.dataset.photoId || ''] || { tx: 0, ty: 0 };
   // Pan offsets are in pre-scale (image-coordinate) CSS pixels; convert to
   // card-coordinate pixels by multiplying by the displayed scale.
   var tx = baseTx + off.tx * s;
@@ -219,10 +219,10 @@ function _grmComputeCardTransform(card, hoverX, hoverY, hovering) {
   };
 }
 
-function _grmApplyAllCardTransforms(x, y) {
+/** @param {number} x @param {number} y */ function _grmApplyAllCardTransforms(x, y) {
   var hovering = _grmLoupeHovering || _grmLoupeLocked;
-  document.querySelectorAll('.grm-card').forEach(function(card) {
-    var img = card.querySelector('img');
+  document.querySelectorAll(/** @type {'div'} */ ('.grm-card')).forEach(function(card) {
+    var img = card.querySelector(/** @type {'img'} */ ('img'));
     if (!img) return;
     var t = _grmComputeCardTransform(card, x, y, hovering);
     img.style.transform = t.transform;
@@ -232,8 +232,8 @@ function _grmApplyAllCardTransforms(x, y) {
   grmUpdateSelectedEyeCrosshair();
 }
 
-function _grmApplyCardTransform(card) {
-  var img = card.querySelector('img');
+/** @param {HTMLElement} card */ function _grmApplyCardTransform(card) {
+  var img = card.querySelector(/** @type {'img'} */ ('img'));
   if (!img) return;
   var hovering = card.classList.contains('zoomed');
   var t = _grmComputeCardTransform(card, _grmLoupeLastX, _grmLoupeLastY, hovering);
@@ -243,7 +243,7 @@ function _grmApplyCardTransform(card) {
   }
 }
 
-function grmLoupeZoom(e) {
+/** @param {WheelEvent} e */ function grmLoupeZoom(e) {
   e.preventDefault();
   // Wheel input is an explicit override of any pending 1:1 snap.
   _grmPendingSnap = false;
@@ -258,11 +258,11 @@ function grmLoupeZoom(e) {
   _grmUpgradeStripToOriginal();
   _grmLoupeHovering = true;
   // Update origin from the wheel event even when locked so zoom follows cursor.
-  var rect = e.currentTarget.getBoundingClientRect();
+  var rect = /** @type {HTMLElement} */ (e.currentTarget).getBoundingClientRect();
   _grmLoupeLastX = ((e.clientX - rect.left) / rect.width) * 100;
   _grmLoupeLastY = ((e.clientY - rect.top) / rect.height) * 100;
-  document.getElementById('grmCrosshairH').style.top = _grmLoupeLastY + '%';
-  document.getElementById('grmCrosshairV').style.left = _grmLoupeLastX + '%';
+  /** @type {HTMLElement} */ (document.getElementById('grmCrosshairH')).style.top = _grmLoupeLastY + '%';
+  /** @type {HTMLElement} */ (document.getElementById('grmCrosshairV')).style.left = _grmLoupeLastX + '%';
   grmApplyLoupeZoom();
   _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
 }
@@ -277,12 +277,12 @@ function grmSnapOneToOne() {
   // <img> has loaded and grmCardImgLoaded has reconciled data-nat-w/h with
   // naturalWidth/naturalHeight, so the snap lands at true 1:1.
   var card = grmState.selected
-    ? document.querySelector('.grm-card[data-photo-id="' + grmState.selected + '"]')
+    ? document.querySelector(/** @type {'div'} */ ('.grm-card[data-photo-id="' + grmState.selected + '"]'))
     : null;
-  var img = card ? card.querySelector('img') : null;
-  if (img && img.complete && img.naturalWidth && img.naturalHeight) {
-    var dw = parseFloat(card.dataset.natW) || 0;
-    var dh = parseFloat(card.dataset.natH) || 0;
+  var img = card ? card.querySelector(/** @type {'img'} */ ('img')) : null;
+  if (card && img && img.complete && img.naturalWidth && img.naturalHeight) {
+    var dw = parseFloat(card.dataset.natW || '') || 0;
+    var dh = parseFloat(card.dataset.natH || '') || 0;
     if (img.naturalWidth === dw && img.naturalHeight === dh) {
       _grmPendingSnap = false;
       _grmFinishSnap();

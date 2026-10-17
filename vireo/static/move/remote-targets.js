@@ -2,7 +2,7 @@
 // Classic page script; load boot.js after all definitions.
 
 /* ---------- Remote (SSH) move targets ---------- */
-var quickRemoteTargets = [];
+/** @type {MoveRemoteTarget[]} */ var quickRemoteTargets = [];
 var quickRsyncAvailable = false;
 
 async function loadRemoteTargets() {
@@ -14,7 +14,7 @@ async function loadRemoteTargets() {
     quickRemoteTargets = [];
     quickRsyncAvailable = false;
   }
-  var sel = document.getElementById('quickDestMode');
+  var sel = /** @type {HTMLSelectElement} */ (document.getElementById('quickDestMode'));
   if (!sel) return;
   // Rebuild remote options, keeping the "Local path" option at index 0.
   while (sel.options.length > 1) sel.remove(1);
@@ -28,19 +28,19 @@ async function loadRemoteTargets() {
 
 // The remote target id when the destination mode is a remote target, else ''.
 function quickRemoteTargetId() {
-  var el = document.getElementById('quickDestMode');
+  var el = /** @type {HTMLSelectElement} */ (document.getElementById('quickDestMode'));
   var v = el ? el.value : 'local';
   return v.indexOf('remote:') === 0 ? v.slice(7) : '';
 }
 
 function onQuickDestModeChange() {
   var remoteId = quickRemoteTargetId();
-  document.getElementById('quickLocalRow').style.display = remoteId ? 'none' : '';
-  document.getElementById('quickRemoteRow').style.display = remoteId ? '' : 'none';
-  var dateOption = document.querySelector('#quickFolderMode option[value="date"]');
+  /** @type {HTMLElement} */ (document.getElementById('quickLocalRow')).style.display = remoteId ? 'none' : '';
+  /** @type {HTMLElement} */ (document.getElementById('quickRemoteRow')).style.display = remoteId ? '' : 'none';
+  var dateOption = /** @type {HTMLOptionElement | null} */ (document.querySelector('#quickFolderMode option[value="date"]'));
   if (dateOption) dateOption.disabled = !!remoteId;
   if (remoteId && quickUsesDateFolders()) {
-    document.getElementById('quickFolderMode').value = 'single';
+    /** @type {HTMLSelectElement} */ (document.getElementById('quickFolderMode')).value = 'single';
     onQuickFolderModeChange();
     return;
   }

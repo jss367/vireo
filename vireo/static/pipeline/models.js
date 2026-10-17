@@ -5,7 +5,7 @@
 async function loadModels() {
   try {
     var data = await safeFetch('/api/models', {}, { toast: false });
-    var div = document.getElementById('modelPicker');
+    var div = /** @type {HTMLElement} */ (document.getElementById('modelPicker'));
     div.innerHTML = '';
     var downloaded = data.models.filter(function(m) { return m.downloaded; });
     if (downloaded.length === 0) {
@@ -42,10 +42,10 @@ async function loadModels() {
 // Grey out the labels picker when no selected model uses label lists,
 // or show a "BioCLIP-only" note when selection is mixed.
 function updateLabelsPickerState() {
-  var picker = document.getElementById('labelsPicker');
-  var note = document.getElementById('labelsPickerNote');
+  var picker = /** @type {HTMLElement} */ (document.getElementById('labelsPicker'));
+  var note = /** @type {HTMLElement} */ (document.getElementById('labelsPickerNote'));
   if (!picker || !note) return;
-  var selected = Array.from(document.querySelectorAll('.model-checkbox:checked'));
+  var selected = Array.from(/** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.model-checkbox:checked')));
   if (selected.length === 0) {
     picker.style.opacity = '';
     picker.style.pointerEvents = '';
@@ -76,8 +76,8 @@ function updateLabelsPickerState() {
 }
 
 function getSelectedLabelFiles() {
-  var files = [];
-  document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+  /** @type {string[]} */ var files = [];
+  /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.labels-run-cb:checked')).forEach(function(cb) {
     files.push(cb.value);
   });
   return files;

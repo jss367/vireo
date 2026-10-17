@@ -1,11 +1,11 @@
 
-function _lbNormalizeFlag(flag) {
+/** @returns {LightboxFlag | null} */ function _lbNormalizeFlag(/** @type {unknown} */ flag) {
   if (flag === 'flagged' || flag === 'rejected' || flag === 'none') return flag;
   if (flag == null || flag === '') return 'none';
   return null;
 }
 
-function _lbSetFlagStatus(flag) {
+function _lbSetFlagStatus(/** @type {unknown} */ flag) {
   var normalized = typeof flag === 'undefined' ? null : _lbNormalizeFlag(flag);
   var flagBtn = document.getElementById('lightboxFlagBtn');
   var rejectBtn = document.getElementById('lightboxRejectBtn');
@@ -30,38 +30,38 @@ function _lbSetFlagStatus(flag) {
   }
 }
 
-function _lbPendingFlagLabel(flag) {
+function _lbPendingFlagLabel(/** @type {LightboxFlag} */ flag) {
   if (flag === 'flagged') return 'Flagging...';
   if (flag === 'rejected') return 'Rejecting...';
   if (flag === 'none') return 'Clearing flag...';
   return 'Saving...';
 }
 
-function _lbSetPendingFlagStatus(flag) {
+function _lbSetPendingFlagStatus(/** @type {LightboxFlag} */ flag) {
   var el = document.getElementById('lightboxFlagStatus');
   if (!el) return;
   el.className = 'lightbox-flag-status visible pending';
   el.textContent = _lbPendingFlagLabel(flag);
 }
 
-function _lbFlagFromPhotoList(photoId) {
+function _lbFlagFromPhotoList(/** @type {number | null} */ photoId) {
   var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (!p || !Object.prototype.hasOwnProperty.call(p, 'flag')) return undefined;
   return p.flag;
 }
 
-function _lbRememberConfirmedFlag(photoId, flag) {
-  var normalized = _lbNormalizeFlag(flag);
+function _lbRememberConfirmedFlag(/** @type {number | null} */ photoId, /** @type {unknown} */ flag) {
+  const normalized = _lbNormalizeFlag(flag);
   if (!normalized || photoId == null) return;
   _lbConfirmedFlags[String(photoId)] = normalized;
 }
 
-function _lbForgetConfirmedFlag(photoId) {
+function _lbForgetConfirmedFlag(/** @type {number | null} */ photoId) {
   if (photoId == null) return;
   delete _lbConfirmedFlags[String(photoId)];
 }
 
-function _lbConfirmedFlagFor(photoId) {
+function _lbConfirmedFlagFor(/** @type {number | null} */ photoId) {
   var key = String(photoId);
   if (Object.prototype.hasOwnProperty.call(_lbConfirmedFlags, key)) {
     return _lbConfirmedFlags[key];
@@ -69,7 +69,7 @@ function _lbConfirmedFlagFor(photoId) {
   return _lbFlagFromPhotoList(photoId);
 }
 
-function _lbDisplayedFlagFor(photoId) {
+function _lbDisplayedFlagFor(/** @type {number | null} */ photoId) {
   var key = String(photoId);
   if (Object.prototype.hasOwnProperty.call(_lbProvisionalFlags, key)) {
     return _lbProvisionalFlags[key];
@@ -78,15 +78,15 @@ function _lbDisplayedFlagFor(photoId) {
 }
 
 window.setLightboxProvisionalFlag = function(photoId, flag, editSeq) {
-  var normalized = _lbNormalizeFlag(flag);
+  const normalized = _lbNormalizeFlag(flag);
   if (photoId == null || !normalized) return;
   var key = String(photoId);
-  var seq = Number.isInteger(editSeq) ? editSeq : (_lbFlagEditSeq + 1);
+  var seq = typeof editSeq === 'number' && Number.isInteger(editSeq) ? editSeq : (_lbFlagEditSeq + 1);
   if (seq < (_lbProvisionalFlagSeq[key] || 0)) return;
   _lbFlagEditSeq = Math.max(_lbFlagEditSeq, seq);
   _lbProvisionalFlags[key] = normalized;
   _lbProvisionalFlagSeq[key] = seq;
-  if (vireoLightboxSession.requestedPhotoId() === parseInt(photoId, 10)) {
+  if (vireoLightboxSession.requestedPhotoId() === Number(photoId)) {
     _lbSetFlagStatus(normalized);
   }
 };
@@ -102,14 +102,14 @@ window.clearLightboxProvisionalFlags = function(photoIds) {
     _lbForgetConfirmedFlag(photoId);
   });
   if (vireoLightboxSession.requestedPhotoId() != null && (photoIds || []).some(function(photoId) {
-    return parseInt(photoId, 10) === vireoLightboxSession.requestedPhotoId();
+    return Number(photoId) === vireoLightboxSession.requestedPhotoId();
   })) {
     _lbSetFlagStatus(_lbDisplayedFlagFor(vireoLightboxSession.requestedPhotoId()));
   }
 };
 
-function _lbRecordFlag(photoId, flag) {
-  var normalized = _lbNormalizeFlag(flag);
+function _lbRecordFlag(/** @type {number | null} */ photoId, /** @type {unknown} */ flag) {
+  const normalized = _lbNormalizeFlag(flag);
   if (!normalized) return;
   var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (p) p.flag = normalized;
@@ -119,21 +119,21 @@ function _lbRecordFlag(photoId, flag) {
   }
 }
 
-function _lbCacheFlag(photoId, flag) {
-  var normalized = _lbNormalizeFlag(flag);
+function _lbCacheFlag(/** @type {number} */ photoId, /** @type {unknown} */ flag) {
+  const normalized = _lbNormalizeFlag(flag);
   if (!normalized) return;
   var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (p) p.flag = normalized;
   _lbRememberConfirmedFlag(photoId, normalized);
 }
 
-function _lbRecordFetchedFlag(photoId, flag, flagFetchSeq) {
+function _lbRecordFetchedFlag(/** @type {number} */ photoId, /** @type {unknown} */ flag, /** @type {number} */ flagFetchSeq) {
   if (_lbFlagEditSeq !== flagFetchSeq) return;
   _lbRecordFlag(photoId, flag);
 }
 
-function _lbApplyFlag(photoId, flag) {
-  var normalized = _lbNormalizeFlag(flag);
+function _lbApplyFlag(/** @type {number | null} */ photoId, /** @type {unknown} */ flag) {
+  const normalized = _lbNormalizeFlag(flag);
   if (!normalized || photoId == null) return false;
   var previousFlag = _lbNormalizeFlag(_lbConfirmedFlagFor(photoId)) || 'none';
   var seq = _lbFlagEditSeq + 1;
@@ -159,7 +159,7 @@ function _lbApplyFlag(photoId, flag) {
 
   // Resolve both success and rejection through one settle path so the per-photo
   // pending count is always balanced and the quiescence event always fires.
-  function settle(result) {
+  function settle(/** @type {boolean | void | {provisional: boolean}} */ result) { if (photoId == null || !normalized) return;
     // Page-local flag helpers may deliberately keep a change provisional
     // (for example, Process Review's Group Review stages picks/rejects until
     // Apply). Show that choice in the open lightbox, but do not promote it to

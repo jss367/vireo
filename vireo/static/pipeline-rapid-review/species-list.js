@@ -15,6 +15,7 @@
 // same equivalence SQLite's NOCASE gives add_keyword(). A Unicode-aware
 // toLowerCase() would merge names the database keeps distinct (Éclair vs
 // éclair) and make a replace/remove skip the tag it should drop.
+/** @param {string|null|undefined} name */
 function speciesKey(name) {
   return (name || '').trim().replace(/\s+/g, ' ').replace(/[A-Z]/g, function(ch) {
     return ch.toLowerCase();
@@ -26,9 +27,10 @@ function speciesKey(name) {
 // quotes, CSV style ("" inside quotes is a literal quote). joinSpecies()
 // produces exactly this encoding, so a stored keyword such as
 // `Mallard, domestic` round-trips through the field untouched.
+/** @param {string} text */
 function parseSpeciesList(text) {
-  var out = [];
-  var seen = {};
+  var out = /** @type {string[]} */ ([]);
+  var seen = /** @type {Record<string,boolean>} */ ({});
   var parts = [];
   var buf = '';
   var quoted = false;
@@ -63,22 +65,26 @@ function parseSpeciesList(text) {
   return out;
 }
 
+/** @param {string} name */
 function quoteSpeciesName(name) {
   if (/[,;"]/.test(name)) return '"' + name.replace(/"/g, '""') + '"';
   return name;
 }
 
+/** @param {string[]|null|undefined} list */
 function joinSpecies(list) {
   return (list || []).map(quoteSpeciesName).join(', ');
 }
 
+/** @param {string[]} a @param {string[]} b */
 function sameSpeciesSet(a, b) {
   if (a.length !== b.length) return false;
-  var keys = {};
+  var keys = /** @type {Record<string,boolean>} */ ({});
   a.forEach(function(name) { keys[speciesKey(name)] = true; });
   return b.every(function(name) { return !!keys[speciesKey(name)]; });
 }
 
+/** @param {RapidOverride|null|undefined} ovr */
 function overrideSpeciesList(ovr) {
   if (!ovr) return [];
   if (Array.isArray(ovr.species_list)) return ovr.species_list.filter(Boolean);
@@ -92,6 +98,7 @@ function overrideSpeciesList(ovr) {
 // outrank the encounter's confirmed species, or a flag-only apply would
 // "replace" the encounter species with the guess. Mirrors the backend's
 // burst_species_list() and applyCurrent()'s alreadyConfirmedList.
+/** @param {RapidOverride|null|undefined} ovr */
 function overrideIsExplicit(ovr) {
   if (!ovr) return false;
   // A species_list array is authoritative whatever the confirmed flag:
@@ -103,14 +110,16 @@ function overrideIsExplicit(ovr) {
   return ovr.confirmed === true && !!ovr.species;
 }
 
+/** @param {RapidEncounter|null|undefined} enc */
 function encounterConfirmedList(enc) {
   if (!enc) return [];
   if (Array.isArray(enc.confirmed_species_list)) return enc.confirmed_species_list.filter(Boolean);
   return enc.confirmed_species ? [enc.confirmed_species] : [];
 }
 
+/** @param {RapidEncounter|null|undefined} enc @param {RapidBurst|null|undefined} burst */
 function burstSpeciesList(enc, burst) {
-  var ovr = burst && burst.species_override;
+  var ovr = burst && (Array.isArray(burst) ? undefined : burst.species_override);
   if (overrideIsExplicit(ovr)) return overrideSpeciesList(ovr);
   var confirmed = encounterConfirmedList(enc);
   if (confirmed.length) return confirmed;
@@ -122,21 +131,24 @@ function burstSpeciesList(enc, burst) {
   return [];
 }
 
+/** @param {RapidEncounter|null|undefined} enc @param {RapidBurst|null|undefined} burst */
 function burstSpecies(enc, burst) {
   return joinSpecies(burstSpeciesList(enc, burst));
 }
 
+/** @param {RapidBurst|null|undefined} burst */
 function hasBurstSpeciesOverride(burst) {
-  return overrideIsExplicit(burst && burst.species_override);
+  return overrideIsExplicit(burst && (Array.isArray(burst) ? undefined : burst.species_override));
 }
 
 // Find the burst that still holds every one of `ids` after the server
 // returned a (possibly restructured) encounter list. A replace can
 // auto-detach the burst into another encounter, shifting burst indices, so
 // each follow-up species request must target the burst's new position.
+/** @param {RapidEncounter[]} encounters @param {number[]} ids */
 function locateBurstByPhotoIds(encounters, ids) {
   for (var e = 0; e < (encounters || []).length; e++) {
-    var enc = encounters[e];
+    var enc = /** @type {RapidEncounter} */ (encounters[e]);
     var bursts = enc.bursts && enc.bursts.length ? enc.bursts : [{ photo_ids: enc.photo_ids || [] }];
     for (var b = 0; b < bursts.length; b++) {
       var members = new Set(burstIds(bursts[b]));

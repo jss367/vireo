@@ -1,16 +1,16 @@
 // ---------- External Editors list ----------
 // Source-of-truth for the editor list in settings UI. Populated by
 // loadConfig() and read back on save via collectExternalEditors().
-var _editorsState = [];
+/** @type {SettingsEditor[]} */ var _editorsState = [];
 
 function renderExternalEditors() {
-  var container = document.getElementById('cfgExternalEditorsList');
+  var container = /** @type {HTMLElement} */ (document.getElementById('cfgExternalEditorsList'));
   if (!container) return;
   container.innerHTML = '';
   if (_editorsState.length === 0) {
     var empty = document.createElement('div');
     empty.style.cssText = 'color:var(--text-dim);font-size:12px;font-style:italic;';
-    empty.textContent = 'No editors configured. Photos will open in your OS default app.';
+    empty.textContent = String('No editors configured. Photos will open in your OS default app.');
     container.appendChild(empty);
     return;
   }
@@ -22,26 +22,26 @@ function renderExternalEditors() {
     var nameInput = document.createElement('input');
     nameInput.type = 'text';
     nameInput.placeholder = 'Display name (e.g. Lightroom)';
-    nameInput.value = ed.name || '';
+    nameInput.value = String(ed.name || '');
     nameInput.style.cssText = inputCss + 'width:160px;';
     nameInput.addEventListener('input', function() {
-      _editorsState[i].name = nameInput.value;
+      ed.name = nameInput.value;
       saveConfig();
     });
 
     var pathInput = document.createElement('input');
     pathInput.type = 'text';
     pathInput.placeholder = window.VIREO_EDITOR_PATH_PLACEHOLDER || '/usr/bin/darktable';
-    pathInput.value = ed.path || '';
+    pathInput.value = String(ed.path || '');
     pathInput.style.cssText = inputCss + 'flex:1;min-width:240px;font-family:monospace;';
     pathInput.addEventListener('input', function() {
-      _editorsState[i].path = pathInput.value;
+      ed.path = pathInput.value;
       saveConfig();
     });
 
     var removeBtn = document.createElement('button');
     removeBtn.type = 'button';
-    removeBtn.textContent = '×';
+    removeBtn.textContent = String('×');
     removeBtn.title = 'Remove';
     removeBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;width:28px;height:28px;font-size:16px;cursor:pointer;line-height:1;';
     removeBtn.addEventListener('click', function() {
@@ -73,7 +73,7 @@ function collectExternalEditors() {
   // strings, but if any later code path stored a non-string (or a future edit
   // skips that load step), calling .trim() directly here would TypeError and
   // block every settings autosave until the malformed entry is repaired.
-  var asStr = function(v) { return typeof v === 'string' ? v.trim() : ''; };
+  /** @param {unknown} v */ var asStr = function(v) { return typeof v === 'string' ? v.trim() : ''; };
   return _editorsState
     .map(function(e) { return { name: asStr(e && e.name), path: asStr(e && e.path) }; })
     .filter(function(e) { return e.path.length > 0; })

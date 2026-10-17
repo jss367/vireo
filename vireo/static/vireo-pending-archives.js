@@ -4,6 +4,7 @@
   if (!panel) return;
   const list = document.getElementById('pendingArchiveItems');
   const error = document.getElementById('pendingArchiveError');
+  if (!list || !error) return;
   let signature = '';
   let loading = false;
   let sending = false;
@@ -15,6 +16,7 @@
   // than having the sidebar poll the endpoint itself) keeps both surfaces on
   // one snapshot, so a transfer can never look sent in one and pending in the
   // other.
+  /** @param {PendingArchive[]} items */
   function publish(items) {
     window.vireoPendingArchives = items;
     try {
@@ -22,19 +24,58 @@
     } catch (_error) {}
   }
 
-  async function refresh() {
+  /** @param {PendingArchive} item @param {HTMLElement} row */
+  function appendUnsyncedNote(item, row) {
+  if (item.unsynced_photos || item.unsynced_photos_other_workspaces || item.unsynced_photos_here_with_sibling_edits) {
+    const unsynced = document.createElement('div');
+    unsynced.className = 'pending-archive-note';
+    const parts = [];
+    if (item.unsynced_photos) {
+      parts.push(item.unsynced_photos === 1
+        ? '1 photo here has metadata changes that are not written to its sidecar yet. '
+          + 'Writing it now is a local disk write; after the transfer the same sync has to run over the NAS connection.'
+        : item.unsynced_photos + ' photos here have metadata changes that are not written to their sidecars yet. '
+          + 'Writing them now is a local disk write; after the transfer the same sync has to run over the NAS connection.');
+    }
+    // Said separately because this button will not write them: the
+    // sync queue is per workspace, so a number that lumped them in
+    // would promise work that is not going to happen.
+    if (item.unsynced_photos_other_workspaces) {
+      const n = item.unsynced_photos_other_workspaces;
+      parts.push(n === 1
+        ? '1 more photo has changes queued in another workspace. "Sync metadata and send to NAS" will not write those — switch to that workspace and sync there first.'
+        : n + ' more photos have changes queued in other workspaces. "Sync metadata and send to NAS" will not write those — switch to those workspaces and sync there first.');
+    }
+    // The overlap: photos already counted above whose sibling-workspace
+    // edits will still miss the transfer even after this button runs.
+    // Called out because the "here" number would otherwise read as
+    // "these photos are covered" when only the active workspace's half
+    // of their edits is.
+    if (item.unsynced_photos_here_with_sibling_edits) {
+      const n = item.unsynced_photos_here_with_sibling_edits;
+      parts.push(n === 1
+        ? '1 of those photos also has edits queued in another workspace. Only this workspace’s half will be written; switch to that workspace and sync there before the transfer to catch the rest.'
+        : n + ' of those photos also have edits queued in other workspaces. Only this workspace’s half will be written; switch to those workspaces and sync there before the transfer to catch the rest.');
+    }
+    unsynced.textContent = parts.join(' ');
+    row.appendChild(unsynced);
+  }
+  }
+
+  const refresh = async function() {
     if (loading || sending || document.hidden) return;
     loading = true;
     try {
       const response = await fetch('/api/import/pending-archives');
       if (!response.ok) throw new Error('Could not check photos waiting for NAS transfer.');
+      /** @type {{items: PendingArchive[]}} */
       const data = await response.json();
       error.textContent = actionError;
       const next = JSON.stringify(data.items || []);
       if (next === signature) return;
       signature = next;
       publish(data.items || []);
-      const expanded = new Set(Array.from(list.querySelectorAll('details[open]'), el => el.dataset.archiveId));
+      const expanded = new Set(Array.from(list.querySelectorAll('details[open]'), el => el.getAttribute('data-archive-id')));
       list.replaceChildren();
       panel.hidden = !data.items.length;
       data.items.forEach(item => {
@@ -57,32 +98,35 @@
         row.appendChild(actions);
         if (item.collection_id) {
           const review = document.createElement('a');
-          review.href = '/browse?collection_id=' + encodeURIComponent(item.collection_id);
+          review.href = '/browse?collection_id=' + encodeURIComponent(String(item.collection_id));
           review.textContent = 'Review photos';
           actions.appendChild(review);
         }
+        /** @type {HTMLButtonElement[]} */
         const sendButtons = [];
-        async function startSend(syncFirst) {
+        /** @param {boolean} syncFirst */
+        const startSend = async function(syncFirst) {
           if (sending) return;
           sending = true;
           sendButtons.forEach(b => { b.disabled = true; });
           error.textContent = '';
           actionError = '';
           try {
-            const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(item.id) + '/send', {
+            const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(String(item.id)) + '/send', {
               method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sync_first: syncFirst}),
             });
+            /** @type {{error?: string}} */
             const result = await response.json();
             if (!response.ok) throw new Error(result.error || 'Could not start the NAS transfer.');
           } catch (e) {
-            actionError = e.message;
+            actionError = e instanceof Error ? e.message : String(e);
             error.textContent = actionError;
           } finally {
             sending = false;
             signature = '';
             refresh();
           }
-        }
+        };
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'btn';
@@ -104,40 +148,7 @@
           actions.appendChild(syncSend);
         }
         actions.appendChild(button);
-        if (item.unsynced_photos || item.unsynced_photos_other_workspaces || item.unsynced_photos_here_with_sibling_edits) {
-          const unsynced = document.createElement('div');
-          unsynced.className = 'pending-archive-note';
-          const parts = [];
-          if (item.unsynced_photos) {
-            parts.push(item.unsynced_photos === 1
-              ? '1 photo here has metadata changes that are not written to its sidecar yet. '
-                + 'Writing it now is a local disk write; after the transfer the same sync has to run over the NAS connection.'
-              : item.unsynced_photos + ' photos here have metadata changes that are not written to their sidecars yet. '
-                + 'Writing them now is a local disk write; after the transfer the same sync has to run over the NAS connection.');
-          }
-          // Said separately because this button will not write them: the
-          // sync queue is per workspace, so a number that lumped them in
-          // would promise work that is not going to happen.
-          if (item.unsynced_photos_other_workspaces) {
-            const n = item.unsynced_photos_other_workspaces;
-            parts.push(n === 1
-              ? '1 more photo has changes queued in another workspace. "Sync metadata and send to NAS" will not write those — switch to that workspace and sync there first.'
-              : n + ' more photos have changes queued in other workspaces. "Sync metadata and send to NAS" will not write those — switch to those workspaces and sync there first.');
-          }
-          // The overlap: photos already counted above whose sibling-workspace
-          // edits will still miss the transfer even after this button runs.
-          // Called out because the "here" number would otherwise read as
-          // "these photos are covered" when only the active workspace's half
-          // of their edits is.
-          if (item.unsynced_photos_here_with_sibling_edits) {
-            const n = item.unsynced_photos_here_with_sibling_edits;
-            parts.push(n === 1
-              ? '1 of those photos also has edits queued in another workspace. Only this workspace’s half will be written; switch to that workspace and sync there before the transfer to catch the rest.'
-              : n + ' of those photos also have edits queued in other workspaces. Only this workspace’s half will be written; switch to those workspaces and sync there before the transfer to catch the rest.');
-          }
-          unsynced.textContent = parts.join(' ');
-          row.appendChild(unsynced);
-        }
+        appendUnsyncedNote(item, row);
         if (item.source_available === false) {
           const missing = document.createElement('div');
           missing.className = 'pending-archive-note';
@@ -155,13 +166,14 @@
             actionError = '';
             error.textContent = '';
             try {
-              const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(item.id) + '/discard', {
+              const response = await fetch('/api/import/pending-archives/' + encodeURIComponent(String(item.id)) + '/discard', {
                 method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirmed: true}),
               });
-              const result = await response.json();
+              /** @type {{error?: string}} */
+            const result = await response.json();
               if (!response.ok) throw new Error(result.error || 'Could not remove the transfer record.');
             } catch (e) {
-              actionError = e.message;
+              actionError = e instanceof Error ? e.message : String(e);
               error.textContent = actionError;
             } finally {
               sending = false;
@@ -180,11 +192,11 @@
         list.appendChild(row);
       });
     } catch (e) {
-      if (!panel.hidden) error.textContent = e.message;
+      if (!panel.hidden) error.textContent = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
-  }
+  };
   refresh();
   setInterval(refresh, 5000);
   window.addEventListener('focus', refresh);

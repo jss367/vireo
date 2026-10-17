@@ -3,23 +3,24 @@
 
 // Event delegation for detail pane clicks (step toggle, pause/resume, cancel)
 function bindDetailPaneActions() {
-  document.getElementById('jobDetailPane').addEventListener('click', function(e) {
-    var cleanupButton = e.target.closest('[data-review-source], [data-clean-source]');
+  /** @type {HTMLElement} */ (document.getElementById('jobDetailPane')).addEventListener('click', function(e) {
+    if (!(e.target instanceof Element)) return;
+    let cleanupButton = e.target.closest('[data-review-source], [data-clean-source]');
     if (cleanupButton) {
-      var cleanId = cleanupButton.getAttribute('data-clean-source');
-      requestSourceCleanup(cleanId || cleanupButton.getAttribute('data-review-source'), !!cleanId);
+      let cleanId = cleanupButton.getAttribute('data-clean-source');
+      let cleanupId = cleanId || cleanupButton.getAttribute('data-review-source'); if (cleanupId) requestSourceCleanup(cleanupId, !!cleanId);
       return;
     }
-    var showJobBtn = e.target.closest('[data-show-job]');
+    let showJobBtn = e.target.closest('[data-show-job]');
     if (showJobBtn) {
-      var showJobId = showJobBtn.getAttribute('data-show-job');
-      var inActive = activeJobs.some(function(job) { return job.id === showJobId; });
+      let showJobId = showJobBtn.getAttribute('data-show-job'); if (!showJobId) return;
+      let inActive = activeJobs.some(function(job) { return job.id === showJobId; });
       selectJob(showJobId, inActive ? 'active' : 'history');
       return;
     }
-    var restartInPlaceBtn = e.target.closest('[data-restart-in-place]');
+    let restartInPlaceBtn = /** @type {HTMLButtonElement | null} */ (e.target.closest('[data-restart-in-place]'));
     if (restartInPlaceBtn) {
-      var restartId = restartInPlaceBtn.getAttribute('data-restart-in-place');
+      let restartId = restartInPlaceBtn.getAttribute('data-restart-in-place'); if (!restartId) return;
       if (inPlaceRestarts[restartId]) return;
       inPlaceRestarts[restartId] = {pending: true};
       restartInPlaceBtn.disabled = true;
@@ -50,7 +51,7 @@ function bindDetailPaneActions() {
         restartInPlaceBtn.disabled = false;
         restartInPlaceBtn.textContent = 'Restart import';
         if (selectedJobId === restartId) {
-          var originalImport = activeJobs.concat(historyJobs).find(function(job) { return job.id === restartId; });
+          let originalImport = activeJobs.concat(historyJobs).find(function(job) { return job.id === restartId; });
           if (originalImport) renderHistoryDetail(originalImport);
         }
         if (typeof showToast === 'function') showToast(error.message, 'error');
@@ -58,10 +59,10 @@ function bindDetailPaneActions() {
       });
       return;
     }
-    var retryImportBtn = e.target.closest('[data-retry-import-job]');
-    var recoveryCheckBtn = e.target.closest('[data-check-import-recovery]');
+    let retryImportBtn = /** @type {HTMLButtonElement | null} */ (e.target.closest('[data-retry-import-job]'));
+    let recoveryCheckBtn = /** @type {HTMLButtonElement | null} */ (e.target.closest('[data-check-import-recovery]'));
     if (recoveryCheckBtn) {
-      var recoveryJob = historyJobs.find(function(job) {
+      let recoveryJob = historyJobs.find(function(job) {
         return job.id === recoveryCheckBtn.getAttribute('data-check-import-recovery');
       });
       if (recoveryJob) {
@@ -71,20 +72,20 @@ function bindDetailPaneActions() {
       return;
     }
     if (retryImportBtn) {
-      var retryJobId = retryImportBtn.getAttribute('data-retry-import-job');
-      var retryJob = activeJobs.concat(historyJobs).find(function(job) {
+      let retryJobId = retryImportBtn.getAttribute('data-retry-import-job'); if (!retryJobId) return;
+      let retryJob = activeJobs.concat(historyJobs).find(function(job) {
         return job.id === retryJobId;
       });
       if (retryJob && (retryJob.import_resume_pending ||
           (retryJob.import_recovery_options && retryJob.import_recovery_options.error &&
            (!importFailedBeforeStart(retryJob.result) || !retryJob.import_recovery_options.retryable)))) {
         if (typeof showToast === 'function') showToast(
-          retryJob.import_resume_pending ? 'Checking recovery options…' : retryJob.import_recovery_options.error,
+          retryJob.import_resume_pending ? 'Checking recovery options…' : retryJob.import_recovery_options?.error,
           'info');
         return;
       }
-      var retryBody = importRetryBody(retryJob);
-      var directToNas = retryImportBtn.hasAttribute('data-retry-direct-to-nas');
+      let retryBody = importRetryBody(retryJob);
+      let directToNas = retryImportBtn.hasAttribute('data-retry-direct-to-nas');
       if (directToNas) retryBody = directNasImportRetryBody(retryJob, retryBody, historyJobs);
       if (!retryBody) {
         if (typeof showToast === 'function') {
@@ -92,11 +93,10 @@ function bindDetailPaneActions() {
         }
         return;
       }
-      // Backstop the render-time gate: a click landing between poll
-      // ticks could otherwise fire a second retry for the same parent
-      // while the first is still active. Same rationale as the disabled
-      // button above; keeps the parallel-launch race closed even when
-      // ``activeJobs`` refreshed just after render.
+      // A click between poll ticks could otherwise launch a second
+      // retry for the same parent while its first retry is still active.
+      // Keep this guard even when activeJobs refreshed just after render.
+
       if (hasActiveRetryFor(retryJobId)) {
         if (typeof showToast === 'function') {
           showToast(
@@ -108,34 +108,34 @@ function bindDetailPaneActions() {
       }
       // A resume that finished between renders took this row over; the
       // server would refuse with a 409, so say so without sending it.
-      var lateTakeover = importResumeTakeover(retryJob, historyJobs);
+      let lateTakeover = importResumeTakeover(retryJob, historyJobs);
       if (lateTakeover.by) {
         if (typeof showToast === 'function') {
           showToast(importTakeoverNote(lateTakeover), 'info');
         }
-        if (selectedJobId === retryJobId) renderHistoryDetail(retryJob);
+        if (retryJob && selectedJobId === retryJobId) renderHistoryDetail(retryJob);
         return;
       }
       // Preserve the original count-specific label so the error path
       // below can restore it exactly — dropping to a generic "Retry
       // failed files" would silently hide the real failed-file count.
-      var retryOriginalLabel = retryImportBtn.textContent;
+      let retryOriginalLabel = retryImportBtn.textContent;
       // Resume keeps the parent's ``skip_duplicates`` like any retry:
       // with it off, the collision walk still adopts each file the parent
       // already landed (byte-identical at its destination path) instead
       // of copying it again, and files the parent never reached are
       // copied as the user asked.
-      var isResume = retryImportBtn.hasAttribute('data-import-resume');
+      let isResume = retryImportBtn.hasAttribute('data-import-resume');
       retryImportBtn.disabled = true;
       retryImportBtn.textContent = isResume ? 'Resuming…' : 'Starting retry…';
       pendingImportRetries[retryJobId] = true;
-      var retryButtons = document.getElementById('jobDetailPane').querySelectorAll('[data-retry-import-job]');
+      let retryButtons = /** @type {HTMLElement} */ (document.getElementById('jobDetailPane')).querySelectorAll(/** @type {'button'} */ ('button[data-retry-import-job]'));
       retryButtons.forEach(function(button) { button.disabled = true; });
-      var eligibility = Promise.resolve();
+      let eligibility = Promise.resolve();
       if (directToNas) {
         eligibility = fetchImportRecoveryOptions(retryJobId)
           .then(function(options) {
-            var current = historyJobs.find(function(job) { return job.id === retryJobId; });
+            let current = historyJobs.find(function(job) { return job.id === retryJobId; });
             if (current) current.import_recovery_options = options;
             if (options.direct_to_nas_allowed !== true) {
               throw new Error(options.error || 'Direct-to-NAS retry is no longer available. Retry with the original settings.');
@@ -172,27 +172,27 @@ function bindDetailPaneActions() {
         retryImportBtn.disabled = false;
         retryImportBtn.textContent = retryOriginalLabel;
         if (selectedJobId === retryJobId) {
-          var failedRetryParent = historyJobs.find(function(job) { return job.id === retryJobId; });
+          let failedRetryParent = historyJobs.find(function(job) { return job.id === retryJobId; });
           if (failedRetryParent) renderHistoryDetail(failedRetryParent);
         }
         if (typeof showToast === 'function') showToast(error.message, 'error');
       });
       return;
     }
-    var stepHeader = e.target.closest('[data-toggle-step]');
+    let stepHeader = e.target.closest('[data-toggle-step]');
     if (stepHeader) {
-      toggleStep(stepHeader.getAttribute('data-toggle-step'));
+      var stepId = stepHeader.getAttribute('data-toggle-step'); if (stepId) toggleStep(stepId);
       return;
     }
-    var pauseBtn = e.target.closest('[data-pause-job]');
-    var resumeBtn = e.target.closest('[data-resume-job]');
+    let pauseBtn = /** @type {HTMLButtonElement | null} */ (e.target.closest('[data-pause-job]'));
+    let resumeBtn = /** @type {HTMLButtonElement | null} */ (e.target.closest('[data-resume-job]'));
     if (pauseBtn || resumeBtn) {
-      var controlBtn = pauseBtn || resumeBtn;
-      var action = pauseBtn ? 'pause' : 'resume';
-      var cancellingPause = !!(resumeBtn && resumeBtn.hasAttribute('data-cancel-pause'));
-      var jobId = controlBtn.getAttribute(
+      let controlBtn = pauseBtn || resumeBtn; if (!controlBtn) return;
+      let action = pauseBtn ? 'pause' : 'resume';
+      let cancellingPause = !!(resumeBtn && resumeBtn.hasAttribute('data-cancel-pause'));
+      let jobId = controlBtn.getAttribute(
         pauseBtn ? 'data-pause-job' : 'data-resume-job'
-      );
+      ); if (!jobId) return;
       controlBtn.disabled = true;
       controlBtn.textContent = pauseBtn ? 'Pausing…' :
         (cancellingPause ? 'Cancelling pause…' : 'Resuming…');
@@ -206,7 +206,7 @@ function bindDetailPaneActions() {
         }
         return r.json();
       }).then(function(data) {
-        var job = activeJobs.find(function(j) { return j.id === jobId; });
+        let job = activeJobs.find(function(j) { return j.id === jobId; });
         if (job && data.status) job.status = data.status;
         if (typeof showToast === 'function') {
           showToast(
@@ -222,9 +222,9 @@ function bindDetailPaneActions() {
       });
       return;
     }
-    var cancelBtn = e.target.closest('[data-cancel-job]');
+    let cancelBtn = /** @type {HTMLButtonElement | null} */ (e.target.closest('[data-cancel-job]'));
     if (cancelBtn) {
-      jobId = cancelBtn.getAttribute('data-cancel-job');
+      let jobId = cancelBtn.getAttribute('data-cancel-job'); if (!jobId) return;
       // Optimistic UI: flip the button to a disabled "Cancelling…" pill
       // immediately so the click feels live. The server cancel just sets
       // a flag; the running stage may take seconds to actually exit. Track
@@ -241,7 +241,7 @@ function bindDetailPaneActions() {
             fetchJobs();
           } else {
             return r.json().then(function(data) {
-              var msg = (data && data.error) || 'Unable to cancel job';
+              let msg = (data && data.error) || 'Unable to cancel job';
               if (typeof showToast === 'function') showToast(msg, 'error');
               delete cancellingJobIds[jobId];
               cancelBtn.disabled = false;

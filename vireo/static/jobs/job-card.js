@@ -1,7 +1,7 @@
 // The job card: header controls, meta, retry/resume row, banners, and results.
 // Classic page script; load boot.js after all definitions.
 
-function jobCollectionText(job) {
+/** @param {JobsRow} job */ function jobCollectionText(job) {
   var cfg = jobConfig(job);
   if (cfg.collection_name) return 'Collection: ' + cfg.collection_name;
   if (cfg.collection_id !== undefined && cfg.collection_id !== null && cfg.collection_id !== '') {
@@ -10,7 +10,7 @@ function jobCollectionText(job) {
   return '';
 }
 
-function renderJobCard(job, options) {
+/** @param {JobsRow} job @param {{workspaceName?:string}=} options */ function renderJobCard(job, options) {
   options = options || {};
   // Queued pipelines are "live" for UI purposes: they have a real
   // backend identity, they're cancellable (runner.cancel_job handles
@@ -23,7 +23,7 @@ function renderJobCard(job, options) {
     elapsed = formatElapsed((Date.now() - new Date(job.started_at).getTime()) / 1000);
   } else if (job.duration != null) {
     elapsed = formatElapsed(job.duration);
-  } else if (job.result && job.result.interrupted && !job.result.last_progress_at) {
+  } else if (job.result && job.result.interrupted && !job.result?.last_progress_at) {
     elapsed = 'unknown (no progress recorded before the restart)';
   } else if (job.started_at && job.finished_at) {
     elapsed = formatElapsed((new Date(job.finished_at).getTime() - new Date(job.started_at).getTime()) / 1000);
@@ -94,7 +94,7 @@ function renderJobCard(job, options) {
 
   if (canRestartInPlace(job)) {
     var restartedJobId = inPlaceRestartJobId(job);
-    var restarting = inPlaceRestarts[job.id] && inPlaceRestarts[job.id].pending;
+    var restarting = inPlaceRestarts[job.id]?.pending;
     html += '<div style="padding:10px 0 2px;font-size:12px;color:var(--text-muted);">';
     if (restartedJobId) {
       html += 'Already restarted. <button class="btn-retry" data-show-job="' +
@@ -109,7 +109,7 @@ function renderJobCard(job, options) {
     html += '</div>';
   }
 
-  var failedImportCount = job.result && Number(job.result.failed || 0);
+  var failedImportCount = Number(job.result?.failed || 0);
   var importNotStarted = job.status === 'failed' && importFailedBeforeStart(job.result);
   // Once a later resume or retry took over, the server refuses both
   // Resume and Retry on this row (409), so neither is offered; say where
@@ -228,7 +228,7 @@ function renderJobCard(job, options) {
     // result.interrupted, the banner above already says it.
     var resultError = job.error || (job.result && typeof job.result === 'object' && job.result.error) || '';
     var wasInterrupted = !!(job.result && job.result.interrupted);
-    if (wasInterrupted && resultError === job.result.error) {
+    if (wasInterrupted && resultError === job.result?.error) {
       resultError = '';
     }
     if (resultError) {
@@ -262,7 +262,7 @@ function renderJobCard(job, options) {
 // Plain-language account of a job the restart cut short: how far it
 // got (steps finished, or the last recorded count) and when that was
 // last recorded. Never claims more than the checkpoint actually saw.
-function interruptedText(job) {
+/** @param {JobsRow} job */ function interruptedText(job) {
   var parts = ['Interrupted by Vireo restart.'];
   var steps = job.steps || job.tree || [];
   var progress = job.progress || {};
@@ -271,19 +271,19 @@ function interruptedText(job) {
     parts.push(done + ' of ' + steps.length + (steps.length === 1 ? ' step' : ' steps') +
       ' finished before the restart.');
   } else if (typeof progress.current === 'number' &&
-             (progress.current > 0 || progress.total > 0)) {
+             (progress.current > 0 || (progress.total || 0) > 0)) {
     // "0 of N" is worth saying: it tells the user nothing was done.
     var got = 'Got through ' + progress.current.toLocaleString();
-    if (progress.total > 0) got += ' of ' + progress.total.toLocaleString();
+    if ((progress.total || 0) > 0) got += ' of ' + (progress.total || 0).toLocaleString();
     if (progress.phase) got += ' (' + progress.phase + ')';
     parts.push(got + '.');
   }
   if (progress.current_file) {
     parts.push('Last file: ' + progress.current_file + '.');
   }
-  if (job.result.last_progress_at) {
+  if (job.result?.last_progress_at) {
     parts.push('Last progress was recorded at ' +
-      new Date(job.result.last_progress_at).toLocaleString() + '.');
+      new Date(job.result?.last_progress_at).toLocaleString() + '.');
   } else {
     parts.push('No progress was recorded before the restart.');
   }

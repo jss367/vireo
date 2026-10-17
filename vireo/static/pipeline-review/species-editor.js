@@ -3,32 +3,35 @@
 
 // -- Species confirmation --
 
-var activeDropdown = null;
-var speciesConfirmInFlight = {};
+/** @type {HTMLElement | null} */ var activeDropdown = null;
+/** @type {Record<string,boolean>} */ var speciesConfirmInFlight = {};
 
+/** @param {number[]} photoIds */
 function speciesConfirmPhotoKey(photoIds) {
   return 'photos:' + (photoIds || []).slice().sort(function(a, b) { return a - b; }).join(',');
 }
 
+/** @param {ReviewEncounter} enc @param {number | null} [burstIdx] */
 function speciesConfirmPendingFor(enc, burstIdx) {
   if (!enc) return false;
   var photoIds;
-  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
-    photoIds = enc.bursts[burstIdx].photo_ids;
+  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx ?? -1]) {
+    photoIds = requireReviewValue(requireReviewValue(enc.bursts)[burstIdx ?? -1]).photo_ids;
   } else {
     photoIds = enc.photo_ids;
   }
   return !!speciesConfirmInFlight[speciesConfirmPhotoKey(photoIds)];
 }
 
+/** @param {ReviewEncounter} enc @param {number} encIdx @param {string} level @param {number | null} [burstIdx] @param {string} [pos] */
 function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   // level: 'encounter' or 'burst'
   // pos:   'top' (default) or 'bot' — disambiguates the duplicated bottom widget
   pos = pos || 'top';
   var isConfirmed, displayName, candidateSpecies;
   if (level === 'burst') {
-    var burst = enc.bursts[burstIdx];
-    var ovr = burst.species_override;
+    var burst = enc.bursts[burstIdx ?? -1];
+    var ovr = requireReviewValue(burst).species_override;
     if (ovr) {
       isConfirmed = !!ovr.confirmed;
       candidateSpecies = ovr.species || enc.confirmed_species || (enc.species ? enc.species[0] : null);
@@ -46,7 +49,7 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
   }
 
   var hasCandidate = !!candidateSpecies;
-  var identity = pipelineResults && pipelineResults.species_identities && pipelineResults.species_identities[candidateSpecies];
+  var identity = pipelineResults && currentReviewResults().species_identities && requireReviewValue(currentReviewResults().species_identities)[candidateSpecies || ''];
   if (identity) displayName = identity.display_name;
   var isPending = speciesConfirmPendingFor(enc, burstIdx);
   var cls = isConfirmed ? 'confirmed' : (hasCandidate ? 'unconfirmed' : 'missing');
@@ -72,10 +75,11 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx, pos) {
 
 // A large review can have thousands of species widgets. Build the search
 // controls and prediction rows only for the menu the user actually opens.
+/** @param {ReviewEncounter} enc @param {number} encIdx @param {number | null} [burstIdx] @param {string} [pos] */
 function renderSpeciesDropdownContents(enc, encIdx, burstIdx, pos) {
   var level = burstIdx != null ? 'burst' : 'encounter';
   var predictions = level === 'burst'
-    ? (enc.bursts[burstIdx].species_predictions || []) : (enc.species_predictions || []);
+    ? (requireReviewValue(requireReviewValue(enc.bursts)[burstIdx ?? -1]).species_predictions || []) : (enc.species_predictions || []);
   var idKey = (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
   var html = '';
   html += '<div class="species-dropdown-search"><div class="search-control"><input type="text" placeholder="Search or type a new name..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + pos + '\')" onkeydown="speciesInputKey(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ')">';
@@ -106,51 +110,53 @@ function renderSpeciesDropdownContents(enc, encIdx, burstIdx, pos) {
   return html;
 }
 
+/** @param {Event} event @param {number} encIdx @param {number | null} [burstIdx] @param {string} [pos] */
 function toggleSpeciesDropdown(event, encIdx, burstIdx, pos) {
   event.stopPropagation();
-  if (pipelineResults && pipelineResults.encounters && speciesConfirmPendingFor(pipelineResults.encounters[encIdx], burstIdx)) return;
+  if (pipelineResults && currentReviewResults().encounters && speciesConfirmPendingFor(requireReviewValue(currentReviewResults().encounters[encIdx]), burstIdx)) return;
   pos = pos || 'top';
   var id = 'spDrop_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
-  var el = document.getElementById(id);
+  var el = /** @type {HTMLElement} */ (document.getElementById(id));
   if (!el) return;
   var isOpen = el.classList.contains('open');
   // Close any open dropdown
   closeAllDropdowns();
   if (!isOpen) {
-    el.innerHTML = renderSpeciesDropdownContents(pipelineResults.encounters[encIdx], encIdx, burstIdx, pos);
+    el.innerHTML = renderSpeciesDropdownContents(requireReviewValue(currentReviewResults().encounters[encIdx]), encIdx, burstIdx, pos);
     el.classList.add('open');
     activeDropdown = el;
-    var input = el.querySelector('input');
+    var input = /** @type {HTMLInputElement} */ (el.querySelector('input'));
     if (input) setTimeout(function() { input.focus(); }, 50);
   }
 }
 
 function closeAllDropdowns() {
-  clearTimeout(_searchTimer);
+  clearTimeout(_searchTimer || undefined);
   _searchTimer = null;
   _speciesSearchSeq++;
-  document.querySelectorAll('.species-dropdown.open').forEach(function(d) {
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.species-dropdown.open')).forEach(function(d) {
     d.classList.remove('open');
     d.replaceChildren();
   });
   activeDropdown = null;
 }
 
-var _searchTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var _searchTimer = null;
 // Bumped on every keystroke and on close, so a search already in flight can
 // tell it is stale and not fill the list with results for an older query.
 var _speciesSearchSeq = 0;
 function renderSpeciesDropdownSearchOptions() {
-  document.querySelectorAll('.species-dropdown-match-case').forEach(function(btn) {
+  /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.species-dropdown-match-case')).forEach(function(btn) {
     btn.classList.toggle('active', speciesDropdownSearchOptions.matchCase);
     btn.setAttribute('aria-pressed', speciesDropdownSearchOptions.matchCase ? 'true' : 'false');
   });
-  document.querySelectorAll('.species-dropdown-whole-word').forEach(function(btn) {
+  /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.species-dropdown-whole-word')).forEach(function(btn) {
     btn.classList.toggle('active', speciesDropdownSearchOptions.wholeWord);
     btn.setAttribute('aria-pressed', speciesDropdownSearchOptions.wholeWord ? 'true' : 'false');
   });
 }
 
+/** @param {Event} event @param {'match_case' | 'whole_word'} option */
 function toggleSpeciesDropdownSearchOption(event, option) {
   if (event) event.stopPropagation();
   if (option === 'match_case') {
@@ -160,26 +166,27 @@ function toggleSpeciesDropdownSearchOption(event, option) {
     speciesDropdownSearchOptions.wholeWord = !speciesDropdownSearchOptions.wholeWord;
   }
   renderSpeciesDropdownSearchOptions();
-  var dropdown = event && event.target ? event.target.closest('.species-dropdown') : null;
-  var input = dropdown ? dropdown.querySelector('.species-dropdown-search input') : null;
+  var dropdown = event && event.target ? /** @type {HTMLElement} */ (event.target).closest('.species-dropdown') : null;
+  var input = dropdown ? /** @type {HTMLInputElement} */ (dropdown.querySelector('.species-dropdown-search input')) : null;
   if (input) input.dispatchEvent(new Event('input', {bubbles: true}));
 }
 
+/** @param {Event} event @param {number} encIdx @param {number | null} [burstIdx] @param {string} [pos] */
 function searchSpecies(event, encIdx, burstIdx, pos) {
   pos = pos || 'top';
-  var q = event.target.value.trim();
+  var q = /** @type {HTMLInputElement} */ (event.target).value.trim();
   var targetId = 'spSearch_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '_' + pos;
-  var container = document.getElementById(targetId);
+  var container = /** @type {HTMLElement} */ (document.getElementById(targetId));
   if (!container) return;
   // Cancel the pending search before the early returns below: typing "ro"
   // then clearing the field must not let the "ro" search fire and fill the
   // list afterwards.
-  clearTimeout(_searchTimer);
+  clearTimeout(_searchTimer || undefined);
   _searchTimer = null;
   var seq = ++_speciesSearchSeq;
   if (!q) { container.innerHTML = ''; return; }
 
-  function renderInto(target, typed, results) {
+  function renderInto(/** @type {HTMLElement} */ target, /** @type {string} */ typed, /** @type {string[]} */ results) {
     var hasExact = results.some(function(name) {
       return speciesDropdownSearchOptions.matchCase
         ? name === typed
@@ -199,7 +206,7 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
       html += '</div>';
     });
     target.innerHTML = html;
-    var freeRow = target.querySelector('[data-freeform="1"]');
+    var freeRow = /** @type {HTMLElement} */ (target.querySelector('[data-freeform="1"]'));
     if (freeRow) {
       freeRow.addEventListener('click', function(e) {
         confirmSpecies(e, encIdx, burstIdx, typed);
@@ -227,17 +234,19 @@ function searchSpecies(event, encIdx, burstIdx, pos) {
   }, 250);
 }
 
+/** @param {KeyboardEvent} event @param {number} encIdx @param {number | null} [burstIdx] */
 function speciesInputKey(event, encIdx, burstIdx) {
   if (event.key !== 'Enter') return;
   // Skip while an IME composition is active — Enter is used to finalize
   // character conversion in East Asian input methods.
   if (event.isComposing || event.keyCode === 229) return;
   event.preventDefault();
-  var typed = (event.target.value || '').trim();
+  var typed = (/** @type {HTMLInputElement} */ (event.target).value || '').trim();
   if (!typed) return;
   confirmSpecies(event, encIdx, burstIdx, typed);
 }
 
+/** @param {ReviewEncounter[]} encounters */
 function encounterStructureSignature(encounters) {
   return JSON.stringify((encounters || []).map(function(enc) {
     return {
@@ -249,9 +258,10 @@ function encounterStructureSignature(encounters) {
   }));
 }
 
+/** @param {HTMLElement} node @param {number} encIdx @param {number | null} [burstIdx] */
 function replaceSpeciesWidgetNode(node, encIdx, burstIdx) {
-  if (!node || !pipelineResults || !pipelineResults.encounters) return;
-  var enc = pipelineResults.encounters[encIdx];
+  if (!node || !pipelineResults || !currentReviewResults().encounters) return;
+  const enc = requireReviewValue(currentReviewResults().encounters[encIdx]);
   if (!enc) return;
   var level = node.getAttribute('data-level') || (burstIdx != null ? 'burst' : 'encounter');
   var pos = node.getAttribute('data-pos') || 'top';
@@ -260,6 +270,7 @@ function replaceSpeciesWidgetNode(node, encIdx, burstIdx) {
   node.outerHTML = renderSpeciesWidget(enc, encIdx, level, targetBurstIdx, pos);
 }
 
+/** @param {number} encIdx @param {number | null} [burstIdx] */
 function rerenderSpeciesWidgets(encIdx, burstIdx) {
   // Partial widget updates change the live card without regenerating its
   // cached markup. Invalidate it so Undo can restore a former state even
@@ -269,7 +280,7 @@ function rerenderSpeciesWidgets(encIdx, burstIdx) {
   var selector = '[data-species-widget="1"][data-enc="' + encIdx + '"]';
   if (burstIdx != null) selector += '[data-burst="' + burstIdx + '"]';
   document.querySelectorAll(selector).forEach(function(node) {
-    replaceSpeciesWidgetNode(node, encIdx, burstIdx);
+    replaceSpeciesWidgetNode(/** @type {HTMLElement} */ (node), encIdx, burstIdx);
   });
 }
 
@@ -277,6 +288,7 @@ function speciesConfirmNeedsFullRender() {
   return hideConfirmed || !!speciesFilter;
 }
 
+/** @param {number} encIdx @param {number | null} [burstIdx] @param {boolean} [forceFullRender] */
 function refreshAfterSpeciesConfirm(encIdx, burstIdx, forceFullRender) {
   updateSummaryBar(refreshLocalSummaryCounts());
   if (forceFullRender || speciesConfirmNeedsFullRender()) {
@@ -286,6 +298,7 @@ function refreshAfterSpeciesConfirm(encIdx, burstIdx, forceFullRender) {
   }
 }
 
+/** @param {Event} event @param {number} encIdx @param {number | null | undefined} burstIdx @param {string | null | undefined} speciesName */
 async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   if (event && event.stopPropagation) event.stopPropagation();
   closeAllDropdowns();
@@ -295,18 +308,18 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   // overwrite the persisted review with only the scoped photo set. Block
   // it here — the inline species chip/dropdown buttons that call us have
   // no scope awareness of their own.
-  if (isScopedReviewView() || (pipelineResults && pipelineResults.source === 'browse-selection')) {
+  if (isScopedReviewView() || (pipelineResults && currentReviewResults().source === 'browse-selection')) {
     notifyReadOnlyScopedView();
     return;
   }
 
-  var enc = pipelineResults.encounters[encIdx];
+  const enc = requireReviewValue(currentReviewResults().encounters[encIdx]);
   if (!enc) return;
 
   // Determine which species to confirm
   if (!speciesName) {
-    if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
-      var ovr = enc.bursts[burstIdx].species_override;
+    if (burstIdx != null && enc.bursts && enc.bursts[burstIdx ?? -1]) {
+      var ovr = requireReviewValue(requireReviewValue(enc.bursts)[burstIdx ?? -1]).species_override;
       speciesName = (ovr && ovr.species) || enc.confirmed_species || (enc.species ? enc.species[0] : null);
     } else {
       speciesName = enc.confirmed_species || (enc.species ? enc.species[0] : null);
@@ -316,8 +329,8 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
 
   // Determine photo IDs
   var photoIds;
-  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
-    photoIds = enc.bursts[burstIdx].photo_ids;
+  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx ?? -1]) {
+    photoIds = requireReviewValue(requireReviewValue(enc.bursts)[burstIdx ?? -1]).photo_ids;
   } else {
     photoIds = enc.photo_ids;
   }
@@ -326,10 +339,10 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   speciesConfirmInFlight[pendingKey] = true;
   rerenderSpeciesWidgets(encIdx, burstIdx);
 
-  var body = { species: speciesName, photo_ids: photoIds };
+  /** @type {{species: string; photo_ids: number[]; burst_index?: number}} */ var body = { species: speciesName, photo_ids: photoIds };
   if (burstIdx != null) body.burst_index = burstIdx;
 
-  var previousStructure = encounterStructureSignature(pipelineResults.encounters);
+  var previousStructure = encounterStructureSignature(currentReviewResults().encounters);
 
   var resp;
   try {
@@ -356,13 +369,13 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   var forceFullRender = false;
   if (resp.encounters) {
     forceFullRender = encounterStructureSignature(resp.encounters) !== previousStructure;
-    pipelineResults.encounters = resp.encounters;
+    currentReviewResults().encounters = resp.encounters;
     if (resp.summary) {
-      pipelineResults.summary = resp.summary;
-      updateSummaryBar(pipelineResults.summary);
+      currentReviewResults().summary = resp.summary;
+      updateSummaryBar(currentReviewResults().summary);
     }
-  } else if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
-    enc.bursts[burstIdx].species_override = { species: speciesName, confirmed: true };
+  } else if (burstIdx != null && enc.bursts && enc.bursts[burstIdx ?? -1]) {
+    requireReviewValue(requireReviewValue(enc.bursts)[burstIdx ?? -1]).species_override = { species: speciesName, confirmed: true };
     updateSummaryBar(refreshLocalSummaryCounts());
   } else {
     enc.species_confirmed = true;
@@ -381,28 +394,29 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   refreshLatestScopeSnapshotIfCurrent();
 }
 
+/** @param {Event} event @param {number} encIdx @param {number | null} [burstIdx] */
 async function clearBurstOverride(event, encIdx, burstIdx) {
   event.stopPropagation();
   closeAllDropdowns();
-  if (isScopedReviewView() || (pipelineResults && pipelineResults.source === 'browse-selection')) {
+  if (isScopedReviewView() || (pipelineResults && currentReviewResults().source === 'browse-selection')) {
     notifyReadOnlyScopedView();
     return;
   }
-  var enc = pipelineResults.encounters[encIdx];
-  if (!enc || !enc.bursts || !enc.bursts[burstIdx]) return;
-  var burst = enc.bursts[burstIdx];
+  const enc = requireReviewValue(currentReviewResults().encounters[encIdx]);
+  if (!enc || !enc.bursts || !enc.bursts[burstIdx ?? -1]) return;
+  var burst = enc.bursts[burstIdx ?? -1];
   try {
     var response = await safeFetch('/api/pipeline/save-cache', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({clear_override: {
         encounter_photo_ids: enc.photo_ids,
-        burst_photo_ids: burst.photo_ids,
-        expected_override: burst.species_override || null,
+        burst_photo_ids: requireReviewValue(burst).photo_ids,
+        expected_override: requireReviewValue(burst).species_override || null,
       }}),
     });
-    if (response.encounters) pipelineResults.encounters = response.encounters;
-    if (response.summary) pipelineResults.summary = response.summary;
+    if (response.encounters) currentReviewResults().encounters = response.encounters;
+    if (response.summary) currentReviewResults().summary = response.summary;
   } catch (_) { return; }
 
   renderResults();
@@ -413,8 +427,8 @@ async function clearBurstOverride(event, encIdx, burstIdx) {
 function bindPipelineReviewSpeciesDropdown() {
     // Close dropdown on outside click
     document.addEventListener('click', function(e) {
-      if (activeDropdown && !activeDropdown.contains(e.target) &&
-          !e.target.classList.contains('species-name')) {
+      if (activeDropdown && !activeDropdown.contains(/** @type {Node | null} */ (e.target)) &&
+          !/** @type {HTMLElement} */ (e.target).classList.contains('species-name')) {
         closeAllDropdowns();
       }
     });
@@ -427,7 +441,7 @@ function registerPipelineReviewHistoryHooks() {
         showToast('A photo edit is still finishing — try again in a moment', 'info');
         return false;
       }
-      if (document.querySelector('.grm-overlay.open, .inspect-overlay.open')) {
+      if (/** @type {HTMLElement | null} */ (document.querySelector('.grm-overlay.open, .inspect-overlay.open'))) {
         showToast('Finish or close Group Review before undoing saved edits', 'info');
         return false;
       }
@@ -440,8 +454,8 @@ function registerPipelineReviewHistoryHooks() {
       if (seq !== reviewScopeRequestSeq || !data || !data.results) return;
       var results = data.results;
       cachedPipelineResults = cloneReviewData(results);
-      cachedResultsCacheInfo = cloneReviewData(data.results_cache_info);
-      if (!isScopedReviewView()) applyReviewResults(results, data.results_cache_info);
+      cachedResultsCacheInfo = cloneReviewData(data.results_cache_info || null);
+      if (!isScopedReviewView()) applyReviewResults(results, data.results_cache_info || null);
       else loadReviewScopeResults();
     };
 }

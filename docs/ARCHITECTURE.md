@@ -154,22 +154,36 @@ apply across the static scripts; intentionally empty catch blocks are allowed.
 Inline template scripts continue to use the existing rendered-script parsing and
 browser tests.
 
-TypeScript checks those controllers' JavaScript with `checkJs`, strict types,
-DOM types, and no output files. `types/frontend.d.ts` describes Browse state,
+TypeScript checks every first-party JavaScript file under `vireo/static`,
+excluding vendor and minified assets, with `checkJs`, strict types,
+`noUncheckedIndexedAccess`, DOM types, and no output files. The page projects in
+`tsconfig.frontend-pages/` extend `tsconfig.frontend.base.json`; each classic-script
+page has its own program so unrelated page globals do not collide.
+`tsconfig.frontend.json` also checks the original controller contract tests.
+`types/frontend.d.ts` describes Browse state,
 selection data, and legacy action dependencies; `types/dialogs.d.ts` describes the
 shared dialog lifecycle. `types/panel-loaders.d.ts` covers the panel loader inputs,
 selection responses, and renderer dependencies. `types/shared-controllers.d.ts`
 covers visibility-aware polling and grouped prediction decisions. The thumbnail
 queue declares its image/request state locally and narrows observer nodes before
-using image-only properties. These contracts check implementations and
-call sites; legacy actions outside the selected files remain unchecked. Runtime
+using image-only properties. Page payloads and external dependencies live in
+`types/pages/`, while JSDoc annotates implementation state and inputs. These
+projects check actual JavaScript bodies and their call sites. Inline template
+scripts retain rendered-script parsing and browser coverage. Runtime
 validation is separate: grouped prediction responses enter as `unknown`, only
 positive safe-integer ids are credited, and invalid response members cannot
 enter the decision tracker.
 
-When encapsulating another controller, add it to the strict ESLint list and
-`tsconfig.frontend.json`, describe its dependencies with narrow JSDoc or declaration
-types, and add meaningful negative cases to `tests/frontend/type-contracts.ts`.
+`scripts/check_frontend_types.mjs` discovers every page project, verifies its
+effective strict options, checks that every first-party script is included,
+rejects implementation suppressions, then compiles each program. Adding a script
+without including it in a strict project fails `npm run typecheck:frontend`.
+Run `npx tsc --project tsconfig.frontend-pages/<page>.json` for a focused check.
+
+When adding a controller, include its implementation in the appropriate strict
+page project, describe its dependencies with narrow JSDoc or declaration types,
+and add meaningful negative cases for public contracts. Enable the strict ESLint
+rules as its shared-global dependencies become explicit.
 Avoid `any` or blanket suppression to make a controller pass. The expected type
 errors and ESLint regression tests ensure the checks continue rejecting invalid
 code as configuration changes. A classic script whose top-level functions are

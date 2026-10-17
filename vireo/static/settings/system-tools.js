@@ -1,5 +1,5 @@
 function darktableInstallPlatform() {
-  var asset = window._dtAsset || {};
+  /** @type {SettingsDarktableAsset} */ var asset = window._dtAsset || {};
   if (typeof asset.platform === 'string' && asset.platform) return asset.platform;
   var ua = navigator.userAgent || '';
   if (/Windows/.test(ua)) return 'win32';
@@ -17,7 +17,7 @@ function darktableIsWindows() {
 }
 
 async function loadLocationWriteStatus() {
-  var el = document.getElementById('locationWriteStatus');
+  var el = /** @type {HTMLElement} */ (document.getElementById('locationWriteStatus'));
   if (!el) return;
   try {
     var data = await safeFetch('/api/sync/location-writes', {}, { toast: false });
@@ -36,15 +36,15 @@ async function loadLocationWriteStatus() {
     } else {
       parts.push('Both location writes are turned off, so a sync would only remove location GPS and keywords Vireo wrote earlier.');
     }
-    el.textContent = parts.join(' ');
+    el.textContent = String(parts.join(' '));
   } catch (err) {
-    el.textContent = 'Could not read location counts: ' + (err && err.message || String(err));
+    el.textContent = String('Could not read location counts: ' + (err && settingsErrorMessage(err) || String(err)));
   }
 }
 
 async function queueLocationWrites() {
-  var btn = document.getElementById('locationWriteQueueBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Queueing...'; }
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('locationWriteQueueBtn'));
+  if (btn) { btn.disabled = true; btn.textContent = String('Queueing...'); }
   try {
     var data = await safeFetch('/api/sync/location-writes', { method: 'POST' });
     if (typeof showToast === 'function') {
@@ -59,14 +59,14 @@ async function queueLocationWrites() {
     await loadLocationWriteStatus();
     if (typeof checkPendingSync === 'function') checkPendingSync();
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Queue location writes'; }
+    if (btn) { btn.disabled = false; btn.textContent = String('Queue location writes'); }
   }
 }
 
 async function loadDarktableStatus() {
   try {
     var data = await safeFetch('/api/darktable/status', {}, { toast: false });
-    var el = document.getElementById('darktableStatus');
+    var el = /** @type {HTMLElement} */ (document.getElementById('darktableStatus'));
     var needsGetOption = false;
     if (data.available) {
       el.innerHTML = '<span style="color:var(--accent);font-size:13px;">&#10003; darktable-cli found</span>' +
@@ -125,7 +125,7 @@ async function loadDarktableStatus() {
 // the OS installer and the user finishes the job, so it says "Download
 // installer" — never "Install darktable".
 async function renderDarktableGetOption() {
-  var host = document.getElementById('darktableGet');
+  var host = /** @type {HTMLElement} */ (document.getElementById('darktableGet'));
   if (!host) return;
   var info;
   try {
@@ -183,7 +183,7 @@ async function downloadDarktable() {
   // Name the exact artifact before any bytes move: version, filename, size,
   // source host.
   if (!confirm('Download darktable ' + a.version + '?\n\n' +
-               a.name + ' (' + Math.round(a.size / 1048576) + ' MB)\n' +
+               a.name + ' (' + Math.round((a.size || 0) / 1048576) + ' MB)\n' +
                'From: github.com/darktable-org/darktable\n\n' + what +
                osWarning)) return;
 
@@ -191,12 +191,12 @@ async function downloadDarktable() {
   // a singleton guard (a second POST joins the running job instead of starting
   // another worker on the same .partial) so a rapid double click still lands
   // on one download rather than an error.
-  document.getElementById('darktableGet').style.display = 'none';
-  var wrap = document.getElementById('darktableProgress');
-  var fill = document.getElementById('dtProgressFill');
-  var text = document.getElementById('dtProgressText');
+  /** @type {HTMLElement} */ (document.getElementById('darktableGet')).style.display = 'none';
+  var wrap = /** @type {HTMLElement} */ (document.getElementById('darktableProgress'));
+  var fill = /** @type {HTMLElement} */ (document.getElementById('dtProgressFill'));
+  var text = /** @type {HTMLElement} */ (document.getElementById('dtProgressText'));
   wrap.style.display = 'block';
-  text.textContent = 'Starting...';
+  text.textContent = String('Starting...');
 
   // The route 400s on insufficient disk space, an unusable download directory,
   // or a release it can no longer resolve. Without this guard the panel sits on
@@ -229,18 +229,18 @@ async function downloadDarktable() {
     });
   } catch(e) {
     fill.style.width = '0%';
-    if (e && e.code === 'darktable_asset_changed') {
+    if (e && typeof e === 'object' && 'code' in e && e.code === 'darktable_asset_changed') {
       // Do not just show a red error — the user's intent was still to
       // download darktable, and the fresh version is what they should decide
       // on now. Re-render the panel so it fetches the new availability info,
       // then explain in-panel why they were bounced back.
-      text.innerHTML = escapeHtml(e.message || 'The darktable release changed since this dialog opened.') +
+      text.innerHTML = escapeHtml(settingsErrorMessage(e) || 'The darktable release changed since this dialog opened.') +
         '<br><button class="btn" style="margin-top:6px;" onclick="loadDarktableStatus()">Re-check</button>';
       return;
     }
     text.innerHTML = '<span style="color:var(--danger);">' +
-      escapeHtml(e.message || 'Could not start the download.') + '</span>';
-    document.getElementById('darktableGet').style.display = '';
+      escapeHtml(settingsErrorMessage(e) || 'Could not start the download.') + '</span>';
+    /** @type {HTMLElement} */ (document.getElementById('darktableGet')).style.display = '';
     return;
   }
 
@@ -251,11 +251,11 @@ async function downloadDarktable() {
     // That is honest — the bytes really were discarded — so do not clamp it.
     onProgress: function(p) {
       if (p.total) {
-        fill.style.width = Math.round((p.current / p.total) * 100) + '%';
-        text.textContent = p.phase + ': ' +
-          Math.round(p.current / 1048576) + ' of ' + Math.round(p.total / 1048576) + ' MB';
+        fill.style.width = Math.round(((p.current || 0) / (p.total || 1)) * 100) + '%';
+        text.textContent = String(p.phase + ': ' +
+          Math.round((p.current || 0) / 1048576) + ' of ' + Math.round(p.total / 1048576) + ' MB');
       } else {
-        text.textContent = p.phase + (p.current_file ? ': ' + p.current_file : '');
+        text.textContent = String(p.phase + (p.current_file ? ': ' + p.current_file : ''));
       }
     },
     onComplete: function(r) {
@@ -311,8 +311,8 @@ async function downloadDarktable() {
                    'xattr -d com.apple.quarantine ' + res.downloaded_to);
       }
       if (res.config_written && res.bin_path) {
-        var binInput = document.getElementById('cfgDarktableBin');
-        if (binInput) binInput.value = res.bin_path;
+        var binInput = /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableBin'));
+        if (binInput) binInput.value = String(res.bin_path);
       }
       text.innerHTML = lines.map(escapeHtml).join('<br>') +
         '<br><button class="btn" style="margin-top:6px;" onclick="loadDarktableStatus()">Re-check</button>';
@@ -330,28 +330,28 @@ async function downloadDarktable() {
 async function loadSystemInfo() {
   try {
     var d = await safeFetch('/api/system/info', {}, { toast: false });
-    document.getElementById('deviceName').textContent = d.device;
-    document.getElementById('deviceDetail').textContent = d.device_detail;
-    document.getElementById('onnxrtVersion').textContent = d.onnxruntime_version || 'Not installed';
-    document.getElementById('onnxrtProviders').textContent = (d.onnxruntime_providers || []).join(', ');
-    var mdStatus = document.getElementById('megadetectorStatus');
-    var mdDetail = document.getElementById('megadetectorDetail');
+    /** @type {HTMLElement} */ (document.getElementById('deviceName')).textContent = String(d.device);
+    /** @type {HTMLElement} */ (document.getElementById('deviceDetail')).textContent = String(d.device_detail);
+    /** @type {HTMLElement} */ (document.getElementById('onnxrtVersion')).textContent = String(d.onnxruntime_version || 'Not installed');
+    /** @type {HTMLElement} */ (document.getElementById('onnxrtProviders')).textContent = String((d.onnxruntime_providers || []).join(', '));
+    var mdStatus = /** @type {HTMLElement} */ (document.getElementById('megadetectorStatus'));
+    var mdDetail = /** @type {HTMLElement} */ (document.getElementById('megadetectorDetail'));
     if (d.megadetector === 'installed') {
-      mdStatus.textContent = 'Installed';
+      mdStatus.textContent = String('Installed');
       mdStatus.style.color = 'var(--accent)';
-      mdDetail.textContent = d.megadetector_detail;
+      mdDetail.textContent = String(d.megadetector_detail);
     } else if (d.megadetector === 'weights_missing') {
-      mdStatus.textContent = 'Not ready';
+      mdStatus.textContent = String('Not ready');
       mdStatus.style.color = 'var(--warning)';
-      mdDetail.textContent = d.megadetector_detail;
+      mdDetail.textContent = String(d.megadetector_detail);
     } else if (d.megadetector === 'unavailable' || d.megadetector === 'not installed') {
-      mdStatus.textContent = 'Not installed';
+      mdStatus.textContent = String('Not installed');
       mdStatus.style.color = 'var(--warning)';
-      mdDetail.textContent = 'Subject detection disabled — ' + d.megadetector_detail;
+      mdDetail.textContent = String('Subject detection disabled — ' + d.megadetector_detail);
     } else {
-      mdStatus.textContent = 'Error';
+      mdStatus.textContent = String('Error');
       mdStatus.style.color = 'var(--danger)';
-      mdDetail.textContent = d.megadetector_detail;
+      mdDetail.textContent = String(d.megadetector_detail);
     }
     renderPlatformReadiness(d.platform_support || null);
   } catch(e) {}
@@ -359,37 +359,37 @@ async function loadSystemInfo() {
   loadPipelineModels();
 }
 
-function renderPlatformReadiness(support) {
+/** @param {SettingsPlatformReadiness} support */ function renderPlatformReadiness(support) {
   if (!support) return;
-  var row = document.getElementById('windowsSupportRow');
+  var row = /** @type {HTMLElement} */ (document.getElementById('windowsSupportRow'));
   if (support.platform === 'win32') {
     row.style.display = '';
-    var status = document.getElementById('windowsSupportStatus');
-    var detail = document.getElementById('windowsSupportDetail');
+    var status = /** @type {HTMLElement} */ (document.getElementById('windowsSupportStatus'));
+    var detail = /** @type {HTMLElement} */ (document.getElementById('windowsSupportDetail'));
     var supported = support.support_tier === 'supported';
-    status.textContent = supported ? 'Supported' : 'Unsupported Windows version';
+    status.textContent = String(supported ? 'Supported' : 'Unsupported Windows version');
     status.style.color = supported ? 'var(--accent)' : 'var(--danger)';
     var bits = ['Windows ' + (support.windows_release || '11'), support.architecture || 'x64', 'CPU inference supported'];
     if (support.webview2_version) bits.push('WebView2 ' + support.webview2_version);
     if (support.long_paths && !support.long_paths.enabled) {
       bits.push('Long paths need Windows policy');
-      status.textContent = 'Action needed';
+      status.textContent = String('Action needed');
       status.style.color = 'var(--danger)';
     }
-    detail.textContent = bits.join(' · ');
+    detail.textContent = String(bits.join(' · '));
   }
 
   var deps = support.dependencies || {};
-  var names = {
+  /** @type {Record<string,string>} */ var names = {
     exiftool: 'ExifTool', darktable: 'Darktable', dng_converter: 'Adobe DNG Converter',
     lightroom: 'Lightroom Classic', openssh: 'OpenSSH Client', rsync: 'GNU rsync',
     remote_transfer: 'Remote transfers'
   };
   var keys = Object.keys(names).filter(function(key) { return deps[key]; });
   if (!keys.length) return;
-  document.getElementById('dependencyReadiness').style.display = '';
-  document.getElementById('dependencyReadinessRows').innerHTML = keys.map(function(key) {
-    var dep = deps[key];
+  /** @type {HTMLElement} */ (document.getElementById('dependencyReadiness')).style.display = '';
+  /** @type {HTMLElement} */ (document.getElementById('dependencyReadinessRows')).innerHTML = keys.map(function(key) {
+    var dep = deps[key]; if (!dep) return '';
     var ready = dep.state === 'ready';
     var color = ready ? 'var(--accent)' : (dep.required ? 'var(--danger)' : 'var(--warning)');
     var label = ready ? 'Ready' : (dep.state === 'misconfigured' ? 'Needs repair' : 'Unavailable');
@@ -399,9 +399,9 @@ function renderPlatformReadiness(support) {
       color + ';">' + label + '</span></div>';
   }).join('');
   keys.forEach(function(key) {
-    if (deps[key].state !== 'ready') {
+    var dep = deps[key]; if (dep && dep.state !== 'ready') {
       appendRsyncInstallCommands(
-        document.querySelector('[data-dependency="' + key + '"]'), deps[key].install_commands);
+        document.querySelector(/** @type {'div'} */ ('[data-dependency="' + key + '"]')), dep.install_commands);
     }
   });
 }
@@ -410,27 +410,27 @@ function renderPlatformReadiness(support) {
 // degrades scans silently, so report its presence next to the other
 // external dependencies.
 async function loadExiftoolStatus() {
-  var statusEl = document.getElementById('exiftoolStatus');
-  var detailEl = document.getElementById('exiftoolDetail');
+  var statusEl = /** @type {HTMLElement} */ (document.getElementById('exiftoolStatus'));
+  var detailEl = /** @type {HTMLElement} */ (document.getElementById('exiftoolDetail'));
   if (!statusEl) return;
   try {
     var d = await safeFetch('/api/exiftool/status', {}, { toast: false });
     if (d && d.available) {
-      statusEl.textContent = d.version ? 'Installed (v' + d.version + ')' : 'Installed';
+      statusEl.textContent = String(d.version ? 'Installed (v' + d.version + ')' : 'Installed');
       statusEl.style.color = 'var(--accent)';
-      detailEl.textContent = d.path || 'Reads capture date, GPS, and camera info during scans.';
+      detailEl.textContent = String(d.path || 'Reads capture date, GPS, and camera info during scans.');
     } else {
       /* A populated path with available=false means the binary resolved
          on PATH but the -ver probe failed — a broken install, not a
          missing one. Surface that distinction so the user knows whether
          to install or to repair. */
       var broken = !!(d && d.path);
-      statusEl.textContent = broken ? 'Installed but broken' : 'Not installed';
+      statusEl.textContent = String(broken ? 'Installed but broken' : 'Not installed');
       statusEl.style.color = 'var(--danger)';
-      detailEl.textContent = 'Scans won’t record dates, GPS, or camera info — ' +
+      detailEl.textContent = String('Scans won’t record dates, GPS, or camera info — ' +
         ((d && d.hint) ||
          (broken ? 'reinstall ExifTool' : 'install ExifTool')) +
-        ', then restart Vireo.';
+        ', then restart Vireo.');
     }
   } catch(e) {}
 }

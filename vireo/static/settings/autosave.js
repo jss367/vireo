@@ -7,7 +7,7 @@
  * no-op. The body's data-settings-ready attribute flips to "true" after
  * both initial loads have settled (success OR handled failure). */
 var _settingsInitialLoads = { config: false, ws: false };
-function _markSettingsInitialLoad(kind) {
+/** @param {'config'|'ws'} kind */ function _markSettingsInitialLoad(kind) {
   _settingsInitialLoads[kind] = true;
   if (_settingsInitialLoads.config && _settingsInitialLoads.ws) {
     document.body.setAttribute('data-settings-ready', 'true');
@@ -32,8 +32,8 @@ function _markSettingsInitialLoad(kind) {
 // POST for the first is in flight would show "Saved" as soon as the first
 // completes — during the second edit's debounce window or even while its
 // request was already running.
-var _saveStatus = { pending: {}, inflight: {}, lastResult: {}, lastSavedAt: null };
-var _saveStatusFlashTimer = null;
+/** @type {{pending:Record<string,number>;inflight:Record<string,Record<number,boolean>>;lastResult:Record<string,{gen:number;phase:string}>;lastSavedAt:Date|null}} */ var _saveStatus = { pending: {}, inflight: {}, lastResult: {}, lastSavedAt: null };
+/** @type {ReturnType<typeof setTimeout>|null} */ var _saveStatusFlashTimer = null;
 var _saveGenCounter = 0;
 
 function _nextSaveGen() { return ++_saveGenCounter; }
@@ -47,11 +47,11 @@ function _nextSaveGen() { return ++_saveGenCounter; }
 // server applies snapshots in the order they were sent, and each snapshot
 // is read from the form at send time so a queued save always carries the
 // latest values.
-var _saveChains = {};
-var _saveChainEpochs = {};
+/** @type {Record<string,Promise<unknown>>} */ var _saveChains = {};
+/** @type {Record<string,number>} */ var _saveChainEpochs = {};
 var _autosaveSuspended = false;
 var _editedWhileSuspended = false;
-function _serializedSave(path, doSave) {
+/** @template T @param {string} path @param {()=>Promise<T>} doSave */ function _serializedSave(path, doSave) {
   var epoch = _saveChainEpochs[path] || 0;
   var prev = _saveChains[path] || Promise.resolve();
   var run = prev.catch(function() {}).then(function() {
@@ -69,14 +69,14 @@ function _serializedSave(path, doSave) {
 // Drop every save queued for a path that has not started yet, and wait
 // for the one in flight (if any) to settle. Used before replacing the
 // whole config so no pre-import snapshot can land after the import.
-function _cancelQueuedSaves(path) {
+/** @param {string} path */ function _cancelQueuedSaves(path) {
   _saveChainEpochs[path] = (_saveChainEpochs[path] || 0) + 1;
   var chain = _saveChains[path] || Promise.resolve();
-  _saveStatusMark(path, 'cancel');
+  _saveStatusMark(path, 'cancel', 0);
   return chain.catch(function() {});
 }
 
-function _saveStatusMark(path, phase, gen) {
+/** @param {string} path @param {'pending'|'inflight'|'ok'|'error'|'cancel'} phase @param {number} gen */ function _saveStatusMark(path, phase, gen) {
   if (phase === 'pending') {
     // Debounced writes are singleton per path (clearTimeout drops any
     // older timer), so overwrite rather than accumulate — otherwise a
@@ -118,37 +118,37 @@ function _saveStatusMark(path, phase, gen) {
 }
 
 function _renderSaveStatus() {
-  var el = document.getElementById('settingsSaveStatus');
+  var el = /** @type {HTMLElement} */ (document.getElementById('settingsSaveStatus'));
   if (!el) return;
   var busy = Object.keys(_saveStatus.pending).length > 0 ||
              Object.keys(_saveStatus.inflight).length > 0;
   var failed = Object.keys(_saveStatus.lastResult).some(function(p) {
-    return _saveStatus.lastResult[p].phase === 'error';
+    return _saveStatus.lastResult[p]?.phase === 'error';
   });
-  clearTimeout(_saveStatusFlashTimer);
+  clearTimeout(_saveStatusFlashTimer ?? undefined);
   el.classList.remove('flash');
   if (busy) {
     el.setAttribute('data-state', 'saving');
-    el.textContent = 'Saving\u2026';
+    el.textContent = String('Saving\u2026');
     el.title = 'Your change is being written to disk.';
   } else if (failed) {
     el.setAttribute('data-state', 'error');
-    el.textContent = 'Save failed \u2014 changes not saved';
+    el.textContent = String('Save failed \u2014 changes not saved');
     el.title = 'The last save was rejected. Edit the field again to retry.';
   } else if (_saveStatus.lastSavedAt) {
     var t = _saveStatus.lastSavedAt.toLocaleTimeString([], {
       hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
     el.setAttribute('data-state', 'saved');
-    el.textContent = 'Saved \u2713 ' + t;
+    el.textContent = String('Saved \u2713 ' + t);
     el.title = 'All changes on this page are saved automatically. Last saved at ' + t + '.';
     el.classList.add('flash');
     _saveStatusFlashTimer = setTimeout(function() { el.classList.remove('flash'); }, 2000);
   } else {
     el.removeAttribute('data-state');
-    el.textContent = '';
+    el.textContent = String('');
     el.title = '';
   }
 }
 
-var _saveTimer = null;
+/** @type {ReturnType<typeof setTimeout>|null} */ var _saveTimer = null;

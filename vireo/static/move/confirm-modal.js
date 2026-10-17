@@ -2,16 +2,18 @@
 // Classic page script; load boot.js after all definitions.
 
 /* ---------- Confirm Modal ---------- */
+/** @param {string} title @param {string} message @param {() => unknown} callback */
 function showConfirm(title, message, callback) {
-  document.querySelector('#confirmHeading .confirm-heading-icon').style.display = 'none';
-  document.getElementById('confirmEyebrow').textContent = 'Please confirm';
-  document.getElementById('confirmTitle').textContent = title;
-  document.getElementById('confirmMessage').textContent = message;
-  document.getElementById('confirmOkBtn').textContent = 'Move';
+  /** @type {HTMLElement} */ (document.querySelector('#confirmHeading .confirm-heading-icon')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('confirmEyebrow')).textContent = 'Please confirm';
+  /** @type {HTMLElement} */ (document.getElementById('confirmTitle')).textContent = title;
+  /** @type {HTMLElement} */ (document.getElementById('confirmMessage')).textContent = message;
+  /** @type {HTMLButtonElement} */ (document.getElementById('confirmOkBtn')).textContent = 'Move';
   confirmCallback = callback;
-  document.getElementById('confirmModal').classList.add('open');
+  /** @type {HTMLElement} */ (document.getElementById('confirmModal')).classList.add('open');
 }
 
+/** @param {HTMLElement} container @param {string} label @param {string} path */
 function appendConfirmRoute(container, label, path) {
   var row = document.createElement('div');
   row.className = 'confirm-route-row';
@@ -26,6 +28,7 @@ function appendConfirmRoute(container, label, path) {
   container.appendChild(row);
 }
 
+/** @param {HTMLElement} container @param {string} value @param {string} label */
 function appendConfirmStat(container, value, label) {
   var stat = document.createElement('div');
   stat.className = 'confirm-stat';
@@ -40,6 +43,7 @@ function appendConfirmStat(container, value, label) {
   container.appendChild(stat);
 }
 
+/** @param {HTMLElement} container @param {string} icon @param {string} title @param {string} detail @param {boolean} warning */
 function appendConfirmNote(container, icon, title, detail, warning) {
   var note = document.createElement('div');
   note.className = 'confirm-note' + (warning ? ' warning' : '');
@@ -57,14 +61,15 @@ function appendConfirmNote(container, icon, title, detail, warning) {
   container.appendChild(note);
 }
 
+/** @param {MoveMergeDetails} details @param {() => unknown} callback */
 function showMergeConfirm(details, callback) {
-  var heading = document.getElementById('confirmHeading');
-  heading.querySelector('.confirm-heading-icon').style.display = 'grid';
-  document.getElementById('confirmEyebrow').textContent = 'Destination already exists';
-  document.getElementById('confirmTitle').textContent = 'Merge with the existing folder?';
-  document.getElementById('confirmOkBtn').textContent = 'Merge & Resume';
+  var heading = /** @type {HTMLElement} */ (document.getElementById('confirmHeading'));
+  /** @type {HTMLElement} */ (heading.querySelector('.confirm-heading-icon')).style.display = 'grid';
+  /** @type {HTMLElement} */ (document.getElementById('confirmEyebrow')).textContent = 'Destination already exists';
+  /** @type {HTMLElement} */ (document.getElementById('confirmTitle')).textContent = 'Merge with the existing folder?';
+  /** @type {HTMLButtonElement} */ (document.getElementById('confirmOkBtn')).textContent = 'Merge & Resume';
 
-  var message = document.getElementById('confirmMessage');
+  var message = /** @type {HTMLElement} */ (document.getElementById('confirmMessage'));
   message.replaceChildren();
 
   var route = document.createElement('div');
@@ -113,11 +118,11 @@ function showMergeConfirm(details, callback) {
   appendConfirmNote(message, '✓', 'Your originals stay put until verification.', verifyDetail, false);
 
   confirmCallback = callback;
-  document.getElementById('confirmModal').classList.add('open');
+  /** @type {HTMLElement} */ (document.getElementById('confirmModal')).classList.add('open');
 }
 
 function closeConfirm() {
-  document.getElementById('confirmModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('confirmModal')).classList.remove('open');
   confirmCallback = null;
 }
 

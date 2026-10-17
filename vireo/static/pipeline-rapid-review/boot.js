@@ -15,7 +15,7 @@ bindRapidKeyboard();
 
 loadRapidShortcuts();
 initRapidReview();
-document.getElementById('photoStage').addEventListener('pointerdown', rapidZoomPointerDown);
-document.getElementById('photoStage').addEventListener('pointermove', rapidZoomPointerMove);
-document.getElementById('photoStage').addEventListener('pointerup', rapidZoomPointerUp);
-document.getElementById('photoStage').addEventListener('pointercancel', rapidZoomPointerUp);
+/** @type {HTMLElement} */ (document.getElementById('photoStage')).addEventListener('pointerdown', rapidZoomPointerDown);
+/** @type {HTMLElement} */ (document.getElementById('photoStage')).addEventListener('pointermove', rapidZoomPointerMove);
+/** @type {HTMLElement} */ (document.getElementById('photoStage')).addEventListener('pointerup', rapidZoomPointerUp);
+/** @type {HTMLElement} */ (document.getElementById('photoStage')).addEventListener('pointercancel', rapidZoomPointerUp);

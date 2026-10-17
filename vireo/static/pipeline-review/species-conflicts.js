@@ -14,12 +14,14 @@ var SPECIES_CONFLICT_THRESHOLDS = {
   possibleMargin: 0.25,
 };
 
+/** @param {string | null} name */
 function normalizedSpeciesName(name) {
-  var identity = typeof pipelineResults !== 'undefined' && pipelineResults && pipelineResults.species_identities && pipelineResults.species_identities[name];
+  var identity = typeof pipelineResults !== 'undefined' && pipelineResults && currentReviewResults().species_identities && requireReviewValue(currentReviewResults().species_identities)[name || ''];
   if (identity) return identity.key;
   return String(name || '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
 }
 
+/** @param {string | null} name */
 function speciesDisplayKey(name) {
   return String(name || '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
 }
@@ -27,10 +29,12 @@ function speciesDisplayKey(name) {
 // A "name:" key is the resolver's way of saying it could not identify the
 // species at all — the key is the display text itself, not evidence about a
 // taxon. "taxon:"/"scientific:" keys are evidence.
+/** @param {string | null} key */
 function speciesKeyIsUnidentified(key) {
   return String(key || '').indexOf('name:') === 0;
 }
 
+/** @param {ReviewEncounter | null | undefined} enc @param {ReviewBurst | null | undefined} burst */
 function speciesCandidateForReviewUnit(enc, burst) {
   var override = burst && burst.species_override;
   if (override && override.species) return override.species;
@@ -39,12 +43,13 @@ function speciesCandidateForReviewUnit(enc, burst) {
   return null;
 }
 
+/** @param {ReviewPhoto} photo @param {string | null} expectedSpecies @param {((name: string | null) => string) | null} [normalizeSpecies] @param {string | null | undefined} [expectedIdentityKey] */
 function analyzePhotoSpeciesConflict(photo, expectedSpecies, normalizeSpecies, expectedIdentityKey) {
   normalizeSpecies = normalizeSpecies || normalizedSpeciesName;
   var expectedKey = expectedIdentityKey || normalizeSpecies(expectedSpecies);
   if (!expectedIdentityKey && photo) {
     var confirmed = (photo.confirmed_species_identities || []).filter(function(entry) { return entry.name === expectedSpecies; });
-    if (confirmed.length === 1) expectedKey = confirmed[0].key;
+    if (confirmed.length === 1) expectedKey = requireReviewValue(confirmed[0]).key;
   }
   var expectedDisplayKey = speciesDisplayKey(expectedSpecies);
   var top5 = (photo && photo.species_top5) || [];
@@ -52,8 +57,8 @@ function analyzePhotoSpeciesConflict(photo, expectedSpecies, normalizeSpecies, e
 
   // A model may contribute several detections/crops. Retain its strongest
   // confidence for each species so repeated detections do not inflate support.
-  var byModel = {};
-  var displayNames = {};
+  /** @type {Record<string,Record<string,number>>} */ var byModel = {};
+  /** @type {Record<string,string>} */ var displayNames = {};
   top5.forEach(function(entry) {
     if (!entry || entry.length < 2) return;
     var display = String(entry[0] || '').trim();
@@ -75,26 +80,26 @@ function analyzePhotoSpeciesConflict(photo, expectedSpecies, normalizeSpecies, e
     var model = String(entry[2] || 'unknown');
     if (!species || !isFinite(confidence) || confidence < 0 || confidence > 1) return;
     if (!byModel[model]) byModel[model] = {};
-    var prior = byModel[model][species];
-    if (prior == null || confidence > prior) byModel[model][species] = confidence;
+    var prior = requireReviewValue(byModel[model])[species];
+    if (prior == null || confidence > prior) requireReviewValue(byModel[model])[species] = confidence;
   });
   var models = Object.keys(byModel);
   if (models.length === 0) return null;
 
-  var speciesNames = {};
+  /** @type {Record<string,boolean>} */ var speciesNames = {};
   models.forEach(function(model) {
-    Object.keys(byModel[model]).forEach(function(species) {
+    Object.keys(byModel[model] || {}).forEach(function(species) {
       if (species !== expectedKey) speciesNames[species] = true;
     });
   });
 
-  function averageSupport(speciesKey) {
+  function averageSupport(/** @type {string} */ speciesKey) {
     var total = 0;
     models.forEach(function(model) {
       var best = 0;
-      Object.keys(byModel[model]).forEach(function(species) {
+      Object.keys(byModel[model] || {}).forEach(function(species) {
         if (species === speciesKey) {
-          best = Math.max(best, byModel[model][species]);
+          best = Math.max(best, requireReviewValue(byModel[model])[species] || 0);
         }
       });
       total += best;
@@ -124,11 +129,11 @@ function analyzePhotoSpeciesConflict(photo, expectedSpecies, normalizeSpecies, e
   models.forEach(function(model) {
     var topSpecies = null;
     var topConfidence = -1;
-    Object.keys(byModel[model]).forEach(function(species) {
-      var confidence = byModel[model][species];
-      if (confidence > topConfidence) {
+    Object.keys(byModel[model] || {}).forEach(function(species) {
+      var confidence = requireReviewValue(byModel[model])[species];
+      if (requireReviewValue(confidence) > topConfidence) {
         topSpecies = species;
-        topConfidence = confidence;
+        topConfidence = confidence || 0;
       }
     });
     if (topSpecies === alternativeKey) alternativeModelWins++;
@@ -163,42 +168,44 @@ function analyzePhotoSpeciesConflict(photo, expectedSpecies, normalizeSpecies, e
   };
 }
 
+/** @param {ReviewEncounter | null | undefined} enc @param {ReviewBurst | null | undefined} burst @param {string | null} expected */
 function speciesCandidateKeyForReviewUnit(enc, burst, expected) {
   var override = burst && burst.species_override;
   if ((override && (override.confirmed || Array.isArray(override.species_list))) ||
       (!override && enc && enc.confirmed_species)) return null;
   var candidates = (burst && burst.species_predictions) || (enc && enc.species_predictions) || [];
-  var winner = null;
+  /** @type {ReviewSpeciesRow | null} */ var winner = null;
   candidates.forEach(function(candidate) {
     if (candidate.species !== expected || !candidate.species_key) return;
-    if (!winner || candidate.count * candidate.avg_confidence > winner.count * winner.avg_confidence) winner = candidate;
+    if (!winner || Number(candidate.count) * Number(candidate.avg_confidence) > Number(winner.count) * Number(winner.avg_confidence)) winner = candidate;
   });
-  return winner && winner.species_key;
+  return (/** @type {ReviewSpeciesRow | null} */ (winner))?.species_key || null;
 }
 
+/** @param {Record<number,ReviewPhoto>} [photoMap] */
 function buildSpeciesConflictEvidence(photoMap) {
-  var evidence = {};
+  /** @type {ReviewConflictEvidence} */ var evidence = {};
   // The same species names recur across predictions, models and photos.
   // Locale-aware normalization is expensive in WebKit; do it once per name
   // in this render, without caching decisions that could go stale after edits.
-  var normalizedNames = new Map();
-  function normalizeSpecies(name) {
+  /** @type {Map<string | null,string>} */ var normalizedNames = new Map();
+  function normalizeSpecies(/** @type {string | null} */ name) {
     if (!normalizedNames.has(name)) normalizedNames.set(name, normalizedSpeciesName(name));
-    return normalizedNames.get(name);
+    return normalizedNames.get(name) || '';
   }
-  (pipelineResults.encounters || []).forEach(function(enc) {
+  (currentReviewResults().encounters || []).forEach(function(enc) {
     if (enc.bursts && enc.bursts.length > 0) {
       enc.bursts.forEach(function(burst) {
         var expected = speciesCandidateForReviewUnit(enc, burst);
         (burst.photo_ids || burst || []).forEach(function(pid) {
-          var photo = photoMap[pid];
+          var photo = requireReviewValue(photoMap)[pid];
           if (photo) evidence[pid] = analyzePhotoSpeciesConflict(photo, expected, normalizeSpecies, speciesCandidateKeyForReviewUnit(enc, burst, expected));
         });
       });
     } else {
       var expected = speciesCandidateForReviewUnit(enc, null);
       (enc.photo_ids || []).forEach(function(pid) {
-        var photo = photoMap[pid];
+        var photo = requireReviewValue(photoMap)[pid];
         if (photo) evidence[pid] = analyzePhotoSpeciesConflict(photo, expected, normalizeSpecies, speciesCandidateKeyForReviewUnit(enc, null, expected));
       });
     }
@@ -206,10 +213,12 @@ function buildSpeciesConflictEvidence(photoMap) {
   return evidence;
 }
 
+/** @param {number | undefined} value */
 function formatSpeciesConfidence(value) {
   return Math.round((Number(value) || 0) * 100) + '%';
 }
 
+/** @param {ReviewConflict | null | undefined} issue */
 function speciesConflictTitle(issue) {
   if (!issue || !issue.severity) return '';
   var strength = issue.severity === 'strong' ? 'Strong' : 'Possible';
@@ -221,9 +230,10 @@ function speciesConflictTitle(issue) {
     formatSpeciesConfidence(issue.expectedSupport) + '. Click to inspect this photo and its review group.';
 }
 
+/** @param {number[]} photoIds @param {ReviewConflictEvidence} evidence */
 function summarizeSpeciesConflicts(photoIds, evidence) {
   var classifiedCount = 0;
-  var issues = [];
+  /** @type {ReviewConflict[]} */ var issues = [];
   (photoIds || []).forEach(function(pid) {
     var item = evidence[pid];
     if (item) classifiedCount++;
@@ -231,30 +241,31 @@ function summarizeSpeciesConflicts(photoIds, evidence) {
   });
   if (issues.length === 0) return null;
 
-  var groups = {};
+  /** @type {Record<string,{species: string | null; count: number; strong: number}>} */ var groups = {};
   issues.forEach(function(issue) {
-    var key = issue.alternativeKey || normalizedSpeciesName(issue.alternativeSpecies);
-    if (!groups[key]) groups[key] = {species: issue.alternativeSpecies, count: 0, strong: 0};
-    groups[key].count++;
-    if (issue.severity === 'strong') groups[key].strong++;
+    var key = issue.alternativeKey || normalizedSpeciesName(issue.alternativeSpecies || null);
+    if (!groups[key]) groups[key] = {species: issue.alternativeSpecies || null, count: 0, strong: 0};
+    requireReviewValue(groups[key]).count++;
+    if (issue.severity === 'strong') requireReviewValue(groups[key]).strong++;
   });
-  var dominant = null;
+  /** @type {{species: string | null; count: number; strong: number} | null} */ var dominant = null;
   Object.keys(groups).forEach(function(key) {
     var group = groups[key];
-    if (!dominant || group.count > dominant.count ||
-        (group.count === dominant.count && group.strong > dominant.strong)) {
-      dominant = group;
+    if (!dominant || requireReviewValue(group).count > dominant.count ||
+        (requireReviewValue(group).count === dominant.count && requireReviewValue(group).strong > dominant.strong)) {
+      dominant = group || null;
     }
   });
   return {
     issueCount: issues.length,
     classifiedCount: classifiedCount,
-    dominantSpecies: dominant.species,
-    dominantCount: dominant.count,
-    severity: dominant.strong > 0 ? 'strong' : 'possible',
+    dominantSpecies: requireReviewValue(/** @type {{species: string | null; count: number; strong: number} | null} */ (dominant)).species,
+    dominantCount: requireReviewValue(/** @type {{species: string | null; count: number; strong: number} | null} */ (dominant)).count,
+    severity: requireReviewValue(/** @type {{species: string | null; count: number; strong: number} | null} */ (dominant)).strong > 0 ? 'strong' : 'possible',
   };
 }
 
+/** @param {ReviewEncounter} enc @param {ReviewConflictEvidence} evidence @param {Set<number> | null} [hiddenIds] @param {(photoId: number) => boolean} [inScope] */
 function renderEncounterSpeciesConflict(enc, evidence, hiddenIds, inScope) {
   // Match the set of photos that renderResults() will actually draw for this
   // encounter: when hide-confirmed is on, confirmed bursts are skipped, so a
@@ -289,6 +300,7 @@ function renderEncounterSpeciesConflict(enc, evidence, hiddenIds, inScope) {
     ' species conflict' + (summary.issueCount === 1 ? '' : 's') + '</span>';
 }
 
+/** @param {ReviewEncounter} enc @param {number} encIdx @param {ReviewBurst} burst @param {number | null | undefined} burstIdx @param {ReviewConflictEvidence} evidence @param {(photoId: number) => boolean} [inScope] */
 function renderBurstSpeciesConflict(enc, encIdx, burst, burstIdx, evidence, inScope) {
   // Under a Folder/Collection scope filter, hidden out-of-scope photos
   // could otherwise drive the dominant count and the Split burst action,
@@ -323,12 +335,14 @@ function renderBurstSpeciesConflict(enc, encIdx, burst, burstIdx, evidence, inSc
   return html;
 }
 
+/** @param {ReviewPhoto} photo @param {ReviewConflict | null | undefined} issue */
 function photoMatchesPipelineFilter(photo, issue) {
   if (activeFilter === 'all') return true;
   if (activeFilter === 'SPECIES_CONFLICT') return !!(issue && issue.severity);
   return photo.label === activeFilter;
 }
 
+/** @param {ReviewEncounter} enc */
 function encounterHasSpeciesSuggestion(enc) {
   return !!(enc && (enc.confirmed_species || (enc.species && enc.species[0])));
 }

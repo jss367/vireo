@@ -7,8 +7,8 @@ function resetRapidZoom() {
   rapid.zoomAnchor = null;
   rapid.zoomDrag = null;
   rapid.suppressZoomClick = false;
-  var stage = document.getElementById('photoStage');
-  var img = document.getElementById('currentPhoto');
+  var stage = /** @type {HTMLElement} */ (document.getElementById('photoStage'));
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('currentPhoto'));
   if (stage) {
     stage.classList.remove('zoomed', 'dragging');
     stage.scrollLeft = 0;
@@ -22,8 +22,8 @@ function resetRapidZoom() {
 
 function applyRapidZoomLayout() {
   var p = currentPhoto();
-  var stage = document.getElementById('photoStage');
-  var img = document.getElementById('currentPhoto');
+  var stage = /** @type {HTMLElement} */ (document.getElementById('photoStage'));
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('currentPhoto'));
   var shouldZoom = !!(p && rapid.zoomed && rapid.zoomPhotoId === p.id);
   stage.classList.toggle('zoomed', shouldZoom);
   if (!shouldZoom) {
@@ -51,6 +51,7 @@ function rapidImageLoaded() {
   applyRapidZoomLayout();
 }
 
+/** @param {MouseEvent} [e] */
 function toggleRapidZoom(e) {
   if (e) e.stopPropagation();
   if (rapid.suppressZoomClick) {
@@ -64,7 +65,7 @@ function toggleRapidZoom(e) {
     renderCurrent();
     return;
   }
-  var img = document.getElementById('currentPhoto');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('currentPhoto'));
   var rect = img.getBoundingClientRect();
   var anchorX = 0.5;
   var anchorY = 0.5;
@@ -81,10 +82,11 @@ function toggleRapidZoom(e) {
   renderCurrent();
 }
 
+/** @param {PointerEvent} e */
 function rapidZoomPointerDown(e) {
   var p = currentPhoto();
   if (!p || !rapid.zoomed || rapid.zoomPhotoId !== p.id || e.button !== 0) return;
-  var stage = document.getElementById('photoStage');
+  var stage = /** @type {HTMLElement} */ (document.getElementById('photoStage'));
   rapid.zoomDrag = {
     pointerId: e.pointerId,
     startX: e.clientX,
@@ -94,12 +96,13 @@ function rapidZoomPointerDown(e) {
     moved: false,
   };
   stage.classList.add('dragging');
-  e.currentTarget.setPointerCapture(e.pointerId);
+  /** @type {HTMLElement} */ (e.currentTarget).setPointerCapture(e.pointerId);
 }
 
+/** @param {PointerEvent} e */
 function rapidZoomPointerMove(e) {
   if (!rapid.zoomDrag) return;
-  var stage = document.getElementById('photoStage');
+  var stage = /** @type {HTMLElement} */ (document.getElementById('photoStage'));
   var dx = e.clientX - rapid.zoomDrag.startX;
   var dy = e.clientY - rapid.zoomDrag.startY;
   if (!rapid.zoomDrag.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
@@ -111,13 +114,14 @@ function rapidZoomPointerMove(e) {
   }
 }
 
+/** @param {PointerEvent} e */
 function rapidZoomPointerUp(e) {
   if (!rapid.zoomDrag) return;
   var moved = rapid.zoomDrag.moved;
   rapid.zoomDrag = null;
-  document.getElementById('photoStage').classList.remove('dragging');
+  /** @type {HTMLElement} */ (document.getElementById('photoStage')).classList.remove('dragging');
   if (moved) rapid.suppressZoomClick = true;
   try {
-    e.currentTarget.releasePointerCapture(e.pointerId);
+    /** @type {HTMLElement} */ (e.currentTarget).releasePointerCapture(e.pointerId);
   } catch (_) {}
 }

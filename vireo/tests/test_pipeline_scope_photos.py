@@ -152,9 +152,15 @@ def _render_burst_conflict(scope_ids):
         pytest.skip("Node is required to execute the review renderer")
     source = (Path(__file__).parents[1]
               / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
+    # ``species-conflicts.js`` reaches ``pipelineResults`` through two review-state
+    # helpers that live in ``pipeline-review/state.js``. This test extracts the
+    # module without that one, so provide shims matching the live contract.
     script = (
         "function escapeHtml(s) { return String(s); }\n"
         "function escapeAttr(s) { return String(s); }\n"
+        "function requireReviewValue(v) {"
+        " if (v == null) throw new Error('review value missing'); return v; }\n"
+        "function currentReviewResults() { return requireReviewValue(null); }\n"
         + source
         + "\nvar enc = {bursts: [{photo_ids: [10]}, {photo_ids: [11, 12, 13]}]};\n"
         "var grebe = {severity: 'strong', alternativeSpecies: 'Little Grebe'};\n"

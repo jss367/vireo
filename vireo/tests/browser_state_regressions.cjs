@@ -6,6 +6,12 @@ function fn(file, name) {
   const src = [].concat(file).map(f => fs.readFileSync(f, 'utf8')).join('\n');
   const found = src.match(new RegExp('(?:async )?function ' + name + '\\([^]*?\\n\\}'));
   assert(found, name);
+  // The extracted review functions use the same state guards as the page.
+  // Evaluate those real helpers in each isolated VM as well.
+  if ([].concat(file).includes('vireo/static/pipeline-review/state.js') &&
+      !['requireReviewValue', 'currentReviewResults'].includes(name)) {
+    return fn(file, 'requireReviewValue') + '\n' + fn(file, 'currentReviewResults') + '\n' + found[0];
+  }
   return found[0];
 }
 const browse = ['vireo/static/browse/loading.js', 'vireo/static/browse/selection.js'];
@@ -524,7 +530,29 @@ async function testSavedCollectionPreviewScope() {
   }
 }
 
-Promise.all([testAsyncModalOwnership(), testReadinessAndRegroupRaces(), testSavedCollectionPreviewScope()])
+async function testDeepLinkFailureReleasesLoading() {
+  const source = fn('vireo/static/browse/boot.js', '_runPhotoDeepLink');
+  for (const failure of ['config', 'photo', 'superseded']) {
+    const context = vm.createContext({
+      document: {getElementById: () => ({checked: true})},
+      folderHealthRefreshSeq: 1,
+      loading: false,
+      _cfgPromise: failure === 'config' ? Promise.reject(new Error('offline')) : Promise.resolve({}),
+      applyBrowseConfig() {},
+      safeFetch: async () => {
+        if (failure === 'superseded') context.folderHealthRefreshSeq++;
+        throw new Error('offline');
+      },
+    });
+    vm.runInContext(source, context);
+    await context._runPhotoDeepLink(1);
+    // An early failure releases the grid; a newer health refresh retains
+    // ownership so cleanup cannot allow competing page requests.
+    assert.equal(context.loading, failure === 'superseded', failure);
+  }
+}
+
+Promise.all([testAsyncModalOwnership(), testReadinessAndRegroupRaces(), testSavedCollectionPreviewScope(), testDeepLinkFailureReleasesLoading()])
   .catch(err => { console.error(err); process.exitCode = 1; });
 
 const noteFilter = vm.createContext({});

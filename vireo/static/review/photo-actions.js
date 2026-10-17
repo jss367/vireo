@@ -5,26 +5,25 @@
 // share one result and notification; a different choice runs after its predecessor.
 // Clipboard writes share one lane so a late lookup cannot overwrite a newer copy.
 var enqueueReviewPhotoAction = (function() {
-  var pending = new Map();
-  return function(key, value, run) {
+  /** @type {Map<string,{value:string|number;promise:Promise<boolean>}>} */ var pending = new Map();
+  return /** @param {string} key @param {string|number} value @param {()=>Promise<boolean>} run */ function(key, value, run) {
     var previous = pending.get(key);
     if (previous && previous.value === value) return previous.promise;
-    var task = {value: value, promise: null};
-    task.promise = (previous ? previous.promise.catch(function() {}) : Promise.resolve())
+    var promise = (previous ? previous.promise.catch(function() {}) : Promise.resolve())
       .then(run).finally(function() {
         if (pending.get(key) === task) pending.delete(key);
       });
-    pending.set(key, task);
-    return task.promise;
+    var task = {value: value, promise: promise}; pending.set(key, task);
+    return promise;
   };
 })();
 
-function saveReviewPhotoValue(photoId, field, value) {
+/** @param {number} photoId @param {'rating'|'flag'} field @param {number|string} value */ function saveReviewPhotoValue(photoId, field, value) {
   return enqueueReviewPhotoAction(field + ':' + photoId, value, async function() {
     try {
-      var body = {photo_ids: [photoId]};
+      /** @type {{photo_ids:number[];rating?:number|string;flag?:number|string}} */ var body = {photo_ids: [photoId]};
       body[field] = value;
-      var data = await safeFetch('/api/batch/' + field, {
+      /** @type {{ok:boolean;updated:number}} */ var data = await safeFetch('/api/batch/' + field, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body),
@@ -34,8 +33,8 @@ function saveReviewPhotoValue(photoId, field, value) {
       }
     } catch (error) {
       // The history transport already explains why undo/redo blocked a write.
-      if (!error || error.code !== 'history_busy') {
-        showToast('Could not save ' + field + ': ' + (error && error.message || 'Request failed. Try again.'), 'error');
+      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'history_busy') {
+        showToast('Could not save ' + field + ': ' + (reviewErrorMessage(error, 'Request failed. Try again.')), 'error');
       }
       return false;
     }
@@ -45,7 +44,7 @@ function saveReviewPhotoValue(photoId, field, value) {
   });
 }
 
-function setReviewRating(photoId, rating) {
+/** @param {number} photoId @param {number} rating */ function setReviewRating(photoId, rating) {
   return saveReviewPhotoValue(photoId, 'rating', rating);
 }
 
@@ -56,7 +55,7 @@ function setReviewRating(photoId, rating) {
 // true until a full reload. Un-rejecting is intentionally left alone: the
 // client can't know whether the DB preference still points at this photo,
 // so the badge stays hidden until reload rather than lighting up incorrectly.
-function _clearPredictionRepresentativeStateIfIneligible(photoId, flag) {
+/** @param {number} photoId @param {string|number} flag */ function _clearPredictionRepresentativeStateIfIneligible(photoId, flag) {
   if (flag !== 'rejected') return false;
   var changed = false;
   allPredictions.forEach(function(pred) {
@@ -76,11 +75,11 @@ function _clearPredictionRepresentativeStateIfIneligible(photoId, flag) {
   return changed;
 }
 
-function setReviewFlag(photoId, flag) {
+/** @param {number} photoId @param {string} flag */ function setReviewFlag(photoId, flag) {
   return saveReviewPhotoValue(photoId, 'flag', flag);
 }
 
-function revealReviewPhoto(photoId) {
+/** @param {number} photoId */ function revealReviewPhoto(photoId) {
   safeFetch('/api/files/reveal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -96,10 +95,10 @@ function revealReviewPhoto(photoId) {
   });
 }
 
-function copyReviewPhotoPath(photoId) {
+/** @param {number} photoId */ function copyReviewPhotoPath(photoId) {
   return enqueueReviewPhotoAction('copy-path', photoId, async function() {
     try {
-      var data = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
+      /** @type {{path?:string}} */ var data = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
       if (!data || typeof data.path !== 'string' || !data.path.trim()) {
         throw new Error('The photo path is unavailable.');
       }
@@ -108,7 +107,7 @@ function copyReviewPhotoPath(photoId) {
       }
       await navigator.clipboard.writeText(data.path);
     } catch (error) {
-      showToast('Could not copy path: ' + (error && error.message || 'The operation failed. Try again.'), 'error');
+      showToast('Could not copy path: ' + (reviewErrorMessage(error, 'The operation failed. Try again.')), 'error');
       return false;
     }
     showToast('Path copied', 'success');
@@ -116,17 +115,17 @@ function copyReviewPhotoPath(photoId) {
   });
 }
 
-function openReviewLightbox(photoId, filename) {
+/** @param {number} photoId @param {string} filename */ function openReviewLightbox(photoId, filename) {
   // Build the same photoList the grid click handler builds, so arrow-key
   // navigation inside the lightbox walks the current review grid.
-  var seen = {};
+  /** @type {Record<number,boolean>} */ var seen = {};
   var photoList = [];
-  var thumbs = document.getElementById('grid').querySelectorAll('img[data-photo-id]');
+  var thumbs = /** @type {HTMLElement} */ (document.getElementById('grid')).querySelectorAll(/** @type {'img'} */ ('img[data-photo-id]'));
   for (var i = 0; i < thumbs.length; i++) {
-    var pid = parseInt(thumbs[i].dataset.photoId, 10);
+    var thumb = thumbs[i]; if (!thumb) continue; var pid = parseInt(thumb.dataset.photoId || '', 10);
     if (seen[pid]) continue;
     seen[pid] = true;
-    photoList.push({ id: pid, filename: thumbs[i].dataset.filename || '' });
+    photoList.push({ id: pid, filename: thumb.dataset.filename || '' });
   }
   openLightbox(photoId, filename || '', photoList);
 }
@@ -142,7 +141,7 @@ function openReviewLightbox(photoId, filename) {
 function bindReviewLifeListEvents() {
   document.addEventListener('lifelist:changed', function(e) {
     var detail = e && e.detail ? e.detail : {};
-    var species = detail.species;
+    const species = detail.species;
     var photoId = detail.photoId;
     if (!species || !photoId) return;
     var changed = false;
@@ -174,4 +173,10 @@ function bindReviewLifeListEvents() {
     });
     if (changed) renderAll();
   });
+}
+
+/** @param {unknown} error @param {string} fallback */
+function reviewErrorMessage(error, fallback) {
+  return error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+    ? error.message : fallback;
 }

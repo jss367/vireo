@@ -11,23 +11,24 @@ function candidateIdsForApply() {
 }
 
 function updateSummaryFromPhotos() {
-  var summary = rapid.results.summary || {};
+  var summary = /** @type {Required<RapidSummary>} */ (/** @type {RapidResults} */ (rapid.results).summary || {});
   summary.keep_count = 0;
   summary.review_count = 0;
   summary.reject_count = 0;
-  (rapid.results.photos || []).forEach(function(p) {
+  (/** @type {RapidResults} */ (rapid.results).photos || []).forEach(function(p) {
     if (p.label === 'KEEP') summary.keep_count++;
     else if (p.label === 'REJECT') summary.reject_count++;
     else summary.review_count++;
   });
-  rapid.results.summary = summary;
+  /** @type {RapidResults} */ (rapid.results).summary = summary;
 }
 
+/** @param {boolean} openNext */
 async function applyCurrent(openNext) {
   if (!rapid.seeded || rapid.applying || rapid.sessionIndex < 0) return false;
   rapid.applying = true;
   renderApplyState();
-  var targetList = parseSpeciesList(document.getElementById('speciesInput').value);
+  var targetList = parseSpeciesList(/** @type {HTMLInputElement} */ (document.getElementById('speciesInput')).value);
   var species = joinSpecies(targetList);
   var picks = Array.from(rapid.picks);
   var rejects = Array.from(rapid.rejects);
@@ -37,7 +38,7 @@ async function applyCurrent(openNext) {
   // rapid.picks / rapid.rejects after the await could splice burst A's
   // response into burst B's labels, confirmed species/subtitle, and cache.
   var sessionIndex = rapid.sessionIndex;
-  var session = rapid.sessions[sessionIndex];
+  var session = /** @type {RapidSession} */ (rapid.sessions[sessionIndex]);
   var items = rapid.items.slice();
   var pickSet = new Set(picks);
   var rejectSet = new Set(rejects);
@@ -52,12 +53,12 @@ async function applyCurrent(openNext) {
   // INSERT-OR-IGNORE no-op, and undoing that no-op add would strip the
   // existing species keywords. Snapshot off rapid.results (not live rapid.*)
   // since openSession() can run during the awaits below.
-  var alreadyConfirmedList = [];
-  var snapEnc = (rapid.results.encounters || [])[session.encIdx];
+  var alreadyConfirmedList = /** @type {string[]} */ ([]);
+  var snapEnc = (/** @type {RapidResults} */ (rapid.results).encounters || [])[session.encIdx];
   if (snapEnc) {
     var snapBursts = (snapEnc.bursts && snapEnc.bursts.length) ? snapEnc.bursts : null;
     var snapBurst = snapBursts ? snapBursts[session.burstIdx] : null;
-    var snapOvr = snapBurst && snapBurst.species_override;
+    var snapOvr = snapBurst && (Array.isArray(snapBurst) ? undefined : snapBurst.species_override);
     if (snapOvr && Array.isArray(snapOvr.species_list)) {
       // Authoritative whatever the confirmed flag (see overrideIsExplicit):
       // a confirmed list, a mixed burst's edited baseline, or the empty
@@ -106,19 +107,19 @@ async function applyCurrent(openNext) {
   // shared with the encounter), then replacements, then adds (which can
   // only widen overlap and never detach).
   var setDiff = rapidSpeciesSetDiff(targetList, alreadyConfirmedList);
-  var speciesRequests = [];
+  var speciesRequests = /** @type {RapidSpeciesRequest[]} */ ([]);
   var pairCount = Math.min(setDiff.added.length, setDiff.removed.length);
   for (var rmi = pairCount; rmi < setDiff.removed.length; rmi++) {
-    speciesRequests.push({ species: setDiff.removed[rmi], remove: true });
+    speciesRequests.push({ species: /** @type {string} */ (setDiff.removed[rmi]), remove: true });
   }
   for (var pi = 0; pi < pairCount; pi++) {
-    speciesRequests.push({ species: setDiff.added[pi], previous_species: setDiff.removed[pi] });
+    speciesRequests.push({ species: /** @type {string} */ (setDiff.added[pi]), previous_species: /** @type {string} */ (setDiff.removed[pi]) });
   }
   for (var ai = pairCount; ai < setDiff.added.length; ai++) {
     if (!alreadyConfirmedList.length && ai === 0) {
-      speciesRequests.push({ species: setDiff.added[ai] });
+      speciesRequests.push({ species: /** @type {string} */ (setDiff.added[ai]) });
     } else {
-      speciesRequests.push({ species: setDiff.added[ai], add: true });
+      speciesRequests.push({ species: /** @type {string} */ (setDiff.added[ai]), add: true });
     }
   }
   setDiff.kept.forEach(function(name) {
@@ -161,16 +162,16 @@ async function applyCurrent(openNext) {
         var pid = parseInt(pidStr, 10);
         var p = rapid.photoMap[pid];
         if (p) {
-          p.flag = resp.photos[pidStr].flag;
+          p.flag = /** @type {RapidKeywordRow} */ (/** @type {Record<string,RapidKeywordRow>} */ (resp.photos)[pidStr]).flag;
           // /group/apply is flags-only, so has_species_keyword is always
           // false here in production; confirmed species comes from the
           // adopted /api/encounters/species response below. Kept only because
           // some rapid-review tests still mock the old response shape.
-          if (species && resp.photos[pidStr].has_species_keyword) {
+          if (species && /** @type {RapidKeywordRow} */ (/** @type {Record<string,RapidKeywordRow>} */ (resp.photos)[pidStr]).has_species_keyword) {
             // Merge, never overwrite: a mixed frame may carry a species the
             // burst as a whole does not, and a flag-only apply never touched
             // it. Only species this apply drops from the burst's set go.
-            var mirrorKeys = {};
+            var mirrorKeys = /** @type {Record<string,boolean>} */ ({});
             targetList.forEach(function(name) { mirrorKeys[speciesKey(name)] = true; });
             setDiff.removed.forEach(function(name) { mirrorKeys[speciesKey(name)] = true; });
             var mirrorExtras = photoSpeciesList(p).filter(function(name) {
@@ -204,7 +205,7 @@ async function applyCurrent(openNext) {
       // pretend atomicity, stop at the first failure, keep the server's
       // truth for what did land, and say exactly which changes did not.
       var speciesFailure = null;
-      var appliedRequests = [];
+      var appliedRequests = /** @type {RapidSpeciesRequest[]} */ ([]);
       for (var ri = 0; ri < speciesRequests.length; ri++) {
       var spResp;
       try {
@@ -214,21 +215,21 @@ async function applyCurrent(openNext) {
           body: JSON.stringify(Object.assign({
             photo_ids: burstPhotoIds,
             burst_index: burstIndex,
-          }, speciesRequests[ri])),
+          }, /** @type {RapidSpeciesRequest} */ (speciesRequests[ri]))),
         });
       } catch (err) {
         speciesFailure = { index: ri, error: err };
         break;
       }
-      appliedRequests.push(speciesRequests[ri]);
+      appliedRequests.push(/** @type {RapidSpeciesRequest} */ (speciesRequests[ri]));
       // Adopt the authoritative structure (the endpoint may auto-detach on a
       // species mismatch), so the save-cache below doesn't clobber its restructure.
       if (spResp && Array.isArray(spResp.species_list)) {
         confirmedSpeciesList = spResp.species_list.filter(Boolean);
       }
       if (spResp && spResp.encounters) {
-        rapid.results.encounters = spResp.encounters;
-        if (spResp.summary) rapid.results.summary = spResp.summary;
+        /** @type {RapidResults} */ (rapid.results).encounters = spResp.encounters;
+        if (spResp.summary) /** @type {RapidResults} */ (rapid.results).summary = spResp.summary;
         // A detach moves the burst; the next request must follow it.
         var located = locateBurstByPhotoIds(spResp.encounters, burstPhotoIds);
         if (located) burstIndex = located.burstIdx;
@@ -246,7 +247,7 @@ async function applyCurrent(openNext) {
         //     same-species encounter): the shifted encIdx/burstIdx and divergent
         //     species are reflected exactly, so the sidebar and openClassic()
         //     navigate server truth instead of stale indices.
-        rapid.allSessions = buildSessions(rapid.results);
+        rapid.allSessions = buildSessions(/** @type {RapidResults} */ (rapid.results));
       }
       }
       // Only now that the species calls have SUCCEEDED do we mirror the
@@ -262,7 +263,7 @@ async function applyCurrent(openNext) {
       // Merge rather than overwrite: a frame may carry a species the burst as
       // a whole does not (a mixed burst), and the server never touched it —
       // only species this apply removed or replaced away are dropped.
-      var touchedKeys = {};
+      var touchedKeys = /** @type {Record<string,boolean>} */ ({});
       appliedRequests.forEach(function(req) {
         if (req.remove) touchedKeys[speciesKey(req.species)] = true;
         if (req.previous_species) touchedKeys[speciesKey(req.previous_species)] = true;
@@ -271,7 +272,7 @@ async function applyCurrent(openNext) {
         var serverList = confirmedSpeciesList || (speciesFailure ? null : targetList);
         items.forEach(function(p) {
           if (!serverList) return;
-          var serverKeys = {};
+          var serverKeys = /** @type {Record<string,boolean>} */ ({});
           serverList.forEach(function(name) { serverKeys[speciesKey(name)] = true; });
           var extras = photoSpeciesList(p).filter(function(name) {
             var key = speciesKey(name);
@@ -283,7 +284,7 @@ async function applyCurrent(openNext) {
         });
       }
       if (speciesFailure) {
-        var failedReq = speciesRequests[speciesFailure.index];
+        var failedReq = /** @type {RapidSpeciesRequest} */ (speciesRequests[speciesFailure.index]);
         var failedWhat = failedReq.remove
           ? 'removing "' + failedReq.species + '"'
           : failedReq.previous_species
@@ -301,7 +302,7 @@ async function applyCurrent(openNext) {
     await safeFetch('/api/pipeline/save-cache', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(rapid.results),
+      body: JSON.stringify(/** @type {RapidResults} */ (rapid.results)),
     }, { toast: false });
     rapid.applying = false;
     var currentKey = sessionKey(session);

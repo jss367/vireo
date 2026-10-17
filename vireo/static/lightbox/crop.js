@@ -1,11 +1,11 @@
 
-function _cropCloneRecipe(recipe) {
+/** @param {LightboxRecipe | null | undefined} recipe @returns {LightboxRecipe} */ function _cropCloneRecipe(recipe) {
   if (!recipe || typeof recipe !== 'object') return {};
   try { return JSON.parse(JSON.stringify(recipe)); }
   catch (_) { return {}; }
 }
 
-function _cropDefaultCrop(recipe) {
+function _cropDefaultCrop(/** @type {LightboxRecipe} */ recipe) {
   if (!recipe.crop || typeof recipe.crop !== 'object') {
     recipe.crop = { x: 0, y: 0, w: 1, h: 1 };
   }
@@ -17,7 +17,7 @@ function _cropDefaultCrop(recipe) {
   return recipe.crop;
 }
 
-function _cropClampBox(crop) {
+function _cropClampBox(/** @type {LightboxCrop} */ crop) {
   var min = 0.02;
   var x = Number(crop.x) || 0;
   var y = Number(crop.y) || 0;
@@ -30,7 +30,7 @@ function _cropClampBox(crop) {
   return { x: x, y: y, w: w, h: h };
 }
 
-function _cropIsFullFrame(crop) {
+function _cropIsFullFrame(/** @type {LightboxCrop | null | undefined} */ crop) {
   return !crop || (
     Math.abs((Number(crop.x) || 0)) < 0.0005 &&
     Math.abs((Number(crop.y) || 0)) < 0.0005 &&
@@ -39,14 +39,14 @@ function _cropIsFullFrame(crop) {
   );
 }
 
-function _cropSetStatus(message, isError) {
+function _cropSetStatus(/** @type {string} */ message, /** @type {boolean | undefined} */ isError = undefined) {
   var el = document.getElementById('cropEditorStatus');
   if (!el) return;
   el.textContent = message || '';
   el.classList.toggle('error', !!isError);
 }
 
-function _cropIsActiveSession(photoId, session) {
+function _cropIsActiveSession(/** @type {number} */ photoId, /** @type {number} */ session) {
   return _cropPhotoId === photoId && _cropSessionSeq === session;
 }
 
@@ -59,16 +59,16 @@ function _cropDisplayRecipe() {
 function _cropSyncControls() {
   if (!_cropRecipe) return;
   var value = Number(_cropRecipe.straighten || 0);
-  var range = document.getElementById('cropStraightenRange');
-  var input = document.getElementById('cropStraightenInput');
-  if (range) range.value = Math.max(-10, Math.min(10, value));
+  const range = /** @type {HTMLInputElement | null} */ (document.getElementById('cropStraightenRange'));
+  const input = /** @type {HTMLInputElement | null} */ (document.getElementById('cropStraightenInput'));
+  if (range) range.value = String(Math.max(-10, Math.min(10, value)));
   if (input) input.value = String(Math.round(value * 10) / 10);
 }
 
 function _cropRenderBox() {
   if (!_cropRecipe) return;
-  var img = document.getElementById('cropEditorImg');
-  var box = document.getElementById('cropBox');
+  var img = /** @type {HTMLImageElement | null} */ (document.getElementById('cropEditorImg'));
+  const box = document.getElementById('cropBox');
   if (!img || !box || !img.complete || !img.clientWidth || !img.clientHeight) return;
   var crop = _cropDefaultCrop(_cropRecipe);
   box.style.left = (crop.x * img.clientWidth) + 'px';
@@ -79,7 +79,7 @@ function _cropRenderBox() {
 
 function _cropUpdatePreview() {
   if (!_cropPhotoId || !_cropRecipe) return;
-  var img = document.getElementById('cropEditorImg');
+  var img = /** @type {HTMLImageElement | null} */ (document.getElementById('cropEditorImg'));
   if (!img) return;
   var seq = ++_cropPreviewSeq;
   var recipe = _cropDisplayRecipe();
@@ -127,9 +127,9 @@ function _cropNormalizeRecipeForSave() {
 function _cropInitEvents() {
   if (window._cropEventsReady) return;
   window._cropEventsReady = true;
-  var range = document.getElementById('cropStraightenRange');
-  var input = document.getElementById('cropStraightenInput');
-  function setStraighten(value) {
+  const range = /** @type {HTMLInputElement | null} */ (document.getElementById('cropStraightenRange'));
+  const input = /** @type {HTMLInputElement | null} */ (document.getElementById('cropStraightenInput'));
+  function setStraighten(/** @type {string | number} */ value) {
     if (!_cropRecipe) return;
     var v = Number(value);
     if (!Number.isFinite(v)) v = 0;
@@ -141,18 +141,18 @@ function _cropInitEvents() {
   if (range) range.addEventListener('input', function() { setStraighten(range.value); });
   if (input) input.addEventListener('input', function() { setStraighten(input.value); });
 
-  var box = document.getElementById('cropBox');
+  const box = document.getElementById('cropBox');
   if (box) {
     box.addEventListener('pointerdown', function(e) {
       if (!_cropRecipe) return;
-      var img = document.getElementById('cropEditorImg');
+      var img = /** @type {HTMLImageElement | null} */ (document.getElementById('cropEditorImg'));
       if (!img || !img.clientWidth || !img.clientHeight) return;
-      var handle = e.target && e.target.dataset ? e.target.dataset.handle : '';
+      var handle = e.target instanceof HTMLElement ? e.target.dataset.handle : '';
       _cropDrag = {
         handle: handle || 'move',
         startX: e.clientX,
         startY: e.clientY,
-        startCrop: _cropCloneRecipe({ crop: _cropDefaultCrop(_cropRecipe) }).crop,
+        startCrop: Object.assign({}, _cropDefaultCrop(_cropRecipe)),
         imgW: img.clientWidth,
         imgH: img.clientHeight,
       };
@@ -166,7 +166,7 @@ function _cropInitEvents() {
     if (!_cropDrag || !_cropRecipe) return;
     var dx = (e.clientX - _cropDrag.startX) / _cropDrag.imgW;
     var dy = (e.clientY - _cropDrag.startY) / _cropDrag.imgH;
-    var c = _cropCloneRecipe({ crop: _cropDrag.startCrop }).crop;
+    var c = Object.assign({}, _cropDrag.startCrop);
     var min = 0.02;
     if (_cropDrag.handle === 'move') {
       c.x += dx;
@@ -207,17 +207,17 @@ async function openCropEditor() {
   if (_lbGuardReadOnly()) return false;
   if (!vireoLightboxSession.requestedPhotoId()) return;
   _cropInitEvents();
-  var requestedPhotoId = vireoLightboxSession.requestedPhotoId();
+  var requestedPhotoId = vireoLightboxSession.requestedPhotoId(); if (requestedPhotoId == null) return;
   _cropPhotoId = requestedPhotoId;
   var session = ++_cropSessionSeq;
-  var saveBtn = document.getElementById('cropSaveBtn');
+  var saveBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('cropSaveBtn'));
   if (saveBtn) saveBtn.disabled = false;
   _cropSetStatus('Loading recipe...');
   try {
     _lbFlushPendingAdjustmentSave();
     await _lbWaitForAdjustmentSaveIdle(requestedPhotoId);
     if (vireoLightboxSession.requestedPhotoId() !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
-    var data = await safeFetch('/api/photos/' + requestedPhotoId + '/edit-recipe', {}, { toast: false });
+    var data = await /** @type {Promise<{recipe?: LightboxRecipe | null}>} */ (safeFetch('/api/photos/' + requestedPhotoId + '/edit-recipe', {}, { toast: false }));
     if (vireoLightboxSession.requestedPhotoId() !== requestedPhotoId || !_cropIsActiveSession(requestedPhotoId, session)) return;
     _cropRecipe = _cropCloneRecipe(_lbEditRecipeLoaded ? _lbEditRecipe : (data.recipe || {}));
     _cropDefaultCrop(_cropRecipe);
@@ -229,12 +229,12 @@ async function openCropEditor() {
     _cropUpdatePreview();
   } catch (e) {
     if (_cropIsActiveSession(requestedPhotoId, session)) {
-      _cropSetStatus(e.message || 'Could not load recipe', true);
+      _cropSetStatus((e instanceof Error && e.message) || 'Could not load recipe', true);
     }
   }
 }
 
-function closeCropEditor(event) {
+function closeCropEditor(/** @type {Event | undefined} */ event = undefined) {
   if (event) {
     event.preventDefault();
     event.stopPropagation();
@@ -255,7 +255,7 @@ function closeCropEditor(event) {
   }
 }
 
-function cropRotate(delta) {
+function cropRotate(/** @type {number} */ delta) {
   if (!_cropRecipe) return;
   var current = Number(_cropRecipe.rotation || 0);
   var next = (current + delta) % 360;
@@ -271,7 +271,7 @@ function cropResetFrame() {
   _cropRenderBox();
 }
 
-function _cropBoxForAspect(crop, normalizedRatio) {
+function _cropBoxForAspect(/** @type {LightboxCrop} */ crop, /** @type {number} */ normalizedRatio) {
   var current = _cropClampBox(crop);
   if (!Number.isFinite(normalizedRatio) || normalizedRatio <= 0) return current;
   var centerX = current.x + current.w / 2;
@@ -295,9 +295,9 @@ function _cropBoxForAspect(crop, normalizedRatio) {
   });
 }
 
-function cropSetAspect(aspect) {
+function cropSetAspect(/** @type {number} */ aspect) {
   if (!_cropRecipe) return;
-  var img = document.getElementById('cropEditorImg');
+  var img = /** @type {HTMLImageElement | null} */ (document.getElementById('cropEditorImg'));
   if (!img || !img.clientWidth || !img.clientHeight) return;
   var imageAspect = img.clientWidth / img.clientHeight;
   var normalizedRatio = aspect / imageAspect;
@@ -312,31 +312,31 @@ async function saveCropEditor() {
   if (!_cropPhotoId || !_cropRecipe) return;
   var pid = _cropPhotoId;
   var session = _cropSessionSeq;
-  var btn = document.getElementById('cropSaveBtn');
+  var btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('cropSaveBtn'));
   if (btn) btn.disabled = true;
   _cropSetStatus('Saving...');
   try {
     var recipe = _cropNormalizeRecipeForSave();
-    var data = await safeFetch('/api/photos/' + pid + '/edit-recipe', {
+    var data = await /** @type {Promise<{recipe?: LightboxRecipe | null}>} */ (safeFetch('/api/photos/' + pid + '/edit-recipe', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recipe: recipe }),
-    }, { toast: false });
-    var updates = {};
+    }, { toast: false }));
+    /** @type {Record<string, LightboxRecipe | null | undefined>} */ var updates = {};
     updates[String(pid)] = data.recipe;
     _lbRefreshEditRecipeCache(updates);
     var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
     if (_cropIsActiveSession(pid, session)) {
       closeCropEditor();
       if (vireoLightboxSession.requestedPhotoId() === pid) {
-        var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
+        var filename = p ? p.filename : document.getElementById('lightboxFilename')?.textContent;
         openLightbox(pid, filename, _lightboxPhotoList);
       }
       showToast('Crop saved', 'success');
     }
   } catch (e) {
     if (_cropIsActiveSession(pid, session)) {
-      _cropSetStatus(e.message || 'Could not save crop', true);
+      _cropSetStatus((e instanceof Error && e.message) || 'Could not save crop', true);
     }
   } finally {
     if (btn && _cropIsActiveSession(pid, session)) btn.disabled = false;
@@ -352,21 +352,21 @@ async function cropClearEdits() {
     await safeFetch('/api/photos/' + pid + '/edit-recipe', {
       method: 'DELETE',
     }, { toast: false });
-    var updates = {};
+    /** @type {Record<string, LightboxRecipe | null | undefined>} */ var updates = {};
     updates[String(pid)] = null;
     _lbRefreshEditRecipeCache(updates);
     var p = _lightboxPhotoList.find(function(x) { return x.id === pid; });
     if (_cropIsActiveSession(pid, session)) {
       closeCropEditor();
       if (vireoLightboxSession.requestedPhotoId() === pid) {
-        var filename = p ? p.filename : document.getElementById('lightboxFilename').textContent;
+        var filename = p ? p.filename : document.getElementById('lightboxFilename')?.textContent;
         openLightbox(pid, filename, _lightboxPhotoList);
       }
       showToast('Edits cleared', 'success');
     }
   } catch (e) {
     if (_cropIsActiveSession(pid, session)) {
-      _cropSetStatus(e.message || 'Could not clear edits', true);
+      _cropSetStatus((e instanceof Error && e.message) || 'Could not clear edits', true);
     }
   }
 }

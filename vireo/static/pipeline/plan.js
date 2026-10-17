@@ -3,8 +3,9 @@
 
 // -- Shared --
 
+/** @param {string} name */
 function toggleCard(name) {
-  var card = document.getElementById('card-' + name);
+  var card = /** @type {HTMLElement} */ (document.getElementById('card-' + name));
   if (card) card.classList.toggle('expanded');
 }
 
@@ -23,8 +24,8 @@ var _pipelineState = {
 // allows concurrent stages — e.g. scan runs alongside thumbnails/previews —
 // and a single global would let one stage's status update clobber another's
 // "Running…" pill on the next refresh.
-var _runningStages = {};  // suffix -> true while that stage is running
-var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'cancelled' | 'skipped' | 'will-skip' | 'done-prior'
+/** @type {Record<string,boolean>} */ var _runningStages = {};  // suffix -> true while that stage is running
+/** @type {Record<string,string>} */ var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'cancelled' | 'skipped' | 'will-skip' | 'done-prior'
 
 // Plan response from POST /api/pipeline/plan, keyed by stage suffix:
 //   { Classify: { state, summary, detail }, Extract: ..., ... }
@@ -33,9 +34,9 @@ var _stageOutcomes = {};  // suffix -> 'done' | 'failed' | 'cancelled' | 'skippe
 // page never tells the user a stage is done when, given new models or
 // labels, the next run actually has work to do (CORE_PHILOSOPHY: "No
 // black boxes" — pills must answer the question users read them as).
-var _pipelinePlan = null;
+/** @type {PipelinePlan | null} */ var _pipelinePlan = null;
 var _planFetchSeq = 0;
-var _planDebounceTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var _planDebounceTimer = null;
 // True while a /api/pipeline/plan refresh is queued (debounce timer set) or
 // the latest fetch is in-flight. Used by updateStartButton() so a fast click
 // during the debounce window — when _pipelinePlan is null or stale relative
@@ -43,7 +44,7 @@ var _planDebounceTimer = null;
 // missing-labels classify run slip through the blocked gate.
 var _planRefreshPending = false;
 
-var _STAGES = [
+/** @type {PipelineStage[]} */ var _STAGES = [
   { suffix: 'Scan',         label: 'Scan & Index',           enable: null },
   { suffix: 'Previews',     label: 'Thumbnails & Previews',  enable: null },
   { suffix: 'Classify',     label: 'Classify',               enable: 'enableClassify' },
@@ -54,7 +55,7 @@ var _STAGES = [
 
 // Lookup: cardSuffix -> enable-checkbox id (null for stages with no toggle).
 var _STAGE_ENABLE_BY_SUFFIX = (function() {
-  var m = {};
+  /** @type {Record<string, string | null>} */ var m = {};
   _STAGES.forEach(function(s) { m[s.suffix] = s.enable; });
   return m;
 })();
@@ -62,14 +63,15 @@ var _STAGE_ENABLE_BY_SUFFIX = (function() {
 // Did the user disable this stage via its enable checkbox? Used to
 // distinguish backend `skipped` due to a user toggle ("Will skip") from
 // `skipped` due to prior outputs already existing ("Already done").
+/** @param {string} cardSuffix */
 function _isUserDisabledStage(cardSuffix) {
   var enableId = _STAGE_ENABLE_BY_SUFFIX[cardSuffix];
   if (!enableId) return false;
-  var cb = document.getElementById(enableId);
+  var cb = /** @type {HTMLInputElement} */ (document.getElementById(enableId));
   return !!(cb && !cb.checked);
 }
 
-var _PILL_LABELS = {
+/** @type {Record<string,string>} */ var _PILL_LABELS = {
   'running':    'Running…',
   'done':       'Done',
   'failed':     'Failed',
@@ -88,6 +90,7 @@ var _PILL_LABELS = {
 // settings-changed cases; the distinction lives in
 // `detail.fingerprint_outdated` / `detail.fingerprint_invalidated`.
 // Classify gets a more specific label when only the BioCLIP label set changed.
+/** @param {PipelineStage | undefined} stage @param {PipelinePlanEntry | null | undefined} planEntry @param {string} state */
 function _formatPillLabel(stage, planEntry, state) {
   // Special-cased states (running/done/failed/will-skip) have static
   // labels — counts during a run come from a separate channel.
@@ -141,8 +144,9 @@ function _formatPillLabel(stage, planEntry, state) {
   return 'Will run (' + eligible + ')';
 }
 
+/** @param {string} suffix @param {string} state @param {string | null} [text] @param {PipelineStage} [stage] */
 function _setPill(suffix, state, text, stage) {
-  var pill = document.getElementById('pill' + suffix);
+  var pill = /** @type {HTMLElement} */ (document.getElementById('pill' + suffix));
   if (!pill) return;
   pill.className = 'stage-status-pill visible ' + state;
   if (text != null) {
@@ -157,7 +161,7 @@ function _setPill(suffix, state, text, stage) {
 // Map each stage suffix to the .stage-summary span it owns. The span shows
 // the plan summary text before/between runs and switches to live counts
 // during a run via the existing txtDetections/txtMasks ids.
-var _STAGE_SUMMARY_IDS = {
+/** @type {Record<string,string>} */ var _STAGE_SUMMARY_IDS = {
   'Previews':     'summaryPreviews',
   'Classify':     'txtDetections',
   'Extract':      'txtMasks',
@@ -165,16 +169,18 @@ var _STAGE_SUMMARY_IDS = {
   'Group':        'txtResults',
 };
 
+/** @param {string} suffix @param {string} text */
 function _setStageSummaryText(suffix, text) {
   var id = _STAGE_SUMMARY_IDS[suffix];
   if (!id) return;
-  var el = document.getElementById(id);
+  var el = /** @type {HTMLElement} */ (document.getElementById(id));
   if (el) el.textContent = text || '';
 }
 
+/** @param {PipelineStage} stage */
 function _stageStateFor(stage) {
   if (_runningStages[stage.suffix]) return 'running';
-  if (_stageOutcomes[stage.suffix]) return _stageOutcomes[stage.suffix];
+  if (_stageOutcomes[stage.suffix]) return _stageOutcomes[stage.suffix] || 'will-run';
   if (!_pipelineRunning && !hasPipelineSource()) return 'needs-source';
 
   var fromPlan = _pipelinePlan && _pipelinePlan.stages
@@ -192,7 +198,7 @@ function _stageStateFor(stage) {
   // mental model that toggling a stage off is the strongest signal of
   // "do not run this".
   if (stage.enable) {
-    var cb = document.getElementById(stage.enable);
+    var cb = /** @type {HTMLInputElement} */ (document.getElementById(stage.enable));
     if (cb && !cb.checked) return 'will-skip';
   }
   // Wait for a selected source's plan before promising work. Once a plan
@@ -208,13 +214,14 @@ function _stageStateFor(stage) {
 // so this correctly returns false and does not gate Start in that case.
 function _classifyBlocked() {
   for (var i = 0; i < _STAGES.length; i++) {
-    if (_STAGES[i].suffix === 'Classify') {
-      return _stageStateFor(_STAGES[i]) === 'blocked';
+    if (_STAGES[i]?.suffix === 'Classify') {
+      return _stageStateFor(/** @type {PipelineStage} */ (_STAGES[i])) === 'blocked';
     }
   }
   return false;
 }
 
+/** @param {PipelineStage} stage */
 function _stageSummaryFor(stage) {
   if (!_pipelinePlan) return '';
   var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
@@ -222,7 +229,7 @@ function _stageSummaryFor(stage) {
 }
 
 function _renderPlanSummary() {
-  var box = document.getElementById('pipelinePlanSummary');
+  var box = /** @type {HTMLElement} */ (document.getElementById('pipelinePlanSummary'));
   if (!box) return;
   if (!_pipelineRunning && !hasPipelineSource()
       && !Object.keys(_runningStages).length && !Object.keys(_stageOutcomes).length) {
@@ -232,7 +239,7 @@ function _renderPlanSummary() {
   // Per-stage rows: stage name, pill label, summary text. Mirrors the
   // pills inside each card so the user sees the same answer in two places
   // and can scan the whole plan at a glance before pressing Start.
-  var rows = [];
+  /** @type {string[]} */ var rows = [];
   _STAGES.forEach(function(stage) {
     if (!_STAGE_SUMMARY_IDS[stage.suffix]) return;  // Scan
     var state = _stageStateFor(stage);
@@ -259,10 +266,11 @@ function _renderPlanSummary() {
 
 // Stages that don't have a per-photo work unit don't get a progress bar.
 // Group is workspace-level; Scan/Previews don't have stage cards.
-var _STAGES_WITH_BAR = { 'Classify': 1, 'Extract': 1, 'EyeKeypoints': 1 };
+/** @type {Record<string,number>} */ var _STAGES_WITH_BAR = { 'Classify': 1, 'Extract': 1, 'EyeKeypoints': 1 };
 
+/** @param {PipelineStage} stage @param {PipelinePlanEntry | null | undefined} planEntry */
 function _renderProgressBar(stage, planEntry) {
-  var bar = document.getElementById('progressBar' + stage.suffix);
+  var bar = /** @type {HTMLElement} */ (document.getElementById('progressBar' + stage.suffix));
   if (!bar) return;
   if (!_STAGES_WITH_BAR[stage.suffix]) {
     bar.classList.add('hidden');
@@ -280,7 +288,7 @@ function _renderProgressBar(stage, planEntry) {
   bar.classList.toggle('outdated', outdated);
   var done = Math.max(0, eligible - (pending || 0));
   var pct = (done / eligible) * 100;
-  var fill = bar.querySelector('.stage-progress-bar-fill');
+  var fill = /** @type {HTMLElement} */ (bar.querySelector('.stage-progress-bar-fill'));
   if (fill) fill.style.width = pct + '%';
 }
 
@@ -301,7 +309,7 @@ function refreshPipelineUI() {
 // Build the body for /api/pipeline/plan from the current DOM. Mirrors the
 // subset of /api/jobs/pipeline the plan needs to make accurate decisions.
 function _buildPlanBody() {
-  var body = {};
+  /** @type {PipelineRequest} */ var body = {};
   // Source mode determines how the backend scopes the plan:
   //   - 'folders': scope = selected workspace folder subtrees.
   //   - 'collection': scope = collection's photo ids (real per-photo status).
@@ -309,11 +317,11 @@ function _buildPlanBody() {
     var folderIds = selectedFolderIds();
     if (folderIds.length) body.folder_ids = folderIds;
   } else if (_sourceMode === 'collection') {
-    var picker = document.getElementById('collectionPicker');
+    var picker = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker'));
     var cid = picker && picker.value ? parseInt(picker.value, 10) : NaN;
     if (!isNaN(cid)) body.collection_id = cid;
     if (_previewData && _previewSelected) {
-      var excludedIds = [];
+      /** @type {number[]} */ var excludedIds = [];
       _previewData.files.forEach(function(f) {
         if (!_previewSelected[f.path] && f.photo_id) excludedIds.push(f.photo_id);
       });
@@ -321,18 +329,18 @@ function _buildPlanBody() {
     }
   }
 
-  body.skip_classify       = !document.getElementById('enableClassify').checked;
-  body.raw_subject_analysis = !!document.getElementById('chkRawSubjectAnalysis').checked;
-  body.skip_extract_masks  = !document.getElementById('enableExtract').checked;
-  body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
-  body.skip_regroup        = !document.getElementById('enableGroup').checked;
+  body.skip_classify       = !/** @type {HTMLInputElement} */ (document.getElementById('enableClassify')).checked;
+  body.raw_subject_analysis = !!/** @type {HTMLInputElement} */ (document.getElementById('chkRawSubjectAnalysis')).checked;
+  body.skip_extract_masks  = !/** @type {HTMLInputElement} */ (document.getElementById('enableExtract')).checked;
+  body.skip_eye_keypoints  = !/** @type {HTMLInputElement} */ (document.getElementById('enableEyeKeypoints')).checked;
+  body.skip_regroup        = !/** @type {HTMLInputElement} */ (document.getElementById('enableGroup')).checked;
 
   // Send review_mode so the plan describes the species-review path correctly:
   // with skip_regroup=true + review_mode="species" the run prepares species
   // review results, and without this the plan would report Group as
   // "Disabled" and imply no grouping work at all.
   body.review_mode =
-    document.getElementById('enableSpeciesReview').checked ? 'species' : null;
+    /** @type {HTMLInputElement} */ (document.getElementById('enableSpeciesReview')).checked ? 'species' : null;
 
   // Only send ``eye_detect_override`` when the checkbox is CHECKED. An
   // unchecked box means "skip the eye stage" and does NOT imply "disable eye
@@ -341,7 +349,7 @@ function _buildPlanBody() {
   // show a different outcome (e.g. no ``eye_override_differs``) than the
   // workspace would produce via any non-Process-page path. Sending ``false``
   // here caused the plan to silently disable eye scoring on such workspaces.
-  if (document.getElementById('enableEyeKeypoints').checked) {
+  if (/** @type {HTMLInputElement} */ (document.getElementById('enableEyeKeypoints')).checked) {
     body.eye_detect_override = true;
   }
 
@@ -349,19 +357,19 @@ function _buildPlanBody() {
   // the backend planner and job both use the same workspace-effective value.
 
   if (!body.skip_classify) {
-    var modelIds = [];
-    document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
+    /** @type {string[]} */ var modelIds = [];
+    /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.model-checkbox:checked')).forEach(function(cb) {
       modelIds.push(cb.value);
     });
     if (modelIds.length) body.model_ids = modelIds;
 
-    var labelsFiles = [];
-    document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+    /** @type {string[]} */ var labelsFiles = [];
+    /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.labels-run-cb:checked')).forEach(function(cb) {
       labelsFiles.push(cb.value);
     });
     if (labelsFiles.length) body.labels_files = labelsFiles;
 
-    var rc = document.getElementById('chkReclassify');
+    var rc = /** @type {HTMLInputElement} */ (document.getElementById('chkReclassify'));
     body.reclassify = !!(rc && rc.checked);
   }
   return body;

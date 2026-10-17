@@ -11,16 +11,19 @@ window.vireoEditNav = (function() {
   var NAV_KEY = 'vireo:editNav';
   var COPY_KEY = 'vireo:copiedRecipe';
   var COPY_PENDING_KEY = 'vireo:copiedRecipePending';
+  /** @template [T=unknown] @param {string} key @returns {T | null} */
   function read(key) {
-    try { return JSON.parse(localStorage.getItem(key)); }
+    try { return JSON.parse(localStorage.getItem(key) || 'null'); }
     catch (_) { return null; }
   }
+  /** @param {string} key @param {unknown} value */
   function write(key, value) {
     try {
       if (value == null) localStorage.removeItem(key);
       else localStorage.setItem(key, JSON.stringify(value));
     } catch (_) {}
   }
+  /** @template T @param {() => T | Promise<T>} callback @returns {Promise<T>} */
   function withClipboardLock(callback) {
     if (navigator.locks && typeof navigator.locks.request === 'function') {
       return navigator.locks.request('vireo:editClipboard', callback);
@@ -38,13 +41,13 @@ window.vireoEditNav = (function() {
     },
     setList: function(photoList, currentId) {
       var ids = (photoList || [])
-        .map(function(p) { return Number(p && p.id != null ? p.id : p); })
+        .map(function(p) { return Number(p && typeof p === 'object' && p.id != null ? p.id : p); })
         .filter(function(n) { return Number.isFinite(n) && n > 0; });
       if (ids.length > 1) write(NAV_KEY, {ids: ids, from: Number(currentId) || null});
       else write(NAV_KEY, null);
     },
     getList: function() {
-      var nav = read(NAV_KEY);
+      /** @type {{ids?: number[]} | null} */ var nav = read(NAV_KEY);
       return nav && Array.isArray(nav.ids) ? nav.ids : null;
     },
     setCopiedRecipe: function(recipe, meta) {

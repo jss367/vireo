@@ -1,8 +1,9 @@
 // Group Review session state, opening, seeding, closing, and detaching.
 // Classic page script; shared globals are initialized before boot.js runs.
 
+/** @param {number} encIdx @param {number | null | undefined} [burstIdx] */
 async function detachBurst(encIdx, burstIdx) {
-  if (isScopedReviewView() || (pipelineResults && pipelineResults.source === 'browse-selection')) {
+  if (isScopedReviewView() || (pipelineResults && currentReviewResults().source === 'browse-selection')) {
     notifyReadOnlyScopedView();
     return;
   }
@@ -13,12 +14,12 @@ async function detachBurst(encIdx, burstIdx) {
   // because its button is only rendered next to in-scope cards.
   var scopeIds = activeReviewScopeFilter();
   if (scopeIds) {
-    var enc = pipelineResults && pipelineResults.encounters && pipelineResults.encounters[encIdx];
-    var burst = enc && enc.bursts && enc.bursts[burstIdx];
+    var enc = pipelineResults && currentReviewResults().encounters && currentReviewResults().encounters[encIdx];
+    var burst = enc && enc.bursts && enc.bursts[burstIdx ?? -1];
     var burstIds = burst ? (burst.photo_ids || burst || []) : [];
     var outside = 0;
     for (var i = 0; i < burstIds.length; i++) {
-      if (!scopeIds.has(burstIds[i])) outside++;
+      if (!scopeIds.has(burstIds[i] ?? -1)) outside++;
     }
     if (outside) {
       var noun = reviewScopeMode === 'folder' ? 'folder' : 'collection';
@@ -39,17 +40,18 @@ async function detachBurst(encIdx, burstIdx) {
   });
   if (!resp || !resp.ok) return;
 
-  pipelineResults.encounters = resp.encounters;
-  if (resp.summary) pipelineResults.summary = resp.summary;
+  currentReviewResults().encounters = resp.encounters;
+  if (resp.summary) currentReviewResults().summary = resp.summary;
   renderResults();
-  updateSummaryBar(pipelineResults.summary);
+  updateSummaryBar(currentReviewResults().summary);
   refreshLatestScopeSnapshotIfCurrent();
 
   showToast('Burst detached from encounter', 'success');
 }
 
+/** @param {number} encIdx @param {number | null | undefined} burstIdx @param {number} photoId */
 async function detachPhoto(encIdx, burstIdx, photoId) {
-  if (isScopedReviewView() || (pipelineResults && pipelineResults.source === 'browse-selection')) {
+  if (isScopedReviewView() || (pipelineResults && currentReviewResults().source === 'browse-selection')) {
     notifyReadOnlyScopedView();
     return;
   }
@@ -62,10 +64,10 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
   });
   if (!resp || !resp.ok) return;
 
-  pipelineResults.encounters = resp.encounters;
-  if (resp.summary) pipelineResults.summary = resp.summary;
+  currentReviewResults().encounters = resp.encounters;
+  if (resp.summary) currentReviewResults().summary = resp.summary;
   renderResults();
-  updateSummaryBar(pipelineResults.summary);
+  updateSummaryBar(currentReviewResults().summary);
   refreshLatestScopeSnapshotIfCurrent();
 
   showToast('Photo detached from burst', 'success');
@@ -73,10 +75,11 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
 
 /* ==================== Group Review Modal ==================== */
 
-var grmState = {
+/** @type {ReviewGroupState} */ var grmState = {
+    dbState: {},
   encIdx: null,       // encounter index in pipelineResults
   burstIdx: null,     // burst index within encounter
-  items: [],          // photo objects from pipelineResults.photos
+  items: [],          // photo objects from currentReviewResults().photos
   picks: new Set(),
   rejects: new Set(),
   removed: new Set(),
@@ -89,14 +92,15 @@ var grmState = {
   applying: false
 };
 
+/** @param {number} photoId */
 function findBurstForPhoto(photoId) {
   if (!pipelineResults) return null;
-  for (var ei = 0; ei < pipelineResults.encounters.length; ei++) {
-    var enc = pipelineResults.encounters[ei];
-    if (!enc.bursts) continue;
-    for (var bi = 0; bi < enc.bursts.length; bi++) {
-      var burst = enc.bursts[bi];
-      var ids = burst.photo_ids || burst;
+  for (var ei = 0; ei < currentReviewResults().encounters.length; ei++) {
+    var enc = currentReviewResults().encounters[ei];
+    if (!requireReviewValue(enc).bursts) continue;
+    for (var bi = 0; bi < requireReviewValue(enc).bursts.length; bi++) {
+      var burst = requireReviewValue(enc).bursts[bi];
+      var ids = requireReviewValue(burst).photo_ids || burst;
       if (ids.indexOf(photoId) >= 0) {
         return { encIdx: ei, burstIdx: bi, photoIds: ids };
       }
@@ -105,11 +109,13 @@ function findBurstForPhoto(photoId) {
   return null;
 }
 
+/** @param {unknown} photoId */
 function grmNormalizePhotoId(photoId) {
-  var id = parseInt(photoId, 10);
+  var id = parseInt(String(photoId), 10);
   return Number.isInteger(id) ? id : null;
 }
 
+/** @param {ReviewPhoto[]} items @param {unknown} photoId @param {Set<number> | null} [removedSet] */
 function grmSelectablePhotoId(items, photoId, removedSet) {
   var id = grmNormalizePhotoId(photoId);
   if (id == null) return null;
@@ -117,18 +123,21 @@ function grmSelectablePhotoId(items, photoId, removedSet) {
   return items.some(function(p) { return p.id === id; }) ? id : null;
 }
 
+/** @param {ReviewPhoto[]} items @param {Set<number> | null} [removedSet] */
 function grmFirstSelectablePhotoId(items, removedSet) {
   for (var i = 0; i < items.length; i++) {
-    if (!removedSet || !removedSet.has(items[i].id)) return items[i].id;
+    if (!removedSet || !removedSet.has(requireReviewValue(items[i]).id)) return requireReviewValue(items[i]).id;
   }
   return null;
 }
 
+/** @param {ReviewPhoto[]} items @param {number | null | undefined} preferredId */
 function grmFallbackSelectionId(items, preferredId) {
   var removedSet = grmState && grmState.removed ? grmState.removed : null;
   return grmSelectablePhotoId(items, preferredId, removedSet) || grmFirstSelectablePhotoId(items, removedSet);
 }
 
+/** @param {ReviewPhoto[]} items */
 function grmCurrentSelectionId(items) {
   var removedSet = grmState && grmState.removed ? grmState.removed : null;
   var selected = grmSelectablePhotoId(items, grmState && grmState.selected, removedSet);
@@ -143,6 +152,7 @@ function grmCurrentSelectionId(items) {
   return null;
 }
 
+/** @param {ReviewPhoto[]} items @param {number | null | undefined} [fallbackId] */
 function grmRenderKeepingCurrentSelection(items, fallbackId) {
   var currentId = grmCurrentSelectionId(items);
   if (currentId != null) {
@@ -176,28 +186,29 @@ function openRequestedGroupReviewFromUrl() {
   if (!pipelineResults) return;
   var params = new URLSearchParams(window.location.search || '');
   if (!params.has('enc') || !params.has('burst')) return;
-  var encIdx = parseInt(params.get('enc'), 10);
-  var burstIdx = parseInt(params.get('burst'), 10);
+  var encIdx = Number(params.get('enc'));
+  var burstIdx = Number(params.get('burst'));
   if (!Number.isInteger(encIdx) || !Number.isInteger(burstIdx)) return;
-  var enc = pipelineResults.encounters && pipelineResults.encounters[encIdx];
-  if (!enc || !enc.bursts || !enc.bursts[burstIdx]) return;
-  var photoId = params.has('photo') ? parseInt(params.get('photo'), 10) : null;
+  var enc = currentReviewResults().encounters && currentReviewResults().encounters[encIdx];
+  if (!enc || !enc.bursts || !enc.bursts[burstIdx ?? -1]) return;
+  var photoId = params.has('photo') ? Number(params.get('photo')) : null;
   openGroupReview(encIdx, burstIdx, Number.isInteger(photoId) ? photoId : null);
 }
 
+/** @param {number} encIdx @param {number | null | undefined} [burstIdx] @param {number | null | undefined} [selectPhotoId] */
 function openGroupReview(encIdx, burstIdx, selectPhotoId) {
-  var enc = pipelineResults.encounters[encIdx];
-  var burst = enc.bursts[burstIdx];
-  var photoIds = burst.photo_ids || burst;
-  var source = pipelineResults && pipelineResults.source === 'browse-selection'
+  var enc = currentReviewResults().encounters[encIdx];
+  var burst = requireReviewValue(enc).bursts[burstIdx ?? -1];
+  var photoIds = requireReviewValue(burst).photo_ids || burst;
+  var source = pipelineResults && currentReviewResults().source === 'browse-selection'
     ? 'browse-selection'
     : 'pipeline';
 
-  // Build items array from pipelineResults.photos
-  var photoMap = {};
-  pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+  // Build items array from currentReviewResults().photos
+  /** @type {Record<number,ReviewPhoto>} */ var photoMap = {};
+  currentReviewResults().photos.forEach(function(p) { photoMap[p.id] = p; });
 
-  var items = photoIds.map(function(pid) { return photoMap[pid]; }).filter(Boolean);
+  var items = photoIds.map(function(pid) { return photoMap[pid]; }).filter((item) => item != null);
 
   // Reset the species input to this burst's value so a stale value from a
   // previously-reviewed group doesn't leak in when the prior modal was closed
@@ -216,12 +227,12 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   // whatever its confirmed flag (confirmed, mixed-but-edited, or empty), so
   // it supplies BOTH the pre-fill and the apply baseline below; this page
   // edits one species at a time, so the primary (first entry) stands in.
-  var burstHasList = !!burstOvr && Array.isArray(burstOvr.species_list);
-  var burstListPrimary = burstHasList ? (burstOvr.species_list[0] || '') : '';
+  var burstHasList = !!burstOvr && Array.isArray(burstOvr?.species_list);
+  var burstListPrimary = burstHasList ? (requireReviewValue(burstOvr?.species_list)[0] || '') : '';
   var initialSpecies = burstHasList ? burstListPrimary : (
     (burstOvr && burstOvr.species)
-    || enc.confirmed_species
-    || (enc.species ? enc.species[0] : '')
+    || requireReviewValue(enc).confirmed_species
+    || (requireReviewValue(enc).species ? requireReviewValue(requireReviewValue(enc).species)[0] : '')
     || ''
   );
 
@@ -238,8 +249,8 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     initialConfirmedSpecies = burstListPrimary;
   } else if (burstOvr && burstOvr.confirmed === true && burstOvr.species) {
     initialConfirmedSpecies = burstOvr.species;
-  } else if (enc.species_confirmed && enc.confirmed_species) {
-    initialConfirmedSpecies = enc.confirmed_species;
+  } else if (requireReviewValue(enc).species_confirmed && requireReviewValue(enc).confirmed_species) {
+    initialConfirmedSpecies = requireReviewValue(enc).confirmed_species || '';
   }
 
   // Bump the session id so any in-flight /group/state fetch from a previous
@@ -252,8 +263,8 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   var allowRemove = !(isSinglePhotoReview && source !== 'browse-selection');
 
   grmState = {
-    encIdx: encIdx,
-    burstIdx: burstIdx,
+        encIdx: encIdx,
+    burstIdx: burstIdx ?? null,
     items: items,
     picks: new Set(),
     rejects: new Set(),
@@ -310,16 +321,16 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   _grmSuppressLoupeClick = false;
   grmRefreshResetAllVisibility();
 
-  var overlay = document.getElementById('grmOverlay');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   overlay.inert = false;
   overlay.classList.add('open');
-  var title = document.getElementById('grmTitle');
+  var title = /** @type {HTMLElement} */ (document.getElementById('grmTitle'));
   if (title) {
     title.textContent = source === 'browse-selection'
       ? 'Review Selected Photos'
       : (isSinglePhotoReview ? 'Review Photo' : 'Review Burst Group');
   }
-  var removeBtn = document.getElementById('grmRemoveBtn');
+  var removeBtn = /** @type {HTMLButtonElement} */ (document.getElementById('grmRemoveBtn'));
   if (removeBtn) {
     removeBtn.style.display = allowRemove ? '' : 'none';
     removeBtn.textContent = source === 'browse-selection' ? 'Remove from review' : 'Remove from group';
@@ -330,16 +341,16 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   // Navigate (←→) only makes sense with more than one frame; remove (Del)
   // tracks the Remove button's availability. Keep these keycaps honest so the
   // bar never advertises a shortcut that does nothing in the current context.
-  var navKey = document.getElementById('grmKeyNav');
+  var navKey = /** @type {HTMLElement} */ (document.getElementById('grmKeyNav'));
   if (navKey) navKey.style.display = (isSinglePhotoReview && source !== 'browse-selection') ? 'none' : '';
-  var removeKey = document.getElementById('grmKeyRemove');
+  var removeKey = /** @type {HTMLElement} */ (document.getElementById('grmKeyRemove'));
   if (removeKey) removeKey.style.display = (allowRemove === false) ? 'none' : '';
   grmSetThumbSize(GRM_CARD_W, false);
 
   // Disable Apply while we wait for /group/state — clicking it before
   // seed completes would send empty picks/rejects, which the server treats
   // as "all candidates" and silently clears prior flags.
-  var applyBtn = document.getElementById('grmApplyBtn');
+  var applyBtn = /** @type {HTMLButtonElement} */ (document.getElementById('grmApplyBtn'));
   if (applyBtn) {
     applyBtn.disabled = true;
     applyBtn.style.opacity = '0.5';
@@ -347,11 +358,11 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     applyBtn.textContent = 'Loading…';
   }
 
-  document.getElementById('grmSpecies').value = initialSpecies;
+  /** @type {HTMLInputElement} */ (document.getElementById('grmSpecies')).value = initialSpecies;
 
   // Sync slider DOM with persisted resolution choice
-  var slider = document.getElementById('grmResSlider');
-  if (slider) slider.value = grmResolutionIdx;
+  var slider = /** @type {HTMLInputElement} */ (document.getElementById('grmResSlider'));
+  if (slider) slider.value = String(grmResolutionIdx);
   grmSetLoupeZoom(100);
   grmUpdateResLabel();
 
@@ -363,7 +374,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
   safeFetch('/api/pipeline/group/state', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ photo_ids: items.map(function(p) { return p.id; }), species: initialSpecies }),
+    body: JSON.stringify({ photo_ids: items.map(function(p) { return requireReviewValue(p).id; }), species: initialSpecies }),
   }, { toast: false }).then(function(data) {
     // Drop the response if a newer openGroupReview has fired since: seeding
     // burst A's DB state into burst B's modal would mis-flag photos on Apply.
@@ -381,7 +392,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 }
 
 function refreshPipelineReviewLightboxReadOnlyState() {
-  var lightbox = document.getElementById('lightboxOverlay');
+  var lightbox = /** @type {HTMLElement} */ (document.getElementById('lightboxOverlay'));
   if (!lightbox || !lightbox.classList.contains('active') ||
       typeof window.setLightboxReadOnlyMode !== 'function') return;
   // Pass the lightbox's current photo so a collection-membership refresh
@@ -390,17 +401,18 @@ function refreshPipelineReviewLightboxReadOnlyState() {
   var currentPhotoId = (typeof vireoLightboxSession !== 'undefined' && vireoLightboxSession)
     ? vireoLightboxSession.requestedPhotoId()
     : null;
-  var options = pipelineReviewLightboxOptions(currentPhotoId);
+  var options = pipelineReviewLightboxOptions(currentPhotoId ?? undefined);
   window.setLightboxReadOnlyMode(options.readOnly, options.readOnlyMessage);
 }
 
+/** @param {boolean} isApplying */
 function grmSetApplying(isApplying) {
   if (!grmState) return;
   grmState.applying = isApplying;
-  var overlay = document.getElementById('grmOverlay');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   if (overlay) overlay.inert = !!isApplying;
   refreshPipelineReviewLightboxReadOnlyState();
-  var btn = document.getElementById('grmApplyBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('grmApplyBtn'));
   if (!btn) return;
   if (isApplying) {
     btn.disabled = true;
@@ -421,10 +433,11 @@ function grmSetApplying(isApplying) {
 // in the button label. We deliberately do NOT set grmState.seeded = true
 // here — grmApply early-returns until it is, so a stray click can't clear
 // flags from a degraded snapshot.
+/** @param {ReviewPhoto[]} items @param {number | null | undefined} [selectPhotoId] */
 function grmShowSeedError(items, selectPhotoId) {
   grmState.dbState = {};
   grmRenderKeepingCurrentSelection(items, selectPhotoId);
-  var btn = document.getElementById('grmApplyBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('grmApplyBtn'));
   if (btn) {
     btn.disabled = true;
     btn.style.opacity = '0.5';
@@ -436,6 +449,7 @@ function grmShowSeedError(items, selectPhotoId) {
 
 // Seed picks/rejects on modal open only from live DB state. Unflagged photos
 // stay as candidates until the user explicitly moves them.
+/** @param {Record<number,ReviewDbPhoto>} dbPhotos @param {ReviewPhoto[]} items @param {number | null | undefined} [selectPhotoId] */
 function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   grmState.dbState = dbPhotos || {};
 
@@ -452,7 +466,7 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
 
   var initSelect = grmSelectablePhotoId(items, selectPhotoId, grmState.removed);
   if (initSelect == null) {
-    var firstSelected = null;
+    /** @type {number | null} */ var firstSelected = null;
     items.forEach(function(p) {
       if (
         firstSelected == null &&
@@ -465,7 +479,7 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   // Mark the modal seeded *before* re-rendering so grmUpdateApplyLabel
   // (called from renderGroupModal) re-enables the button.
   grmState.seeded = true;
-  var applyBtn = document.getElementById('grmApplyBtn');
+  var applyBtn = /** @type {HTMLButtonElement} */ (document.getElementById('grmApplyBtn'));
   if (applyBtn) {
     applyBtn.disabled = false;
     applyBtn.style.opacity = '';
@@ -478,15 +492,16 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
 
 function grmSyncSelectionClasses() {
   var selectedIds = grmState && grmState.selectedIds ? grmState.selectedIds : new Set();
-  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
-    var id = card.getAttribute('data-photo-id');
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]')).forEach(function(card) {
+    var id = card.getAttribute('data-photo-id') || '';
     card.classList.toggle(
       'selected',
-      selectedIds.has(parseInt(id, 10)) || selectedIds.has(id)
+      selectedIds.has(parseInt(String(id), 10)) || selectedIds.has(id)
     );
   });
 }
 
+/** @param {string} text */
 function grmZonePlaceholder(text) {
   var span = document.createElement('span');
   span.style.cssText = 'font-size:12px;color:var(--text-ghost);';
@@ -496,8 +511,8 @@ function grmZonePlaceholder(text) {
 
 function grmSyncZoneCards() {
   if (!grmState) return;
-  var zones = { picks: [], candidates: [], rejects: [] };
-  var visible = {};
+  /** @type {{picks: string[]; candidates: string[]; rejects: string[]}} */ var zones = { picks: [], candidates: [], rejects: [] };
+  /** @type {Record<string,boolean>} */ var visible = {};
   _grmVisibleItems().forEach(function(p) {
     var id = String(p.id);
     visible[id] = true;
@@ -506,15 +521,15 @@ function grmSyncZoneCards() {
     else zones.candidates.push(id);
   });
 
-  var cardById = {};
-  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
-    var id = card.getAttribute('data-photo-id');
+  /** @type {Record<string,HTMLElement>} */ var cardById = {};
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]')).forEach(function(card) {
+    var id = card.getAttribute('data-photo-id') || '';
     if (visible[id]) cardById[id] = card;
     else card.remove();
   });
 
-  function syncStrip(stripId, ids, emptyText) {
-    var strip = document.getElementById(stripId);
+  function syncStrip(/** @type {string} */ stripId, /** @type {string[]} */ ids, /** @type {string} */ emptyText) {
+    var strip = /** @type {HTMLElement} */ (document.getElementById(stripId));
     if (!strip) return;
     Array.from(strip.children).forEach(function(child) {
       if (!child.classList || !child.classList.contains('grm-card')) child.remove();
@@ -530,7 +545,7 @@ function grmSyncZoneCards() {
   syncStrip('grmCandidates', zones.candidates, 'All sorted');
   syncStrip('grmRejects', zones.rejects, 'Press ↓ to reject');
 
-  document.getElementById('grmCount').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('grmCount')).textContent =
     zones.picks.length + ' picks, ' + zones.rejects.length + ' rejects, ' +
     zones.candidates.length + ' unsorted';
   // A lightbox flag action stages the same pending zone state. Keep its
@@ -541,7 +556,7 @@ function grmSyncZoneCards() {
       var flag = grmState.picks.has(photoId)
         ? 'flagged'
         : (grmState.rejects.has(photoId) ? 'rejected' : 'none');
-      window.setLightboxProvisionalFlag(photoId, flag);
+      window.setLightboxProvisionalFlag?.(photoId, flag);
     });
   }
   grmUpdateKeywordSummary(grmKeywordStats(_grmKeywordSummaryMembers()));
@@ -550,6 +565,7 @@ function grmSyncZoneCards() {
   grmUpdateApplyLabel();
 }
 
+/** @param {boolean} [force] */
 function closeGroupReview(force) {
   if (grmState && grmState.applying && force !== true) return false;
   grmCancelHoverFrame();
@@ -557,7 +573,7 @@ function closeGroupReview(force) {
       typeof window.clearLightboxProvisionalFlags === 'function') {
     window.clearLightboxProvisionalFlags(grmState.items.map(function(photo) { return photo.id; }));
   }
-  document.getElementById('grmOverlay').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('grmOverlay')).classList.remove('open');
   if (grmState) grmState.applying = false;
   refreshPipelineReviewLightboxReadOnlyState();
   _grmOffsets = {};
@@ -567,7 +583,7 @@ function closeGroupReview(force) {
   document.removeEventListener('mousemove', grmLoupeMouseMove);
   document.removeEventListener('mouseup', grmLoupeMouseUp);
   grmRefreshResetAllVisibility();
-  var overlay = document.getElementById('grmOverlay');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   if (overlay) overlay.inert = false;
   return true;
 }

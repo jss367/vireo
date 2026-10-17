@@ -1,36 +1,38 @@
 // Photo and group flags, including in-flight write coordination.
 // Classic page script; shared globals are initialized before boot.js runs.
 
-var pipelineReviewGroupFlagInFlight = {};
+/** @type {Record<string,boolean>} */ var pipelineReviewGroupFlagInFlight = {};
 // Photo IDs that any in-flight bulk reject/clear is currently mutating. We
 // check for overlap so an encounter action and one of its burst actions
 // cannot make competing decisions from the same live-state read. The server
 // records each completed write in history. Disjoint groups can still proceed
 // in parallel.
-var pipelineReviewGroupFlagInFlightPhotoIds = new Set();
+/** @type {Set<number>} */ var pipelineReviewGroupFlagInFlightPhotoIds = new Set();
 // Direct per-photo flag writes can already be in flight when Group Review
 // opens. Track them by photo so Apply can wait before persisting a newer
 // staged decision for the same ID; otherwise network reordering could let the
 // older request land last and overwrite the Group Review choice.
-var pipelineReviewDirectFlagWritesByPhoto = {};
+/** @type {Record<string,Set<Promise<unknown>>>} */ var pipelineReviewDirectFlagWritesByPhoto = {};
 
+/** @param {number} photoId @param {Promise<unknown>} promise */
 function trackPipelineReviewDirectFlagWrite(photoId, promise) {
   var key = String(photoId);
   if (!pipelineReviewDirectFlagWritesByPhoto[key]) {
     pipelineReviewDirectFlagWritesByPhoto[key] = new Set();
   }
   var writes = pipelineReviewDirectFlagWritesByPhoto[key];
-  writes.add(promise);
+  requireReviewValue(writes).add(promise);
   function release() {
-    writes.delete(promise);
-    if (!writes.size) delete pipelineReviewDirectFlagWritesByPhoto[key];
+    requireReviewValue(writes).delete(promise);
+    if (!requireReviewValue(writes).size) delete pipelineReviewDirectFlagWritesByPhoto[key];
   }
   Promise.resolve(promise).then(release, release);
   return promise;
 }
 
+/** @param {number[]} photoIds */
 function waitForPipelineReviewDirectFlagWrites(photoIds) {
-  var pending = [];
+  /** @type {Promise<unknown>[]} */ var pending = [];
   (photoIds || []).forEach(function(photoId) {
     var writes = pipelineReviewDirectFlagWritesByPhoto[String(photoId)];
     if (writes) pending = pending.concat(Array.from(writes));
@@ -45,12 +47,14 @@ function waitForPipelineReviewDirectFlagWrites(photoIds) {
 // species-conflict filter both narrow the target to what the user can see.
 // groupFlagTarget() reads from here so the click applies to the visible set,
 // not the raw underlying photo list.
-var pipelineReviewVisibleTargets = {};
+/** @type {Record<string,number[]>} */ var pipelineReviewVisibleTargets = {};
 
+/** @param {string | undefined} flag */
 function normalizedPipelineReviewFlag(flag) {
   return flag === 'flagged' || flag === 'rejected' ? flag : 'none';
 }
 
+/** @param {ReviewPhoto | null | undefined} photo @param {string} flag */
 function updatePipelineReviewPhotoFlag(photo, flag) {
   if (!photo) return;
   photo.flag = flag;
@@ -69,10 +73,11 @@ function updatePipelineReviewPhotoFlag(photo, flag) {
   }
 }
 
+/** @param {string} kind @param {number} encIdx @param {number | null | undefined} burstIdx @param {number[]} photoIds @param {Record<number,ReviewPhoto>} photoMap */
 function renderGroupRejectButton(kind, encIdx, burstIdx, photoIds, photoMap) {
   photoIds = Array.isArray(photoIds) ? photoIds : [];
-  var allRejected = photoIds.length > 0 && photoIds.every(function(pid) {
-    return photoMap[pid] && photoMap[pid].flag === 'rejected';
+  var allRejected = photoIds.length > 0 && photoIds.every(function(/** @type {number} */ pid) {
+    return requireReviewValue(photoMap)[pid] && requireReviewValue(requireReviewValue(photoMap)[pid]).flag === 'rejected';
   });
   var noun = kind === 'burst' ? 'burst' : 'encounter';
   var label = allRejected ? 'Clear rejects' : 'Reject ' + noun;
@@ -89,9 +94,10 @@ function renderGroupRejectButton(kind, encIdx, burstIdx, photoIds, photoMap) {
     escapeHtml(label) + '</button>';
 }
 
+/** @param {number} encIdx @param {number | null} [burstIdx] */
 function groupFlagTarget(encIdx, burstIdx) {
-  if (!pipelineResults || !pipelineResults.encounters) return null;
-  var enc = pipelineResults.encounters[encIdx];
+  if (!pipelineResults || !currentReviewResults().encounters) return null;
+  var enc = currentReviewResults().encounters[encIdx];
   if (!enc) return null;
   if (burstIdx == null) {
     // Read the exact set of photos the encounter button represents on
@@ -117,6 +123,7 @@ function groupFlagTarget(encIdx, burstIdx) {
   };
 }
 
+/** @param {ReviewGroupTarget | null} target @param {string} flag */
 function setPipelineReviewGroupFlag(target, flag) {
   if (!target || pipelineReviewGroupFlagInFlight[target.key]) return Promise.resolve();
   if (isScopedReviewView()) {
@@ -125,9 +132,9 @@ function setPipelineReviewGroupFlag(target, flag) {
   }
   // The rendered target is already scope-narrowed, but the fallbacks in
   // groupFlagTarget() (no render yet) read the raw encounter/burst list.
-  var ids = Array.from(new Set((target.photoIds || []).map(function(pid) {
-    return parseInt(pid, 10);
-  }).filter(function(pid) {
+  var ids = Array.from(new Set((target.photoIds || []).map(function(/** @type {number} */ pid) {
+    return Number(pid);
+  }).filter(function(/** @type {number} */ pid) {
     return !!pid && !!findPhotoInResults(pid) && isPhotoActionableInReviewScope(pid);
   })));
   if (!ids.length) return Promise.resolve();
@@ -136,7 +143,7 @@ function setPipelineReviewGroupFlag(target, flag) {
   // clicking Reject burst while the parent encounter's Reject is still
   // running. Both requests would otherwise make their decisions from the
   // state before the first write completed.
-  var overlaps = ids.some(function(pid) {
+  var overlaps = ids.some(function(/** @type {number} */ pid) {
     return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
   });
   if (overlaps) {
@@ -145,8 +152,8 @@ function setPipelineReviewGroupFlag(target, flag) {
   }
 
   pipelineReviewGroupFlagInFlight[target.key] = true;
-  ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.add(pid); });
-  // pipelineResults.photos[].flag is a cache written when the pipeline ran;
+  ids.forEach(function(/** @type {number} */ pid) { pipelineReviewGroupFlagInFlightPhotoIds.add(pid); });
+  // currentReviewResults().photos[].flag is a cache written when the pipeline ran;
   // GET /api/pipeline/results serves it as-is without refreshing from the DB
   // (unlike the GRM, which fetches /api/pipeline/group/state on open). If the
   // user picked a photo in Browse after the cache was written, the cache can
@@ -160,12 +167,12 @@ function setPipelineReviewGroupFlag(target, flag) {
     body: JSON.stringify({photo_ids: ids, species: ''}),
   }).then(function(data) {
     var live = (data && data.photos) || {};
-    var liveFlagFor = function(pid) {
-      return normalizedPipelineReviewFlag(live[pid] && live[pid].flag);
+    var liveFlagFor = function(/** @type {number} */ pid) {
+      return normalizedPipelineReviewFlag(live[pid]?.flag);
     };
     // Sync the review cache to the live snapshot so subsequent button
     // labels and card badges reflect truth, not the cache's opening value.
-    ids.forEach(function(pid) {
+    ids.forEach(function(/** @type {number} */ pid) {
       var liveFlag = liveFlagFor(pid);
       var photo = findPhotoInResults(pid);
       if (photo && normalizedPipelineReviewFlag(photo.flag) !== liveFlag) {
@@ -176,7 +183,7 @@ function setPipelineReviewGroupFlag(target, flag) {
     // including live picks — because the user explicitly asked to reject the
     // group. "Clear rejects" only touches photos that are actually rejected;
     // it must never overwrite a live pick or an unflagged photo to 'none'.
-    var changedIds = ids.filter(function(pid) {
+    var changedIds = ids.filter(function(/** @type {number} */ pid) {
       var liveFlag = liveFlagFor(pid);
       if (flag === 'none') return liveFlag === 'rejected';
       return liveFlag !== flag;
@@ -190,7 +197,7 @@ function setPipelineReviewGroupFlag(target, flag) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: changedIds, flag: flag}),
     }).then(function() {
-      changedIds.forEach(function(pid) {
+      changedIds.forEach(function(/** @type {number} */ pid) {
         updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
       });
       renderResults();
@@ -203,26 +210,28 @@ function setPipelineReviewGroupFlag(target, flag) {
     });
   }).finally(function() {
     delete pipelineReviewGroupFlagInFlight[target.key];
-    ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.delete(pid); });
+    ids.forEach(function(/** @type {number} */ pid) { pipelineReviewGroupFlagInFlightPhotoIds.delete(pid); });
   });
 }
 
+/** @param {Event} event @param {number} encIdx */
 function toggleEncounterRejected(event, encIdx) {
   if (event && event.stopPropagation) event.stopPropagation();
   var target = groupFlagTarget(encIdx, null);
   if (!target) return;
-  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(pid) {
+  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(/** @type {number} */ pid) {
     var photo = findPhotoInResults(pid);
     return photo && photo.flag === 'rejected';
   });
   setPipelineReviewGroupFlag(target, allRejected ? 'none' : 'rejected');
 }
 
+/** @param {Event} event @param {number} encIdx @param {number | null} [burstIdx] */
 function toggleBurstRejected(event, encIdx, burstIdx) {
   if (event && event.stopPropagation) event.stopPropagation();
   var target = groupFlagTarget(encIdx, burstIdx);
   if (!target) return;
-  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(pid) {
+  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(/** @type {number} */ pid) {
     var photo = findPhotoInResults(pid);
     return photo && photo.flag === 'rejected';
   });
@@ -233,18 +242,19 @@ function toggleBurstRejected(event, encIdx, burstIdx) {
 // burst modal, route those commands through the modal's pending zones (the
 // same behavior as its P/X/Space shortcuts) rather than writing directly to
 // /api/batch/flag behind the modal's Apply workflow.
+/** @param {string} flag */
 function batchSetFlag(flag) {
   if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') {
     return Promise.resolve(false);
   }
-  var overlay = document.getElementById('grmOverlay');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   if (overlay && overlay.classList.contains('open') && grmState) {
     if (grmState.applying) {
       showToast('Group Review is applying changes — wait for it to finish', 'warning');
       return Promise.resolve(false);
     }
     var ids = _grmActionTargetIds();
-    var overlapsBulkFlagWrite = ids.some(function(pid) {
+    var overlapsBulkFlagWrite = ids.some(function(/** @type {number} */ pid) {
       return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
     });
     if (overlapsBulkFlagWrite) {
@@ -261,20 +271,21 @@ function batchSetFlag(flag) {
     ? nativeMenuActivePhotoIds()
     : [];
   if (!activeIds.length) return Promise.resolve(false);
-  return Promise.all(activeIds.map(function(pid) {
+  return Promise.all(activeIds.map(function(/** @type {number} */ pid) {
     return setPipelineReviewFlag(pid, flag);
   })).then(function(results) {
     return results.every(function(result) { return result !== false; });
   });
 }
 
+/** @param {number} photoId @param {string} flag */
 function setPipelineReviewFlag(photoId, flag) {
   if (window.vireoHistoryBusy && window.vireoHistoryBusy()) {
     showToast('Undo or redo is still finishing — try again in a moment', 'warning');
     return Promise.resolve(false);
   }
   if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') return Promise.resolve();
-  photoId = parseInt(photoId, 10);
+  photoId = parseInt(String(photoId), 10);
   if (!photoId) return Promise.resolve();
   if (isScopedReviewView()) {
     notifyReadOnlyScopedView();
@@ -289,7 +300,7 @@ function setPipelineReviewFlag(photoId, flag) {
   // context menu already does this for its own flag chips. Otherwise the
   // burst's Apply reads a stale zone value and can clobber this newer flag,
   // and closing the lightbox shows the pre-lightbox pick/reject state.
-  var grmOverlay = document.getElementById('grmOverlay');
+  var grmOverlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   if (grmOverlay && grmOverlay.classList.contains('open') && grmState && grmState.items) {
     if (grmState.applying) {
       showToast('Group Review is applying changes — wait for it to finish', 'warning');
@@ -344,7 +355,7 @@ function setPipelineReviewFlag(photoId, flag) {
       updatePipelineReviewPhotoFlag(photo, flag);
     }
     renderResults();
-    if (inspectPhotoId === photoId && document.getElementById('inspectOverlay').classList.contains('open')) {
+    if (inspectPhotoId === photoId && /** @type {HTMLElement} */ (document.getElementById('inspectOverlay')).classList.contains('open')) {
       openInspect(photoId);
     }
     var msg = flag === 'flagged' ? 'Marked as pick' : (flag === 'rejected' ? 'Marked as reject' : 'Flag cleared');

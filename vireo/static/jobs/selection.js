@@ -1,7 +1,7 @@
 // Selecting a job and following it over its progress stream.
 // Classic page script; load boot.js after all definitions.
 
-function selectJob(jobId, source) {
+/** @param {string} jobId @param {string} source */ function selectJob(jobId, source) {
   currentView = jobId;
   selectedJobId = jobId;
   selectedSource = source;
@@ -19,7 +19,7 @@ function selectJob(jobId, source) {
   updateList();
 }
 
-function connectSSE(jobId) {
+/** @param {string} jobId */ function connectSSE(jobId) {
   if (sseSource) sseSource.close();
   sseSource = new EventSource('/api/jobs/' + jobId + '/stream');
   sseSource.addEventListener('progress', function(e) {
@@ -43,7 +43,7 @@ function connectSSE(jobId) {
     }
   });
   sseSource.addEventListener('complete', function(e) {
-    var data = {};
+    /** @type {Partial<JobsRow>} */ var data = {};
     try { data = JSON.parse(e.data); } catch(ex) {}
     var job = activeJobs.find(function(j) { return j.id === jobId; });
     if (job) {

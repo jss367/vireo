@@ -1,11 +1,11 @@
 (function() {
   'use strict';
 
-  var helpData = [];
-  var fuse = null;
-  var modal = document.getElementById('helpModal');
-  var input = document.getElementById('helpSearchInput');
-  var results = document.getElementById('helpResults');
+  /** @type {NavHelpItem[]} */ var helpData = [];
+  /** @type {Fuse<NavHelpItem> | null} */ var fuse = null;
+  var modal = /** @type {HTMLElement} */ (document.getElementById('helpModal'));
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('helpSearchInput'));
+  var results = /** @type {HTMLElement} */ (document.getElementById('helpResults'));
 
   // Load help data and init Fuse
   fetch('/static/help.json')
@@ -28,17 +28,18 @@
     });
 
   // Render all entries grouped by category (default state)
+  /** @param {NavHelpItem[]} items */
   function renderGrouped(items) {
-    var groups = {};
+    /** @type {Record<string,NavHelpItem[]>} */ var groups = {};
     items.forEach(function(item) {
       var cat = item.category || 'Other';
       if (!groups[cat]) groups[cat] = [];
-      groups[cat].push(item);
+      groups[cat]?.push(item);
     });
     var html = '';
     Object.keys(groups).forEach(function(cat) {
       html += '<div class="help-category">' + escHtml(cat) + '</div>';
-      groups[cat].forEach(function(item) {
+      (groups[cat] || []).forEach(function(item) {
         html += renderItem(item);
       });
     });
@@ -46,6 +47,7 @@
   }
 
   // Render a single help item
+  /** @param {NavHelpItem} item */
   function renderItem(item) {
     return '<div class="help-item">' +
       '<div class="help-question">' + escHtml(item.question) + '</div>' +
@@ -151,9 +153,10 @@
     }
   });
 
+  /** @param {unknown} s */
   function escHtml(s) {
     var d = document.createElement('div');
-    d.textContent = s;
+    d.textContent = String(s ?? '');
     return d.innerHTML;
   }
 })();
