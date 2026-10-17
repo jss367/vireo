@@ -41,6 +41,347 @@ PHOTO_COUNT_PATH_BUDGET_SECS = 1.5
 PHOTO_COUNT_REQUEST_BUDGET_SECS = 5.0
 
 
+class _BadFirstPaintScope(Exception):
+    """A first-paint scope the catalog refused (its ``ValueError`` message)."""
+
+
+def _first_paint_photos(
+    db, cfg, *, stacks, folder_id, collection_id, page, per_page, sort,
+):
+    """The first page of photos (or stacks) for Browse's first paint.
+
+    Returns ``(photos, total, underlying_total, stack_count)``;
+    ``stack_count`` is None without stacks. Raises ``_BadFirstPaintScope``
+    for a scope the catalog refuses.
+    """
+    stack_count = None
+    try:
+        if stacks:
+            stack_cfg = db.browse_stack_settings(cfg.load())
+            photos = db.query_browse_stacks(
+                [], folder_id=folder_id, collection_id=collection_id,
+                page=page, per_page=per_page, sort=sort,
+                stack_config=stack_cfg,
+            )
+            stack_totals = db.browse_stack_totals(
+                [], folder_id=folder_id, collection_id=collection_id,
+                stack_config=stack_cfg,
+            )
+            total = stack_totals["total"]
+            stack_count = stack_totals["stack_count"]
+            underlying_total = db.count_photos_for_rules(
+                [], folder_id=folder_id, collection_id=collection_id,
+            )
+        else:
+            photos = db.get_photos(
+                folder_id=folder_id,
+                collection_id=collection_id,
+                page=page,
+                per_page=per_page,
+                sort=sort,
+            )
+    except ValueError as exc:
+        raise _BadFirstPaintScope(str(exc)) from exc
+    if not stacks:
+        if not any([folder_id, collection_id]):
+            total = db.count_photos()
+        else:
+            try:
+                total = db.count_filtered_photos(
+                    folder_id=folder_id,
+                    collection_id=collection_id,
+                )
+            except ValueError as exc:
+                raise _BadFirstPaintScope(str(exc)) from exc
+        underlying_total = total
+    return photos, total, underlying_total, stack_count
+
+
+def _first_paint_focus(
+    db, photos, focus_photo_id, *, folder_id, collection_id, page, per_page, sort,
+):
+    """Place a focused deep link: ``(photos, focus_index, focus_page)``.
+
+    ``photos`` is replaced by the page that holds the focus target when that
+    is not the requested page. Raises ``_BadFirstPaintScope`` for a scope the
+    catalog refuses.
+    """
+    # Photo deep links need the target's position in the exact sort
+    # order used by this first paint. Returning the zero-based index
+    # and its bounded page from this read snapshot avoids probing
+    # serial 50-photo pages until the target happens to appear. Keep
+    # the extra ordered-id query opt-in so ordinary Browse loads retain
+    # their existing cost.
+    #
+    # When the target is already in the first-page ``photos`` fetched
+    # above (the common case — Highlights and most native actions open
+    # a photo whose sorted position is on page 1), compute the index
+    # from that page directly.  Materializing every folder ID would
+    # add O(folder size) latency and memory to the critical first
+    # paint on the documented 100K- and 1M-photo libraries, even when
+    # a lookup was never necessary (Codex review r3792637103).
+    focus_index = None
+    focus_page = page
+    if focus_photo_id is not None:
+        local_index = None
+        for offset, row in enumerate(photos):
+            if row["id"] == focus_photo_id:
+                local_index = offset
+                break
+        if local_index is not None:
+            focus_index = (page - 1) * per_page + local_index
+        else:
+            try:
+                focus_index = db.get_photo_position(
+                    focus_photo_id,
+                    folder_id=folder_id,
+                    collection_id=collection_id,
+                    sort=sort,
+                )
+            except ValueError as exc:
+                raise _BadFirstPaintScope(str(exc)) from exc
+        # Return only the bounded page containing the target from the
+        # same SQLite read snapshot as its position and total. Sending
+        # every preceding row can freeze Browse for a focus deep in a
+        # million-photo folder; independent parallel offset requests,
+        # meanwhile, allow ingestion/deletion to create overlaps,
+        # gaps, and stale totals. One target page avoids both failure
+        # modes, and ordinary lazy paging resumes after it.
+        if focus_index is not None:
+            focus_page = focus_index // per_page + 1
+            if focus_page != page:
+                try:
+                    photos = db.get_photos(
+                        folder_id=folder_id,
+                        collection_id=collection_id,
+                        page=focus_page,
+                        per_page=per_page,
+                        sort=sort,
+                    )
+                except ValueError as exc:
+                    raise _BadFirstPaintScope(str(exc)) from exc
+    return photos, focus_index, focus_page
+
+
+def _first_paint_collection_dicts(db, collections):
+    """The sidebar's collection rows, flagged degraded or not addable."""
+    collection_dicts = []
+    for c in collections:
+        d = dict(c)
+        # Flag degraded rules at first paint so a fast click on the
+        # sidebar row can't fall into the 400 /photos path before
+        # loadCollectionCounts() lands. Only validate the rules — do
+        # not run COUNT(DISTINCT p.id) per collection here; that
+        # N+1 is what the async loadCollectionCounts() call in
+        # bootstrapBrowse() was designed to avoid, and re-adding it
+        # to the critical first-paint path makes opening Browse wait
+        # on every smart-collection query. Malformed JSON is treated
+        # as degraded too — those rules would 400 downstream just
+        # like an unresolvable rule.
+        parsed_rules, degraded = collection_rules_state(db, c["rules"])
+        if degraded:
+            d["can_add_photos"] = False
+            d["count_error"] = True
+            collection_dicts.append(d)
+            current_app.logger.warning(
+                "Collection %s (%s) has unresolvable rules; marking degraded",
+                c["id"],
+                c["name"],
+            )
+            continue
+        else:
+            # A visual-only collection stores ``rules: []`` which
+            # ``_collection_accepts_manual_photos`` treats as addable,
+            # but ``/add-photos`` would just append to ``photo_ids``
+            # without touching ``visual_json`` — the manually added
+            # photos would only show up in the reopened collection
+            # if they also matched the hidden visual clause, making
+            # the add silently ineffective (Codex r3620791304).
+            d["can_add_photos"] = (
+                c["visual_json"] is None
+                and _collection_accepts_manual_photos(parsed_rules)
+            )
+        collection_dicts.append(d)
+    return collection_dicts
+
+
+def _pending_predictions_by_species(resolver, pending, ambiguous_row_ids):
+    """Bucket a selection's pending predictions by consensus species key."""
+    by_key = {}
+    for row in pending:
+        # Group by the species the accept path will actually apply, not
+        # the raw per-frame label: for a burst whose frames disagree,
+        # ``accept_prediction`` uses the individual-vote consensus, so a
+        # Robin/Robin/Sparrow burst must aggregate under Robin — the
+        # Sparrow minority frame would otherwise surface its own bucket
+        # advertising an Accept button that tags Robin.
+        identity = resolver.consensus(row)
+        species = identity.display_name
+        if not species:
+            continue
+        key = identity.key
+        entry = by_key.setdefault(key, {
+            "species": species,
+            "models": set(),
+            "rows_by_photo": {},
+            "confidences": [],
+        })
+        entry["models"].add(row["model"])
+        # ``row["confidence"]`` is the classifier's confidence in the
+        # row's own per-frame label. For a burst whose consensus differs
+        # from that label — a Sparrow-labelled frame in a Robin-majority
+        # burst — the raw score reflects Sparrow evidence, not Robin,
+        # and pooling it under Robin would rank the bucket at Sparrow's
+        # 95% and let the earlier threshold filter keep Robin actionable
+        # on the strength of a vote for someone else. Only credit
+        # confidence when the raw label agrees with the consensus.
+        raw_species = row["species"]
+        row_matches_consensus = bool(
+            raw_species
+            and resolver.prediction(row).key == key
+        )
+        if row_matches_consensus:
+            entry["confidences"].append(row["confidence"] or 0.0)
+        ambiguous = row["id"] in ambiguous_row_ids
+        # One photo can hold several detections of the same species, or
+        # the same detection classified by several models. Keep every
+        # matching prediction id so the batch accept flips them all —
+        # keywording the photo once and leaving nothing pending in Review.
+        # Submitting only the top-confidence id used to accept that row,
+        # keyword the photo, and then hide the sibling rows behind the
+        # "already keyworded" filter with no way to resolve them.
+        photo_entry = entry["rows_by_photo"].setdefault(row["photo_id"], {
+            "ids": [],
+            "max_confidence": None,
+            "ambiguous": False,
+        })
+        photo_entry["ids"].append((row["confidence"] or 0, row["id"]))
+        if ambiguous:
+            photo_entry["ambiguous"] = True
+        if row_matches_consensus:
+            conf = row["confidence"] or 0
+            if (
+                photo_entry["max_confidence"] is None
+                or conf > photo_entry["max_confidence"]
+            ):
+                photo_entry["max_confidence"] = conf
+    return by_key
+
+
+def _species_keyword_ids_by_key(db, resolver):
+    """Species keyword ids grouped by resolved species key."""
+    # Resolve "already carries this species" against linked taxa, not
+    # spelling, so a hierarchical Birds|Verdin tag counts as keyworded.
+    # Look up existing rows only — asking here must not create keywords.
+    kids_by_key = {}
+    for row in db.get_species_keyword_identity_rows():
+        source = {"taxon_id": row["source_id"], "scientific_name": row["scientific_name"]} if row["source_id"] else None
+        identity = resolver.resolve(row["name"], row["scientific_name"], source)
+        kids_by_key.setdefault(identity.key, []).append(row["id"])
+    return kids_by_key
+
+
+def _prediction_suggestion(db, key, entry, order, kids_by_key):
+    """One species bucket of the selection's prediction suggestions."""
+    predicted_ids = sorted(entry["rows_by_photo"], key=lambda p: order[p])
+    # Legacy duplicates can resolve to one species while having
+    # different local taxon links. Count every matching keyword,
+    # rather than letting the arbitrary first row hide the others.
+    keyworded = set()
+    for kid in kids_by_key.get(key, []):
+        keyworded.update(db.get_photos_with_equivalent_species(predicted_ids, kid))
+    missing_ids = [p for p in predicted_ids if p not in keyworded]
+    # A pending prediction on an already-keyworded photo still has to
+    # go somewhere: dropping it would leave Review holding the same
+    # row the panel just told the user was "already keyworded", and
+    # the user has no way to clear it from Browse. ``accept_prediction``
+    # already supports a status-only accept — ``add_keyword`` is
+    # idempotent and the ``already_has_species`` branch skips the
+    # re-tag — so an unambiguous keyworded row is safe to include
+    # here. Ambiguous keyworded rows still route to Review, same as
+    # ambiguous missing ones, because their resolution needs Review's
+    # full comparison UI.
+    acceptable, ambiguous_ids, ambiguous_photos = [], [], []
+    acceptable_photos = []
+    for pid in predicted_ids:
+        row = entry["rows_by_photo"][pid]
+        # Highest confidence first so a stable, obvious order lands in
+        # the payload (and any downstream truncation keeps the
+        # strongest evidence per photo).
+        ids_here = [
+            rid for _c, rid in sorted(row["ids"], reverse=True)
+        ]
+        if row["ambiguous"]:
+            ambiguous_ids.extend(ids_here)
+            ambiguous_photos.append(pid)
+        else:
+            acceptable.extend(ids_here)
+            acceptable_photos.append(pid)
+    # Photo-level count for the button label. A photo with several
+    # matching detections contributes several ids to ``acceptable``, so
+    # ``len(acceptable)`` overcounts the photos that would be touched.
+    acceptable_photo_count = len(acceptable_photos)
+    already_keyworded_acceptable = sum(
+        1 for pid in acceptable_photos if pid in keyworded
+    )
+    return {
+        "species": entry["species"],
+        "models": sorted(entry["models"]),
+        "predicted_count": len(predicted_ids),
+        # Count of photos already carrying this species keyword. Kept
+        # informational — the panel labels them so the user knows
+        # some of the "Accept on N" targets will status-only flip
+        # without re-tagging.
+        "keyworded_count": len(predicted_ids) - len(missing_ids),
+        # Subset of ``acceptable_photo_count`` whose keyword is
+        # already present. Lets the UI say "already keyworded on M
+        # of N" without recomputing the intersection client-side.
+        "acceptable_keyworded_count": already_keyworded_acceptable,
+        "predicted_photo_ids": predicted_ids,
+        "missing_photo_ids": missing_ids,
+        "prediction_ids": acceptable + ambiguous_ids,
+        "acceptable_prediction_ids": acceptable,
+        "acceptable_photo_ids": acceptable_photos,
+        "acceptable_photo_count": acceptable_photo_count,
+        "ambiguous_prediction_ids": ambiguous_ids,
+        "ambiguous_photo_ids": ambiguous_photos,
+        # ``confidences`` can be empty when every credit-eligible row
+        # was a minority frame whose raw label disagreed with the
+        # consensus (see _pending_predictions_by_species). ``None`` renders as
+        # ``formatPredictionConfidence(null)`` → "confidence unknown"
+        # rather than inventing a 0% or misattributing a minority
+        # frame's score to the consensus species.
+        "min_confidence": (
+            min(entry["confidences"]) if entry["confidences"] else None
+        ),
+        "max_confidence": (
+            max(entry["confidences"]) if entry["confidences"] else None
+        ),
+    }
+
+
+def _is_visual_collection(db, collection_id):
+    """Whether Browse's first paint must show an empty grid for this scope."""
+    # ``db.get_photos(collection_id=...)`` / ``count_filtered_photos`` both
+    # expand only ``collections.rules`` — the same rules-only path guarded
+    # elsewhere by ``reject_visual_collection``. A visual-only collection
+    # stores ``rules: []``, so running it through that path here would
+    # silently widen first paint to every workspace photo. The client's
+    # ``bootstrapBrowse()`` calls ``filterByCollection()`` right after,
+    # which reloads through ``/api/photos/query`` with the visual clause,
+    # but the wrong grid still flashes between the two — and any failure
+    # before ``filterByCollection()`` runs leaves the user staring at the
+    # widened scope. Drop the ``collection_id`` from the photo query and
+    # return an empty grid so the wrong data can never appear (Codex
+    # review on PR #1343). Folders/keywords/collections are still returned
+    # so the sidebar bootstraps.
+    if collection_id is not None:
+        coll_row = db.get_collection(collection_id)
+        if coll_row is not None and coll_row["visual_json"] is not None:
+            return True
+    return False
+
+
 def create_browse_blueprint(
     get_db,
     json_error,
@@ -88,24 +429,7 @@ def create_browse_blueprint(
         # that split response.
         db.begin()
 
-        # ``db.get_photos(collection_id=...)`` / ``count_filtered_photos`` both
-        # expand only ``collections.rules`` — the same rules-only path guarded
-        # elsewhere by ``reject_visual_collection``. A visual-only collection
-        # stores ``rules: []``, so running it through that path here would
-        # silently widen first paint to every workspace photo. The client's
-        # ``bootstrapBrowse()`` calls ``filterByCollection()`` right after,
-        # which reloads through ``/api/photos/query`` with the visual clause,
-        # but the wrong grid still flashes between the two — and any failure
-        # before ``filterByCollection()`` runs leaves the user staring at the
-        # widened scope. Drop the ``collection_id`` from the photo query and
-        # return an empty grid so the wrong data can never appear (Codex
-        # review on PR #1343). Folders/keywords/collections are still returned
-        # so the sidebar bootstraps.
-        visual_first_paint = False
-        if collection_id is not None:
-            coll_row = db.get_collection(collection_id)
-            if coll_row is not None and coll_row["visual_json"] is not None:
-                visual_first_paint = True
+        visual_first_paint = _is_visual_collection(db, collection_id)
 
         # Snapshot the active workspace's missing-folder IDs so the client's
         # navbar can seed ``_missingFoldersLastIds`` from this init response.
@@ -130,152 +454,27 @@ def create_browse_blueprint(
         # reloads through /api/photos/query once initialized (Phase 5 —
         # legacy per-field params removed from this endpoint).
         if visual_first_paint:
-            photos = []
-            total = 0
-            underlying_total = 0
-            stack_count = 0
-            focus_index = None
-            focus_page = page
+            photos, total, underlying_total, stack_count = [], 0, 0, 0
+            focus_index, focus_page = None, page
         else:
+            scope = dict(folder_id=folder_id, collection_id=collection_id, sort=sort)
             try:
-                if stacks:
-                    stack_cfg = db.browse_stack_settings(cfg.load())
-                    photos = db.query_browse_stacks(
-                        [], folder_id=folder_id, collection_id=collection_id,
-                        page=page, per_page=per_page, sort=sort,
-                        stack_config=stack_cfg,
-                    )
-                    stack_totals = db.browse_stack_totals(
-                        [], folder_id=folder_id, collection_id=collection_id,
-                        stack_config=stack_cfg,
-                    )
-                    total = stack_totals["total"]
-                    stack_count = stack_totals["stack_count"]
-                    underlying_total = db.count_photos_for_rules(
-                        [], folder_id=folder_id, collection_id=collection_id,
-                    )
-                else:
-                    photos = db.get_photos(
-                        folder_id=folder_id,
-                        collection_id=collection_id,
-                        page=page,
-                        per_page=per_page,
-                        sort=sort,
-                    )
-            except ValueError as exc:
+                photos, total, underlying_total, stack_count = _first_paint_photos(
+                    db, cfg, stacks=stacks, page=page, per_page=per_page, **scope,
+                )
+                photos, focus_index, focus_page = _first_paint_focus(
+                    db, photos, focus_photo_id,
+                    page=page, per_page=per_page, **scope,
+                )
+            except _BadFirstPaintScope as exc:
                 db.rollback()
                 return json_error(str(exc), 400)
-            if not stacks:
-                if not any([folder_id, collection_id]):
-                    total = db.count_photos()
-                else:
-                    try:
-                        total = db.count_filtered_photos(
-                            folder_id=folder_id,
-                            collection_id=collection_id,
-                        )
-                    except ValueError as exc:
-                        db.rollback()
-                        return json_error(str(exc), 400)
-                underlying_total = total
-            # Photo deep links need the target's position in the exact sort
-            # order used by this first paint. Returning the zero-based index
-            # and its bounded page from this read snapshot avoids probing
-            # serial 50-photo pages until the target happens to appear. Keep
-            # the extra ordered-id query opt-in so ordinary Browse loads retain
-            # their existing cost.
-            #
-            # When the target is already in the first-page ``photos`` fetched
-            # above (the common case — Highlights and most native actions open
-            # a photo whose sorted position is on page 1), compute the index
-            # from that page directly.  Materializing every folder ID would
-            # add O(folder size) latency and memory to the critical first
-            # paint on the documented 100K- and 1M-photo libraries, even when
-            # a lookup was never necessary (Codex review r3792637103).
-            focus_index = None
-            focus_page = page
-            if focus_photo_id is not None:
-                local_index = None
-                for offset, row in enumerate(photos):
-                    if row["id"] == focus_photo_id:
-                        local_index = offset
-                        break
-                if local_index is not None:
-                    focus_index = (page - 1) * per_page + local_index
-                else:
-                    try:
-                        focus_index = db.get_photo_position(
-                            focus_photo_id,
-                            folder_id=folder_id,
-                            collection_id=collection_id,
-                            sort=sort,
-                        )
-                    except ValueError as exc:
-                        db.rollback()
-                        return json_error(str(exc), 400)
-                # Return only the bounded page containing the target from the
-                # same SQLite read snapshot as its position and total. Sending
-                # every preceding row can freeze Browse for a focus deep in a
-                # million-photo folder; independent parallel offset requests,
-                # meanwhile, allow ingestion/deletion to create overlaps,
-                # gaps, and stale totals. One target page avoids both failure
-                # modes, and ordinary lazy paging resumes after it.
-                if focus_index is not None:
-                    focus_page = focus_index // per_page + 1
-                    if focus_page != page:
-                        try:
-                            photos = db.get_photos(
-                                folder_id=folder_id,
-                                collection_id=collection_id,
-                                page=focus_page,
-                                per_page=per_page,
-                                sort=sort,
-                            )
-                        except ValueError as exc:
-                            db.rollback()
-                            return json_error(str(exc), 400)
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
 
         photo_dicts = prepare_browse_photo_dicts(db, photos)
-        collection_dicts = []
-        for c in collections:
-            d = dict(c)
-            # Flag degraded rules at first paint so a fast click on the
-            # sidebar row can't fall into the 400 /photos path before
-            # loadCollectionCounts() lands. Only validate the rules — do
-            # not run COUNT(DISTINCT p.id) per collection here; that
-            # N+1 is what the async loadCollectionCounts() call in
-            # bootstrapBrowse() was designed to avoid, and re-adding it
-            # to the critical first-paint path makes opening Browse wait
-            # on every smart-collection query. Malformed JSON is treated
-            # as degraded too — those rules would 400 downstream just
-            # like an unresolvable rule.
-            parsed_rules, degraded = collection_rules_state(db, c["rules"])
-            if degraded:
-                d["can_add_photos"] = False
-                d["count_error"] = True
-                collection_dicts.append(d)
-                current_app.logger.warning(
-                    "Collection %s (%s) has unresolvable rules; marking degraded",
-                    c["id"],
-                    c["name"],
-                )
-                continue
-            else:
-                # A visual-only collection stores ``rules: []`` which
-                # ``_collection_accepts_manual_photos`` treats as addable,
-                # but ``/add-photos`` would just append to ``photo_ids``
-                # without touching ``visual_json`` — the manually added
-                # photos would only show up in the reopened collection
-                # if they also matched the hidden visual clause, making
-                # the add silently ineffective (Codex r3620791304).
-                d["can_add_photos"] = (
-                    c["visual_json"] is None
-                    and _collection_accepts_manual_photos(parsed_rules)
-                )
-            collection_dicts.append(d)
+        collection_dicts = _first_paint_collection_dicts(db, collections)
 
         response_payload = {
             "photos": photo_dicts,
@@ -538,73 +737,10 @@ def create_browse_blueprint(
         from species_identity import SpeciesResolver
         resolver = SpeciesResolver(db=db)
         order = {pid: i for i, pid in enumerate(photo_ids)}
-        by_key = {}
-        for row in pending:
-            # Group by the species the accept path will actually apply, not
-            # the raw per-frame label: for a burst whose frames disagree,
-            # ``accept_prediction`` uses the individual-vote consensus, so a
-            # Robin/Robin/Sparrow burst must aggregate under Robin — the
-            # Sparrow minority frame would otherwise surface its own bucket
-            # advertising an Accept button that tags Robin.
-            identity = resolver.consensus(row)
-            species = identity.display_name
-            if not species:
-                continue
-            key = identity.key
-            entry = by_key.setdefault(key, {
-                "species": species,
-                "models": set(),
-                "rows_by_photo": {},
-                "confidences": [],
-            })
-            entry["models"].add(row["model"])
-            # ``row["confidence"]`` is the classifier's confidence in the
-            # row's own per-frame label. For a burst whose consensus differs
-            # from that label — a Sparrow-labelled frame in a Robin-majority
-            # burst — the raw score reflects Sparrow evidence, not Robin,
-            # and pooling it under Robin would rank the bucket at Sparrow's
-            # 95% and let the earlier threshold filter keep Robin actionable
-            # on the strength of a vote for someone else. Only credit
-            # confidence when the raw label agrees with the consensus.
-            raw_species = row["species"]
-            row_matches_consensus = bool(
-                raw_species
-                and resolver.prediction(row).key == key
-            )
-            if row_matches_consensus:
-                entry["confidences"].append(row["confidence"] or 0.0)
-            ambiguous = row["id"] in ambiguous_row_ids
-            # One photo can hold several detections of the same species, or
-            # the same detection classified by several models. Keep every
-            # matching prediction id so the batch accept flips them all —
-            # keywording the photo once and leaving nothing pending in Review.
-            # Submitting only the top-confidence id used to accept that row,
-            # keyword the photo, and then hide the sibling rows behind the
-            # "already keyworded" filter with no way to resolve them.
-            photo_entry = entry["rows_by_photo"].setdefault(row["photo_id"], {
-                "ids": [],
-                "max_confidence": None,
-                "ambiguous": False,
-            })
-            photo_entry["ids"].append((row["confidence"] or 0, row["id"]))
-            if ambiguous:
-                photo_entry["ambiguous"] = True
-            if row_matches_consensus:
-                conf = row["confidence"] or 0
-                if (
-                    photo_entry["max_confidence"] is None
-                    or conf > photo_entry["max_confidence"]
-                ):
-                    photo_entry["max_confidence"] = conf
-
-        # Resolve "already carries this species" against linked taxa, not
-        # spelling, so a hierarchical Birds|Verdin tag counts as keyworded.
-        # Look up existing rows only — asking here must not create keywords.
-        kids_by_key = {}
-        for row in db.get_species_keyword_identity_rows():
-            source = {"taxon_id": row["source_id"], "scientific_name": row["scientific_name"]} if row["source_id"] else None
-            identity = resolver.resolve(row["name"], row["scientific_name"], source)
-            kids_by_key.setdefault(identity.key, []).append(row["id"])
+        by_key = _pending_predictions_by_species(
+            resolver, pending, ambiguous_row_ids,
+        )
+        kids_by_key = _species_keyword_ids_by_key(db, resolver)
 
         results = []
         # A bucket-level suppression used to sit here: when the threshold was
@@ -627,81 +763,9 @@ def create_browse_blueprint(
         # rests on ever regressed it degrades to "confidence unknown"
         # instead of quoting one species' score beside another's name.
         for key, entry in by_key.items():
-            predicted_ids = sorted(entry["rows_by_photo"], key=lambda p: order[p])
-            # Legacy duplicates can resolve to one species while having
-            # different local taxon links. Count every matching keyword,
-            # rather than letting the arbitrary first row hide the others.
-            keyworded = set()
-            for kid in kids_by_key.get(key, []):
-                keyworded.update(db.get_photos_with_equivalent_species(predicted_ids, kid))
-            missing_ids = [p for p in predicted_ids if p not in keyworded]
-            # A pending prediction on an already-keyworded photo still has to
-            # go somewhere: dropping it would leave Review holding the same
-            # row the panel just told the user was "already keyworded", and
-            # the user has no way to clear it from Browse. ``accept_prediction``
-            # already supports a status-only accept — ``add_keyword`` is
-            # idempotent and the ``already_has_species`` branch skips the
-            # re-tag — so an unambiguous keyworded row is safe to include
-            # here. Ambiguous keyworded rows still route to Review, same as
-            # ambiguous missing ones, because their resolution needs Review's
-            # full comparison UI.
-            acceptable, ambiguous_ids, ambiguous_photos = [], [], []
-            acceptable_photos = []
-            for pid in predicted_ids:
-                row = entry["rows_by_photo"][pid]
-                # Highest confidence first so a stable, obvious order lands in
-                # the payload (and any downstream truncation keeps the
-                # strongest evidence per photo).
-                ids_here = [
-                    rid for _c, rid in sorted(row["ids"], reverse=True)
-                ]
-                if row["ambiguous"]:
-                    ambiguous_ids.extend(ids_here)
-                    ambiguous_photos.append(pid)
-                else:
-                    acceptable.extend(ids_here)
-                    acceptable_photos.append(pid)
-            # Photo-level count for the button label. A photo with several
-            # matching detections contributes several ids to ``acceptable``, so
-            # ``len(acceptable)`` overcounts the photos that would be touched.
-            acceptable_photo_count = len(acceptable_photos)
-            already_keyworded_acceptable = sum(
-                1 for pid in acceptable_photos if pid in keyworded
+            results.append(
+                _prediction_suggestion(db, key, entry, order, kids_by_key)
             )
-            results.append({
-                "species": entry["species"],
-                "models": sorted(entry["models"]),
-                "predicted_count": len(predicted_ids),
-                # Count of photos already carrying this species keyword. Kept
-                # informational — the panel labels them so the user knows
-                # some of the "Accept on N" targets will status-only flip
-                # without re-tagging.
-                "keyworded_count": len(predicted_ids) - len(missing_ids),
-                # Subset of ``acceptable_photo_count`` whose keyword is
-                # already present. Lets the UI say "already keyworded on M
-                # of N" without recomputing the intersection client-side.
-                "acceptable_keyworded_count": already_keyworded_acceptable,
-                "predicted_photo_ids": predicted_ids,
-                "missing_photo_ids": missing_ids,
-                "prediction_ids": acceptable + ambiguous_ids,
-                "acceptable_prediction_ids": acceptable,
-                "acceptable_photo_ids": acceptable_photos,
-                "acceptable_photo_count": acceptable_photo_count,
-                "ambiguous_prediction_ids": ambiguous_ids,
-                "ambiguous_photo_ids": ambiguous_photos,
-                # ``confidences`` can be empty when every credit-eligible row
-                # was a minority frame whose raw label disagreed with the
-                # consensus (see above). ``None`` renders as
-                # ``formatPredictionConfidence(null)`` → "confidence unknown"
-                # rather than inventing a 0% or misattributing a minority
-                # frame's score to the consensus species.
-                "min_confidence": (
-                    min(entry["confidences"]) if entry["confidences"] else None
-                ),
-                "max_confidence": (
-                    max(entry["confidences"]) if entry["confidences"] else None
-                ),
-            })
         # Breadth first, then strength: the panel collapses to the top few, so
         # a species predicted on every selected photo at 100% must outrank one
         # predicted on the same photos at 20%.

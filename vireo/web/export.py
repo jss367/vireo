@@ -13,6 +13,70 @@ from highlights_payload import build_highlights_payload, build_life_list_payload
 from web.background_jobs import make_background_job
 
 
+def _photo_export_work(
+    ctx, photo_ids, destination, *, vireo_dir, naming_template, max_size,
+    quality, output_format, wc_max_size, developed_dir, metadata_fields,
+    export_to_subfolder, subfolder_name, reveal_after_export,
+):
+    """The ``export`` job's work function for an already-validated request."""
+
+    def work(job):
+        from export import export_photos, reveal_exported_files
+
+        thread_db = ctx.thread_db()
+
+        job["_start_time"] = time.time()
+        job["progress"]["total"] = len(photo_ids)
+
+        def progress_cb(current, total, filename):
+            job["progress"]["current"] = current
+            job["progress"]["total"] = total
+            job["progress"]["current_file"] = filename
+            ctx.runner.push_event(job["id"], "progress", {
+                "current": current,
+                "total": total,
+                "current_file": filename,
+                "rate": round(
+                    current / max(time.time() - job["_start_time"], 0.01), 1
+                ),
+                "phase": "Exporting photos",
+            })
+
+        result = export_photos(
+            db=thread_db,
+            vireo_dir=vireo_dir,
+            photo_ids=photo_ids,
+            destination=destination,
+            options={
+                "naming_template": naming_template,
+                "max_size": max_size,
+                "quality": quality,
+                "format": output_format,
+                "working_copy_max_size": wc_max_size,
+                "developed_dir": developed_dir,
+                "metadata_fields": metadata_fields,
+                "export_to_subfolder": export_to_subfolder,
+                "subfolder_name": subfolder_name,
+                "collect_files": reveal_after_export,
+            },
+            progress_cb=progress_cb,
+            cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
+            cancel_only_check=lambda: ctx.runner.cancellation_requested(job["id"]),
+        )
+        exported_files = result.pop("files", [])
+        result["revealed"] = bool(
+            reveal_after_export
+            and exported_files
+            and not ctx.runner.is_cancelled(job["id"])
+            and reveal_exported_files(exported_files)
+        )
+        # Per-photo export failures fail the job (the runner folds them in).
+        result["ok"] = not result.get("errors")
+        return result
+
+    return work
+
+
 def create_export_blueprint(
     get_db,
     json_error,
@@ -299,59 +363,20 @@ def create_export_blueprint(
         # perfected render over a fresh libraw decode of the RAW.
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
-        def work(job):
-            from export import export_photos, reveal_exported_files
-
-            thread_db = ctx.thread_db()
-
-            job["_start_time"] = time.time()
-            job["progress"]["total"] = len(photo_ids)
-
-            def progress_cb(current, total, filename):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                job["progress"]["current_file"] = filename
-                ctx.runner.push_event(job["id"], "progress", {
-                    "current": current,
-                    "total": total,
-                    "current_file": filename,
-                    "rate": round(
-                        current / max(time.time() - job["_start_time"], 0.01), 1
-                    ),
-                    "phase": "Exporting photos",
-                })
-
-            result = export_photos(
-                db=thread_db,
-                vireo_dir=vireo_dir,
-                photo_ids=photo_ids,
-                destination=destination,
-                options={
-                    "naming_template": naming_template,
-                    "max_size": max_size,
-                    "quality": quality,
-                    "format": output_format,
-                    "working_copy_max_size": wc_max_size,
-                    "developed_dir": developed_dir,
-                    "metadata_fields": metadata_fields,
-                    "export_to_subfolder": export_to_subfolder,
-                    "subfolder_name": subfolder_name,
-                    "collect_files": reveal_after_export,
-                },
-                progress_cb=progress_cb,
-                cancel_check=lambda: ctx.runner.is_cancelled(job["id"]),
-                cancel_only_check=lambda: ctx.runner.cancellation_requested(job["id"]),
-            )
-            exported_files = result.pop("files", [])
-            result["revealed"] = bool(
-                reveal_after_export
-                and exported_files
-                and not ctx.runner.is_cancelled(job["id"])
-                and reveal_exported_files(exported_files)
-            )
-            # Per-photo export failures fail the job (the runner folds them in).
-            result["ok"] = not result.get("errors")
-            return result
+        work = _photo_export_work(
+            ctx, photo_ids, destination,
+            vireo_dir=vireo_dir,
+            naming_template=naming_template,
+            max_size=max_size,
+            quality=quality,
+            output_format=output_format,
+            wc_max_size=wc_max_size,
+            developed_dir=developed_dir,
+            metadata_fields=metadata_fields,
+            export_to_subfolder=export_to_subfolder,
+            subfolder_name=subfolder_name,
+            reveal_after_export=reveal_after_export,
+        )
 
         return ctx.start(
             "export", work, pausable=True,

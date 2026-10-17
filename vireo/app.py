@@ -1159,7 +1159,6 @@ def _migrate_legacy_preview_cache(app):
     try:
         migrated = 0
         orphaned = 0
-        adopted = 0
         if unsized_files and target_size == 0:
             log.info(
                 "Leaving %d legacy preview files (preview_max_size=0 — can't assign tier)",
@@ -1168,67 +1167,19 @@ def _migrate_legacy_preview_cache(app):
 
         # Pass 1: rename unsized {id}.jpg → {id}_<target>.jpg + insert.
         if target_size:
-            for fname in unsized_files:
-                m = unsized_pat.match(fname)
-                photo_id = int(m.group(1))
-                src = os.path.join(preview_dir, fname)
-                dst = os.path.join(preview_dir, f"{photo_id}_{target_size}.jpg")
-                # Skip orphans: if the photo was deleted, inserting into
-                # preview_cache would raise a FK error and rolling back the
-                # already-performed os.rename is ugly. Unlink the orphan so
-                # disk doesn't keep pointing at vanished photos.
-                photo_row = db.conn.execute(
-                    "SELECT 1 FROM photos WHERE id=?", (photo_id,)
-                ).fetchone()
-                if photo_row is None:
-                    try:
-                        os.remove(src)
-                        orphaned += 1
-                    except OSError:
-                        pass
-                    continue
-                if os.path.exists(dst):
-                    try:
-                        os.remove(src)
-                    except OSError:
-                        pass
-                    continue
-                try:
-                    os.rename(src, dst)
-                    st = os.stat(dst)
-                    db.caches.preview_insert(photo_id, target_size, st.st_size)
-                    migrated += 1
-                except OSError as e:
-                    log.warning("Failed to migrate legacy preview %s: %s", src, e)
+            migrated, orphaned = _adopt_unsized_legacy_previews(
+                db, preview_dir, unsized_files, unsized_pat, target_size,
+            )
 
         # Pass 2: adopt pre-existing sized {id}_{size}.jpg files that
         # aren't tracked yet. These are produced by older /preview calls
         # that ran before preview_cache existed; without this pass they
         # stay invisible to accounting/eviction even though they already
         # match the new naming scheme.
-        for fname in sized_files:
-            m = sized_pat.match(fname)
-            photo_id = int(m.group(1))
-            size = int(m.group(2))
-            path = os.path.join(preview_dir, fname)
-            if db.caches.preview_get(photo_id, size):
-                continue
-            photo_row = db.conn.execute(
-                "SELECT 1 FROM photos WHERE id=?", (photo_id,)
-            ).fetchone()
-            if photo_row is None:
-                try:
-                    os.remove(path)
-                    orphaned += 1
-                except OSError:
-                    pass
-                continue
-            try:
-                st = os.stat(path)
-                db.caches.preview_insert(photo_id, size, st.st_size)
-                adopted += 1
-            except OSError as e:
-                log.warning("Failed to adopt sized preview %s: %s", path, e)
+        adopted, sized_orphaned = _adopt_untracked_sized_previews(
+            db, preview_dir, sized_files, sized_pat,
+        )
+        orphaned += sized_orphaned
 
         if migrated:
             log.info(
@@ -1241,6 +1192,82 @@ def _migrate_legacy_preview_cache(app):
             log.info("Removed %d orphaned legacy preview files", orphaned)
     finally:
         db.close()
+
+
+def _adopt_unsized_legacy_previews(db, preview_dir, unsized_files, unsized_pat,
+                                   target_size):
+    """Rename each unsized ``{id}.jpg`` to ``{id}_<target>.jpg`` and track it.
+
+    Returns ``(migrated, orphaned)``.
+    """
+    migrated = 0
+    orphaned = 0
+    for fname in unsized_files:
+        m = unsized_pat.match(fname)
+        photo_id = int(m.group(1))
+        src = os.path.join(preview_dir, fname)
+        dst = os.path.join(preview_dir, f"{photo_id}_{target_size}.jpg")
+        # Skip orphans: if the photo was deleted, inserting into
+        # preview_cache would raise a FK error and rolling back the
+        # already-performed os.rename is ugly. Unlink the orphan so
+        # disk doesn't keep pointing at vanished photos.
+        photo_row = db.conn.execute(
+            "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+        if photo_row is None:
+            try:
+                os.remove(src)
+                orphaned += 1
+            except OSError:
+                pass
+            continue
+        if os.path.exists(dst):
+            try:
+                os.remove(src)
+            except OSError:
+                pass
+            continue
+        try:
+            os.rename(src, dst)
+            st = os.stat(dst)
+            db.caches.preview_insert(photo_id, target_size, st.st_size)
+            migrated += 1
+        except OSError as e:
+            log.warning("Failed to migrate legacy preview %s: %s", src, e)
+    return migrated, orphaned
+
+
+def _adopt_untracked_sized_previews(db, preview_dir, sized_files, sized_pat):
+    """Track each sized ``{id}_{size}.jpg`` that has no preview_cache row.
+
+    Returns ``(adopted, orphaned)``.
+    """
+    adopted = 0
+    orphaned = 0
+    for fname in sized_files:
+        m = sized_pat.match(fname)
+        photo_id = int(m.group(1))
+        size = int(m.group(2))
+        path = os.path.join(preview_dir, fname)
+        if db.caches.preview_get(photo_id, size):
+            continue
+        photo_row = db.conn.execute(
+            "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+        if photo_row is None:
+            try:
+                os.remove(path)
+                orphaned += 1
+            except OSError:
+                pass
+            continue
+        try:
+            st = os.stat(path)
+            db.caches.preview_insert(photo_id, size, st.st_size)
+            adopted += 1
+        except OSError as e:
+            log.warning("Failed to adopt sized preview %s: %s", path, e)
+    return adopted, orphaned
 
 
 def _migrate_edit_math_render_caches(app):
@@ -1292,101 +1319,17 @@ def _migrate_edit_math_render_caches(app):
         # row could still be served, and bumping the version would make the
         # next boot skip the migration and never retry. Leaving the version
         # behind makes the migration idempotent and self-retrying.
-        purge_failed = False
-
-        # Scan preview_dir once and group untracked preview files by photo id.
-        # The per-photo listdir would otherwise be O(N*M) (N edited photos x M
-        # preview files) and can spend minutes just rescanning the same
-        # directory on a large library before the server even starts.
-        edited_set = set(photo_ids)
-        untracked_previews_by_pid = {}
-        try:
-            preview_names = os.listdir(preview_dir)
-        except FileNotFoundError:
-            # Cache dir doesn't exist yet — nothing untracked to clean up.
-            preview_names = ()
-        except OSError:
-            # Permissions / locked network volume / other transient read
-            # failure: we can't see what's in there, so we don't know whether
-            # there are stale orphans to purge. Skip the scan but leave the
-            # version old so the next boot retries — matches the unlink-error
-            # contract instead of taking the app down for a disposable cache
-            # problem.
-            log.warning(
-                "Failed to list preview cache dir %s during edit-math "
-                "migration; leaving version at %s to retry next boot",
-                preview_dir, stored_version, exc_info=True,
-            )
-            preview_names = ()
-            purge_failed = True
-
-        for name in preview_names:
-            if not name.endswith(".jpg"):
-                continue
-            underscore = name.find("_")
-            if underscore <= 0:
-                continue
-            try:
-                file_pid = int(name[:underscore])
-            except ValueError:
-                continue
-            if file_pid in edited_set:
-                untracked_previews_by_pid.setdefault(file_pid, []).append(name)
+        untracked_previews_by_pid, purge_failed = _untracked_previews_by_photo(
+            preview_dir, set(photo_ids), stored_version,
+        )
         for pid in photo_ids:
-            for row in db.conn.execute(
-                "SELECT size FROM preview_cache WHERE photo_id = ?", (pid,)
-            ).fetchall():
-                size_value = row["size"]
-                path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    log.warning(
-                        "Failed to remove stale preview cache %s during "
-                        "edit-math migration", path, exc_info=True,
-                    )
-                    purge_failed = True
-                    continue
-                db.conn.execute(
-                    "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
-                    (pid, size_value),
-                )
-                invalidated_previews += 1
-            for name in untracked_previews_by_pid.get(pid, ()):
-                path = os.path.join(preview_dir, name)
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    purge_failed = True
-            thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
-            try:
-                if os.path.exists(thumb_cache):
-                    os.remove(thumb_cache)
-                    invalidated_thumbs += 1
-            except OSError:
-                log.warning(
-                    "Failed to remove stale thumbnail %s during "
-                    "edit-math migration", thumb_cache, exc_info=True,
-                )
-                purge_failed = True
-                continue
-            for source in ("raw", "jpeg"):
-                variant = os.path.join(thumb_dir, f"{pid}_{source}.jpg")
-                try:
-                    if os.path.exists(variant):
-                        os.remove(variant)
-                        invalidated_thumbs += 1
-                except OSError:
-                    log.warning(
-                        "Failed to remove paired thumbnail %s during "
-                        "edit-math migration", variant, exc_info=True,
-                    )
-                    purge_failed = True
-            db.conn.execute(
-                "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+            previews, thumbs, failed = _purge_edited_photo_renders(
+                db, pid, preview_dir, thumb_dir,
+                untracked_previews_by_pid.get(pid, ()),
             )
+            invalidated_previews += previews
+            invalidated_thumbs += thumbs
+            purge_failed = purge_failed or failed
 
         if purge_failed:
             # Commit the row deletions that did succeed, but leave the stored
@@ -1419,6 +1362,118 @@ def _migrate_edit_math_render_caches(app):
             )
     finally:
         db.close()
+
+
+def _untracked_previews_by_photo(preview_dir, edited_set, stored_version):
+    """Group the preview files of edited photos by photo id, in one listdir.
+
+    Returns ``(names_by_pid, purge_failed)``; ``purge_failed`` is True when
+    the directory could not be listed, so the migration retries next boot.
+    """
+    # Scan preview_dir once and group untracked preview files by photo id.
+    # The per-photo listdir would otherwise be O(N*M) (N edited photos x M
+    # preview files) and can spend minutes just rescanning the same
+    # directory on a large library before the server even starts.
+    purge_failed = False
+    untracked_previews_by_pid = {}
+    try:
+        preview_names = os.listdir(preview_dir)
+    except FileNotFoundError:
+        # Cache dir doesn't exist yet — nothing untracked to clean up.
+        preview_names = ()
+    except OSError:
+        # Permissions / locked network volume / other transient read
+        # failure: we can't see what's in there, so we don't know whether
+        # there are stale orphans to purge. Skip the scan but leave the
+        # version old so the next boot retries — matches the unlink-error
+        # contract instead of taking the app down for a disposable cache
+        # problem.
+        log.warning(
+            "Failed to list preview cache dir %s during edit-math "
+            "migration; leaving version at %s to retry next boot",
+            preview_dir, stored_version, exc_info=True,
+        )
+        preview_names = ()
+        purge_failed = True
+
+    for name in preview_names:
+        if not name.endswith(".jpg"):
+            continue
+        underscore = name.find("_")
+        if underscore <= 0:
+            continue
+        try:
+            file_pid = int(name[:underscore])
+        except ValueError:
+            continue
+        if file_pid in edited_set:
+            untracked_previews_by_pid.setdefault(file_pid, []).append(name)
+    return untracked_previews_by_pid, purge_failed
+
+
+def _purge_edited_photo_renders(db, pid, preview_dir, thumb_dir, untracked_names):
+    """Drop one edited photo's cached previews and thumbnails.
+
+    Returns ``(invalidated_previews, invalidated_thumbs, purge_failed)``.
+    A thumbnail that cannot be removed leaves ``photos.thumb_path`` alone.
+    """
+    invalidated_previews = 0
+    invalidated_thumbs = 0
+    purge_failed = False
+    for row in db.conn.execute(
+        "SELECT size FROM preview_cache WHERE photo_id = ?", (pid,)
+    ).fetchall():
+        size_value = row["size"]
+        path = os.path.join(preview_dir, f"{pid}_{size_value}.jpg")
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            log.warning(
+                "Failed to remove stale preview cache %s during "
+                "edit-math migration", path, exc_info=True,
+            )
+            purge_failed = True
+            continue
+        db.conn.execute(
+            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+            (pid, size_value),
+        )
+        invalidated_previews += 1
+    for name in untracked_names:
+        path = os.path.join(preview_dir, name)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            purge_failed = True
+    thumb_cache = os.path.join(thumb_dir, f"{pid}.jpg")
+    try:
+        if os.path.exists(thumb_cache):
+            os.remove(thumb_cache)
+            invalidated_thumbs += 1
+    except OSError:
+        log.warning(
+            "Failed to remove stale thumbnail %s during "
+            "edit-math migration", thumb_cache, exc_info=True,
+        )
+        return invalidated_previews, invalidated_thumbs, True
+    for source in ("raw", "jpeg"):
+        variant = os.path.join(thumb_dir, f"{pid}_{source}.jpg")
+        try:
+            if os.path.exists(variant):
+                os.remove(variant)
+                invalidated_thumbs += 1
+        except OSError:
+            log.warning(
+                "Failed to remove paired thumbnail %s during "
+                "edit-math migration", variant, exc_info=True,
+            )
+            purge_failed = True
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
+    )
+    return invalidated_previews, invalidated_thumbs, purge_failed
 
 
 def _enforce_preview_cache_quota_at_startup(app):
@@ -1511,6 +1566,25 @@ def _sweep_abandoned_transient_originals(app):
         )
 
 
+@dataclass
+class _AppWiring:
+    """The per-app objects ``create_app`` builds and hands to the blueprints."""
+
+    db_path: str
+    get_db: object
+    init_db: Database
+    location_errors: LocationErrors
+    render_cache: RenderCache
+    photo_deletion: PhotoDeletion
+    missing_originals: MissingOriginals
+    visual_scope: VisualScope
+    bulk_gps_locations: BulkGpsLocations
+    inat_token_generation: InatTokenGeneration
+    build_scan_work: object
+    folder_moves: FolderMoves
+    pipeline_chain: PipelineChain
+
+
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -1522,35 +1596,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             traffic is rejected with 401 — the token is expected to be
             supplied by ``main()`` after calling ``runtime.generate_token``.
     """
-    app = Flask(
-        __name__, template_folder=os.path.join(os.path.dirname(__file__), "templates")
-    )
-    app.config["DB_PATH"] = db_path
-    app.config["COMPUTATION_CACHE_DIR"] = os.path.expanduser(
-        "~/.vireo/computation-cache"
-    )
-    app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
-        "~/.vireo/thumbnails"
-    )
-    app.config["API_TOKEN"] = api_token
-    app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1", "::1"]
-    app.config["BROWSER_SESSION_COOKIE"] = "vireo_session"
-    app.config["BROWSER_SESSION_TOKEN"] = secrets.token_urlsafe(32)
-    app.config["BROWSER_AUTH_ENABLED"] = (
-        os.environ.get("VIREO_DISABLE_BROWSER_AUTH") != "1"
-    )
-    app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] = (
-        os.environ.get("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "1") != "0"
-    )
-    app.config["CARD_CLEANUP_DIR"] = os.path.join(
-        os.path.dirname(os.path.abspath(db_path)), "card_cleanup"
-    )
-    # Built here rather than on first request: a check-then-set in the request
-    # path lets two concurrent first requests each build their own store, and a
-    # token handed out by whichever store loses the race is never found again.
-    # The endpoint would then silently re-derive the whole comparison — the
-    # multi-second cost this store exists to avoid.
-    app.config["ID_CONFLICTS_SNAPSHOTS"] = id_conflicts.SnapshotStore()
+    app = _new_configured_app(db_path, thumb_cache_dir, api_token)
 
     # Schema creation and migrations are startup work, never request work.
     # `:memory:` is the development exception because each SQLite connection
@@ -1589,11 +1635,89 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         render_edit_preview_job, threads=app.config.get('EDIT_PREVIEW_THREADS', 2),
     )
 
-    # Batch delete and the post-delete cache sweep (services.photo_deletion).
-    # The filesystem helpers are wrapped in lambdas so they are looked up on
-    # this module at call time — tests monkeypatch ``app._trash_paths`` /
-    # ``app._chunked`` and must keep reaching the delete path.
-    photo_deletion = PhotoDeletion(
+    photo_deletion = _build_photo_deletion(app)
+
+    # Startup catalog, its repairs, the job runner and the background passes.
+    # Missing Originals is built here, before the shared services below:
+    # FolderMoves, build_scan_work and PipelineChain capture
+    # ``missing_originals.invalidate`` at construction.
+    init_db, missing_originals = _start_app_runtime(app, db_path)
+
+    wiring = _build_shared_services(
+        app,
+        db_path=db_path,
+        get_db=_get_db,
+        init_db=init_db,
+        location_errors=location_errors,
+        render_cache=render_cache,
+        photo_deletion=photo_deletion,
+        missing_originals=missing_originals,
+    )
+
+    # -- Blueprints --
+    # Per-app service methods are passed as bound methods at registration;
+    # pure helpers are imported by the blueprint modules themselves. The
+    # registration order below is the order the blueprints are added to the
+    # app, and it ends with the photos blueprint, which the /api/v1 alias
+    # loop needs registered.
+    serve_original_photo, serve_photo_preview = _register_core_blueprints(
+        app, wiring,
+    )
+    _register_library_blueprints(app, wiring)
+    _register_browse_blueprints(app, wiring)
+    _register_file_blueprints(app, wiring)
+    _register_job_blueprints(app, wiring)
+    _register_photo_blueprints(
+        app, wiring, serve_original_photo, serve_photo_preview,
+    )
+
+    _register_v1_aliases(app, _reservation_exempt_endpoints)
+
+    return app
+
+
+def _new_configured_app(db_path, thumb_cache_dir, api_token):
+    """The bare Flask app with every ``app.config`` value create_app sets."""
+    app = Flask(
+        __name__, template_folder=os.path.join(os.path.dirname(__file__), "templates")
+    )
+    app.config["DB_PATH"] = db_path
+    app.config["COMPUTATION_CACHE_DIR"] = os.path.expanduser(
+        "~/.vireo/computation-cache"
+    )
+    app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
+        "~/.vireo/thumbnails"
+    )
+    app.config["API_TOKEN"] = api_token
+    app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1", "::1"]
+    app.config["BROWSER_SESSION_COOKIE"] = "vireo_session"
+    app.config["BROWSER_SESSION_TOKEN"] = secrets.token_urlsafe(32)
+    app.config["BROWSER_AUTH_ENABLED"] = (
+        os.environ.get("VIREO_DISABLE_BROWSER_AUTH") != "1"
+    )
+    app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] = (
+        os.environ.get("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "1") != "0"
+    )
+    app.config["CARD_CLEANUP_DIR"] = os.path.join(
+        os.path.dirname(os.path.abspath(db_path)), "card_cleanup"
+    )
+    # Built here rather than on first request: a check-then-set in the request
+    # path lets two concurrent first requests each build their own store, and a
+    # token handed out by whichever store loses the race is never found again.
+    # The endpoint would then silently re-derive the whole comparison — the
+    # multi-second cost this store exists to avoid.
+    app.config["ID_CONFLICTS_SNAPSHOTS"] = id_conflicts.SnapshotStore()
+    return app
+
+
+def _build_photo_deletion(app):
+    """Batch delete and the post-delete cache sweep (services.photo_deletion).
+
+    The filesystem helpers are wrapped in lambdas so they are looked up on
+    this module at call time — tests monkeypatch ``app._trash_paths`` /
+    ``app._chunked`` and must keep reaching the delete path.
+    """
+    return PhotoDeletion(
         app.config,
         chunked=lambda *args, **kwargs: _chunked(*args, **kwargs),
         trash_paths=lambda *args, **kwargs: _trash_paths(*args, **kwargs),
@@ -1605,6 +1729,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ),
     )
 
+
+def _start_app_runtime(app, db_path):
+    """Open the startup catalog, run its repairs, and start the job runner.
+
+    Returns ``(init_db, missing_originals)``. Also sets the ``app._*``
+    runtime attributes (job runner, log broadcaster, sync lock, the Missing
+    Originals state, the backfill kickoffs) and starts the startup
+    background threads and timers unless
+    ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS`` is set.
+    """
     # Load user config (e.g. HF token) on startup
     import config as cfg
 
@@ -1636,6 +1770,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         threading.Thread(target=startup.mark_species, daemon=True).start()
 
+    missing_originals = _start_missing_originals(app, db_path)
+
+    app._job_runner = JobRunner(db=init_db)
+
+    # XMP sidecars are read-modify-written files; serialize sync jobs so
+    # repeated clicks cannot race while touching the same sidecar.
+    app._sync_job_lock = threading.Lock()
+    app._log_broadcaster = LogBroadcaster(buffer_size=500)
+    app._log_broadcaster.install()
+
+    app._cleanup_app_resources = startup.cleanup_app_resources
+    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
+        startup.schedule_retained_cache_maintenance()
+
+    # Live progress of the most recent new-images walk, keyed by
+    # (db_path, workspace_id). Written by the walk's progress callback and
+    # read by the GET/POST endpoints so a ``pending`` response can say
+    # "38,000 files checked, 2,100 new so far" instead of a bare spinner —
+    # the transparency the banner-click path needs on multi-minute walks
+    # over large network volumes. Values are per-spawn dicts; a new walk
+    # replaces the key wholesale, so readers never see torn state.
+    app._new_images_walk_progress = {}
+
+    # Working copies are generated by imports, scans, and on-demand reads.
+    # Do not warm the library-wide cache at startup: it consumes disk and
+    # CPU for photos the user has not requested.
+
+    _schedule_startup_backfills(app, startup)
+
+    return init_db, missing_originals
+
+
+def _start_missing_originals(app, db_path):
+    """Build the Missing Originals service and start its folder-health loop."""
+    import threading
+
     # Missing Originals scan cache and the folder-health loop. The app
     # attributes below are the service's own lock and dicts (not copies), so
     # code and tests that reach ``app._missing_originals_*`` see live state.
@@ -1664,31 +1834,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # since fired.
     if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
         threading.Thread(target=missing_originals.folder_health_loop, daemon=True).start()
+    return missing_originals
 
-    app._job_runner = JobRunner(db=init_db)
 
-    # XMP sidecars are read-modify-written files; serialize sync jobs so
-    # repeated clicks cannot race while touching the same sidecar.
-    app._sync_job_lock = threading.Lock()
-    app._log_broadcaster = LogBroadcaster(buffer_size=500)
-    app._log_broadcaster.install()
-
-    app._cleanup_app_resources = startup.cleanup_app_resources
-    if not os.environ.get("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS"):
-        startup.schedule_retained_cache_maintenance()
-
-    # Live progress of the most recent new-images walk, keyed by
-    # (db_path, workspace_id). Written by the walk's progress callback and
-    # read by the GET/POST endpoints so a ``pending`` response can say
-    # "38,000 files checked, 2,100 new so far" instead of a bare spinner —
-    # the transparency the banner-click path needs on multi-minute walks
-    # over large network volumes. Values are per-spawn dicts; a new walk
-    # replaces the key wholesale, so readers never see torn state.
-    app._new_images_walk_progress = {}
-
-    # Working copies are generated by imports, scans, and on-demand reads.
-    # Do not warm the library-wide cache at startup: it consumes disk and
-    # CPU for photos the user has not requested.
+def _schedule_startup_backfills(app, startup):
+    """Expose the backfill kickoffs on ``app`` and arm their startup timers."""
+    import threading
 
     # thumb_path self-healing backfill: aligns photos.thumb_path with the
     # thumbnails on disk (see StartupTasks.kickoff_thumb_path_backfill).
@@ -1721,8 +1872,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _exif_search_timer.daemon = True
         _exif_search_timer.start()
 
-    # -- Per-app services shared by several blueprints --
 
+def _build_shared_services(
+    app, *, db_path, get_db, init_db, location_errors, render_cache,
+    photo_deletion, missing_originals,
+):
+    """Per-app services shared by several blueprints, gathered with the rest."""
     # Resolves visual-search clauses; owns the per-app query-text
     # embedding cache, so every route shares one instance.
     visual_scope = VisualScope()
@@ -1748,7 +1903,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     )
     folder_moves = FolderMoves(
         get_runner=lambda: app._job_runner,
-        get_db=_get_db,
+        get_db=get_db,
         db_path=db_path,
         config=app.config,
         invalidate_missing_originals=missing_originals.invalidate,
@@ -1764,10 +1919,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         enqueue_move_folder_job=folder_moves.enqueue_job,
     )
 
-    # -- Blueprints --
-    # Per-app service methods are passed as bound methods at registration;
-    # pure helpers are imported by the blueprint modules themselves.
+    return _AppWiring(
+        db_path=db_path,
+        get_db=get_db,
+        init_db=init_db,
+        location_errors=location_errors,
+        render_cache=render_cache,
+        photo_deletion=photo_deletion,
+        missing_originals=missing_originals,
+        visual_scope=visual_scope,
+        bulk_gps_locations=bulk_gps_locations,
+        inat_token_generation=inat_token_generation,
+        build_scan_work=build_scan_work,
+        folder_moves=folder_moves,
+        pipeline_chain=pipeline_chain,
+    )
 
+
+def _register_core_blueprints(app, w):
+    """Pages, highlights, Work Locally, jobs and media, in that order.
+
+    Returns the registered ``/original`` and ``/preview`` views for the
+    prepare-full-resolution job.
+    """
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
     app.register_blueprint(create_pages_blueprint(_get_db))
     app.register_blueprint(create_highlights_blueprint(_get_db, json_error))
     app.register_blueprint(
@@ -1807,8 +1982,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             json_error,
             db_path,
             app.config,
-            invalid_preview_cache_paths=render_cache.invalid_preview_cache_paths,
-            clear_preview_cache_invalid=render_cache.clear_preview_cache_invalid,
+            invalid_preview_cache_paths=w.render_cache.invalid_preview_cache_paths,
+            clear_preview_cache_invalid=w.render_cache.clear_preview_cache_invalid,
             render_edit_preview=app._preview_workers.render,
             cancel_edit_preview=app._preview_workers.cancel,
         )
@@ -1818,7 +1993,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # lightbox's.
     serve_original_photo = app.view_functions["media.serve_original_photo"]
     serve_photo_preview = app.view_functions["media.serve_photo_preview"]
+    return serve_original_photo, serve_photo_preview
 
+
+def _register_library_blueprints(app, w):
+    """Labels and review through settings, iNaturalist and folders, in order."""
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
+    photo_deletion = w.photo_deletion
     app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))
     app.register_blueprint(create_photo_review_blueprint(_get_db, json_error))
     app.register_blueprint(create_life_list_blueprint(_get_db, json_error))
@@ -1842,7 +2023,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db,
             json_error,
             app.config,
-            advance_inat_token_generation=inat_token_generation.advance,
+            advance_inat_token_generation=w.inat_token_generation.advance,
         )
     )
     app.register_blueprint(
@@ -1852,7 +2033,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            token_generation=inat_token_generation,
+            token_generation=w.inat_token_generation,
         )
     )
     app.register_blueprint(
@@ -1875,13 +2056,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             json_error,
             lambda: app._job_runner,
             db_path,
-            build_scan_work=build_scan_work,
+            build_scan_work=w.build_scan_work,
             cleanup_cached_files_for_deleted_photos=(
                 photo_deletion.cleanup_cached_files_for_deleted_photos
             ),
             invalidate_missing_originals=missing_originals.invalidate,
         )
     )
+
+
+def _register_browse_blueprints(app, w):
+    """Capture time and system through collections and dashboard, in order."""
+    _get_db, db_path = w.get_db, w.db_path
     app.register_blueprint(create_capture_time_blueprint(_get_db, json_error))
     app.register_blueprint(
         create_remote_setup_blueprint(_get_db, json_error, app.config)
@@ -1900,22 +2086,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     )
     app.register_blueprint(
         create_misses_blueprint(
-            _get_db, json_error, resolve_visual=visual_scope.resolve,
+            _get_db, json_error, resolve_visual=w.visual_scope.resolve,
         )
     )
     app.register_blueprint(
-        create_browse_blueprint(_get_db, json_error, visual_scope=visual_scope)
+        create_browse_blueprint(_get_db, json_error, visual_scope=w.visual_scope)
     )
     app.register_blueprint(
         create_predictions_blueprint(
-            _get_db, json_error, app.config, visual_scope=visual_scope,
+            _get_db, json_error, app.config, visual_scope=w.visual_scope,
         )
     )
     app.register_blueprint(create_encounters_blueprint(_get_db, json_error, db_path))
-    # Registered before the /api/v1 alias loop below, which aliases two of
+    # Registered before the /api/v1 alias loop, which aliases two of
     # these endpoints by their ``collections.``-qualified names.
     app.register_blueprint(create_collections_blueprint(_get_db, json_error))
     app.register_blueprint(create_dashboard_blueprint(_get_db, json_error))
+
+
+def _register_file_blueprints(app, w):
+    """Sync, moves, duplicates and card cleanup, in that order."""
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
+    folder_moves = w.folder_moves
     app.register_blueprint(
         create_sync_blueprint(
             _get_db,
@@ -1939,7 +2131,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             network_volume_roots=lambda: _network_volume_roots(),
             path_on_network_volume=_path_on_network_volume,
             cleanup_cached_files_for_deleted_photos=(
-                photo_deletion.cleanup_cached_files_for_deleted_photos
+                w.photo_deletion.cleanup_cached_files_for_deleted_photos
             ),
             invalidate_missing_originals=missing_originals.invalidate,
         )
@@ -1949,13 +2141,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _get_db, json_error, lambda: app._job_runner, db_path, app.config,
         )
     )
+
+
+def _register_job_blueprints(app, w):
+    """Models and caches through imports, keywords, locations and batch."""
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
     app.register_blueprint(
         create_models_blueprint(
             _get_db,
             json_error,
             lambda: app._job_runner,
             db_path,
-            count_keywords=init_db.count_keywords,
+            count_keywords=w.init_db.count_keywords,
         )
     )
     app.register_blueprint(
@@ -1968,7 +2165,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            resolve_visual=visual_scope.resolve,
+            resolve_visual=w.visual_scope.resolve,
         )
     )
     app.register_blueprint(
@@ -1989,10 +2186,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db_path,
             app.config,
             invalidate_missing_originals=missing_originals.invalidate,
-            enqueue_process_job=pipeline_chain.enqueue_process_job,
-            chain_after_move=pipeline_chain.chain_after_move,
-            bulk_gps_location_payload=bulk_gps_locations.payload,
-            guard_move_folder=folder_moves.guard_error,
+            enqueue_process_job=w.pipeline_chain.enqueue_process_job,
+            chain_after_move=w.pipeline_chain.chain_after_move,
+            bulk_gps_location_payload=w.bulk_gps_locations.payload,
+            guard_move_folder=w.folder_moves.guard_error,
             sync_job_lock=app._sync_job_lock,
         )
     )
@@ -2001,22 +2198,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         create_locations_blueprint(
             _get_db,
             json_error,
-            location_errors=location_errors,
-            normalize_photo_id_list=bulk_gps_locations.normalize_photo_id_list,
-            bulk_gps_location_source_ids=bulk_gps_locations.source_ids,
+            location_errors=w.location_errors,
+            normalize_photo_id_list=w.bulk_gps_locations.normalize_photo_id_list,
+            bulk_gps_location_source_ids=w.bulk_gps_locations.source_ids,
         )
     )
     app.register_blueprint(
         create_batch_blueprint(
             _get_db,
             json_error,
-            location_errors=location_errors,
-            bulk_gps_location_payload=bulk_gps_locations.payload,
-            run_batch_delete=photo_deletion.run_batch_delete,
+            location_errors=w.location_errors,
+            bulk_gps_location_payload=w.bulk_gps_locations.payload,
+            run_batch_delete=w.photo_deletion.run_batch_delete,
             invalidate_missing_originals=missing_originals.invalidate,
         )
     )
-    # Registered before the /api/v1 alias loop below, which aliases
+
+
+def _register_photo_blueprints(app, w, serve_original_photo, serve_photo_preview):
+    """The photo data API, edit recipes, history and the job launchers."""
+    _get_db, db_path, missing_originals = w.get_db, w.db_path, w.missing_originals
+    render_cache, folder_moves = w.render_cache, w.folder_moves
+    # Registered before the /api/v1 alias loop, which aliases
     # ``photos.api_photos`` and ``photos.api_photo_detail``.
     app.register_blueprint(
         create_photos_blueprint(
@@ -2025,11 +2228,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             app.config,
-            visual_scope=visual_scope,
+            visual_scope=w.visual_scope,
             missing_originals_payload=missing_originals.payload,
             start_missing_originals_scan=missing_originals.start_scan,
             invalidate_missing_originals=missing_originals.invalidate,
-            run_batch_delete=photo_deletion.run_batch_delete,
+            run_batch_delete=w.photo_deletion.run_batch_delete,
         )
     )
     app.register_blueprint(
@@ -2050,7 +2253,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     )
     app.register_blueprint(
         create_photo_location_keywords_blueprint(
-            _get_db, json_error, location_errors=location_errors,
+            _get_db, json_error, location_errors=w.location_errors,
         )
     )
     app.register_blueprint(
@@ -2061,8 +2264,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db_path,
             app.config,
             invalidate_missing_originals=missing_originals.invalidate,
-            run_batch_delete=photo_deletion.run_batch_delete,
-            build_scan_work=build_scan_work,
+            run_batch_delete=w.photo_deletion.run_batch_delete,
+            build_scan_work=w.build_scan_work,
             pending_local_workspace_transition=(
                 folder_moves.pending_local_workspace_transition
             ),
@@ -2080,22 +2283,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
     )
 
-    # --- /api/v1/* aliases over the stable subset of /api/* ---
-    # These are the endpoints advertised to external callers in docs/headless-api.md.
-    # Keep this list tight — expanding it locks the surface.
-    _V1_ALIASES = [
-        # (v1 path, existing endpoint name, methods)
-        ("/api/v1/photos", "photos.api_photos", ["GET"]),
-        ("/api/v1/photos/<int:photo_id>", "photos.api_photo_detail", ["GET"]),
-        ("/api/v1/collections", "collections.api_collections", ["GET"]),
-        ("/api/v1/collections/<int:collection_id>/photos",
-         "collections.api_collection_photos", ["GET"]),
-        ("/api/v1/workspaces", "workspaces.api_get_workspaces", ["GET"]),
-        ("/api/v1/workspaces/<int:ws_id>/activate",
-         "workspaces.api_activate_workspace", ["POST"]),
-        ("/api/v1/keywords", "keywords.api_keywords", ["GET"]),
-    ]
 
+# --- /api/v1/* aliases over the stable subset of /api/* ---
+# These are the endpoints advertised to external callers in docs/headless-api.md.
+# Keep this list tight — expanding it locks the surface.
+_V1_ALIASES = [
+    # (v1 path, existing endpoint name, methods)
+    ("/api/v1/photos", "photos.api_photos", ["GET"]),
+    ("/api/v1/photos/<int:photo_id>", "photos.api_photo_detail", ["GET"]),
+    ("/api/v1/collections", "collections.api_collections", ["GET"]),
+    ("/api/v1/collections/<int:collection_id>/photos",
+     "collections.api_collection_photos", ["GET"]),
+    ("/api/v1/workspaces", "workspaces.api_get_workspaces", ["GET"]),
+    ("/api/v1/workspaces/<int:ws_id>/activate",
+     "workspaces.api_activate_workspace", ["POST"]),
+    ("/api/v1/keywords", "keywords.api_keywords", ["GET"]),
+]
+
+
+def _register_v1_aliases(app, reservation_exempt_endpoints):
+    """Add the ``/api/v1`` aliases; runs after every blueprint is registered.
+
+    Adds ``v1_<view>`` to ``reservation_exempt_endpoints`` (the set
+    ``register_app_hooks`` holds) for each alias of an exempt endpoint.
+    """
     for v1_path, endpoint_name, methods in _V1_ALIASES:
         view = app.view_functions.get(endpoint_name)
         if view is None:
@@ -2113,10 +2324,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         # An alias is exempt from the workspace mutation reservation exactly
         # when the view it aliases is, so the two surfaces can't drift.
-        if endpoint_name in _reservation_exempt_endpoints:
-            _reservation_exempt_endpoints.add(v1_endpoint)
-
-    return app
+        if endpoint_name in reservation_exempt_endpoints:
+            reservation_exempt_endpoints.add(v1_endpoint)
 
 
 def _emit_incompatible_database_exit(e):
@@ -2148,9 +2357,7 @@ def _emit_incompatible_database_exit(e):
     raise SystemExit(3) from e
 
 
-def main():
-    _setup_file_logging()
-
+def _parse_main_args():
     parser = argparse.ArgumentParser(description="Vireo Photo Browser")
     parser.add_argument(
         "--db",
@@ -2181,59 +2388,53 @@ def main():
         action="store_true",
         help="Verify the bundled/system ExifTool, print its version, and exit",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    if args.check_exiftool:
-        from metadata import exiftool_status
 
-        status = exiftool_status()
-        if status["available"]:
-            print(status["version"] or "unknown")
-            raise SystemExit(0)
-        print(status.get("error") or status.get("hint") or "ExifTool unavailable", file=sys.stderr)
-        raise SystemExit(1)
+def _check_exiftool_and_exit():
+    """``--check-exiftool``: print the ExifTool version (or why not) and exit."""
+    from metadata import exiftool_status
 
-    if args.headless:
-        args.no_browser = True
-
-    if args.load_taxonomy:
-        from db import Database
-        from taxonomy import fetch_common_names, load_taxonomy, seed_informal_groups
-        # Run the newer-schema guard before Database(args.db) executes any
-        # legacy DDL/ALTERs against a catalog stamped by a future Vireo build.
-        # create_app takes this same check through ensure_schema; keep the two
-        # entry points in sync so `--load-taxonomy` can't corrupt a newer DB.
-        try:
-            ensure_schema(args.db)
-        except IncompatibleDatabaseError as e:
-            _emit_incompatible_database_exit(e)
-        db = Database(args.db)
-        log.info("Loading taxonomy tree from iNaturalist...")
-        stats = load_taxonomy(db)
-        log.info("  Taxonomy: %d taxa loaded, %d skipped", stats['loaded'], stats['skipped'])
-        log.info("Fetching common names from iNat API (this may take a few minutes)...")
-        cn_stats = fetch_common_names(db)
-        log.info("  Common names: %d taxa updated", cn_stats['updated'])
-        log.info("Seeding informal groups...")
-        ig_stats = seed_informal_groups(db)
-        log.info("  Informal groups: %d groups created", ig_stats['groups_created'])
-        log.info("Done.")
+    status = exiftool_status()
+    if status["available"]:
+        print(status["version"] or "unknown")
         raise SystemExit(0)
+    print(status.get("error") or status.get("hint") or "ExifTool unavailable", file=sys.stderr)
+    raise SystemExit(1)
 
-    # Resolve port: --port 0 means pick a random free port
-    port = args.port
-    if port == 0:
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
 
+def _load_taxonomy_and_exit(db_path):
+    """``--load-taxonomy``: import the iNaturalist taxonomy, then exit."""
+    from db import Database
+    from taxonomy import fetch_common_names, load_taxonomy, seed_informal_groups
+    # Run the newer-schema guard before Database(args.db) executes any
+    # legacy DDL/ALTERs against a catalog stamped by a future Vireo build.
+    # create_app takes this same check through ensure_schema; keep the two
+    # entry points in sync so `--load-taxonomy` can't corrupt a newer DB.
+    try:
+        ensure_schema(db_path)
+    except IncompatibleDatabaseError as e:
+        _emit_incompatible_database_exit(e)
+    db = Database(db_path)
+    log.info("Loading taxonomy tree from iNaturalist...")
+    stats = load_taxonomy(db)
+    log.info("  Taxonomy: %d taxa loaded, %d skipped", stats['loaded'], stats['skipped'])
+    log.info("Fetching common names from iNat API (this may take a few minutes)...")
+    cn_stats = fetch_common_names(db)
+    log.info("  Common names: %d taxa updated", cn_stats['updated'])
+    log.info("Seeding informal groups...")
+    ig_stats = seed_informal_groups(db)
+    log.info("  Informal groups: %d groups created", ig_stats['groups_created'])
+    log.info("Done.")
+    raise SystemExit(0)
+
+
+def _reserve_single_instance_or_exit():
+    """Take the single-instance slot and register the cleanup that frees it."""
     from runtime import (
         acquire_single_instance,
         delete_runtime_json,
-        generate_token,
         release_single_instance,
-        write_runtime_json,
     )
 
     # Atomically reserve the single-instance slot BEFORE any heavy
@@ -2275,9 +2476,9 @@ def main():
     atexit.register(_cleanup_runtime_state)
     _signal.signal(_signal.SIGTERM, lambda *_: (_cleanup_runtime_state(), os._exit(0)))
 
-    api_token = generate_token()
-    mode = "headless" if args.headless else "gui"
 
+def _create_app_or_exit(args, api_token):
+    """``create_app`` with the structured startup-failure exits."""
     try:
         app = create_app(
             db_path=args.db, thumb_cache_dir=args.thumb_dir, api_token=api_token,
@@ -2287,7 +2488,7 @@ def main():
         # Fail fast with actionable guidance instead of letting a raw
         # OperationalError traceback escape (which the sidecar host only sees
         # as "did not become healthy within 30s"). The atexit/SIGTERM cleanup
-        # registered above releases the single-instance lock and runtime.json
+        # registered by _reserve_single_instance_or_exit releases the single-instance lock and runtime.json
         # on this exit, so a retry isn't blocked by a stale reservation.
         _emit_incompatible_database_exit(e)
     except Exception as e:
@@ -2304,8 +2505,10 @@ def main():
             "reason": str(e) or e.__class__.__name__,
         }) + "\n")
         raise SystemExit(2) from e
+    return app
 
-    # Startup banner
+
+def _log_startup_banner(args, port):
     import config as cfg
     startup_cfg = cfg.load()
     log.info("=" * 50)
@@ -2320,25 +2523,68 @@ def main():
         log.info("  HuggingFace token: configured")
     log.info("=" * 50)
 
+
+def _open_browser_when_ready(port):
+    """Open the browser once the server answers, polling for up to 5 s."""
+    import http.client
+    import threading
+    import urllib.request
+
+    def _open_browser():
+        url = f"http://localhost:{port}"
+        for _ in range(50):  # try for up to 5 seconds
+            try:
+                urllib.request.urlopen(url, timeout=0.1)
+                webbrowser.open(url)
+                return
+            except (OSError, http.client.HTTPException):
+                # Server not accepting connections yet; poll again.
+                time.sleep(0.1)
+        log.warning("Server did not answer on %s within 5s; not opening a browser", url)
+
+    threading.Thread(target=_open_browser, daemon=True).start()
+
+
+def main():
+    _setup_file_logging()
+
+    args = _parse_main_args()
+
+    if args.check_exiftool:
+        _check_exiftool_and_exit()
+
+    if args.headless:
+        args.no_browser = True
+
+    if args.load_taxonomy:
+        _load_taxonomy_and_exit(args.db)
+
+    # Resolve port: --port 0 means pick a random free port
+    port = args.port
+    if port == 0:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+    from runtime import (
+        generate_token,
+        write_runtime_json,
+    )
+
+    _reserve_single_instance_or_exit()
+
+    api_token = generate_token()
+    mode = "headless" if args.headless else "gui"
+
+    app = _create_app_or_exit(args, api_token)
+
+    # Startup banner
+    _log_startup_banner(args, port)
+
     # Open browser after server is ready, not before
     if not args.no_browser:
-        import http.client
-        import threading
-        import urllib.request
-
-        def _open_browser():
-            url = f"http://localhost:{port}"
-            for _ in range(50):  # try for up to 5 seconds
-                try:
-                    urllib.request.urlopen(url, timeout=0.1)
-                    webbrowser.open(url)
-                    return
-                except (OSError, http.client.HTTPException):
-                    # Server not accepting connections yet; poll again.
-                    time.sleep(0.1)
-            log.warning("Server did not answer on %s within 5s; not opening a browser", url)
-
-        threading.Thread(target=_open_browser, daemon=True).start()
+        _open_browser_when_ready(port)
 
     # Look up the running version with the helper /api/version uses:
     # package metadata, then pyproject.toml, then "0.0.0".
@@ -2350,7 +2596,8 @@ def main():
 
     # Finalize runtime.json, replacing the reservation marker with the full
     # payload now that the port and token are known. Cleanup handlers were
-    # registered immediately after `acquire_single_instance` above.
+    # registered immediately after `acquire_single_instance` (in
+    # _reserve_single_instance_or_exit).
     write_runtime_json(
         port=port, pid=os.getpid(), version=ver, db_path=args.db,
         token=api_token, mode=mode,

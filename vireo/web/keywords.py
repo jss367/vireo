@@ -59,6 +59,175 @@ def _keyword_update_fields(body):
     return fields, None
 
 
+def _location_pipe_rename_error(body, old_row):
+    """The refusal for a ``|`` in a rename that lands on a location, or None."""
+    # Reject '|' in a rename that lands on a location keyword before we
+    # ever touch the row. ``get_or_create_text_location`` refuses pipes
+    # at creation time because XMP keyword hierarchies reserve it as the
+    # delimiter and there is no reversible XMP encoding, but the update
+    # path used to accept them. Once such a rename landed, every sync
+    # of a photo tagged with the row raised in
+    # ``SidecarEditor.set_location_keywords``, leaving the ``location``
+    # change queued forever and blocking any other edit that shared
+    # its sidecar transaction. Guard both a name-only rename of an
+    # existing location and a retype-into-location that also renames.
+    rename_target = body.get("name")
+    if isinstance(rename_target, str) and "|" in rename_target:
+        effective_type = body.get("type")
+        if not isinstance(effective_type, str):
+            effective_type = old_row["type"] if old_row is not None else None
+        if effective_type == "location":
+            return (
+                "location name may not contain '|' -- XMP keyword "
+                "hierarchies reserve it as the level delimiter"
+            )
+    return None
+
+
+def _location_rename_requeue_skips(db, affected):
+    """``{workspace_id: skip}`` for a location-to-location rename.
+
+    A workspace with ``write_location_keywords_to_xmp`` on skips the
+    keyword_remove + keyword_add requeue; see
+    ``_queue_keyword_rename_sidecars``.
+    """
+    skip_keyword_requeue_by_ws = {}
+    import config as cfg
+
+    try:
+        global_cfg = cfg.load()
+    except Exception:
+        log.warning("Could not load config for location rename requeue", exc_info=True)
+        global_cfg = {}
+    for row in affected:
+        ws_id = row["workspace_id"]
+        if ws_id in skip_keyword_requeue_by_ws:
+            continue
+        ws = db.workspaces.get(ws_id)
+        raw = ws["config_overrides"] if ws else None
+        skip_keyword_requeue_by_ws[ws_id] = (
+            workspace_effective_setting(
+                raw, global_cfg, LOCATION_KEYWORDS_SETTING,
+            )
+        )
+    return skip_keyword_requeue_by_ws
+
+
+def _queue_keyword_rename_sidecars(db, old_row, new_row, affected):
+    """Carry a keyword rename into species preferences and queued XMP edits."""
+    old_name = old_row["name"]
+    new_name = new_row["name"]
+    old_is_species_keyword = (
+        old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
+    )
+    new_is_species_keyword = (
+        new_row["is_species"] == 1 or new_row["type"] == "taxonomy"
+    )
+    if old_is_species_keyword and new_is_species_keyword:
+        pairs = [
+            (row["photo_id"], row["workspace_id"]) for row in affected
+        ]
+        db.rename_photo_preferences_species(
+            old_name,
+            new_name,
+            pairs,
+        )
+        db.rename_species_highlights_species(
+            old_name,
+            new_name,
+            pairs,
+        )
+    # A pure location-to-location rename is handled entirely by the
+    # ``location`` change _queue_location_path_changes queues WHEN
+    # ``write_location_keywords_to_xmp`` is on for the affected
+    # workspace: set_location_keywords() writes both flat and
+    # hierarchical entries under the new leaf and claims full
+    # marker ownership because the sidecar is stripped of the old
+    # marker's entries first. Queueing a keyword_add for the new
+    # leaf in that case would land it in ``dc:subject`` BEFORE
+    # set_location_keywords() runs, at which point it looks
+    # pre-existing (existed_flat=True) and gets only hierarchical
+    # ownership; a later clear would then leave the renamed flat
+    # leaf in XMP indefinitely.
+    #
+    # When the setting is OFF for a workspace, however, the queued
+    # ``location`` change only runs marker cleanup at sync time;
+    # set_location_keywords() never writes the new flat leaf, so
+    # a pre-existing flat XMP keyword under the OLD name (from a
+    # manual entry or an earlier period when the setting was on)
+    # would stay behind indefinitely. Fall back to the ordinary
+    # keyword_remove + keyword_add for those workspaces so the
+    # flat leaf still gets renamed in XMP.
+    location_to_location_rename = (
+        old_row["type"] == "location"
+        and new_row["type"] == "location"
+    )
+    skip_keyword_requeue_by_ws = (
+        _location_rename_requeue_skips(db, affected)
+        if location_to_location_rename else {}
+    )
+    for row in affected:
+        if skip_keyword_requeue_by_ws.get(row["workspace_id"], False):
+            continue
+        queue_keyword_remove(db, row["photo_id"], old_name, workspace_id=row["workspace_id"])
+        queue_keyword_add(db, row["photo_id"], new_name, workspace_id=row["workspace_id"])
+
+
+def _queue_location_retype_add(db, old_row, new_row, affected):
+    """Keep the flat leaf of a location keyword retyped without a rename."""
+    # A location→non-location retype with no name change queues a
+    # ``location`` change (``_queue_location_path_changes``) but no
+    # keyword_add — the name-change block didn't run. sync_to_xmp()
+    # therefore resolves no location path for the photo and
+    # remove_vireo_location_keywords()
+    # strips the marker-owned flat leaf, leaving XMP without a keyword
+    # that the DB still assigns to the photo. Queue an ordinary
+    # keyword_add so the flat leaf survives the location cleanup as
+    # the user's newly ``general`` keyword. Name-changed retypes
+    # already had the add queued for the new spelling.
+    if (
+        old_row is not None and new_row is not None
+        and old_row["type"] == "location"
+        and new_row["type"] != "location"
+        and old_row["name"] == new_row["name"]
+    ):
+        for row in affected:
+            queue_keyword_add(
+                db, row["photo_id"], new_row["name"],
+                workspace_id=row["workspace_id"],
+            )
+
+
+def _queue_location_path_changes(db, old_row, new_row, location_affected):
+    """Requeue ``location`` sync for every photo under a changed location."""
+    # If a location keyword's name or type changed, requeue a
+    # ``location`` change for every descendant-tagged photo so
+    # ``sync_to_xmp`` rewrites the sidecar's hierarchy path and
+    # ``vireo:locationKeywords`` marker under the new spelling.
+    # ``keyword_remove``/``keyword_add`` only rewrites the flat
+    # ``dc:subject`` entry (and only for a leaf rename); the hierarchy
+    # and marker require the ``location`` change type. ``queue_change``
+    # dedupes silently, so re-running an already-queued photo is
+    # harmless.
+    if location_affected and old_row is not None and new_row is not None:
+        old_was_location = old_row["type"] == "location"
+        new_is_location = new_row["type"] == "location"
+        name_changed = old_row["name"] != new_row["name"]
+        type_changed = old_row["type"] != new_row["type"]
+        if (old_was_location or new_is_location) and (
+            name_changed or type_changed
+        ):
+            for row in location_affected:
+                db.queue_change(
+                    row["photo_id"],
+                    "location",
+                    "effective",
+                    workspace_id=row["workspace_id"],
+                    _commit=False,
+                )
+            db.commit()
+
+
 def create_keywords_blueprint(get_db, json_error):
     """Build the keywords blueprint.
 
@@ -206,26 +375,10 @@ def create_keywords_blueprint(get_db, json_error):
         ):
             location_affected = db.get_keyword_subtree_photo_workspaces(keyword_id)
         # Reject '|' in a rename that lands on a location keyword before we
-        # ever touch the row. ``get_or_create_text_location`` refuses pipes
-        # at creation time because XMP keyword hierarchies reserve it as the
-        # delimiter and there is no reversible XMP encoding, but the update
-        # path used to accept them. Once such a rename landed, every sync
-        # of a photo tagged with the row raised in
-        # ``SidecarEditor.set_location_keywords``, leaving the ``location``
-        # change queued forever and blocking any other edit that shared
-        # its sidecar transaction. Guard both a name-only rename of an
-        # existing location and a retype-into-location that also renames.
-        rename_target = body.get("name")
-        if isinstance(rename_target, str) and "|" in rename_target:
-            effective_type = body.get("type")
-            if not isinstance(effective_type, str):
-                effective_type = old_row["type"] if old_row is not None else None
-            if effective_type == "location":
-                return json_error(
-                    "location name may not contain '|' -- XMP keyword "
-                    "hierarchies reserve it as the level delimiter",
-                    400,
-                )
+        # ever touch the row (see _location_pipe_rename_error).
+        invalid = _location_pipe_rename_error(body, old_row)
+        if invalid is not None:
+            return json_error(invalid, 400)
         # Apply the update first — if it raises, no sidecar changes are queued
         try:
             effective_id = db.update_keyword(keyword_id, **body)
@@ -239,124 +392,9 @@ def create_keywords_blueprint(get_db, json_error):
             old_row is not None and new_row is not None
             and old_row["name"] != new_row["name"]
         ):
-            old_name = old_row["name"]
-            new_name = new_row["name"]
-            old_is_species_keyword = (
-                old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
-            )
-            new_is_species_keyword = (
-                new_row["is_species"] == 1 or new_row["type"] == "taxonomy"
-            )
-            if old_is_species_keyword and new_is_species_keyword:
-                pairs = [
-                    (row["photo_id"], row["workspace_id"]) for row in affected
-                ]
-                db.rename_photo_preferences_species(
-                    old_name,
-                    new_name,
-                    pairs,
-                )
-                db.rename_species_highlights_species(
-                    old_name,
-                    new_name,
-                    pairs,
-                )
-            # A pure location-to-location rename is handled entirely by the
-            # ``location`` change queued below WHEN
-            # ``write_location_keywords_to_xmp`` is on for the affected
-            # workspace: set_location_keywords() writes both flat and
-            # hierarchical entries under the new leaf and claims full
-            # marker ownership because the sidecar is stripped of the old
-            # marker's entries first. Queueing a keyword_add for the new
-            # leaf in that case would land it in ``dc:subject`` BEFORE
-            # set_location_keywords() runs, at which point it looks
-            # pre-existing (existed_flat=True) and gets only hierarchical
-            # ownership; a later clear would then leave the renamed flat
-            # leaf in XMP indefinitely.
-            #
-            # When the setting is OFF for a workspace, however, the queued
-            # ``location`` change only runs marker cleanup at sync time;
-            # set_location_keywords() never writes the new flat leaf, so
-            # a pre-existing flat XMP keyword under the OLD name (from a
-            # manual entry or an earlier period when the setting was on)
-            # would stay behind indefinitely. Fall back to the ordinary
-            # keyword_remove + keyword_add for those workspaces so the
-            # flat leaf still gets renamed in XMP.
-            location_to_location_rename = (
-                old_row["type"] == "location"
-                and new_row["type"] == "location"
-            )
-            skip_keyword_requeue_by_ws = {}
-            if location_to_location_rename:
-                import config as cfg
-
-                try:
-                    global_cfg = cfg.load()
-                except Exception:
-                    log.warning("Could not load config for location rename requeue", exc_info=True)
-                    global_cfg = {}
-                for row in affected:
-                    ws_id = row["workspace_id"]
-                    if ws_id in skip_keyword_requeue_by_ws:
-                        continue
-                    ws = db.workspaces.get(ws_id)
-                    raw = ws["config_overrides"] if ws else None
-                    skip_keyword_requeue_by_ws[ws_id] = (
-                        workspace_effective_setting(
-                            raw, global_cfg, LOCATION_KEYWORDS_SETTING,
-                        )
-                    )
-            for row in affected:
-                if skip_keyword_requeue_by_ws.get(row["workspace_id"], False):
-                    continue
-                queue_keyword_remove(db, row["photo_id"], old_name, workspace_id=row["workspace_id"])
-                queue_keyword_add(db, row["photo_id"], new_name, workspace_id=row["workspace_id"])
-        # A location→non-location retype with no name change queues a
-        # ``location`` change below but no keyword_add — the name-change
-        # block above didn't run. sync_to_xmp() therefore resolves no
-        # location path for the photo and remove_vireo_location_keywords()
-        # strips the marker-owned flat leaf, leaving XMP without a keyword
-        # that the DB still assigns to the photo. Queue an ordinary
-        # keyword_add so the flat leaf survives the location cleanup as
-        # the user's newly ``general`` keyword. Name-changed retypes
-        # already had the add queued for the new spelling above.
-        if (
-            old_row is not None and new_row is not None
-            and old_row["type"] == "location"
-            and new_row["type"] != "location"
-            and old_row["name"] == new_row["name"]
-        ):
-            for row in affected:
-                queue_keyword_add(
-                    db, row["photo_id"], new_row["name"],
-                    workspace_id=row["workspace_id"],
-                )
-        # If a location keyword's name or type changed, requeue a
-        # ``location`` change for every descendant-tagged photo so
-        # ``sync_to_xmp`` rewrites the sidecar's hierarchy path and
-        # ``vireo:locationKeywords`` marker under the new spelling.
-        # ``keyword_remove``/``keyword_add`` above only rewrites the flat
-        # ``dc:subject`` entry (and only for a leaf rename); the hierarchy
-        # and marker require the ``location`` change type. ``queue_change``
-        # dedupes silently, so re-running an already-queued photo is
-        # harmless.
-        if location_affected and old_row is not None and new_row is not None:
-            old_was_location = old_row["type"] == "location"
-            new_is_location = new_row["type"] == "location"
-            name_changed = old_row["name"] != new_row["name"]
-            type_changed = old_row["type"] != new_row["type"]
-            if (old_was_location or new_is_location) and (
-                name_changed or type_changed
-            ):
-                for row in location_affected:
-                    db.queue_change(
-                        row["photo_id"],
-                        "location",
-                        "effective",
-                        workspace_id=row["workspace_id"],
-                        _commit=False,
-                    )
-                db.commit()
+            _queue_keyword_rename_sidecars(db, old_row, new_row, affected)
+        _queue_location_retype_add(db, old_row, new_row, affected)
+        _queue_location_path_changes(db, old_row, new_row, location_affected)
         # keywords.html's updateType/renameKeyword/bulk-apply handlers refetch
         # only when `merged` is truthy; without it the UI keeps the deleted
         # source id and its next edit/delete would 404 or hit the wrong row.
