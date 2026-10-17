@@ -396,6 +396,39 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     sg = sim_embedding(photo_a.get("dino_global_embedding"), photo_b.get("dino_global_embedding"))
     sm = sim_meta(photo_a, photo_b)
 
+    missing, absent, used = _s_enc_signal_flags(
+        photo_a, photo_b, ts_a, ts_b, dt, absent_a, absent_b, uncertain_a, uncertain_b,
+        asymmetric_subject, both_absent,
+    )
+    weight_keys = {
+        "time": "w_time",
+        "subj": "w_subj",
+        "global": "w_global",
+        "species": "w_species",
+        "meta": "w_meta",
+    }
+    values = {"time": st, "subj": ss, "global": sg, "species": sp, "meta": sm}
+
+    total_weight = sum(cfg[weight_keys[k]] for k, u in used.items() if u)
+    if total_weight == 0:
+        s_enc = 0.0
+    else:
+        s_enc = sum(cfg[weight_keys[k]] * values[k] for k, u in used.items() if u) / total_weight
+
+    if not return_components:
+        return s_enc
+
+    components = _s_enc_components(
+        values, cfg, weight_keys, used, missing, absent, uncertain_a, uncertain_b
+    )
+    return s_enc, components
+
+
+def _s_enc_signal_flags(
+    photo_a, photo_b, ts_a, ts_b, dt, absent_a, absent_b, uncertain_a, uncertain_b,
+    asymmetric_subject, both_absent,
+):
+    """Return the ``(missing, absent, used)`` per-signal flags for S_enc."""
     # Per-component missing flags: which photo (if any) lacks the signal.
     # Used by the trace UI to surface "compute embeddings on photo B" hints
     # without conflating a missing signal with an explicitly-zeroed weight.
@@ -438,7 +471,7 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
         # Asymmetric subject_absent ⇒ subj/species are USED (active 0).
         # Both-sides absent drops the signal — two subjectless frames carry
         # no evidence either way (and this overrides any stale cached
-        # embeddings/species; see the absent-handling block above).
+        # embeddings/species; see the absent-handling block in compute_s_enc).
         "subj": asymmetric_subject or (
             has_subj_a and has_subj_b and not both_absent
         ),
@@ -449,25 +482,12 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
         # Meta always contributes (even if 0)
         "meta": True,
     }
-    weight_keys = {
-        "time": "w_time",
-        "subj": "w_subj",
-        "global": "w_global",
-        "species": "w_species",
-        "meta": "w_meta",
-    }
-    values = {"time": st, "subj": ss, "global": sg, "species": sp, "meta": sm}
+    return missing, absent, used
 
-    total_weight = sum(cfg[weight_keys[k]] for k, u in used.items() if u)
-    if total_weight == 0:
-        s_enc = 0.0
-    else:
-        s_enc = sum(cfg[weight_keys[k]] * values[k] for k, u in used.items() if u) / total_weight
 
-    if not return_components:
-        return s_enc
-
-    components = {
+def _s_enc_components(values, cfg, weight_keys, used, missing, absent, uncertain_a, uncertain_b):
+    """Build the per-signal ``{value, weight, used, ...}`` breakdown of S_enc."""
+    return {
         k: {
             "value": float(values[k]),
             "weight": float(cfg[weight_keys[k]]),
@@ -481,7 +501,6 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
         }
         for k in values
     }
-    return s_enc, components
 
 
 # -- Pass 1: Cut timeline into microsegments (Section 2.2) --
@@ -509,20 +528,7 @@ def cut_microsegments(photos, config=None, emit_trace=False):
             return ([photos] if photos else []), []
         return [photos] if photos else []
 
-    # Sort by timestamp. Null-timestamp photos (scan I/O errors, unreadable
-    # files) sort AFTER all timestamped photos — never datetime.min, which
-    # would pile them at the top of the review timeline and read as "the whole
-    # pipeline failed to group." Within the null group, order by
-    # (folder_id, filename) so consecutive frames from one shoot stay adjacent
-    # even without EXIF, letting the both-null branch below keep them together.
-    sorted_photos = sorted(
-        photos,
-        key=lambda p: (
-            (0, _parse_timestamp(p.get("timestamp")), 0, "")
-            if _parse_timestamp(p.get("timestamp")) is not None
-            else (1, datetime.min, p.get("folder_id") or 0, p.get("filename") or "")
-        ),
-    )
+    sorted_photos = _sort_for_timeline(photos)
 
     cuts = set()
     recent_scores = []  # sliding window for soft cut detection
@@ -541,141 +547,198 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         ts_b = _parse_timestamp(sorted_photos[i + 1].get("timestamp"))
         dt = _time_delta_seconds(ts_a, ts_b)
 
-        bid_a = sorted_photos[i].get("burst_id")
-        bid_b = sorted_photos[i + 1].get("burst_id")
-        decision = None
         species_conflict = _confident_species_conflict(
             sorted_photos[i], sorted_photos[i + 1], config=cfg
         )
-
-        both_null = ts_a is None and ts_b is None
-        folder_a = sorted_photos[i].get("folder_id")
-        folder_b = sorted_photos[i + 1].get("folder_id")
-        # A folder change between two null-timestamp photos is a hard cut.
-        # The null sort key (1, datetime.min, folder_id, filename) places the
-        # last null of one folder adjacent to the first null of the next, and
-        # folder_id is NOT part of compute_s_enc — so without an explicit
-        # boundary cut, two undated photos from DIFFERENT shoots could merge
-        # whether they're unreadable (score ~0, force-grouped by file order)
-        # or signalful (visually similar embeddings/species sliding under the
-        # score cut). Treat distinct or missing folder_id as a boundary; only
-        # same, non-null folders are "unchanged". (Missing folder_id shouldn't
-        # happen in production scans — cutting there stays on the safe side.)
-        folder_changed = folder_a is None or folder_a != folder_b
-        # "Signal-less" = no timestamp AND no usable similarity signal on
-        # either side (no embeddings, no species). Unreadable files are
-        # signal-less; undated-but-readable photos (e.g. screenshots, which
-        # still get embeddings) are NOT — they must be judged on the score
-        # cut, not force-grouped by file order. Requires the same folder so
-        # contiguous nulls only group within a single shoot.
-        signal_less = (
-            both_null
-            and not folder_changed
-            and not (
-                _has_similarity_signal(sorted_photos[i])
-                or _has_similarity_signal(sorted_photos[i + 1])
-            )
+        decision, cut, recent_scores = _classify_pair(
+            sorted_photos[i], sorted_photos[i + 1], ts_a, ts_b, dt, score,
+            species_conflict, recent_scores, cfg,
         )
-
-        if species_conflict is not None:
-            # A camera burst id is not allowed to conceal a confidently
-            # identified species change. Burst mode can span a subject switch,
-            # and the classifier evidence is the more relevant encounter
-            # boundary signal in that case.
+        if cut:
             cuts.add(i)
-            recent_scores = []
-            decision = "cut_species"
-        elif bid_a is not None and bid_b is not None and bid_a == bid_b:
-            decision = "burst_id_kept"
-            recent_scores.append(score)
-            if len(recent_scores) > 3:
-                recent_scores.pop(0)
-        elif signal_less:
-            # No time signal and no embeddings/species — every similarity
-            # score is ~0, so the score cut would split the whole null run
-            # into singletons. With no reliable basis to separate them, keep
-            # contiguous nulls together by file order.
-            decision = "kept_no_timestamp"
-            recent_scores = []
-        elif both_null and folder_changed:
-            # Both null but across a folder boundary — hard cut, regardless of
-            # similarity signal. dt is inf for both-null pairs, so the time cut
-            # below never fires for them; folder_id isn't in compute_s_enc
-            # either, so a signalful pair would otherwise slide under the score
-            # cut and merge two separate shoots. Cut here to keep them apart.
-            cuts.add(i)
-            recent_scores = []
-            decision = "cut_folder"
-        elif not both_null and dt > cfg["hard_cut_time"]:
-            # Time cut only applies when at least one side has a timestamp.
-            # Asymmetric pairs (one null, one real) give dt=inf and cut here,
-            # so the null cluster never absorbs a real photo. Both-null pairs
-            # in the SAME folder that reached this point DO have a similarity
-            # signal and fall through to the score cut below.
-            cuts.add(i)
-            recent_scores = []
-            decision = "cut_time"
-        elif score < cfg["hard_cut_score"]:
-            cuts.add(i)
-            recent_scores = []
-            decision = "cut_score"
-        else:
-            recent_scores.append(score)
-            if len(recent_scores) > 3:
-                recent_scores.pop(0)
-            if len(recent_scores) >= 3:
-                below = sum(1 for s in recent_scores if s < cfg["soft_cut_score"])
-                if below >= 2:
-                    cuts.add(i)
-                    recent_scores = []
-                    decision = "cut_soft"
-            if decision is None:
-                if (
-                    sorted_photos[i].get("isolated_species_context")
-                    or sorted_photos[i + 1].get("isolated_species_context")
-                ):
-                    decision = "kept_species_continuity"
-                elif (
-                    sorted_photos[i].get("subject_uncertain")
-                    or sorted_photos[i + 1].get("subject_uncertain")
-                ):
-                    decision = "kept_weak_detection"
-                else:
-                    decision = "kept"
 
         if emit_trace:
-            trace.append({
-                "pair_index": i,
-                "photo_a_id": sorted_photos[i].get("id"),
-                "photo_b_id": sorted_photos[i + 1].get("id"),
-                "photo_a_filename": sorted_photos[i].get("filename"),
-                "photo_b_filename": sorted_photos[i + 1].get("filename"),
-                "score": float(score),
-                "dt_seconds": float(dt) if dt != float("inf") else None,
-                "decision": decision,
-                "species_conflict": (
-                    {
-                        "photo_a_species": species_conflict[0]["species"],
-                        "photo_a_confidence": species_conflict[0]["confidence"],
-                        "photo_a_margin": species_conflict[0]["margin"],
-                        "photo_b_species": species_conflict[1]["species"],
-                        "photo_b_confidence": species_conflict[1]["confidence"],
-                        "photo_b_margin": species_conflict[1]["margin"],
-                    }
-                    if species_conflict is not None
-                    else None
-                ),
-                "components": components,
-                "thresholds": {
-                    "hard_cut_time": cfg["hard_cut_time"],
-                    "hard_cut_score": cfg["hard_cut_score"],
-                    "soft_cut_score": cfg["soft_cut_score"],
-                    "species_hard_cut_confidence": cfg["species_hard_cut_confidence"],
-                    "species_hard_cut_margin": cfg["species_hard_cut_margin"],
-                    "weak_detection_confidence": cfg["weak_detection_confidence"],
-                },
-            })
+            trace.append(_cut_trace_entry(
+                i, sorted_photos[i], sorted_photos[i + 1], score, dt, decision,
+                species_conflict, components, cfg,
+            ))
 
+    segments = _segments_from_cuts(sorted_photos, cuts)
+
+    if emit_trace:
+        return segments, trace
+    return segments
+
+
+def _sort_for_timeline(photos):
+    """Return ``photos`` in timeline order, null-timestamp photos last."""
+    # Sort by timestamp. Null-timestamp photos (scan I/O errors, unreadable
+    # files) sort AFTER all timestamped photos — never datetime.min, which
+    # would pile them at the top of the review timeline and read as "the whole
+    # pipeline failed to group." Within the null group, order by
+    # (folder_id, filename) so consecutive frames from one shoot stay adjacent
+    # even without EXIF, letting _classify_pair's both-null branch keep them
+    # together.
+    return sorted(
+        photos,
+        key=lambda p: (
+            (0, _parse_timestamp(p.get("timestamp")), 0, "")
+            if _parse_timestamp(p.get("timestamp")) is not None
+            else (1, datetime.min, p.get("folder_id") or 0, p.get("filename") or "")
+        ),
+    )
+
+
+def _null_timestamp_pair_facts(photo_a, photo_b, ts_a, ts_b):
+    """Return ``(both_null, folder_changed, signal_less)`` for adjacent photos."""
+    both_null = ts_a is None and ts_b is None
+    folder_a = photo_a.get("folder_id")
+    folder_b = photo_b.get("folder_id")
+    # A folder change between two null-timestamp photos is a hard cut.
+    # The null sort key (1, datetime.min, folder_id, filename) places the
+    # last null of one folder adjacent to the first null of the next, and
+    # folder_id is NOT part of compute_s_enc — so without an explicit
+    # boundary cut, two undated photos from DIFFERENT shoots could merge
+    # whether they're unreadable (score ~0, force-grouped by file order)
+    # or signalful (visually similar embeddings/species sliding under the
+    # score cut). Treat distinct or missing folder_id as a boundary; only
+    # same, non-null folders are "unchanged". (Missing folder_id shouldn't
+    # happen in production scans — cutting there stays on the safe side.)
+    folder_changed = folder_a is None or folder_a != folder_b
+    # "Signal-less" = no timestamp AND no usable similarity signal on
+    # either side (no embeddings, no species). Unreadable files are
+    # signal-less; undated-but-readable photos (e.g. screenshots, which
+    # still get embeddings) are NOT — they must be judged on the score
+    # cut, not force-grouped by file order. Requires the same folder so
+    # contiguous nulls only group within a single shoot.
+    signal_less = (
+        both_null
+        and not folder_changed
+        and not (
+            _has_similarity_signal(photo_a)
+            or _has_similarity_signal(photo_b)
+        )
+    )
+    return both_null, folder_changed, signal_less
+
+
+def _classify_pair(photo_a, photo_b, ts_a, ts_b, dt, score, species_conflict, recent_scores, cfg):
+    """Decide whether the timeline cuts between two adjacent photos.
+
+    Returns ``(decision, cut, recent_scores)``; ``recent_scores`` is the
+    soft-cut sliding window to carry into the next pair.
+    """
+    bid_a = photo_a.get("burst_id")
+    bid_b = photo_b.get("burst_id")
+    decision = None
+    cut = False
+    both_null, folder_changed, signal_less = _null_timestamp_pair_facts(photo_a, photo_b, ts_a, ts_b)
+
+    if species_conflict is not None:
+        # A camera burst id is not allowed to conceal a confidently
+        # identified species change. Burst mode can span a subject switch,
+        # and the classifier evidence is the more relevant encounter
+        # boundary signal in that case.
+        cut = True
+        recent_scores = []
+        decision = "cut_species"
+    elif bid_a is not None and bid_b is not None and bid_a == bid_b:
+        decision = "burst_id_kept"
+        recent_scores.append(score)
+        if len(recent_scores) > 3:
+            recent_scores.pop(0)
+    elif signal_less:
+        # No time signal and no embeddings/species — every similarity
+        # score is ~0, so the score cut would split the whole null run
+        # into singletons. With no reliable basis to separate them, keep
+        # contiguous nulls together by file order.
+        decision = "kept_no_timestamp"
+        recent_scores = []
+    elif both_null and folder_changed:
+        # Both null but across a folder boundary — hard cut, regardless of
+        # similarity signal. dt is inf for both-null pairs, so the time cut
+        # below never fires for them; folder_id isn't in compute_s_enc
+        # either, so a signalful pair would otherwise slide under the score
+        # cut and merge two separate shoots. Cut here to keep them apart.
+        cut = True
+        recent_scores = []
+        decision = "cut_folder"
+    elif not both_null and dt > cfg["hard_cut_time"]:
+        # Time cut only applies when at least one side has a timestamp.
+        # Asymmetric pairs (one null, one real) give dt=inf and cut here,
+        # so the null cluster never absorbs a real photo. Both-null pairs
+        # in the SAME folder that reached this point DO have a similarity
+        # signal and fall through to the score cut below.
+        cut = True
+        recent_scores = []
+        decision = "cut_time"
+    elif score < cfg["hard_cut_score"]:
+        cut = True
+        recent_scores = []
+        decision = "cut_score"
+    else:
+        recent_scores.append(score)
+        if len(recent_scores) > 3:
+            recent_scores.pop(0)
+        if len(recent_scores) >= 3:
+            below = sum(1 for s in recent_scores if s < cfg["soft_cut_score"])
+            if below >= 2:
+                cut = True
+                recent_scores = []
+                decision = "cut_soft"
+        if decision is None:
+            if (
+                photo_a.get("isolated_species_context")
+                or photo_b.get("isolated_species_context")
+            ):
+                decision = "kept_species_continuity"
+            elif (
+                photo_a.get("subject_uncertain")
+                or photo_b.get("subject_uncertain")
+            ):
+                decision = "kept_weak_detection"
+            else:
+                decision = "kept"
+    return decision, cut, recent_scores
+
+
+def _cut_trace_entry(i, photo_a, photo_b, score, dt, decision, species_conflict, components, cfg):
+    """Build the trace entry describing the cut decision for pair ``i``."""
+    return {
+        "pair_index": i,
+        "photo_a_id": photo_a.get("id"),
+        "photo_b_id": photo_b.get("id"),
+        "photo_a_filename": photo_a.get("filename"),
+        "photo_b_filename": photo_b.get("filename"),
+        "score": float(score),
+        "dt_seconds": float(dt) if dt != float("inf") else None,
+        "decision": decision,
+        "species_conflict": (
+            {
+                "photo_a_species": species_conflict[0]["species"],
+                "photo_a_confidence": species_conflict[0]["confidence"],
+                "photo_a_margin": species_conflict[0]["margin"],
+                "photo_b_species": species_conflict[1]["species"],
+                "photo_b_confidence": species_conflict[1]["confidence"],
+                "photo_b_margin": species_conflict[1]["margin"],
+            }
+            if species_conflict is not None
+            else None
+        ),
+        "components": components,
+        "thresholds": {
+            "hard_cut_time": cfg["hard_cut_time"],
+            "hard_cut_score": cfg["hard_cut_score"],
+            "soft_cut_score": cfg["soft_cut_score"],
+            "species_hard_cut_confidence": cfg["species_hard_cut_confidence"],
+            "species_hard_cut_margin": cfg["species_hard_cut_margin"],
+            "weak_detection_confidence": cfg["weak_detection_confidence"],
+        },
+    }
+
+
+def _segments_from_cuts(sorted_photos, cuts):
+    """Split ``sorted_photos`` after each index in ``cuts``, dropping empties."""
     # Build segments from cut points
     segments = []
     start = 0
@@ -683,11 +746,7 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         segments.append(sorted_photos[start: i + 1])
         start = i + 1
     segments.append(sorted_photos[start:])
-    segments = [seg for seg in segments if seg]
-
-    if emit_trace:
-        return segments, trace
-    return segments
+    return [seg for seg in segments if seg]
 
 
 # -- Pass 2: Merge neighboring microsegments (Section 2.3) --

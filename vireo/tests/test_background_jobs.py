@@ -130,14 +130,14 @@ def test_thread_db_with_real_database(tmp_path):
     db_path = str(tmp_path / "t.db")
     request_db = Database(db_path)
     ws_id = request_db._active_workspace_id
-    request_db.conn.close()
+    request_db.close()
 
     ctx = JobLaunch(FakeRunner(), ws_id, db_path, Database)
     worker = ctx.thread_db()
     try:
         assert worker._ws_id() == ws_id
     finally:
-        worker.conn.close()
+        worker.close()
 
 
 def test_runner_is_looked_up_per_request():

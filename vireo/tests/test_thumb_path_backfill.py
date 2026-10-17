@@ -95,7 +95,7 @@ def test_startup_thumb_path_backfill_sets_unsynced_rows(tmp_path, monkeypatch):
     )
     # Pre-existing on-disk thumbnail (the legacy state).
     _make_jpeg(thumb_dir / f"{pid}.jpg")
-    db.conn.close()
+    db.close()
 
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="t")
     app._kickoff_thumb_path_backfill()
@@ -143,7 +143,7 @@ def test_startup_thumb_path_backfill_does_not_persist_to_history(tmp_path, monke
         width=200, height=150,
     )
     _make_jpeg(thumb_dir / f"{pid}.jpg")
-    db.conn.close()
+    db.close()
 
     app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="t")
     app._kickoff_thumb_path_backfill()

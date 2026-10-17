@@ -1159,7 +1159,7 @@ def _prepare_backfill_app(tmp_path, monkeypatch, filenames):
             file_mtime=os.path.getmtime(str(src)),
             width=2000, height=1500,
         ))
-    db.conn.close()
+    db.close()
 
     app = create_app(
         db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="t",
@@ -1331,7 +1331,7 @@ def test_backfill_skips_row_when_id_reused_during_pause(
         file_mtime=os.path.getmtime(replacement),
         width=1600, height=1200,
     )
-    admin_db.conn.close()
+    admin_db.close()
     assert new_id == stale_id, (
         f"test setup: expected id reuse (freed {stale_id}, got {new_id}); "
         "SQLite behavior may have changed"
@@ -1358,7 +1358,7 @@ def test_backfill_skips_row_when_id_reused_during_pause(
     wc_path = verify_db.conn.execute(
         "SELECT working_copy_path FROM photos WHERE id=?", (stale_id,),
     ).fetchone()["working_copy_path"]
-    verify_db.conn.close()
+    verify_db.close()
     assert wc_path is None, (
         f"replacement photo (id={stale_id}) received a working_copy_path "
         f"from the stale snapshot: {wc_path!r}"
@@ -1449,7 +1449,7 @@ def test_snapshot_revalidation_covers_relocation_repair_and_publish(
     db.conn.execute("DELETE FROM photos WHERE id=?", (photo_id,))
     db.conn.commit()
     assert _snapshot_row_still_current(db, row) is False
-    db.conn.close()
+    db.close()
 
 
 def test_backfill_discards_orphan_when_id_reused_during_extraction(
@@ -1532,7 +1532,7 @@ def test_backfill_discards_orphan_when_id_reused_during_extraction(
         file_mtime=os.path.getmtime(replacement),
         width=1600, height=1200,
     )
-    admin_db.conn.close()
+    admin_db.close()
     assert new_id == target_id, (
         f"test setup: expected id reuse (freed {target_id}, got {new_id})"
     )
@@ -1562,7 +1562,7 @@ def test_backfill_discards_orphan_when_id_reused_during_extraction(
     wc_path = verify_db.conn.execute(
         "SELECT working_copy_path FROM photos WHERE id=?", (target_id,),
     ).fetchone()["working_copy_path"]
-    verify_db.conn.close()
+    verify_db.close()
     assert wc_path is None, (
         f"replacement photo (id={target_id}) received a working_copy_path "
         f"from the stale snapshot: {wc_path!r}"
@@ -2625,7 +2625,7 @@ def test_extract_update_rejects_companion_swap_during_decode(
         (target_id,),
     )
     admin_db.conn.commit()
-    admin_db.conn.close()
+    admin_db.close()
 
     release_extract.set()
     job = _wait_for_backfill_terminal(app._job_runner)
@@ -2635,7 +2635,7 @@ def test_extract_update_rejects_companion_swap_during_decode(
     wc_path = verify_db.conn.execute(
         "SELECT working_copy_path FROM photos WHERE id=?", (target_id,),
     ).fetchone()["working_copy_path"]
-    verify_db.conn.close()
+    verify_db.close()
     assert wc_path is None, (
         "post-extraction UPDATE committed a working_copy_path onto a row "
         f"whose companion_path changed during extraction: {wc_path!r}"
@@ -2688,7 +2688,7 @@ def test_extract_update_rejects_folder_relocation_during_decode(
         (str(tmp_path / "relocated"), target_id),
     )
     admin_db.conn.commit()
-    admin_db.conn.close()
+    admin_db.close()
 
     release_extract.set()
     job = _wait_for_backfill_terminal(app._job_runner)
@@ -2699,7 +2699,7 @@ def test_extract_update_rejects_folder_relocation_during_decode(
         "SELECT working_copy_path, working_copy_failed_at"
         " FROM photos WHERE id=?", (target_id,),
     ).fetchone()
-    verify_db.conn.close()
+    verify_db.close()
     assert row["working_copy_path"] is None, (
         "post-extraction UPDATE committed a working_copy_path onto a row "
         f"whose folder path changed during extraction: {row['working_copy_path']!r}"
@@ -2792,7 +2792,7 @@ def test_orphan_cleanup_preserves_replacement_publishers_bytes(
         (wc_rel, target_id),
     )
     admin_db.conn.commit()
-    admin_db.conn.close()
+    admin_db.close()
 
     release_extract.set()
     job = _wait_for_backfill_terminal(app._job_runner)
@@ -2810,7 +2810,7 @@ def test_orphan_cleanup_preserves_replacement_publishers_bytes(
     wc_path = verify_db.conn.execute(
         "SELECT working_copy_path FROM photos WHERE id=?", (target_id,),
     ).fetchone()["working_copy_path"]
-    verify_db.conn.close()
+    verify_db.close()
     assert wc_path == wc_rel, (
         "replacement publisher's working_copy_path was cleared alongside "
         f"the unlink: {wc_path!r}"
@@ -2970,7 +2970,7 @@ def test_orphan_cleanup_preserves_racing_publisher_uncommitted_bytes(
 
     # Do NOT commit the racing publisher's ``working_copy_path`` — this
     # is the case where their UPDATE is still queued behind our guard.
-    admin_db.conn.close()
+    admin_db.close()
 
     release_after_race.set()
     job = _wait_for_backfill_terminal(app._job_runner)
@@ -3690,7 +3690,7 @@ def test_deferred_row_marker_guards_companion_and_folder_identity(
     )
     # Bring target_id last so it will be the one deferred (batch DESC-
     # processes the newer one first).
-    db.conn.close()
+    db.close()
 
     import scanner as _scanner_mod
 
@@ -3723,7 +3723,7 @@ def test_deferred_row_marker_guards_companion_and_folder_identity(
         (target_id,),
     )
     db2.conn.commit()
-    db2.conn.close()
+    db2.close()
 
     db3 = Database(str(vireo_dir / "test.db"))
     _extract_working_copies(db3, str(vireo_dir))
@@ -3732,7 +3732,7 @@ def test_deferred_row_marker_guards_companion_and_folder_identity(
         "SELECT working_copy_evicted_mtime, companion_path"
         " FROM photos WHERE id=?", (target_id,),
     ).fetchone()
-    db3.conn.close()
+    db3.close()
 
     assert row["companion_path"] == "sibling.jpg", (
         "test setup: companion swap did not stick"
@@ -3904,7 +3904,7 @@ def test_post_loop_trim_quota_refresh_covers_pre_existing_overshoot(
     batch_src = folder / "batch.jpg"
     _make_jpeg(str(batch_src), 2000, 1500)
     batch_id = _photo_id_of_file(db, folder_id, "batch.jpg", batch_src)
-    db.conn.close()
+    db.close()
 
     import scanner as _scanner_mod
 
@@ -3949,7 +3949,7 @@ def test_post_loop_trim_quota_refresh_covers_pre_existing_overshoot(
         "SELECT working_copy_evicted_mtime FROM photos WHERE id=?",
         (batch_id,),
     ).fetchone()
-    verify_db.conn.close()
+    verify_db.close()
     assert row["working_copy_evicted_mtime"] is None, (
         "trim stamped a capacity-deferred marker even though the "
         "raised quota accommodates the batch; the added capacity "
@@ -4004,7 +4004,7 @@ def test_post_loop_trim_quota_refresh_runs_under_publication_guard(
         imported_ids.append(
             _photo_id_of_file(db, folder_id, f"photo-{i:02d}.jpg", src)
         )
-    db.conn.close()
+    db.close()
 
     import scanner as _scanner_mod
 
@@ -4045,7 +4045,7 @@ def test_post_loop_trim_quota_refresh_runs_under_publication_guard(
 
     verify_db = Database(str(vireo_dir / "test.db"))
     _extract_working_copies(verify_db, str(vireo_dir))
-    verify_db.conn.close()
+    verify_db.close()
 
     assert lock_held_when_refreshed, (
         "expected the trim's ``_configured_quota_mb`` call to reach "
@@ -4107,7 +4107,7 @@ def test_post_loop_trim_usage_snapshot_under_publication_guard(
     src = folder / "photo.jpg"
     _make_jpeg(str(src), 2000, 1500)
     _photo_id_of_file(db, folder_id, "photo.jpg", src)
-    db.conn.close()
+    db.close()
 
     import scanner as _scanner_mod
 
@@ -4135,7 +4135,7 @@ def test_post_loop_trim_usage_snapshot_under_publication_guard(
 
     verify_db = Database(str(vireo_dir / "test.db"))
     _extract_working_copies(verify_db, str(vireo_dir))
-    verify_db.conn.close()
+    verify_db.close()
 
     assert stats_lock_states, (
         "expected the trim to call ``working_copy_stats`` for its "
@@ -4335,7 +4335,7 @@ def test_trim_deferred_marker_carries_snapshot_source_identity(
             _photo_id_of_file(db, folder_id, f"photo-{i:02d}.jpg", src)
         )
     lowest_id = min(imported_ids)
-    db.conn.close()
+    db.close()
 
     import scanner as _scanner_mod
 
@@ -4363,7 +4363,7 @@ def test_trim_deferred_marker_carries_snapshot_source_identity(
                 "WHERE id=?", (lowest_id,),
             )
             db_mid.conn.commit()
-            db_mid.conn.close()
+            db_mid.close()
         return result
 
     monkeypatch.setattr(_scanner_mod.os, "remove", remove_then_swap)
@@ -4375,7 +4375,7 @@ def test_trim_deferred_marker_carries_snapshot_source_identity(
         "SELECT working_copy_evicted_mtime, companion_path"
         " FROM photos WHERE id=?", (lowest_id,),
     ).fetchone()
-    verify_db.conn.close()
+    verify_db.close()
 
     assert row["companion_path"] == "sibling.jpg", (
         "test setup: companion swap did not stick"
@@ -4452,7 +4452,7 @@ def test_trim_revalidation_rejects_candidates_without_publisher_fingerprint(
         imported_ids.append(
             _photo_id_of_file(db, folder_id, f"photo-{i:02d}.jpg", src)
         )
-    db.conn.close()
+    db.close()
 
     import contextlib
 
@@ -4532,7 +4532,7 @@ def test_trim_revalidation_rejects_candidates_without_publisher_fingerprint(
         "SELECT working_copy_evicted_mtime FROM photos WHERE id=?",
         (target_id,),
     ).fetchone()
-    verify_db.conn.close()
+    verify_db.close()
 
     assert guard_calls["fired"], (
         "test setup: the guard wrapper never reached the trim's "
@@ -4638,7 +4638,7 @@ def test_success_update_rejects_stale_overwrite_before_commit(
         "SELECT working_copy_path FROM photos WHERE id=?",
         (target_id,),
     ).fetchone()
-    verify_db.conn.close()
+    verify_db.close()
 
     assert row is not None, "target row disappeared during the run"
     assert row["working_copy_path"] is None, (
@@ -4746,7 +4746,7 @@ def test_orphan_cleanup_unlinks_stale_bytes_over_replacement_row(
         (f"working/{new_id}.jpg", new_id),
     )
     admin_db.conn.commit()
-    admin_db.conn.close()
+    admin_db.close()
 
     wc_abs = vireo_dir / "working" / f"{target_id}.jpg"
 
@@ -4832,7 +4832,7 @@ def test_success_update_rejects_publication_with_none_fingerprint(
         "SELECT working_copy_path FROM photos WHERE id=?",
         (target_id,),
     ).fetchone()
-    verify_db.conn.close()
+    verify_db.close()
 
     assert row is not None, "target row disappeared during the run"
     assert row["working_copy_path"] is None, (
