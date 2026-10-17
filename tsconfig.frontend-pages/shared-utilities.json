@@ -17,6 +17,13 @@
     "../vireo/static/workspace-deletion.js",
     "../vireo/static/keymap.js",
     "../vireo/static/vireo-search.js",
-    "../tests/frontend/shared-type-contracts.ts"
+    "../tests/frontend/shared-type-contracts.ts",
+    "../vireo/static/map-container-size.js",
+    "../vireo/static/vireo-rsync-help.js",
+    "../vireo/static/vireo-workspace-switcher.js",
+    "../vireo/static/vireo-folder-browser.js",
+    "../vireo/static/vireo-export-collisions.js",
+    "../vireo/static/vireo-pending-archives.js",
+    "../vireo/static/vireo-color-labels.js"
   ]
 }

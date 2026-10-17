@@ -65,3 +65,69 @@ interface Window {
 }
 declare var VireoSearch: Window['VireoSearch'];
 declare const module: {exports: unknown} | undefined;
+
+interface WorkspaceSummary {id: number; name: string; pinned_at?: string | null;}
+interface WorkspaceSwitcherOptions {
+  window?: Window & typeof globalThis;
+  fetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
+  navigate(path: string): void;
+  clearWorkspaceCursors(): void;
+}
+interface WorkspaceSwitcher {
+  loadCurrentName(): Promise<void>;
+  toggle(): Promise<void> | undefined;
+  close(): void;
+  showCreate(): void;
+  hideCreate(): void;
+  createWorkspace(): Promise<void>;
+}
+interface Window {VireoWorkspaceSwitcher: {create(options: WorkspaceSwitcherOptions): WorkspaceSwitcher};}
+
+interface FolderBrowserModeBase {
+  title?: string | (() => string);
+  startPath?: string | (() => string);
+  showCounts?: boolean;
+  fileTypes?: string | string[] | (() => string | string[]);
+}
+type FolderBrowserMode = FolderBrowserModeBase & (
+  {multiple: true; onSelect?(paths: string[]): void} |
+  {multiple?: false; onSelect?(path: string): void}
+);
+interface FolderBrowserOptions {
+  overlayId: string; defaultMode?: string; modes: Record<string, FolderBrowserMode>;
+  onError?(message: string): void;
+}
+interface FolderBrowserDirectory {path: string; name?: string;}
+interface FolderBrowserListing {path: string; dirs: FolderBrowserDirectory[];}
+interface FolderBrowserCount {count: number; incomplete?: boolean; skipped?: boolean;}
+interface Window {VireoFolderBrowser: new(options: FolderBrowserOptions) => {
+  readonly sequence: number;
+  open(mode: string, options?: {skipInitialBrowse?: boolean}): void;
+  close(): void; browse(path: string | null): Promise<void>; confirm(): void;
+};}
+
+interface ExportPreflightRequest {photo_ids: number[]; destination: string;}
+interface ExportPreflightResult {
+  rename_count: number;
+  renames?: {requested_name: string; export_name: string}[];
+  destination_folders?: string[]; destination_folder_count?: number;
+  error?: string;
+}
+
+interface PendingArchive {
+  id: string | number; name: string; destination: string; collection_id?: number | null;
+  state: string; unsynced_photos?: number; unsynced_photos_other_workspaces?: number;
+  unsynced_photos_here_with_sibling_edits?: number; source_available?: boolean; error?: string;
+}
+interface Window {vireoPendingArchives?: PendingArchive[];}
+
+interface VireoColorLabelController {
+  ensureLoaded(): Promise<Record<string, unknown>>;
+  isValid(color: string): boolean;
+  description(color: string): string;
+  title(color: string, baseTitle?: string): string;
+  refreshControls(root?: ParentNode): void;
+  openEditor(color: string): Promise<void>;
+  closeEditor(): void; saveEditor(): Promise<void>;
+}
+interface Window {VireoColorLabels: VireoColorLabelController; closeContextMenu?(): void;}

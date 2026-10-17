@@ -88,7 +88,7 @@
   "vireo/static/vireo-dialog.js:create": 104,
   "vireo/static/vireo-filter.js:init": 101,
   "vireo/static/vireo-filter.js:installEvents": 398,
-  "vireo/static/vireo-pending-archives.js:refresh": 163,
-  "vireo/static/vireo-pending-archives.js:refresh.@call:[[\"member\",[\"member\",[\"identifier\",\"data\"],[\"property\",\"Identifier\",\"items\"],false],[\"property\",\"Identifier\",\"forEach\"],false],null]": 142,
+  "vireo/static/vireo-pending-archives.js:refresh": 135,
+  "vireo/static/vireo-pending-archives.js:refresh.@call:[[\"member\",[\"member\",[\"identifier\",\"data\"],[\"property\",\"Identifier\",\"items\"],false],[\"property\",\"Identifier\",\"forEach\"],false],null]": 113,
   "vireo/static/vireo-workspace-switcher.js:create": 225
 }
