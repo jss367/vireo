@@ -13573,6 +13573,90 @@ def test_api_browse_summary_accepts_rules(app_and_db):
     assert client.get('/api/browse/summary?rules=notjson').status_code == 400
 
 
+def _seed_browse_summary_analysis(db):
+    """bird1: two animal boxes, quality, eye and misses; bird2 (January):
+    quality only, plus a person box and a below-threshold animal box; bird3:
+    only the full-image placeholder row."""
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    box = {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}
+    db.save_detections(photos["bird1.jpg"], [
+        {"box": box, "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    db.save_detections(photos["bird2.jpg"], [
+        {"box": box, "confidence": 0.9, "category": "person"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.05, "category": "animal"},
+    ], detector_model="MDV6")
+    db.save_detections(photos["bird3.jpg"], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 1.0, "category": "animal"},
+    ], detector_model="full-image")
+    db.model_runs.record_detector_run(photos["bird1.jpg"], "MDV6", 2)
+    db.model_runs.record_detector_run(photos["bird2.jpg"], "MDV6", 2)
+    db.model_runs.record_detector_run(photos["bird3.jpg"], "full-image", 1)
+    db.conn.execute(
+        "UPDATE photos SET subject_tenengrad = 12.5, eye_tenengrad = 3.0, "
+        "miss_computed_at = '2026-10-17T00:00:00' WHERE id = ?",
+        (photos["bird1.jpg"],),
+    )
+    db.conn.execute(
+        "UPDATE photos SET subject_tenengrad = 8.0 WHERE id = ?",
+        (photos["bird2.jpg"],),
+    )
+    db.conn.commit()
+    return photos
+
+
+def test_api_browse_summary_reports_analysis_coverage(app_and_db):
+    """The summary says how many photos each analysis reached, so an empty
+    result is distinguishable from an analysis that never ran."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    data = client.get('/api/browse/summary').get_json()
+    assert data["filtered_total"] == 3
+    assert data["analysis"] == {
+        "with_detection": 0, "with_detection_run": 0, "with_quality": 0, "with_eye": 0, "with_misses": 0,
+    }
+
+    _seed_browse_summary_analysis(db)
+
+    data = client.get('/api/browse/summary').get_json()
+    assert data["filtered_total"] == 3
+    # bird1 counts once despite two boxes; bird2's person and 0.05 boxes
+    # and bird3's full-image row are not detections.
+    assert data["analysis"] == {
+        "with_detection": 1, "with_detection_run": 2, "with_quality": 2, "with_eye": 1, "with_misses": 1,
+    }
+
+
+def test_api_browse_summary_analysis_respects_folder_scope(app_and_db):
+    app, db = app_and_db
+    _seed_browse_summary_analysis(db)
+    jan = [f for f in db.get_folder_tree() if f['name'] == 'January'][0]
+    client = app.test_client()
+
+    data = client.get(f'/api/browse/summary?folder_id={jan["id"]}').get_json()
+    assert data["filtered_total"] == 1
+    assert data["analysis"] == {
+        "with_detection": 0, "with_detection_run": 1, "with_quality": 1, "with_eye": 0, "with_misses": 0,
+    }
+
+
+def test_api_browse_summary_analysis_honors_workspace_threshold(app_and_db):
+    """Lowering the workspace's detector_confidence counts bird2's 0.05 box
+    as a detection without rewriting any rows."""
+    app, db = app_and_db
+    _seed_browse_summary_analysis(db)
+    client = app.test_client()
+
+    assert client.get('/api/browse/summary').get_json()["analysis"]["with_detection"] == 1
+
+    db.workspaces.update(db._active_workspace_id,
+                         config_overrides={"detector_confidence": 0.01})
+
+    assert client.get('/api/browse/summary').get_json()["analysis"]["with_detection"] == 2
+
+
 def test_api_photos_calendar_accepts_rules(app_and_db):
     import json as _json
     app, _ = app_and_db
