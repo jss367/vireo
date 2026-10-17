@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/life-list.d.ts",
+    "../vireo/static/life-list/boot.js",
+    "../vireo/static/life-list/cards.js",
+    "../vireo/static/life-list/explorer-cards.js",
+    "../vireo/static/life-list/explorer-species.js",
+    "../vireo/static/life-list/explorer.js",
+    "../vireo/static/life-list/export.js",
+    "../vireo/static/life-list/filters.js",
+    "../vireo/static/life-list/lightbox.js",
+    "../vireo/static/life-list/list.js",
+    "../vireo/static/life-list/publish.js",
+    "../vireo/static/life-list/rank-view.js",
+    "../vireo/static/life-list/site-export.js",
+    "../vireo/static/life-list/sunburst.js",
+    "../vireo/static/life-list/tabs.js"
+  ]
+}

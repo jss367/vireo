@@ -15,7 +15,7 @@
 // untouched branch reads clearly faded and a complete branch fully saturated.
 // Clicking an arc drills in; clicking the center moves up one level.
 
-var explorerSunburstLineage = {};   // node id -> [{id,name,rank}] root→node lineage
+/** @type {Record<number,LifeCrumb[]>} */ var explorerSunburstLineage = {};   // node id -> [{id,name,rank}] root→node lineage
 
 // Resolve explorerPath against the materialized tree. Keeping this separate
 // from currentExplorerNodes makes the selected taxon's own rollup available to
@@ -25,7 +25,7 @@ function currentExplorerFocus() {
   var focus = null;
   var lineage = [];
   for (var i = 0; i < explorerPath.length; i++) {
-    var step = explorerPath[i];
+    const step = explorerPath[i]; if (!step) break;
     var match = nodes.find(function(n) { return n.id === step.id; });
     if (!match) break;
     focus = match;
@@ -35,7 +35,7 @@ function currentExplorerFocus() {
   return { node: focus, children: focus ? (focus.children || []) : nodes, lineage: lineage };
 }
 
-function explorerTreeDepth(nodes) {
+/** @param {LifeNode[]} nodes */ function explorerTreeDepth(nodes) {
   var depth = 0;
   (nodes || []).forEach(function(node) {
     depth = Math.max(depth, 1 + explorerTreeDepth(node.children || []));
@@ -45,13 +45,13 @@ function explorerTreeDepth(nodes) {
 
 // Convert a polar point (center + radius + angle in radians, 0 = top,
 // clockwise) to SVG x/y. Returns a string "x,y".
-function llPolar(cx, cy, r, a) {
+/** @param {number} cx @param {number} cy @param {number} r @param {number} a */ function llPolar(cx, cy, r, a) {
   return (cx + r * Math.sin(a)).toFixed(3) + ',' + (cy - r * Math.cos(a)).toFixed(3);
 }
 
 // SVG path for a single ring segment (annular sector) spanning [a0,a1] radians
 // between inner radius r0 and outer radius r1.
-function llArcPath(cx, cy, r0, r1, a0, a1) {
+/** @param {number} cx @param {number} cy @param {number} r0 @param {number} r1 @param {number} a0 @param {number} a1 @returns {string} */ function llArcPath(cx, cy, r0, r1, a0, a1) {
   // A single child spanning (near) a full 360° collapses to a degenerate arc
   // because start==end. Draw a full annulus (two stacked half-arcs) instead.
   if ((a1 - a0) >= 2 * Math.PI - 1e-6) {
@@ -73,7 +73,7 @@ function llArcPath(cx, cy, r0, r1, a0, a1) {
 // Accent fill at an opacity scaled by completeness. 0 found → a ghost track so
 // untouched branches read faded; 1.0 → full accent. Zero-total arcs (should not
 // happen below genus, but guard anyway) render as the plain track.
-function llArcFill(found, total) {
+/** @param {number} found @param {number} total */ function llArcFill(found, total) {
   if (!total || total <= 0) return { fill: 'var(--bg-tertiary)', op: 1 };
   var frac = Math.max(0, Math.min(1, found / total));
   if (frac <= 0) return { fill: 'var(--bg-tertiary)', op: 1 };
@@ -81,7 +81,7 @@ function llArcFill(found, total) {
 }
 
 function renderSunburst() {
-  var host = document.getElementById('explorerSunburst');
+  var host = /** @type {HTMLElement} */ (document.getElementById('explorerSunburst'));
   if (!host) return;
   var focus = currentExplorerFocus();
   var top = focus.children;
@@ -101,15 +101,15 @@ function renderSunburst() {
     rings.push(R_CENTER + ((R_OUTER - R_CENTER) * ringIndex / visibleDepth));
   }
 
-  var root = (explorerData && explorerData.root) || {};
+  /** @type {Partial<LifeTaxon>} */ var root = (explorerData && explorerData.root) || {};
   var rootLineage = focus.lineage;   // lineage entries accumulate as we recurse
-  var arcs = [];          // collected {path, fill, op, tip, lineage}
+  /** @type {{id:number;path:string;fill:string;op:number;name:string;sci:string;found:number;total:number}[]} */ var arcs = [];          // collected {path, fill, op, tip, lineage}
 
   var FULL = 2 * Math.PI;
 
   // Recurse a level, laying children out proportional to total_species within
   // [a0,a1]. The first visible level depends on the active selection.
-  function layout(list, a0, a1, depth, lineage) {
+  /** @param {LifeNode[]} list @param {number} a0 @param {number} a1 @param {number} depth @param {LifeCrumb[]} lineage */ function layout(list, a0, a1, depth, lineage) {
     if (depth >= visibleDepth || !list || !list.length) return;
     var span = a1 - a0;
     // Denominator = sum of this level's total_species; fall back to equal
@@ -129,7 +129,7 @@ function renderSunburst() {
       var shade = llArcFill(n.found_species || 0, n.total_species || 0);
       arcs.push({
         id: n.id,
-        path: llArcPath(cx, cy, rings[depth], rings[depth + 1], s, e),
+        path: llArcPath(cx, cy, rings[depth] || 0, rings[depth + 1] || 0, s, e),
         fill: shade.fill, op: shade.op,
         name: n.common_name || n.name,
         sci: (n.common_name && n.common_name !== n.name) ? n.name : '',
@@ -175,7 +175,7 @@ function renderSunburst() {
 
 // Shared floating tooltip element (one per document, reused).
 function llSunburstTooltip() {
-  var tip = document.getElementById('explorerSunburstTip');
+  var tip = /** @type {HTMLElement} */ (document.getElementById('explorerSunburstTip'));
   if (!tip) {
     tip = document.createElement('div');
     tip.id = 'explorerSunburstTip';
@@ -185,12 +185,12 @@ function llSunburstTooltip() {
   return tip;
 }
 
-function wireSunburst(host) {
-  var svg = host.querySelector('.ll-sb-svg');
+/** @param {HTMLElement} host */ function wireSunburst(host) {
+  var svg = host.querySelector(/** @type {'svg'} */ ('.ll-sb-svg'));
   if (!svg) return;
   var tip = llSunburstTooltip();
 
-  function showTip(el, ev) {
+  /** @param {Element} el @param {MouseEvent} ev */ function showTip(el, ev) {
     var name = el.getAttribute('data-name') || '';
     var sci = el.getAttribute('data-sci') || '';
     var found = el.getAttribute('data-found') || '0';
@@ -203,7 +203,7 @@ function wireSunburst(host) {
     tip.style.display = 'block';
     moveTip(ev);
   }
-  function moveTip(ev) {
+  /** @param {MouseEvent} ev */ function moveTip(ev) {
     // Offset from cursor; clamp to viewport so the tip never spills off-screen.
     var pad = 14, tw = tip.offsetWidth, th = tip.offsetHeight;
     var x = ev.clientX + pad, y = ev.clientY + pad;
@@ -215,6 +215,7 @@ function wireSunburst(host) {
   function hideTip() { tip.style.display = 'none'; }
 
   svg.addEventListener('mousemove', function(ev) {
+    if (!(ev.target instanceof Element)) return;
     var t = ev.target.closest('.ll-sb-arc, .ll-sb-center');
     if (t) { showTip(t, ev); } else { hideTip(); }
   });
@@ -222,6 +223,7 @@ function wireSunburst(host) {
 
   // Click an arc → drill via its precomputed lineage; click center → up one.
   svg.addEventListener('click', function(ev) {
+    if (!(ev.target instanceof Element)) return;
     var center = ev.target.closest('.ll-sb-center');
     if (center) {
       explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
@@ -232,7 +234,7 @@ function wireSunburst(host) {
     }
     var arc = ev.target.closest('.ll-sb-arc');
     if (!arc) return;
-    var id = parseInt(arc.getAttribute('data-id'), 10);
+    var id = parseInt(arc.getAttribute('data-id') || '', 10);
     var lineage = explorerSunburstLineage[id];
     if (!lineage) return;
     explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
@@ -240,7 +242,7 @@ function wireSunburst(host) {
     // Genus arcs: drilling to a genus loads its species leaf (matches card
     // behavior); anything above genus just sets the path and shows cards.
     var leaf = lineage[lineage.length - 1];
-    if (leaf.rank === 'genus') {
+    if (leaf?.rank === 'genus') {
       // Set path to the genus's parent chain, then load species (which pushes
       // the genus crumb itself), mirroring a card click on that genus.
       explorerPath = lineage.slice(0, -1);

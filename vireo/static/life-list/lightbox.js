@@ -6,7 +6,7 @@ function bindLifeListLightboxEvents() {
   // lightbox list. If navigation reaches the boundary first, the boundary
   // listener waits for that same request and advances as soon as it arrives.
   document.addEventListener('lightbox:photochanged', function(event) {
-    var entry = lifeListEntry(lifeListLightboxSpecies);
+    const entry = lifeListEntry(lifeListLightboxSpecies);
     if (!entry || !entry.has_more) return;
     var photoId = event && event.detail && event.detail.photoId;
     var index = (entry.photos || []).findIndex(function(photo) { return photo.id === photoId; });
@@ -16,14 +16,14 @@ function bindLifeListLightboxEvents() {
   document.addEventListener('lightbox:navigationboundary', function(event) {
     var detail = event && event.detail || {};
     if (detail.delta !== 1) return;
-    var entry = lifeListEntry(lifeListLightboxSpecies);
+    const entry = lifeListEntry(lifeListLightboxSpecies);
     if (!entry || !entry.has_more) return;
     var currentId = detail.photoId;
     loadMoreLifeListPhotos(entry).then(function() {
       if (window.vireoLightboxSession.requestedPhotoId() !== currentId) return;
       var index = entry.photos.findIndex(function(photo) { return photo.id === currentId; });
       var next = entry.photos[index + 1];
-      if (next && window.openLightbox) {
+      if (next && typeof window.openLightbox === 'function') {
         openLightbox(next.id, next.filename, entry.photos);
       }
     });
