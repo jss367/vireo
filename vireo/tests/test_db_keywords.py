@@ -506,13 +506,15 @@ def test_get_top_level_species_keyword_prefers_taxonomy_then_lowest_id(db):
     # non-taxonomy rows never match.
     row = db.get_top_level_species_keyword("ROBIN")
     assert (row["id"], row["name"]) == (general, "robin")
-    # The one taxonomy row filed in the tree stands in for the general row,
-    # as it does for add_keyword; a second one leaves the name ambiguous.
-    placed = _raw_kw(db, "Robin", _raw_kw(db, "Thrushes"), "taxonomy", 1)
+    # The one taxonomy row filed in the tree, linked to the species the name
+    # resolves to, stands in for the general row as it does for add_keyword;
+    # a second one leaves the name ambiguous.
+    _taxon(db, 3, "Turdus migratorius", "species", common_name="Robin")
+    placed = _raw_kw(db, "Robin", _raw_kw(db, "Thrushes"), "taxonomy", 1, taxon_id=3)
     row = db.get_top_level_species_keyword("robin")
     assert (row["id"], row["name"]) == (placed, "Robin")
     assert db.add_keyword("robin", is_species=True) == placed
-    _raw_kw(db, "Robin", _raw_kw(db, "Garden birds"), "taxonomy", 1)
+    _raw_kw(db, "Robin", _raw_kw(db, "Garden birds"), "taxonomy", 1, taxon_id=3)
     assert db.get_top_level_species_keyword("robin")["id"] == general
     _raw_kw(db, "Robin", None, "general")
     taxonomy = _raw_kw(db, "ROBIN", None, "taxonomy", 1)

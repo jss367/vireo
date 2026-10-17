@@ -1128,6 +1128,14 @@ class KeywordRepository:
         A name alone cannot reassign a genus or another species homonym.
         Unknown or conflicting identity stays for an explicit user choice.
         """
+        # Most top-level adds name nothing in the tree; skip the taxon
+        # lookup for them.
+        if self.conn.execute(
+            "SELECT 1 FROM keywords WHERE name = ? COLLATE NOCASE "
+            "AND parent_id IS NOT NULL AND type = 'taxonomy' LIMIT 1",
+            (name,),
+        ).fetchone() is None:
+            return None
         requested = self._lookup_taxon_id_for_keyword(name, species_only=True)
         if requested is None:
             return None
