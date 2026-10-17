@@ -130,8 +130,6 @@
   "tone.py:apply_adjustments": 152,
   "web/batch.py:create_batch_blueprint.api_batch_set_photo_location": 103,
   "web/card_cleanup.py:create_card_cleanup_blueprint.api_card_cleanup_delete": 101,
-  "web/collections.py:create_collections_blueprint.api_collection_photos": 117,
-  "web/collections.py:create_collections_blueprint.api_collections": 103,
   "web/duplicates.py:create_duplicates_blueprint.api_duplicates_delete_loser_files": 192,
   "web/job_launchers.py:create_job_launchers_blueprint.api_job_develop": 136,
   "web/job_launchers.py:create_job_launchers_blueprint.api_job_develop.work": 102,
