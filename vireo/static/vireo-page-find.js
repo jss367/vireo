@@ -5,16 +5,21 @@
 (function() {
   'use strict';
 
-  var panel = document.getElementById('pageFindPanel');
-  var panelHome = panel.parentNode;
+  var panel = /** @type {HTMLElement} */ (document.getElementById('pageFindPanel'));
+  var panelHome = /** @type {ParentNode} */ (panel.parentNode);
+  /** @type {HTMLDialogElement | null} */
   var ownerDialog = null;
-  var input = document.getElementById('pageFindInput');
-  var status = document.getElementById('pageFindStatus');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('pageFindInput'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('pageFindStatus'));
+  /** @type {Element[][]} */
   var marks = []; // One group of highlight fragments per logical match.
   var activeIndex = -1;
+  /** @type {Element | null} */
   var previousFocus = null;
+  /** @type {number | null} */
   var escToken = null;
-  var refreshTimer = null;
+  /** @type {number | undefined} */
+  var refreshTimer = undefined;
   var observer = new MutationObserver(function(records) {
     if (records.every(function(record) { return panel.contains(record.target); })) return;
     clearTimeout(refreshTimer);
@@ -32,12 +37,13 @@
 
   function clearMarks() {
     observer.disconnect();
+    /** @type {Set<Node>} */
     var parents = new Set();
     marks.forEach(function(group) {
       group.forEach(function(mark) {
         var parent = mark.parentNode;
         if (!parent) return;
-        parent.replaceChild(document.createTextNode(mark.textContent), mark);
+        parent.replaceChild(document.createTextNode(mark.textContent || ''), mark);
         parents.add(parent);
       });
     });
@@ -45,20 +51,23 @@
     marks = [];
   }
 
+  /** @param {Element} el @param {WeakMap<Element, CSSStyleDeclaration>} cache @returns {CSSStyleDeclaration} */
   function computedStyle(el, cache) {
-    if (!cache.has(el)) cache.set(el, window.getComputedStyle(el));
-    return cache.get(el);
+    var style = cache.get(el);
+    if (!style) { style = window.getComputedStyle(el); cache.set(el, style); }
+    return style;
   }
 
+  /** @param {Node} node @param {WeakMap<Element, CSSStyleDeclaration>} styles */
   function visibleForFind(node, styles) {
-    var el = node.nodeType === 3 ? node.parentElement : node;
+    var el = node instanceof Element ? node : node.parentElement;
     if (!el) return false;
     if (el.closest('#pageFindPanel, script, style, noscript, textarea, input, select, [contenteditable], svg title, svg desc')) return false;
-    for (var current = el; current; current = current.parentElement) {
-      if (current.hidden || current.getAttribute('aria-hidden') === 'true') return false;
-      if (current.tagName === 'DETAILS' && !current.open &&
+    for (var current = /** @type {Element | null} */ (el); current; current = current.parentElement) {
+      if ((current instanceof HTMLElement && current.hidden) || current.getAttribute('aria-hidden') === 'true') return false;
+      if (current instanceof HTMLDetailsElement && !current.open &&
           (current !== el || node.nodeType === 3)) {
-        var summary = current.querySelector(':scope > summary');
+        var summary = /** @type {HTMLElement | null} */ (current.querySelector(':scope > summary'));
         if (!summary || !summary.contains(el)) return false;
       }
       var style = computedStyle(current, styles);
@@ -73,12 +82,16 @@
     return el.getClientRects().length > 0;
   }
 
+  /** @returns {FindTextRun[]} */
   function collectTextRuns() {
     var styles = new WeakMap();
+    /** @type {FindTextRun[]} */
     var runs = [];
+    /** @type {FindTextRun | null} */
     var run = null;
+    /** @param {Node} node */
     function collect(node) {
-      if (node.nodeType === 3) {
+      if (node instanceof Text) {
         if (!node.nodeValue) return;
         if (!visibleForFind(node, styles)) { run = null; return; }
         if (!run) {
@@ -89,14 +102,14 @@
         run.text += node.nodeValue;
         return;
       }
-      if (node.nodeType !== 1) return;
+      if (!(node instanceof Element)) return;
       var display = computedStyle(node, styles).display;
       // Inline formatting stays together. Blocks, line breaks, replaced
       // controls/images, and independent SVG labels delimit text runs.
       var boundary = (display !== 'inline' && display !== 'contents') ||
         /^(BR|IMG|HR|INPUT|SELECT|TEXTAREA|IFRAME|VIDEO|AUDIO|CANVAS|TEXT|TEXTPATH)$/.test(node.tagName.toUpperCase());
       if (boundary) run = null;
-      Array.prototype.forEach.call(node.childNodes, collect);
+      node.childNodes.forEach(collect);
       if (boundary) run = null;
     }
     // A modal's backdrop obscures the rest of the page.
@@ -106,10 +119,11 @@
 
   function updateStatus() {
     status.textContent = marks.length ? (activeIndex + 1) + ' of ' + marks.length : '0 results';
-    document.getElementById('pageFindPrevious').disabled = !marks.length;
-    document.getElementById('pageFindNext').disabled = !marks.length;
+    /** @type {HTMLButtonElement} */ (document.getElementById('pageFindPrevious')).disabled = !marks.length;
+    /** @type {HTMLButtonElement} */ (document.getElementById('pageFindNext')).disabled = !marks.length;
   }
 
+  /** @param {number} index @param {boolean} scroll */
   function activate(index, scroll) {
     observer.disconnect();
     marks.forEach(function(group) {
@@ -118,13 +132,15 @@
     activeIndex = marks.length ? ((index % marks.length) + marks.length) % marks.length : -1;
     if (activeIndex >= 0) {
       var active = marks[activeIndex];
+      if (!active) return;
       active.forEach(function(mark) { mark.classList.add('active'); });
-      if (scroll) active[0].scrollIntoView({block: 'center', inline: 'nearest'});
+      if (scroll && active[0]) active[0].scrollIntoView({block: 'center', inline: 'nearest'});
     }
     updateStatus();
     observe();
   }
 
+  /** @param {boolean} scroll */
   function refresh(scroll) {
     clearTimeout(refreshTimer);
     clearMarks();
@@ -140,22 +156,26 @@
       return word.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&');
     }).join('\\s+');
     var matcher = new RegExp(pattern, 'giu');
+    /** @type {Map<Text, FindTextSegment[]>} */
     var segmentsByNode = new Map();
     collectTextRuns().forEach(function(run) {
       matcher.lastIndex = 0;
       var partIndex = 0;
       var match;
       while ((match = matcher.exec(run.text)) !== null) {
+        /** @type {Element[]} */
         var group = [];
         marks.push(group);
         var start = match.index;
         var end = start + match[0].length;
-        while (partIndex < run.parts.length && run.parts[partIndex].end <= start) partIndex++;
-        for (var i = partIndex; i < run.parts.length && run.parts[i].start < end; i++) {
+        while ((run.parts[partIndex]?.end ?? Infinity) <= start) partIndex++;
+        for (var i = partIndex; i < run.parts.length; i++) {
           var part = run.parts[i];
+          if (!part || part.start >= end) break;
           if (part.end <= start) continue;
-          if (!segmentsByNode.has(part.node)) segmentsByNode.set(part.node, []);
-          segmentsByNode.get(part.node).push({
+          var segments = segmentsByNode.get(part.node);
+          if (!segments) { segments = []; segmentsByNode.set(part.node, segments); }
+          segments.push({
             start: Math.max(start, part.start) - part.start,
             end: Math.min(end, part.end) - part.start,
             group: group
@@ -164,12 +184,14 @@
       }
     });
     segmentsByNode.forEach(function(segments, node) {
-      var text = node.nodeValue;
+      var text = node.data;
+      var parent = node.parentNode;
+      if (!parent) return;
       var fragment = document.createDocumentFragment();
       var pos = 0;
       segments.forEach(function(segment) {
         fragment.appendChild(document.createTextNode(text.slice(pos, segment.start)));
-        var mark = node.parentElement.namespaceURI === 'http://www.w3.org/2000/svg'
+        var mark = node.parentElement?.namespaceURI === 'http://www.w3.org/2000/svg'
           ? document.createElementNS('http://www.w3.org/2000/svg', 'tspan')
           : document.createElement('mark');
         mark.setAttribute('class', 'page-find-mark');
@@ -179,7 +201,7 @@
         pos = segment.end;
       });
       fragment.appendChild(document.createTextNode(text.slice(pos)));
-      node.parentNode.replaceChild(fragment, node);
+      parent.replaceChild(fragment, node);
     });
     activate(Math.max(0, Math.min(activeIndex, marks.length - 1)), scroll);
   }
@@ -195,7 +217,7 @@
     activeIndex = -1;
     if (escToken !== null) window.Keymap.popEsc(escToken);
     escToken = null;
-    if (previousFocus && previousFocus.isConnected) previousFocus.focus({preventScroll: true});
+    if (previousFocus && previousFocus.isConnected && 'focus' in previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus({preventScroll: true});
   }
 
   function open() {
@@ -203,12 +225,12 @@
       window.Keymap.captureNativeShortcut('ctrl+f');
       return;
     }
-    var modal = document.querySelector('dialog:modal');
+    var modal = /** @type {HTMLDialogElement | null} */ (document.querySelector('dialog:modal'));
     if (!modal && typeof window.openSettingsFind === 'function') {
       window.openSettingsFind();
       return;
     }
-    var filterInput = document.querySelector('.vf-search input');
+    var filterInput = /** @type {HTMLInputElement | null} */ (document.querySelector('.vf-search input'));
     if (!modal && filterInput && filterInput.getClientRects().length) {
       filterInput.focus();
       filterInput.select();
@@ -232,6 +254,7 @@
     refresh(true);
   }
 
+  /** @param {number} delta */
   function move(delta) { activate(activeIndex + delta, true); }
 
   document.addEventListener('close', function(e) {
@@ -248,9 +271,9 @@
   input.addEventListener('keydown', function(e) {
     if (e.key === 'Enter') { e.preventDefault(); move(e.shiftKey ? -1 : 1); }
   });
-  document.getElementById('pageFindPrevious').addEventListener('click', function() { move(-1); });
-  document.getElementById('pageFindNext').addEventListener('click', function() { move(1); });
-  document.getElementById('pageFindClose').addEventListener('click', close);
+  /** @type {HTMLButtonElement} */ (document.getElementById('pageFindPrevious')).addEventListener('click', function() { move(-1); });
+  /** @type {HTMLButtonElement} */ (document.getElementById('pageFindNext')).addEventListener('click', function() { move(1); });
+  /** @type {HTMLButtonElement} */ (document.getElementById('pageFindClose')).addEventListener('click', close);
   document.addEventListener('keydown', function(e) {
     if (!window.__TAURI_INTERNALS__) return;
     if (window.Keymap.isDispatchPaused()) return;

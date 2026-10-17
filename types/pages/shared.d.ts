@@ -131,3 +131,46 @@ interface VireoColorLabelController {
   closeEditor(): void; saveEditor(): Promise<void>;
 }
 interface Window {VireoColorLabels: VireoColorLabelController; closeContextMenu?(): void;}
+
+type ComparePane = 'A' | 'B';
+interface ComparePhoto {
+  id: number; filename?: string; width?: number; height?: number;
+  timestamp?: string; rating?: number; sharpness?: number; flag?: string;
+}
+interface ComparePointer {
+  pointerId: number; prefix: ComparePane; startX: number; startY: number;
+  panX: number; panY: number;
+}
+interface CompareOptions {
+  window?: Pick<Window & typeof globalThis, 'document' | 'Image' | 'addEventListener' | 'removeEventListener' | 'Keymap'>;
+  keymap?: Pick<VireoKeymap, 'pushEsc' | 'popEsc' | 'lockBodyScroll' | 'unlockBodyScroll'>;
+  syncZoom?: boolean;
+  findPhoto(id: number): ComparePhoto | null | undefined;
+  fetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
+  showToast(message: string, type?: string): void;
+}
+interface CompareController {
+  open(ids: number[]): Promise<void> | undefined;
+  close(event?: Event): void; isOpen(): boolean;
+  step(delta: number): Promise<void> | undefined;
+  resetViews(): void; destroy(): void;
+}
+interface Window {VireoBrowseCompare: {create(options: CompareOptions): CompareController};}
+
+interface FindTextRun {text: string; parts: {node: Text; start: number; end: number}[];}
+interface FindTextSegment {start: number; end: number; group: Element[];}
+interface Window {openSettingsFind?(): void; handleNativeMenuCommand?(command: string): unknown;}
+
+interface PanoramaDone {
+  result?: {path: string; width: number; height: number}; status?: string; errors?: string[];
+}
+interface ReleaseScope {all_cached?: boolean; photo_ids?: number[]; folder_id?: number;}
+interface ReleaseResult {
+  released?: number; bytes?: number; kept?: number; not_cached?: number; failed?: number;
+  total: number; processed: number; kept_reasons?: string[];
+}
+interface Window {
+  _vireoNativeMenuPhotoIdsOverride?: number[] | null;
+  VireoReleaseOriginals: {release(scope: ReleaseScope, description: string): Promise<void>;
+    storageButton(): string; isRunning(): boolean};
+}

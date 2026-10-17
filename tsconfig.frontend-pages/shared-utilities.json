@@ -24,6 +24,11 @@
     "../vireo/static/vireo-folder-browser.js",
     "../vireo/static/vireo-export-collisions.js",
     "../vireo/static/vireo-pending-archives.js",
-    "../vireo/static/vireo-color-labels.js"
+    "../vireo/static/vireo-color-labels.js",
+    "../vireo/static/tauri-bridge.js",
+    "../vireo/static/vireo-browse-compare.js",
+    "../vireo/static/vireo-page-find.js",
+    "../vireo/static/vireo-panorama.js",
+    "../vireo/static/vireo-release-originals.js"
   ]
 }
