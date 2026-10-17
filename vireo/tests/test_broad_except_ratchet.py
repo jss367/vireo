@@ -16,10 +16,9 @@ Two rules hold that line:
   ``json.JSONDecodeError``, ...). Removing one fails until its entry is
   lowered, so the cleanup cannot be quietly undone; run
   ``python vireo/tests/test_broad_except_ratchet.py --write-baseline``. The
-  writer refuses to raise an entry. It accepts a new module's entry only
-  when the tree's total does not grow, so handlers moved with their code
-  (a module split into a package) keep their count without opening room
-  for new ones.
+  writer refuses to raise an entry. It refuses every new module entry after bootstrap: numeric totals cannot
+  prove that a handler moved. A genuine move/split requires a reviewed
+  baseline-key migration by hand, preserving or reducing each moved budget.
 - Under ``DOCUMENTED_ROOTS``, every broad handler must account for what it
   catches: re-raise (a cleanup or rollback guard), log with the traceback
   (``log.exception(...)`` or a log call passing ``exc_info``), or carry a
@@ -33,6 +32,8 @@ Two rules hold that line:
 import ast
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,6 +51,7 @@ SKIPPED_DIRS = {"tests", "testing"}
 DOCUMENTED_ROOTS: tuple[str, ...] = ()
 
 BROAD_NAMES = {"Exception", "BaseException"}
+LOGGER_NAMES = {"log", "logger", "logging", "_log", "_logger", "LOG"}
 LOG_METHODS = {"debug", "info", "warning", "warn", "error", "critical", "exception", "log"}
 REASON_COMMENT = re.compile(r"#\s*broad:\s*\S")
 
@@ -66,26 +68,88 @@ def _is_broad_type(node) -> bool:
     return False
 
 
-def _is_broad_suppress(node) -> bool:
-    """``suppress(Exception)`` / ``contextlib.suppress(..., BaseException)``."""
+def _scope_bindings(body, inherited, args=None):
+    """Bounded import resolution; assignments/parameters shadow imported aliases.
+
+    No value-flow or dynamic import analysis. A rebound name is excluded even
+    if a later import might restore it. Class scopes do not leak into methods.
+    """
+    bindings = dict(inherited)
+    def bind(node):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bindings[node.name] = None
+            return
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings[alias.asname or alias.name.split(".")[0]] = (
+                    "contextlib" if alias.name == "contextlib" else None
+                )
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = (
+                    "suppress" if node.level == 0 and node.module == "contextlib" and alias.name == "suppress" else None
+                )
+        for child in ast.iter_child_nodes(node):
+            bind(child)
+    for node in body:
+        bind(node)
+    # Conservatively invalidate assignments, regardless of statement ordering.
+    for node in _own_nodes(body):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bindings[node.id] = None
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bindings[node.name] = None
+    if args is not None:
+        for arg in args.posonlyargs + args.args + args.kwonlyargs:
+            bindings[arg.arg] = None
+        for arg in (args.vararg, args.kwarg):
+            if arg is not None:
+                bindings[arg.arg] = None
+    return bindings
+
+
+def _is_broad_suppress(node, bindings) -> bool:
+    """Only contextlib.suppress and explicit, unshadowed import aliases."""
     if not isinstance(node, ast.Call):
         return False
     func = node.func
-    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-    return name == "suppress" and any(_is_broad_type(arg) for arg in node.args)
+    resolved = (
+        isinstance(func, ast.Name) and bindings.get(func.id) == "suppress"
+        or isinstance(func, ast.Attribute) and func.attr == "suppress"
+        and isinstance(func.value, ast.Name) and bindings.get(func.value.id) == "contextlib"
+    )
+    return bool(resolved) and any(_is_broad_type(arg) for arg in node.args)
 
 
 def broad_handlers(tree):
-    """Every broad handler in ``tree``: ``("except", handler)`` or ``("suppress", with)``."""
+    """Direct broad except types and syntactically resolved contextlib suppress.
+
+    Canonical contextlib is recognized without an import in AST snippets.
+    Other aliases require explicit imports; local definitions/parameters and
+    assignments shadow them. Exception-type aliases remain outside scope.
+    """
     found = []
-    for node in ast.walk(tree):
+    def visit(node, bindings, lexical):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            local = _scope_bindings(node.body, lexical, node.args)
+            for child in node.body:
+                visit(child, local, local)
+            return
+        if isinstance(node, ast.ClassDef):
+            local = _scope_bindings(node.body, bindings)
+            for child in node.body:
+                visit(child, local, lexical)
+            return
         if isinstance(node, ast.ExceptHandler) and _is_broad_type(node.type):
             found.append(("except", node))
         elif isinstance(node, (ast.With, ast.AsyncWith)):
-            found.extend(
-                ("suppress", node) for item in node.items
-                if _is_broad_suppress(item.context_expr)
-            )
+            found.extend(("suppress", node) for item in node.items
+                         if _is_broad_suppress(item.context_expr, bindings))
+        for child in ast.iter_child_nodes(node):
+            visit(child, bindings, lexical)
+    bindings = _scope_bindings(tree.body, {"contextlib": "contextlib"})
+    for child in tree.body:
+        visit(child, bindings, bindings)
     return found
 
 
@@ -101,21 +165,28 @@ def _own_nodes(statements):
         )
 
 
-def _receiver_name(node) -> str:
+def _logger_receiver(node) -> bool:
+    """Known logger naming conventions and logging.getLogger expressions only.
+
+    This is a syntax policy, not proof of an object's runtime type. In
+    particular catalog.error/dialog.error and arbitrary factories do not count.
+    """
     if isinstance(node, ast.Name):
-        return node.id
+        return node.id in LOGGER_NAMES
     if isinstance(node, ast.Attribute):
-        return node.attr
-    if isinstance(node, ast.Call):  # logging.getLogger(__name__).exception(...)
-        return _receiver_name(node.func)
-    return ""
+        return node.attr in LOGGER_NAMES - {"logging"}
+    if isinstance(node, ast.Call):
+        func = node.func
+        return (isinstance(func, ast.Attribute) and func.attr == "getLogger"
+                and isinstance(func.value, ast.Name) and func.value.id == "logging")
+    return False
 
 
 def _logs_traceback(call) -> bool:
     func = call.func
     if not isinstance(func, ast.Attribute) or func.attr not in LOG_METHODS:
         return False
-    if "log" not in _receiver_name(func.value).lower():
+    if not _logger_receiver(func.value):
         return False
     if func.attr == "exception":
         return True
@@ -247,8 +318,15 @@ def test_documented_roots_exist():
     ("try:\n    f()\nexcept OSError:\n    pass\n", 0),
     ("try:\n    f()\nexcept (OSError, ValueError):\n    pass\n", 0),
     ("with contextlib.suppress(Exception):\n    f()\n", 1),
-    ("with suppress(OSError, BaseException), open(p):\n    f()\n", 1),
+    ("from contextlib import suppress\nwith suppress(OSError, BaseException), open(p):\n    f()\n", 1),
     ("with contextlib.suppress(OSError):\n    f()\n", 0),
+    ("import contextlib as ctx\nwith ctx.suppress(Exception): pass\n", 1),
+    ("from contextlib import suppress as quiet\nwith quiet(BaseException): pass\n", 1),
+    ("def suppress(*args): pass\nwith suppress(Exception): pass\n", 0),
+    ("from other import suppress\nwith suppress(Exception): pass\n", 0),
+    ("from contextlib import suppress\ndef f(suppress):\n    with suppress(Exception): pass\n", 0),
+    ("import contextlib as ctx\ndef f():\n    ctx = unrelated\n    with ctx.suppress(Exception): pass\n", 0),
+    ("def f():\n    from contextlib import suppress as quiet\n    with quiet(Exception): pass\n", 1),
 ])
 def test_broad_handler_detection(source, count):
     assert len(broad_handlers(ast.parse(source))) == count
@@ -276,6 +354,9 @@ def test_broad_handler_detection(source, count):
     ("with contextlib.suppress(Exception):\n    f()\n", False),
     ("# broad: probe only\nwith contextlib.suppress(Exception):\n    f()\n", True),
     ("with contextlib.suppress(Exception):  # broad: probe only\n    f()\n", True),
+    ("try:\n    f()\nexcept Exception:\n    catalog.error('x', exc_info=True)\n", False),
+    ("try:\n    f()\nexcept Exception:\n    dialog.exception('x')\n", False),
+    ("try:\n    f()\nexcept Exception:\n    factory.getLogger().exception('x')\n", False),
 ])
 def test_accounted_for(source, accounted):
     tree = ast.parse(source)
@@ -283,12 +364,30 @@ def test_accounted_for(source, accounted):
     assert is_accounted_for(kind, node, source.splitlines()) is accounted
 
 
+def test_cli_refuses_unproved_transfer_even_when_total_is_unchanged(tmp_path):
+    fixture = tmp_path / "vireo"
+    tests = fixture / "tests"
+    tests.mkdir(parents=True)
+    script = tests / Path(__file__).name
+    shutil.copyfile(__file__, script)
+    baseline = tests / "broad_except_baseline.json"
+    baseline.write_text(json.dumps({"old.py": 1}), encoding="utf-8")
+    (fixture / "old.py").write_text("pass\n", encoding="utf-8")
+    (fixture / "unrelated.py").write_text(
+        "try:\n    other_operation()\nexcept BaseException:\n    pass\n", encoding="utf-8",
+    )
+    previous = baseline.read_bytes()
+    result = subprocess.run([sys.executable, str(script), "--write-baseline"], capture_output=True)
+    assert result.returncode == 1 and baseline.read_bytes() == previous
+    assert b"totals cannot prove a move" in result.stdout
+
+
 def write_baseline() -> int:
     """Rewrite the baseline from the tree; refuse to raise any entry.
 
-    A module missing from the baseline is admitted only when the tree's
-    total does not grow, which is what a move between modules looks like.
-    With no baseline file yet, every module is written.
+    A new module requires a reviewed manual baseline-key migration, since
+    matching numeric totals alone do not prove that code moved. With no
+    baseline file yet, every module is written for initial bootstrap.
     """
     current = broad_counts()
     bootstrapping = not BASELINE_PATH.exists()
@@ -303,11 +402,10 @@ def write_baseline() -> int:
             print(f"  {name}: {old} -> {new}")
         return 1
     new = {name: count for name, count in sorted(current.items()) if name not in previous}
-    if new and not bootstrapping and sum(current.values()) > sum(previous.values()):
+    if new and not bootstrapping:
         print(
-            "Refusing to add entries for modules that were not in the baseline "
-            "while the tree's total grew "
-            f"({sum(previous.values())} -> {sum(current.values())}); narrow these handlers:"
+            "Refusing to add entries for new modules; totals cannot prove a move. "
+            "Narrow new handlers, or manually migrate baseline keys for a reviewed move/split."
         )
         for name, count in new.items():
             print(f"  {name}: {count}")
