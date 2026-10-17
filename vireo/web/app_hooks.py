@@ -100,6 +100,260 @@ def claim_search_lane(db):
     search_lanes.cancel_when_superseded(db, superseded)
 
 
+def _start_timer():
+    request._start_time = time.time()
+    supplied_request_id = request.headers.get("X-Request-ID", "")
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", supplied_request_id):
+        g.request_id = supplied_request_id
+    else:
+        g.request_id = uuid.uuid4().hex
+
+
+def _browser_surface_refusal(config):
+    """The refusal for a request on the browser surface, or ``None``.
+
+    The check behind ``_protect_browser_surface`` (see there), reading
+    ``app.config`` as ``config``.
+    """
+    if not config["BROWSER_AUTH_ENABLED"]:
+        return None
+
+    path = request.path
+    if path.startswith("/api/v1/") or path in {
+        "/api/health",
+        "/api/shutdown",
+    }:
+        return None
+
+    protected = (
+        path.startswith("/api/")
+        or path.startswith("/photos/")
+        or path.startswith("/thumbnails/")
+        or path.startswith("/masks/")
+    )
+    if not protected:
+        return None
+
+    # Native desktop clients cannot use the HttpOnly browser cookie.
+    # They authenticate with the same per-runtime secret as /api/v1.
+    expected_api_token = config.get("API_TOKEN")
+    supplied_api_token = request.headers.get("X-Vireo-Token", "")
+    if (
+        expected_api_token
+        and supplied_api_token
+        and secrets.compare_digest(
+            supplied_api_token.encode("utf-8"),
+            expected_api_token.encode("utf-8"),
+        )
+    ):
+        return None
+
+    fetch_site = request.headers.get("Sec-Fetch-Site", "").lower()
+    if fetch_site and fetch_site not in {"same-origin", "none"}:
+        return json_error(
+            "Non-origin requests are not allowed",
+            403,
+            code="cross_site_request",
+        )
+
+    origin = request.headers.get("Origin")
+    if origin:
+        parsed = urlsplit(origin)
+        expected = urlsplit(request.host_url)
+        if (parsed.scheme, parsed.netloc) != (expected.scheme, expected.netloc):
+            return json_error(
+                "Cross-origin requests are not allowed",
+                403,
+                code="cross_origin_request",
+            )
+
+    cookie_name = config["BROWSER_SESSION_COOKIE"]
+    expected_token = config["BROWSER_SESSION_TOKEN"]
+    if not secrets.compare_digest(
+        request.cookies.get(cookie_name, "").encode("utf-8"),
+        expected_token.encode("utf-8"),
+    ):
+        return json_error(
+            "Browser session required",
+            401,
+            code="browser_session_required",
+        )
+
+    if (
+        request.method not in {"GET", "HEAD", "OPTIONS"}
+        and request.headers.get("X-Vireo-Client") != "browser"
+    ):
+        return json_error(
+            "Missing browser request header",
+            403,
+            code="browser_header_required",
+        )
+    return None
+
+
+def _action_log_detail():
+    """The `` key=value`` suffix the action log adds for a POST/DELETE."""
+    # Log user actions with details about what changed
+    detail = ""
+    path = request.path
+    if path in ("/api/capture-time/preview", "/api/jobs/capture-time"):
+        body = {}
+    else:
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            # Valid non-object JSON (5, "x", [..]) — the
+            # .get() calls below would 500 the response of
+            # any endpoint after it already ran.
+            body = {}
+    if "/rating" in path:
+        detail = f" rating={body.get('rating')}"
+    elif "/flag" in path:
+        detail = f" flag={body.get('flag')}"
+    elif "/keywords" in path and request.method == "POST":
+        detail = f" keyword={body.get('name')}"
+    elif "/accept" in path:
+        detail = " (accept prediction)"
+    elif "/reject" in path:
+        detail = " (reject prediction)"
+    elif "batch" in path:
+        # The view already ran (and may have committed), so a
+        # malformed ``photo_ids`` must not turn its response
+        # into a 500 here.
+        ids = body.get("photo_ids")
+        if isinstance(ids, list):
+            detail = f" ({len(ids)} photos)"
+    elif "/classify" in path:
+        detail = f" collection={body.get('collection_id')}"
+    elif "/scan" in path:
+        detail = f" root={body.get('root', '')}"
+    return detail
+
+
+def _log_request_timing(response):
+    """Log the action, slow-request and API lines for the finished request."""
+    if hasattr(request, "_start_time"):
+        elapsed = time.time() - request._start_time
+        if request.method in ("POST", "DELETE"):
+            detail = _action_log_detail()
+            log.info(
+                "Action: %s %s → %s (%.1fs)%s request_id=%s",
+                request.method,
+                request.path,
+                response.status_code,
+                elapsed,
+                detail,
+                getattr(g, "request_id", "-"),
+            )
+        elif elapsed > 0.5 and not getattr(g, "search_superseded_response", False):
+            # A superseded read was interrupted on purpose; its elapsed
+            # time is how long the page waited before the next keystroke,
+            # not a real slow request.
+            log.warning(
+                "Slow request: %s %s took %.1fs request_id=%s",
+                request.method,
+                request.path,
+                elapsed,
+                getattr(g, "request_id", "-"),
+            )
+        if request.path.startswith("/api/"):
+            _quiet = request.method == "GET" and request.path == "/api/jobs"
+            (log.debug if _quiet else log.info)(
+                "API: %s %s → %s (%.3fs) request_id=%s",
+                request.method,
+                request.path,
+                response.status_code,
+                elapsed,
+                getattr(g, "request_id", "-"),
+            )
+
+
+def _finish_response(response, config):
+    """Stamp the request id and security headers; set the session cookie."""
+    request_id = getattr(g, "request_id", None)
+    if request_id:
+        response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Content-Security-Policy-Report-Only"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com; "
+        "style-src 'self' 'unsafe-inline' https://unpkg.com; "
+        "img-src 'self' data: blob: https:; "
+        "connect-src 'self' https:; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'"
+    )
+    if (
+        config["BROWSER_AUTH_ENABLED"]
+        and response.mimetype == "text/html"
+        and 200 <= response.status_code < 400
+    ):
+        response.set_cookie(
+            config["BROWSER_SESSION_COOKIE"],
+            config["BROWSER_SESSION_TOKEN"],
+            httponly=True,
+            samesite="Strict",
+            secure=request.is_secure,
+            path="/",
+        )
+    return response
+
+
+# Catch uncaught exceptions so they don't disappear silently
+def _handle_error(e):
+    if isinstance(e, WorkspaceBusyError):
+        return json_error(str(e), 409)
+    if isinstance(e, HTTPException):
+        return e
+    if search_lanes.is_superseded_interrupt(e, g.get("search_superseded")):
+        # The page already sent a newer request for this loader and will
+        # ignore this response; the interrupt is the point, not a fault.
+        log.info("Superseded: %s %s", request.method, request.path)
+        g.search_superseded_response = True
+        return json_error(
+            "A newer request replaced this one", 409,
+            code=search_lanes.SUPERSEDED_CODE,
+        )
+    log.exception("Unhandled error: %s %s", request.method, request.path)
+    return jsonify({
+        "error": "Internal server error",
+        "code": "internal_error",
+        "message": "Something went wrong in Vireo. Try again.",
+        "request_id": getattr(g, "request_id", None),
+    }), 500
+
+
+def _reject_non_object_json_body():
+    """Refuse a JSON body that parses to anything but an object.
+
+    Every API route reads its body as an object, usually through
+    ``request.get_json(silent=True) or {}``. That guards only against a
+    missing or unparsable body: a valid non-object document such as
+    ``"x"``, ``[1]`` or ``5`` comes through as-is and the route's first
+    ``body.get(...)`` raises, so the client gets a 500 instead of a 400.
+    Answering here covers every route at once, before the request takes
+    a workspace reservation. Unparsable JSON is left to the route, which
+    already decides how to report it.
+    """
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    if not request.path.startswith("/api/") or not request.is_json:
+        return None
+    body = request.get_json(silent=True)
+    if body is None or isinstance(body, dict):
+        return None
+    return json_error(
+        "request body must be a JSON object", 400,
+        code="json_body_not_object",
+    )
+
+
+def _release_workspace_mutation(exc):
+    reservation = g.pop("nas_workspace_mutation", None)
+    if reservation is not None:
+        reservation.__exit__(None, None, None)
+
+
 def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
     """Install the app-wide request hooks on ``app``.
 
@@ -110,14 +364,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
     """
 
     # Request timing middleware — logs slow requests and user actions
-    @app.before_request
-    def _start_timer():
-        request._start_time = time.time()
-        supplied_request_id = request.headers.get("X-Request-ID", "")
-        if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", supplied_request_id):
-            g.request_id = supplied_request_id
-        else:
-            g.request_id = uuid.uuid4().hex
+    app.before_request(_start_timer)
 
     @app.before_request
     def _protect_browser_surface():
@@ -128,201 +375,14 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
         session established by a Vireo HTML page.  Unsafe browser requests
         additionally carry a header that cross-origin forms cannot emit.
         """
-        if not app.config["BROWSER_AUTH_ENABLED"]:
-            return None
-
-        path = request.path
-        if path.startswith("/api/v1/") or path in {
-            "/api/health",
-            "/api/shutdown",
-        }:
-            return None
-
-        protected = (
-            path.startswith("/api/")
-            or path.startswith("/photos/")
-            or path.startswith("/thumbnails/")
-            or path.startswith("/masks/")
-        )
-        if not protected:
-            return None
-
-        # Native desktop clients cannot use the HttpOnly browser cookie.
-        # They authenticate with the same per-runtime secret as /api/v1.
-        expected_api_token = app.config.get("API_TOKEN")
-        supplied_api_token = request.headers.get("X-Vireo-Token", "")
-        if (
-            expected_api_token
-            and supplied_api_token
-            and secrets.compare_digest(
-                supplied_api_token.encode("utf-8"),
-                expected_api_token.encode("utf-8"),
-            )
-        ):
-            return None
-
-        fetch_site = request.headers.get("Sec-Fetch-Site", "").lower()
-        if fetch_site and fetch_site not in {"same-origin", "none"}:
-            return json_error(
-                "Non-origin requests are not allowed",
-                403,
-                code="cross_site_request",
-            )
-
-        origin = request.headers.get("Origin")
-        if origin:
-            parsed = urlsplit(origin)
-            expected = urlsplit(request.host_url)
-            if (parsed.scheme, parsed.netloc) != (expected.scheme, expected.netloc):
-                return json_error(
-                    "Cross-origin requests are not allowed",
-                    403,
-                    code="cross_origin_request",
-                )
-
-        cookie_name = app.config["BROWSER_SESSION_COOKIE"]
-        expected_token = app.config["BROWSER_SESSION_TOKEN"]
-        if not secrets.compare_digest(
-            request.cookies.get(cookie_name, "").encode("utf-8"),
-            expected_token.encode("utf-8"),
-        ):
-            return json_error(
-                "Browser session required",
-                401,
-                code="browser_session_required",
-            )
-
-        if (
-            request.method not in {"GET", "HEAD", "OPTIONS"}
-            and request.headers.get("X-Vireo-Client") != "browser"
-        ):
-            return json_error(
-                "Missing browser request header",
-                403,
-                code="browser_header_required",
-            )
-        return None
+        return _browser_surface_refusal(app.config)
 
     @app.after_request
     def _log_requests(response):
-        if hasattr(request, "_start_time"):
-            elapsed = time.time() - request._start_time
-            if request.method in ("POST", "DELETE"):
-                # Log user actions with details about what changed
-                detail = ""
-                path = request.path
-                if path in ("/api/capture-time/preview", "/api/jobs/capture-time"):
-                    body = {}
-                else:
-                    body = request.get_json(silent=True) or {}
-                    if not isinstance(body, dict):
-                        # Valid non-object JSON (5, "x", [..]) — the
-                        # .get() calls below would 500 the response of
-                        # any endpoint after it already ran.
-                        body = {}
-                if "/rating" in path:
-                    detail = f" rating={body.get('rating')}"
-                elif "/flag" in path:
-                    detail = f" flag={body.get('flag')}"
-                elif "/keywords" in path and request.method == "POST":
-                    detail = f" keyword={body.get('name')}"
-                elif "/accept" in path:
-                    detail = " (accept prediction)"
-                elif "/reject" in path:
-                    detail = " (reject prediction)"
-                elif "batch" in path:
-                    # The view already ran (and may have committed), so a
-                    # malformed ``photo_ids`` must not turn its response
-                    # into a 500 here.
-                    ids = body.get("photo_ids")
-                    if isinstance(ids, list):
-                        detail = f" ({len(ids)} photos)"
-                elif "/classify" in path:
-                    detail = f" collection={body.get('collection_id')}"
-                elif "/scan" in path:
-                    detail = f" root={body.get('root', '')}"
-                log.info(
-                    "Action: %s %s → %s (%.1fs)%s request_id=%s",
-                    request.method,
-                    path,
-                    response.status_code,
-                    elapsed,
-                    detail,
-                    getattr(g, "request_id", "-"),
-                )
-            elif elapsed > 0.5 and not getattr(g, "search_superseded_response", False):
-                # A superseded read was interrupted on purpose; its elapsed
-                # time is how long the page waited before the next keystroke,
-                # not a real slow request.
-                log.warning(
-                    "Slow request: %s %s took %.1fs request_id=%s",
-                    request.method,
-                    request.path,
-                    elapsed,
-                    getattr(g, "request_id", "-"),
-                )
-            if request.path.startswith("/api/"):
-                _quiet = request.method == "GET" and request.path == "/api/jobs"
-                (log.debug if _quiet else log.info)(
-                    "API: %s %s → %s (%.3fs) request_id=%s",
-                    request.method,
-                    request.path,
-                    response.status_code,
-                    elapsed,
-                    getattr(g, "request_id", "-"),
-                )
-        request_id = getattr(g, "request_id", None)
-        if request_id:
-            response.headers["X-Request-ID"] = request_id
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "same-origin"
-        response.headers["Content-Security-Policy-Report-Only"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com; "
-            "style-src 'self' 'unsafe-inline' https://unpkg.com; "
-            "img-src 'self' data: blob: https:; "
-            "connect-src 'self' https:; frame-ancestors 'none'; "
-            "base-uri 'self'; form-action 'self'"
-        )
-        if (
-            app.config["BROWSER_AUTH_ENABLED"]
-            and response.mimetype == "text/html"
-            and 200 <= response.status_code < 400
-        ):
-            response.set_cookie(
-                app.config["BROWSER_SESSION_COOKIE"],
-                app.config["BROWSER_SESSION_TOKEN"],
-                httponly=True,
-                samesite="Strict",
-                secure=request.is_secure,
-                path="/",
-            )
-        return response
+        _log_request_timing(response)
+        return _finish_response(response, app.config)
 
-    # Catch uncaught exceptions so they don't disappear silently
-    @app.errorhandler(Exception)
-    def _handle_error(e):
-        if isinstance(e, WorkspaceBusyError):
-            return json_error(str(e), 409)
-        if isinstance(e, HTTPException):
-            return e
-        if search_lanes.is_superseded_interrupt(e, g.get("search_superseded")):
-            # The page already sent a newer request for this loader and will
-            # ignore this response; the interrupt is the point, not a fault.
-            log.info("Superseded: %s %s", request.method, request.path)
-            g.search_superseded_response = True
-            return json_error(
-                "A newer request replaced this one", 409,
-                code=search_lanes.SUPERSEDED_CODE,
-            )
-        log.exception("Unhandled error: %s %s", request.method, request.path)
-        return jsonify({
-            "error": "Internal server error",
-            "code": "internal_error",
-            "message": "Something went wrong in Vireo. Try again.",
-            "request_id": getattr(g, "request_id", None),
-        }), 500
+    app.errorhandler(Exception)(_handle_error)
 
     app.teardown_appcontext(close_request_db)
 
@@ -343,30 +403,7 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
             return json_error("Invalid or missing X-Vireo-Token", 401)
         return None
 
-    @app.before_request
-    def _reject_non_object_json_body():
-        """Refuse a JSON body that parses to anything but an object.
-
-        Every API route reads its body as an object, usually through
-        ``request.get_json(silent=True) or {}``. That guards only against a
-        missing or unparsable body: a valid non-object document such as
-        ``"x"``, ``[1]`` or ``5`` comes through as-is and the route's first
-        ``body.get(...)`` raises, so the client gets a 500 instead of a 400.
-        Answering here covers every route at once, before the request takes
-        a workspace reservation. Unparsable JSON is left to the route, which
-        already decides how to report it.
-        """
-        if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
-            return None
-        if not request.path.startswith("/api/") or not request.is_json:
-            return None
-        body = request.get_json(silent=True)
-        if body is None or isinstance(body, dict):
-            return None
-        return json_error(
-            "request body must be a JSON object", 400,
-            code="json_body_not_object",
-        )
+    app.before_request(_reject_non_object_json_body)
 
     @app.before_request
     def _reserve_workspace_mutation():
@@ -404,8 +441,4 @@ def register_app_hooks(app, *, get_db, reservation_exempt_endpoints):
             g.nas_workspace_mutation = reservation.pop_all()
         return None
 
-    @app.teardown_request
-    def _release_workspace_mutation(exc):
-        reservation = g.pop("nas_workspace_mutation", None)
-        if reservation is not None:
-            reservation.__exit__(None, None, None)
+    app.teardown_request(_release_workspace_mutation)

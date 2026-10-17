@@ -169,6 +169,35 @@ def publish_site(db, vireo_dir, destination, life_list, highlights=None, options
             shutil.rmtree(staging, ignore_errors=True)
 
 
+def _write_site_data(data_dir, published_life_list, published_highlights,
+                     exported):
+    """Write the site manifest and section JSON; the files' site paths."""
+    generated_at = datetime.now(UTC).isoformat()
+    site_manifest = {
+        "schema_version": 1,
+        "generated_at": generated_at,
+        "sections": {
+            "life_list": "data/life-list.json",
+            "highlights": "data/highlights.json",
+        },
+        "counts": {
+            "life_list_species": published_life_list.get("meta", {}).get("species_count", 0),
+            "life_list_photos": published_life_list.get("meta", {}).get("photo_count", 0),
+            "highlight_buckets": len(published_highlights.get("buckets", [])),
+            "exported_images": exported,
+        },
+    }
+    published_life_list.setdefault("meta", {})["generated_at"] = generated_at
+    published_highlights.setdefault("meta", {})["generated_at"] = generated_at
+
+    _write_json(data_dir / "site.json", site_manifest)
+    _write_json(data_dir / "life-list.json", published_life_list)
+    _write_json(data_dir / "highlights.json", published_highlights)
+
+    data_files = ["data/site.json", "data/life-list.json", "data/highlights.json"]
+    return data_files
+
+
 def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
                   options, progress_cb, cancel_check, begin_commit):
     options = options or {}
@@ -239,29 +268,9 @@ def _publish_site(db, vireo_dir, destination, staging, life_list, highlights,
         return {"destination": destination, "data_files": [],
                 "exported_images": exported, "errors": errors}
 
-    generated_at = datetime.now(UTC).isoformat()
-    site_manifest = {
-        "schema_version": 1,
-        "generated_at": generated_at,
-        "sections": {
-            "life_list": "data/life-list.json",
-            "highlights": "data/highlights.json",
-        },
-        "counts": {
-            "life_list_species": published_life_list.get("meta", {}).get("species_count", 0),
-            "life_list_photos": published_life_list.get("meta", {}).get("photo_count", 0),
-            "highlight_buckets": len(published_highlights.get("buckets", [])),
-            "exported_images": exported,
-        },
-    }
-    published_life_list.setdefault("meta", {})["generated_at"] = generated_at
-    published_highlights.setdefault("meta", {})["generated_at"] = generated_at
-
-    _write_json(data_dir / "site.json", site_manifest)
-    _write_json(data_dir / "life-list.json", published_life_list)
-    _write_json(data_dir / "highlights.json", published_highlights)
-
-    data_files = ["data/site.json", "data/life-list.json", "data/highlights.json"]
+    data_files = _write_site_data(
+        data_dir, published_life_list, published_highlights, exported,
+    )
     if not _commit_site(destination_path, staging_path, image_paths + data_files,
                         cancel_check, begin_commit):
         return {"destination": destination, "data_files": [],

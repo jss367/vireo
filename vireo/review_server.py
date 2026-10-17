@@ -43,27 +43,56 @@ def create_app(data_dir):
             return jsonify({"error": "A JSON object is required"}), 400
         return None
 
-    def _load_results():
-        with open(os.path.join(data_dir, "results.json")) as f:
+    _register_photo_routes(app, data_dir)
+    _register_group_routes(app, data_dir)
+
+    @app.route("/api/settings", methods=["GET"])
+    def get_settings():
+        return jsonify(_load_settings(data_dir))
+
+    @app.route("/api/settings", methods=["POST"])
+    def save_settings():
+        body = request.get_json(silent=True) or {}
+        settings = _load_settings(data_dir)
+        settings.update(body)
+        _save_settings(data_dir, settings)
+        return jsonify({"ok": True})
+
+    @app.route("/thumbnails/<filename>")
+    def thumbnail(filename):
+        return send_from_directory(os.path.join(data_dir, "thumbnails"), filename)
+
+    return app
+
+
+def _load_results(data_dir):
+    with open(os.path.join(data_dir, "results.json")) as f:
+        return json.load(f)
+
+
+def _save_results(data_dir, data):
+    with open(os.path.join(data_dir, "results.json"), "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _load_settings(data_dir):
+    path = os.path.join(data_dir, "settings.json")
+    if os.path.exists(path):
+        with open(path) as f:
             return json.load(f)
+    # Default from results.json settings
+    data = _load_results(data_dir)
+    return data.get("settings", {})
 
-    def _save_results(data):
-        with open(os.path.join(data_dir, "results.json"), "w") as f:
-            json.dump(data, f, indent=2)
 
-    def _load_settings():
-        path = os.path.join(data_dir, "settings.json")
-        if os.path.exists(path):
-            with open(path) as f:
-                return json.load(f)
-        # Default from results.json settings
-        data = _load_results()
-        return data.get("settings", {})
+def _save_settings(data_dir, settings):
+    path = os.path.join(data_dir, "settings.json")
+    with open(path, "w") as f:
+        json.dump(settings, f, indent=2)
 
-    def _save_settings(settings):
-        path = os.path.join(data_dir, "settings.json")
-        with open(path, "w") as f:
-            json.dump(settings, f, indent=2)
+
+def _register_photo_routes(app, data_dir):
+    """The pages, the photo listing, and the single-photo/group skip routes."""
 
     @app.route("/")
     def index():
@@ -75,7 +104,7 @@ def create_app(data_dir):
 
     @app.route("/api/photos")
     def get_photos():
-        data = _load_results()
+        data = _load_results(data_dir)
         category = request.args.get("category")
         if category:
             data["photos"] = [
@@ -88,7 +117,7 @@ def create_app(data_dir):
         body = request.get_json(silent=True) or {}
         model = body.get("model")
 
-        data = _load_results()
+        data = _load_results(data_dir)
         for photo in data["photos"]:
             if photo.get("filename") == filename:
                 # Get prediction from the specified model or the first available
@@ -107,7 +136,7 @@ def create_app(data_dir):
                     hierarchical_keywords=set(),
                 )
                 photo["status"] = "accepted"
-                _save_results(data)
+                _save_results(data_dir, data)
                 return jsonify(
                     {"ok": True, "status": "accepted", "prediction": prediction}
                 )
@@ -115,30 +144,34 @@ def create_app(data_dir):
 
     @app.route("/api/skip/<filename>", methods=["POST"])
     def skip(filename):
-        data = _load_results()
+        data = _load_results(data_dir)
         for photo in data["photos"]:
             if photo.get("filename") == filename:
                 photo["status"] = "skipped"
-                _save_results(data)
+                _save_results(data_dir, data)
                 return jsonify({"ok": True, "status": "skipped"})
         return jsonify({"error": "not found"}), 404
 
     @app.route("/api/skip-group/<group_id>", methods=["POST"])
     def skip_group(group_id):
-        data = _load_results()
+        data = _load_results(data_dir)
         for photo in data["photos"]:
             if photo.get("group_id") == group_id:
                 photo["status"] = "skipped"
-                _save_results(data)
+                _save_results(data_dir, data)
                 return jsonify({"ok": True, "status": "skipped"})
         return jsonify({"error": "group not found"}), 404
+
+
+def _register_group_routes(app, data_dir):
+    """The group accept and batch accept routes."""
 
     @app.route("/api/accept-group/<group_id>", methods=["POST"])
     def accept_group(group_id):
         body = request.get_json(silent=True) or {}
         model = body.get("model")
 
-        data = _load_results()
+        data = _load_results(data_dir)
         for photo in data["photos"]:
             if photo.get("group_id") == group_id:
                 cons = photo.get("consensus", {})
@@ -176,7 +209,7 @@ def create_app(data_dir):
                         "prediction": prediction,
                     }), 500
                 photo["status"] = "accepted"
-                _save_results(data)
+                _save_results(data_dir, data)
                 return jsonify(
                     {"ok": True, "accepted_count": written, "prediction": prediction}
                 )
@@ -198,106 +231,103 @@ def create_app(data_dir):
         if not math.isfinite(min_confidence):
             return jsonify({"error": "min_confidence must be a finite number"}), 400
 
-        data = _load_results()
+        data = _load_results(data_dir)
         accepted = 0
         failed = 0
         for photo in data["photos"]:
             if photo["status"] != "pending":
                 continue
-
-            # Determine effective category for filtering
-            if category:
-                preds = photo.get("predictions", {})
-                cons = photo.get("consensus", {})
-                if preds:
-                    if model and model in preds:
-                        eff_cat = preds[model].get("category")
-                    else:
-                        eff_cat = preds[next(iter(preds))].get("category")
-                elif cons:
-                    eff_cat = photo.get("category")
-                else:
-                    eff_cat = None
-                if eff_cat != category:
-                    continue
-
-            # Handle individual photos
-            preds = photo.get("predictions", {})
-            if preds:
-                if model and model in preds:
-                    pred = preds[model]
-                else:
-                    pred = preds[next(iter(preds))]
-
-                if pred["confidence"] < min_confidence:
-                    continue
-
-                try:
-                    write_sidecar(
-                        photo["xmp_path"],
-                        flat_keywords={pred["prediction"]},
-                        hierarchical_keywords=set(),
-                    )
-                    photo["status"] = "accepted"
-                    accepted += 1
-                except Exception:
-                    log.warning(
-                        "Failed to write XMP for %s",
-                        photo.get("filename"),
-                        exc_info=True,
-                    )
-                    failed += 1
-
-            # Handle groups
-            elif photo.get("consensus"):
-                cons = photo["consensus"]
-                if model and model in cons:
-                    pred = cons[model]
-                else:
-                    pred = cons[next(iter(cons))]
-
-                if pred["confidence"] < min_confidence:
-                    continue
-
-                group_ok = True
-                for xp in photo.get("member_xmp_paths", []):
-                    try:
-                        write_sidecar(
-                            xp,
-                            flat_keywords={pred["prediction"]},
-                            hierarchical_keywords=set(),
-                        )
-                    except Exception:
-                        log.warning("Failed to write XMP: %s", xp, exc_info=True)
-                        group_ok = False
-
-                if not group_ok:
-                    # Stays pending so a retry can finish the group.
-                    failed += 1
-                    continue
-                photo["status"] = "accepted"
+            if category and _batch_category(photo, model) != category:
+                continue
+            outcome = _batch_accept_photo(photo, model, min_confidence)
+            if outcome == "accepted":
                 accepted += 1
+            elif outcome == "failed":
+                failed += 1
 
-        _save_results(data)
+        _save_results(data_dir, data)
         return jsonify({"ok": failed == 0, "accepted": accepted, "failed": failed})
 
-    @app.route("/api/settings", methods=["GET"])
-    def get_settings():
-        return jsonify(_load_settings())
 
-    @app.route("/api/settings", methods=["POST"])
-    def save_settings():
-        body = request.get_json(silent=True) or {}
-        settings = _load_settings()
-        settings.update(body)
-        _save_settings(settings)
-        return jsonify({"ok": True})
+def _batch_category(photo, model):
+    """The category a batch accept filters ``photo`` by."""
+    # Determine effective category for filtering
+    preds = photo.get("predictions", {})
+    cons = photo.get("consensus", {})
+    if preds:
+        if model and model in preds:
+            eff_cat = preds[model].get("category")
+        else:
+            eff_cat = preds[next(iter(preds))].get("category")
+    elif cons:
+        eff_cat = photo.get("category")
+    else:
+        eff_cat = None
+    return eff_cat
 
-    @app.route("/thumbnails/<filename>")
-    def thumbnail(filename):
-        return send_from_directory(os.path.join(data_dir, "thumbnails"), filename)
 
-    return app
+def _batch_accept_photo(photo, model, min_confidence):
+    """Accept one pending photo or group in a batch.
+
+    Returns ``"accepted"``, ``"failed"`` (it stays pending), or ``None``
+    when it was below ``min_confidence`` or had nothing to accept.
+    """
+    # Handle individual photos
+    preds = photo.get("predictions", {})
+    if preds:
+        if model and model in preds:
+            pred = preds[model]
+        else:
+            pred = preds[next(iter(preds))]
+
+        if pred["confidence"] < min_confidence:
+            return None
+
+        try:
+            write_sidecar(
+                photo["xmp_path"],
+                flat_keywords={pred["prediction"]},
+                hierarchical_keywords=set(),
+            )
+            photo["status"] = "accepted"
+            return "accepted"
+        except Exception:
+            log.warning(
+                "Failed to write XMP for %s",
+                photo.get("filename"),
+                exc_info=True,
+            )
+            return "failed"
+
+    # Handle groups
+    elif photo.get("consensus"):
+        cons = photo["consensus"]
+        if model and model in cons:
+            pred = cons[model]
+        else:
+            pred = cons[next(iter(cons))]
+
+        if pred["confidence"] < min_confidence:
+            return None
+
+        group_ok = True
+        for xp in photo.get("member_xmp_paths", []):
+            try:
+                write_sidecar(
+                    xp,
+                    flat_keywords={pred["prediction"]},
+                    hierarchical_keywords=set(),
+                )
+            except Exception:
+                log.warning("Failed to write XMP: %s", xp, exc_info=True)
+                group_ok = False
+
+        if not group_ok:
+            # Stays pending so a retry can finish the group.
+            return "failed"
+        photo["status"] = "accepted"
+        return "accepted"
+    return None
 
 
 def main():

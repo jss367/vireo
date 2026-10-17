@@ -170,6 +170,321 @@ def _unplottable_map_focus(db, photo_id):
     return focus
 
 
+def _text_search_response(db, emb_pairs, query_vec, *, threshold, limit,
+                          ids_only, model_name):
+    """Rank ``emb_pairs`` against ``query_vec`` and build the search response."""
+    import numpy as np
+
+    # Build matrix and compute similarities
+    photo_ids = [pid for pid, _ in emb_pairs]
+    emb_matrix = np.stack(
+        [np.frombuffer(blob, dtype=np.float32) for _, blob in emb_pairs]
+    )
+    similarities = emb_matrix @ query_vec
+
+    # Filter and sort
+    mask = similarities >= threshold
+    filtered_ids = [photo_ids[i] for i in range(len(photo_ids)) if mask[i]]
+    filtered_sims = similarities[mask]
+    total_matches = len(filtered_ids)
+
+    # Top-N by similarity
+    if total_matches > 0:
+        ranked_indices = np.argsort(filtered_sims)[::-1]
+        if ids_only:
+            return jsonify({
+                "photo_ids": [filtered_ids[idx] for idx in ranked_indices],
+                "total_matches": total_matches,
+                "model_used": model_name,
+            })
+        top_indices = ranked_indices[:limit]
+        top_pids = [filtered_ids[idx] for idx in top_indices]
+        top_sims = [float(filtered_sims[idx]) for idx in top_indices]
+        photos_map = db.get_photos_by_ids(top_pids)
+        photo_dicts = []
+        sims_by_pid = {}
+        for pid, sim in zip(top_pids, top_sims, strict=False):
+            if pid in photos_map:
+                photo_dicts.append(dict(photos_map[pid]))
+                sims_by_pid[pid] = round(sim, 4)
+        attach_species(db, photo_dicts)
+        attach_location_statuses(db, photo_dicts)
+        attach_species_representatives(db, photo_dicts)
+        attach_detections(db, photo_dicts)
+        attach_edit_recipes(db, photo_dicts)
+        results = [
+            {
+                "photo": photo,
+                "similarity": sims_by_pid[photo["id"]],
+            }
+            for photo in photo_dicts
+        ]
+    else:
+        if ids_only:
+            return jsonify({
+                "photo_ids": [],
+                "total_matches": 0,
+                "model_used": model_name,
+            })
+        results = []
+
+    return jsonify({
+        "results": results,
+        "total_matches": total_matches,
+        "model_used": model_name,
+    })
+
+
+def _sort_missing_removals(db, ws_id, photo_ids, delete_sidecars):
+    """Recheck each photo's original before a Missing Originals removal.
+
+    Returns ``(confirmed_ids, restored_ids, folder_offline_ids, skipped,
+    sidecar_targets)``: still missing, back on disk, under an unreachable
+    folder, unusable ids, and the originals whose sidecars to delete.
+    """
+    confirmed_ids = []
+    restored_ids = []
+    folder_offline_ids = []
+    skipped = 0
+    sidecar_targets = []
+    folder_online_cache = {}
+
+    def folder_accessible(folder_path):
+        cached = folder_online_cache.get(folder_path)
+        if cached is not None:
+            return cached
+        accessible = False
+        if os.path.isdir(folder_path):
+            try:
+                with os.scandir(folder_path):
+                    accessible = True
+            except OSError:
+                accessible = False
+        folder_online_cache[folder_path] = accessible
+        return accessible
+
+    for raw_id in photo_ids:
+        try:
+            pid = int(raw_id)
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        row = db.get_photo_file_in_workspace(pid, ws_id)
+        if not row:
+            skipped += 1
+            continue
+        folder_path = row["folder_path"]
+        if not folder_accessible(folder_path):
+            # The parent folder/NAS mount is currently unreachable, so
+            # ``os.path.exists(src)`` would return False for every row
+            # regardless of whether the original was restored before
+            # the volume went offline. Deleting under that ambiguity
+            # would remove valid Vireo rows; leave the decision for a
+            # later scan (once folder health flips or the volume comes
+            # back) instead.
+            folder_offline_ids.append(pid)
+            continue
+        src = os.path.join(folder_path, row["filename"])
+        if os.path.exists(src):
+            # Original is back on disk — the cached "missing" verdict
+            # was stale. Keep the Vireo row (and its sidecar).
+            restored_ids.append(pid)
+            continue
+        confirmed_ids.append(pid)
+        if delete_sidecars:
+            sidecar_targets.append(src)
+    return confirmed_ids, restored_ids, folder_offline_ids, skipped, sidecar_targets
+
+
+def _delete_missing_sidecars(sidecar_targets):
+    """Delete the XMP sidecars of confirmed-missing originals.
+
+    Returns ``(sidecars_deleted, sidecars_skipped)``.
+    """
+    sidecars_deleted = 0
+    sidecars_skipped = 0
+    for src in sidecar_targets:
+        stem, _ = os.path.splitext(src)
+        removed_one = False
+        for candidate in (stem + ".xmp", stem + ".XMP",
+                          src + ".xmp", src + ".XMP"):
+            if os.path.isfile(candidate):
+                try:
+                    os.remove(candidate)
+                    removed_one = True
+                except OSError as e:
+                    log.warning(
+                        "Failed to delete sidecar %s: %s", candidate, e
+                    )
+        if removed_one:
+            sidecars_deleted += 1
+        else:
+            sidecars_skipped += 1
+    return sidecars_deleted, sidecars_skipped
+
+
+def _score_sharpness_region(db, raw, vireo_dir):
+    """Score one requested region; the region's result row."""
+    from image_loader import load_working_image
+    from sharpness import _score_from_pil
+
+    if not isinstance(raw, dict):
+        return {
+            "photo_id": None,
+            "sharpness": None,
+            "error": "region must be an object",
+        }
+    raw_photo_id = raw.get("photo_id")
+    if isinstance(raw_photo_id, bool):
+        return {
+            "photo_id": None,
+            "sharpness": None,
+            "error": "invalid photo_id",
+        }
+    try:
+        photo_id = int(raw_photo_id)
+    except (TypeError, ValueError):
+        return {
+            "photo_id": None,
+            "sharpness": None,
+            "error": "invalid photo_id",
+        }
+    photo = db.get_photo(photo_id, verify_workspace=True)
+    if not photo:
+        return {"photo_id": photo_id, "sharpness": None, "error": "not found"}
+
+    folder = db.get_folder(photo["folder_id"])
+    if not folder:
+        return {"photo_id": photo_id, "sharpness": None, "error": "folder not found"}
+
+    photo_dict = dict(photo)
+    folders = {folder["id"]: folder["path"]}
+    # A user reviewing a burst is actively using these working
+    # copies; stamp them so quota eviction does not treat them as
+    # the least recently used files in the cache.
+    img = load_working_image(
+        photo_dict, vireo_dir, max_size=1024, folders=folders,
+        record_access=True,
+    )
+    if img is None:
+        return {"photo_id": photo_id, "sharpness": None, "error": "could not load image"}
+
+    def _float(name, default, region=raw):
+        raw_value = region.get(name, default)
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError(f"invalid {name}") from None
+        if not math.isfinite(value):
+            raise ValueError(f"invalid {name}")
+        return value
+
+    try:
+        source_w = _float("source_w", photo["width"] or img.width)
+        source_h = _float("source_h", photo["height"] or img.height)
+        x = _float("x", 0)
+        y = _float("y", 0)
+        w = _float("w", source_w)
+        h = _float("h", source_h)
+    except ValueError as exc:
+        return {
+            "photo_id": photo_id,
+            "sharpness": None,
+            "error": str(exc),
+        }
+
+    if source_w <= 0 or source_h <= 0:
+        source_w, source_h = img.width, img.height
+
+    scale_x = img.width / source_w
+    scale_y = img.height / source_h
+    try:
+        ix = max(0, min(img.width - 1, int(round(x * scale_x))))
+        iy = max(0, min(img.height - 1, int(round(y * scale_y))))
+        iw = max(1, int(round(w * scale_x)))
+        ih = max(1, int(round(h * scale_y)))
+    except OverflowError:
+        return {
+            "photo_id": photo_id,
+            "sharpness": None,
+            "error": "invalid region bounds",
+        }
+    if ix + iw > img.width:
+        iw = img.width - ix
+    if iy + ih > img.height:
+        ih = img.height - iy
+
+    if iw < 2 or ih < 2:
+        score = None
+    else:
+        score = _score_from_pil(img, (ix, iy, iw, ih))
+    return {
+        "photo_id": photo_id,
+        "sharpness": score,
+        "region": {"x": ix, "y": iy, "w": iw, "h": ih},
+    }
+
+
+def _map_visible_photos(db, photos, focus_photo_id, selection_ids):
+    """The Map's rendered rows: ``(visible_photos, unplottable_focus)``."""
+    unplottable_focus = None
+    if (
+        focus_photo_id is not None
+        and selection_ids is None
+        and all(p["id"] != focus_photo_id for p in photos)
+    ):
+        # Plotting the whole library around a photo that is not on it
+        # reads as "here is your photo". Send no markers and say why.
+        unplottable_focus = _unplottable_map_focus(db, focus_photo_id)
+        visible_photos = []
+    else:
+        visible_photos = list(photos[:MAP_RENDER_PHOTO_LIMIT])
+    # A deep-linked photo must remain reachable even when it falls beyond
+    # the safety ceiling in the default date ordering. Replace the last
+    # visible row rather than exceeding the bound.
+    if (
+        focus_photo_id is not None
+        and visible_photos
+        and all(p["id"] != focus_photo_id for p in visible_photos)
+    ):
+        focused = next((p for p in photos if p["id"] == focus_photo_id), None)
+        if focused is not None:
+            visible_photos[-1] = focused
+    return visible_photos, unplottable_focus
+
+
+def _attach_photo_file_fields(db, photo, result):
+    """Add the on-disk path and XMP sidecar fields to a photo detail."""
+    # Read XMP sidecar keywords
+    folder = db.get_folder(photo["folder_id"])
+    if folder:
+        # Full on-disk path: mirrors the folder-join logic in
+        # api_files_reveal. Exposed so the browse-grid "Copy Path"
+        # right-click action can read a real filesystem path from the
+        # detail response.
+        result["path"] = os.path.join(folder["path"], photo["filename"])
+        result["folder_name"] = os.path.basename(folder["path"])
+        xmp_path = os.path.join(
+            folder["path"],
+            os.path.splitext(photo["filename"])[0] + ".xmp",
+        )
+        xmp_keywords = []
+        xmp_exists = os.path.exists(xmp_path)
+        if xmp_exists:
+            from xmp import read_keywords
+
+            xmp_keywords = sorted(read_keywords(xmp_path))
+        result["xmp_exists"] = xmp_exists
+        result["xmp_keywords"] = xmp_keywords
+        result["xmp_path"] = xmp_path
+    else:
+        result["path"] = ""
+        result["folder_name"] = ""
+        result["xmp_exists"] = False
+        result["xmp_keywords"] = []
+        result["xmp_path"] = ""
+
+
 def create_photos_blueprint(
     get_db,
     json_error,
@@ -364,78 +679,17 @@ def create_photos_blueprint(
         ws_id = db.active_workspace_id
         if ws_id is None:
             return json_error("No active workspace", 400)
-        confirmed_ids = []
-        restored_ids = []
-        folder_offline_ids = []
-        skipped = 0
-        sidecar_targets = []
-        folder_online_cache = {}
-
-        def folder_accessible(folder_path):
-            cached = folder_online_cache.get(folder_path)
-            if cached is not None:
-                return cached
-            accessible = False
-            if os.path.isdir(folder_path):
-                try:
-                    with os.scandir(folder_path):
-                        accessible = True
-                except OSError:
-                    accessible = False
-            folder_online_cache[folder_path] = accessible
-            return accessible
-
-        for raw_id in photo_ids:
-            try:
-                pid = int(raw_id)
-            except (TypeError, ValueError):
-                skipped += 1
-                continue
-            row = db.get_photo_file_in_workspace(pid, ws_id)
-            if not row:
-                skipped += 1
-                continue
-            folder_path = row["folder_path"]
-            if not folder_accessible(folder_path):
-                # The parent folder/NAS mount is currently unreachable, so
-                # ``os.path.exists(src)`` would return False for every row
-                # regardless of whether the original was restored before
-                # the volume went offline. Deleting under that ambiguity
-                # would remove valid Vireo rows; leave the decision for a
-                # later scan (once folder health flips or the volume comes
-                # back) instead.
-                folder_offline_ids.append(pid)
-                continue
-            src = os.path.join(folder_path, row["filename"])
-            if os.path.exists(src):
-                # Original is back on disk — the cached "missing" verdict
-                # was stale. Keep the Vireo row (and its sidecar).
-                restored_ids.append(pid)
-                continue
-            confirmed_ids.append(pid)
-            if delete_sidecars:
-                sidecar_targets.append(src)
+        (
+            confirmed_ids, restored_ids, folder_offline_ids, skipped,
+            sidecar_targets,
+        ) = _sort_missing_removals(db, ws_id, photo_ids, delete_sidecars)
 
         sidecars_deleted = 0
         sidecars_skipped = 0
         if delete_sidecars:
-            for src in sidecar_targets:
-                stem, _ = os.path.splitext(src)
-                removed_one = False
-                for candidate in (stem + ".xmp", stem + ".XMP",
-                                  src + ".xmp", src + ".XMP"):
-                    if os.path.isfile(candidate):
-                        try:
-                            os.remove(candidate)
-                            removed_one = True
-                        except OSError as e:
-                            log.warning(
-                                "Failed to delete sidecar %s: %s", candidate, e
-                            )
-                if removed_one:
-                    sidecars_deleted += 1
-                else:
-                    sidecars_skipped += 1
+            sidecars_deleted, sidecars_skipped = _delete_missing_sidecars(
+                sidecar_targets,
+            )
 
         deleted_count = 0
         if confirmed_ids:
@@ -815,34 +1069,7 @@ def create_photos_blueprint(
         # A small photo's natural dimensions cannot reveal the configured cap.
         result["full_preview_max_size"] = 1920 if preview_max_size is None else preview_max_size
 
-        # Read XMP sidecar keywords
-        folder = db.get_folder(photo["folder_id"])
-        if folder:
-            # Full on-disk path: mirrors the folder-join logic in
-            # api_files_reveal. Exposed so the browse-grid "Copy Path"
-            # right-click action can read a real filesystem path from the
-            # detail response.
-            result["path"] = os.path.join(folder["path"], photo["filename"])
-            result["folder_name"] = os.path.basename(folder["path"])
-            xmp_path = os.path.join(
-                folder["path"],
-                os.path.splitext(photo["filename"])[0] + ".xmp",
-            )
-            xmp_keywords = []
-            xmp_exists = os.path.exists(xmp_path)
-            if xmp_exists:
-                from xmp import read_keywords
-
-                xmp_keywords = sorted(read_keywords(xmp_path))
-            result["xmp_exists"] = xmp_exists
-            result["xmp_keywords"] = xmp_keywords
-            result["xmp_path"] = xmp_path
-        else:
-            result["path"] = ""
-            result["folder_name"] = ""
-            result["xmp_exists"] = False
-            result["xmp_keywords"] = []
-            result["xmp_path"] = ""
+        _attach_photo_file_fields(db, photo, result)
 
         return jsonify(result)
 
@@ -967,6 +1194,50 @@ def create_photos_blueprint(
         attach_nested_edit_recipes(db, result)
         return jsonify(result)
 
+    def _map_request_scope(db, folder_id):
+        """``(selection_ids, rules, visual_info)`` for a Map request.
+
+        Raises ``ValueError`` for a malformed body, rules or visual clause.
+        """
+        selection_ids = None
+        if request.method == "POST":
+            body = request.get_json(silent=True)
+            if not isinstance(body, dict):
+                raise ValueError("request body must be a JSON object")
+            selection_ids = _map_selection_ids(body.get("photo_ids"))
+            rules = body.get("rules") or None
+            visual = validate_visual_arg(body.get("visual"))
+        else:
+            rules = request_rules_arg()
+            visual = request_visual_arg()
+        # Fill in the active visual model on any UI-emitted
+        # ``has_visual_index`` rule that omits it. Without this a Map
+        # filter for "has index" (rule sent without a ``model`` key)
+        # would match any embedding row, so a workspace with stale
+        # embeddings from an inactive model would surface photos that
+        # are not indexed for the currently-active visual search —
+        # /api/photos/query already injects here (line 5691), so the
+        # Map path must match to stay consistent.
+        rules = inject_active_visual_model(rules)
+        # Restrict the visual candidate set to plottable photos so a
+        # workspace whose only embeddings live on non-plottable photos
+        # doesn't return ``status: ok`` with ids that
+        # ``get_geolocated_photos`` then intersects to zero — the user
+        # would see a "visual match" chip over an empty map with no
+        # fallback / no-index warning.
+        plottable_ids = (
+            db.get_plottable_photo_ids(folder_id=folder_id)
+            if visual is not None else None
+        )
+        if plottable_ids is not None and selection_ids is not None:
+            selected = set(selection_ids)
+            plottable_ids = [pid for pid in plottable_ids if pid in selected]
+        rules, visual_info = visual_scope.apply_to_rules(
+            db, rules, visual, folder_id=folder_id,
+            candidate_photo_ids=plottable_ids,
+        )
+        return selection_ids, rules, visual_info
+
     @blueprint.route("/api/photos/geo", methods=["GET", "POST"])
     def api_photos_geo():
         """Plottable photos for the Map page.
@@ -981,44 +1252,8 @@ def create_photos_blueprint(
         db = get_db()
         folder_id = request.args.get("folder_id", None, type=int)
         focus_photo_id = request.args.get("photo_id", None, type=int)
-        selection_ids = None
         try:
-            if request.method == "POST":
-                body = request.get_json(silent=True)
-                if not isinstance(body, dict):
-                    raise ValueError("request body must be a JSON object")
-                selection_ids = _map_selection_ids(body.get("photo_ids"))
-                rules = body.get("rules") or None
-                visual = validate_visual_arg(body.get("visual"))
-            else:
-                rules = request_rules_arg()
-                visual = request_visual_arg()
-            # Fill in the active visual model on any UI-emitted
-            # ``has_visual_index`` rule that omits it. Without this a Map
-            # filter for "has index" (rule sent without a ``model`` key)
-            # would match any embedding row, so a workspace with stale
-            # embeddings from an inactive model would surface photos that
-            # are not indexed for the currently-active visual search —
-            # /api/photos/query already injects here (line 5691), so the
-            # Map path must match to stay consistent.
-            rules = inject_active_visual_model(rules)
-            # Restrict the visual candidate set to plottable photos so a
-            # workspace whose only embeddings live on non-plottable photos
-            # doesn't return ``status: ok`` with ids that
-            # ``get_geolocated_photos`` then intersects to zero — the user
-            # would see a "visual match" chip over an empty map with no
-            # fallback / no-index warning.
-            plottable_ids = (
-                db.get_plottable_photo_ids(folder_id=folder_id)
-                if visual is not None else None
-            )
-            if plottable_ids is not None and selection_ids is not None:
-                selected = set(selection_ids)
-                plottable_ids = [pid for pid in plottable_ids if pid in selected]
-            rules, visual_info = visual_scope.apply_to_rules(
-                db, rules, visual, folder_id=folder_id,
-                candidate_photo_ids=plottable_ids,
-            )
+            selection_ids, rules, visual_info = _map_request_scope(db, folder_id)
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -1038,29 +1273,9 @@ def create_photos_blueprint(
         total_geolocated = total_photos - total_without_coordinates
 
         total_filtered = len(photos)
-        unplottable_focus = None
-        if (
-            focus_photo_id is not None
-            and selection_ids is None
-            and all(p["id"] != focus_photo_id for p in photos)
-        ):
-            # Plotting the whole library around a photo that is not on it
-            # reads as "here is your photo". Send no markers and say why.
-            unplottable_focus = _unplottable_map_focus(db, focus_photo_id)
-            visible_photos = []
-        else:
-            visible_photos = list(photos[:MAP_RENDER_PHOTO_LIMIT])
-        # A deep-linked photo must remain reachable even when it falls beyond
-        # the safety ceiling in the default date ordering. Replace the last
-        # visible row rather than exceeding the bound.
-        if (
-            focus_photo_id is not None
-            and visible_photos
-            and all(p["id"] != focus_photo_id for p in visible_photos)
-        ):
-            focused = next((p for p in photos if p["id"] == focus_photo_id), None)
-            if focused is not None:
-                visible_photos[-1] = focused
+        visible_photos, unplottable_focus = _map_visible_photos(
+            db, photos, focus_photo_id, selection_ids,
+        )
 
         photo_dicts = [dict(p) for p in visible_photos]
         attach_edit_recipes(db, photo_dicts)
@@ -1141,116 +1356,11 @@ def create_photos_blueprint(
         if len(regions) > max_regions:
             return json_error(f"too many regions (max {max_regions})", 400)
 
-        from image_loader import load_working_image
-        from sharpness import _score_from_pil
-
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
         results = []
 
         for raw in regions:
-            if not isinstance(raw, dict):
-                results.append({
-                    "photo_id": None,
-                    "sharpness": None,
-                    "error": "region must be an object",
-                })
-                continue
-            raw_photo_id = raw.get("photo_id")
-            if isinstance(raw_photo_id, bool):
-                results.append({
-                    "photo_id": None,
-                    "sharpness": None,
-                    "error": "invalid photo_id",
-                })
-                continue
-            try:
-                photo_id = int(raw_photo_id)
-            except (TypeError, ValueError):
-                results.append({
-                    "photo_id": None,
-                    "sharpness": None,
-                    "error": "invalid photo_id",
-                })
-                continue
-            photo = db.get_photo(photo_id, verify_workspace=True)
-            if not photo:
-                results.append({"photo_id": photo_id, "sharpness": None, "error": "not found"})
-                continue
-
-            folder = db.get_folder(photo["folder_id"])
-            if not folder:
-                results.append({"photo_id": photo_id, "sharpness": None, "error": "folder not found"})
-                continue
-
-            photo_dict = dict(photo)
-            folders = {folder["id"]: folder["path"]}
-            # A user reviewing a burst is actively using these working
-            # copies; stamp them so quota eviction does not treat them as
-            # the least recently used files in the cache.
-            img = load_working_image(
-                photo_dict, vireo_dir, max_size=1024, folders=folders,
-                record_access=True,
-            )
-            if img is None:
-                results.append({"photo_id": photo_id, "sharpness": None, "error": "could not load image"})
-                continue
-
-            def _float(name, default, region=raw):
-                raw_value = region.get(name, default)
-                try:
-                    value = float(raw_value)
-                except (TypeError, ValueError):
-                    raise ValueError(f"invalid {name}") from None
-                if not math.isfinite(value):
-                    raise ValueError(f"invalid {name}")
-                return value
-
-            try:
-                source_w = _float("source_w", photo["width"] or img.width)
-                source_h = _float("source_h", photo["height"] or img.height)
-                x = _float("x", 0)
-                y = _float("y", 0)
-                w = _float("w", source_w)
-                h = _float("h", source_h)
-            except ValueError as exc:
-                results.append({
-                    "photo_id": photo_id,
-                    "sharpness": None,
-                    "error": str(exc),
-                })
-                continue
-
-            if source_w <= 0 or source_h <= 0:
-                source_w, source_h = img.width, img.height
-
-            scale_x = img.width / source_w
-            scale_y = img.height / source_h
-            try:
-                ix = max(0, min(img.width - 1, int(round(x * scale_x))))
-                iy = max(0, min(img.height - 1, int(round(y * scale_y))))
-                iw = max(1, int(round(w * scale_x)))
-                ih = max(1, int(round(h * scale_y)))
-            except OverflowError:
-                results.append({
-                    "photo_id": photo_id,
-                    "sharpness": None,
-                    "error": "invalid region bounds",
-                })
-                continue
-            if ix + iw > img.width:
-                iw = img.width - ix
-            if iy + ih > img.height:
-                ih = img.height - iy
-
-            if iw < 2 or ih < 2:
-                score = None
-            else:
-                score = _score_from_pil(img, (ix, iy, iw, ih))
-            results.append({
-                "photo_id": photo_id,
-                "sharpness": score,
-                "region": {"x": ix, "y": iy, "w": iw, "h": ih},
-            })
+            results.append(_score_sharpness_region(db, raw, vireo_dir))
 
         return jsonify({"results": results})
 
@@ -1361,8 +1471,6 @@ def create_photos_blueprint(
     @blueprint.route("/api/photos/search")
     def api_photo_text_search():
         """Search photos by text query using CLIP cosine similarity."""
-        import numpy as np
-
         query = request.args.get("q", "").strip()
         if not query:
             return json_error("Missing query parameter 'q'")
@@ -1448,64 +1556,11 @@ def create_photos_blueprint(
             log.exception("Text encoding failed for query=%r model=%s", query, model_name)
             return json_error(f"Text encoding failed: {e}", status=500)
 
-        # Build matrix and compute similarities
-        photo_ids = [pid for pid, _ in emb_pairs]
-        emb_matrix = np.stack(
-            [np.frombuffer(blob, dtype=np.float32) for _, blob in emb_pairs]
+        return _text_search_response(
+            db, emb_pairs, query_vec,
+            threshold=threshold, limit=limit, ids_only=ids_only,
+            model_name=model_name,
         )
-        similarities = emb_matrix @ query_vec
-
-        # Filter and sort
-        mask = similarities >= threshold
-        filtered_ids = [photo_ids[i] for i in range(len(photo_ids)) if mask[i]]
-        filtered_sims = similarities[mask]
-        total_matches = len(filtered_ids)
-
-        # Top-N by similarity
-        if total_matches > 0:
-            ranked_indices = np.argsort(filtered_sims)[::-1]
-            if ids_only:
-                return jsonify({
-                    "photo_ids": [filtered_ids[idx] for idx in ranked_indices],
-                    "total_matches": total_matches,
-                    "model_used": model_name,
-                })
-            top_indices = ranked_indices[:limit]
-            top_pids = [filtered_ids[idx] for idx in top_indices]
-            top_sims = [float(filtered_sims[idx]) for idx in top_indices]
-            photos_map = db.get_photos_by_ids(top_pids)
-            photo_dicts = []
-            sims_by_pid = {}
-            for pid, sim in zip(top_pids, top_sims, strict=False):
-                if pid in photos_map:
-                    photo_dicts.append(dict(photos_map[pid]))
-                    sims_by_pid[pid] = round(sim, 4)
-            attach_species(db, photo_dicts)
-            attach_location_statuses(db, photo_dicts)
-            attach_species_representatives(db, photo_dicts)
-            attach_detections(db, photo_dicts)
-            attach_edit_recipes(db, photo_dicts)
-            results = [
-                {
-                    "photo": photo,
-                    "similarity": sims_by_pid[photo["id"]],
-                }
-                for photo in photo_dicts
-            ]
-        else:
-            if ids_only:
-                return jsonify({
-                    "photo_ids": [],
-                    "total_matches": 0,
-                    "model_used": model_name,
-                })
-            results = []
-
-        return jsonify({
-            "results": results,
-            "total_matches": total_matches,
-            "model_used": model_name,
-        })
 
     @blueprint.route("/api/photos/<int:photo_id>/similar")
     def api_photo_similar(photo_id):
@@ -2190,19 +2245,13 @@ class _OpenExternal:
         if not recipe:
             return fallback_path, None
 
-        import local_masks as _local_masks
-        from image_edits import (
-            EDIT_MATH_VERSION,
-            apply_recipe_to_loaded_image,
-            recipe_to_json,
-        )
+        from image_edits import EDIT_MATH_VERSION, recipe_to_json
         from image_loader import (
             RAW_DECODE_LINEAR,
             RAW_EXTENSIONS,
             load_image,
         )
 
-        vireo_dir = self.vireo_dir
         source_path, using_working_copy = self.recipe_source(
             photo, recipe, fallback_path,
         )
@@ -2259,29 +2308,51 @@ class _OpenExternal:
             )
             load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
             img = load_image(src.source_path, max_size=None, **load_kwargs)
-            if img is None and src.using_working_copy and fallback_path and (
-                os.path.isfile(fallback_path)
-                and os.path.abspath(fallback_path)
-                != os.path.abspath(src.source_path)
-            ):
-                # Working copy was evicted between validation and decode.
-                # Retry from the original before the companion fallback so
-                # RAW primaries still use the highlight-preserving decode.
-                retry_img = load_image(
-                    fallback_path, max_size=None, **load_kwargs,
-                )
-                if retry_img is not None:
-                    img = retry_img
-                    src.source_path = fallback_path
-                    src.using_working_copy = False
-                    with contextlib.suppress(OSError):
-                        src.source_mtime = os.path.getmtime(src.source_path)
-                    src.expected_meta["source_path"] = src.source_path
-                    src.expected_meta["source_mtime"] = src.source_mtime
+            img = self._retry_from_original(src, img, load_kwargs, load_image)
         if primary_is_raw:
             img = self._companion_fallback(photo, src, img, load_image)
         if img is None:
             return None, f"{photo['filename']}: failed to load image"
+        self._write_handoff_render(photo, recipe, src, img)
+        return src.out_path, None
+
+    @staticmethod
+    def _retry_from_original(src, img, load_kwargs, load_image):
+        """Retry a failed working-copy decode from the original; the image.
+
+        On a successful retry ``src`` is re-pointed at the original.
+        """
+        fallback_path = src.fallback_path
+        if img is None and src.using_working_copy and fallback_path and (
+            os.path.isfile(fallback_path)
+            and os.path.abspath(fallback_path)
+            != os.path.abspath(src.source_path)
+        ):
+            # Working copy was evicted between validation and decode.
+            # Retry from the original before the companion fallback so
+            # RAW primaries still use the highlight-preserving decode.
+            retry_img = load_image(
+                fallback_path, max_size=None, **load_kwargs,
+            )
+            if retry_img is not None:
+                img = retry_img
+                src.source_path = fallback_path
+                src.using_working_copy = False
+                with contextlib.suppress(OSError):
+                    src.source_mtime = os.path.getmtime(src.source_path)
+                src.expected_meta["source_path"] = src.source_path
+                src.expected_meta["source_mtime"] = src.source_mtime
+        return img
+
+    def _write_handoff_render(self, photo, recipe, src, img):
+        """Render ``recipe`` onto ``img`` and publish the handoff JPEG.
+
+        Closes ``img`` (and the render) whether or not the write succeeds.
+        """
+        import local_masks as _local_masks
+        from image_edits import apply_recipe_to_loaded_image
+
+        vireo_dir = self.vireo_dir
         rendered = None
         tmp_path = None
         fd = None
@@ -2317,7 +2388,6 @@ class _OpenExternal:
                 rendered.close()
             if rendered is not img:
                 img.close()
-        return src.out_path, None
 
     def _open_handoff_source(self, photo, src):
         """Confirm the resolved source still exists, lay out the handoff

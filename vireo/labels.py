@@ -132,6 +132,121 @@ def _qualified_name(name, entry):
     return f"{_base_name(name, entry)} ({scientific_name})"
 
 
+def _emit_label_groups(groups):
+    """Fold each name group into prompts: ``(emitted, dropped)``.
+
+    One prompt per uncontested group, one per taxon in a contested group;
+    ``dropped`` holds the unattributable prompts of contested groups.
+    """
+    emitted, dropped = [], []
+    for group in groups.values():
+        by_taxon = {}
+        unattributed = []
+        for index, name, entry in group:
+            scientific_name = entry.get("scientific_name")
+            if entry.get("ambiguous") or not scientific_name:
+                unattributed.append((index, name, entry))
+            else:
+                by_taxon.setdefault(_taxon_key(entry), []).append(
+                    (index, name, entry)
+                )
+        contested = len(by_taxon) > 1 or any(
+            entry.get("ambiguous") for _i, _name, entry in unattributed
+        )
+        if not contested:
+            # One taxon, or none at all: keep the historical spelling fold.
+            # Every record in the group backs the surviving prompt, including
+            # a spelling that lost the fold — it named the same species.
+            spelling = _preferred_spelling([name for _i, name, _e in group])
+            members = next(iter(by_taxon.values()), [])
+            entry = _representative_entry(members) if members else None
+            emitted.append([spelling, entry, spelling, False,
+                            {index for index, _n, _e in group}])
+            continue
+        for members in by_taxon.values():
+            spelling = _preferred_spelling([name for _i, name, _e in members])
+            entry = _representative_entry(members)
+            qualified = _qualified_name(spelling, entry)
+            emitted.append([qualified, entry, spelling, True,
+                            {index for index, _n, _e in members}])
+        # A prompt with no scientific name in a contested group cannot be
+        # qualified — and must not stand, because it would answer for
+        # whichever taxon the model happened to mean.
+        dropped.extend(name for _i, name, _e in unattributed)
+    return emitted, dropped
+
+
+def _contested_names(records):
+    """Match keys that two or more taxa claim among ``records``."""
+    from keyword_normalization import keyword_match_key
+
+    claims = {}
+    for record in records:
+        claims.setdefault(keyword_match_key(record[0]), set()).add(
+            _taxon_key(record[1])
+        )
+    return {key for key, taxa in claims.items() if len(taxa) > 1}
+
+
+def _settle_contested_names(emitted, dropped):
+    """Re-qualify emitted prompts that still collide by taxon id.
+
+    Prompts with no taxon id left to tell them apart go to ``dropped``.
+    """
+    from keyword_normalization import keyword_match_key
+
+    # Two groups can still land on one string: a source whose common name
+    # literally reads "Foo (Alpha beta)" for another taxon, or two taxon
+    # IDs sharing a binomial. Taking the collision after every group has
+    # spoken keeps the outcome independent of label-set order, and the
+    # taxon form is one ``SpeciesResolver.explicit_source`` already reads.
+    # Fold the claim key the way SQLite and ``add_prediction`` do: two
+    # prompts that differ only in case are one keyword downstream, so a
+    # shared binomial under two taxon IDs collides even when the strings
+    # are not byte-identical.
+    settled = []
+    disputed = _contested_names(emitted)
+    for name, entry, spelling, was_split, sources in emitted:
+        if keyword_match_key(name) in disputed:
+            taxon_id = (entry or {}).get("taxon_id")
+            if not taxon_id:
+                # Nothing left to tell it apart by; it would answer for a
+                # taxon that is not its own.
+                dropped.append(name)
+                continue
+            # Strip whichever qualifier the spelling already carries, so a
+            # reloaded fallback is re-qualified rather than stacked.
+            name = f"{_base_name(spelling, entry)} (taxon {taxon_id})"
+            was_split = True
+        settled.append([name, entry, spelling, was_split, sources])
+    return settled
+
+
+def _settled_name_winners(settled):
+    """``(still_disputed, winner)``: keys still shared, and who keeps each."""
+    from keyword_normalization import keyword_match_key
+
+    # A generated fallback can land on a name a third source already uses
+    # verbatim. Nothing is left to qualify by at that point, so keep the
+    # claimant the prompt actually names — ``explicit_source`` reads the
+    # taxon out of the string, and attributing it to anyone else would be
+    # wrong — and report the rest rather than overwriting an identity.
+    still_disputed = _contested_names(settled)
+    winner = {}
+    for index in sorted(
+        (i for i, r in enumerate(settled)
+         if keyword_match_key(r[0]) in still_disputed),
+        key=lambda i: (
+            # The prompt names a taxon: that claimant, not another, is who
+            # ``explicit_source`` would read out of it.
+            f" (taxon {(settled[i][1] or {}).get('taxon_id')})" not in settled[i][0],
+            json.dumps(settled[i][1], sort_keys=True),
+        ),
+    ):
+        winner.setdefault(keyword_match_key(settled[index][0]), index)
+    return still_disputed, winner
+
+
 def disambiguate_labels(records):
     """Split prompts that two different taxa would otherwise share.
 
@@ -176,93 +291,9 @@ def disambiguate_labels(records):
         key = keyword_match_key(_base_name(name, entry)) or name
         groups.setdefault(key, []).append((index, name, entry or {}))
 
-    emitted, dropped = [], []
-    for group in groups.values():
-        by_taxon = {}
-        unattributed = []
-        for index, name, entry in group:
-            scientific_name = entry.get("scientific_name")
-            if entry.get("ambiguous") or not scientific_name:
-                unattributed.append((index, name, entry))
-            else:
-                by_taxon.setdefault(_taxon_key(entry), []).append(
-                    (index, name, entry)
-                )
-        contested = len(by_taxon) > 1 or any(
-            entry.get("ambiguous") for _i, _name, entry in unattributed
-        )
-        if not contested:
-            # One taxon, or none at all: keep the historical spelling fold.
-            # Every record in the group backs the surviving prompt, including
-            # a spelling that lost the fold — it named the same species.
-            spelling = _preferred_spelling([name for _i, name, _e in group])
-            members = next(iter(by_taxon.values()), [])
-            entry = _representative_entry(members) if members else None
-            emitted.append([spelling, entry, spelling, False,
-                            {index for index, _n, _e in group}])
-            continue
-        for members in by_taxon.values():
-            spelling = _preferred_spelling([name for _i, name, _e in members])
-            entry = _representative_entry(members)
-            qualified = _qualified_name(spelling, entry)
-            emitted.append([qualified, entry, spelling, True,
-                            {index for index, _n, _e in members}])
-        # A prompt with no scientific name in a contested group cannot be
-        # qualified — and must not stand, because it would answer for
-        # whichever taxon the model happened to mean.
-        dropped.extend(name for _i, name, _e in unattributed)
-
-    # Two groups can still land on one string: a source whose common name
-    # literally reads "Foo (Alpha beta)" for another taxon, or two taxon
-    # IDs sharing a binomial. Taking the collision after every group has
-    # spoken keeps the outcome independent of label-set order, and the
-    # taxon form is one ``SpeciesResolver.explicit_source`` already reads.
-    # Fold the claim key the way SQLite and ``add_prediction`` do: two
-    # prompts that differ only in case are one keyword downstream, so a
-    # shared binomial under two taxon IDs collides even when the strings
-    # are not byte-identical.
-    def contested_names(records):
-        claims = {}
-        for record in records:
-            claims.setdefault(keyword_match_key(record[0]), set()).add(
-                _taxon_key(record[1])
-            )
-        return {key for key, taxa in claims.items() if len(taxa) > 1}
-
-    settled = []
-    disputed = contested_names(emitted)
-    for name, entry, spelling, was_split, sources in emitted:
-        if keyword_match_key(name) in disputed:
-            taxon_id = (entry or {}).get("taxon_id")
-            if not taxon_id:
-                # Nothing left to tell it apart by; it would answer for a
-                # taxon that is not its own.
-                dropped.append(name)
-                continue
-            # Strip whichever qualifier the spelling already carries, so a
-            # reloaded fallback is re-qualified rather than stacked.
-            name = f"{_base_name(spelling, entry)} (taxon {taxon_id})"
-            was_split = True
-        settled.append([name, entry, spelling, was_split, sources])
-
-    # A generated fallback can land on a name a third source already uses
-    # verbatim. Nothing is left to qualify by at that point, so keep the
-    # claimant the prompt actually names — ``explicit_source`` reads the
-    # taxon out of the string, and attributing it to anyone else would be
-    # wrong — and report the rest rather than overwriting an identity.
-    still_disputed = contested_names(settled)
-    winner = {}
-    for index in sorted(
-        (i for i, r in enumerate(settled)
-         if keyword_match_key(r[0]) in still_disputed),
-        key=lambda i: (
-            # The prompt names a taxon: that claimant, not another, is who
-            # ``explicit_source`` would read out of it.
-            f" (taxon {(settled[i][1] or {}).get('taxon_id')})" not in settled[i][0],
-            json.dumps(settled[i][1], sort_keys=True),
-        ),
-    ):
-        winner.setdefault(keyword_match_key(settled[index][0]), index)
+    emitted, dropped = _emit_label_groups(groups)
+    settled = _settle_contested_names(emitted, dropped)
+    still_disputed, winner = _settled_name_winners(settled)
 
     names, identities, disambiguated, sources = [], {}, [], {}
     for index, (name, entry, _spelling, was_split, record_ids) in enumerate(settled):
@@ -346,6 +377,122 @@ OBSERVATION_FILTERS = {
 }
 
 
+def _fetch_species_counts_page(url, page, group_name, group_prefix,
+                               progress_callback):
+    """One ``species_counts`` page, retried up to three times; None on failure."""
+    data = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Vireo/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx) as resp:
+                data = json.loads(resp.read())
+            break
+        except Exception:
+            log.warning(
+                "Fetch attempt %d failed for page %d of %s",
+                attempt + 1,
+                page,
+                group_name,
+                exc_info=True,
+            )
+            if attempt < 2:
+                import time
+
+                time.sleep(2)
+            else:
+                if progress_callback:
+                    progress_callback(
+                        f"{group_prefix}: failed after 3 attempts on page {page}",
+                        0,
+                        0,
+                    )
+    return data
+
+
+def _fetch_group_species(place_id, group, group_prefix, filter_params,
+                         progress_callback, strict, records):
+    """Page through one taxon group's species counts, appending to ``records``."""
+    taxon_id = group["id"]
+    group_name = group["name"]
+
+    if progress_callback:
+        progress_callback(f"{group_prefix}: starting...", 0, 0)
+
+    page = 1
+    per_page = 500
+    group_species = []
+    group_total = 0
+
+    while True:
+        params = urllib.parse.urlencode(
+            {
+                "place_id": place_id,
+                "taxon_id": taxon_id,
+                "per_page": per_page,
+                "page": page,
+                **filter_params,
+            }
+        )
+        url = f"{INAT_API}/observations/species_counts?{params}"
+
+        data = _fetch_species_counts_page(
+            url, page, group_name, group_prefix, progress_callback,
+        )
+
+        if data is None:
+            if strict:
+                raise RuntimeError(
+                    f"Could not fetch page {page} of {group_name} species "
+                    f"from iNaturalist"
+                )
+            break
+
+        results = data.get("results", [])
+        if not results:
+            break
+
+        group_total = data.get("total_results", 0)
+
+        for r in results:
+            taxon = r.get("taxon", {})
+            common_name = taxon.get("preferred_common_name", "")
+            scientific_name = taxon.get("name", "")
+            name = common_name or scientific_name
+            if name:
+                group_species.append(name)
+                entry = None
+                if scientific_name and isinstance(taxon.get("id"), int):
+                    entry = {
+                        "taxon_id": taxon["id"],
+                        "scientific_name": scientific_name,
+                        "common_name": common_name,
+                        "rank": taxon.get("rank"),
+                    }
+                records.append((name, entry))
+
+        fetched = (page - 1) * per_page + len(results)
+
+        if progress_callback:
+            progress_callback(
+                f"{group_prefix}: {fetched}/{group_total} species",
+                fetched,
+                group_total,
+            )
+
+        if fetched >= group_total:
+            break
+        page += 1
+
+    log.info(
+        "Fetched %d %s species for place %d",
+        len(group_species),
+        group_name,
+        place_id,
+    )
+
+
 def fetch_species_list(
     place_id, taxon_groups, observation_filter="research", progress_callback=None,
     strict=False,
@@ -380,108 +527,10 @@ def fetch_species_list(
         if not group:
             continue
 
-        taxon_id = group["id"]
-        group_name = group["name"]
-        group_prefix = f"[{gi + 1}/{len(taxon_groups)}] {group_name}"
-
-        if progress_callback:
-            progress_callback(f"{group_prefix}: starting...", 0, 0)
-
-        page = 1
-        per_page = 500
-        group_species = []
-        group_total = 0
-
-        while True:
-            params = urllib.parse.urlencode(
-                {
-                    "place_id": place_id,
-                    "taxon_id": taxon_id,
-                    "per_page": per_page,
-                    "page": page,
-                    **filter_params,
-                }
-            )
-            url = f"{INAT_API}/observations/species_counts?{params}"
-
-            data = None
-            for attempt in range(3):
-                try:
-                    req = urllib.request.Request(
-                        url, headers={"User-Agent": "Vireo/1.0"}
-                    )
-                    with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx) as resp:
-                        data = json.loads(resp.read())
-                    break
-                except Exception:
-                    log.warning(
-                        "Fetch attempt %d failed for page %d of %s",
-                        attempt + 1,
-                        page,
-                        group_name,
-                        exc_info=True,
-                    )
-                    if attempt < 2:
-                        import time
-
-                        time.sleep(2)
-                    else:
-                        if progress_callback:
-                            progress_callback(
-                                f"{group_prefix}: failed after 3 attempts on page {page}",
-                                0,
-                                0,
-                            )
-
-            if data is None:
-                if strict:
-                    raise RuntimeError(
-                        f"Could not fetch page {page} of {group_name} species "
-                        f"from iNaturalist"
-                    )
-                break
-
-            results = data.get("results", [])
-            if not results:
-                break
-
-            group_total = data.get("total_results", 0)
-
-            for r in results:
-                taxon = r.get("taxon", {})
-                common_name = taxon.get("preferred_common_name", "")
-                scientific_name = taxon.get("name", "")
-                name = common_name or scientific_name
-                if name:
-                    group_species.append(name)
-                    entry = None
-                    if scientific_name and isinstance(taxon.get("id"), int):
-                        entry = {
-                            "taxon_id": taxon["id"],
-                            "scientific_name": scientific_name,
-                            "common_name": common_name,
-                            "rank": taxon.get("rank"),
-                        }
-                    records.append((name, entry))
-
-            fetched = (page - 1) * per_page + len(results)
-
-            if progress_callback:
-                progress_callback(
-                    f"{group_prefix}: {fetched}/{group_total} species",
-                    fetched,
-                    group_total,
-                )
-
-            if fetched >= group_total:
-                break
-            page += 1
-
-        log.info(
-            "Fetched %d %s species for place %d",
-            len(group_species),
-            group_name,
-            place_id,
+        group_prefix = f"[{gi + 1}/{len(taxon_groups)}] {group['name']}"
+        _fetch_group_species(
+            place_id, group, group_prefix, filter_params,
+            progress_callback, strict, records,
         )
 
     names, identities, disambiguated, dropped, _sources = disambiguate_labels(
@@ -896,19 +945,12 @@ def load_label_set(path, meta=None):
     return normalized_label_set(meta or {"labels_file": path})
 
 
-def load_merged_labels_with_metas(label_sets):
-    """Read and merge species, returning the metadata of the sets consumed.
+def _read_label_set_records(label_sets):
+    """``(records, read_sets)`` from every label file that could be read.
 
-    Same as ``load_merged_labels`` (see its docstring for dedupe/fingerprint
-    semantics), plus a second return value: the sublist of ``label_sets``
-    whose file was actually opened and read in this same pass. Sets whose
-    file is missing at read time — the ``load_merged_labels`` code path
-    already skips them silently — are dropped from the returned metadata
-    too, so callers naming the label source cannot claim a list that
-    contributed nothing. Doing this in the same pass closes the race
-    between a caller's existence check and this loader's read: the Settings
-    DELETE endpoint can retire a label file while the classify job is
-    loading, so any two-pass check disagrees with reality.
+    ``records`` is the deduplicated ``(name, identity)`` list;
+    ``read_sets`` pairs each set actually read with the indices of its
+    records.
     """
     index_of = {}
     records = []
@@ -937,6 +979,24 @@ def load_merged_labels_with_metas(label_sets):
                 records.append((name, entry))
             own.add(index_of[key])
         read_sets.append((ls, own))
+    return records, read_sets
+
+
+def load_merged_labels_with_metas(label_sets):
+    """Read and merge species, returning the metadata of the sets consumed.
+
+    Same as ``load_merged_labels`` (see its docstring for dedupe/fingerprint
+    semantics), plus a second return value: the sublist of ``label_sets``
+    whose file was actually opened and read in this same pass. Sets whose
+    file is missing at read time — the ``load_merged_labels`` code path
+    already skips them silently — are dropped from the returned metadata
+    too, so callers naming the label source cannot claim a list that
+    contributed nothing. Doing this in the same pass closes the race
+    between a caller's existence check and this loader's read: the Settings
+    DELETE endpoint can retire a label file while the classify job is
+    loading, so any two-pass check disagrees with reality.
+    """
+    records, read_sets = _read_label_set_records(label_sets)
     # ``disambiguate_labels`` groups by the ASCII-NOCASE key so case-only
     # variants collapse the same way SQLite's ``COLLATE NOCASE`` does,
     # keeps the source spelling of every group that names one taxon, and

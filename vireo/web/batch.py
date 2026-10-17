@@ -32,6 +32,49 @@ from web.location_edits import (
 from web.request_args import parse_selection_photo_ids
 
 
+def _batch_location_photo_ids(raw_ids):
+    """``(photo_ids, error message)`` for a batch location edit.
+
+    The ids are deduplicated in request order.
+    """
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return None, "photo_ids required"
+
+    photo_ids = []
+    seen = set()
+    for raw in raw_ids:
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return None, "photo_ids must contain only integers"
+        if raw not in seen:
+            photo_ids.append(raw)
+            seen.add(raw)
+    if not photo_ids:
+        return None, "photo_ids required"
+    if len(photo_ids) > 1000:
+        return None, "too many photo_ids"
+    return photo_ids, None
+
+
+def _finish_batch_location(db, photo_ids, items, location_name, new_value):
+    """Record a batch location edit, commit it, and build the response."""
+    if items:
+        db.record_edit(
+            "photo_location",
+            f"set location: {location_name} on {len(items)} photos",
+            new_value,
+            items,
+            is_batch=True,
+            _commit=False,
+        )
+    db.commit()
+    db._prune_edit_history()
+    return jsonify({
+        "ok": True,
+        "updated": len(items),
+        "location": serialize_photo_location(db, photo_ids[0]),
+    })
+
+
 def create_batch_blueprint(
     get_db,
     json_error,
@@ -60,22 +103,9 @@ def create_batch_blueprint(
     def api_batch_set_photo_location_text():
         """Attach one free-text location keyword to multiple photos."""
         body = request.get_json(silent=True) or {}
-        raw_ids = body.get("photo_ids", [])
-        if not isinstance(raw_ids, list) or not raw_ids:
-            return json_error("photo_ids required", 400)
-
-        photo_ids = []
-        seen = set()
-        for raw in raw_ids:
-            if isinstance(raw, bool) or not isinstance(raw, int):
-                return json_error("photo_ids must contain only integers", 400)
-            if raw not in seen:
-                photo_ids.append(raw)
-                seen.add(raw)
-        if not photo_ids:
-            return json_error("photo_ids required", 400)
-        if len(photo_ids) > 1000:
-            return json_error("too many photo_ids", 400)
+        photo_ids, invalid = _batch_location_photo_ids(body.get("photo_ids", []))
+        if invalid is not None:
+            return json_error(invalid, 400)
 
         name = body.get("name") or ""
         if not name.strip():
@@ -125,44 +155,16 @@ def create_batch_blueprint(
             item = change_photo_location(db, pid, leaf_id)
             if item is not None:
                 items.append(item)
-        if items:
-            db.record_edit(
-                "photo_location",
-                f"set location: {stripped} on {len(items)} photos",
-                str(leaf_id),
-                items,
-                is_batch=True,
-                _commit=False,
-            )
-        db.commit()
-        db._prune_edit_history()
-        return jsonify({
-            "ok": True,
-            "updated": len(items),
-            "location": serialize_photo_location(db, photo_ids[0]),
-        })
+        return _finish_batch_location(db, photo_ids, items, stripped, str(leaf_id))
 
     @blueprint.route("/api/batch/location", methods=["POST"])
     @atomic_edit(get_db)
     def api_batch_set_photo_location():
         """Attach one Google place location to multiple photos."""
         body = request.get_json(silent=True) or {}
-        raw_ids = body.get("photo_ids", [])
-        if not isinstance(raw_ids, list) or not raw_ids:
-            return json_error("photo_ids required", 400)
-
-        photo_ids = []
-        seen = set()
-        for raw in raw_ids:
-            if isinstance(raw, bool) or not isinstance(raw, int):
-                return json_error("photo_ids must contain only integers", 400)
-            if raw not in seen:
-                photo_ids.append(raw)
-                seen.add(raw)
-        if not photo_ids:
-            return json_error("photo_ids required", 400)
-        if len(photo_ids) > 1000:
-            return json_error("too many photo_ids", 400)
+        photo_ids, invalid = _batch_location_photo_ids(body.get("photo_ids", []))
+        if invalid is not None:
+            return json_error(invalid, 400)
 
         keyword_id = extract_keyword_id(body)
         place_id = extract_place_id(body)
@@ -189,22 +191,9 @@ def create_batch_blueprint(
                     location_name = loc.get("name") or "unknown"
                 if item is not None:
                     items.append(item)
-            if items:
-                db.record_edit(
-                    "photo_location",
-                    f"set location: {location_name} on {len(items)} photos",
-                    str(keyword_id),
-                    items,
-                    is_batch=True,
-                    _commit=False,
-                )
-            db.commit()
-            db._prune_edit_history()
-            return jsonify({
-                "ok": True,
-                "updated": len(items),
-                "location": serialize_photo_location(db, photo_ids[0]),
-            })
+            return _finish_batch_location(
+                db, photo_ids, items, location_name, str(keyword_id),
+            )
 
         details = normalize_client_place_details(body)
         if details is None:
@@ -231,22 +220,9 @@ def create_batch_blueprint(
             item = change_photo_location(db, pid, leaf_id)
             if item is not None:
                 items.append(item)
-        if items:
-            db.record_edit(
-                "photo_location",
-                f"set location: {details.get('name', 'unknown')} on {len(items)} photos",
-                str(leaf_id),
-                items,
-                is_batch=True,
-                _commit=False,
-            )
-        db.commit()
-        db._prune_edit_history()
-        return jsonify({
-            "ok": True,
-            "updated": len(items),
-            "location": serialize_photo_location(db, photo_ids[0]),
-        })
+        return _finish_batch_location(
+            db, photo_ids, items, details.get('name', 'unknown'), str(leaf_id),
+        )
 
     @blueprint.route("/api/batch/location/from-exif", methods=["POST"])
     @atomic_edit(get_db)
