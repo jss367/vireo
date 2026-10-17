@@ -104,6 +104,47 @@ def analyze_for_culling(
             "photos_missing_phash": 0,
         }
 
+    predictions = _load_top_predictions(db, photo_ids, pause_callback)
+
+    signals = _load_photo_signals(db, photo_ids, predictions, pause_callback)
+    embeddings, quality, extensions, timestamps, phashes, filenames, missing_phash = signals
+
+    # Backfill missing pHashes on the fly
+    if missing_phash:
+        _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_callback, pause_callback)
+
+    species_map = _group_by_species(photo_ids, predictions, extensions, separate_file_types, pause_callback)
+
+    # Analyze each species group
+    species_groups = []
+    total_keepers = 0
+    total_rejects = 0
+
+    for group_key, group_data in sorted(species_map.items(), key=lambda x: -len(x[1]["pids"])):
+        if pause_callback:
+            pause_callback()
+        group = _analyze_species_group(
+            group_key, group_data, embeddings, quality, timestamps, phashes,
+            filenames, redundancy_threshold, time_window, phash_threshold,
+            cross_bucket_merge,
+        )
+        species_groups.append(group)
+        total_keepers += group["keepers"]
+        total_rejects += group["rejects"]
+
+    photos_missing_phash = sum(1 for pid in photo_ids if pid not in phashes)
+
+    return {
+        "species_groups": species_groups,
+        "total_photos": len(photo_ids),
+        "suggested_keepers": total_keepers,
+        "suggested_rejects": total_rejects,
+        "photos_missing_phash": photos_missing_phash,
+    }
+
+
+def _load_top_predictions(db, photo_ids, pause_callback):
+    """Return each photo's highest-confidence prediction, keyed by photo id."""
     # Load predictions (highest confidence per photo via detections). The
     # prediction's classifier_model also drives which row in
     # photo_embeddings we read for that photo — clustering vectors across
@@ -132,7 +173,15 @@ def analyze_for_culling(
                 "confidence": pred["confidence"],
                 "classifier_model": pred["classifier_model"],
             }
+    return predictions
 
+
+def _load_photo_signals(db, photo_ids, predictions, pause_callback):
+    """Load the per-photo inputs the culling analysis groups and ranks on.
+
+    Returns ``(embeddings, quality, extensions, timestamps, phashes,
+    filenames, missing_phash)``.
+    """
     # Load embeddings, quality scores, file extensions, timestamps, phashes, and filenames
     embeddings = {}
     quality = {}
@@ -168,60 +217,65 @@ def analyze_for_culling(
             phashes[pid] = imagehash.hex_to_hash(row["phash"])
         elif row:
             missing_phash.append(pid)
+    return embeddings, quality, extensions, timestamps, phashes, filenames, missing_phash
 
-    # Backfill missing pHashes on the fly
-    if missing_phash:
-        if progress_callback:
-            progress_callback("Computing scene hashes...")
-        folders_map = {
-            r["id"]: r["path"]
-            for r in db.conn.execute("SELECT id, path FROM folders").fetchall()
-        }
-        for pid in missing_phash:
-            if pause_callback:
-                pause_callback()
-            row = db.conn.execute(
-                "SELECT folder_id, filename, working_copy_path FROM photos WHERE id = ?",
-                (pid,),
-            ).fetchone()
-            if not row:
-                continue
-            # Scope the broad except narrowly to the image-loading + hash step:
-            # those have a legitimate "skip this photo" failure mode
-            # (corrupt RAW, missing working copy, decode error). DB errors on
-            # the UPDATE/commit below must propagate — masking them would
-            # silently drop pHash writes AND leave the writer transaction
-            # open, defeating the per-photo commit's lock-release purpose.
-            try:
-                img = None
-                if vireo_dir:
-                    img = load_working_image(
-                        dict(row), vireo_dir, max_size=None, folders=folders_map
-                    )
-                if img is None:
-                    # Working copy absent/corrupt, or vireo_dir not provided —
-                    # try the original source (handles RAW via rawpy).
-                    folder_path = folders_map.get(row["folder_id"], "")
-                    img = load_image(os.path.join(folder_path, row["filename"]))
-                if img is None:
-                    continue
-                h = imagehash.phash(img)
-            except Exception:
-                log.debug("Could not compute pHash for photo %d", pid, exc_info=True)
-                continue
-            phashes[pid] = h
-            db.conn.execute(
-                "UPDATE photos SET phash = ? WHERE id = ?",
-                (str(h), pid),
-            )
-            # Commit per photo so the writer lock is released between
-            # iterations. Otherwise this loop holds the lock for the entire
-            # backfill (potentially many minutes on a fresh import where
-            # thousands of photos still need pHashes), starving any
-            # concurrent writer (e.g. a pipeline scan whose next
-            # ``add_photo`` INSERT will time out past the 30s busy_timeout).
-            db.conn.commit()
 
+def _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_callback, pause_callback):
+    """Compute and store pHashes for ``missing_phash``, adding each to ``phashes``."""
+    if progress_callback:
+        progress_callback("Computing scene hashes...")
+    folders_map = {
+        r["id"]: r["path"]
+        for r in db.conn.execute("SELECT id, path FROM folders").fetchall()
+    }
+    for pid in missing_phash:
+        if pause_callback:
+            pause_callback()
+        row = db.conn.execute(
+            "SELECT folder_id, filename, working_copy_path FROM photos WHERE id = ?",
+            (pid,),
+        ).fetchone()
+        if not row:
+            continue
+        # Scope the broad except narrowly to the image-loading + hash step:
+        # those have a legitimate "skip this photo" failure mode
+        # (corrupt RAW, missing working copy, decode error). DB errors on
+        # the UPDATE/commit below must propagate — masking them would
+        # silently drop pHash writes AND leave the writer transaction
+        # open, defeating the per-photo commit's lock-release purpose.
+        try:
+            img = None
+            if vireo_dir:
+                img = load_working_image(
+                    dict(row), vireo_dir, max_size=None, folders=folders_map
+                )
+            if img is None:
+                # Working copy absent/corrupt, or vireo_dir not provided —
+                # try the original source (handles RAW via rawpy).
+                folder_path = folders_map.get(row["folder_id"], "")
+                img = load_image(os.path.join(folder_path, row["filename"]))
+            if img is None:
+                continue
+            h = imagehash.phash(img)
+        except Exception:
+            log.debug("Could not compute pHash for photo %d", pid, exc_info=True)
+            continue
+        phashes[pid] = h
+        db.conn.execute(
+            "UPDATE photos SET phash = ? WHERE id = ?",
+            (str(h), pid),
+        )
+        # Commit per photo so the writer lock is released between
+        # iterations. Otherwise this loop holds the lock for the entire
+        # backfill (potentially many minutes on a fresh import where
+        # thousands of photos still need pHashes), starving any
+        # concurrent writer (e.g. a pipeline scan whose next
+        # ``add_photo`` INSERT will time out past the 30s busy_timeout).
+        db.conn.commit()
+
+
+def _group_by_species(photo_ids, predictions, extensions, separate_file_types, pause_callback):
+    """Group predicted photos by species key (and optionally RAW/other file type)."""
     # Classify extensions as RAW or non-RAW
     from image_loader import RAW_EXTENSIONS
 
@@ -242,68 +296,55 @@ def analyze_for_culling(
         if key not in species_map:
             species_map[key] = {"species": sp + suffix, "pids": []}
         species_map[key]["pids"].append(pid)
+    return species_map
 
-    # Analyze each species group
-    species_groups = []
-    total_keepers = 0
-    total_rejects = 0
 
-    for group_key, group_data in sorted(species_map.items(), key=lambda x: -len(x[1]["pids"])):
-        if pause_callback:
-            pause_callback()
-        species = group_data["species"]
-        pids = group_data["pids"]
-        sp_embeddings = {pid: embeddings[pid] for pid in pids if pid in embeddings}
+def _analyze_species_group(
+    group_key, group_data, embeddings, quality, timestamps, phashes, filenames,
+    redundancy_threshold, time_window, phash_threshold, cross_bucket_merge,
+):
+    """Cluster one species group into scenes and keeper/reject suggestions."""
+    species = group_data["species"]
+    pids = group_data["pids"]
+    sp_embeddings = {pid: embeddings[pid] for pid in pids if pid in embeddings}
 
-        # Build per-photo metadata for client-side regrouping
-        photo_data = []
-        for pid in pids:
-            ts = timestamps.get(pid)
-            photo_data.append({
-                "photo_id": pid,
-                "quality": quality.get(pid, 0),
-                "filename": filenames.get(pid, ""),
-                "timestamp": ts.isoformat() if ts else None,
-                "phash": str(phashes[pid]) if pid in phashes else None,
-            })
-
-        # Pre-compute redundancy clusters from embeddings (expensive — stays server-side)
-        if len(sp_embeddings) >= 2:
-            redundancy_clusters = _cluster_photos(sp_embeddings, redundancy_threshold)
-        else:
-            redundancy_clusters = [[pid] for pid in pids]
-
-        # Compute initial scene grouping for the default render
-        scene_clusters = _group_into_scenes(
-            pids, timestamps, phashes, time_window, phash_threshold, cross_bucket_merge
-        )
-
-        scene_groups, sp_keepers, sp_rejects = _build_scene_groups(
-            scene_clusters, redundancy_clusters, photo_data, timestamps, filenames
-        )
-
-        species_groups.append({
-            "species": species,
-            "species_key": group_key,
-            "photo_count": len(pids),
-            "scene_groups": scene_groups,
-            "keepers": sp_keepers,
-            "rejects": sp_rejects,
-            # Raw data for client-side regrouping
-            "photos_data": photo_data,
-            "redundancy_clusters": [[pid for pid in c] for c in redundancy_clusters],
+    # Build per-photo metadata for client-side regrouping
+    photo_data = []
+    for pid in pids:
+        ts = timestamps.get(pid)
+        photo_data.append({
+            "photo_id": pid,
+            "quality": quality.get(pid, 0),
+            "filename": filenames.get(pid, ""),
+            "timestamp": ts.isoformat() if ts else None,
+            "phash": str(phashes[pid]) if pid in phashes else None,
         })
-        total_keepers += sp_keepers
-        total_rejects += sp_rejects
 
-    photos_missing_phash = sum(1 for pid in photo_ids if pid not in phashes)
+    # Pre-compute redundancy clusters from embeddings (expensive — stays server-side)
+    if len(sp_embeddings) >= 2:
+        redundancy_clusters = _cluster_photos(sp_embeddings, redundancy_threshold)
+    else:
+        redundancy_clusters = [[pid] for pid in pids]
+
+    # Compute initial scene grouping for the default render
+    scene_clusters = _group_into_scenes(
+        pids, timestamps, phashes, time_window, phash_threshold, cross_bucket_merge
+    )
+
+    scene_groups, sp_keepers, sp_rejects = _build_scene_groups(
+        scene_clusters, redundancy_clusters, photo_data, timestamps, filenames
+    )
 
     return {
-        "species_groups": species_groups,
-        "total_photos": len(photo_ids),
-        "suggested_keepers": total_keepers,
-        "suggested_rejects": total_rejects,
-        "photos_missing_phash": photos_missing_phash,
+        "species": species,
+        "species_key": group_key,
+        "photo_count": len(pids),
+        "scene_groups": scene_groups,
+        "keepers": sp_keepers,
+        "rejects": sp_rejects,
+        # Raw data for client-side regrouping
+        "photos_data": photo_data,
+        "redundancy_clusters": [[pid for pid in c] for c in redundancy_clusters],
     }
 
 

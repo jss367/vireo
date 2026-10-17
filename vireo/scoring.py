@@ -391,78 +391,87 @@ def score_encounter(encounter, config=None):
         enc_body_tenegrads = enc_tenegrads
 
     for photo in photos:
-        eye_t = photo.get("eye_tenengrad") if eye_enabled else None
-        if eye_t is not None and enc_eye_tenegrads:
-            # Eye-based focus: pure percentile rank within the eye cohort.
-            # The subject-vs-bg ratio term from subject_focus_score does not
-            # translate to a small eye window, so the normalization is just
-            # the peer comparison — sharper eye relative to peers = higher.
-            f = _percentile_rank(eye_t, enc_eye_tenegrads)
-            photo["eye_focus_score"] = round(f, 4)
-        else:
-            f = subject_focus_score(
-                photo.get("subject_tenengrad"),
-                photo.get("bg_tenengrad"),
-                enc_body_tenegrads,
-            )
-        e = exposure_score(
-            photo.get("subject_clip_high"),
-            photo.get("subject_clip_low"),
-            photo.get("subject_y_median"),
+        _score_photo(
+            photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
+            enc_bg_seps, enc_bg_tenegrads, enc_noise,
         )
-        c = composition_score(
-            photo.get("crop_complete"),
-            photo.get("bg_separation"),
-            enc_bg_seps,
-            config=cfg,
-        )
-        a = area_score(photo.get("subject_size"))
-        n = noise_score(
-            photo.get("bg_tenengrad"),
-            enc_bg_tenegrads,
-            noise_estimate=photo.get("noise_estimate"),
-            encounter_noise_estimates=enc_noise,
-        )
-
-        q = (
-            cfg["w_focus"] * f
-            + cfg["w_exposure"] * e
-            + cfg["w_composition"] * c
-            + cfg["w_area"] * a
-            + cfg["w_noise"] * n
-        )
-        q = round(q, 4)
-
-        photo["focus_score"] = round(f, 4)
-        photo["exposure_score"] = round(e, 4)
-        photo["composition_score"] = round(c, 4)
-        photo["area_score"] = round(a, 4)
-        photo["noise_score"] = round(n, 4)
-        photo["quality_composite"] = q
-
-        # Check focus reject using encounter percentile
-        reasons = hard_reject_reasons(photo, q, config=cfg)
-        if f < cfg.get("reject_focus", 0.35) and photo.get("mask_path"):
-            reasons.append(f"out_of_focus (F={f:.3f} < {cfg['reject_focus']})")
-
-        # Eye-soft reject: catches "sharp body, soft eye" frames. Only fires
-        # when we have a confidently-localized eye — a null eye_tenengrad
-        # means the pipeline stage's gates didn't all pass, and we fall back
-        # to out_of_focus on subject_tenengrad (already handled above).
-        # Also skipped when eye detection is disabled so stale eye_tenengrad
-        # values from prior runs can't reject photos after the user toggles
-        # the feature off.
-        if (
-            eye_enabled
-            and photo.get("eye_tenengrad") is not None
-            and f < cfg.get("reject_eye_focus", 0.35)
-            and photo.get("mask_path")
-        ):
-            reasons.append(
-                f"eye_soft (E={f:.3f} < {cfg['reject_eye_focus']})"
-            )
-
-        photo["reject_reasons"] = reasons
-        photo["label"] = "REJECT" if reasons else None
 
     return encounter
+
+
+def _score_photo(photo, cfg, eye_enabled, enc_eye_tenegrads, enc_body_tenegrads,
+                 enc_bg_seps, enc_bg_tenegrads, enc_noise):
+    """Score one encounter photo against its peers and record its reject reasons."""
+    eye_t = photo.get("eye_tenengrad") if eye_enabled else None
+    if eye_t is not None and enc_eye_tenegrads:
+        # Eye-based focus: pure percentile rank within the eye cohort.
+        # The subject-vs-bg ratio term from subject_focus_score does not
+        # translate to a small eye window, so the normalization is just
+        # the peer comparison — sharper eye relative to peers = higher.
+        f = _percentile_rank(eye_t, enc_eye_tenegrads)
+        photo["eye_focus_score"] = round(f, 4)
+    else:
+        f = subject_focus_score(
+            photo.get("subject_tenengrad"),
+            photo.get("bg_tenengrad"),
+            enc_body_tenegrads,
+        )
+    e = exposure_score(
+        photo.get("subject_clip_high"),
+        photo.get("subject_clip_low"),
+        photo.get("subject_y_median"),
+    )
+    c = composition_score(
+        photo.get("crop_complete"),
+        photo.get("bg_separation"),
+        enc_bg_seps,
+        config=cfg,
+    )
+    a = area_score(photo.get("subject_size"))
+    n = noise_score(
+        photo.get("bg_tenengrad"),
+        enc_bg_tenegrads,
+        noise_estimate=photo.get("noise_estimate"),
+        encounter_noise_estimates=enc_noise,
+    )
+
+    q = (
+        cfg["w_focus"] * f
+        + cfg["w_exposure"] * e
+        + cfg["w_composition"] * c
+        + cfg["w_area"] * a
+        + cfg["w_noise"] * n
+    )
+    q = round(q, 4)
+
+    photo["focus_score"] = round(f, 4)
+    photo["exposure_score"] = round(e, 4)
+    photo["composition_score"] = round(c, 4)
+    photo["area_score"] = round(a, 4)
+    photo["noise_score"] = round(n, 4)
+    photo["quality_composite"] = q
+
+    # Check focus reject using encounter percentile
+    reasons = hard_reject_reasons(photo, q, config=cfg)
+    if f < cfg.get("reject_focus", 0.35) and photo.get("mask_path"):
+        reasons.append(f"out_of_focus (F={f:.3f} < {cfg['reject_focus']})")
+
+    # Eye-soft reject: catches "sharp body, soft eye" frames. Only fires
+    # when we have a confidently-localized eye — a null eye_tenengrad
+    # means the pipeline stage's gates didn't all pass, and we fall back
+    # to out_of_focus on subject_tenengrad (already handled above).
+    # Also skipped when eye detection is disabled so stale eye_tenengrad
+    # values from prior runs can't reject photos after the user toggles
+    # the feature off.
+    if (
+        eye_enabled
+        and photo.get("eye_tenengrad") is not None
+        and f < cfg.get("reject_eye_focus", 0.35)
+        and photo.get("mask_path")
+    ):
+        reasons.append(
+            f"eye_soft (E={f:.3f} < {cfg['reject_eye_focus']})"
+        )
+
+    photo["reject_reasons"] = reasons
+    photo["label"] = "REJECT" if reasons else None

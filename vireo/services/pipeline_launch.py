@@ -114,6 +114,159 @@ def resolve_remote_archive_target(
     remote_archive_config["target"]["ssh_bin"] = ssh_bin
     return remote_archive_config, rsync_bin, None
 
+
+def _record_after_move_skip(runner, job, result, skip):
+    """Record why a chained process run's NAS moves were not enqueued."""
+    if isinstance(result, dict):
+        result["after_move_skipped"] = skip
+    if skip != "process cancelled":
+        # Stepped pipeline jobs render ONLY the step tree, so a
+        # skip recorded just on the result would be invisible —
+        # and a skip_note means photos the user expected on the
+        # NAS stay local. Surface it as a warning step.
+        runner.append_step(
+            job["id"], "after-move", "Move to NAS",
+            summary="Skipped",
+            error=skip, error_count=1,
+        )
+    log.info("after-process move skipped: %s", skip)
+
+
+def _record_after_move_outcome(runner, job, result, after_move, move_ids, failures):
+    """Record the chained moves' handoff on the result, job and step tree."""
+    if isinstance(result, dict):
+        if move_ids:
+            result["move_job_ids"] = move_ids
+        if after_move.get("skip_note"):
+            # Partial skip: some folders moved but others (e.g.
+            # photos cataloged on the archive root) stayed local.
+            result["after_move_note"] = after_move["skip_note"]
+        if failures:
+            result["after_move_errors"] = failures
+    elif failures:
+        # run_pipeline_job raised, so there is no result dict to
+        # carry after_move_errors — fold the failures into the
+        # job's own error tally so they reach the persisted
+        # history and jobs panel instead of dying in the log.
+        # Safe: same thread, before _run_job's except handler
+        # takes the lock, and that handler dedups before
+        # appending.
+        job["errors"].extend(failures)
+    # Stepped pipeline jobs render ONLY the step tree, so the
+    # handoff outcome must live there too: a completed process job
+    # whose chained move never started (missing rsync/ssh, folder
+    # guard, bad mount) would otherwise look clean while the photos
+    # silently stay in the local archive.
+    target_name = (after_move.get("target") or {}).get("name") or "NAS"
+    if failures and not move_ids:
+        runner.append_step(
+            job["id"], "after-move", "Move to NAS",
+            status="failed",
+            summary="Failed to start the chained move",
+            error="; ".join(failures), error_count=len(failures),
+        )
+    else:
+        n = len(move_ids)
+        warn_bits = list(failures)
+        if after_move.get("skip_note"):
+            warn_bits.append(after_move["skip_note"])
+        runner.append_step(
+            job["id"], "after-move", "Move to NAS",
+            summary=(
+                f"{n} move job{'s' if n != 1 else ''} started → "
+                f"{target_name}"
+            ),
+            error="; ".join(warn_bits) or None,
+            error_count=len(warn_bits),
+        )
+
+
+def _process_pipeline_params(collection_id, expanded):
+    """Build the collection-scoped ``PipelineParams`` for a saved process."""
+    from pipeline_job import PipelineParams
+
+    return PipelineParams(
+        collection_id=collection_id,
+        skip_classify=expanded["skip_classify"],
+        skip_extract_masks=expanded["skip_extract_masks"],
+        skip_eye_keypoints=expanded["skip_eye_keypoints"],
+        skip_regroup=expanded["skip_regroup"],
+        miss_enabled=expanded["miss_enabled"],
+        review_mode=expanded["review_mode"],
+        # A saved process's Eye Keypoints toggle is an explicit opt-in
+        # (the Process-page checkbox sends eye_detect_override alongside
+        # it). When the process runs the eye stage, opt into eye scoring
+        # too so a chained/by-id run matches running the same toggles on
+        # the page, instead of silently deferring to the workspace's
+        # eye_detect_enabled default and skipping eye detection.
+        eye_detect_override=(
+            None if expanded["skip_eye_keypoints"] else True
+        ),
+    )
+
+
+def _missing_labels_blocker(thread_db, params, process_id):
+    """Return the pause message when Classify has no species list, else None."""
+    if not params.skip_classify:
+        from classify_job import _load_labels
+        from models import get_active_model
+
+        model = get_active_model()
+        if model is not None:
+            try:
+                _load_labels(
+                    model.get("model_type", "bioclip"),
+                    model.get("model_str", ""),
+                    None,
+                    None,
+                    db=thread_db,
+                    model_dir=model.get("weights_path"),
+                )
+            except RuntimeError:
+                saved_process = thread_db.processes.get(process_id)
+                process_name = (
+                    saved_process["name"] if saved_process
+                    else "the selected process"
+                )
+                return (
+                    "paused — Classify needs a species list. Download one "
+                    "in Settings › Labels, then run "
+                    f"{process_name} on this import collection."
+                )
+    return None
+
+
+def _process_job_config(thread_db, collection_id, process_id, params, chained_from):
+    """Build the jobs-panel config for a chained/by-id process run."""
+    job_config = {
+        "source": None,
+        "sources": None,
+        "collection_id": collection_id,
+        "collection_name": next(
+            (
+                c["name"]
+                for c in thread_db.get_collections()
+                if c["id"] == collection_id
+            ),
+            None,
+        ),
+        "destination": None,
+        "local_processing": False,
+        "process_id": process_id,
+        "skip_classify": params.skip_classify,
+        "skip_extract_masks": params.skip_extract_masks,
+        "skip_regroup": params.skip_regroup,
+        "review_mode": params.review_mode,
+        "miss_enabled": params.miss_enabled,
+        "eye_detect_override": params.eye_detect_override,
+    }
+    if chained_from:
+        # Provenance for the jobs panel: this run was started by an
+        # import's after-import choice, not by hand.
+        job_config["chained_from"] = chained_from
+    return job_config
+
+
 class PipelineChain:
     """After-import processing and after-process NAS moves.
 
@@ -155,115 +308,76 @@ class PipelineChain:
                 # would hide that those photos silently stay local.
                 skip = after_move.get("skip_note") or "no folders to move"
             if skip:
-                if isinstance(result, dict):
-                    result["after_move_skipped"] = skip
-                if skip != "process cancelled":
-                    # Stepped pipeline jobs render ONLY the step tree, so a
-                    # skip recorded just on the result would be invisible —
-                    # and a skip_note means photos the user expected on the
-                    # NAS stay local. Surface it as a warning step.
-                    runner.append_step(
-                        job["id"], "after-move", "Move to NAS",
-                        summary="Skipped",
-                        error=skip, error_count=1,
-                    )
-                log.info("after-process move skipped: %s", skip)
+                _record_after_move_skip(runner, job, result, skip)
                 return
             thread_db = Database(self._db_path)
             thread_db.set_active_workspace(workspace_id)
-            # One shared lock per batch: the move jobs all enqueue now (so
-            # move_job_ids is complete immediately) but their transfers run
-            # one at a time — see the why-comment in _start_move_folder_job.
-            serialize_lock = threading.Lock()
-            move_ids, failures = [], []
-            for entry in after_move["folders"]:
-                try:
-                    move_ids.append(self._enqueue_move_folder_job(
-                        thread_db, runner, workspace_id,
-                        folder_id=entry["folder_id"],
-                        subpath=entry["subpath"],
-                        target=after_move["target"],
-                        chained_from=job["id"],
-                        serialize_lock=serialize_lock,
-                    ))
-                except Exception as e:
-                    log.exception(
-                        "after-process move enqueue failed for folder %s",
-                        entry["folder_id"])
-                    failures.append(f"{entry['subpath']}: {e}")
-            if isinstance(result, dict):
-                if move_ids:
-                    result["move_job_ids"] = move_ids
-                if after_move.get("skip_note"):
-                    # Partial skip: some folders moved but others (e.g.
-                    # photos cataloged on the archive root) stayed local.
-                    result["after_move_note"] = after_move["skip_note"]
-                if failures:
-                    result["after_move_errors"] = failures
-            elif failures:
-                # run_pipeline_job raised, so there is no result dict to
-                # carry after_move_errors — fold the failures into the
-                # job's own error tally so they reach the persisted
-                # history and jobs panel instead of dying in the log.
-                # Safe: same thread, before _run_job's except handler
-                # takes the lock, and that handler dedups before
-                # appending.
-                job["errors"].extend(failures)
-            # Stepped pipeline jobs render ONLY the step tree, so the
-            # handoff outcome must live there too: a completed process job
-            # whose chained move never started (missing rsync/ssh, folder
-            # guard, bad mount) would otherwise look clean while the photos
-            # silently stay in the local archive.
-            target_name = (after_move.get("target") or {}).get("name") or "NAS"
-            if failures and not move_ids:
-                runner.append_step(
-                    job["id"], "after-move", "Move to NAS",
-                    status="failed",
-                    summary="Failed to start the chained move",
-                    error="; ".join(failures), error_count=len(failures),
-                )
-            else:
-                n = len(move_ids)
-                warn_bits = list(failures)
-                if after_move.get("skip_note"):
-                    warn_bits.append(after_move["skip_note"])
-                runner.append_step(
-                    job["id"], "after-move", "Move to NAS",
-                    summary=(
-                        f"{n} move job{'s' if n != 1 else ''} started → "
-                        f"{target_name}"
-                    ),
-                    error="; ".join(warn_bits) or None,
-                    error_count=len(warn_bits),
-                )
+            move_ids, failures = self._enqueue_after_moves(
+                thread_db, runner, job, after_move, workspace_id,
+            )
+            _record_after_move_outcome(
+                runner, job, result, after_move, move_ids, failures,
+            )
         except Exception as e:
             # This hook runs in the process job's ``finally`` — raising
             # here would mask a run_pipeline_job failure with a chaining
             # bug, so log and swallow.
             log.exception("after-process move chaining failed")
-            msg = f"after-process move chaining failed: {e}"
-            # Same visibility rule as above: the step tree is the only
-            # surface a stepped job shows, so record the machinery
-            # failure there too. Best-effort — never let step plumbing
-            # mask the original failure being handled here.
+            self._record_chaining_failure(job, result, e)
+
+    def _enqueue_after_moves(self, thread_db, runner, job, after_move, workspace_id):
+        """Enqueue one move-folder job per chained folder.
+
+        Returns ``(move_ids, failures)``; a folder whose enqueue raises is
+        logged and reported in ``failures`` instead of stopping the rest.
+        """
+        # One shared lock per batch: the move jobs all enqueue now (so
+        # move_job_ids is complete immediately) but their transfers run
+        # one at a time — see the why-comment in _start_move_folder_job.
+        serialize_lock = threading.Lock()
+        move_ids, failures = [], []
+        for entry in after_move["folders"]:
             try:
-                self._get_runner().append_step(
-                    job["id"], "after-move", "Move to NAS",
-                    status="failed", summary="Chaining failed",
-                    error=msg, error_count=1,
-                )
-            except Exception:
-                log.warning("Could not record the chaining failure step", exc_info=True)
-            if isinstance(result, dict):
-                # The pipeline succeeded but the chain machinery itself
-                # failed (e.g. creating the thread Database) — surface it
-                # on the result so the planned move doesn't just silently
-                # never happen.
-                result.setdefault("after_move_errors", []).append(msg)
-            elif msg not in job["errors"]:
-                # Raise path: no result dict to surface the failure on, so
-                # record it on the job itself (see the dedup note above).
-                job["errors"].append(msg)
+                move_ids.append(self._enqueue_move_folder_job(
+                    thread_db, runner, workspace_id,
+                    folder_id=entry["folder_id"],
+                    subpath=entry["subpath"],
+                    target=after_move["target"],
+                    chained_from=job["id"],
+                    serialize_lock=serialize_lock,
+                ))
+            except Exception as e:
+                log.exception(
+                    "after-process move enqueue failed for folder %s",
+                    entry["folder_id"])
+                failures.append(f"{entry['subpath']}: {e}")
+        return move_ids, failures
+
+    def _record_chaining_failure(self, job, result, e):
+        """Surface a failure of the chaining machinery itself."""
+        msg = f"after-process move chaining failed: {e}"
+        # Same visibility rule as above: the step tree is the only
+        # surface a stepped job shows, so record the machinery
+        # failure there too. Best-effort — never let step plumbing
+        # mask the original failure being handled here.
+        try:
+            self._get_runner().append_step(
+                job["id"], "after-move", "Move to NAS",
+                status="failed", summary="Chaining failed",
+                error=msg, error_count=1,
+            )
+        except Exception:
+            log.warning("Could not record the chaining failure step", exc_info=True)
+        if isinstance(result, dict):
+            # The pipeline succeeded but the chain machinery itself
+            # failed (e.g. creating the thread Database) — surface it
+            # on the result so the planned move doesn't just silently
+            # never happen.
+            result.setdefault("after_move_errors", []).append(msg)
+        elif msg not in job["errors"]:
+            # Raise path: no result dict to surface the failure on, so
+            # record it on the job itself (see the dedup note above).
+            job["errors"].append(msg)
 
     def enqueue_process_job(self, thread_db, runner, workspace_id, *,
                              collection_id, process_id,
@@ -293,60 +407,20 @@ class PipelineChain:
         ``skip_note`` explains folders the import cataloged but the move
         must leave local (photos on the archive root itself).
         """
-        from pipeline_job import PipelineParams, run_pipeline_job
+        from pipeline_job import run_pipeline_job
 
         if expanded is None:
             expanded = thread_db.resolve_process(process_id)
-        params = PipelineParams(
-            collection_id=collection_id,
-            skip_classify=expanded["skip_classify"],
-            skip_extract_masks=expanded["skip_extract_masks"],
-            skip_eye_keypoints=expanded["skip_eye_keypoints"],
-            skip_regroup=expanded["skip_regroup"],
-            miss_enabled=expanded["miss_enabled"],
-            review_mode=expanded["review_mode"],
-            # A saved process's Eye Keypoints toggle is an explicit opt-in
-            # (the Process-page checkbox sends eye_detect_override alongside
-            # it). When the process runs the eye stage, opt into eye scoring
-            # too so a chained/by-id run matches running the same toggles on
-            # the page, instead of silently deferring to the workspace's
-            # eye_detect_enabled default and skipping eye detection.
-            eye_detect_override=(
-                None if expanded["skip_eye_keypoints"] else True
-            ),
-        )
+        params = _process_pipeline_params(collection_id, expanded)
         model_warning = apply_no_model_auto_skip(params)
 
         # Chained imports bypass the Process page's missing-label Start gate.
         # Resolve the active label mode with the pipeline's own loader before
         # reserving a queue slot, so missing regional labels pause cleanly
         # instead of producing a guaranteed model_loader failure.
-        if not params.skip_classify:
-            from classify_job import _load_labels
-            from models import get_active_model
-
-            model = get_active_model()
-            if model is not None:
-                try:
-                    _load_labels(
-                        model.get("model_type", "bioclip"),
-                        model.get("model_str", ""),
-                        None,
-                        None,
-                        db=thread_db,
-                        model_dir=model.get("weights_path"),
-                    )
-                except RuntimeError:
-                    saved_process = thread_db.processes.get(process_id)
-                    process_name = (
-                        saved_process["name"] if saved_process
-                        else "the selected process"
-                    )
-                    return None, model_warning, (
-                        "paused — Classify needs a species list. Download one "
-                        "in Settings › Labels, then run "
-                        f"{process_name} on this import collection."
-                    )
+        blocker = _missing_labels_blocker(thread_db, params, process_id)
+        if blocker is not None:
+            return None, model_warning, blocker
 
         work_units = runtime_warning_work_units(
             "pipeline collection",
@@ -378,32 +452,9 @@ class PipelineChain:
                 if after_move:
                     self.chain_after_move(job, result, after_move, workspace_id)
 
-        job_config = {
-            "source": None,
-            "sources": None,
-            "collection_id": collection_id,
-            "collection_name": next(
-                (
-                    c["name"]
-                    for c in thread_db.get_collections()
-                    if c["id"] == collection_id
-                ),
-                None,
-            ),
-            "destination": None,
-            "local_processing": False,
-            "process_id": process_id,
-            "skip_classify": params.skip_classify,
-            "skip_extract_masks": params.skip_extract_masks,
-            "skip_regroup": params.skip_regroup,
-            "review_mode": params.review_mode,
-            "miss_enabled": params.miss_enabled,
-            "eye_detect_override": params.eye_detect_override,
-        }
-        if chained_from:
-            # Provenance for the jobs panel: this run was started by an
-            # import's after-import choice, not by hand.
-            job_config["chained_from"] = chained_from
+        job_config = _process_job_config(
+            thread_db, collection_id, process_id, params, chained_from,
+        )
         job_id = runner.enqueue_pipeline(
             work,
             config=job_config,
