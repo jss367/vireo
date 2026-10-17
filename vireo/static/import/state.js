@@ -46,6 +46,11 @@ let importPreviewSeq = 0;
 /** @type {Map<string,ImportDayEntry[]>} */ let importDayGroups = new Map();
 /** @type {Set<string>} */ let importCollapsedDays = new Set();
 /** @type {number | null} */ let newImagesSnapshotId = null;
+// New-images flow only: captured file count per folder, the capture's total,
+// and the folders the user left out of this import (sent as exclude_folders).
+/** @type {Record<string, number>} */ let newImagesFolderCounts = {};
+let newImagesFileCount = 0;
+/** @type {Set<string>} */ let newImagesExcludedFolders = new Set();
 // Preview lifecycle, read only by updateStartGate(). The four states below
 // must stay distinguishable — collapsing "no preview run" with "in flight"
 // is what would let a user who picked 100 of 5,000 files hit Start during the

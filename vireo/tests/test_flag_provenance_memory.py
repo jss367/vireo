@@ -279,6 +279,32 @@ def test_migration_and_canonical_ddl_match_without_backfilling_legacy_history():
     conn.close()
 
 
+
+def test_note_publication_failure_and_photo_replacement_cannot_leave_false_attribution():
+    conn, _, db, service, note = durable_fixture()
+    service.set_flag(7, "flagged", source="first")
+    repo_cls = type(db.photo_review)
+    original = repo_cls.set_current_flag_note
+    def fail(*a, **kw):
+        raise sqlite3.IntegrityError("invented note publication failure")
+    repo_cls.set_current_flag_note = fail
+    try:
+        try:
+            service.set_flag(7, "rejected", source="failed")
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("publication failure swallowed")
+    finally:
+        repo_cls.set_current_flag_note = original
+    assert not conn.in_transaction
+    assert note(db, 7, "flagged")["source"] == "first"
+    conn.execute("DELETE FROM photos WHERE id=7")
+    conn.execute("INSERT INTO photos(id,flag) VALUES(7,'flagged')")
+    assert note(db, 7, "flagged") is None
+    conn.close()
+
+
 if __name__ == "__main__":
     failed = []
     for name, check in list(globals().items()):

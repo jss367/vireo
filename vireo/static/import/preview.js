@@ -62,6 +62,7 @@ function importPreviewSignature() {
   return JSON.stringify({
     sources: sources.slice(),
     source_snapshot_id: newImagesSnapshotId,
+    exclude_folders: newImagesExcludedFolderList(),
     mode: copyMode ? 'copy' : 'in_place',
     file_types: copyMode ? selectedFileTypes() : 'both',
     recursive: /** @type {HTMLInputElement} */ (document.getElementById('chkRecursive')).checked,
@@ -166,9 +167,7 @@ async function previewImport(opts) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: previewAbort.signal,
-      body: JSON.stringify(snapshotMode ? {
-        snapshot_id: newImagesSnapshotId,
-      } : {
+      body: JSON.stringify(snapshotMode ? newImagesPreviewBody() : {
           folders: sources,
           file_types: fileTypes,
           recursive: /** @type {HTMLInputElement} */ (document.getElementById('chkRecursive')).checked,
