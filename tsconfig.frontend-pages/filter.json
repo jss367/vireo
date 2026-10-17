@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": ["../types/pages/filter.d.ts", "../vireo/static/vireo-filter.js"]
+}

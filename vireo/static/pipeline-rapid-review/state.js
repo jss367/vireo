@@ -2,6 +2,7 @@
 // active queue, the staged decisions for the open burst, and the zoom state.
 // Classic page script; load boot.js after all definitions.
 
+/** @type {RapidState} */
 var rapid = {
   results: null,
   photoMap: {},
@@ -39,6 +40,7 @@ var rapid = {
   queuePromptResolve: null,
 };
 
+/** @type {Record<string,{label:string;empty:string}> & {all:{label:string;empty:string}}} */
 var QUEUE_FILTERS = {
   'needs-species': { label: 'Needs species', empty: 'No bursts need species review.' },
   'needs-culling': { label: 'Needs culling', empty: 'No bursts need culling review.' },

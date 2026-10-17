@@ -7,18 +7,18 @@ var moveVisibilityReady = false;
 async function loadMoveVisibilityPreference() {
   try {
     var cfg = await safeFetch('/api/config');
-    var checkbox = document.getElementById('moveKeepVisible');
+    var checkbox = /** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible'));
     checkbox.checked = cfg.move_keep_visible_in_other_workspaces !== false;
     checkbox.disabled = false;
     moveVisibilityReady = true;
     updatePhotoSelectionUI();
   } catch (e) {
-    document.getElementById('moveAffectedWorkspaces').textContent = 'Could not load the remembered move choice. Reload before moving photos.';
+    /** @type {HTMLElement} */ (document.getElementById('moveAffectedWorkspaces')).textContent = 'Could not load the remembered move choice. Reload before moving photos.';
   }
 }
 
 async function rememberMoveVisibility() {
-  var checkbox = document.getElementById('moveKeepVisible');
+  var checkbox = /** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible'));
   var choice = checkbox.checked;
   checkbox.disabled = true;
   moveVisibilityReady = false;
@@ -36,9 +36,10 @@ async function rememberMoveVisibility() {
   }
 }
 
+/** @param {number[]} ids */
 async function refreshMoveVisibility(ids) {
   var seq = ++moveVisibilityRequest;
-  var status = document.getElementById('moveAffectedWorkspaces');
+  var status = /** @type {HTMLElement} */ (document.getElementById('moveAffectedWorkspaces'));
   if (!ids.length) {
     status.textContent = 'Select photos to see affected workspaces.';
     return [];
@@ -54,7 +55,7 @@ async function refreshMoveVisibility(ids) {
     });
     if (seq === moveVisibilityRequest) {
       status.textContent = names.length ? 'Affected workspaces: ' + names.join(', ') +
-        (document.getElementById('moveKeepVisible').checked ? '. Visibility will be kept for the moved photos.' : '. Moving permits removal of their visibility here; existing destination sharing still applies.') :
+        (/** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible')).checked ? '. Visibility will be kept for the moved photos.' : '. Moving permits removal of their visibility here; existing destination sharing still applies.') :
         'No other workspaces currently see these photos.';
     }
     return names;

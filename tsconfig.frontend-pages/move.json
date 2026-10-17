@@ -1,0 +1,21 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/move.d.ts",
+    "../vireo/static/move/boot.js",
+    "../vireo/static/move/confirm-modal.js",
+    "../vireo/static/move/folder-browser.js",
+    "../vireo/static/move/folders.js",
+    "../vireo/static/move/move-visibility.js",
+    "../vireo/static/move/photo-move.js",
+    "../vireo/static/move/quick-move-form.js",
+    "../vireo/static/move/quick-move-preflight.js",
+    "../vireo/static/move/quick-move-preview.js",
+    "../vireo/static/move/quick-move-start.js",
+    "../vireo/static/move/recent-destinations.js",
+    "../vireo/static/move/remote-targets.js",
+    "../vireo/static/move/rule-form.js",
+    "../vireo/static/move/rules.js",
+    "../vireo/static/move/state.js"
+  ]
+}

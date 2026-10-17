@@ -9,22 +9,22 @@ async function initialize() {
     state.source = {scope: 'all'};
   }
   if ([15, 30, 60, 120].indexOf(state.gapMinutes) === -1) state.gapMinutes = 60;
-  document.getElementById('locationReviewMode').value = state.mode;
-  document.getElementById('locationReviewGap').value = String(state.gapMinutes);
+  /** @type {HTMLSelectElement} */ (document.getElementById('locationReviewMode')).value = state.mode;
+  /** @type {HTMLSelectElement} */ (document.getElementById('locationReviewGap')).value = String(state.gapMinutes);
   document.body.classList.toggle('location-review-time', state.mode === 'time');
   document.body.classList.toggle('location-review-discrepancies', state.mode === 'discrepancies');
-  document.querySelectorAll('.discrepancy-only').forEach(function(el) { el.hidden = state.mode !== 'discrepancies'; });
-  document.getElementById('locationReviewDistance').value = state.minimumDistance;
-  document.getElementById('locationReviewIncludeKept').checked = state.includeKept;
-  document.querySelectorAll('.time-only').forEach(function(el) { el.hidden = state.mode !== 'time'; });
+  document.querySelectorAll(/** @type {'div'} */ ('.discrepancy-only')).forEach(function(el) { el.hidden = state.mode !== 'discrepancies'; });
+  /** @type {HTMLInputElement} */ (document.getElementById('locationReviewDistance')).value = String(state.minimumDistance);
+  /** @type {HTMLInputElement} */ (document.getElementById('locationReviewIncludeKept')).checked = state.includeKept;
+  document.querySelectorAll(/** @type {'div'} */ ('.time-only')).forEach(function(el) { el.hidden = state.mode !== 'time'; });
   if (state.mode === 'time') {
-    document.getElementById('locationReviewScope').textContent = 'Grouping photos by capture time…';
-    document.getElementById('locationReviewLocationsHeading').textContent = 'Choose a location';
-    document.getElementById('locationReviewBasisLabel').textContent = 'Grouping evidence';
-    document.getElementById('locationReviewSearch').placeholder = 'Search saved locations, find a place, or enter a name';
-    document.getElementById('locationReviewSuggestionMode').hidden = true;
+    /** @type {HTMLElement} */ (document.getElementById('locationReviewScope')).textContent = 'Grouping photos by capture time…';
+    /** @type {HTMLElement} */ (document.getElementById('locationReviewLocationsHeading')).textContent = 'Choose a location';
+    /** @type {HTMLElement} */ (document.getElementById('locationReviewBasisLabel')).textContent = 'Grouping evidence';
+    /** @type {HTMLInputElement} */ (document.getElementById('locationReviewSearch')).placeholder = 'Search saved locations, find a place, or enter a name';
+    /** @type {HTMLElement} */ (document.getElementById('locationReviewSuggestionMode')).hidden = true;
     try {
-      var keywords = await safeFetch('/api/keywords/all', {}, {toast: false});
+      /** @type {LocationSaved[]} */ var keywords = await safeFetch('/api/keywords/all', {}, {toast: false});
       state.savedLocations = keywords.filter(function(keyword) { return keyword.type === 'location'; });
     } catch (e) { showToast('Saved locations could not be loaded. You can still enter a custom name.', 'error'); }
   }
@@ -32,17 +32,17 @@ async function initialize() {
     await loadCollectionChoices();
   } catch (e) {
     if (!state.source) {
-      document.getElementById('locationReviewScope').textContent = 'Collections could not be loaded';
-      document.getElementById('locationReviewProgressText').textContent = 'Unavailable';
-      showEmpty('Could not load collections', e.message || 'The collection list is temporarily unavailable.', true);
+      /** @type {HTMLElement} */ (document.getElementById('locationReviewScope')).textContent = 'Collections could not be loaded';
+      /** @type {HTMLElement} */ (document.getElementById('locationReviewProgressText')).textContent = 'Unavailable';
+      showEmpty('Could not load collections', (e instanceof Error ? e.message : '') || 'The collection list is temporarily unavailable.', true);
       return;
     }
   }
   if (!state.source) {
-    document.getElementById('locationReviewScope').textContent = 'Choose a collection to begin';
-    document.getElementById('locationReviewProgressText').textContent = 'Ready';
-    document.getElementById('locationReviewRemaining').textContent = '';
-    document.getElementById('locationReviewProgressFill').style.width = '0';
+    /** @type {HTMLElement} */ (document.getElementById('locationReviewScope')).textContent = 'Choose a collection to begin';
+    /** @type {HTMLElement} */ (document.getElementById('locationReviewProgressText')).textContent = 'Ready';
+    /** @type {HTMLElement} */ (document.getElementById('locationReviewRemaining')).textContent = '';
+    /** @type {HTMLElement} */ (document.getElementById('locationReviewProgressFill')).style.width = '0';
     showEmpty(
       'Choose a collection',
       'Select a collection or All available photos above. To add locations to photos without GPS, choose Missing GPS · group by time.'
@@ -54,11 +54,11 @@ async function initialize() {
   } catch (e) { state.config = {}; }
   await initMap();
   if (state.mode === 'discrepancies') {
-    if (state.map) document.getElementById('locationReviewMapMessage').classList.add('location-review-hidden');
-    else document.getElementById('locationReviewMapMessage').textContent = 'Map unavailable. Coordinates, distances and photo review are still available.';
+    if (state.map) /** @type {HTMLElement} */ (document.getElementById('locationReviewMapMessage')).classList.add('location-review-hidden');
+    else /** @type {HTMLElement} */ (document.getElementById('locationReviewMapMessage')).textContent = 'Map unavailable. Coordinates, distances and photo review are still available.';
     checkPendingSync();
-    if (!state.config.write_assigned_location_to_xmp) {
-      document.getElementById('locationReviewCorrectionStatus').textContent = 'To queue corrections, first enable Write assigned locations to XMP in Settings.';
+    if (!state.config?.write_assigned_location_to_xmp) {
+      /** @type {HTMLElement} */ (document.getElementById('locationReviewCorrectionStatus')).textContent = 'To queue corrections, first enable Write assigned locations to XMP in Settings.';
     }
   }
   await refreshLocationReview();
@@ -66,7 +66,7 @@ async function initialize() {
 
 async function refreshLocationReview() {
   try {
-    var preview = await safeFetch('/api/location-review/preview', {
+    /** @type {LocationPreview} */ var preview = await safeFetch('/api/location-review/preview', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(Object.assign({}, state.source, {mode: state.mode, gap_minutes: state.gapMinutes, minimum_distance_m: state.minimumDistance, include_reviewed: state.includeKept}))
     });
     state.groups = preview.groups || [];
@@ -81,8 +81,8 @@ async function refreshLocationReview() {
     var withCoordinates = (preview.skipped || []).length - assigned;
     if (assigned) scopeParts.push(formatNumber(assigned) + ' already assigned');
     if (withCoordinates) scopeParts.push(formatNumber(withCoordinates) + ' already have GPS');
-    if ((preview.unresolved || []).length) scopeParts.push(formatNumber(preview.unresolved.length) + ' without usable coordinates');
-    document.getElementById('locationReviewScope').textContent = scopeParts.join(' · ');
+    if ((preview.unresolved || []).length) scopeParts.push(formatNumber(preview.unresolved?.length) + ' without usable coordinates');
+    /** @type {HTMLElement} */ (document.getElementById('locationReviewScope')).textContent = scopeParts.join(' · ');
     if (!state.groups.length) {
       showEmpty('No locations to review', state.mode === 'discrepancies' ? 'No unreviewed GPS differences exceed this distance. Photos need both GPS and an assigned place with coordinates. Existing sidecar corrections are excluded.' : preview.total ? (state.mode === 'time' ? 'Every photo in this set already has a location or usable GPS.' : 'Every photo in this set is already assigned or lacks usable coordinates.') : 'This set contains no photos.');
       updateProgress();
@@ -90,6 +90,6 @@ async function refreshLocationReview() {
     }
     renderCurrentGroup();
   } catch (e) {
-    showEmpty('Could not load locations', e.message || 'The location review set could not be opened.', true);
+    showEmpty('Could not load locations', (e instanceof Error ? e.message : '') || 'The location review set could not be opened.', true);
   }
 }

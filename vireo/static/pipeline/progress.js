@@ -4,7 +4,7 @@
 // Map pipeline stage names to UI card element suffixes. Stages with no
 // card here (e.g. the import job's storage/archive stages) are ignored by
 // _updatePipelineStageUI.
-var _stageToCard = {
+/** @type {Record<string,string>} */ var _stageToCard = {
   ingest: 'Source',
   scan: 'Scan',
   thumbnails: 'Previews',
@@ -20,7 +20,7 @@ var _stageToCard = {
 // their card failed but are left out of _cardToStages, so a normal run
 // (where the key is absent) doesn't wait on them to finish the card.
 // ``collection`` builds the run's collection right after the scan.
-var _failureOnlyStageToCard = {
+/** @type {Record<string,string>} */ var _failureOnlyStageToCard = {
   collection: 'Scan',
 };
 
@@ -29,16 +29,16 @@ var _failureOnlyStageToCard = {
 // multi-substage cards (e.g. Previews = thumbnails + previews) so the pill
 // only flips to 'Done' once every substage has reached a terminal state.
 var _cardToStages = (function() {
-  var m = {};
+  /** @type {Record<string,string[]>} */ var m = {};
   for (var s in _stageToCard) {
-    var c = _stageToCard[s];
+    var c = _stageToCard[s]; if (!c) continue;
     (m[c] = m[c] || []).push(s);
   }
   return m;
 })();
 
 // Map pipeline stage names to the progress bar element suffixes
-var _stageToProgress = {
+/** @type {Record<string,string>} */ var _stageToProgress = {
   ingest: 'Source',
   scan: 'Scan',
   thumbnails: 'Previews',
@@ -54,6 +54,7 @@ var _stageToProgress = {
   regroup: 'Group',
 };
 
+/** @param {number} seconds */
 function _formatETA(seconds) {
   if (seconds < 60) return seconds + 's';
   if (seconds < 3600) return Math.round(seconds / 60) + 'm';
@@ -67,9 +68,10 @@ function _formatETA(seconds) {
 // that explicitly instead of leaving the user to guess whether the card is
 // still in use (`ingestInfo.copied` is absent entirely in scan-in-place mode,
 // where there was never a copy and the card stays needed for the whole run).
+/** @param {PipelineStageResult | undefined} ingestInfo */
 function _showSourceEjectSafe(ingestInfo) {
   if (!ingestInfo || typeof ingestInfo.copied !== 'number') return;
-  var statusSourceEl = document.getElementById('statusSource');
+  var statusSourceEl = /** @type {HTMLElement} */ (document.getElementById('statusSource'));
   if (!statusSourceEl) return;
   var parts = [ingestInfo.copied.toLocaleString() + ' copied'];
   if (ingestInfo.skipped_duplicate) {
@@ -79,6 +81,7 @@ function _showSourceEjectSafe(ingestInfo) {
   statusSourceEl.className = 'status-msg ok';
 }
 
+/** @param {PipelineProgress} p */
 function _updatePipelineStageUI(p) {
   var stages = p.stages || {};
 
@@ -88,12 +91,12 @@ function _updatePipelineStageUI(p) {
   // substages reach a terminal state. Resolving each substage event in
   // isolation made the pill flash 'Done' as soon as the first substage
   // finished, even though more work was pending.
-  var cardAgg = {};  // cardSuffix -> aggregate substage outcomes
+  /** @type {Record<string, PipelineCardAggregate>} */ var cardAgg = {};  // cardSuffix -> aggregate substage outcomes
   for (var stageName in stages) {
     var cardSuffix = _stageToCard[stageName];
     if (!cardSuffix) {
       var failureCard = _failureOnlyStageToCard[stageName];
-      if (failureCard && stages[stageName].status === 'failed') {
+      if (failureCard && stages[stageName]?.status === 'failed') {
         (cardAgg[failureCard] || (cardAgg[failureCard] = {
           running: false, failed: false, warning: false,
           completed: 0, skipped: 0, present: 0,
@@ -106,20 +109,20 @@ function _updatePipelineStageUI(p) {
       completed: 0, skipped: 0, present: 0,
     });
     agg.present += 1;
-    var st = stages[stageName].status;
+    var st = stages[stageName]?.status;
     if (st === 'running') agg.running = true;
     else if (st === 'failed') agg.failed = true;
     else if (st === 'completed') {
       agg.completed += 1;
-      if ((stages[stageName].error_count || 0) > 0) agg.warning = true;
+      if ((stages[stageName]?.error_count || 0) > 0) agg.warning = true;
     }
     else if (st === 'skipped') agg.skipped += 1;
   }
 
   for (var cardSuffix2 in cardAgg) {
-    var a = cardAgg[cardSuffix2];
+    var a = cardAgg[cardSuffix2]; if (!a) continue;
     var expected = (_cardToStages[cardSuffix2] || []).length;
-    var numEl = document.getElementById('num' + cardSuffix2);
+    var numEl = /** @type {HTMLElement} */ (document.getElementById('num' + cardSuffix2));
     if (!numEl) continue;
 
     if (a.running) {
@@ -137,7 +140,7 @@ function _updatePipelineStageUI(p) {
       var subStages = _cardToStages[cardSuffix2] || [];
       var stageDone = 0, stageTot = 0;
       for (var i = 0; i < subStages.length; i++) {
-        var info = stages[subStages[i]] || {};
+        var info = stages[subStages[i] || ''] || {};
         if (info.status !== 'running') continue;
         var t = info.total || 0;
         if (t > stageTot) {
@@ -190,10 +193,10 @@ function _updatePipelineStageUI(p) {
   var progressSuffix = _stageToProgress[p.stage_id];
   if (!progressSuffix) return;
 
-  var progressWrap = document.getElementById('progress' + progressSuffix);
-  var fill = document.getElementById('fill' + progressSuffix);
-  var text = document.getElementById('text' + progressSuffix);
-  var status = document.getElementById('status' + progressSuffix);
+  var progressWrap = /** @type {HTMLElement} */ (document.getElementById('progress' + progressSuffix));
+  var fill = /** @type {HTMLElement} */ (document.getElementById('fill' + progressSuffix));
+  var text = /** @type {HTMLElement} */ (document.getElementById('text' + progressSuffix));
+  var status = /** @type {HTMLElement} */ (document.getElementById('status' + progressSuffix));
 
   // Per-stage progress lives in stages[stage_id]; event top-level
   // current/total is the WEIGHTED OVERALL progress and must not drive
@@ -261,6 +264,7 @@ function _updatePipelineStageUI(p) {
 
 // Strip the internal "[stage] Fatal:" prefix so the banner reads as a plain,
 // actionable sentence (the stage is already conveyed by the failed card pill).
+/** @param {string | undefined} msg */
 function _humanizePipelineError(msg) {
   return String(msg).replace(/^\[\w+\]\s*/, '').replace(/^Fatal:\s*/i, '');
 }
@@ -268,20 +272,22 @@ function _humanizePipelineError(msg) {
 // Show why stages of a run that did not fail were skipped. Warning-styled,
 // not the red failure banner: nothing failed, but the user should know why
 // a stage did nothing (e.g. every detection below detector_confidence).
+/** @param {string[]} messages @param {boolean} offerReview */
 function _showPipelineNotes(messages, offerReview) {
-  var banner = document.getElementById('pipelineNoteBanner');
-  var text = document.getElementById('pipelineNoteText');
+  var banner = /** @type {HTMLElement} */ (document.getElementById('pipelineNoteBanner'));
+  var text = /** @type {HTMLElement} */ (document.getElementById('pipelineNoteText'));
   if (!banner || !text) return;
   text.textContent = messages.join('\n');
-  var link = document.getElementById('pipelineNoteReviewLink');
+  var link = /** @type {HTMLAnchorElement} */ (document.getElementById('pipelineNoteReviewLink'));
   if (link) link.style.display = offerReview ? 'inline-block' : 'none';
   banner.style.display = '';
 }
 
 // Show a prominent, dismissible error banner with the full failure message(s).
+/** @param {string[]} messages */
 function _showPipelineError(messages) {
-  var banner = document.getElementById('pipelineErrorBanner');
-  var text = document.getElementById('pipelineErrorText');
+  var banner = /** @type {HTMLElement} */ (document.getElementById('pipelineErrorBanner'));
+  var text = /** @type {HTMLElement} */ (document.getElementById('pipelineErrorText'));
   if (!banner || !text) return;
   text.textContent = messages.join('\n');
   banner.style.display = '';

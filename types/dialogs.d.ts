@@ -17,6 +17,13 @@ interface VireoDialogSession {
   escToken: number;
 }
 
+interface VireoKeymap {
+  pushEsc(handler: () => void): number;
+  popEsc(token: number): boolean;
+  lockBodyScroll(): void;
+  unlockBodyScroll(): void;
+}
+
 interface Window {
   VireoDialog: {
     create(overlay: HTMLElement, options?: VireoDialogOptions): VireoDialogController;
@@ -26,10 +33,5 @@ interface Window {
     // is open, so showing them in that state would be a dead overlay.
     hasActive(): boolean;
   };
-  Keymap: {
-    pushEsc(handler: () => void): number;
-    popEsc(token: number): boolean;
-    lockBodyScroll(): void;
-    unlockBodyScroll(): void;
-  };
+  Keymap: VireoKeymap;
 }

@@ -32,6 +32,132 @@ from services.local_workspace import destination_case_insensitive, stage_boundar
 from services.local_workspace import local_state as legacy_local_state
 
 
+def _stage_progress_reporter(runner, job, root_id, name):
+    """Build the stage job's per-file copy progress callback for one root."""
+
+    def report(current, total, current_bytes, total_bytes, path):
+        job["progress"].update(
+            {
+                "current": current,
+                "total": total,
+                "current_file": path,
+                "phase": f"Copying {name} locally",
+                "bytes_current": current_bytes,
+                "bytes_total": total_bytes,
+                "root_folder_id": root_id,
+            }
+        )
+        runner.update_step(
+            job["id"],
+            f"folder-{root_id}",
+            progress={"current": current, "total": total},
+            current_file=path,
+        )
+        runner.push_event(job["id"], "progress", dict(job["progress"]))
+
+    return report
+
+
+def _folder_sync_steps(root_ids, root_names):
+    """The sync job's step list.
+
+    Two steps per folder, because a sync has two phases with very different
+    meanings: checking re-reads source files and writes nothing, publishing
+    overwrites and deletes them. One shared counter would hide which is
+    running and would feed the checking phase's elapsed time into the
+    publishing phase's ETA.
+    """
+    return [
+        step
+        for root_id in root_ids
+        for step in (
+            {
+                "id": f"check-{root_id}",
+                "label": f"Check {root_names[root_id]} against source",
+            },
+            {
+                "id": f"folder-{root_id}",
+                "label": f"Sync {root_names[root_id]} to source",
+            },
+        )
+    ]
+
+
+def _folder_sync_reporters(runner, job, root_id, name, scan_totals, active_step):
+    """Build one root's sync callbacks: ``(scan_report, begin_publish, report)``.
+
+    ``begin_publish`` records the publishing step in ``active_step["id"]``.
+    """
+
+    def scan_report(current, total, path):
+        scan_totals[root_id] = total
+        job["progress"].update(
+            {
+                "current": current,
+                "total": total,
+                "current_file": path,
+                "phase": f"Checking {name} against source",
+                "root_folder_id": root_id,
+            }
+        )
+        runner.update_step(
+            job["id"],
+            f"check-{root_id}",
+            progress={"current": current, "total": total},
+            current_file=path,
+        )
+        runner.push_event(job["id"], "progress", dict(job["progress"]))
+
+    def begin_publish():
+        """Close the checking phase and open the publishing one."""
+        if not runner.begin_uncancellable(job["id"]):
+            return False
+        checked = scan_totals.get(root_id, 0)
+        runner.update_step(
+            job["id"],
+            f"check-{root_id}",
+            status="completed",
+            summary=(
+                f"{checked:,} checked, no conflicts"
+                if checked
+                else "nothing to check against source"
+            ),
+        )
+        active_step["id"] = f"folder-{root_id}"
+        runner.update_step(job["id"], active_step["id"], status="running")
+        job["progress"].update(
+            {
+                "current": 0,
+                "total": 0,
+                "current_file": "",
+                "phase": f"Syncing {name} to source",
+                "root_folder_id": root_id,
+            }
+        )
+        runner.push_event(job["id"], "progress", dict(job["progress"]))
+        return True
+
+    def report(current, total, path):
+        job["progress"].update(
+            {
+                "current": current,
+                "total": total,
+                "current_file": path,
+                "phase": f"Syncing {name} to source",
+                "root_folder_id": root_id,
+            }
+        )
+        runner.update_step(
+            job["id"],
+            f"folder-{root_id}",
+            progress={"current": current, "total": total},
+            current_file=path,
+        )
+        runner.push_event(job["id"], "progress", dict(job["progress"]))
+
+    return scan_report, begin_publish, report
+
+
 def create_local_folder_blueprint(
     get_db, json_error, get_runner, db_path, vireo_dir, invalidate_missing_originals=None
 ):
@@ -700,18 +826,7 @@ def create_local_folder_blueprint(
             {"cancelled": _cancel_preflight(cancel_workspace_id, preflight_id)}
         )
 
-    @blueprint.post("/api/workspaces/active/local-folders/stage")
-    def stage_local_folders():
-        db, workspace_id, error = _active_context()
-        if error:
-            return error
-        legacy_error = _legacy_error(db, workspace_id)
-        if legacy_error is not None:
-            return legacy_error
-        body = request.get_json(silent=True) or {}
-        root_ids, request_error = _requested_roots(db, workspace_id, body)
-        if request_error is not None:
-            return request_error
+    def _roots_without_local_coverage(db, root_ids):
         # Filter out roots already covered by a local session — either exactly
         # (this root is a staged local root) or as an ancestor of one (a
         # descendant is staged, so the workspace has partial local coverage
@@ -725,7 +840,21 @@ def create_local_folder_blueprint(
             if local_root_under_folder(db, root_id) is not None:
                 continue
             remaining.append(root_id)
-        root_ids = remaining
+        return remaining
+
+    @blueprint.post("/api/workspaces/active/local-folders/stage")
+    def stage_local_folders():
+        db, workspace_id, error = _active_context()
+        if error:
+            return error
+        legacy_error = _legacy_error(db, workspace_id)
+        if legacy_error is not None:
+            return legacy_error
+        body = request.get_json(silent=True) or {}
+        root_ids, request_error = _requested_roots(db, workspace_id, body)
+        if request_error is not None:
+            return request_error
+        root_ids = _roots_without_local_coverage(db, root_ids)
         if not root_ids:
             return json_error(
                 "The selected folders are already local or contain a folder working locally",
@@ -757,36 +886,12 @@ def create_local_folder_blueprint(
                 for root_id in root_ids:
                     step_id = f"folder-{root_id}"
                     runner.update_step(job["id"], step_id, status="running")
-
-                    def report(
-                        current, total, current_bytes, total_bytes, path,
-                        _root=root_id, _name=root_names[root_id],
-                    ):
-                        job["progress"].update(
-                            {
-                                "current": current,
-                                "total": total,
-                                "current_file": path,
-                                "phase": f"Copying {_name} locally",
-                                "bytes_current": current_bytes,
-                                "bytes_total": total_bytes,
-                                "root_folder_id": _root,
-                            }
-                        )
-                        runner.update_step(
-                            job["id"],
-                            f"folder-{_root}",
-                            progress={"current": current, "total": total},
-                            current_file=path,
-                        )
-                        runner.push_event(job["id"], "progress", dict(job["progress"]))
-
                     result = stage_folder(
                         thread_db,
                         root_id,
                         vireo_dir,
                         local_base=destination_bases.get(root_id),
-                        progress=report,
+                        progress=_stage_progress_reporter(runner, job, root_id, root_names[root_id]),
                         cancel_check=lambda: runner.is_cancelled(job["id"]),
                         begin_commit=lambda: runner.begin_uncancellable(job["id"]),
                     )
@@ -828,6 +933,83 @@ def create_local_folder_blueprint(
             )
         return jsonify({"job_id": job_id, "folder_ids": root_ids}), 202
 
+    def _sync_deletion_confirmations(db, root_ids, counts):
+        """Check each root can sync; return its confirmed deletion count, or an error."""
+        confirmed = {}
+        for root_id in root_ids:
+            try:
+                current = folder_status(db, root_id, vireo_dir)
+            except LocalWorkspaceError as exc:
+                return None, json_error(str(exc), 409)
+            if current.get("state") not in {"active", "recovery"}:
+                return None, json_error(
+                    f"Folder {root_id} has an incomplete local copy; discard it before continuing",
+                    409,
+                )
+            if current.get("state") == "recovery" and current.get("recovery_kind") != "sync":
+                return None, json_error(
+                    f"Folder {root_id} cannot be synced because its local copy is incomplete",
+                    409,
+                )
+            if current.get("changes_error"):
+                return None, json_error(current["changes_error"], 409)
+            deleted = int((current.get("changes") or {}).get("deleted", 0))
+            raw = counts.get(str(root_id), counts.get(root_id))
+            if deleted and raw is None:
+                return None, json_error(
+                    f"Folder {root_id} would delete {deleted} source file(s); confirm deletions first",
+                    409,
+                )
+            if raw is not None:
+                try:
+                    raw = int(raw)
+                except (TypeError, ValueError):
+                    return None, json_error("Deletion confirmation counts must be integers", 400)
+            confirmed[root_id] = raw
+        return confirmed, None
+
+    def _sync_one_root(runner, job, thread_db, root_id, name, count, scan_totals):
+        """Check one local root against source, then publish it, tracking the running step."""
+        check_id = f"check-{root_id}"
+        # The step to mark if sync stops: begin_publish moves it from the
+        # checking step to the publishing one.
+        active_step = {"id": check_id}
+        runner.update_step(job["id"], check_id, status="running")
+        job["progress"].update(
+            {
+                "current": 0,
+                "total": 0,
+                "current_file": "",
+                "phase": f"Checking {name} against source",
+                "root_folder_id": root_id,
+            }
+        )
+        runner.push_event(job["id"], "progress", dict(job["progress"]))
+        scan_report, begin_publish, report = _folder_sync_reporters(
+            runner, job, root_id, name, scan_totals, active_step
+        )
+        try:
+            return sync_folder(
+                thread_db,
+                root_id,
+                vireo_dir,
+                allow_deletions=count is not None,
+                confirmed_deletions=count,
+                progress=report,
+                scan_progress=scan_report,
+                cancel_check=lambda: runner.is_cancelled(job["id"]),
+                begin_commit=begin_publish,
+            )
+        except LocalWorkspaceCancelled:
+            runner.update_step(job["id"], active_step["id"], status="cancelled")
+            raise
+        except Exception:
+            # A conflict (the usual failure) ends the checking
+            # phase, not the publishing one. Mark whichever step
+            # was running so the card says where it stopped.
+            runner.update_step(job["id"], active_step["id"], status="failed")
+            raise
+
     @blueprint.post("/api/workspaces/active/local-folders/sync")
     def sync_local_folders():
         db, workspace_id, error = _active_context()
@@ -846,37 +1028,9 @@ def create_local_folder_blueprint(
         counts = body.get("confirmed_deletion_counts") or {}
         if not isinstance(counts, dict):
             return json_error("confirmed_deletion_counts must be an object", 400)
-        confirmed = {}
-        for root_id in root_ids:
-            try:
-                current = folder_status(db, root_id, vireo_dir)
-            except LocalWorkspaceError as exc:
-                return json_error(str(exc), 409)
-            if current.get("state") not in {"active", "recovery"}:
-                return json_error(
-                    f"Folder {root_id} has an incomplete local copy; discard it before continuing",
-                    409,
-                )
-            if current.get("state") == "recovery" and current.get("recovery_kind") != "sync":
-                return json_error(
-                    f"Folder {root_id} cannot be synced because its local copy is incomplete",
-                    409,
-                )
-            if current.get("changes_error"):
-                return json_error(current["changes_error"], 409)
-            deleted = int((current.get("changes") or {}).get("deleted", 0))
-            raw = counts.get(str(root_id), counts.get(root_id))
-            if deleted and raw is None:
-                return json_error(
-                    f"Folder {root_id} would delete {deleted} source file(s); confirm deletions first",
-                    409,
-                )
-            if raw is not None:
-                try:
-                    raw = int(raw)
-                except (TypeError, ValueError):
-                    return json_error("Deletion confirmation counts must be integers", 400)
-            confirmed[root_id] = raw
+        confirmed, confirm_error = _sync_deletion_confirmations(db, root_ids, counts)
+        if confirm_error is not None:
+            return confirm_error
         runner = get_runner()
 
         def work(job):
@@ -884,142 +1038,14 @@ def create_local_folder_blueprint(
             thread_db.set_active_workspace(workspace_id)
             results = []
             try:
-                runner.set_steps(
-                    job["id"],
-                    # Two steps per folder, because a sync has two phases with
-                    # very different meanings: checking re-reads source files
-                    # and writes nothing, publishing overwrites and deletes
-                    # them. One shared counter would hide which is running and
-                    # would feed the checking phase's elapsed time into the
-                    # publishing phase's ETA.
-                    [
-                        step
-                        for root_id in root_ids
-                        for step in (
-                            {
-                                "id": f"check-{root_id}",
-                                "label": f"Check {root_names[root_id]} against source",
-                            },
-                            {
-                                "id": f"folder-{root_id}",
-                                "label": f"Sync {root_names[root_id]} to source",
-                            },
-                        )
-                    ],
-                )
+                runner.set_steps(job["id"], _folder_sync_steps(root_ids, root_names))
                 scan_totals: dict[int, int] = {}
-                active_step = None
                 for root_id in root_ids:
-                    check_id = f"check-{root_id}"
                     step_id = f"folder-{root_id}"
-                    active_step = check_id
-                    runner.update_step(job["id"], check_id, status="running")
-                    job["progress"].update(
-                        {
-                            "current": 0,
-                            "total": 0,
-                            "current_file": "",
-                            "phase": f"Checking {root_names[root_id]} against source",
-                            "root_folder_id": root_id,
-                        }
+                    result = _sync_one_root(
+                        runner, job, thread_db, root_id, root_names[root_id],
+                        confirmed[root_id], scan_totals,
                     )
-                    runner.push_event(job["id"], "progress", dict(job["progress"]))
-
-                    def scan_report(
-                        current, total, path,
-                        _root=root_id, _name=root_names[root_id],
-                    ):
-                        scan_totals[_root] = total
-                        job["progress"].update(
-                            {
-                                "current": current,
-                                "total": total,
-                                "current_file": path,
-                                "phase": f"Checking {_name} against source",
-                                "root_folder_id": _root,
-                            }
-                        )
-                        runner.update_step(
-                            job["id"],
-                            f"check-{_root}",
-                            progress={"current": current, "total": total},
-                            current_file=path,
-                        )
-                        runner.push_event(job["id"], "progress", dict(job["progress"]))
-
-                    def begin_publish(_root=root_id, _name=root_names[root_id]):
-                        """Close the checking phase and open the publishing one."""
-                        nonlocal active_step
-                        if not runner.begin_uncancellable(job["id"]):
-                            return False
-                        checked = scan_totals.get(_root, 0)
-                        runner.update_step(
-                            job["id"],
-                            f"check-{_root}",
-                            status="completed",
-                            summary=(
-                                f"{checked:,} checked, no conflicts"
-                                if checked
-                                else "nothing to check against source"
-                            ),
-                        )
-                        active_step = f"folder-{_root}"
-                        runner.update_step(job["id"], active_step, status="running")
-                        job["progress"].update(
-                            {
-                                "current": 0,
-                                "total": 0,
-                                "current_file": "",
-                                "phase": f"Syncing {_name} to source",
-                                "root_folder_id": _root,
-                            }
-                        )
-                        runner.push_event(job["id"], "progress", dict(job["progress"]))
-                        return True
-
-                    def report(
-                        current, total, path,
-                        _root=root_id, _name=root_names[root_id],
-                    ):
-                        job["progress"].update(
-                            {
-                                "current": current,
-                                "total": total,
-                                "current_file": path,
-                                "phase": f"Syncing {_name} to source",
-                                "root_folder_id": _root,
-                            }
-                        )
-                        runner.update_step(
-                            job["id"],
-                            f"folder-{_root}",
-                            progress={"current": current, "total": total},
-                            current_file=path,
-                        )
-                        runner.push_event(job["id"], "progress", dict(job["progress"]))
-
-                    count = confirmed[root_id]
-                    try:
-                        result = sync_folder(
-                            thread_db,
-                            root_id,
-                            vireo_dir,
-                            allow_deletions=count is not None,
-                            confirmed_deletions=count,
-                            progress=report,
-                            scan_progress=scan_report,
-                            cancel_check=lambda: runner.is_cancelled(job["id"]),
-                            begin_commit=begin_publish,
-                        )
-                    except LocalWorkspaceCancelled:
-                        runner.update_step(job["id"], active_step, status="cancelled")
-                        raise
-                    except Exception:
-                        # A conflict (the usual failure) ends the checking
-                        # phase, not the publishing one. Mark whichever step
-                        # was running so the card says where it stopped.
-                        runner.update_step(job["id"], active_step, status="failed")
-                        raise
                     results.append(result)
                     runner.update_step(
                         job["id"],

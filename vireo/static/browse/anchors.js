@@ -14,7 +14,7 @@
    anchor a reload like any other selected card. */
 function browseSelectedStackCoverId() {
   if (selectedPhotos.size < 2) return null;
-  var isTheSelection = function(photo) {
+  var isTheSelection = function(/** @type {BrowsePhoto | undefined} */ photo) {
     if (!photo || !photo.browse_stack) return false;
     // A focused photo alongside the set usually means a batch the user built
     // by hand around one card. One case is still a whole stack: collapsing a
@@ -31,22 +31,24 @@ function browseSelectedStackCoverId() {
   // the tray's "Select all" — leave ``selectedIndex`` on the cover's grid
   // slot, so this hits on the first try in practice. The scan is the
   // fallback for a selection that outlived its index.
-  if (selectedIndex >= 0 && isTheSelection(photos[selectedIndex])) {
-    return photos[selectedIndex].id;
+  var focused = photos[selectedIndex];
+  if (selectedIndex >= 0 && focused && isTheSelection(focused)) {
+    return focused.id;
   }
   var cover = photos.find(isTheSelection);
   return cover ? cover.id : null;
 }
 
+/** @returns {BrowseAnchor | null} */
 function captureSelectedPhotoAnchor() {
   var stackCoverId = browseSelectedStackCoverId();
   if (stackCoverId == null && (selectedPhotoId == null || selectedPhotos.size > 0)) {
     return null;
   }
-  var anchorId = stackCoverId == null ? selectedPhotoId : stackCoverId;
+  var anchorId = stackCoverId == null ? selectedPhotoId : stackCoverId; if (anchorId == null) return null;
   var card = getBrowsePhotoElement(anchorId);
   if (!card) return null;
-  var container = document.getElementById('gridContainer');
+  var container = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
   var containerRect = container.getBoundingClientRect();
   var cardRect = card.getBoundingClientRect();
   // Position in ``photos`` at capture time. Bounds the paged rescan below
@@ -64,7 +66,7 @@ function captureSelectedPhotoAnchor() {
   // (Codex review r4013378153).
   var index = photos.findIndex(function(p) { return p.id === anchorId; });
   if (index < 0) {
-    var memberCover = loadedBrowseStackCoverForPhoto(anchorId);
+    const memberCover = loadedBrowseStackCoverForPhoto(anchorId);
     if (memberCover) {
       index = photos.findIndex(function(p) { return p.id === memberCover.id; });
     }
@@ -75,7 +77,7 @@ function captureSelectedPhotoAnchor() {
     // A stack selection has no focused frame, so the panel is the batch
     // inspector rather than one photo's detail — there is nothing to reopen.
     detailVisible: stackCoverId == null
-      && document.getElementById('detailContent').classList.contains('visible'),
+      && /** @type {HTMLElement} */ (document.getElementById('detailContent')).classList.contains('visible'),
     index: index,
     stackSelection: stackCoverId != null,
     // The frames the user actually picked. The restore intersects these with
@@ -84,11 +86,11 @@ function captureSelectedPhotoAnchor() {
   };
 }
 
-function restorePhotoAnchor(anchor) {
+function restorePhotoAnchor(/** @type {BrowseAnchor | null} */ anchor) {
   if (!anchor) return false;
   var card = getBrowsePhotoElement(anchor.photoId);
   if (!card) return false;
-  var container = document.getElementById('gridContainer');
+  var container = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
   var containerRect = container.getBoundingClientRect();
   var cardRect = card.getBoundingClientRect();
   container.scrollTop += (cardRect.top - containerRect.top) - anchor.topOffset;
@@ -105,8 +107,9 @@ function restorePhotoAnchor(anchor) {
    Separate from ``captureSelectedPhotoAnchor``: that one restores a *single*
    selection and its detail panel, and deliberately declines when a batch
    selection is active — which is exactly when a user is tagging. */
+/** @returns {BrowseAnchor | null} */
 function captureBrowseViewportAnchor() {
-  var container = document.getElementById('gridContainer');
+  var container = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
   if (!container) return null;
   var containerTop = container.getBoundingClientRect().top;
   // Include ``.browse-stack-member``: an expanded stack tray can be taller
@@ -115,23 +118,24 @@ function captureBrowseViewportAnchor() {
   // the first top-level card *below* the tray — off-screen — and after the
   // reset collapses the tray, restoring that off-screen card at its old
   // large offset snaps the grid upward (Codex review r4012897730).
-  var cards = document.querySelectorAll(
+  var cards = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll(
     '#grid .grid-card, #grid .browse-stack-member'
-  );
+  ));
   for (var i = 0; i < cards.length; i++) {
-    var rect = cards[i].getBoundingClientRect();
+    var card = cards[i]; if (!card) continue;
+    var rect = card.getBoundingClientRect();
     // First card still on screen: its bottom edge has not passed the top of
     // the scroll container.
     if (rect.bottom > containerTop + 1) {
-      var id = parseInt(cards[i].dataset.id, 10);
+      var id = parseInt(card.dataset.id || '', 10);
       if (!id) return null;
       // Anchor on the stack cover, not the member: the reset collapses the
       // tray, so members no longer exist afterwards and ``photos`` never
       // held them anyway. The cover sits directly above where the tray
       // was, so its top after collapse is close to the member's top before.
       var anchorId = id;
-      if (cards[i].classList.contains('browse-stack-member')) {
-        var tray = cards[i].closest('.browse-stack-tray');
+      if (card.classList.contains('browse-stack-member')) {
+        var tray = /** @type {HTMLElement | null} */ (/** @type {HTMLElement | null} */ (card.closest('.browse-stack-tray')));
         var coverId = tray && tray.dataset.stackCoverId
           ? parseInt(tray.dataset.stackCoverId, 10)
           : NaN;
@@ -147,7 +151,7 @@ function captureBrowseViewportAnchor() {
   return null;
 }
 
-async function restoreBrowseViewportAnchor(anchor, shouldContinue) {
+async function restoreBrowseViewportAnchor(/** @type {BrowseAnchor | null} */ anchor, /** @type {(() => boolean) | undefined} */ shouldContinue = undefined) {
   if (!anchor) return;
   // Page forward only as far as the anchor plausibly sits. Scanning to
   // ``allLoaded`` the way ``loadUntilPhotoRendered`` does would walk a
@@ -168,7 +172,7 @@ async function restoreBrowseViewportAnchor(anchor, shouldContinue) {
     // position in the result set rather than snapping back to the top.
     var fallback = photos[Math.min(Math.max(anchor.index, 0), photos.length - 1)];
     if (!fallback || !getGridCard(fallback.id)) return;
-    target = { photoId: fallback.id, topOffset: anchor.topOffset };
+    target = { photoId: fallback.id, topOffset: anchor.topOffset, index: anchor.index };
   }
   requestAnimationFrame(function() {
     if (shouldContinue && !shouldContinue()) return;
@@ -177,11 +181,11 @@ async function restoreBrowseViewportAnchor(anchor, shouldContinue) {
   });
 }
 
-function anchorRestoreIsPending(anchor, restoreEpoch) {
+function anchorRestoreIsPending(/** @type {BrowseAnchor | null} */ anchor, /** @type {number | null | undefined} */ restoreEpoch = undefined) {
   return !!anchor && anchorRestoreEpoch === restoreEpoch && selectedPhotoId == null && selectedPhotos.size === 0;
 }
 
-function anchorSelectionIsCurrent(anchor, restoreEpoch) {
+function anchorSelectionIsCurrent(/** @type {BrowseAnchor | null} */ anchor, /** @type {number | null | undefined} */ restoreEpoch = undefined) {
   if (restoreEpoch != null && anchorRestoreEpoch !== restoreEpoch) return false;
   if (!anchor) return false;
   // A restored stack selection lives in ``selectedPhotos`` with no focused
@@ -193,7 +197,7 @@ function anchorSelectionIsCurrent(anchor, restoreEpoch) {
   return selectedPhotoId === anchor.photoId && selectedPhotos.size === 0;
 }
 
-async function loadUntilPhotoRendered(photoId, shouldContinue, options) {
+async function loadUntilPhotoRendered(/** @type {number} */ photoId, /** @type {(() => boolean) | undefined} */ shouldContinue = undefined, /** @type {{resolveStackMember?: boolean, budget?: number} | undefined} */ options = undefined) {
   var resolveStackMember = !!(options && options.resolveStackMember);
   // Optional cap on how many photos may be paged in while searching.
   // Callers that know the edit which triggered this scan can have removed

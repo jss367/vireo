@@ -4,7 +4,7 @@ async function loadWsOverrides() {
   try {
     var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
     if (ws && ws.name) {
-      document.querySelectorAll('.ws-override-name').forEach(function(el) { el.textContent = ws.name; });
+      document.querySelectorAll(/** @type {'div'} */ ('.ws-override-name')).forEach(function(el) { el.textContent = String(ws.name); });
     }
     var overrides = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
     ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
@@ -20,18 +20,18 @@ async function loadWsOverrides() {
 }
 
 // Show one override row exactly as the server has it.
-function _applyWsOverrideField(key, overrides) {
-  var checkbox = document.getElementById('wsOverride_' + key);
-  var input = document.getElementById('wsVal_' + key);
-  var ctrl = document.getElementById('wsOverrideCtrl_' + key);
+/** @param {string} key @param {Record<string,number|null>} overrides */ function _applyWsOverrideField(key, overrides) {
+  var checkbox = /** @type {HTMLInputElement} */ (document.getElementById('wsOverride_' + key));
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('wsVal_' + key));
+  var ctrl = /** @type {HTMLElement} */ (document.getElementById('wsOverrideCtrl_' + key));
   if (!checkbox || !input || !ctrl) return;
   if (overrides[key] !== undefined) {
     checkbox.checked = true;
     ctrl.style.display = 'flex';
     if (key === 'classification_threshold' || key === 'similarity_threshold' || key === 'detector_confidence') {
-      input.value = Math.round(overrides[key] * 100);
+      input.value = String(Math.round(Number(overrides[key]) * 100));
     } else {
-      input.value = overrides[key];
+      input.value = String(overrides[key]);
     }
     updateWsLabel(key);
   } else {
@@ -43,41 +43,41 @@ function _applyWsOverrideField(key, overrides) {
   }
 }
 
-function updateWsLabel(key) {
-  var input = document.getElementById('wsVal_' + key);
+/** @param {string} key */ function updateWsLabel(key) {
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('wsVal_' + key));
   if (!input) return;
   if (key === 'classification_threshold') {
-    document.getElementById('wsThresholdVal').textContent = input.value + '%';
+    /** @type {HTMLElement} */ (document.getElementById('wsThresholdVal')).textContent = String(input.value + '%');
   } else if (key === 'similarity_threshold') {
-    document.getElementById('wsSimilarityVal').textContent = input.value + '%';
+    /** @type {HTMLElement} */ (document.getElementById('wsSimilarityVal')).textContent = String(input.value + '%');
   } else if (key === 'detector_confidence') {
-    document.getElementById('wsDetectorConfVal').textContent = (parseInt(input.value) / 100).toFixed(2);
+    /** @type {HTMLElement} */ (document.getElementById('wsDetectorConfVal')).textContent = String((parseInt(input.value) / 100).toFixed(2));
   }
 }
 
-function toggleWsOverride(key) {
-  var checkbox = document.getElementById('wsOverride_' + key);
-  var input = document.getElementById('wsVal_' + key);
-  var ctrl = document.getElementById('wsOverrideCtrl_' + key);
+/** @param {string} key */ function toggleWsOverride(key) {
+  var checkbox = /** @type {HTMLInputElement} */ (document.getElementById('wsOverride_' + key));
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('wsVal_' + key));
+  var ctrl = /** @type {HTMLElement} */ (document.getElementById('wsOverrideCtrl_' + key));
   if (!checkbox || !input || !ctrl) return;
   ctrl.style.display = checkbox.checked ? 'flex' : 'none';
   if (checkbox.checked && !input.value) {
-    if (key === 'classification_threshold') input.value = 40;
-    else if (key === 'grouping_window_seconds') input.value = 10;
-    else if (key === 'similarity_threshold') input.value = 85;
-    else if (key === 'detector_confidence') input.value = 20;
+    if (key === 'classification_threshold') input.value = String(40);
+    else if (key === 'grouping_window_seconds') input.value = String(10);
+    else if (key === 'similarity_threshold') input.value = String(85);
+    else if (key === 'detector_confidence') input.value = String(20);
     updateWsLabel(key);
   }
   saveWsConfig();
 }
 
-var _wsSaveTimer = null;
+/** @type {ReturnType<typeof setTimeout>|null} */ var _wsSaveTimer = null;
 function saveWsConfig() {
   // If the initial load failed, every checkbox shows unchecked even though the
   // server may have overrides. Saving now would send null for every key and
   // wipe persisted state we never displayed. Bail out instead.
   if (!_wsOverridesLoaded) return;
-  clearTimeout(_wsSaveTimer);
+  clearTimeout(_wsSaveTimer ?? undefined);
   var gen = _nextSaveGen();
   _saveStatusMark('workspace', 'pending', gen);
   _wsSaveTimer = setTimeout(function() {
@@ -85,15 +85,15 @@ function saveWsConfig() {
   }, 500);
 }
 
-async function _postWsOverrides(gen) {
+/** @param {number} gen */ async function _postWsOverrides(gen) {
     // Runs only once any earlier override POST has settled; reads the form
     // now so the snapshot reflects every edit made while waiting.
-    var overrides = {};
+    /** @type {Record<string,number|null>} */ var overrides = {};
     var needsResync = false;
-    var invalidKeys = [];
+    /** @type {string[]} */ var invalidKeys = [];
     ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
-      var checkbox = document.getElementById('wsOverride_' + key);
-      var input = document.getElementById('wsVal_' + key);
+      var checkbox = /** @type {HTMLInputElement} */ (document.getElementById('wsOverride_' + key));
+      var input = /** @type {HTMLInputElement} */ (document.getElementById('wsVal_' + key));
       if (!checkbox || !input) return;
       if (checkbox.checked) {
         var parsed = parseInt(input.value, 10);
@@ -137,7 +137,7 @@ async function _postWsOverrides(gen) {
       // was dropped. If the resync itself fails, the form still shows an
       // unsaved value, so report that as a failed save rather than a
       // false confirmation.
-      var current;
+      /** @type {Record<string,number|null>} */ var current;
       try {
         current = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
       } catch (e) {

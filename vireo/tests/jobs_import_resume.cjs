@@ -10,7 +10,7 @@ const src = fs.readFileSync('vireo/static/import-recovery.js', 'utf8') + '\n' + 
   .map(file => fs.readFileSync('vireo/static/jobs/' + file, 'utf8')).join('\n');
 function fn(name) {
   // Page functions are declared at the top level of their classic script.
-  const found = src.match(new RegExp('(?:^|\\n)function ' + name + '\\([^]*?\\n\\}\\n'));
+  const found = src.match(new RegExp('(?:^|\\n)(?:/\\*\\*[^\\n]*\\*/\\s*)?function ' + name + '\\([^]*?\\n\\}\\n'));
   assert(found, name);
   return found[0];
 }

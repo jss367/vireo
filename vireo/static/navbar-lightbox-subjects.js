@@ -1,30 +1,31 @@
 /* Per-detection suggestions are previews. Only explicit Use actions edit a photo. */
 (function () {
   'use strict';
-  let data = null;
+  /** @type {NavSubjectData | null} */ let data = null;
   let generation = 0;
   let busy = false;
-  const panel = document.getElementById('lightboxSubjects');
+  const panel = /** @type {HTMLElement} */ (document.getElementById('lightboxSubjects'));
   if (!panel) return;
-  const list = document.getElementById('lightboxSubjectList');
-  const details = document.getElementById('lightboxSubjectDetails');
-  const status = document.getElementById('lightboxSubjectStatus');
-  const corrected = document.getElementById('lightboxSubjectCorrected');
-  const automatic = document.getElementById('lightboxSubjectAutomatic');
-  const cropButton = document.getElementById('lightboxSubjectUseCrop');
-  const analyzeButton = document.getElementById('lightboxSubjectAnalyze');
-  const exposureButton = document.getElementById('lightboxSubjectUseExposure');
+  const list = /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectList'));
+  const details = /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectDetails'));
+  const status = /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectStatus'));
+  const corrected = /** @type {HTMLInputElement} */ (document.getElementById('lightboxSubjectCorrected'));
+  const automatic = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectAutomatic'));
+  const cropButton = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectUseCrop'));
+  const analyzeButton = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectAnalyze'));
+  const exposureButton = /** @type {HTMLButtonElement} */ (document.getElementById('lightboxSubjectUseExposure'));
 
   function primary() { return data && data.subjects.find(s => s.is_primary); }
+  /** @param {NavSubject} subject @param {boolean} correction */
   function previewUrl(subject, correction) {
-    return '/photos/' + data.photo_id + '/crop?detection_id=' + subject.id
+    return '/photos/' + data?.photo_id + '/crop?detection_id=' + subject.id
       + (correction ? '&suggested=1' : '') + '&v=' + encodeURIComponent(subject.analysis?.source_key || 'pending');
   }
   function render() {
     list.replaceChildren();
     details.replaceChildren();
     panel.hidden = !data || !data.subjects.length;
-    if (panel.hidden) return;
+    if (panel.hidden || !data) return;
     // Scoped Pipeline Review views open the lightbox with _lbReadOnly to
     // freeze mutating writes. Every subject control here reaches a
     // PUT/POST — subject cards and "Choose automatically" invoke
@@ -34,7 +35,7 @@
     // recipe — so they all must honor _lbReadOnly (Codex r4056621185).
     const readOnly = typeof _lbReadOnly !== 'undefined' && _lbReadOnly;
     const readOnlyTitle = readOnly && typeof _lbReadOnlyMessage === 'string' ? _lbReadOnlyMessage : null;
-    document.getElementById('lightboxSubjectSummary').textContent = 'Subjects (' + data.subjects.length + ')';
+    /** @type {HTMLElement} */ (document.getElementById('lightboxSubjectSummary')).textContent = 'Subjects (' + data.subjects.length + ')';
     // Stable spatial order keeps thumbnails from jumping when primary changes.
     data.subjects.slice().sort((a, b) => a.box_x - b.box_x || a.box_y - b.box_y || a.id - b.id).forEach((subject, index) => {
       const button = document.createElement('button');
@@ -91,12 +92,13 @@
       : data.subjects.every(s => s.analysis) ? 'Primary selected by quality. Suggestions leave saved edits unchanged.'
       : 'Quality analysis is incomplete. Primary selection is provisional.';
   }
+  /** @param {number} photoId */
   async function load(photoId) {
     const seq = ++generation;
     data = null;
     panel.hidden = true;
     try {
-      const result = await safeFetch('/api/photos/' + photoId + '/subjects', {}, {toast: false});
+      /** @type {NavSubjectData} */ const result = await safeFetch('/api/photos/' + photoId + '/subjects', {}, {toast: false});
       if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       data = result;
       render();
@@ -104,9 +106,10 @@
       if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
       panel.hidden = false;
       list.replaceChildren(); details.replaceChildren();
-      status.textContent = 'Could not load subjects: ' + error.message;
+      status.textContent = 'Could not load subjects: ' + (error instanceof Error ? error.message : String(error));
     }
   }
+  /** @param {number | null} detectionId */
   async function choose(detectionId) {
     if (!data || busy || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
     // Choosing a primary — including "Choose automatically" — reaches
@@ -118,14 +121,14 @@
     busy = true;
     render();
     try {
-      const result = await safeFetch('/api/photos/' + photoId + '/primary-subject', {
+      /** @type {NavSubjectData} */ const result = await safeFetch('/api/photos/' + photoId + '/primary-subject', {
         method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({detection_id: detectionId})
       }, {toast: false});
       if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
-      if (data.primary_detection_id !== result.primary_detection_id) {
-        const photo = _lbPhotoDataByPhoto[String(photoId)];
+      if (data?.primary_detection_id !== result.primary_detection_id) {
+        const photo = _lbPhotoDataByPhoto[photoId];
         if (photo) {
-          ['eye_x', 'eye_y', 'eye_conf', 'eye_tenengrad'].forEach(key => { photo[key] = null; });
+          /** @type {const} */ (['eye_x', 'eye_y', 'eye_conf', 'eye_tenengrad']).forEach(key => { photo[key] = null; });
           _lbRenderEyeCrosshair(photo);
         }
         _lbResetMaskOverlay();
@@ -140,15 +143,16 @@
       // would blame the newly-open photo. Match the success-path
       // stale-request checks.
       if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
-      showToast(error.message || 'Could not change primary subject', 'error');
+      showToast((error instanceof Error ? error.message : '') || 'Could not change primary subject', 'error');
     } finally {
       busy = false;
       if (data?.photo_id === vireoLightboxSession.requestedPhotoId()) render();
     }
   }
+  /** @param {string} kind */
   async function useSuggestion(kind) {
     const subject = primary();
-    if (!subject?.analysis || busy || _lbEditWritePending || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
+    if (!subject?.analysis || busy || _lbEditWritePending || !data || data.photo_id !== vireoLightboxSession.requestedPhotoId()) return;
     // Guard against a rogue click before render() runs after the read-only
     // state flips (Codex r4056563011). _lbGuardReadOnly surfaces the same
     // read-only toast every other edit-recipe writer uses.
@@ -164,7 +168,7 @@
       if (vireoLightboxSession.requestedPhotoId() !== photoId || generation !== seq) return;
       // Fetch the latest recipe so another editor's changes aren't replaced
       // by the lightbox's initially loaded snapshot.
-      const current = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false});
+      /** @type {{recipe?: NavRecipe | null}} */ const current = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false});
       if (vireoLightboxSession.requestedPhotoId() !== photoId || generation !== seq) return;
       const recipe = current.recipe || {};
       if (kind === 'crop') {
@@ -174,7 +178,7 @@
       } else {
         recipe.adjustments = Object.assign({}, recipe.adjustments, {exposure: subject.analysis.exposure_ev});
       }
-      const result = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {
+      /** @type {{recipe?: NavRecipe | null}} */ const result = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {
         method: 'PUT', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({recipe, description: 'Applied subject ' + kind + ' suggestion'})
       }, {toast: false});
@@ -185,7 +189,7 @@
       if (vireoLightboxSession.requestedPhotoId() === photoId) _lbReloadCurrentRenderAfterEdit(photoId);
     } catch (error) {
       if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
-      showToast(error.message || 'Could not apply suggestion', 'error');
+      showToast((error instanceof Error ? error.message : '') || 'Could not apply suggestion', 'error');
     } finally {
       busy = false;
       _lbSetEditBusy(false);
@@ -204,16 +208,16 @@
     busy = true; render();
     status.textContent = 'Analyzing retained subjects…';
     try {
-      const job = await safeFetch('/api/photos/' + photoId + '/subjects/analyze', {method: 'POST'}, {toast: false});
+      /** @type {{job_id: string}} */ const job = await safeFetch('/api/photos/' + photoId + '/subjects/analyze', {method: 'POST'}, {toast: false});
       while (generation === seq && vireoLightboxSession.requestedPhotoId() === photoId) {
-        const progress = await safeFetch('/api/jobs/' + job.job_id, {}, {toast: false});
+        /** @type {{status: string; error?: string}} */ const progress = await safeFetch('/api/jobs/' + job.job_id, {}, {toast: false});
         if (progress.status === 'completed') { await load(photoId); break; }
         if (progress.status === 'failed' || progress.status === 'cancelled') throw new Error(progress.error || 'Subject analysis did not complete');
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     } catch (error) {
       if (seq !== generation || vireoLightboxSession.requestedPhotoId() !== photoId) return;
-      showToast(error.message || 'Could not analyze subjects', 'error');
+      showToast((error instanceof Error ? error.message : '') || 'Could not analyze subjects', 'error');
     } finally {
       busy = false;
       if (data?.photo_id === photoId) render();
@@ -224,5 +228,5 @@
   cropButton.onclick = () => useSuggestion('crop');
   exposureButton.onclick = () => useSuggestion('exposure');
   document.addEventListener('lightbox:subjectreset', () => { generation++; data = null; panel.hidden = true; });
-  document.addEventListener('lightbox:photochanged', event => load(event.detail.photoId));
+  document.addEventListener('lightbox:photochanged', event => load(/** @type {CustomEvent<{photoId: number}>} */ (event).detail.photoId));
 })();

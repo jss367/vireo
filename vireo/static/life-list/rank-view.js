@@ -9,15 +9,15 @@
 // so counts always match the chips. A breadcrumb ("Birds › All families")
 // returns to the normal drill cards.
 
-var rankSearchTimer = null;   // debounce for the flat-view search input
+/** @type {ReturnType<typeof setTimeout>|null} */ var rankSearchTimer = null;   // debounce for the flat-view search input
 
 // Fetch the flat rank list for the current class and switch the body into the
 // flat view. Threads the current class root id from explorerData.root so the
 // endpoint scopes to the same class the drill cards use. Clicking the already-
 // open rank's chip toggles the view closed.
-async function openRankView(rank) {
+/** @param {string} rank */ async function openRankView(rank) {
   // Drop any pending search debounce so it can't fire against a different view.
-  clearTimeout(rankSearchTimer);
+  clearTimeout(rankSearchTimer ?? undefined);
   if (explorerRankView && explorerRankView.rank === rank) {
     explorerRankView = null;
     explorerViewReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
@@ -26,12 +26,12 @@ async function openRankView(rank) {
   }
   var rootId = (explorerData && explorerData.root && explorerData.root.id != null)
     ? explorerData.root.id : null;
-  var body = document.getElementById('explorerBody');
+  var body = /** @type {HTMLElement} */ (document.getElementById('explorerBody'));
   if (body) body.innerHTML = '<div class="ll-exp-empty">Loading…</div>';
   var url = '/api/life-list/explorer/rank?rank=' + encodeURIComponent(rank)
     + (rootId != null ? ('&root=' + encodeURIComponent(rootId)) : '');
   var myReq = ++explorerViewReqId;   // claim the body token; any later navigation bumps it
-  var data;
+  /** @type {LifeRankData} */ var data;
   try {
     data = await safeFetch(url);
   } catch (e) {
@@ -49,13 +49,13 @@ async function openRankView(rank) {
 // grid container, so typing only refreshes the grid (renderRankGrid) and never
 // steals focus from the input.
 function renderRankView() {
-  var body = document.getElementById('explorerBody');
+  var body = /** @type {HTMLElement} */ (document.getElementById('explorerBody'));
   if (!body) return;
-  var rv = explorerRankView;
+  const rv = explorerRankView; if (!rv) return;
   var data = rv.data || {};
   var rank = rv.rank;
   var pluralLabel = rankPlural(rank);
-  var root = (explorerData && explorerData.root) || {};
+  /** @type {Partial<LifeTaxon>} */ var root = (explorerData && explorerData.root) || {};
   var rootLabel = root.common_name || root.name || 'Class';
 
   var html = '<div class="ll-crumbs">';
@@ -77,20 +77,20 @@ function renderRankView() {
   body.innerHTML = html;
 
   var back = function() {
-    clearTimeout(rankSearchTimer);
+    clearTimeout(rankSearchTimer ?? undefined);
     explorerRankView = null;
     explorerViewReqId++;   // invalidate any in-flight /rank fetch so it can't re-open the view
     renderExplorer();
   };
-  var bc = document.getElementById('rankBackCrumb');
+  var bc = /** @type {HTMLElement} */ (document.getElementById('rankBackCrumb'));
   if (bc) bc.addEventListener('click', back);
-  var bb = document.getElementById('rankBackBtn');
+  var bb = /** @type {HTMLButtonElement} */ (document.getElementById('rankBackBtn'));
   if (bb) bb.addEventListener('click', back);
 
-  var search = document.getElementById('rankSearch');
+  var search = /** @type {HTMLInputElement} */ (document.getElementById('rankSearch'));
   if (search) {
     search.addEventListener('input', function() {
-      clearTimeout(rankSearchTimer);
+      clearTimeout(rankSearchTimer ?? undefined);
       rankSearchTimer = setTimeout(function() {
         if (!explorerRankView) return;
         explorerRankView.search = search.value;
@@ -99,7 +99,7 @@ function renderRankView() {
       }, 150);
     });
   }
-  var chk = document.getElementById('rankMissingOnly');
+  var chk = /** @type {HTMLInputElement} */ (document.getElementById('rankMissingOnly'));
   if (chk) chk.addEventListener('change', function() {
     if (!explorerRankView) return;
     explorerRankView.missingOnly = chk.checked;
@@ -118,10 +118,10 @@ function renderRankView() {
 // "Show all" is pressed (No-black-boxes: never truncate silently, and never
 // build an ~11k-tile innerHTML that can freeze the WKWebView renderer).
 function renderRankGrid() {
-  var grid = document.getElementById('rankGrid');
-  var notice = document.getElementById('rankNotice');
+  var grid = /** @type {HTMLElement} */ (document.getElementById('rankGrid'));
+  var notice = /** @type {HTMLElement} */ (document.getElementById('rankNotice'));
   if (!grid) return;
-  var rv = explorerRankView;
+  const rv = explorerRankView; if (!rv) return;
   var data = rv.data || {};
   var items = data.items || [];
   var rank = rv.rank;
@@ -171,7 +171,7 @@ function renderRankGrid() {
   if (!shown.length) gh += '<div class="ll-exp-empty">Nothing to show.</div>';
   grid.innerHTML = gh;
 
-  var showAll = document.getElementById('rankShowAll');
+  var showAll = /** @type {HTMLButtonElement} */ (document.getElementById('rankShowAll'));
   if (showAll) showAll.addEventListener('click', function() {
     if (!explorerRankView) return;
     explorerRankView.showAll = true;
@@ -183,7 +183,7 @@ function renderRankGrid() {
   if (rank !== 'species') {
     grid.querySelectorAll('.ll-card').forEach(function(card) {
       card.addEventListener('click', function() {
-        var id = parseInt(card.getAttribute('data-id'), 10);
+        var id = parseInt(card.getAttribute('data-id') || '', 10);
         if (!isNaN(id)) openRankItem(id);
       });
     });
@@ -193,7 +193,7 @@ function renderRankGrid() {
 // Card for an order/family/genus row in the flat view. Reuses the .ll-card look
 // (ring + name + scientific + species count). The `order` context label is only
 // present for family/genus rows (null for order-rank items themselves).
-function renderRankCard(i) {
+/** @param {LifeNode} i */ function renderRankCard(i) {
   var name = i.common_name || i.name;
   var sci = (i.common_name && i.common_name !== i.name)
     ? '<div class="ll-card-sci">' + escapeHtml(i.name) + '</div>' : '';
@@ -212,12 +212,12 @@ function renderRankCard(i) {
 // Build the drill lineage (root→node, excluding the class root) for a taxon id
 // from explorerData.nodes. Returns [{id,name,rank}] or null if not in the tree
 // (species aren't in the tree, so those rows stay non-navigable).
-function explorerLineage(id) {
-  var path = null;
-  (function walk(list, acc) {
+/** @param {number} id */ function explorerLineage(id) {
+  /** @type {LifeCrumb[] | null} */ var path = null;
+  (/** @param {LifeNode[]} list @param {LifeCrumb[]} acc */ function walk(list, acc) {
     if (path || !list) return;
     for (var k = 0; k < list.length; k++) {
-      var n = list[k];
+      var n = list[k]; if (!n) continue;
       var next = acc.concat([{ id: n.id, name: n.common_name || n.name, rank: n.rank }]);
       if (n.id === id) { path = next; return; }
       walk(n.children || [], next);
@@ -228,12 +228,12 @@ function explorerLineage(id) {
 }
 
 // Locate the raw tree node (with children) for a taxon id in explorerData.nodes.
-function explorerFindNode(id) {
-  var found = null;
-  (function walk(list) {
+/** @param {number} id */ function explorerFindNode(id) {
+  /** @type {LifeNode | null} */ var found = null;
+  (/** @param {LifeNode[]} list */ function walk(list) {
     if (found || !list) return;
     for (var k = 0; k < list.length; k++) {
-      var n = list[k];
+      var n = list[k]; if (!n) continue;
       if (n.id === id) { found = n; return; }
       walk(n.children || []);
       if (found) return;
@@ -245,7 +245,7 @@ function explorerFindNode(id) {
 // Click-through from a flat-view order/family/genus row into the drill view.
 // Sets explorerPath to the row's lineage and clears the flat view. Genus rows
 // open the species leaf. If the id isn't in the tree, do nothing (non-navigable).
-function openRankItem(id) {
+/** @param {number} id */ function openRankItem(id) {
   var lineage = explorerLineage(id);
   var node = explorerFindNode(id);
   if (!lineage || !node) return;

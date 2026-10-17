@@ -1,6 +1,7 @@
 window.vireoWorkspaceSwitcher = VireoWorkspaceSwitcher.create({
   // safeFetch is declared in the later shared-helpers script.
-  fetch: function() { return safeFetch.apply(null, arguments); },
+  /** @template T @param {string} url @param {RequestInit} [init] @param {{toast?: boolean}} [options] @returns {Promise<T>} */
+  fetch: function(url, init, options) { return safeFetch(url, init, options); },
   navigate: function(path) { window.location.href = path; },
   clearWorkspaceCursors: function() {
     if (window.vireoEditNav) window.vireoEditNav.clearWorkspaceScopedCursors();
@@ -15,7 +16,7 @@ document.addEventListener('DOMContentLoaded', function() {
   if (sessionStorage.getItem('vireo_ws_switched')) {
     sessionStorage.removeItem('vireo_ws_switched');
     document.addEventListener('DOMContentLoaded', function() {
-    safeFetch('/api/audit/drift', {}, { toast: false }).then(function(drifts) {
+    /** @type {Promise<unknown[]>} */ (safeFetch('/api/audit/drift', {}, { toast: false })).then(function(/** @type {unknown[]} */ drifts) {
       if (drifts && drifts.length > 0) {
         var driftToast = document.createElement('div');
         driftToast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--bg-secondary);border:1px solid var(--warning);border-radius:8px;padding:12px 16px;z-index:2000;box-shadow:0 4px 16px rgba(0,0,0,0.4);max-width:360px;font-size:13px;color:var(--text-primary);';

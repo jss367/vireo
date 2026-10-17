@@ -2,6 +2,7 @@
 // debounced refetch as the species field changes.
 // Classic page script; load boot.js after all definitions.
 
+/** @type {ReturnType<typeof setTimeout>|null} */
 var _rapidSpeciesRefetchTimer = null;
 var _rapidSpeciesRefetchToken = 0;
 
@@ -14,8 +15,9 @@ function rapidOnSpeciesInput() {
 // Per-frame keyword presence for each species in `speciesList`, keyed by
 // speciesKey. Prefers the per-name map from /group/state; falls back to the
 // legacy single has_species_keyword flag for every name.
+/** @param {RapidKeywordRow|null|undefined} st @param {string[]} speciesList */
 function rapidKeywordStateFor(st, speciesList) {
-  var map = {};
+  var map = /** @type {Record<string,boolean>} */ ({});
   var perName = (st && st.has_species_keywords) || null;
   speciesList.forEach(function(name) {
     if (perName) {
@@ -31,6 +33,7 @@ function rapidKeywordStateFor(st, speciesList) {
 // True when the seeded keyword snapshot covers `targetList` and says frame
 // `pid` already carries `name`. A snapshot fetched for a different list is
 // treated as "missing" so the Apply label stays a conservative overestimate.
+/** @param {number} pid @param {string} name @param {string[]} targetList */
 function rapidFrameHasKeyword(pid, name, targetList) {
   if (rapid.keywordStateSpecies !== joinSpecies(targetList)) return false;
   var st = rapid.initialSpeciesKeywords[pid];
@@ -39,7 +42,7 @@ function rapidFrameHasKeyword(pid, name, targetList) {
 
 function rapidRefreshSpeciesKeywordState() {
   if (!rapid.items || !rapid.items.length || rapid.sessionIndex < 0) return;
-  var speciesEl = document.getElementById('speciesInput');
+  var speciesEl = /** @type {HTMLInputElement} */ (document.getElementById('speciesInput'));
   var speciesList = parseSpeciesList(speciesEl ? speciesEl.value : '');
   var token = ++_rapidSpeciesRefetchToken;
   var openToken = rapid.openToken;

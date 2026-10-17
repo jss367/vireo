@@ -9,10 +9,10 @@ function clearImportPreviewGrid() {
   lastImportPreviewRender = null;
   importRecoveredPaths.clear();
   importDayGroups = new Map();
-  document.getElementById('importDaySummary').style.display = 'none';
-  document.getElementById('importDayRows').replaceChildren();
+  /** @type {HTMLElement} */ (document.getElementById('importDaySummary')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('importDayRows')).replaceChildren();
   updateHideDuplicatesControl(0);
-  const grid = document.getElementById('importPreviewGrid');
+  const grid = /** @type {HTMLElement} */ (document.getElementById('importPreviewGrid'));
   if (!grid) return;
   grid.style.display = 'none';
   grid.innerHTML = '';
@@ -22,16 +22,17 @@ function clearImportPreviewGrid() {
 // flagged duplicates — before the duplicate check runs (or with dedup off)
 // there is nothing to hide, so the control stays hidden rather than
 // implying a filter that would do nothing.
+/** @param {number} dupCount */
 function updateHideDuplicatesControl(dupCount) {
-  const row = document.getElementById('hideDuplicatesRow');
-  const label = document.getElementById('hideDuplicatesLabel');
+  const row = /** @type {HTMLElement} */ (document.getElementById('hideDuplicatesRow'));
+  const label = /** @type {HTMLElement} */ (document.getElementById('hideDuplicatesLabel'));
   if (!row || !label) return;
   row.style.display = dupCount > 0 ? '' : 'none';
   label.textContent = 'Hide duplicates (' + dupCount.toLocaleString() + ')';
 }
 
 function hideDuplicatesEnabled() {
-  const el = document.getElementById('chkHideDuplicates');
+  const el = /** @type {HTMLInputElement} */ (document.getElementById('chkHideDuplicates'));
   return !!(el && el.checked);
 }
 
@@ -45,7 +46,7 @@ function hideDuplicatesEnabled() {
 // updateHideDuplicatesControl) would silently flip the filter off every
 // time an import option change schedules a fresh preview.
 function retireHideDuplicatesOptIn() {
-  const el = document.getElementById('chkHideDuplicates');
+  const el = /** @type {HTMLInputElement} */ (document.getElementById('chkHideDuplicates'));
   if (el) el.checked = false;
 }
 
@@ -57,8 +58,9 @@ function rerenderImportPreviewGrid() {
   renderImportPreviewGrid(last.files, last.duplicatePaths, last.destinationFiles);
 }
 
+/** @param {ImportDestinationFile[] | null | undefined} destinationFiles */
 function importDestinationMap(destinationFiles) {
-  const map = {};
+  /** @type {Record<string,string>} */ const map = {};
   (destinationFiles || []).forEach((f) => {
     if (f && f.path) map[f.path] = f.folder || '.';
   });
@@ -74,15 +76,16 @@ function importDestinationMap(destinationFiles) {
 // the grid could claim every tile is a duplicate while the summary still
 // reports one file remaining. Match the server's ordering by walking
 // `files` in reverse and consuming duplicate-count credits per path.
+/** @param {ImportPreviewFile[]} files @param {string[] | undefined} duplicatePaths */
 function computeDuplicateFlags(files, duplicatePaths) {
-  const flags = new Array(files.length).fill(false);
-  const remaining = new Map();
+  /** @type {boolean[]} */ const flags = new Array(files.length).fill(false);
+  /** @type {Map<string | undefined, number>} */ const remaining = new Map();
   (duplicatePaths || []).forEach((p) => {
     remaining.set(p, (remaining.get(p) || 0) + 1);
   });
   if (!remaining.size) return flags;
   for (let i = files.length - 1; i >= 0; i -= 1) {
-    const p = files[i] && files[i].path;
+    const p = files[i]?.path;
     const count = remaining.get(p) || 0;
     if (count > 0) {
       flags[i] = true;
@@ -92,27 +95,30 @@ function computeDuplicateFlags(files, duplicatePaths) {
   return flags;
 }
 
+/** @param {ImportPreviewFile} file */
 function importCaptureDay(file) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(file.capture_date || '')
+  return file.capture_date && /^\d{4}-\d{2}-\d{2}$/.test(file.capture_date)
     ? file.capture_date : 'Unknown date';
 }
 
+/** @param {ImportDayEntry[]} entries */
 function importDaySelectablePaths(entries) {
-  const skip = document.getElementById('chkSkipDuplicates').checked;
+  const skip = /** @type {HTMLInputElement} */ (document.getElementById('chkSkipDuplicates')).checked;
   return entries.filter(entry => !(entry.isDuplicate && skip))
     .map(entry => entry.file.path).filter(Boolean);
 }
 
+/** @param {ImportPreviewFile[]} files @param {boolean[]} duplicateFlags */
 function renderImportDaySummary(files, duplicateFlags) {
-  const container = document.getElementById('importDaySummary');
-  const rows = document.getElementById('importDayRows');
+  const container = /** @type {HTMLElement} */ (document.getElementById('importDaySummary'));
+  const rows = /** @type {HTMLElement} */ (document.getElementById('importDayRows'));
   rows.replaceChildren();
   importDayGroups = new Map();
   container.style.display = importSelectionEnabled() && files.length ? '' : 'none';
   if (!importSelectionEnabled()) return;
   // A source path can occur twice with overlapping source folders. Count
   // it once, retaining eligibility when either occurrence will be copied.
-  const unique = new Map();
+  /** @type {Map<string, ImportDayEntry>} */ const unique = new Map();
   files.forEach((file, i) => {
     const existing = unique.get(file.path);
     if (!existing || !duplicateFlags[i]) {
@@ -122,7 +128,7 @@ function renderImportDaySummary(files, duplicateFlags) {
   unique.forEach(entry => {
     const day = importCaptureDay(entry.file);
     if (!importDayGroups.has(day)) importDayGroups.set(day, []);
-    importDayGroups.get(day).push(entry);
+    importDayGroups.get(day)?.push(entry);
   });
   Array.from(importDayGroups.keys()).sort().forEach((day, index) => {
     const row = document.createElement('tr');
@@ -133,7 +139,7 @@ function renderImportDaySummary(files, duplicateFlags) {
     check.className = 'day-check';
     check.setAttribute('aria-label', 'Import photos from ' + day);
     check.addEventListener('change', () => {
-      importDaySelectablePaths(importDayGroups.get(day)).forEach(path => {
+      importDaySelectablePaths(importDayGroups.get(day) || []).forEach(path => {
         if (check.checked) importDeselected.delete(path);
         else importDeselected.add(path);
       });
@@ -162,33 +168,34 @@ function renderImportDaySummary(files, duplicateFlags) {
 }
 
 function refreshImportDaySummary() {
-  document.querySelectorAll('#importDayRows tr').forEach(row => {
-    const day = row.dataset.day;
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#importDayRows tr')).forEach(row => {
+    const day = row.dataset.day || '';
     const entries = importDayGroups.get(day) || [];
     const paths = importDaySelectablePaths(entries);
     const selected = paths.filter(path => !importDeselected.has(path)).length;
-    const check = row.querySelector('.day-check');
+    const check = /** @type {HTMLInputElement} */ (row.querySelector('.day-check'));
     check.checked = paths.length > 0 && selected === paths.length;
     check.indeterminate = selected > 0 && selected < paths.length;
     check.disabled = paths.length === 0;
     check.title = paths.length ? 'Select or deselect photos from ' + day
       : 'All photos from ' + day + ' will be skipped as duplicates';
-    row.querySelector('.day-files').textContent = entries.length.toLocaleString();
-    row.querySelector('.day-duplicates').textContent = importDupStreamPending ? 'Checking…'
-      : !document.getElementById('chkSkipDuplicates').checked ? 'Not checked'
+    /** @type {HTMLElement} */ (row.querySelector('.day-files')).textContent = entries.length.toLocaleString();
+    /** @type {HTMLElement} */ (row.querySelector('.day-duplicates')).textContent = importDupStreamPending ? 'Checking…'
+      : !/** @type {HTMLInputElement} */ (document.getElementById('chkSkipDuplicates')).checked ? 'Not checked'
       : entries.filter(entry => entry.isDuplicate).length.toLocaleString();
-    row.querySelector('.day-selected').textContent = selected.toLocaleString();
+    /** @type {HTMLElement} */ (row.querySelector('.day-selected')).textContent = selected.toLocaleString();
     const expanded = !importCollapsedDays.has(day);
-    const toggle = row.querySelector('.import-day-toggle');
+    const toggle = /** @type {HTMLElement} */ (row.querySelector('.import-day-toggle'));
     toggle.textContent = (expanded ? '▾ ' : '▸ ') + day;
     toggle.setAttribute('aria-expanded', String(expanded));
-    const group = document.getElementById(toggle.getAttribute('aria-controls'));
+    const group = document.getElementById(toggle.getAttribute('aria-controls') || '');
     if (group) group.hidden = !expanded;
   });
 }
 
+/** @param {ImportPreviewFile[]} files @param {string[] | undefined} [duplicatePaths] @param {ImportDestinationFile[] | null | undefined} [destinationFiles] */
 function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
-  const grid = document.getElementById('importPreviewGrid');
+  const grid = /** @type {HTMLElement} */ (document.getElementById('importPreviewGrid'));
   if (!grid) return;
   if (importThumbSchedulerCancel) {
     importThumbSchedulerCancel();
@@ -215,7 +222,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
   updateHideDuplicatesControl(dupeCount);
   const hidingDuplicates = dupeCount > 0 && hideDuplicatesEnabled();
 
-  const skipDupes = document.getElementById('chkSkipDuplicates').checked;
+  const skipDupes = /** @type {HTMLInputElement} */ (document.getElementById('chkSkipDuplicates')).checked;
   // The cards are still drawn in every mode — the preview is the honest list
   // of what will be imported either way. Only the controls that would claim
   // the user can change that list are withheld.
@@ -230,11 +237,11 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
   // per-folder view so each duplicate still surfaces as its own tile.
   const pendingFiles = files.filter((f, i) => !duplicateFlags[i]);
   const duplicateCount = files.length - pendingFiles.length;
-  const groups = {};
+  /** @type {Record<string, ImportDayEntry[]>} */ const groups = {};
   files.forEach((f, i) => {
     const key = JSON.stringify([selectionEnabled ? importCaptureDay(f) : '', f.subfolder || 'Source']);
     if (!groups[key]) groups[key] = [];
-    groups[key].push({ file: f, isDuplicate: duplicateFlags[i] });
+    groups[key]?.push({ file: f, isDuplicate: duplicateFlags[i] });
   });
 
   if (hidingDuplicates && duplicateCount) {
@@ -256,10 +263,10 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
 
   let anyTilesRendered = false;
 
-  const dayContainers = new Map();
+  /** @type {Map<string, HTMLElement>} */ const dayContainers = new Map();
   Object.keys(groups).sort().forEach((key) => {
-    const [day, subfolder] = JSON.parse(key);
-    const all = groups[key];
+    /** @type {[string, string]} */ const [day, subfolder] = JSON.parse(key);
+    const all = groups[key] || [];
     let parent = grid;
     if (day) {
       if (!dayContainers.has(day)) {
@@ -274,7 +281,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
         grid.appendChild(section);
         dayContainers.set(day, section);
       }
-      parent = dayContainers.get(day);
+      parent = dayContainers.get(day) || grid;
     }
     const shown = hidingDuplicates ? all.filter((e) => !e.isDuplicate) : all;
     const hiddenHere = all.length - shown.length;
@@ -296,7 +303,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
       // their duplicate class — so the header and the boxes below it read
       // from exactly the same source and cannot disagree.
       folderCheck.addEventListener('change', () => {
-        importFolderPaths(header.parentNode).forEach((p) => {
+        importFolderPaths(header.parentElement).forEach((p) => {
           if (folderCheck.checked) importDeselected.delete(p);
           else importDeselected.add(p);
         });
@@ -352,7 +359,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
         // each pass means a late verdict just changes the answer.
         check.checked = !importDeselected.has(f.path)
           && !(isDuplicate && skipDupes);
-        check.disabled = isDuplicate && skipDupes;
+        check.disabled = !!isDuplicate && skipDupes;
         check.addEventListener('click', (e) => {
           e.stopPropagation();
           toggleImportSelection(f.path, check.checked, e.shiftKey);
@@ -403,7 +410,7 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
   // duplicate banner is already visible it already carries the count and
   // outcome, so keep it and skip the fallback message.
   if (!anyTilesRendered) {
-    const collapsedBanner = grid.querySelector('.import-preview-collapsed');
+    const collapsedBanner = /** @type {HTMLElement} */ (grid.querySelector('.import-preview-collapsed'));
     // Day summaries and their sections remain available even when every
     // thumbnail is filtered out.
     if (selectionEnabled) {
@@ -449,12 +456,12 @@ function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
 // exist — that only happens when the filter itself is toggled, which calls
 // rerenderImportPreviewGrid() directly (see onHideDuplicatesToggle).
 function rerenderImportPreviewGridSafe() {
-  const skipDupes = document.getElementById('chkSkipDuplicates').checked;
+  const skipDupes = /** @type {HTMLInputElement} */ (document.getElementById('chkSkipDuplicates')).checked;
   importGridCards().forEach((el) => {
-    const cb = el.querySelector('.thumb-check');
+    const cb = /** @type {HTMLInputElement} */ (el.querySelector('.thumb-check'));
     if (!cb) return;
     const isDup = el.classList.contains('duplicate');
-    cb.checked = !importDeselected.has(el.dataset.path) && !(isDup && skipDupes);
+    cb.checked = !importDeselected.has(el.dataset.path || '') && !(isDup && skipDupes);
     cb.disabled = isDup && skipDupes;
   });
   // A header left claiming "all selected" after a per-file click is exactly
@@ -475,14 +482,14 @@ function onHideDuplicatesToggle() {
 }
 
 function setupImportThumbnailScheduler() {
-  const grid = document.getElementById('importPreviewGrid');
+  const grid = /** @type {HTMLElement} */ (document.getElementById('importPreviewGrid'));
   if (!grid) return;
-  const pendingQueue = Array.from(grid.querySelectorAll('.import-preview-thumb.skeleton'));
+  const pendingQueue = Array.from(/** @type {NodeListOf<HTMLElement>} */ (grid.querySelectorAll('.import-preview-thumb.skeleton')));
   const visibleSet = new Set();
   let inFlight = 0;
   let cancelled = false;
   const concurrency = 4;
-  let observer = null;
+  /** @type {IntersectionObserver | null} */ let observer = null;
 
   importThumbSchedulerCancel = function() {
     cancelled = true;
@@ -490,9 +497,10 @@ function setupImportThumbnailScheduler() {
     if (observer) observer.disconnect();
   };
 
+  /** @param {HTMLElement} el */
   function dispatch(el) {
-    const path = el.dataset.path;
-    const img = el.querySelector('img');
+    const path = el.dataset.path || '';
+    const img = /** @type {HTMLImageElement} */ (el.querySelector('img'));
     if (!img) return;
     inFlight += 1;
     const done = function() {
@@ -511,7 +519,7 @@ function setupImportThumbnailScheduler() {
       for (let i = 0; i < pendingQueue.length; i += 1) {
         if (visibleSet.has(pendingQueue[i])) { idx = i; break; }
       }
-      dispatch(pendingQueue.splice(idx, 1)[0]);
+      const next = pendingQueue.splice(idx, 1)[0]; if (next) dispatch(next);
     }
   }
 
@@ -527,6 +535,6 @@ function setupImportThumbnailScheduler() {
     });
     if (!cancelled) pump();
   }, { root: grid, rootMargin: '200px' });
-  pendingQueue.forEach((thumb) => observer.observe(thumb));
+  pendingQueue.forEach((thumb) => observer?.observe(thumb));
   setTimeout(() => { if (!cancelled) pump(); }, 0);
 }

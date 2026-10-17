@@ -8,7 +8,7 @@ let _missingBannerDismissedCount = 0;
 // pre-flip photo grid until the user manually reopened the modal or
 // reloaded \u2014 the background reconnect that just restored the folder would
 // never reach the page (Codex review r3685083009).
-let _missingFoldersLastIds = null;
+/** @type {number[] | null} */ let _missingFoldersLastIds = null;
 // Race guards for the two paths that observe the missing-folder set —
 // the GET poll (checkMissingFolders) and the modal's mutating check-
 // health POST (loadMissingFolders). Issuance order alone is not a
@@ -61,13 +61,15 @@ let _missingFoldersSnapshotVersion = 0;
 // endpoint that can establish the missing-folder baseline. Unlike client
 // request generations, this orders responses even when an older server read
 // is delivered before a newer init response is applied.
-let _missingFoldersServerVersion = null;
+/** @type {number | null} */ let _missingFoldersServerVersion = null;
 
+/** @param {unknown} value */
 function _parseFolderHealthVersion(value) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
+/** @param {number[]} prev @param {number[]} curr */
 function _missingFolderIdsDiffer(prev, curr) {
   if (prev.length !== curr.length) return true;
   for (let i = 0; i < prev.length; i++) {
@@ -81,6 +83,7 @@ function _missingFolderIdsDiffer(prev, curr) {
 // ``changed`` count, which reflects a global scan and would trigger a
 // spurious Browse reset when a folder in another workspace flipped
 // (Codex review r3685295409). Returns whether an event was dispatched.
+/** @param {number[] | null} prevIds @param {number[]} currentIds @param {string} source */
 function _dispatchFolderHealthChangeFromIds(prevIds, currentIds, source) {
   if (prevIds === null) return false;
   if (!_missingFolderIdsDiffer(prevIds, currentIds)) return false;
@@ -105,9 +108,10 @@ function _dispatchFolderHealthChangeFromIds(prevIds, currentIds, source) {
 // banner would then keep showing the pre-check state until the next
 // 10-minute poll (Codex review r3686095481). Updating from the POST's
 // authoritative response bypasses the guards entirely.
+/** @param {{id: number}[]} folders */
 function _updateMissingFoldersBanner(folders) {
-  const banner = document.getElementById('missingFoldersBanner');
-  const msg = document.getElementById('missingFoldersMsg');
+  const banner = /** @type {HTMLElement} */ (document.getElementById('missingFoldersBanner'));
+  const msg = /** @type {HTMLElement} */ (document.getElementById('missingFoldersMsg'));
   if (!banner || !msg) return;
   if (folders.length > 0 && folders.length !== _missingBannerDismissedCount) {
     const s = folders.length === 1 ? '' : 's';
@@ -125,6 +129,7 @@ function _updateMissingFoldersBanner(folders) {
 // it and update the banner without dispatching a backwards transition. If
 // the version changed in flight, keep that later observation and dispatch
 // init→current so Browse discards its stale init payload.
+/** @param {number[]} initIds @param {number} snapshotVersionAtStart @param {string} source @param {unknown} [initServerVersion] */
 function _reconcileMissingFoldersInitSnapshot(
   initIds, snapshotVersionAtStart, source, initServerVersion
 ) {
@@ -148,7 +153,7 @@ function _reconcileMissingFoldersInitSnapshot(
     return false;
   }
   const dispatched = _dispatchFolderHealthChangeFromIds(
-    currentIds, _missingFoldersLastIds, source);
+    currentIds, _missingFoldersLastIds || [], source);
   if (dispatched) return true;
   // A higher server version proves the init payload is stale even when the
   // missing-ID set is unchanged (for example a healthy folder was linked,
@@ -208,7 +213,7 @@ async function checkMissingFolders() {
     if (!resp.ok) return;
     const serverVersion = _parseFolderHealthVersion(
       resp.headers.get('X-Vireo-Folder-Health-Version'));
-    const folders = await resp.json();
+    /** @type {NavMissingFolder[]} */ const folders = await resp.json();
     // A newer GET started while this fetch was pending \u2014 its result
     // supersedes ours (Codex review r3685515796). Skip the whole
     // response: banner too, since a stale banner update would just
@@ -261,25 +266,25 @@ async function checkMissingFolders() {
 }
 
 function dismissMissingBanner() {
-  document.getElementById('missingFoldersBanner').style.display = 'none';
-  const msg = document.getElementById('missingFoldersMsg').textContent;
+  /** @type {HTMLElement} */ (document.getElementById('missingFoldersBanner')).style.display = 'none';
+  const msg = /** @type {HTMLElement} */ (document.getElementById('missingFoldersMsg')).textContent;
   const match = msg.match(/^(\d+)/);
-  if (match) _missingBannerDismissedCount = parseInt(match[1]);
+  if (match) _missingBannerDismissedCount = Number(match[1]);
 }
 
 // Check on page load and every 10 minutes while the window is visible
 checkMissingFolders();
-Vireo.pollWhileVisible(checkMissingFolders, 600000);
+/** @type {VisiblePoll} */ (/** @type {VireoNamespace} */ (Vireo).pollWhileVisible)(checkMissingFolders, 600000);
 
 /* ---------- Missing Originals Banner ---------- */
-let _missingPhotosCache = [];
+/** @type {NavMissingPhoto[]} */ let _missingPhotosCache = [];
 // Whatever rows the currently open Missing Originals modal is showing,
 // keyed by photo id. Populated by every modal load — including scoped
 // ones that intentionally skip _missingPhotosCache to keep the banner's
 // dismissed-count math honest — so sidecar cleanup can still look up
 // has_xmp_sidecar for a freshly discovered ghost that only exists in a
 // folder-scoped view.
-let _missingPhotosModalRows = new Map();
+/** @type {Map<number,NavMissingPhoto>} */ let _missingPhotosModalRows = new Map();
 let _missingPhotosBannerDismissedCount = 0;
 // Both the banner and modal read cached /api/photos/missing status. A slow
 // earlier fetch returning after a newer one used to overwrite fresh state
@@ -299,22 +304,25 @@ let _missingPhotosBannerInFlight = false;
 // modal is waiting on a long scan used to cancel the modal's own poll (they
 // shared a single handle), leaving the modal stuck on "Checking missing
 // originals…" until the user closed and reopened it.
-let _missingPhotosBannerStatusPoll = null;
-let _missingPhotosModalStatusPoll = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ let _missingPhotosBannerStatusPoll = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ let _missingPhotosModalStatusPoll = null;
 const MISSING_PHOTOS_INITIAL_DELAY_MS = 180000;
 const MISSING_PHOTOS_AUTOMATIC_INTERVAL_MS = 30 * 60 * 1000;
 
+/** @param {number | null | undefined} [folderId] */
 function _missingPhotosStatusUrl(folderId) {
   return folderId != null
     ? '/api/photos/missing?folder_id=' + encodeURIComponent(folderId)
     : '/api/photos/missing';
 }
 
+/** @param {NavMissingPhotosPayload | NavMissingPhoto[] | null | undefined} payload */
 function _missingPhotosPayloadPhotos(payload) {
   if (Array.isArray(payload)) return payload;  // legacy/test fallback
   return (payload && Array.isArray(payload.photos)) ? payload.photos : [];
 }
 
+/** @param {number | null | undefined} folderId @param {boolean} modal */
 function _scheduleMissingPhotosPoll(folderId, modal) {
   if (modal) {
     if (_missingPhotosModalStatusPoll !== null) clearTimeout(_missingPhotosModalStatusPoll);
@@ -331,9 +339,10 @@ function _scheduleMissingPhotosPoll(folderId, modal) {
   }
 }
 
+/** @param {{automatic?: boolean; folderId?: number | null; modal?: boolean}} [opts] */
 async function startMissingPhotosCheck(opts) {
   opts = opts || {};
-  const body = { automatic: !!opts.automatic };
+  /** @type {{automatic: boolean; folder_id?: number}} */ const body = { automatic: !!opts.automatic };
   if (opts.folderId != null) body.folder_id = opts.folderId;
   const resp = await fetch('/api/photos/missing/check', {
     method: 'POST',
@@ -341,8 +350,8 @@ async function startMissingPhotosCheck(opts) {
     body: JSON.stringify(body),
   });
   if (!resp.ok) throw new Error('missing originals check failed');
-  const payload = await resp.json();
-  if (payload && payload.pending) {
+  /** @type {NavMissingPhotosPayload} */ const payload = await resp.json();
+  if (payload && !Array.isArray(payload) && payload.pending) {
     _scheduleMissingPhotosPoll(opts.folderId || null, !!opts.modal);
   } else if (opts.automatic) {
     checkMissingPhotos();
@@ -379,19 +388,19 @@ async function checkMissingPhotos() {
     const resp = await fetch('/api/photos/missing');
     if (!resp.ok) return;
     if (myId !== _missingPhotosBannerFetchId) return;  // a newer banner poll is authoritative
-    const payload = await resp.json();
+    /** @type {NavMissingPhotosPayload | NavMissingPhoto[]} */ const payload = await resp.json();
     if (myId !== _missingPhotosBannerFetchId) return;
     const photos = _missingPhotosPayloadPhotos(payload);
-    const ready = Array.isArray(payload) || (payload && payload.status === 'ready');
-    if (payload && payload.pending) _scheduleMissingPhotosPoll(null, false);
+    const ready = Array.isArray(payload) || (payload && !Array.isArray(payload) && payload.status === 'ready');
+    if (payload && !Array.isArray(payload) && payload.pending) _scheduleMissingPhotosPoll(null, false);
     if (!ready) {
-      const banner = document.getElementById('missingPhotosBanner');
+      const banner = /** @type {HTMLElement} */ (document.getElementById('missingPhotosBanner'));
       if (banner) banner.style.display = 'none';
       return;
     }
     if (cacheId === _missingPhotosCacheFetchId) _missingPhotosCache = photos;
-    const banner = document.getElementById('missingPhotosBanner');
-    const msg = document.getElementById('missingPhotosMsg');
+    const banner = /** @type {HTMLElement} */ (document.getElementById('missingPhotosBanner'));
+    const msg = /** @type {HTMLElement} */ (document.getElementById('missingPhotosMsg'));
     if (photos.length > 0 && photos.length !== _missingPhotosBannerDismissedCount) {
       const s = photos.length === 1 ? '' : 's';
       msg.textContent = `${photos.length} photo${s} reference${photos.length === 1 ? 's' : ''} a missing original.`;
@@ -407,7 +416,7 @@ async function checkMissingPhotos() {
 }
 
 function dismissMissingPhotosBanner() {
-  document.getElementById('missingPhotosBanner').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('missingPhotosBanner')).style.display = 'none';
   _missingPhotosBannerDismissedCount = _missingPhotosCache.length;
 }
 
@@ -424,7 +433,7 @@ function dismissMissingPhotosBanner() {
 // a ready payload from a prior scan or another tab would stay hidden for the
 // full delay window even though showing it costs no filesystem work.
 checkMissingPhotos();
-Vireo.pollWhileVisible(
+/** @type {VisiblePoll} */ (/** @type {VireoNamespace} */ (Vireo).pollWhileVisible)(
   function() { return startMissingPhotosCheck({ automatic: true }); },
   MISSING_PHOTOS_AUTOMATIC_INTERVAL_MS,
   { initialDelayMs: MISSING_PHOTOS_INITIAL_DELAY_MS }
@@ -450,6 +459,7 @@ Vireo.pollWhileVisible(
 //     than being suppressed by the old "20 === 20" exact match.
 const NEW_IMAGES_DISMISS_PREFIX = 'newImagesDismissed_ws_';
 
+/** @param {string | number | null | undefined} wsId */
 function _newImagesDismissKey(wsId) {
   return NEW_IMAGES_DISMISS_PREFIX + String(wsId);
 }
@@ -459,6 +469,7 @@ function _newImagesDismissKey(wsId) {
 // re-arms the banner via the exact-match check below. The zero-count reset
 // lives in checkNewImages (not here) because it needs to write to storage,
 // not just read it.
+/** @param {string | number | null | undefined} wsId @param {number} newCount @param {string[]} [offlineRoots] */
 function _isNewImagesDismissed(wsId, newCount, offlineRoots) {
   if (wsId === null || wsId === undefined || wsId === '') return false;
   const raw = sessionStorage.getItem(_newImagesDismissKey(wsId));
@@ -478,7 +489,7 @@ function _isNewImagesDismissed(wsId, newCount, offlineRoots) {
 // Without the in-flight guard, two ticks whose fetches are still in flight
 // both schedule timers when their responses land, leaking chains; the
 // start-of-call clearTimeout only catches the most recent handle.
-let _newImagesPendingTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ let _newImagesPendingTimer = null;
 let _newImagesInFlight = false;
 // Set when a *forced* check — the manual recheck — is dropped by the
 // in-flight guard. That poll was issued before the recheck cleared the
@@ -500,11 +511,13 @@ let _newImagesInvalidatedToken = 0;
 // Whether a call that started with ``startInvalidated`` is entitled to
 // conclude the outstanding recheck. Evaluated at render time, because the
 // token can change while a call is in flight.
+/** @param {number} startInvalidated */
 function _newImagesAnswersRecheck(startInvalidated) {
   return _newImagesRecheckToken === 0
     || startInvalidated === _newImagesRecheckToken;
 }
 
+/** @param {{manualRecheck?: boolean; answersRecheck?: boolean; force?: boolean} | undefined} [options] */
 async function checkNewImages(options) {
   if (_newImagesInFlight) {
     if (options && options.force) _newImagesForcedRerun = true;
@@ -530,13 +543,13 @@ async function checkNewImages(options) {
       _failNewImagesRecheck(_newImagesAnswersRecheck(startInvalidated));
       return;
     }
-    const data = await resp.json();
+    /** @type {NavNewImagesPayload} */ const data = await resp.json();
     // The backend returns ``pending: true`` when a fresh-cache walk is still
     // running in the background. The result will land in the cache shortly,
     // so re-poll soon instead of waiting for the next 60s tick.
     if (data && data.pending) {
       if (data.deferred_reason) {
-        const stamp = document.getElementById('newImagesCheckedAt');
+        const stamp = /** @type {HTMLElement} */ (document.getElementById('newImagesCheckedAt'));
         if (stamp) {
           stamp.textContent = data.deferred_reason === 'storage_move_active'
             ? 'Check deferred until the storage move finishes'
@@ -550,7 +563,7 @@ async function checkNewImages(options) {
     // re-poll fast — let the 60s interval try again after the backoff
     // window so we don't hammer a broken resource. Hide the banner.
     if (data && data.error) {
-      const banner = document.getElementById('newImagesBanner');
+      const banner = /** @type {HTMLElement} */ (document.getElementById('newImagesBanner'));
       if (banner) banner.style.display = 'none';
       if (!_newImagesForcedRerun
           && _newImagesAnswersRecheck(startInvalidated)) {
@@ -559,8 +572,8 @@ async function checkNewImages(options) {
       }
       return;
     }
-    const banner = document.getElementById('newImagesBanner');
-    const msg = document.getElementById('newImagesMsg');
+    const banner = /** @type {HTMLElement} */ (document.getElementById('newImagesBanner'));
+    const msg = /** @type {HTMLElement} */ (document.getElementById('newImagesMsg'));
     if (!banner || !msg) return;
     const wsId = (data && data.workspace_id != null) ? String(data.workspace_id) : '';
 
@@ -573,17 +586,17 @@ async function checkNewImages(options) {
     // Roots the walk could not check because their volume is offline. The
     // count above covers only the reachable roots, so the banner must say
     // so rather than present a partial number as the whole truth.
-    const unreachable = Array.isArray(data.unreachable_roots) ? data.unreachable_roots : [];
+    /** @type {string[]} */ const unreachable = Array.isArray(data.unreachable_roots) ? data.unreachable_roots : [];
     // Folders whose originals are staged as a local copy (Work Locally). The
     // walk leaves them out -- the catalog knows those photos by their local
     // path, and an import of them is refused until the copy is synced or
     // discarded -- so the count does not cover them and the banner says so.
-    const localCopies = Array.isArray(data.local_copy_excluded) ? data.local_copy_excluded : [];
+    /** @type {string[]} */ const localCopies = Array.isArray(data.local_copy_excluded) ? data.local_copy_excluded : [];
     const uncheckedRoots = [
       ...unreachable.map(path => 'offline:' + path),
       ...localCopies.map(path => 'local:' + path),
     ];
-    const cta = banner.querySelector('.banner-cta');
+    const cta = /** @type {HTMLElement | null} */ (banner.querySelector('.banner-cta'));
 
     // Only a *real* zero — every root checked, nothing new — resets the
     // dismissal. A zero with offline roots is "unknown", not "resolved".
@@ -667,6 +680,7 @@ const OFFLINE_ROOTS_MAX_LISTED = 6;
 // out five absolute paths inline buries the only part that differs. Factor
 // the shared parent out and list just the tails: the differences end up next
 // to each other instead of at the end of five near-identical strings.
+/** @param {string[]} roots */
 function _offlineRootsPhrase(roots) {
   if (roots.length === 1) return `${roots[0]} is`;
   const sorted = roots.slice().sort();
@@ -674,9 +688,9 @@ function _offlineRootsPhrase(roots) {
   const depth = _commonParentDepth(partsList);
   // Depth 1 is just the filesystem root (or a bare drive) — naming it saves
   // nothing and the "tails" would still be near-full paths.
-  const sep = (sorted[0].indexOf('\\') !== -1 && sorted[0].indexOf('/') === -1)
+  const sep = ((sorted[0] || '').indexOf('\\') !== -1 && (sorted[0] || '').indexOf('/') === -1)
     ? '\\' : '/';
-  const prefix = depth >= 2 ? partsList[0].slice(0, depth).join(sep) : '';
+  const prefix = depth >= 2 ? (partsList[0] || []).slice(0, depth).join(sep) : '';
   const labels = partsList.map(parts => parts.slice(prefix ? depth : 0).join(sep));
   const shown = labels.slice(0, OFFLINE_ROOTS_MAX_LISTED);
   const hidden = labels.length - shown.length;
@@ -688,11 +702,12 @@ function _offlineRootsPhrase(roots) {
 
 // Number of leading path components every path shares, never consuming a
 // path's own last component so each one keeps a non-empty tail.
+/** @param {string[][]} partsList */
 function _commonParentDepth(partsList) {
   const shortest = Math.min(...partsList.map(parts => parts.length));
   let depth = 0;
   while (depth < shortest - 1
-         && partsList.every(parts => parts[depth] === partsList[0][depth])) {
+         && partsList.every(parts => parts[depth] === partsList[0]?.[depth])) {
     depth++;
   }
   return depth;
@@ -703,10 +718,11 @@ function _commonParentDepth(partsList) {
 // and the time the walk behind this answer ran — without that stamp, a
 // recheck of a still-offline volume redraws the same sentence and looks
 // like nothing happened.
+/** @param {string[]} roots @param {string | null | undefined} checkedAt */
 function _applyOfflineBannerDetail(roots, checkedAt) {
-  const msg = document.getElementById('newImagesMsg');
-  const recheck = document.getElementById('newImagesRecheck');
-  const stamp = document.getElementById('newImagesCheckedAt');
+  const msg = /** @type {HTMLElement} */ (document.getElementById('newImagesMsg'));
+  const recheck = /** @type {HTMLButtonElement} */ (document.getElementById('newImagesRecheck'));
+  const stamp = /** @type {HTMLElement} */ (document.getElementById('newImagesCheckedAt'));
   if (msg) msg.title = roots.length ? roots.join('\n') : '';
   if (recheck) recheck.style.display = roots.length ? '' : 'none';
   if (stamp) {
@@ -717,6 +733,7 @@ function _applyOfflineBannerDetail(roots, checkedAt) {
 
 // Sentence naming the folders the walk left out because they are working
 // locally (empty when there are none), with a leading space so it appends.
+/** @param {string[]} localCopies */
 function _localCopiesSentence(localCopies) {
   if (!localCopies.length) return '';
   const one = localCopies.length === 1;
@@ -727,12 +744,14 @@ function _localCopiesSentence(localCopies) {
 
 // Add full paths to the banner message's hover text after whatever
 // _applyOfflineBannerDetail put there.
+/** @param {string[]} paths */
 function _appendBannerTitlePaths(paths) {
-  const msg = document.getElementById('newImagesMsg');
+  const msg = /** @type {HTMLElement} */ (document.getElementById('newImagesMsg'));
   if (!msg || !paths.length) return;
   msg.title = (msg.title ? msg.title + '\n' : '') + paths.join('\n');
 }
 
+/** @param {string | null | undefined} checkedAt */
 function _formatCheckedAt(checkedAt) {
   const secs = Number(checkedAt);
   if (!Number.isFinite(secs) || secs <= 0) return '';
@@ -744,9 +763,10 @@ function _formatCheckedAt(checkedAt) {
 // A recheck that produced no answer — rejected request, network error,
 // unreadable payload — says so and hands the button back, instead of holding
 // "Checking..." until some later poll happens to land.
+/** @param {boolean} answersRecheck */
 function _failNewImagesRecheck(answersRecheck) {
   if (!answersRecheck || _newImagesRecheckToken === 0) return;
-  const stamp = document.getElementById('newImagesCheckedAt');
+  const stamp = /** @type {HTMLElement} */ (document.getElementById('newImagesCheckedAt'));
   if (stamp) stamp.textContent = 'recheck failed \u2014 try again';
   _newImagesRecheckToken = 0;
   _newImagesForcedRerun = false;
@@ -756,8 +776,9 @@ function _failNewImagesRecheck(answersRecheck) {
 // The button stays busy until a final payload renders: a recheck drops the
 // cached result, so the poll right after it is usually `pending` and the
 // real answer lands a few seconds later.
+/** @param {boolean} busy */
 function _setNewImagesRecheckBusy(busy) {
-  const btn = document.getElementById('newImagesRecheck');
+  const btn = /** @type {HTMLButtonElement} */ (document.getElementById('newImagesRecheck'));
   if (!btn) return;
   btn.disabled = !!busy;
   btn.textContent = busy ? 'Checking...' : 'Check again';
@@ -767,7 +788,7 @@ function _setNewImagesRecheckBusy(busy) {
 // caches expire (30s), but those timers are invisible: someone who just
 // remounted the share gets to say "look now" instead of waiting them out.
 async function recheckNewImages() {
-  const btn = document.getElementById('newImagesRecheck');
+  const btn = /** @type {HTMLButtonElement} */ (document.getElementById('newImagesRecheck'));
   if (btn && btn.disabled) return;
   // Claim the recheck before awaiting anything: a poll that lands while the
   // POST is still open (the endpoint re-reads the mount table, which is
@@ -796,6 +817,7 @@ async function recheckNewImages() {
   await checkNewImages({force: true});
 }
 
+/** @param {string[]} roots */
 function _offlineRootsKey(roots) {
   return roots.slice().sort().join('\n');
 }
@@ -803,12 +825,13 @@ function _offlineRootsKey(roots) {
 // Companion to the count key: the exact set of offline roots shown when the
 // banner was dismissed (empty string when none). Both must match for the
 // dismissal to hold — see _isNewImagesDismissed.
+/** @param {string | number | null | undefined} wsId */
 function _newImagesOfflineDismissKey(wsId) {
   return 'newImagesOfflineDismissed_ws_' + String(wsId);
 }
 
 function dismissNewImagesBanner() {
-  const banner = document.getElementById('newImagesBanner');
+  const banner = /** @type {HTMLElement} */ (document.getElementById('newImagesBanner'));
   if (!banner) return;
   const wsId = banner.dataset.ws || '';
   const count = Number(banner.dataset.count || 0);
@@ -821,6 +844,7 @@ function dismissNewImagesBanner() {
   sessionStorage.setItem(_newImagesOfflineDismissKey(wsId), banner.dataset.offline || '');
 }
 
+/** @param {HTMLButtonElement} [btn] */
 async function reviewNewImagesImport(btn) {
   if (btn && btn.disabled) return;
   if (btn) {
@@ -837,7 +861,7 @@ async function reviewNewImagesImport(btn) {
   try {
     const r = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
     if (r.ok && r.status !== 202) {
-      const data = await r.json();
+      /** @type {{snapshot_id?: string}} */ const data = await r.json();
       if (data && data.snapshot_id != null) {
         window.location.href = `/import?new_images=${data.snapshot_id}`;
         return;
@@ -853,7 +877,7 @@ async function reviewNewImagesImport(btn) {
 // per-workspace via sessionStorage and re-arms automatically on any count
 // delta (scan reducing it, or new imports increasing it).
 checkNewImages();
-Vireo.pollWhileVisible(checkNewImages, 60000);
+/** @type {VisiblePoll} */ (/** @type {VireoNamespace} */ (Vireo).pollWhileVisible)(checkNewImages, 60000);
 
 /* ---------- Duplicate-Cleanup Banner ---------- */
 // Surfaces auto-resolved duplicate losers whose files may still be on disk.
@@ -865,6 +889,7 @@ function _dupCleanupDismissKey() {
   return 'dup_cleanup_dismissed';
 }
 
+/** @param {number} count */
 function _isDupCleanupDismissed(count) {
   var v = sessionStorage.getItem(_dupCleanupDismissKey());
   return v != null && Number(v) === count;
@@ -877,9 +902,9 @@ async function checkDupCleanup() {
   try {
     const resp = await fetch('/api/duplicates/disk-cleanup-summary');
     if (!resp.ok) return;
-    const data = await resp.json();
-    const banner = document.getElementById('dupCleanupBanner');
-    const msg = document.getElementById('dupCleanupMsg');
+    /** @type {{count: number; total_size: number}} */ const data = await resp.json();
+    const banner = /** @type {HTMLElement} */ (document.getElementById('dupCleanupBanner'));
+    const msg = /** @type {HTMLElement} */ (document.getElementById('dupCleanupMsg'));
     if (!banner || !msg) return;
 
     const count = data.count || 0;
@@ -903,7 +928,7 @@ async function checkDupCleanup() {
 }
 
 function dismissDupCleanupBanner() {
-  const banner = document.getElementById('dupCleanupBanner');
+  const banner = /** @type {HTMLElement} */ (document.getElementById('dupCleanupBanner'));
   if (!banner) return;
   const count = Number(banner.dataset.count || 0);
   banner.style.display = 'none';
@@ -911,32 +936,32 @@ function dismissDupCleanupBanner() {
 }
 
 checkDupCleanup();
-Vireo.pollWhileVisible(checkDupCleanup, 60000);
+/** @type {VisiblePoll} */ (/** @type {VireoNamespace} */ (Vireo).pollWhileVisible)(checkDupCleanup, 60000);
 
 /* ---------- Missing Folders Modal ---------- */
-let _relocatingFolderId = null;
-let _relocateSelectedSub = null; // {name, path} of clicked subfolder, or null for current dir
+/** @type {number | null} */ let _relocatingFolderId = null;
+/** @type {{name: string; path: string} | null} */ let _relocateSelectedSub = null; // {name, path} of clicked subfolder, or null for current dir
 let _relocateBrowserPath = '';
-let _pendingCascaded = [];
+/** @type {NavMissingFolder[]} */ let _pendingCascaded = [];
 let _browseRelocateGen = 0;
-let _missingFoldersRows = [];
+/** @type {NavMissingFolder[]} */ let _missingFoldersRows = [];
 let _missingFoldersRemoving = false;
 
 function openMissingFoldersModal() {
-  document.getElementById('missingFoldersModal').classList.add('open');
+  /** @type {HTMLElement} */ (document.getElementById('missingFoldersModal')).classList.add('open');
   loadMissingFolders();
 }
 
 function closeMissingFoldersModal() {
-  document.getElementById('missingFoldersModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('missingFoldersModal')).classList.remove('open');
   checkMissingFolders();
 }
 
 async function loadMissingFolders() {
   if (_missingFoldersRemoving) return;
   _missingFoldersRows = [];
-  document.getElementById('missingFoldersRemoveAllBtn').style.display = 'none';
-  const container = document.getElementById('missingFoldersList');
+  /** @type {HTMLButtonElement} */ (document.getElementById('missingFoldersRemoveAllBtn')).style.display = 'none';
+  const container = /** @type {HTMLElement} */ (document.getElementById('missingFoldersList'));
   container.innerHTML = '<p style="color:var(--text-secondary);">Checking folders…</p>';
   // Own mutation gen (POST-vs-POST supersession) and in-flight counter —
   // the shared observation gen the GET poll uses is deliberately NOT
@@ -949,7 +974,7 @@ async function loadMissingFolders() {
   try {
     const resp = await fetch('/api/folders/check-health', { method: 'POST' });
     if (!resp.ok) throw new Error('check failed');
-    const data = await resp.json();
+    /** @type {{missing: NavMissingFolder[]; folder_health_version?: number; changed?: number; workspace_changed?: number}} */ const data = await resp.json();
     const folders = data.missing;
     const serverVersion = _parseFolderHealthVersion(
       data.folder_health_version);
@@ -1036,7 +1061,7 @@ async function loadMissingFolders() {
     // in-flight guard.
     _updateMissingFoldersBanner(folders);
     _missingFoldersRows = folders;
-    document.getElementById('missingFoldersRemoveAllBtn').style.display = folders.length ? '' : 'none';
+    /** @type {HTMLButtonElement} */ (document.getElementById('missingFoldersRemoveAllBtn')).style.display = folders.length ? '' : 'none';
     if (folders.length === 0) {
       container.textContent = '';
       const ok = document.createElement('p');
@@ -1071,7 +1096,7 @@ async function loadMissingFolders() {
       const removeBtn = document.createElement('button');
       removeBtn.className = 'danger';
       removeBtn.textContent = 'Remove';
-      removeBtn.addEventListener('click', () => startRemoveFolder(f.id, f.path, f.photo_count));
+      removeBtn.addEventListener('click', () => startRemoveFolder(f.id, f.path, f.photo_count || 0));
       actions.append(relocateBtn, removeBtn);
       row.append(pathEl, countEl, actions);
       container.appendChild(row);
@@ -1110,11 +1135,12 @@ async function loadMissingFolders() {
   }
 }
 
+/** @param {number} folderId @param {string} originalPath */
 function startRelocate(folderId, originalPath) {
   _relocatingFolderId = folderId;
   _relocateBrowserPath = '';
-  document.getElementById('relocateOriginalPathText').textContent = originalPath || '';
-  document.getElementById('relocateBrowserModal').classList.add('open');
+  /** @type {HTMLElement} */ (document.getElementById('relocateOriginalPathText')).textContent = originalPath || '';
+  /** @type {HTMLElement} */ (document.getElementById('relocateBrowserModal')).classList.add('open');
   loadRelocateQuickAccess();
   browseRelocate(null);
 }
@@ -1123,9 +1149,10 @@ let _quickAccessGen = 0;
 
 async function loadRelocateQuickAccess() {
   const gen = ++_quickAccessGen;
-  const container = document.getElementById('relocateQuickAccess');
+  const container = /** @type {HTMLElement} */ (document.getElementById('relocateQuickAccess'));
   container.innerHTML = '';
 
+  /** @param {string} label @param {string | null} path */
   function makeQuickBtn(label, path) {
     const btn = document.createElement('button');
     btn.className = 'relocate-quick-btn';
@@ -1138,7 +1165,7 @@ async function loadRelocateQuickAccess() {
   container.appendChild(makeQuickBtn('/ (Root)', '/'));
 
   try {
-    const data = await safeFetch('/api/browse?path=/Volumes', undefined, {toast: false});
+    /** @type {FolderBrowserListing} */ const data = await safeFetch('/api/browse?path=/Volumes', undefined, {toast: false});
     if (gen !== _quickAccessGen) return;
     if (data && data.dirs && data.dirs.length > 0) {
       data.dirs.forEach(function(d) {
@@ -1149,22 +1176,23 @@ async function loadRelocateQuickAccess() {
 }
 
 function closeRelocateBrowser() {
-  document.getElementById('relocateBrowserModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('relocateBrowserModal')).classList.remove('open');
   _relocatingFolderId = null;
 }
 
+/** @param {string | null} path */
 async function browseRelocate(path) {
   _relocateSelectedSub = null;
   updateRelocateBtn();
   const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : '/api/browse';
   const gen = ++_browseRelocateGen;
-  const data = await safeFetch(url);
+  /** @type {FolderBrowserListing} */ const data = await safeFetch(url);
   if (gen !== _browseRelocateGen) return;  // stale response, discard
   _relocateBrowserPath = data.path;
 
-  document.getElementById('relocateBreadcrumb').textContent = data.path;
+  /** @type {HTMLElement} */ (document.getElementById('relocateBreadcrumb')).textContent = data.path;
 
-  const list = document.getElementById('relocateFolderList');
+  const list = /** @type {HTMLElement} */ (document.getElementById('relocateFolderList'));
   list.innerHTML = '';
   const normalized = data.path.replace(/\\/g, '/').replace(/\/$/, '');
   const cut = normalized.lastIndexOf('/');
@@ -1182,14 +1210,15 @@ async function browseRelocate(path) {
     const el = document.createElement('div');
     el.className = 'relocate-folder-item';
     el.textContent = '\u{1F4C2} ' + d.name;
-    el.addEventListener('click', function() { selectRelocateFolder(el, d.name, d.path); });
+    el.addEventListener('click', function() { selectRelocateFolder(el, d.name || '', d.path); });
     el.addEventListener('dblclick', function() { browseRelocate(d.path); });
     list.appendChild(el);
   });
 }
 
+/** @param {HTMLElement} el @param {string} name @param {string} path */
 function selectRelocateFolder(el, name, path) {
-  document.querySelectorAll('#relocateFolderList .relocate-folder-item.selected').forEach(function(item) {
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#relocateFolderList .relocate-folder-item.selected')).forEach(function(item) {
     item.classList.remove('selected');
   });
   el.classList.add('selected');
@@ -1198,7 +1227,7 @@ function selectRelocateFolder(el, name, path) {
 }
 
 function updateRelocateBtn() {
-  const btn = document.getElementById('relocateSelectBtn');
+  const btn = /** @type {HTMLButtonElement} */ (document.getElementById('relocateSelectBtn'));
   if (_relocateSelectedSub) {
     btn.textContent = 'Select "' + _relocateSelectedSub.name + '"';
   } else {
@@ -1208,7 +1237,7 @@ function updateRelocateBtn() {
 
 async function confirmRelocate() {
   if (!_relocatingFolderId || !_relocateBrowserPath) return;
-  const data = await safeFetch(`/api/folders/${_relocatingFolderId}/relocate`, {
+  /** @type {{cascaded?: NavMissingFolder[]}} */ const data = await safeFetch(`/api/folders/${_relocatingFolderId}/relocate`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({path: _relocateSelectedSub ? _relocateSelectedSub.path : _relocateBrowserPath}),
@@ -1217,21 +1246,22 @@ async function confirmRelocate() {
 
   if (data.cascaded && data.cascaded.length > 0) {
     _pendingCascaded = data.cascaded;
-    document.getElementById('cascadeMsg').textContent =
+    /** @type {HTMLElement} */ (document.getElementById('cascadeMsg')).textContent =
       `${data.cascaded.length} subfolder${data.cascaded.length !== 1 ? 's were' : ' was'} also found at the new location and re-linked.`;
-    document.getElementById('cascadeConfirmModal').classList.add('open');
+    /** @type {HTMLElement} */ (document.getElementById('cascadeConfirmModal')).classList.add('open');
   } else {
     loadMissingFolders();
   }
 }
 
 function closeCascadeConfirm() {
-  document.getElementById('cascadeConfirmModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('cascadeConfirmModal')).classList.remove('open');
   _pendingCascaded = [];
   loadMissingFolders();
 }
 function confirmCascade() { closeCascadeConfirm(); }
 
+/** @param {number} folderId @param {string} path @param {number} photoCount */
 async function startRemoveFolder(folderId, path, photoCount) {
   if (_missingFoldersRemoving) return;
   if (!confirm(`This will remove ${photoCount} photo${photoCount !== 1 ? 's' : ''} from Vireo.\n\nThe files on disk (if they still exist) won't be touched.\n\nRemove "${path}"?`)) return;
@@ -1243,12 +1273,12 @@ async function removeAllMissingFolders() {
   if (_missingFoldersRemoving || !_missingFoldersRows.length) return;
   // Remove children first: deleting a parent also removes its descendants.
   const folders = [..._missingFoldersRows].sort((a, b) => b.path.length - a.path.length);
-  const photoCount = folders.reduce((total, folder) => total + folder.photo_count, 0);
+  const photoCount = folders.reduce((total, folder) => total + (folder.photo_count || 0), 0);
   if (!confirm(`Remove all ${folders.length} missing folder${folders.length !== 1 ? 's' : ''} from Vireo?\n\nThese folders contain ${photoCount} photo${photoCount !== 1 ? 's' : ''}. Their subfolders will also be removed from Vireo.\n\nThe files on disk (if they still exist) won't be touched.`)) return;
 
   _missingFoldersRemoving = true;
-  const button = document.getElementById('missingFoldersRemoveAllBtn');
-  const controls = document.querySelectorAll('#missingFoldersModal button');
+  const button = /** @type {HTMLButtonElement} */ (document.getElementById('missingFoldersRemoveAllBtn'));
+  const controls = /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('#missingFoldersModal button'));
   controls.forEach(control => { control.disabled = true; });
   let removed = 0;
   try {
@@ -1260,7 +1290,7 @@ async function removeAllMissingFolders() {
     showToast(`Removed ${removed} missing folder${removed !== 1 ? 's' : ''} from Vireo.`, 'success');
   } catch (e) {
     // Stop before an ancestor can cascade over a descendant that failed.
-    showToast(`Removal stopped after ${removed} of ${folders.length} folders. ${e.message || 'Please try again.'}`, 'error');
+    showToast(`Removal stopped after ${removed} of ${folders.length} folders. ${e instanceof Error ? e.message : 'Please try again.'}`, 'error');
   } finally {
     _missingFoldersRemoving = false;
     button.textContent = 'Remove All';
@@ -1270,25 +1300,26 @@ async function removeAllMissingFolders() {
 }
 
 /* ---------- Missing Originals Modal ---------- */
-let _missingPhotosSelected = new Set();
+/** @type {Set<number>} */ let _missingPhotosSelected = new Set();
 let _missingPhotosDeleteInFlight = false;
-let _missingPhotosRemovalRefreshResult = null;
+/** @type {{deleted: number; noun: string} | null} */ let _missingPhotosRemovalRefreshResult = null;
 
 // Scope for the Missing Originals modal. null folderId = whole workspace.
 // The banner poll (checkMissingPhotos) is always workspace-wide; only the
 // modal honors scope so a "rescan this folder" review can't offer to delete
 // ghosts from folders the user didn't ask about.
-let _missingPhotosScope = { folderId: null, label: '' };
+/** @type {{folderId: number | null; label: string}} */ let _missingPhotosScope = { folderId: null, label: '' };
 
+/** @param {number | null} [folderId] @param {string} [label] */
 function openMissingPhotosModal(folderId, label) {
   _missingPhotosScope = {
     folderId: (folderId == null ? null : folderId),
     label: label || '',
   };
   updateMissingPhotosThumbSize(
-    document.getElementById('missingPhotosThumbSizeSlider').value
+    /** @type {HTMLInputElement} */ (document.getElementById('missingPhotosThumbSizeSlider')).value
   );
-  const note = document.getElementById('missingPhotosScopeNote');
+  const note = /** @type {HTMLElement} */ (document.getElementById('missingPhotosScopeNote'));
   if (_missingPhotosScope.folderId != null) {
     note.textContent = 'Showing only: ' + (_missingPhotosScope.label || 'selected folder');
     note.style.display = 'block';
@@ -1296,14 +1327,14 @@ function openMissingPhotosModal(folderId, label) {
     note.style.display = 'none';
     note.textContent = '';
   }
-  document.getElementById('missingPhotosDeleteSidecars').checked = true;
+  /** @type {HTMLInputElement} */ (document.getElementById('missingPhotosDeleteSidecars')).checked = true;
   if (!_missingPhotosRemovalRefreshResult) _setMissingPhotosActionStatus('');
-  document.getElementById('missingPhotosModal').classList.add('open');
+  /** @type {HTMLElement} */ (document.getElementById('missingPhotosModal')).classList.add('open');
   loadMissingPhotos();
 }
 
 function closeMissingPhotosModal() {
-  document.getElementById('missingPhotosModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('missingPhotosModal')).classList.remove('open');
   checkMissingPhotos();  // refresh banner
 }
 
@@ -1313,20 +1344,20 @@ function closeMissingPhotosModal() {
 async function openRescanModal() {
   // Close the workspace dropdown if this was triggered from its menu.
   vireoWorkspaceSwitcher.close();
-  const wsRadio = document.querySelector('input[name="rescanScope"][value="workspace"]');
-  const folderRadio = document.querySelector('input[name="rescanScope"][value="folder"]');
+  const wsRadio = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="rescanScope"][value="workspace"]'));
+  const folderRadio = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="rescanScope"][value="folder"]'));
   if (wsRadio) { wsRadio.checked = true; wsRadio.disabled = false; }
   if (folderRadio) folderRadio.disabled = false;
-  const sel = document.getElementById('rescanFolderSelect');
+  const sel = /** @type {HTMLSelectElement} */ (document.getElementById('rescanFolderSelect'));
   sel.innerHTML = '';
   sel.disabled = true;
-  const emptyNote = document.getElementById('rescanEmptyNote');
+  const emptyNote = /** @type {HTMLElement} */ (document.getElementById('rescanEmptyNote'));
   emptyNote.style.display = 'none';
-  document.getElementById('rescanRunBtn').disabled = false;
-  document.getElementById('rescanModal').classList.add('open');
+  /** @type {HTMLButtonElement} */ (document.getElementById('rescanRunBtn')).disabled = false;
+  /** @type {HTMLElement} */ (document.getElementById('rescanModal')).classList.add('open');
   try {
-    const active = await safeFetch('/api/workspaces/active', {}, { toast: false });
-    const folders = await safeFetch('/api/workspaces/' + active.id + '/folders', {}, { toast: false });
+    /** @type {{id: number}} */ const active = await safeFetch('/api/workspaces/active', {}, { toast: false });
+    /** @type {NavMissingFolder[]} */ const folders = await safeFetch('/api/workspaces/' + active.id + '/folders', {}, { toast: false });
     if (!folders || folders.length === 0) {
       emptyNote.textContent = 'This workspace has no folders yet. Open Import to add photos first.';
       emptyNote.style.display = 'block';
@@ -1335,7 +1366,7 @@ async function openRescanModal() {
     }
     folders.forEach(function(f) {
       const opt = document.createElement('option');
-      opt.value = f.id;
+      opt.value = String(f.id);
       opt.textContent = f.name || f.path;
       opt.title = f.path;
       sel.appendChild(opt);
@@ -1349,23 +1380,23 @@ async function openRescanModal() {
 window.openRescanModal = openRescanModal;
 
 function onRescanScopeChange() {
-  const scopeEl = document.querySelector('input[name="rescanScope"]:checked');
+  const scopeEl = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="rescanScope"]:checked'));
   const isFolder = !!(scopeEl && scopeEl.value === 'folder');
-  document.getElementById('rescanFolderSelect').disabled = !isFolder;
+  /** @type {HTMLSelectElement} */ (document.getElementById('rescanFolderSelect')).disabled = !isFolder;
 }
 
 function closeRescanModal() {
-  document.getElementById('rescanModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('rescanModal')).classList.remove('open');
 }
 
 async function runRescan() {
-  const scopeEl = document.querySelector('input[name="rescanScope"]:checked');
+  const scopeEl = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="rescanScope"]:checked'));
   const scope = scopeEl ? scopeEl.value : 'workspace';
-  const btn = document.getElementById('rescanRunBtn');
+  const btn = /** @type {HTMLButtonElement} */ (document.getElementById('rescanRunBtn'));
   btn.disabled = true;
   try {
     if (scope === 'folder') {
-      const sel = document.getElementById('rescanFolderSelect');
+      const sel = /** @type {HTMLSelectElement} */ (document.getElementById('rescanFolderSelect'));
       const fid = parseInt(sel.value, 10);
       if (isNaN(fid)) {
         showToast('Pick a folder to rescan.', 'error');
@@ -1373,8 +1404,8 @@ async function runRescan() {
         return;
       }
       const label = sel.options[sel.selectedIndex]
-        ? sel.options[sel.selectedIndex].textContent : '';
-      const scanRes = await safeFetch('/api/folders/' + fid + '/rescan', {
+        ? sel.options[sel.selectedIndex]?.textContent : '';
+      /** @type {{job_id?: string}} */ const scanRes = await safeFetch('/api/folders/' + fid + '/rescan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ incremental: true }),
@@ -1383,7 +1414,7 @@ async function runRescan() {
       showToast('Rescanning “' + label + '” for new and changed photos…', 'info');
       await reviewDeletedAfterRescan(fid, label, scanRes && scanRes.job_id);
     } else {
-      const res = await safeFetch('/api/jobs/scan-workspace', {
+      /** @type {{job_id?: string; skipped?: string[]}} */ const res = await safeFetch('/api/jobs/scan-workspace', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ incremental: true }),
@@ -1417,6 +1448,7 @@ async function runRescan() {
 // terminal state (or if the status endpoint stops returning the job).
 // Callers treat "unknown" the same as "done" so a lost job id doesn't
 // hang the review modal indefinitely.
+/** @param {string} jobId @param {{generation?: number; intervalMs?: number; maxAttempts?: number} | undefined} [opts] */
 async function _awaitScanJobDone(jobId, opts) {
   opts = opts || {};
   const intervalMs = opts.intervalMs || 1500;
@@ -1425,7 +1457,7 @@ async function _awaitScanJobDone(jobId, opts) {
   // large NAS/SMB rescans; the scan itself keeps running past the cap.
   const maxAttempts = opts.maxAttempts || 400;
   for (let i = 0; i < maxAttempts; i++) {
-    let job;
+    /** @type {{status: string} | null} */ let job;
     try {
       const resp = await fetch('/api/jobs/' + encodeURIComponent(jobId));
       if (resp.status === 404) return false;
@@ -1450,6 +1482,7 @@ async function _awaitScanJobDone(jobId, opts) {
 // in-flight generation mid-flight and discard the results (the modal
 // would then poll to ``not_ready``/"not checked yet" even though a full
 // filesystem walk had just completed).
+/** @param {number | null} [folderId] @param {string} [label] @param {string} [scanJobId] */
 async function reviewDeletedAfterRescan(folderId, label, scanJobId) {
   if (scanJobId) {
     const scanDone = await _awaitScanJobDone(scanJobId);
@@ -1479,7 +1512,7 @@ async function reviewDeletedAfterRescan(folderId, label, scanJobId) {
       modal: true,
     });
     const photos = _missingPhotosPayloadPhotos(payload);
-    if ((payload && payload.pending) || (photos && photos.length)) {
+    if ((payload && !Array.isArray(payload) && payload.pending) || (photos && photos.length)) {
       openMissingPhotosModal(folderId, label);
     } else {
       showToast('No deleted photos found' + (label ? ' in “' + label + '”' : '') + '.', 'info');
@@ -1490,19 +1523,22 @@ async function reviewDeletedAfterRescan(folderId, label, scanJobId) {
   }
 }
 
+/** @param {unknown} s */
 function _escapeAttr(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+/** @param {unknown} s */
 function _escapeHtml(s) { return _escapeAttr(s); }
 
+/** @param {unknown} value */
 function updateMissingPhotosThumbSize(value) {
-  const list = document.getElementById('missingPhotosList');
+  const list = /** @type {HTMLElement} */ (document.getElementById('missingPhotosList'));
   if (list) list.style.setProperty('--missing-thumb-size', value + 'px');
 }
 
 async function loadMissingPhotos() {
-  const container = document.getElementById('missingPhotosList');
-  const toolbar = document.getElementById('missingPhotosToolbar');
+  const container = /** @type {HTMLElement} */ (document.getElementById('missingPhotosList'));
+  const toolbar = /** @type {HTMLElement} */ (document.getElementById('missingPhotosToolbar'));
   container.innerHTML = '<p style="color:var(--text-secondary);">Checking photos…</p>';
   toolbar.style.display = 'none';
   _missingPhotosSelected = new Set();
@@ -1514,18 +1550,18 @@ async function loadMissingPhotos() {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error('check failed');
     if (myId !== _missingPhotosModalFetchId) return;  // superseded by a newer modal load
-    const payload = await resp.json();
+    /** @type {NavMissingPhotosPayload | NavMissingPhoto[]} */ const payload = await resp.json();
     if (myId !== _missingPhotosModalFetchId) return;
     const photos = _missingPhotosPayloadPhotos(payload);
-    const ready = Array.isArray(payload) || (payload && payload.status === 'ready');
-    if (payload && payload.pending) {
+    const ready = Array.isArray(payload) || (payload && !Array.isArray(payload) && payload.status === 'ready');
+    if (payload && !Array.isArray(payload) && payload.pending) {
       container.innerHTML = '<p style="color:var(--text-secondary);">Checking missing originals…</p>';
       _scheduleMissingPhotosPoll(_missingPhotosScope.folderId, true);
       return 'pending';
     }
     if (!ready) {
-      const err = payload && payload.error ? _escapeHtml(payload.error) : '';
-      const msg = payload && payload.status === 'error'
+      const err = payload && !Array.isArray(payload) && payload.error ? _escapeHtml(payload.error) : '';
+      const msg = payload && !Array.isArray(payload) && payload.status === 'error'
         ? 'Could not check missing originals' + (err ? ': ' + err : '') + '.'
         : 'Missing originals have not been checked yet.';
       container.innerHTML =
@@ -1550,7 +1586,7 @@ async function loadMissingPhotos() {
       return 'ready';
     }
     toolbar.style.display = 'flex';
-    document.getElementById('missingPhotosSelectAll').checked = false;
+    /** @type {HTMLInputElement} */ (document.getElementById('missingPhotosSelectAll')).checked = false;
     container.innerHTML = photos.map(p => {
       const ts = p.timestamp ? new Date(p.timestamp).toLocaleDateString() : '';
       const thumbUrl = window.vireoThumbnailUrl
@@ -1595,8 +1631,8 @@ async function loadMissingPhotos() {
 }
 
 async function refreshMissingPhotosNow() {
-  const container = document.getElementById('missingPhotosList');
-  const toolbar = document.getElementById('missingPhotosToolbar');
+  const container = /** @type {HTMLElement} */ (document.getElementById('missingPhotosList'));
+  const toolbar = /** @type {HTMLElement} */ (document.getElementById('missingPhotosToolbar'));
   if (toolbar) toolbar.style.display = 'none';
   if (container) container.innerHTML = '<p style="color:var(--text-secondary);">Starting missing originals check…</p>';
   try {
@@ -1612,32 +1648,35 @@ async function refreshMissingPhotosNow() {
   return await loadMissingPhotos();
 }
 
+/** @param {number} id @param {boolean} checked */
 function toggleMissingPhoto(id, checked) {
   if (checked) _missingPhotosSelected.add(id);
   else _missingPhotosSelected.delete(id);
   _updateMissingPhotosBulkBtn();
 }
 
+/** @param {boolean} checked */
 function toggleAllMissingPhotos(checked) {
   _missingPhotosSelected = new Set();
-  document.querySelectorAll('#missingPhotosList .missing-photo-row').forEach(function(row) {
-    const cb = row.querySelector('input[type="checkbox"]');
-    cb.checked = checked;
-    if (checked) _missingPhotosSelected.add(parseInt(row.dataset.photoId, 10));
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#missingPhotosList .missing-photo-row')).forEach(function(row) {
+    const cb = /** @type {HTMLInputElement | null} */ (row.querySelector('input[type="checkbox"]'));
+    if (cb) cb.checked = checked;
+    if (checked) _missingPhotosSelected.add(Number(row.dataset.photoId));
   });
   _updateMissingPhotosBulkBtn();
 }
 
 function _updateMissingPhotosBulkBtn() {
   const n = _missingPhotosSelected.size;
-  document.getElementById('missingPhotosSelectedCount').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('missingPhotosSelectedCount')).textContent =
     `${n} selected`;
-  document.getElementById('missingPhotosRemoveBtn').disabled =
+  /** @type {HTMLButtonElement} */ (document.getElementById('missingPhotosRemoveBtn')).disabled =
     _missingPhotosDeleteInFlight || n === 0;
 }
 
+/** @param {string} message @param {string} [state] */
 function _setMissingPhotosActionStatus(message, state) {
-  const status = document.getElementById('missingPhotosActionStatus');
+  const status = /** @type {HTMLElement} */ (document.getElementById('missingPhotosActionStatus'));
   if (!status) return;
   status.textContent = message || '';
   status.hidden = !message;
@@ -1646,6 +1685,7 @@ function _setMissingPhotosActionStatus(message, state) {
   status.setAttribute('aria-live', state === 'error' ? 'assertive' : 'polite');
 }
 
+/** @param {string | undefined} refreshState */
 function _finalizeMissingPhotosRemovalRefresh(refreshState) {
   const result = _missingPhotosRemovalRefreshResult;
   if (!result || refreshState === 'pending') return false;
@@ -1667,10 +1707,11 @@ function _finalizeMissingPhotosRemovalRefresh(refreshState) {
   return true;
 }
 
+/** @param {boolean} busy @param {number} count */
 function _setMissingPhotosDeleteBusy(busy, count) {
   _missingPhotosDeleteInFlight = busy;
-  const button = document.getElementById('missingPhotosRemoveBtn');
-  const refreshButton = document.getElementById('missingPhotosRefreshBtn');
+  const button = /** @type {HTMLButtonElement} */ (document.getElementById('missingPhotosRemoveBtn'));
+  const refreshButton = /** @type {HTMLButtonElement} */ (document.getElementById('missingPhotosRefreshBtn'));
   if (button) {
     button.textContent = busy
       ? `Removing ${count} photo${count === 1 ? '' : 's'}…`
@@ -1680,14 +1721,15 @@ function _setMissingPhotosDeleteBusy(busy, count) {
   document.querySelectorAll(
     '#missingPhotosToolbar input, #missingPhotosList input, #missingPhotosList button'
   ).forEach(function(control) {
-    control.disabled = busy;
+    if (control instanceof HTMLButtonElement || control instanceof HTMLInputElement) control.disabled = busy;
   });
   _updateMissingPhotosBulkBtn();
 }
 
+/** @param {number} id */
 async function removeOneMissingPhoto(id) {
   if (_missingPhotosDeleteInFlight) return;
-  const deleteSidecars = document.getElementById('missingPhotosDeleteSidecars').checked;
+  const deleteSidecars = /** @type {HTMLInputElement} */ (document.getElementById('missingPhotosDeleteSidecars')).checked;
   const sidecarMsg = deleteSidecars
     ? '\n\nLeftover XMP sidecars will also be deleted from disk.'
     : '\n\nThe XMP sidecar on disk will not be touched.';
@@ -1699,12 +1741,13 @@ async function removeSelectedMissingPhotos() {
   if (_missingPhotosDeleteInFlight) return;
   const ids = Array.from(_missingPhotosSelected);
   if (ids.length === 0) return;
-  const deleteSidecars = document.getElementById('missingPhotosDeleteSidecars').checked;
+  const deleteSidecars = /** @type {HTMLInputElement} */ (document.getElementById('missingPhotosDeleteSidecars')).checked;
   const sidecarMsg = deleteSidecars ? '\n\nLeftover XMP sidecars will also be deleted from disk.' : '';
   if (!confirm(`Remove ${ids.length} photo${ids.length !== 1 ? 's' : ''} from Vireo?\n\nCached thumbnails/previews/working copies will be deleted.${sidecarMsg}`)) return;
   await _runMissingPhotosRemoval(ids, deleteSidecars);
 }
 
+/** @param {number[]} ids @param {boolean} deleteSidecars */
 async function _runMissingPhotosRemoval(ids, deleteSidecars) {
   if (_missingPhotosDeleteInFlight || ids.length === 0) return;
   _missingPhotosRemovalRefreshResult = null;
@@ -1739,7 +1782,7 @@ async function _runMissingPhotosRemoval(ids, deleteSidecars) {
         'No photos were removed. Rechecking missing originals…'
       );
     }
-    let refreshState = 'failed';
+    /** @type {string | undefined} */ let refreshState = 'failed';
     try {
       refreshState = await refreshMissingPhotosNow();
     } catch (err) {
@@ -1758,6 +1801,7 @@ async function _runMissingPhotosRemoval(ids, deleteSidecars) {
   }
 }
 
+/** @param {number[]} ids @param {boolean} deleteSidecars */
 async function _deleteMissingPhotoIds(ids, deleteSidecars) {
   // Ready /api/photos/missing payloads are cached for up to 30 min, so a
   // photo whose original came back after the last scan could otherwise be
@@ -1765,7 +1809,7 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
   // missing/remove endpoint re-checks each source on disk in the active
   // workspace, skips any whose original is back, and only deletes the
   // still-missing rows (plus their sidecars in the same transaction).
-  const payload = await safeFetch('/api/photos/missing/remove', {
+  /** @type {{deleted: number; restored?: number[]; folder_offline?: number[]; skipped?: number}} */ const payload = await safeFetch('/api/photos/missing/remove', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({

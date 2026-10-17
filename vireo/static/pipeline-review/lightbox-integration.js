@@ -1,23 +1,24 @@
 // Pipeline Review options and guards for the shared lightbox.
 // Classic page script; shared globals are initialized before boot.js runs.
 
+/** @param {number} photoId */
 function pipelineReviewVisiblePhotoList(photoId) {
   var photo = findPhotoInResults(photoId);
   if (!photo) return [];
-  var groupOverlay = document.getElementById('grmOverlay');
+  var groupOverlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   var groupCard = groupOverlay && groupOverlay.classList.contains('open')
     ? groupOverlay.querySelector('.grm-card[data-photo-id="' + photoId + '"]')
     : null;
-  var root = groupCard ? groupOverlay : document.getElementById('encountersContainer');
+  var root = groupCard ? groupOverlay : /** @type {HTMLElement} */ (document.getElementById('encountersContainer'));
   var selector = groupCard ? '.grm-card[data-photo-id]' : '.photo-card[data-photo-id]';
-  var seen = {};
-  var list = [];
+  /** @type {Record<number,boolean>} */ var seen = {};
+  /** @type {ReviewPhoto[]} */ var list = [];
   if (root) {
-    root.querySelectorAll(selector).forEach(function(card) {
+    /** @type {NodeListOf<HTMLElement>} */ (root.querySelectorAll(selector)).forEach(function(card) {
       // Collapsed encounters remain in the DOM but are not part of the visible
       // review sequence. Group Review cards are all visible in its overlay.
       if (!groupCard && card.offsetParent === null) return;
-      var id = parseInt(card.dataset.photoId, 10);
+      var id = Number(card.dataset.photoId);
       if (!id || seen[id]) return;
       var item = findPhotoInResults(id);
       if (!item) return;
@@ -32,8 +33,9 @@ function pipelineReviewVisiblePhotoList(photoId) {
 // photoId is passed by callers that open the lightbox on a photo that may not
 // be on screen (Find Similar). Under a Folder/Collection scope a photo the
 // scope hides opens read-only, matching the scope guard on the writers.
+/** @param {number} [photoId] */
 function pipelineReviewLightboxOptions(photoId) {
-  var groupOverlay = document.getElementById('grmOverlay');
+  var groupOverlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   var groupApplying = !!(
     groupOverlay && groupOverlay.classList.contains('open') &&
     grmState && grmState.applying
@@ -52,8 +54,9 @@ function pipelineReviewLightboxOptions(photoId) {
   return {readOnly: readOnly, readOnlyMessage: readOnlyMessage};
 }
 
+/** @param {number} photoId */
 function openPipelineLightbox(photoId) {
-  var groupOverlay = document.getElementById('grmOverlay');
+  var groupOverlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   if (groupOverlay && groupOverlay.classList.contains('open') &&
       grmState && grmState.applying) {
     showToast('Group Review is applying changes — wait for it to finish', 'warning');
@@ -88,7 +91,7 @@ function grmHasPendingUserEdits() {
 
 function registerPipelineReviewLightboxBrowseHook() {
     window.getLightboxBrowseDisabledHint = function(photoId, willNavigateInPlace) {
-      var overlay = document.getElementById('grmOverlay');
+      var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
       var groupOpen = overlay && overlay.classList.contains('open');
       var sameWindowNavigation = !!willNavigateInPlace ||
         (typeof isTauri === 'function' && isTauri());

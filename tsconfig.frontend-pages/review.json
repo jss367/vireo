@@ -1,0 +1,24 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/review.d.ts",
+    "../vireo/static/review/boot.js",
+    "../vireo/static/review/collections.js",
+    "../vireo/static/review/context-menu.js",
+    "../vireo/static/review/controls.js",
+    "../vireo/static/review/decisions.js",
+    "../vireo/static/review/deep-links.js",
+    "../vireo/static/review/detection-boxes.js",
+    "../vireo/static/review/grid.js",
+    "../vireo/static/review/group-cards.js",
+    "../vireo/static/review/group-changes.js",
+    "../vireo/static/review/group-loupe.js",
+    "../vireo/static/review/group-render.js",
+    "../vireo/static/review/group-resolution.js",
+    "../vireo/static/review/group-session.js",
+    "../vireo/static/review/keyboard.js",
+    "../vireo/static/review/loading.js",
+    "../vireo/static/review/photo-actions.js",
+    "../vireo/static/review/state.js"
+  ]
+}

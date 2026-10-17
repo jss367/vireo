@@ -1,24 +1,24 @@
 // Group Review zone moves, the Apply label, applying the burst, and the modal's keyboard.
 // Classic page script; load boot.js after all definitions.
 
-function _grmGetZone(photoId) {
+/** @param {number} photoId */ function _grmGetZone(photoId) {
   if (grmState.picks.has(photoId)) return 'picks';
   if (grmState.rejects.has(photoId)) return 'rejects';
   return 'candidates';
 }
 
 function _grmActionTargetIds() {
-  var visible = {};
+  /** @type {Record<number,boolean>} */ var visible = {};
   _grmVisibleItems().forEach(function(it) { visible[it.photo_id] = true; });
-  var ids = [];
+  /** @type {number[]} */ var ids = [];
   if (grmState.selectedIds && grmState.selectedIds.size) {
     grmState.selectedIds.forEach(function(id) {
-      var photoId = parseInt(id, 10);
+      var photoId = parseInt(String(id), 10);
       if (visible[photoId] && ids.indexOf(photoId) === -1) ids.push(photoId);
     });
   }
   if (!ids.length && grmState.selected) {
-    var selectedId = parseInt(grmState.selected, 10);
+    var selectedId = parseInt(String(grmState.selected), 10);
     if (visible[selectedId]) ids.push(selectedId);
   }
   return ids;
@@ -106,11 +106,11 @@ function grmRemoveFromGroup() {
 }
 
 function grmUpdateApplyLabel() {
-  var btn = document.getElementById('grmApplyBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('grmApplyBtn'));
   if (!btn) return;
   var picks = grmState.picks ? grmState.picks.size : 0;
   var rejects = grmState.rejects ? grmState.rejects.size : 0;
-  var speciesEl = document.getElementById('grmSpecies');
+  var speciesEl = /** @type {HTMLInputElement} */ (document.getElementById('grmSpecies'));
   var species = speciesEl ? (speciesEl.value || '').trim() : '';
   var parts = [];
   if (picks > 0) parts.push('Flag ' + picks + (species ? ' as ' + species : ''));
@@ -119,7 +119,7 @@ function grmUpdateApplyLabel() {
 }
 
 async function grmApply() {
-  var species = document.getElementById('grmSpecies').value.trim();
+  var species = /** @type {HTMLInputElement} */ (document.getElementById('grmSpecies')).value.trim();
   try {
     // The statuses this modal displayed when it loaded. The server applies a
     // photo's decision only while its member still holds the status shown
@@ -129,11 +129,11 @@ async function grmApply() {
     // is what keeps a deliberate re-decision working: re-open a burst that
     // was already applied, change the split, apply — the observed status
     // still matches, so the change goes through.
-    var observed = {};
+    /** @type {Record<number,string>} */ var observed = {};
     (grmState.items || []).forEach(function(it) {
       observed[it.id] = it.status || 'pending';
     });
-    var applyResp = await safeFetch('/api/predictions/group/apply', {
+    /** @type {{already_decided?:number}} */ var applyResp = await safeFetch('/api/predictions/group/apply', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -168,7 +168,7 @@ async function grmApply() {
     var model = grmState.model;
     var picks = grmState.picks;
     var rejects = grmState.rejects;
-    function applyLocalStatus(p) {
+    /** @param {ReviewPrediction} p */ function applyLocalStatus(p) {
       if (p.group_id !== groupId || p.model !== model) return;
       if (picks.has(p.photo_id)) {
         p.status = 'accepted';
@@ -189,18 +189,18 @@ async function grmApply() {
 // Keyboard handling for the modal
 function bindBurstGroupKeyboard() {
   document.addEventListener('keydown', function(e) {
-    if (!document.getElementById('grmOverlay').classList.contains('open')) return;
+    if (!/** @type {HTMLElement} */ (document.getElementById('grmOverlay')).classList.contains('open')) return;
     // The lightbox can be opened on top of this modal ("Open in Lightbox").
     // While it's open it owns the keyboard (arrows navigate photos, Esc closes
     // it via the Keymap stack) — these shortcuts must not also fire underneath,
     // invisibly moving photos to Picks/Rejects or removing them.
-    var lb = document.getElementById('lightboxOverlay');
+    var lb = /** @type {HTMLElement} */ (document.getElementById('lightboxOverlay'));
     if (lb && lb.classList.contains('active')) return;
-    if (e.target.tagName === 'INPUT') return;
+    if ((e.target instanceof Element ? e.target.tagName : '') === 'INPUT') return;
     // The mouse-help control is focusable so keyboard users can read its
     // popover; don't let keystrokes there (e.g. Space) fall through to the
     // review shortcuts and mutate the selected photo's state.
-    if (e.target.closest && e.target.closest('.grm-mouse-help')) return;
+    if (e.target instanceof Element && e.target.closest(/** @type {'div'} */ ('.grm-mouse-help'))) return;
 
     if (e.key === 'Escape') { closeGroupReview(); e.preventDefault(); return; }
     if (e.key === 'ArrowUp') { grmMoveUp(); e.preventDefault(); return; }
@@ -209,13 +209,13 @@ function bindBurstGroupKeyboard() {
       // Select previous card
       var items = grmState.items.filter(function(it) { return !grmState.removed.has(it.id); });
       var idx = items.findIndex(function(it) { return it.photo_id === grmState.selected; });
-      if (idx > 0) { grmSelect(items[idx - 1].photo_id, 'single'); }
+      if (idx > 0) { var previous = items[idx - 1]; if (previous) grmSelect(previous.photo_id, 'single'); }
       e.preventDefault(); return;
     }
     if (e.key === 'ArrowRight') {
       items = grmState.items.filter(function(it) { return !grmState.removed.has(it.id); });
       idx = items.findIndex(function(it) { return it.photo_id === grmState.selected; });
-      if (idx < items.length - 1) { grmSelect(items[idx + 1].photo_id, 'single'); }
+      if (idx < items.length - 1) { var next = items[idx + 1]; if (next) grmSelect(next.photo_id, 'single'); }
       e.preventDefault(); return;
     }
     if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }

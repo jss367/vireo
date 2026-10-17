@@ -5,13 +5,13 @@
 // the two static options (hidden default + None) and appends one option per
 // saved process, value = its id.
 async function loadAfterImportProcesses() {
-  const sel = document.getElementById('afterImportSelect');
+  const sel = /** @type {HTMLSelectElement} */ (document.getElementById('afterImportSelect'));
   if (!sel) return;
   try {
     const resp = await fetch('/api/processes');
     if (!resp.ok) return;
-    const procs = await resp.json();
-    Array.from(sel.querySelectorAll('option[data-process]')).forEach(
+    /** @type {{id: string; name: string}[]} */ const procs = await resp.json();
+    Array.from(/** @type {NodeListOf<HTMLElement>} */ (sel.querySelectorAll('option[data-process]'))).forEach(
       (o) => o.remove());
     (procs || []).forEach((p) => {
       const opt = document.createElement('option');
@@ -24,7 +24,7 @@ async function loadAfterImportProcesses() {
 }
 
 function selectedAfterImport() {
-  const v = document.getElementById('afterImportSelect').value;
+  const v = /** @type {HTMLSelectElement} */ (document.getElementById('afterImportSelect')).value;
   // __hidden_default__ is a display-only placeholder — the request path
   // omits after_import in that state, so callers never read this value.
   if (v === '__none__' || v === '__hidden_default__') return null;
@@ -38,10 +38,10 @@ function selectedAfterImport() {
 // server will apply after creating the workspace. The chained NAS move
 // fires from that processing run, so this gates the "Then move to NAS" row.
 function afterImportChainsProcess() {
-  const sel = document.getElementById('afterImportSelect');
+  const sel = /** @type {HTMLSelectElement} */ (document.getElementById('afterImportSelect'));
   if (!sel) return false;
   if (sel.value === '__hidden_default__') {
-    const placeholder = document.getElementById('afterImportHiddenDefault');
+    const placeholder = /** @type {HTMLOptionElement} */ (document.getElementById('afterImportHiddenDefault'));
     return !!(placeholder && placeholder.dataset.maskedValue);
   }
   return selectedAfterImport() !== null;
@@ -50,6 +50,7 @@ function afterImportChainsProcess() {
 // Normalize a path for display and prefix math: forward slashes, no
 // trailing slash. Case is PRESERVED — this feeds the visible move preview
 // (NAS-side paths are case-sensitive) and the rel-subpath slicing.
+/** @param {string | undefined} p */
 function afterMoveNormPath(p) {
   return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
 }
@@ -62,6 +63,7 @@ function afterMoveNormPath(p) {
 // request the server accepts. The server stays authoritative — on a
 // genuinely case-sensitive filesystem the worst case is a clear 400 at
 // Start Import instead of a silently missing option.
+/** @param {string} destination @param {string | undefined} root */
 function afterMovePathInsideRoot(destination, root) {
   const d = afterMoveNormPath(destination).toLowerCase();
   const r = afterMoveNormPath(root).toLowerCase();
@@ -78,7 +80,7 @@ function afterMovePathInsideRoot(destination, root) {
 // connection" warning that says the move won't be offered until the folder
 // exists). The hint names the missing root instead.
 function afterMoveEligibleTargets() {
-  const destination = (document.getElementById('destInput').value || '').trim();
+  const destination = (/** @type {HTMLInputElement} */ (document.getElementById('destInput')).value || '').trim();
   if (!importIsAbsolutePath(destination)) return [];
   return importRemoteTargets.filter(
     (t) => t.local_archive_root
@@ -100,12 +102,13 @@ function afterMoveEligibleTargets() {
 //      exist are annotated inline (a typo'd root is the usual reason the
 //      destination "doesn't match"), but the user is not told to create a
 //      folder that would not make any target eligible.
+/** @param {string} destination */
 function afterMoveUnavailableReason(destination) {
   const configured = importRemoteTargets.filter((t) => t.local_archive_root);
   if (!configured.length) {
     return 'no remote target has a local archive root configured. ';
   }
-  const describe = (t) => t.name + ' (' + t.local_archive_root
+  const describe = (/** @type {ImportRemoteTarget} */ t) => t.name + ' (' + t.local_archive_root
     + (t.local_archive_root_volume_offline ? ' — volume not reachable right now'
       : t.local_archive_root_present === false ? ' — does not exist on this machine' : '')
     + ')';
@@ -138,9 +141,9 @@ function afterMoveUnavailableReason(destination) {
 // hint is rendered (and whenever the tab becomes active again), re-fetch
 // the targets — throttled so typing in the destination field doesn't
 // hammer the server — and re-render if anything the gate reads changed.
-let _afterMoveTargetsRefresh = null;
+/** @type {Promise<void> | null} */ let _afterMoveTargetsRefresh = null;
 let _afterMoveTargetsCheckedAt = 0;
-let _afterMoveTargetsTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ let _afterMoveTargetsTimer = null;
 let _afterMoveTargetsRerun = false;
 const AFTER_MOVE_TARGETS_TTL_MS = 5000;
 // Whole-entry identity. Start posts only the target id and the server
@@ -148,6 +151,7 @@ const AFTER_MOVE_TARGETS_TTL_MS = 5000;
 // (remote_path, mount_path, host, user, port, ssh_key, bwlimit) must be
 // refreshed too, not just the ones the after-move gate reads — otherwise
 // the UI would display one destination while the import goes to another.
+/** @param {ImportRemoteTarget} t */
 function remoteTargetKey(t) {
   return JSON.stringify(t, Object.keys(t).sort());
 }
@@ -215,28 +219,28 @@ let _afterMoveNotice = '';
 function localProcessingAvailable() {
   if (selectedImportMode() !== 'copy' || !afterImportChainsProcess()) return false;
   if (importRemoteTargetId()) return true;
-  const destination = (document.getElementById('destInput')?.value || '').trim();
+  const destination = (/** @type {HTMLInputElement} */ (document.getElementById('destInput'))?.value || '').trim();
   return importRemoteTargets.some((t) => t.mount_path
     && afterMovePathInsideRoot(destination, t.mount_path));
 }
 
 function localProcessingRequest() {
-  return localProcessingAvailable() && !!document.getElementById('chkLocalProcessing')?.checked;
+  return localProcessingAvailable() && !!/** @type {HTMLInputElement} */ (document.getElementById('chkLocalProcessing'))?.checked;
 }
 
 function deferNasTransferRequest() {
-  return localProcessingRequest() && !!document.getElementById('chkDeferNasTransfer')?.checked;
+  return localProcessingRequest() && !!/** @type {HTMLInputElement} */ (document.getElementById('chkDeferNasTransfer'))?.checked;
 }
 
 function updateAfterMoveUI() {
   const localAvailable = localProcessingAvailable();
-  document.getElementById('localProcessingRow').style.display = localAvailable ? '' : 'none';
-  document.getElementById('deferNasTransferRow').style.display = localProcessingRequest() ? '' : 'none';
+  /** @type {HTMLElement} */ (document.getElementById('localProcessingRow')).style.display = localAvailable ? '' : 'none';
+  /** @type {HTMLElement} */ (document.getElementById('deferNasTransferRow')).style.display = localProcessingRequest() ? '' : 'none';
   updateDestinationModeHint();
-  const row = document.getElementById('afterMoveRow');
-  const unavailable = document.getElementById('afterMoveUnavailable');
-  const preview = document.getElementById('afterMovePreview');
-  const sel = document.getElementById('afterMoveTarget');
+  const row = /** @type {HTMLElement} */ (document.getElementById('afterMoveRow'));
+  const unavailable = /** @type {HTMLElement} */ (document.getElementById('afterMoveUnavailable'));
+  const preview = /** @type {HTMLElement} */ (document.getElementById('afterMovePreview'));
+  const sel = /** @type {HTMLSelectElement} */ (document.getElementById('afterMoveTarget'));
   if (!row || !unavailable || !preview || !sel) return;
   const hideAll = () => {
     _afterMoveNotice = '';
@@ -258,7 +262,7 @@ function updateAfterMoveUI() {
     hideAll();
     // Only claim "unavailable" once there is a concrete destination to
     // judge — an empty or relative destination isn't decidable yet.
-    const destination = (document.getElementById('destInput').value || '').trim();
+    const destination = (/** @type {HTMLInputElement} */ (document.getElementById('destInput')).value || '').trim();
     if (importIsAbsolutePath(destination)) {
       refreshAfterMoveTargets();
       unavailable.textContent = 'Move to NAS unavailable: ' + afterMoveUnavailableReason(destination);
@@ -271,7 +275,7 @@ function updateAfterMoveUI() {
     return;
   }
   row.style.display = '';
-  const chk = document.getElementById('chkAfterMove');
+  const chk = /** @type {HTMLInputElement} */ (document.getElementById('chkAfterMove'));
   // A "was unchecked" note must survive the re-renders that follow the
   // refresh that produced it (renderImportDestModes → onImportDestModeChange
   // → updateAfterMoveUI runs this twice); it clears when the user re-checks
@@ -331,9 +335,9 @@ function updateAfterMoveUI() {
     preview.textContent = '';
     return;
   }
-  const target = eligible.find((t) => t.id === sel.value) || eligible[0];
+  const target = eligible.find((t) => t.id === sel.value) || eligible[0]; if (!target) return;
   const destination = afterMoveNormPath(
-    (document.getElementById('destInput').value || '').trim());
+    (/** @type {HTMLInputElement} */ (document.getElementById('destInput')).value || '').trim());
   const root = afterMoveNormPath(target.local_archive_root);
   const rel = destination === root ? '' : destination.slice(root.length + 1);
   const remoteBase =
@@ -373,16 +377,17 @@ function updateAfterMoveUI() {
 function afterMoveRequest() {
   // Reads the row visibility updateAfterMoveUI maintains — keeping the
   // writer and this reader adjacent so a refactor can't silently split them.
-  const row = document.getElementById('afterMoveRow');
-  const sel = document.getElementById('afterMoveTarget');
-  const chk = document.getElementById('chkAfterMove');
+  const row = /** @type {HTMLElement} */ (document.getElementById('afterMoveRow'));
+  const sel = /** @type {HTMLSelectElement} */ (document.getElementById('afterMoveTarget'));
+  const chk = /** @type {HTMLInputElement} */ (document.getElementById('chkAfterMove'));
   return (row && chk && sel && chk.checked &&
           row.style.display !== 'none' && sel.value)
     ? {remote_target_id: sel.value} : null;
 }
 
+/** @param {HTMLSelectElement} sel */
 function retireHiddenDefaultOption(sel) {
-  const placeholder = document.getElementById('afterImportHiddenDefault');
+  const placeholder = /** @type {HTMLOptionElement} */ (document.getElementById('afterImportHiddenDefault'));
   if (!placeholder) return;
   placeholder.hidden = true;
   placeholder.disabled = true;
@@ -391,8 +396,9 @@ function retireHiddenDefaultOption(sel) {
   if (sel && sel.value === '__hidden_default__') sel.value = '__none__';
 }
 
+/** @param {string | number | null} processId */
 function afterImportOptionLabel(processId) {
-  const sel = document.getElementById('afterImportSelect');
+  const sel = /** @type {HTMLSelectElement} */ (document.getElementById('afterImportSelect'));
   const value = processId == null ? '__none__' : String(processId);
   const fallback = processId == null ? 'None — import only' : String(processId);
   if (!sel) return fallback;
@@ -406,9 +412,9 @@ function afterImportOptionLabel(processId) {
 // no longer have an "advanced" tier, so there's nothing to hide/show — the
 // only remaining job is the new-workspace default placeholder.)
 function updateAdvancedImportOptions() {
-  const sel = document.getElementById('afterImportSelect');
+  const sel = /** @type {HTMLSelectElement} */ (document.getElementById('afterImportSelect'));
   if (!sel) return;
-  const placeholder = document.getElementById('afterImportHiddenDefault');
+  const placeholder = /** @type {HTMLOptionElement} */ (document.getElementById('afterImportHiddenDefault'));
   if (!placeholder) return;
 
   // Once the user actively picks an option, that pick is authoritative
@@ -419,7 +425,7 @@ function updateAdvancedImportOptions() {
     return;
   }
 
-  const newMode = !!document.getElementById('workspaceNew')?.checked;
+  const newMode = !!/** @type {HTMLInputElement} */ (document.getElementById('workspaceNew'))?.checked;
 
   // "New workspace" untouched: startImport() omits after_import so the
   // server resolves it against the freshly-created workspace (which
@@ -511,7 +517,7 @@ let _afterImportUserTouched = false;
 // workspace default: X" placeholder so the visible dropdown selection
 // isn't misled by whatever was prefilled from the currently-active
 // workspace's (possibly-overridden) default.
-let _globalDefaultProcessId = null;
+/** @type {string | number | null} */ let _globalDefaultProcessId = null;
 
 // The effective pipeline.default_process_id for the CURRENTLY-active
 // workspace (global config merged with the workspace's overrides). Used
@@ -519,7 +525,7 @@ let _globalDefaultProcessId = null;
 // selection when the user toggles "New workspace" off without touching
 // the dropdown — the underlying target reverts to the current workspace's
 // default rather than sticking on whatever placeholder was showing.
-let _workspaceDefaultProcessId = null;
+/** @type {string | number | null} */ let _workspaceDefaultProcessId = null;
 
 function bindAfterImportEvents() {
   window.addEventListener('focus', _afterMoveOnReturn);

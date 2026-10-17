@@ -13,21 +13,21 @@ var _dashboardActionScopeError = '';
 function initPipelinePage() {
   fetch('/api/pipeline/page-init')
     .then(function(r) { return r.json(); })
-    .then(function(data) {
+    .then(function(/** @type {PipelinePageInit} */ data) {
       var cfg = data.pipeline_config;
 
       // Hide taxonomy checkbox if already downloaded
       if (data.taxonomy_available) {
-        var taxWrap = document.getElementById('chkDownloadTaxonomy').closest('div');
+        var taxWrap = /** @type {HTMLInputElement} */ (document.getElementById('chkDownloadTaxonomy')).closest('div');
         if (taxWrap) taxWrap.style.display = 'none';
       }
 
       // Config selects and range
-      document.getElementById('cfgSam2').value = cfg.sam2_variant;
-      document.getElementById('cfgDinov2').value = cfg.dinov2_variant;
-      document.getElementById('cfgProxy').value = cfg.proxy_longest_edge;
-      document.getElementById('valProxy').textContent = cfg.proxy_longest_edge;
-      var previewSummary = document.getElementById('cfgPreviewSizeSummary');
+      /** @type {HTMLSelectElement} */ (document.getElementById('cfgSam2')).value = cfg.sam2_variant;
+      /** @type {HTMLSelectElement} */ (document.getElementById('cfgDinov2')).value = cfg.dinov2_variant;
+      /** @type {HTMLInputElement} */ (document.getElementById('cfgProxy')).value = String(cfg.proxy_longest_edge);
+      /** @type {HTMLElement} */ (document.getElementById('valProxy')).textContent = String(cfg.proxy_longest_edge);
+      var previewSummary = /** @type {HTMLElement} */ (document.getElementById('cfgPreviewSizeSummary'));
       if (previewSummary) {
         var previewMax = cfg.preview_max_size;
         previewSummary.textContent = previewMax === 0
@@ -38,7 +38,7 @@ function initPipelinePage() {
       // Eye keypoints stage default tracks the global eye_detect_enabled
       // config. Missing config defaults off; the checkbox is the per-run
       // override.
-      var ekCb = document.getElementById('enableEyeKeypoints');
+      var ekCb = /** @type {HTMLInputElement} */ (document.getElementById('enableEyeKeypoints'));
       if (ekCb) ekCb.checked = cfg.eye_detect_enabled === true;
 
       // Update saved config defaults from server
@@ -105,19 +105,19 @@ function applyClassifyQueryParams() {
   if (qsModels.length === 0 && qsLabels.length === 0) return;
   if (qsModels.length > 0) {
     var wantModels = new Set(qsModels);
-    document.querySelectorAll('.model-checkbox').forEach(function(cb) {
+    /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.model-checkbox')).forEach(function(cb) {
       cb.checked = wantModels.has(cb.value);
     });
   }
   if (qsLabels.length > 0) {
     var wantLabels = new Set(qsLabels);
-    document.querySelectorAll('.labels-run-cb').forEach(function(cb) {
+    /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.labels-run-cb')).forEach(function(cb) {
       // Match by full path or by basename (the inventory passes basenames).
       // Split on both POSIX (/) and Windows (\) separators so deep links work
       // regardless of OS.
       var parts = cb.value.split(/[/\\]/);
       var base = parts[parts.length - 1];
-      cb.checked = wantLabels.has(cb.value) || wantLabels.has(base);
+      cb.checked = wantLabels.has(cb.value) || wantLabels.has(base || '');
     });
   }
   if (typeof updateLabelsPickerState === 'function') updateLabelsPickerState();
@@ -131,12 +131,12 @@ function applyDashboardActionQueryParams() {
   var stage = qs.get('dashboard_stage');
   if (stage !== 'classify' && stage !== 'previews') return;
 
-  var classify = document.getElementById('enableClassify');
-  var extract = document.getElementById('enableExtract');
-  var eyes = document.getElementById('enableEyeKeypoints');
-  var group = document.getElementById('enableGroup');
-  var misses = document.getElementById('enableMisses');
-  var speciesReview = document.getElementById('enableSpeciesReview');
+  var classify = /** @type {HTMLInputElement} */ (document.getElementById('enableClassify'));
+  var extract = /** @type {HTMLInputElement} */ (document.getElementById('enableExtract'));
+  var eyes = /** @type {HTMLInputElement} */ (document.getElementById('enableEyeKeypoints'));
+  var group = /** @type {HTMLInputElement} */ (document.getElementById('enableGroup'));
+  var misses = /** @type {HTMLInputElement} */ (document.getElementById('enableMisses'));
+  var speciesReview = /** @type {HTMLInputElement} */ (document.getElementById('enableSpeciesReview'));
   if (classify) classify.checked = stage === 'classify';
   if (extract) extract.checked = false;
   if (eyes) eyes.checked = false;
@@ -145,10 +145,10 @@ function applyDashboardActionQueryParams() {
   if (speciesReview) speciesReview.checked = false;
 
   var collectionId = qs.get('collection_id');
-  var picker = document.getElementById('collectionPicker');
+  var picker = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker'));
   if (collectionId) {
-    var option = picker && picker.querySelector(
-      'option[value="' + CSS.escape(collectionId) + '"]');
+    var option = picker && /** @type {HTMLOptionElement | null} */ (picker.querySelector(
+      'option[value="' + CSS.escape(collectionId) + '"]'));
     if (!option || option.disabled) {
       _dashboardActionScopeError =
         'The Dashboard collection is unavailable. Return to Dashboard and choose another scope.';
@@ -159,7 +159,7 @@ function applyDashboardActionQueryParams() {
     }
   }
 
-  var card = document.getElementById(stage === 'classify' ? 'card-classify' : 'card-previews');
+  var card = /** @type {HTMLElement} */ (document.getElementById(stage === 'classify' ? 'card-classify' : 'card-previews'));
   if (card) card.classList.add('expanded');
   updateCardStates();
   updateStartButton();

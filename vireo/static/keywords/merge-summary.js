@@ -1,9 +1,9 @@
 // renderMergeSummary(): what the merge will do, in prose.
 // Classic page script; load boot.js after all definitions.
 
-function renderMergeSummary(data) {
+/** @param {KeywordMergePreview} data */ function renderMergeSummary(data) {
   const resolved = data.resolved;
-  const childLine = child => {
+  /** @param {KeywordMergeChild} child */ const childLine = child => {
     const where = child.to_path ? escapeHtml(child.to_path.join(' → ')) : '';
     if (child.outcome === 'merge') {
       return escapeHtml(child.name) + ' — merges into the keyword already at ' + where;

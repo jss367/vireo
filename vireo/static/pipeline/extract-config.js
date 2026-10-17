@@ -4,9 +4,9 @@
 // -- Card 3: Extract Features --
 
 function _currentModelConfigFromDom() {
-  var samEl = document.getElementById('cfgSam2');
-  var dinoEl = document.getElementById('cfgDinov2');
-  var proxyEl = document.getElementById('cfgProxy');
+  var samEl = /** @type {HTMLSelectElement} */ (document.getElementById('cfgSam2'));
+  var dinoEl = /** @type {HTMLSelectElement} */ (document.getElementById('cfgDinov2'));
+  var proxyEl = /** @type {HTMLInputElement} */ (document.getElementById('cfgProxy'));
   return {
     sam2_variant: samEl ? samEl.value : '',
     dinov2_variant: dinoEl ? dinoEl.value : '',
@@ -16,12 +16,13 @@ function _currentModelConfigFromDom() {
 }
 
 var _savedModelConfig = _currentModelConfigFromDom();
-var _samVariantWarning = null;
+/** @type {PipelineWarning | null} */ var _samVariantWarning = null;
 
+/** @param {PipelineWarning | null} warning */
 function updateSamVariantWarning(warning) {
   _samVariantWarning = warning || null;
-  var banner = document.getElementById('modelWarningBanner');
-  var text = document.getElementById('modelWarningText');
+  var banner = /** @type {HTMLElement} */ (document.getElementById('modelWarningBanner'));
+  var text = /** @type {HTMLElement} */ (document.getElementById('modelWarningText'));
   if (!banner || !text) return;
   if (_samVariantWarning && _samVariantWarning.message) {
     banner.dataset.kind = 'sam-variant';
@@ -35,14 +36,14 @@ function updateSamVariantWarning(warning) {
 }
 
 function onModelConfigChange() {
-  var proxyEl = document.getElementById('cfgProxy');
-  var valEl = document.getElementById('valProxy');
+  var proxyEl = /** @type {HTMLInputElement} */ (document.getElementById('cfgProxy'));
+  var valEl = /** @type {HTMLElement} */ (document.getElementById('valProxy'));
   if (proxyEl && valEl) valEl.textContent = proxyEl.value;
 
   var newCfg = {
-    sam2_variant: document.getElementById('cfgSam2').value,
-    dinov2_variant: document.getElementById('cfgDinov2').value,
-    proxy_longest_edge: parseInt(document.getElementById('cfgProxy').value),
+    sam2_variant: /** @type {HTMLSelectElement} */ (document.getElementById('cfgSam2')).value,
+    dinov2_variant: /** @type {HTMLSelectElement} */ (document.getElementById('cfgDinov2')).value,
+    proxy_longest_edge: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgProxy')).value),
     eye_detect_enabled: _savedModelConfig.eye_detect_enabled === true,
   };
 
@@ -62,12 +63,12 @@ function onModelConfigChange() {
 }
 
 async function updateExtractReadiness() {
-  var panel = document.getElementById('extractReadinessPanel');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('extractReadinessPanel'));
   if (!panel) return;
-  var sam2 = document.getElementById('cfgSam2').value;
-  var dinov2 = document.getElementById('cfgDinov2').value;
+  var sam2 = /** @type {HTMLSelectElement} */ (document.getElementById('cfgSam2')).value;
+  var dinov2 = /** @type {HTMLSelectElement} */ (document.getElementById('cfgDinov2')).value;
   try {
-    var r = await safeFetch(
+    /** @type {PipelineExtractReadiness} */ var r = await safeFetch(
       '/api/pipeline/extract-readiness'
         + '?sam2_variant=' + encodeURIComponent(sam2)
         + '&dinov2_variant=' + encodeURIComponent(dinov2),
@@ -94,6 +95,7 @@ async function updateExtractReadiness() {
 // Build the readiness line as DOM nodes so variant strings (which
 // originate from /api/pipeline/config and may be arbitrary) can never
 // be interpreted as HTML — avoids a stored DOM-XSS sink on /pipeline.
+/** @param {string} label @param {PipelineModelReadiness | undefined} info @param {boolean | undefined} known */
 function renderModelReadiness(label, info, known) {
   var frag = document.createDocumentFragment();
   var variant = info ? info.variant : '?';
@@ -146,11 +148,12 @@ function renderModelReadiness(label, info, known) {
 // Powered by /api/pipeline/page-init's mask_variant_coverage payload (a
 // list of {variant, count, active_count} for the active workspace).
 // 'unknown' is a migration sentinel: render with [legacy] tag, no button.
+/** @param {PipelineCoverage[]} coverage */
 function renderSam2Coverage(coverage) {
-  var panel = document.getElementById('sam2CoveragePanel');
-  var rowsEl = document.getElementById('sam2CoverageRows');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('sam2CoveragePanel'));
+  var rowsEl = /** @type {HTMLElement} */ (document.getElementById('sam2CoverageRows'));
   if (!panel || !rowsEl) return;
-  var errEl = document.getElementById('sam2CoverageError');
+  var errEl = /** @type {HTMLElement} */ (document.getElementById('sam2CoverageError'));
   if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
   rowsEl.textContent = '';
   if (!coverage || coverage.length === 0) {
@@ -204,8 +207,9 @@ function renderSam2Coverage(coverage) {
   });
 }
 
+/** @param {string} msg */
 function _showSam2CoverageError(msg) {
-  var errEl = document.getElementById('sam2CoverageError');
+  var errEl = /** @type {HTMLElement} */ (document.getElementById('sam2CoverageError'));
   if (!errEl) return;
   errEl.textContent = msg;
   errEl.style.display = '';
@@ -220,6 +224,7 @@ async function refreshSam2Coverage() {
   }
 }
 
+/** @param {string} variant */
 async function setActiveMaskVariant(variant) {
   if (variant === 'unknown') return;  // sentinel, no button rendered
   try {
@@ -228,7 +233,7 @@ async function setActiveMaskVariant(variant) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({variant: variant}),
     });
-    var body = await resp.json();
+    /** @type {{message?: string; error?: string}} */ var body = await resp.json();
     if (!resp.ok) {
       _showSam2CoverageError(body.message || body.error || ('HTTP ' + resp.status));
       return;

@@ -11,7 +11,7 @@ function setup(text='Needle needle') {
   get parentElement(){return this.parentNode?.nodeType===1?this.parentNode:null;}
   get isConnected(){let n=this;while(n.parentNode)n=n.parentNode;return n===doc.body;}
   get textContent(){return this.nodeType===3?this.nodeValue:this.children.map(n=>n.textContent).join('');}
-  set textContent(v){this.children.forEach(n=>n.parentNode=null);this.children=[];this.appendChild(new N('',3,String(v)));}
+  set textContent(v){this.children.forEach(n=>n.parentNode=null);this.children=[];this.appendChild(new T(String(v)));}
   appendChild(n){if(n.nodeType===11){for(const c of [...n.children])this.appendChild(c);}else{n.parentNode=this;this.children.push(n);}return n;}
   replaceChild(n,old){const i=this.children.indexOf(old);assert(i>=0);const replacements=n.nodeType===11?[...n.children]:[n];replacements.forEach(c=>c.parentNode=this);this.children.splice(i,1,...replacements);old.parentNode=null;}
   normalize(){for(let i=this.children.length-1;i>0;i--){const a=this.children[i-1],b=this.children[i];if(a.nodeType===3&&b.nodeType===3){a.nodeValue+=b.nodeValue;this.children.splice(i,1);b.parentNode=null;}}}
@@ -26,16 +26,20 @@ function setup(text='Needle needle') {
   addEventListener(name,fn){(this.listeners[name]??=[]).push(fn);}
   fire(name,e={}){for(const fn of this.listeners[name]??[])fn(e);}
  }
+ class E extends N {constructor(tag){super(tag);}}
+ class T extends N {constructor(value){super('',3,value);}get data(){return this.nodeValue;}set data(value){this.nodeValue=value;}}
+ class Details extends E {constructor(){super('details');this.open=false;}}
+ class HtmlElement {static [Symbol.hasInstance](node){return node instanceof E&&node.namespaceURI==='http://www.w3.org/1999/xhtml';}}
  const elements={};
- doc={body:new N('body'),listeners:[],activeElement:null,filter:null,getElementById:id=>elements[id],querySelector:selector=>selector==='dialog:modal'?null:doc.filter,createTextNode:s=>new N('',3,s),createDocumentFragment:()=>new N('',11),createElement:t=>new N(t),createElementNS:(ns,t)=>{const e=new N(t);e.namespaceURI=ns;return e;},addEventListener:(name,fn)=>{if(name==='keydown')doc.listeners.push(fn);},createTreeWalker:(body,type,filter)=>{const nodes=[];function visit(n){if(n.nodeType===3&&filter.acceptNode(n)===1)nodes.push(n);n.children.forEach(visit);}visit(body);let i=-1;return{currentNode:null,nextNode(){this.currentNode=nodes[++i];return !!this.currentNode;}};}};
- for(const id of ['pageFindPanel','pageFindInput','pageFindStatus','pageFindPrevious','pageFindNext','pageFindClose']){elements[id]=new N(id==='pageFindInput'?'input':'div');elements[id].id=id;}
+ doc={body:new E('body'),listeners:[],activeElement:null,filter:null,getElementById:id=>elements[id],querySelector:selector=>selector==='dialog:modal'?null:doc.filter,createTextNode:s=>new T(s),createDocumentFragment:()=>new N('',11),createElement:t=>t==='details'?new Details():new E(t),createElementNS:(ns,t)=>{const e=new E(t);e.namespaceURI=ns;return e;},addEventListener:(name,fn)=>{if(name==='keydown')doc.listeners.push(fn);},createTreeWalker:(body,type,filter)=>{const nodes=[];function visit(n){if(n.nodeType===3&&filter.acceptNode(n)===1)nodes.push(n);n.children.forEach(visit);}visit(body);let i=-1;return{currentNode:null,nextNode(){this.currentNode=nodes[++i];return !!this.currentNode;}};}};
+ for(const id of ['pageFindPanel','pageFindInput','pageFindStatus','pageFindPrevious','pageFindNext','pageFindClose']){elements[id]=new E(id==='pageFindInput'?'input':'div');elements[id].id=id;}
  doc.body.appendChild(elements.pageFindPanel);for(const id of Object.keys(elements).slice(1))elements.pageFindPanel.appendChild(elements[id]);elements.pageFindPanel.hidden=true;
- const previous=new N('button');doc.body.appendChild(previous);doc.activeElement=previous;
- const paragraph=new N('p');paragraph.textContent=text;doc.body.appendChild(paragraph);
+ const previous=new E('button');doc.body.appendChild(previous);doc.activeElement=previous;
+ const paragraph=new E('p');paragraph.textContent=text;doc.body.appendChild(paragraph);
  const timers=new Map();let token=0;
  class KeyboardEvent {constructor(type,init){Object.assign(this,init);this.type=type;}preventDefault(){}stopPropagation(){}}
  class Observer{constructor(fn){this.fn=fn;observer=this;}observe(){this.active=true;}disconnect(){this.active=false;}}
- const ctx={KeyboardEvent,document:doc,MutationObserver:Observer,NodeFilter:{SHOW_TEXT:4,FILTER_ACCEPT:1,FILTER_REJECT:2},setTimeout:fn=>{timers.set(++token,fn);return token;},clearTimeout:t=>timers.delete(t),console};ctx.window=ctx;ctx.__TAURI_INTERNALS__={};ctx.getComputedStyle=e=>({display:e.style.display??(['B','SPAN','EM','STRONG','I','MARK','BR','TSPAN'].includes(e.tagName)?'inline':'block'),visibility:e.style.visibility??'visible'});
+ const ctx={KeyboardEvent,Node:N,Element:E,HTMLElement:HtmlElement,Text:T,HTMLDetailsElement:Details,document:doc,MutationObserver:Observer,NodeFilter:{SHOW_TEXT:4,FILTER_ACCEPT:1,FILTER_REJECT:2},setTimeout:fn=>{timers.set(++token,fn);return token;},clearTimeout:t=>timers.delete(t),console};ctx.window=ctx;ctx.__TAURI_INTERNALS__={};ctx.getComputedStyle=e=>({display:e.style.display??(['B','SPAN','EM','STRONG','I','MARK','BR','TSPAN'].includes(e.tagName)?'inline':'block'),visibility:e.style.visibility??'visible'});
  vm.createContext(ctx);for(const f of ['keymap.js','vireo-page-find.js'])vm.runInContext(fs.readFileSync(root+'/'+f,'utf8'),ctx);
  function key(mod={}){const e={key:'f',ctrlKey:true,metaKey:false,altKey:false,shiftKey:false,preventDefault(){this.prevented=true;},stopPropagation(){},stopImmediatePropagation(){this.stopped=true;},...mod};for(const fn of doc.listeners){fn(e);if(e.stopped)break;}return e;}
  function change(q){elements.pageFindInput.value=q;elements.pageFindInput.fire('input');}

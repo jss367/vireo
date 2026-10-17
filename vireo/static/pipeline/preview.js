@@ -2,11 +2,11 @@
 // Classic page script; load boot.js after all definitions.
 
 // -- Preview panel state --
-var _previewData = null;       // response from the preview endpoint
-var _previewSelected = {};     // { filePath: true/false }
+/** @type {PipelinePreview | null} */ var _previewData = null;       // response from the preview endpoint
+/** @type {Record<string,boolean>} */ var _previewSelected = {};     // { filePath: true/false }
 var _previewLoading = false;
-var _previewAbort = null;      // AbortController for in-flight request
-var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-render
+/** @type {AbortController | null} */ var _previewAbort = null;      // AbortController for in-flight request
+/** @type {(() => void) | null} */ var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-render
 
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
@@ -20,7 +20,7 @@ function fetchFolderPreview() {
 
   // Collection mode: fetch from collection-preview endpoint
   if (_sourceMode === 'collection') {
-    var collId = document.getElementById('collectionPicker').value;
+    var collId = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker')).value;
     if (!collId) {
       showPreviewPlaceholder();
       return;
@@ -34,7 +34,7 @@ function fetchFolderPreview() {
       signal: _previewAbort.signal,
     })
       .then(async function(r) {
-        var data = await r.json();
+        /** @type {PipelinePreview} */ var data = await r.json();
         if (!r.ok || data.error) throw new Error(data.error || 'Could not load collection preview');
         return data;
       })
@@ -57,10 +57,10 @@ function fetchFolderPreview() {
 }
 
 function showPreviewPlaceholder() {
-  document.getElementById('previewPlaceholder').style.display = '';
-  document.getElementById('previewContent').style.display = 'none';
-  document.getElementById('previewLoading').style.display = 'none';
-  document.getElementById('previewError').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewPlaceholder')).style.display = '';
+  /** @type {HTMLElement} */ (document.getElementById('previewContent')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewLoading')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewError')).style.display = 'none';
   _previewLoading = false;
   _previewData = null;
   _previewSelected = {};
@@ -69,10 +69,10 @@ function showPreviewPlaceholder() {
 }
 
 function showPreviewLoading() {
-  document.getElementById('previewPlaceholder').style.display = 'none';
-  document.getElementById('previewContent').style.display = 'none';
-  document.getElementById('previewLoading').style.display = '';
-  document.getElementById('previewError').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewPlaceholder')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewContent')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewLoading')).style.display = '';
+  /** @type {HTMLElement} */ (document.getElementById('previewError')).style.display = 'none';
   _previewLoading = true;
   _previewData = null;
   _previewSelected = {};
@@ -84,11 +84,12 @@ function showPreviewLoading() {
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
+/** @param {string} msg */
 function showPreviewError(msg) {
-  document.getElementById('previewPlaceholder').style.display = 'none';
-  document.getElementById('previewContent').style.display = 'none';
-  document.getElementById('previewLoading').style.display = 'none';
-  var errEl = document.getElementById('previewError');
+  /** @type {HTMLElement} */ (document.getElementById('previewPlaceholder')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewContent')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewLoading')).style.display = 'none';
+  var errEl = /** @type {HTMLElement} */ (document.getElementById('previewError'));
   errEl.style.display = '';
   errEl.textContent = msg;
   _previewLoading = false;
@@ -99,17 +100,17 @@ function showPreviewError(msg) {
 }
 
 function renderPreview() {
-  document.getElementById('previewPlaceholder').style.display = 'none';
-  document.getElementById('previewLoading').style.display = 'none';
-  document.getElementById('previewError').style.display = 'none';
-  document.getElementById('previewContent').style.display = '';
+  /** @type {HTMLElement} */ (document.getElementById('previewPlaceholder')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewLoading')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewError')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('previewContent')).style.display = '';
   _previewLoading = false;
 
-  var data = _previewData;
+  const data = _previewData;
   if (!data) return;
 
   // Summary bar
-  var summary = document.getElementById('previewSummary');
+  var summary = /** @type {HTMLElement} */ (document.getElementById('previewSummary'));
   var sizeStr = formatBytes(data.total_size);
   var typeStrs = Object.keys(data.type_breakdown).map(function(ext) {
     return data.type_breakdown[ext] + ' ' + ext.replace('.', '').toUpperCase();
@@ -120,19 +121,19 @@ function renderPreview() {
     '<span class="stat">' + typeStrs.join(' &middot; ') + '</span>';
 
   // Group files by subfolder
-  var groups = {};
+  /** @type {Record<string,PipelinePhoto[]>} */ var groups = {};
   data.files.forEach(function(f) {
-    var key = f.subfolder;
+    var key = f.subfolder || '';
     if (!groups[key]) groups[key] = [];
-    groups[key].push(f);
+    groups[key]?.push(f);
   });
 
   // Render grid
-  var grid = document.getElementById('previewGrid');
+  var grid = /** @type {HTMLElement} */ (document.getElementById('previewGrid'));
   grid.innerHTML = '';
 
   Object.keys(groups).sort().forEach(function(subfolder) {
-    var files = groups[subfolder];
+    var files = groups[subfolder] || [];
     var groupEl = document.createElement('div');
     groupEl.className = 'preview-folder-group';
 
@@ -200,8 +201,8 @@ function setupThumbnailObserver() {
   // on elements that were removed from the DOM by a re-render.
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 
-  var grid = document.getElementById('previewGrid');
-  var pendingQueue = Array.from(grid.querySelectorAll('.preview-thumb.skeleton'));
+  var grid = /** @type {HTMLElement} */ (document.getElementById('previewGrid'));
+  var pendingQueue = Array.from(/** @type {NodeListOf<HTMLElement>} */ (grid.querySelectorAll('.preview-thumb.skeleton')));
   var visibleSet = new Set();
   var inFlight = 0;
   var CONCURRENCY = 4;
@@ -215,9 +216,10 @@ function setupThumbnailObserver() {
     observer.disconnect();
   };
 
+  /** @param {HTMLElement} el */
   function dispatch(el) {
-    var path = el.dataset.path;
-    var img = el.querySelector('img');
+    var path = el.dataset.path || '';
+    var img = /** @type {HTMLImageElement} */ (el.querySelector('img'));
     inFlight++;
     var done = function() {
       el.classList.remove('skeleton');
@@ -236,7 +238,7 @@ function setupThumbnailObserver() {
       for (var i = 0; i < pendingQueue.length; i++) {
         if (visibleSet.has(pendingQueue[i])) { idx = i; break; }
       }
-      dispatch(pendingQueue.splice(idx, 1)[0]);
+      var next = pendingQueue.splice(idx, 1)[0]; if (next) dispatch(next);
     }
   }
 
@@ -267,20 +269,20 @@ function updatePreviewCounts() {
   _previewData.files.forEach(function(f) {
     if (_previewSelected[f.path]) selected++;
   });
-  var countEl = document.getElementById('previewSelectedCount');
+  var countEl = /** @type {HTMLElement} */ (document.getElementById('previewSelectedCount'));
   if (selected === total) {
     countEl.textContent = '';
   } else {
     countEl.textContent = selected + ' of ' + total + ' selected';
   }
   // Update select-all checkbox
-  var chkAll = document.getElementById('chkSelectAll');
+  var chkAll = /** @type {HTMLInputElement} */ (document.getElementById('chkSelectAll'));
   chkAll.checked = selected === total;
   chkAll.indeterminate = selected > 0 && selected < total;
 }
 
 function toggleSelectAll() {
-  var checked = document.getElementById('chkSelectAll').checked;
+  var checked = /** @type {HTMLInputElement} */ (document.getElementById('chkSelectAll')).checked;
   if (_previewData) {
     _previewData.files.forEach(function(f) { _previewSelected[f.path] = checked; });
     renderPreview();

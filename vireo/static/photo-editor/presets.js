@@ -5,9 +5,9 @@
 // Presets explicitly select the settings they own; application merges those
 // settings into the working recipe and rebinds local masks to this photo.
 
-async function loadPresets(selectId) {
+/** @param {number|string=} selectId */ async function loadPresets(selectId) {
   try {
-    var data = await safeFetch('/api/edit-presets', {}, {toast: false});
+    /** @type {{presets?:EditorPreset[]}} */ var data = await safeFetch('/api/edit-presets', {}, {toast: false});
     editorState.presets = data.presets || [];
   } catch (e) {
     editorState.presets = [];
@@ -15,8 +15,8 @@ async function loadPresets(selectId) {
   renderPresetOptions(selectId);
 }
 
-function renderPresetOptions(selectId) {
-  var sel = document.getElementById('presetSelect');
+/** @param {number|string=} selectId */ function renderPresetOptions(selectId) {
+  var sel = /** @type {HTMLSelectElement} */ (document.getElementById('presetSelect'));
   if (!sel) return;
   var current = selectId != null ? String(selectId) : sel.value;
   sel.innerHTML = '';
@@ -38,16 +38,16 @@ function renderPresetOptions(selectId) {
 }
 
 function selectedPreset() {
-  var sel = document.getElementById('presetSelect');
+  var sel = /** @type {HTMLSelectElement} */ (document.getElementById('presetSelect'));
   var id = sel ? Number(sel.value) : NaN;
   return editorState.presets.find(function(p) { return p.id === id; }) || null;
 }
 
 function onPresetSelected() {
   var preset = selectedPreset();
-  document.getElementById('applyPresetBtn').disabled = !preset;
-  document.getElementById('deletePresetBtn').disabled = !preset;
-  if (preset) document.getElementById('presetNameInput').value = preset.name;
+  /** @type {HTMLButtonElement} */ (document.getElementById('applyPresetBtn')).disabled = !preset;
+  /** @type {HTMLButtonElement} */ (document.getElementById('deletePresetBtn')).disabled = !preset;
+  if (preset) /** @type {HTMLInputElement} */ (document.getElementById('presetNameInput')).value = preset.name;
 }
 
 async function applySelectedPreset() {
@@ -57,7 +57,7 @@ async function applySelectedPreset() {
   var savedRecipeSeq = editorState.savedRecipeSeq;
   var startingKey = recipeKey(editorState.recipe);
   var loadSeq = editorState.loadSeq;
-  var button = document.getElementById('applyPresetBtn');
+  var button = /** @type {HTMLButtonElement} */ (document.getElementById('applyPresetBtn'));
   button.disabled = true;
   try {
     var defs = await VireoBatchEdits.fields();
@@ -68,7 +68,7 @@ async function applySelectedPreset() {
       title: 'Apply preset “' + preset.name + '”', fields: available, available: available,
     });
     if (!fields || photoId !== editorState.photoId || loadSeq !== editorState.loadSeq) return;
-    var data = await safeFetch('/api/photos/' + photoId + '/edit-recipe/compose', {
+    /** @type {{recipe?:EditorRecipe}} */ var data = await safeFetch('/api/photos/' + photoId + '/edit-recipe/compose', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({current: recipeForSave(editorState.recipe), recipe: preset.recipe || {}, fields: fields}),
     }, {toast: false});
@@ -87,13 +87,13 @@ async function applySelectedPreset() {
     markChanged(true);
     showToast('Applied preset "' + preset.name + '" (not saved yet)', 'success');
   } catch (error) {
-    showToast(error.message || 'Could not apply preset', 'error');
+    showToast(editorErrorMessage(error) || 'Could not apply preset', 'error');
   } finally { onPresetSelected(); }
 }
 
 async function saveCurrentAsPreset() {
   var current = recipeForSave(editorState.recipe);
-  var name = document.getElementById('presetNameInput').value.trim();
+  var name = /** @type {HTMLInputElement} */ (document.getElementById('presetNameInput')).value.trim();
   if (!name) {
     if (typeof showToast === 'function') {
       showToast('Enter a preset name first', 'error');
@@ -113,7 +113,7 @@ async function saveCurrentAsPreset() {
       hint: 'Choose the settings this preset will change. Unchecked settings stay untouched when applying it. Subject and background settings use each destination photo’s own mask.',
     });
     if (!fields) return;
-    var data = await safeFetch('/api/edit-presets', {
+    /** @type {{preset:EditorPreset}} */ var data = await safeFetch('/api/edit-presets', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -128,7 +128,7 @@ async function saveCurrentAsPreset() {
     }
   } catch (e) {
     if (typeof showToast === 'function') {
-      showToast(e.message || 'Could not save preset', 'error');
+      showToast(editorErrorMessage(e) || 'Could not save preset', 'error');
     }
   }
 }
@@ -139,14 +139,14 @@ async function deleteSelectedPreset() {
   if (!window.confirm('Delete preset "' + preset.name + '"?')) return;
   try {
     await safeFetch('/api/edit-presets/' + preset.id, {method: 'DELETE'}, {toast: false});
-    document.getElementById('presetNameInput').value = '';
+    /** @type {HTMLInputElement} */ (document.getElementById('presetNameInput')).value = '';
     await loadPresets('');
     if (typeof showToast === 'function') {
       showToast('Deleted preset "' + preset.name + '"', 'success');
     }
   } catch (e) {
     if (typeof showToast === 'function') {
-      showToast(e.message || 'Could not delete preset', 'error');
+      showToast(editorErrorMessage(e) || 'Could not delete preset', 'error');
     }
   }
 }

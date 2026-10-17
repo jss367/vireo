@@ -10,9 +10,9 @@
 // click, and they consume no text or arrow keys, so hotkeys (b, h, arrows)
 // must keep working while one is focused. Text inputs, selects, and range
 // sliders (the Adjust panel) genuinely consume keys, so they stay guarded.
-function _lbKeyTargetEditable(t) {
-  if (!t) return false;
-  if (t.tagName === 'INPUT') return !(t.type === 'checkbox' || t.type === 'radio');
+/** @param {EventTarget | null} t */ function _lbKeyTargetEditable(t) {
+  if (!(t instanceof HTMLElement)) return false;
+  if (t instanceof HTMLInputElement) return !(t.type === 'checkbox' || t.type === 'radio');
   return t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || !!t.isContentEditable;
 }
 document.addEventListener('keydown', function(e) {
@@ -20,7 +20,7 @@ document.addEventListener('keydown', function(e) {
   // stack now: each open*() pushes its close*() and each close*() pops it. The
   // listener below still handles arrow keys / +/-/0 / B / Z / F / G while the
   // lightbox is open.
-  if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
+  if (!document.getElementById('lightboxOverlay')?.classList.contains('active')) return;
   // .grm-overlay.open is deliberately NOT in this suppression list: the burst
   // modal can only sit *underneath* the lightbox (review's "Open in Lightbox"),
   // so the lightbox keeps keyboard precedence; the burst modal's own keydown
@@ -93,9 +93,9 @@ document.addEventListener('keydown', function(e) {
   var zoomKey = (window._vireoShortcuts && window._vireoShortcuts.browse) ? window._vireoShortcuts.browse.zoom : 'z';
   if (matchesShortcut(e, zoomKey) && !_lbKeyTargetEditable(e.target)) {
     // Zoom toggle — simulate a click in the center
-    var wrap = document.getElementById('lightboxWrap');
+    var wrap = document.getElementById('lightboxWrap'); if (!wrap) return;
     var rect = wrap.getBoundingClientRect();
-    toggleLightboxZoom({clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2, stopPropagation: function(){}});
+    toggleLightboxZoom({clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2});
     e.preventDefault();
     e.stopImmediatePropagation();
     return;  // Stop here so a user-remapped zoomKey (e.g. '+') doesn't also trigger step-zoom below.
@@ -115,12 +115,12 @@ document.addEventListener('keydown', function(e) {
     var flagKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.flag) || 'p';
     var rejectKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.reject) || 'x';
     var unflagKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.unflag) || 'u';
-    var lbFlag = null;
+    /** @type {LightboxFlag | null} */ var lbFlag = null;
     if (matchesShortcut(e, flagKey)) lbFlag = 'flagged';
     else if (matchesShortcut(e, rejectKey)) lbFlag = 'rejected';
     else if (matchesShortcut(e, unflagKey)) lbFlag = 'none';
     if (lbFlag !== null && vireoLightboxSession.requestedPhotoId() != null) {
-      var pid = vireoLightboxSession.requestedPhotoId();
+      var pid = vireoLightboxSession.requestedPhotoId(); if (pid == null) return;
       if (
         typeof window.handleMissesLightboxFlagShortcut === 'function' &&
         window.handleMissesLightboxFlagShortcut(pid, lbFlag) === true
@@ -159,29 +159,27 @@ document.addEventListener('keydown', function(e) {
 document.addEventListener('keydown', function(e) {
   if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey) return;
   e.preventDefault();
-  var navLinks = Array.prototype.slice.call(
-    document.querySelectorAll('#navTabStrip .nav-tab[href]')
-  );
+  var navLinks = Array.from(/** @type {NodeListOf<HTMLAnchorElement>} */ (document.querySelectorAll('#navTabStrip .nav-tab[href]')));
   if (!navLinks.length) return;
   var activeIdx = -1;
   for (var i = 0; i < navLinks.length; i++) {
-    if (navLinks[i].classList.contains('active')) { activeIdx = i; break; }
+    if (navLinks[i]?.classList.contains('active')) { activeIdx = i; break; }
   }
   var dir = e.shiftKey ? -1 : 1;
   var next = (activeIdx + dir + navLinks.length) % navLinks.length;
-  window.location.href = navLinks[next].getAttribute('href');
+  var link = navLinks[next]; if (link) window.location.href = link.href;
 });
 
 /* ---------- Keyboard Shortcut Helpers (global) ---------- */
-function parseShortcut(str) {
+/** @param {string} str */ function parseShortcut(str) {
   var parts = str.toLowerCase().split('+');
   var key = parts.pop();
   var mods = {ctrl: false, meta: false, shift: false, alt: false};
-  parts.forEach(function(m) { if (m in mods) mods[m] = true; });
+  parts.forEach(function(m) { if (m === 'ctrl' || m === 'meta' || m === 'shift' || m === 'alt') mods[m] = true; });
   return {key: key, ctrl: mods.ctrl, meta: mods.meta, shift: mods.shift, alt: mods.alt};
 }
 
-function matchesShortcut(e, shortcutStr) {
+function matchesShortcut(/** @type {KeyboardEvent} */ e, /** @type {string | undefined} */ shortcutStr) {
   if (!shortcutStr) return false;
   var sc = parseShortcut(shortcutStr);
   if (e.key.toLowerCase() !== sc.key) return false;
@@ -193,7 +191,7 @@ function matchesShortcut(e, shortcutStr) {
   return true;
 }
 
-function formatShortcut(str) {
+/** @param {string} str */ function formatShortcut(str) {
   if (!str) return 'Unassigned';
   return str.split('+').map(function(p) {
     if (p === ' ') return 'Space';

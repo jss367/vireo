@@ -1,13 +1,13 @@
 /* Storage for retained generated payloads and grouping undo snapshots. */
-var retainedStorageData = null;
+/** @type {RetainedStorageResponse | null} */ var retainedStorageData = null;
 
 async function loadRetainedStorage() {
-  var panel = document.getElementById('retainedStorageItems');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('retainedStorageItems'));
   try {
-    var data = await safeFetch('/api/storage/retained', {}, {toast: false});
+    /** @type {RetainedStorageResponse} */ var data = await safeFetch('/api/storage/retained', {}, {toast: false});
     retainedStorageData = data;
     if (data.maintenance) {
-      document.getElementById('retainedStorageStatus').textContent = 'Latest storage maintenance: ' +
+      /** @type {HTMLElement} */ (document.getElementById('retainedStorageStatus')).textContent = 'Latest storage maintenance: ' +
         data.maintenance.status + ' · ' + new Date(data.maintenance.finished_at || data.maintenance.started_at).toLocaleString() +
         (data.maintenance.summary ? ' · ' + data.maintenance.summary : '');
     }
@@ -88,17 +88,18 @@ async function loadRetainedStorage() {
     }
     panel.appendChild(historyDetails);
     // Preserve unsaved policy inputs during a refresh.
-    if (!document.getElementById('retainedCacheLimit').dataset.loaded) {
-      document.getElementById('retainedCacheLimit').value = data.policy.retained_cache_max_mb;
-      document.getElementById('retainedCacheAge').value = data.policy.retained_cache_max_age_days;
-      document.getElementById('groupingHistoryLimit').value = data.policy.grouping_history_max_mb;
-      document.getElementById('retainedCacheLimit').dataset.loaded = '1';
+    if (!/** @type {HTMLInputElement} */ (document.getElementById('retainedCacheLimit')).dataset.loaded) {
+      /** @type {HTMLInputElement} */ (document.getElementById('retainedCacheLimit')).value = String(data.policy.retained_cache_max_mb);
+      /** @type {HTMLInputElement} */ (document.getElementById('retainedCacheAge')).value = String(data.policy.retained_cache_max_age_days);
+      /** @type {HTMLInputElement} */ (document.getElementById('groupingHistoryLimit')).value = String(data.policy.grouping_history_max_mb);
+      /** @type {HTMLInputElement} */ (document.getElementById('retainedCacheLimit')).dataset.loaded = '1';
     }
   } catch(e) {
     panel.textContent = 'Could not measure retained storage. Refresh to try again.';
   }
 }
 
+/** @param {string} type @param {string} name @param {HTMLButtonElement} button */
 async function clearRetainedStorage(type, name, button) {
   var message = type === 'grouping-history'
     ? 'Remove grouping undo and redo snapshots from every workspace? Current grouping and ordinary photo edits remain. Removed grouping history cannot be restored.'
@@ -106,7 +107,7 @@ async function clearRetainedStorage(type, name, button) {
   if (!await confirmRetainedStorage(message)) return;
   button.disabled = true;
   try {
-    var response = await safeFetch('/api/storage/retained/clear', {
+    /** @type {{job_id:string}} */ var response = await safeFetch('/api/storage/retained/clear', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({type: type, confirm_history_loss: type === 'grouping-history'}),
     });
@@ -117,18 +118,19 @@ async function clearRetainedStorage(type, name, button) {
   }
 }
 
+/** @param {HTMLButtonElement} button */
 async function saveRetainedStoragePolicy(button) {
   var fields = ['retainedCacheLimit', 'retainedCacheAge', 'groupingHistoryLimit'];
-  if (!fields.every(function(id) { return document.getElementById(id).reportValidity(); })) return;
+  if (!fields.every(function(id) { return /** @type {HTMLInputElement} */ (document.getElementById(id)).reportValidity(); })) return;
   var values = {
-    retained_cache_max_mb: Number(document.getElementById('retainedCacheLimit').value),
-    retained_cache_max_age_days: Number(document.getElementById('retainedCacheAge').value),
-    grouping_history_max_mb: Number(document.getElementById('groupingHistoryLimit').value),
+    retained_cache_max_mb: Number(/** @type {HTMLInputElement} */ (document.getElementById('retainedCacheLimit')).value),
+    retained_cache_max_age_days: Number(/** @type {HTMLInputElement} */ (document.getElementById('retainedCacheAge')).value),
+    grouping_history_max_mb: Number(/** @type {HTMLInputElement} */ (document.getElementById('groupingHistoryLimit')).value),
   };
   if (!await confirmRetainedStorage('Apply these limits to every workspace? Maintenance removes older generated files and completed grouping undo above their limits. Snapshots awaiting redo and ordinary photo edits are retained. Newly written files have a one-hour grace period.')) return;
   button.disabled = true;
   try {
-    var response = await safeFetch('/api/storage/retention', {
+    /** @type {{job_id:string}} */ var response = await safeFetch('/api/storage/retention', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(values),
     });
     watchRetainedStorageJob(response.job_id);
@@ -139,12 +141,13 @@ async function saveRetainedStoragePolicy(button) {
   }
 }
 
+/** @param {string} jobId */
 function watchRetainedStorageJob(jobId) {
-  var status = document.getElementById('retainedStorageStatus');
+  var status = /** @type {HTMLElement} */ (document.getElementById('retainedStorageStatus'));
   status.textContent = 'Storage cleanup is running. Follow progress or cancel in Jobs.';
   async function poll() {
     try {
-      var job = await safeFetch('/api/jobs/' + encodeURIComponent(jobId), {}, {toast: false});
+      /** @type {{status:string;_persisted?:boolean}} */ var job = await safeFetch('/api/jobs/' + encodeURIComponent(jobId), {}, {toast: false});
       if (['completed', 'failed', 'cancelled'].indexOf(job.status) < 0 || !job._persisted) {
         setTimeout(poll, 1000);
         return;
@@ -159,26 +162,27 @@ function watchRetainedStorageJob(jobId) {
   poll();
 }
 
+/** @param {string} message @returns {Promise<boolean>} */
 function confirmRetainedStorage(message) {
-  var modal = document.getElementById('retainedActionModal');
+  var modal = /** @type {HTMLDialogElement} */ (document.getElementById('retainedActionModal'));
   if (modal.open) return Promise.resolve(false);
-  document.getElementById('retainedActionDescription').textContent = message;
+  /** @type {HTMLElement} */ (document.getElementById('retainedActionDescription')).textContent = message;
   var previousFocus = document.activeElement;
   return new Promise(function(resolve) {
-    function finish(accepted) {
+    /** @param {boolean} accepted */ function finish(accepted) {
       modal.close();
       modal.classList.remove('open');
       modal.oncancel = null;
-      document.getElementById('retainedActionConfirm').onclick = null;
-      document.getElementById('retainedActionCancel').onclick = null;
-      if (previousFocus) previousFocus.focus();
+      /** @type {HTMLElement} */ (document.getElementById('retainedActionConfirm')).onclick = null;
+      /** @type {HTMLElement} */ (document.getElementById('retainedActionCancel')).onclick = null;
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
       resolve(accepted);
     }
-    document.getElementById('retainedActionConfirm').onclick = function() { finish(true); };
-    document.getElementById('retainedActionCancel').onclick = function() { finish(false); };
+    /** @type {HTMLElement} */ (document.getElementById('retainedActionConfirm')).onclick = function() { finish(true); };
+    /** @type {HTMLElement} */ (document.getElementById('retainedActionCancel')).onclick = function() { finish(false); };
     modal.oncancel = function(event) { event.preventDefault(); finish(false); };
     modal.classList.add('open');
     modal.showModal();
-    document.getElementById('retainedActionCancel').focus();
+    /** @type {HTMLElement} */ (document.getElementById('retainedActionCancel')).focus();
   });
 }

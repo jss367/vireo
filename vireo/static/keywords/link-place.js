@@ -8,8 +8,8 @@
 window.GOOGLE_MAPS_PREFER_ENGLISH = true;
 
 // Cached promise for the Google Maps JS loader (memoized).
-let _gmapsLoadPromise = null;
-function loadGoogleMapsJs() {
+/** @type {Promise<KeywordGoogle|undefined>|null} */ let _gmapsLoadPromise = null;
+/** @returns {Promise<KeywordGoogle|undefined>} */ function loadGoogleMapsJs() {
   if (_gmapsLoadPromise) return _gmapsLoadPromise;
   const apiKey = window.GOOGLE_MAPS_API_KEY || '';
   if (!apiKey) {
@@ -37,7 +37,7 @@ function loadGoogleMapsJs() {
 const _cfgPromise = (async function() {
   try {
     const r = await fetch('/api/config');
-    const cfg = await r.json();
+    /** @type {{google_maps_api_key?:string;google_maps_prefer_english?:boolean}} */ const cfg = await r.json();
     window.GOOGLE_MAPS_API_KEY = cfg.google_maps_api_key || '';
     window.GOOGLE_MAPS_PREFER_ENGLISH = cfg.google_maps_prefer_english !== false;
     return cfg;
@@ -48,24 +48,24 @@ const _cfgPromise = (async function() {
   }
 })();
 
-let _activeLinkAutocomplete = null;
-let _activeLinkKeywordId = null;
+/** @type {KeywordAutocomplete|null} */ let _activeLinkAutocomplete = null;
+/** @type {number|null} */ let _activeLinkKeywordId = null;
 
-function _showLinkError(msg) {
-  const el = document.getElementById('linkPlaceError');
+/** @param {string} msg */ function _showLinkError(msg) {
+  const el = /** @type {HTMLElement} */ (document.getElementById('linkPlaceError'));
   if (!el) return;
   el.textContent = msg;
   el.style.display = 'block';
 }
 
 function _hideLinkError() {
-  const el = document.getElementById('linkPlaceError');
+  const el = /** @type {HTMLElement} */ (document.getElementById('linkPlaceError'));
   if (el) el.style.display = 'none';
 }
 
-async function openLinkPlaceModal(keywordId, currentName) {
-  const modal = document.getElementById('linkPlaceModal');
-  const input = document.getElementById('linkPlaceInput');
+/** @param {number} keywordId @param {string} currentName */ async function openLinkPlaceModal(keywordId, currentName) {
+  const modal = /** @type {HTMLElement} */ (document.getElementById('linkPlaceModal'));
+  const input = /** @type {HTMLInputElement} */ (document.getElementById('linkPlaceInput'));
   if (!modal || !input) return;
 
   _hideLinkError();
@@ -107,7 +107,7 @@ async function openLinkPlaceModal(keywordId, currentName) {
       ],
     });
     _activeLinkAutocomplete.addListener('place_changed', function() {
-      const place = _activeLinkAutocomplete.getPlace();
+      if (!_activeLinkAutocomplete) return; const place = _activeLinkAutocomplete.getPlace();
       if (place && place.place_id && _activeLinkKeywordId) {
         submitLinkPlace(
           _activeLinkKeywordId,
@@ -117,19 +117,19 @@ async function openLinkPlaceModal(keywordId, currentName) {
       }
     });
   } catch(err) {
-    _showLinkError('Failed to load Google Maps: ' + (err && err.message || err));
+    _showLinkError('Failed to load Google Maps: ' + keywordErrorMessage(err));
   }
 }
 
 function closeLinkPlaceModal() {
-  const modal = document.getElementById('linkPlaceModal');
+  const modal = /** @type {HTMLElement} */ (document.getElementById('linkPlaceModal'));
   if (modal) modal.classList.remove('open');
   _activeLinkKeywordId = null;
   _activeLinkAutocomplete = null;
   _hideLinkError();
 }
 
-function normalizeGooglePlaceForSubmit(place) {
+/** @param {KeywordGooglePlace|null|undefined} place @returns {KeywordPlaceSubmission|null} */ function normalizeGooglePlaceForSubmit(place) {
   if (!place || !place.place_id) return null;
   const loc = place.geometry && place.geometry.location;
   let lat = null;
@@ -155,9 +155,9 @@ function normalizeGooglePlaceForSubmit(place) {
   };
 }
 
-async function submitLinkPlace(keywordId, placeId, placeDetails) {
+/** @param {number} keywordId @param {string} placeId @param {KeywordPlaceSubmission|null} [placeDetails] */ async function submitLinkPlace(keywordId, placeId, placeDetails) {
   _hideLinkError();
-  const body = {place_id: placeId};
+  /** @type {{place_id:string;place?:KeywordPlaceSubmission}} */ const body = {place_id: placeId};
   if (placeDetails) body.place = placeDetails;
   let resp;
   try {
@@ -167,16 +167,16 @@ async function submitLinkPlace(keywordId, placeId, placeDetails) {
       body: JSON.stringify(body),
     });
   } catch(err) {
-    _showLinkError('Network error: ' + (err && err.message || err));
+    _showLinkError('Network error: ' + keywordErrorMessage(err));
     return;
   }
   if (!resp.ok) {
-    let body = {};
+    /** @type {KeywordMutation} */ let body = {};
     try { body = await resp.json(); } catch(e) {}
     _showLinkError(body.message || body.error || ('Failed (HTTP ' + resp.status + ')'));
     return;
   }
-  let data = {};
+  /** @type {KeywordMutation} */ let data = {};
   try { data = await resp.json(); } catch(e) {}
 
   closeLinkPlaceModal();
@@ -197,27 +197,27 @@ async function submitLinkPlace(keywordId, placeId, placeDetails) {
 // Per-row "Link..." button click handler. Bound on the body via delegation
 // because rows are re-rendered by render().
 function bindLinkPlaceControls() {
-  document.getElementById('kwBody').addEventListener('click', function(e) {
-    const btn = e.target.closest('.kw-link-btn');
+  /** @type {HTMLElement} */ (document.getElementById('kwBody')).addEventListener('click', function(e) {
+    if (!(e.target instanceof Element)) return; const btn = e.target.closest(/** @type {'button'} */ ('.kw-link-btn'));
     if (!btn) return;
     e.stopPropagation();
-    const kwId = parseInt(btn.dataset.linkId, 10);
+    const kwId = parseInt(btn.dataset.linkId || '', 10);
     if (!kwId) return;
     const kw = allKeywords.find(k => k.id === kwId);
     openLinkPlaceModal(kwId, kw ? kw.name : '');
   });
 
   // Modal: cancel button + click-on-overlay + Escape key.
-  document.getElementById('linkPlaceCancel').addEventListener(
+  /** @type {HTMLButtonElement} */ (document.getElementById('linkPlaceCancel')).addEventListener(
     'click', closeLinkPlaceModal
   );
-  document.getElementById('linkPlaceModal').addEventListener('click', function(e) {
+  /** @type {HTMLElement} */ (document.getElementById('linkPlaceModal')).addEventListener('click', function(e) {
     // Click on the overlay (outside .modal) closes it.
     if (e.target === this) closeLinkPlaceModal();
   });
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
-      const modal = document.getElementById('linkPlaceModal');
+      const modal = /** @type {HTMLElement} */ (document.getElementById('linkPlaceModal'));
       if (modal && modal.classList.contains('open')) closeLinkPlaceModal();
     }
   });

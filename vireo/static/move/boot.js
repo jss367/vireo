@@ -15,18 +15,18 @@ document.addEventListener('DOMContentLoaded', function() {
 
 /* ---------- Input listeners for button state ---------- */
 document.addEventListener('DOMContentLoaded', function() {
-  var quickDest = document.getElementById('quickDestInput');
+  var quickDest = /** @type {HTMLInputElement} */ (document.getElementById('quickDestInput'));
   if (quickDest) quickDest.addEventListener('input', updateQuickMoveBtn);
 
-  var photoDest = document.getElementById('photoDestInput');
+  var photoDest = /** @type {HTMLInputElement} */ (document.getElementById('photoDestInput'));
   if (photoDest) photoDest.addEventListener('input', updatePhotoSelectionUI);
 
   // Delegated handler so folder paths (which can contain backslashes on
   // Windows, e.g. C:\) don't have to be JS-escaped into inline handlers.
-  var moveBrowserList = document.getElementById('moveBrowserList');
+  var moveBrowserList = /** @type {HTMLElement} */ (document.getElementById('moveBrowserList'));
   if (moveBrowserList) {
     moveBrowserList.addEventListener('dblclick', function(e) {
-      var item = e.target.closest('.browser-folder-item[data-browse-path]');
+      var item = e.target instanceof Element && e.target.closest('.browser-folder-item[data-browse-path]');
       if (item) browseTo(item.getAttribute('data-browse-path'));
     });
   }

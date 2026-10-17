@@ -1,0 +1,29 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/pipeline-review.d.ts",
+    "../vireo/static/pipeline-review/boot.js",
+    "../vireo/static/pipeline-review/context-menu.js",
+    "../vireo/static/pipeline-review/events.js",
+    "../vireo/static/pipeline-review/flags.js",
+    "../vireo/static/pipeline-review/group-changes.js",
+    "../vireo/static/pipeline-review/group-render.js",
+    "../vireo/static/pipeline-review/group-resolution.js",
+    "../vireo/static/pipeline-review/group-session.js",
+    "../vireo/static/pipeline-review/group-viewport.js",
+    "../vireo/static/pipeline-review/inspection.js",
+    "../vireo/static/pipeline-review/lightbox-integration.js",
+    "../vireo/static/pipeline-review/loading.js",
+    "../vireo/static/pipeline-review/metadata.js",
+    "../vireo/static/pipeline-review/organization.js",
+    "../vireo/static/pipeline-review/photo-actions.js",
+    "../vireo/static/pipeline-review/results.js",
+    "../vireo/static/pipeline-review/scope.js",
+    "../vireo/static/pipeline-review/species-conflicts.js",
+    "../vireo/static/pipeline-review/species-editor.js",
+    "../vireo/static/pipeline-review/state.js",
+    "../vireo/static/pipeline-review/summary.js",
+    "../vireo/static/pipeline-review/tuning.js",
+    "../vireo/static/pipeline-review/view-controls.js"
+  ]
+}

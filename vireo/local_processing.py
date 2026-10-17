@@ -132,6 +132,99 @@ def conflicting_archive_paths(
     )
 
 
+def _ingest_would_skip(checker, source_file: Path) -> bool:
+    """Return True when ingest would skip ``source_file`` as a duplicate."""
+    if checker is None:
+        return False
+    try:
+        return checker.check_and_record(source_file)
+    except OSError:
+        # ingest() treats identity-check failures as per-file failures
+        # before copy, so they do not claim destination names.
+        return True
+
+
+def _archive_conflict_sets(
+    files: list[Path],
+    archive_root: Path,
+    folder_template: str,
+    timestamps,
+    checker,
+    indexed_keys: set[str] | None,
+) -> tuple[set[str], set[str], set[str]]:
+    """Walk ``files`` as ingest would stage them; see ``archive_conflict_report``.
+
+    Returns the ``(empty, partial, conflicts)`` archive path sets.
+    """
+    empty: set[str] = set()
+    partial: set[str] = set()
+    conflicts: set[str] = set()
+    # Per-archive-subfolder name slots already claimed by earlier survivors
+    # in this iteration. Mirrors the per-batch staging tree ingest builds.
+    occupied: dict[str, set[str]] = {}
+    for source_file in files:
+        try:
+            rel_folder = build_destination_path(
+                timestamps.get(source_file),
+                folder_template,
+                source_file,
+            )
+            dest_folder = archive_root / rel_folder
+            folder_key = os.path.normcase(os.path.abspath(dest_folder))
+            folder_taken = occupied.setdefault(folder_key, set())
+
+            chosen_name = _suffix_against(folder_taken, source_file.name)
+
+            dest_file = dest_folder / chosen_name
+            if not os.path.lexists(dest_file):
+                if _ingest_would_skip(checker, source_file):
+                    continue
+                folder_taken.add(chosen_name)
+                continue
+
+            source_size = source_file.stat().st_size
+            dest_size: int | None = None
+            if not dest_file.is_symlink() and dest_file.is_file():
+                dest_size = dest_file.stat().st_size
+                if (
+                    dest_size == source_size
+                    and filecmp.cmp(source_file, dest_file, shallow=False)
+                ):
+                    if _ingest_would_skip(checker, source_file):
+                        continue
+                    folder_taken.add(chosen_name)
+                    continue
+
+            # Same-path archive file with different content. If ingest
+            # would skip this source as a known duplicate, it never
+            # reaches staging and so cannot conflict — confirm before
+            # rejecting the run.
+            if _ingest_would_skip(checker, source_file):
+                # ingest's skip_duplicates branch drops this source
+                # before staging; do not claim a slot either.
+                continue
+
+            dest_path = str(dest_file)
+            dest_key = os.path.normcase(os.path.abspath(dest_path))
+            is_unindexed = (
+                indexed_keys is not None
+                and dest_key not in indexed_keys
+            )
+            if is_unindexed and source_size > 0 and dest_size is not None:
+                if dest_size == 0:
+                    empty.add(dest_path)
+                elif dest_size < source_size:
+                    partial.add(dest_path)
+                else:
+                    conflicts.add(dest_path)
+            else:
+                conflicts.add(dest_path)
+            folder_taken.add(chosen_name)
+        except OSError:
+            continue
+    return empty, partial, conflicts
+
+
 def archive_conflict_report(
     path: str,
     files: list[Path],
@@ -187,9 +280,6 @@ def archive_conflict_report(
 
     timestamps = _source_file_timestamps(files)
     archive_root = Path(path)
-    empty: set[str] = set()
-    partial: set[str] = set()
-    conflicts: set[str] = set()
     indexed_keys = (
         {
             os.path.normcase(os.path.abspath(indexed_path))
@@ -200,81 +290,9 @@ def archive_conflict_report(
     checker = duplicate_checker or _as_duplicate_checker(known_hashes)
     if checker is not None:
         checker.prepare(files)
-    # Per-archive-subfolder name slots already claimed by earlier survivors
-    # in this iteration. Mirrors the per-batch staging tree ingest builds.
-    occupied: dict[str, set[str]] = {}
-
-    def _skip_or_record_survivor(source_file: Path) -> bool:
-        """Return True when ingest would skip ``source_file`` as a duplicate."""
-        if checker is None:
-            return False
-        try:
-            return checker.check_and_record(source_file)
-        except OSError:
-            # ingest() treats identity-check failures as per-file failures
-            # before copy, so they do not claim destination names.
-            return True
-
-    for source_file in files:
-        try:
-            rel_folder = build_destination_path(
-                timestamps.get(source_file),
-                folder_template,
-                source_file,
-            )
-            dest_folder = archive_root / rel_folder
-            folder_key = os.path.normcase(os.path.abspath(dest_folder))
-            folder_taken = occupied.setdefault(folder_key, set())
-
-            chosen_name = _suffix_against(folder_taken, source_file.name)
-
-            dest_file = dest_folder / chosen_name
-            if not os.path.lexists(dest_file):
-                if _skip_or_record_survivor(source_file):
-                    continue
-                folder_taken.add(chosen_name)
-                continue
-
-            source_size = source_file.stat().st_size
-            dest_size: int | None = None
-            if not dest_file.is_symlink() and dest_file.is_file():
-                dest_size = dest_file.stat().st_size
-                if (
-                    dest_size == source_size
-                    and filecmp.cmp(source_file, dest_file, shallow=False)
-                ):
-                    if _skip_or_record_survivor(source_file):
-                        continue
-                    folder_taken.add(chosen_name)
-                    continue
-
-            # Same-path archive file with different content. If ingest
-            # would skip this source as a known duplicate, it never
-            # reaches staging and so cannot conflict — confirm before
-            # rejecting the run.
-            if _skip_or_record_survivor(source_file):
-                # ingest's skip_duplicates branch drops this source
-                # before staging; do not claim a slot either.
-                continue
-
-            dest_path = str(dest_file)
-            dest_key = os.path.normcase(os.path.abspath(dest_path))
-            is_unindexed = (
-                indexed_keys is not None
-                and dest_key not in indexed_keys
-            )
-            if is_unindexed and source_size > 0 and dest_size is not None:
-                if dest_size == 0:
-                    empty.add(dest_path)
-                elif dest_size < source_size:
-                    partial.add(dest_path)
-                else:
-                    conflicts.add(dest_path)
-            else:
-                conflicts.add(dest_path)
-            folder_taken.add(chosen_name)
-        except OSError:
-            continue
+    empty, partial, conflicts = _archive_conflict_sets(
+        files, archive_root, folder_template, timestamps, checker, indexed_keys,
+    )
     return {
         "empty": sorted(empty),
         "partial": sorted(partial),
@@ -397,6 +415,34 @@ def estimate_required_bytes(source_bytes: int) -> int:
     return source_bytes + derived
 
 
+def _same_device(staging_dir: str, archive_parent: str | None) -> bool:
+    """Whether staging and the archive parent share a volume (False if unknown)."""
+    same_device = False
+    if archive_parent:
+        try:
+            same_device = (
+                os.stat(staging_dir).st_dev == os.stat(archive_parent).st_dev
+            )
+        except OSError:
+            same_device = False
+    return same_device
+
+
+def _archive_volume_space(
+    archive_parent: str, archive_required: int, reserved_free_bytes: int,
+) -> tuple[int | None, int | None, bool]:
+    """Return ``(free, usable, enough)`` for a separate archive volume."""
+    try:
+        archive_usage = shutil.disk_usage(archive_parent)
+    except OSError:
+        # Can't probe the destination volume — let the eventual
+        # move_folder surface ENOSPC rather than guess. Leave
+        # archive_enough True so the preflight doesn't false-positive.
+        return None, None, True
+    archive_usable = max(0, archive_usage.free - reserved_free_bytes)
+    return archive_usage.free, archive_usable, archive_required <= archive_usable
+
+
 def storage_plan(
     staging_dir: str,
     source_bytes: int,
@@ -438,14 +484,7 @@ def storage_plan(
     existing_credit = max(0, min(archive_existing_bytes, source_bytes))
     archive_delta = max(0, source_bytes - existing_credit)
 
-    same_device = False
-    if archive_parent:
-        try:
-            same_device = (
-                os.stat(staging_dir).st_dev == os.stat(archive_parent).st_dev
-            )
-        except OSError:
-            same_device = False
+    same_device = _same_device(staging_dir, archive_parent)
 
     usage = shutil.disk_usage(staging_dir)
     required = estimate_required_bytes(source_bytes)
@@ -465,17 +504,9 @@ def storage_plan(
     archive_enough = True
     if archive_parent and not same_device:
         archive_required = archive_delta
-        try:
-            archive_usage = shutil.disk_usage(archive_parent)
-        except OSError:
-            # Can't probe the destination volume — let the eventual
-            # move_folder surface ENOSPC rather than guess. Leave
-            # archive_enough True so the preflight doesn't false-positive.
-            pass
-        else:
-            archive_free = archive_usage.free
-            archive_usable = max(0, archive_usage.free - reserved_free_bytes)
-            archive_enough = archive_required <= archive_usable
+        archive_free, archive_usable, archive_enough = _archive_volume_space(
+            archive_parent, archive_required, reserved_free_bytes,
+        )
 
     enough = staging_enough and archive_enough
     if enough:

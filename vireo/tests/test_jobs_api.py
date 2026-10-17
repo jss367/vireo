@@ -730,7 +730,11 @@ def test_jobs_page_returns_200(app_and_db):
     assert 'data-import-resume' in html
     # A retry keeps everything its parent carried, including photos a
     # resume recovered from its interrupted parent.
-    assert "['photo_ids', 'carried_photo_ids', 'recovered_photo_ids']" in html
+    assert (
+        "[/** @type {const} */ ('photo_ids'), "
+        "/** @type {const} */ ('carried_photo_ids'), "
+        "/** @type {const} */ ('recovered_photo_ids')]"
+    ) in html
     assert 'result.interrupted && Array.isArray(result.photo_ids)' in html
     # A parent with both post-import steps done has nothing to resume;
     # a parent whose chain ran but still owes tag/GPS work stays

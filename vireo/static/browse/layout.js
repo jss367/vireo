@@ -18,12 +18,12 @@ var BROWSE_SIDEBAR_HANDLE_WIDTH = 7;
 var BROWSE_MIN_CONTENT_WIDTH = 360;
 
 function currentBrowseSidebarWidth() {
-  var sidebar = document.getElementById('browseSidebar');
+  var sidebar = /** @type {HTMLElement} */ (document.getElementById('browseSidebar'));
   return sidebar ? sidebar.getBoundingClientRect().width : BROWSE_SIDEBAR_DEFAULT_WIDTH;
 }
 
 function currentBrowseDetailPanelWidth() {
-  var detailPanel = document.getElementById('detailPanel');
+  var detailPanel = /** @type {HTMLElement} */ (document.getElementById('detailPanel'));
   return detailPanel ? detailPanel.getBoundingClientRect().width : BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
 }
 
@@ -54,15 +54,15 @@ function browseDetailPanelMaxWidth() {
 }
 
 function updateBrowsePanelResizeLimits() {
-  var sidebarResizer = document.getElementById('browseSidebarResizer');
-  var detailResizer = document.getElementById('detailPanelResizer');
+  var sidebarResizer = /** @type {HTMLElement} */ (document.getElementById('browseSidebarResizer'));
+  var detailResizer = /** @type {HTMLElement} */ (document.getElementById('detailPanelResizer'));
   if (sidebarResizer) sidebarResizer.setAttribute('aria-valuemax', String(browseSidebarMaxWidth()));
   if (detailResizer) detailResizer.setAttribute('aria-valuemax', String(browseDetailPanelMaxWidth()));
 }
 
-function setBrowseSidebarWidth(width, persist) {
-  var sidebar = document.getElementById('browseSidebar');
-  var resizer = document.getElementById('browseSidebarResizer');
+function setBrowseSidebarWidth(/** @type {number} */ width, /** @type {boolean} */ persist) {
+  var sidebar = /** @type {HTMLElement} */ (document.getElementById('browseSidebar'));
+  var resizer = /** @type {HTMLElement} */ (document.getElementById('browseSidebarResizer'));
   if (!sidebar || !resizer) return;
   var nextWidth = Math.round(Math.max(
     BROWSE_SIDEBAR_MIN_WIDTH,
@@ -79,8 +79,8 @@ function setBrowseSidebarWidth(width, persist) {
 }
 
 function initBrowseSidebarResize() {
-  var sidebar = document.getElementById('browseSidebar');
-  var resizer = document.getElementById('browseSidebarResizer');
+  var sidebar = /** @type {HTMLElement} */ (document.getElementById('browseSidebar'));
+  var resizer = /** @type {HTMLElement} */ (document.getElementById('browseSidebarResizer'));
   if (!sidebar || !resizer) return;
 
   var storedWidth = BROWSE_SIDEBAR_DEFAULT_WIDTH;
@@ -96,10 +96,10 @@ function initBrowseSidebarResize() {
     resizer.classList.add('dragging');
     document.body.classList.add('sidebar-resizing');
 
-    function onPointerMove(moveEvent) {
+    function onPointerMove(/** @type {PointerEvent} */ moveEvent) {
       setBrowseSidebarWidth(startWidth + moveEvent.clientX - startX, false);
     }
-    function stopDragging(upEvent) {
+    function stopDragging(/** @type {PointerEvent} */ upEvent) {
       setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, true);
       resizer.classList.remove('dragging');
       document.body.classList.remove('sidebar-resizing');
@@ -138,9 +138,9 @@ function initBrowseSidebarResize() {
   });
 }
 
-function setBrowseDetailPanelWidth(width, persist) {
-  var detailPanel = document.getElementById('detailPanel');
-  var resizer = document.getElementById('detailPanelResizer');
+function setBrowseDetailPanelWidth(/** @type {number} */ width, /** @type {boolean} */ persist) {
+  var detailPanel = /** @type {HTMLElement} */ (document.getElementById('detailPanel'));
+  var resizer = /** @type {HTMLElement} */ (document.getElementById('detailPanelResizer'));
   if (!detailPanel || !resizer) return;
   var nextWidth = Math.round(Math.max(
     BROWSE_DETAIL_PANEL_MIN_WIDTH,
@@ -157,8 +157,8 @@ function setBrowseDetailPanelWidth(width, persist) {
 }
 
 function initBrowseDetailPanelResize() {
-  var detailPanel = document.getElementById('detailPanel');
-  var resizer = document.getElementById('detailPanelResizer');
+  var detailPanel = /** @type {HTMLElement} */ (document.getElementById('detailPanel'));
+  var resizer = /** @type {HTMLElement} */ (document.getElementById('detailPanelResizer'));
   if (!detailPanel || !resizer) return;
 
   var storedWidth = BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
@@ -174,10 +174,10 @@ function initBrowseDetailPanelResize() {
     resizer.classList.add('dragging');
     document.body.classList.add('sidebar-resizing');
 
-    function onPointerMove(moveEvent) {
+    function onPointerMove(/** @type {PointerEvent} */ moveEvent) {
       setBrowseDetailPanelWidth(startWidth + startX - moveEvent.clientX, false);
     }
-    function stopDragging(upEvent) {
+    function stopDragging(/** @type {PointerEvent} */ upEvent) {
       setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, true);
       resizer.classList.remove('dragging');
       document.body.classList.remove('sidebar-resizing');

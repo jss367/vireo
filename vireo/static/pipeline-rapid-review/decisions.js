@@ -7,12 +7,14 @@ function currentPhoto() {
   return rapid.items[rapid.currentIndex];
 }
 
+/** @param {number} id @returns {RapidZone} */
 function zoneFor(id) {
   if (rapid.picks.has(id)) return 'pick';
   if (rapid.rejects.has(id)) return 'reject';
   return 'review';
 }
 
+/** @param {number} id @param {RapidZone} zone */
 function setZone(id, zone) {
   rapid.picks.delete(id);
   rapid.rejects.delete(id);
@@ -20,6 +22,7 @@ function setZone(id, zone) {
   else if (zone === 'reject') rapid.rejects.add(id);
 }
 
+/** @param {RapidZone} zone */
 function decideCurrent(zone) {
   var p = currentPhoto();
   // Block until DB seed lands. Otherwise the seed loop in openSession() can
@@ -66,13 +69,13 @@ function advanceToNext() {
     return;
   }
   for (var i = rapid.currentIndex + 1; i < rapid.items.length; i++) {
-    if (!rapid.reviewed.has(rapid.items[i].id)) {
+    if (!rapid.reviewed.has(/** @type {RapidPhoto} */ (rapid.items[i]).id)) {
       rapid.currentIndex = i;
       return;
     }
   }
   for (var j = 0; j < rapid.currentIndex; j++) {
-    if (!rapid.reviewed.has(rapid.items[j].id)) {
+    if (!rapid.reviewed.has(/** @type {RapidPhoto} */ (rapid.items[j]).id)) {
       rapid.currentIndex = j;
       return;
     }
@@ -82,7 +85,7 @@ function advanceToNext() {
 
 function undoLast() {
   if (!rapid.history.length || rapid.applying) return;
-  var entry = rapid.history.pop();
+  var entry = /** @type {RapidHistory} */ (rapid.history.pop());
   setZone(entry.id, entry.prevZone);
   if (entry.prevReviewed) rapid.reviewed.add(entry.id);
   else rapid.reviewed.delete(entry.id);
@@ -93,6 +96,7 @@ function undoLast() {
   renderAll();
 }
 
+/** @param {number} id */
 function selectPhoto(id) {
   var idx = rapid.items.findIndex(function(p) { return p.id === id; });
   if (idx >= 0) {

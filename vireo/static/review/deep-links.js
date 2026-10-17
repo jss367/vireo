@@ -11,7 +11,7 @@ function applyReviewQueryParams() {
   // offering a bare Accept it can't honour. Landing on the full workspace
   // queue would make the user hunt for the photo they just clicked, so the
   // deep link narrows Review to it.
-  var qsPhoto = parseInt(qs.get('photo_id'), 10);
+  var qsPhoto = parseInt(qs.get('photo_id') || '', 10);
   if (!isNaN(qsPhoto)) currentPhotoIdFilter = qsPhoto;
 }
 
@@ -22,13 +22,13 @@ function applyReviewQueryParams() {
 // fallback must stay an *append into* the body, never a sibling of it (a
 // sibling of <body> never renders): a silent no-op is exactly the failure mode
 // these pills exist to prevent.
-function insertFilterPill(pill) {
-  var row = document.getElementById('reviewFilterPills');
+/** @param {HTMLElement} pill */ function insertFilterPill(pill) {
+  var row = /** @type {HTMLElement} */ (document.getElementById('reviewFilterPills'));
   (row || document.body).appendChild(pill);
 }
 
 function renderFingerprintFilterPill() {
-  var existing = document.getElementById('fpFilterPill');
+  var existing = /** @type {HTMLElement} */ (document.getElementById('fpFilterPill'));
   if (existing) existing.remove();
   if (!currentLabelsFingerprint) return;
   var pill = document.createElement('div');
@@ -40,7 +40,7 @@ function renderFingerprintFilterPill() {
     escapeHtml(currentLabelsFingerprint.substring(0, 12)) +
     '</code> <a href="#" id="fpFilterClear" style="color:inherit;text-decoration:none;">×</a>';
   insertFilterPill(pill);
-  document.getElementById('fpFilterClear').addEventListener('click', function(e) {
+  /** @type {HTMLElement} */ (document.getElementById('fpFilterClear')).addEventListener('click', function(e) {
     e.preventDefault();
     currentLabelsFingerprint = null;
     var url = new URL(window.location.href);
@@ -52,7 +52,7 @@ function renderFingerprintFilterPill() {
 }
 
 function renderPhotoFilterPill() {
-  var existing = document.getElementById('photoFilterPill');
+  var existing = /** @type {HTMLElement} */ (document.getElementById('photoFilterPill'));
   if (existing) existing.remove();
   if (currentPhotoIdFilter == null) return;
   // Without this pill a one-photo queue reads as "Review is empty" — the
@@ -66,7 +66,7 @@ function renderPhotoFilterPill() {
     '<a href="#" id="photoFilterClear" style="color:inherit;text-decoration:none;">' +
     'show all ×</a>';
   insertFilterPill(pill);
-  document.getElementById('photoFilterClear').addEventListener('click', function(e) {
+  /** @type {HTMLElement} */ (document.getElementById('photoFilterClear')).addEventListener('click', function(e) {
     e.preventDefault();
     currentPhotoIdFilter = null;
     var url = new URL(window.location.href);

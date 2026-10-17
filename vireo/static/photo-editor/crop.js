@@ -1,9 +1,9 @@
 // Crop box, crop fields, rotate/flip/straighten, aspect ratios, and committing a crop.
 // Classic page script; load boot.js after all definitions.
 
-function renderCropBox(forceInputs) {
-  var img = document.getElementById('editorImg');
-  var box = document.getElementById('editorCropBox');
+/** @param {boolean=} forceInputs */ function renderCropBox(forceInputs) {
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
+  var box = /** @type {HTMLElement} */ (document.getElementById('editorCropBox'));
   if (!box) return;
   var crop = editorState.showBefore
     ? Object.assign({x: 0, y: 0, w: 1, h: 1}, editorState.savedRecipe.crop || {})
@@ -11,13 +11,13 @@ function renderCropBox(forceInputs) {
   var showCropBox = editorState.cropEditing && !editorState.showBefore &&
     editorImageMatchesZoomRecipe(img);
   box.style.display = showCropBox ? '' : 'none';
-  var editBtn = document.getElementById('editCropBtn');
+  var editBtn = /** @type {HTMLButtonElement} */ (document.getElementById('editCropBtn'));
   if (editBtn) {
     editBtn.disabled = !!editorState.loading || !!editorState.showBefore || editorState.cropEditing;
     editBtn.classList.toggle('active', editorState.cropEditing);
   }
-  ['x', 'y', 'w', 'h'].forEach(function(key) {
-    var input = document.getElementById('crop' + key.toUpperCase());
+  /** @type {(keyof EditorCrop)[]} */ (['x', 'y', 'w', 'h']).forEach(function(key) {
+    var input = /** @type {HTMLInputElement} */ (document.getElementById('crop' + key.toUpperCase()));
     if (!input) return;
     // While the user is typing in a field, don't overwrite it from a stray
     // redraw — but a forced pass (after commit) snaps it to the clamped value.
@@ -47,7 +47,7 @@ function beginCropEdit() {
   updatePreview();
 }
 
-function setCropField(key, raw) {
+/** @param {keyof EditorCrop} key @param {string} raw */ function setCropField(key, raw) {
   if (editorState.loading || editorState.showBefore) return;
   var reopenedCrop = activateCropEditing();
   var v = Number(raw);
@@ -56,7 +56,7 @@ function setCropField(key, raw) {
   var crop = cloneRecipe({crop: ensureCrop(editorState.recipe)}).crop;
   crop[key] = v;
   if (editorState.cropAspect && (key === 'w' || key === 'h')) {
-    var img = document.getElementById('editorImg');
+    var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
     var dims = editorNativeRecipeDimensions(editorState.recipe || {}, false);
     var useLoadedImage = img && img.clientWidth && img.clientHeight &&
       editorImageMatchesZoomRecipe(img);
@@ -83,7 +83,7 @@ function setCropField(key, raw) {
 }
 
 function currentCropAspect() {
-  var img = document.getElementById('editorImg');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
   var dims = editorNativeRecipeDimensions(editorState.recipe || {}, false);
   var useLoadedImage = img && img.clientWidth && img.clientHeight &&
     editorImageMatchesZoomRecipe(img);
@@ -95,7 +95,7 @@ function currentCropAspect() {
   return Number.isFinite(aspect) && aspect > 0 ? aspect : null;
 }
 
-function cropBoxForAspect(crop, normalizedRatio) {
+/** @param {EditorCrop} crop @param {number} normalizedRatio */ function cropBoxForAspect(crop, normalizedRatio) {
   var current = clampCrop(crop);
   if (!Number.isFinite(normalizedRatio) || normalizedRatio <= 0) return current;
   var centerX = current.x + current.w / 2;
@@ -120,7 +120,7 @@ function cropBoxForAspect(crop, normalizedRatio) {
   });
 }
 
-function markChanged(render) {
+/** @param {boolean=} render */ function markChanged(render) {
   if (editorState.loading) return;
   recordEditorHistory();
   var wasShowingBefore = editorState.showBefore;
@@ -139,7 +139,7 @@ function markChanged(render) {
   }
 }
 
-function rotateRecipe(delta) {
+/** @param {number} delta */ function rotateRecipe(delta) {
   var crop = ensureCrop(editorState.recipe);
   var current = Number(editorState.recipe.rotation || 0);
   var next = (current + delta) % 360;
@@ -155,7 +155,7 @@ function rotateRecipe(delta) {
   markChanged(true);
 }
 
-function flipRecipe(axis) {
+/** @param {keyof EditorFlip} axis */ function flipRecipe(axis) {
   var crop = ensureCrop(editorState.recipe);
   var flip = editorState.recipe.flip || {};
   flip[axis] = !flip[axis];
@@ -164,22 +164,22 @@ function flipRecipe(axis) {
   markChanged(true);
 }
 
-function setStraighten(value) {
+/** @param {string} value */ function setStraighten(value) {
   var v = Number(value);
   if (!Number.isFinite(v)) v = 0;
   v = Math.max(-45, Math.min(45, v));
   editorState.recipe.straighten = v;
-  document.getElementById('straightenValue').textContent = v.toFixed(1);
+  /** @type {HTMLElement} */ (document.getElementById('straightenValue')).textContent = v.toFixed(1);
   markChanged(true);
 }
 
 function updateAspectButtons() {
-  document.getElementById('rememberCropRatio').checked = cropRatioPreference.enabled;
-  var map = { aspect32Btn: 1.5, aspect43Btn: 1.3333333333, aspect11Btn: 1 };
+  /** @type {HTMLInputElement} */ (document.getElementById('rememberCropRatio')).checked = cropRatioPreference.enabled;
+  /** @type {Record<string,number>} */ var map = { aspect32Btn: 1.5, aspect43Btn: 1.3333333333, aspect11Btn: 1 };
   setButtonActive('aspectLockBtn', !!editorState.cropAspect);
   setButtonDisabled('aspectLockBtn', !!editorState.showBefore || !!editorState.loading);
   Object.keys(map).forEach(function(id) {
-    setButtonActive(id, Math.abs(Number(editorState.cropAspect || 0) - map[id]) < 0.0001);
+    setButtonActive(id, Math.abs(Number(editorState.cropAspect || 0) - (map[id] || 0)) < 0.0001);
     setButtonDisabled(id, !!editorState.showBefore || !!editorState.loading);
   });
 }
@@ -193,10 +193,10 @@ function resetCrop() {
   markChanged(reopenedCrop);
 }
 
-function setAspect(aspect) {
+/** @param {number} aspect */ function setAspect(aspect) {
   if (editorState.loading || editorState.showBefore) return;
   var reopenedCrop = activateCropEditing();
-  var img = document.getElementById('editorImg');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
   var dims = editorNativeRecipeDimensions(editorState.recipe || {}, false);
   var useLoadedImage = !reopenedCrop && img && img.clientWidth &&
     img.clientHeight && editorImageMatchesZoomRecipe(img);
@@ -238,7 +238,7 @@ function toggleAspectLock() {
 }
 
 function commitCropView() {
-  var saveBtn = document.getElementById('saveBtn');
+  var saveBtn = /** @type {HTMLButtonElement} */ (document.getElementById('saveBtn'));
   if (saveBtn && !saveBtn.disabled) {
     saveRecipe();
     return;

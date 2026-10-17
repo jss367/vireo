@@ -3,9 +3,9 @@
 
 /* ---------- Photo Move ---------- */
 async function loadPhotosForFolder() {
-  var sel = document.getElementById('photoFolderSelect');
+  var sel = /** @type {HTMLSelectElement} */ (document.getElementById('photoFolderSelect'));
   var fid = parseInt(sel.value);
-  var container = document.getElementById('photoGridContainer');
+  var container = /** @type {HTMLElement} */ (document.getElementById('photoGridContainer'));
   var seq = ++photoLoadSeq;
   photoList = [];
   selectedPhotos.clear();
@@ -22,9 +22,9 @@ async function loadPhotosForFolder() {
   try {
     var page = 1;
     var total = null;
-    var loadedPhotos = [];
+    /** @type {MovePhoto[]} */ var loadedPhotos = [];
     while (total === null || loadedPhotos.length < total) {
-      var data = await safeFetch(
+      /** @type {{photos?: MovePhoto[], total?: number}} */ var data = await safeFetch(
         '/api/photos?folder_id=' + encodeURIComponent(fid) +
         '&per_page=500&page=' + page
       );
@@ -54,7 +54,7 @@ async function loadPhotosForFolder() {
 }
 
 function renderPhotoGrid() {
-  var container = document.getElementById('photoGridContainer');
+  var container = /** @type {HTMLElement} */ (document.getElementById('photoGridContainer'));
   var html = '<div class="photo-grid">';
   photoList.forEach(function(p, idx) {
     var selClass = selectedPhotos.has(p.id) ? ' selected' : '';
@@ -68,6 +68,7 @@ function renderPhotoGrid() {
   container.innerHTML = html;
 }
 
+/** @param {MouseEvent} e @param {number} id @param {number} idx */
 function handlePhotoClick(e, id, idx) {
   e.preventDefault();
   if (e.shiftKey && lastSelectedIdx >= 0) {
@@ -75,7 +76,7 @@ function handlePhotoClick(e, id, idx) {
     var start = Math.min(lastSelectedIdx, idx);
     var end = Math.max(lastSelectedIdx, idx);
     for (var i = start; i <= end; i++) {
-      if (photoList[i]) selectedPhotos.add(photoList[i].id);
+      var photo = photoList[i]; if (photo) selectedPhotos.add(photo.id);
     }
   } else if (e.metaKey || e.ctrlKey) {
     // Toggle
@@ -92,8 +93,8 @@ function handlePhotoClick(e, id, idx) {
   lastSelectedIdx = idx;
 
   // Update card highlights
-  document.querySelectorAll('#photoGridContainer .grid-card').forEach(function(el) {
-    var cardId = parseInt(el.dataset.id);
+  document.querySelectorAll(/** @type {'.grid-card'} */ ('#photoGridContainer .grid-card')).forEach(function(el) {
+    var cardId = parseInt(el.getAttribute('data-id') || '');
     el.classList.toggle('selected', selectedPhotos.has(cardId));
   });
 
@@ -103,36 +104,36 @@ function handlePhotoClick(e, id, idx) {
 function clearPhotoSelection() {
   selectedPhotos.clear();
   lastSelectedIdx = -1;
-  document.querySelectorAll('#photoGridContainer .grid-card').forEach(function(el) {
+  document.querySelectorAll(/** @type {'.grid-card'} */ ('#photoGridContainer .grid-card')).forEach(function(el) {
     el.classList.remove('selected');
   });
   updatePhotoSelectionUI();
 }
 
 function updatePhotoSelectionUI() {
-  var bar = document.getElementById('photoSelectionBar');
-  var btn = document.getElementById('photoMoveBtn');
+  var bar = /** @type {HTMLElement} */ (document.getElementById('photoSelectionBar'));
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('photoMoveBtn'));
   var count = selectedPhotos.size;
 
   if (count > 0) {
     bar.style.display = 'flex';
-    document.getElementById('photoSelCount').textContent = count + ' photo' + (count !== 1 ? 's' : '') + ' selected';
+    /** @type {HTMLElement} */ (document.getElementById('photoSelCount')).textContent = count + ' photo' + (count !== 1 ? 's' : '') + ' selected';
   } else {
     bar.style.display = 'none';
   }
 
-  var dest = document.getElementById('photoDestInput').value.trim();
+  var dest = /** @type {HTMLInputElement} */ (document.getElementById('photoDestInput')).value.trim();
   btn.disabled = !(count > 0 && dest && moveVisibilityReady);
   refreshMoveVisibility(Array.from(selectedPhotos)).catch(function() {});
 }
 
 async function startPhotoMove() {
   var ids = Array.from(selectedPhotos);
-  var dest = document.getElementById('photoDestInput').value.trim();
+  var dest = /** @type {HTMLInputElement} */ (document.getElementById('photoDestInput')).value.trim();
   if (ids.length === 0 || !dest || !moveVisibilityReady) return;
   var names;
   try { names = await refreshMoveVisibility(ids); } catch (e) { return; }
-  var keepVisible = document.getElementById('moveKeepVisible').checked;
+  var keepVisible = /** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible')).checked;
   var visibilityText = names.length ? ' Other workspaces: ' + names.join(', ') +
     (keepVisible ? '. Keep moved photos visible there.' : '. Allow removal of their visibility there.') : '';
 
@@ -145,6 +146,7 @@ async function startPhotoMove() {
   );
 }
 
+/** @param {number[]} photoIds @param {string} destination @param {boolean} keepVisible */
 async function executePhotoMove(photoIds, destination, keepVisible) {
   try {
     var resp = await safeFetch('/api/jobs/move-photos', {

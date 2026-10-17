@@ -41,7 +41,7 @@ def start_filter_bar(page, delayed_endpoint, stored_scope=None):
             getItem: () => scope, setItem: () => {},
           }});
         }""", stored_scope)
-    for name in ['vireo-search.js', 'vireo-filter.js']:
+    for name in ['vireo-utils.js', 'vireo-search.js', 'vireo-filter.js']:
         page.add_script_tag(path=str(ROOT / 'vireo/static' / name))
     page.evaluate('''() => {
       window.filterInit = VireoFilter.init({root: '#vireoFilterBar', page: 'browse'});

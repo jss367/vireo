@@ -2,7 +2,7 @@
 // the ?since= URL parameter.
 // Classic page script; load boot.js after all definitions.
 
-function photoThumbnailUrl(p) {
+/** @param {MissPhoto} p */ function photoThumbnailUrl(p) {
   if (!p || p.id == null) return '';
   return window.vireoThumbnailUrl
     ? window.vireoThumbnailUrl(p)
@@ -14,7 +14,7 @@ function photoThumbnailUrl(p) {
  * where x/y/w/h are normalized [0,1] image coordinates.
  * Returns null if missing or unparseable.
  */
-function parseDetectionBox(raw) {
+/** @param {MissPhoto["detection_box"]} raw */ function parseDetectionBox(raw) {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   try {
@@ -27,7 +27,7 @@ function parseDetectionBox(raw) {
 }
 
 /* ---------- Sorting: burst_id first, then filename ---------- */
-function sortPhotos(photos) {
+/** @param {MissPhoto[]} photos */ function sortPhotos(photos) {
   return photos.slice().sort(function(a, b) {
     var ab = a.burst_id || '';
     var bb = b.burst_id || '';

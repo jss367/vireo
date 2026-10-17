@@ -14,7 +14,7 @@ installMissSliderHandlers();
 var missSince = getSinceParam();
 VireoFilter.init({
   page: 'misses',
-  root: document.getElementById('vireoFilterBar'),
+  root: /** @type {HTMLElement} */ (document.getElementById('vireoFilterBar')),
   scopeLabel: missSince
     ? 'Misses \u00b7 Current pipeline run'
     : 'Misses \u00b7 Detected misses',

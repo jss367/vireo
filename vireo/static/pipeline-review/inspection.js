@@ -3,25 +3,28 @@
 
 // -- Photo inspection --
 
+/** @param {number} photoId */
 function findPhotoInResults(photoId) {
   if (!pipelineResults) return null;
-  for (var i = 0; i < pipelineResults.photos.length; i++) {
-    if (pipelineResults.photos[i].id === photoId) return pipelineResults.photos[i];
+  for (var i = 0; i < currentReviewResults().photos.length; i++) {
+    if (requireReviewValue(currentReviewResults().photos[i]).id === photoId) return currentReviewResults().photos[i];
   }
   return null;
 }
 
+/** @param {number} photoId */
 function findEncounterForPhoto(photoId) {
   if (!pipelineResults) return null;
-  for (var i = 0; i < pipelineResults.encounters.length; i++) {
-    var enc = pipelineResults.encounters[i];
-    if (enc.photo_ids && enc.photo_ids.indexOf(photoId) >= 0) return enc;
+  for (var i = 0; i < currentReviewResults().encounters.length; i++) {
+    var enc = currentReviewResults().encounters[i];
+    if (requireReviewValue(enc).photo_ids && requireReviewValue(enc).photo_ids.indexOf(photoId) >= 0) return enc;
   }
   return null;
 }
 
-var inspectPhotoId = null;
+/** @type {number | null} */ var inspectPhotoId = null;
 
+/** @param {KeyboardEvent} e @param {string} key */
 function pipelineReviewBareKey(e, key) {
   return !e.ctrlKey && !e.metaKey && !e.altKey && e.key && e.key.toLowerCase() === key;
 }
@@ -30,6 +33,7 @@ function pipelineReviewBareKey(e, key) {
 // filmstrip, algorithm-trace links) goes through here, so the scope guard
 // keeps a photo the Folder/Collection scope hides from becoming
 // inspectPhotoId, which getActiveSelection() and the P/X shortcuts target.
+/** @param {number} photoId */
 function openInspect(photoId) {
   if (!isPhotoActionableInReviewScope(photoId)) return;
   var photo = findPhotoInResults(photoId);
@@ -46,15 +50,15 @@ function openInspect(photoId) {
   }
 
   var enc = findEncounterForPhoto(photoId);
-  var panel = document.getElementById('inspectPanel');
-  var overlay = document.getElementById('inspectOverlay');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('inspectPanel'));
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('inspectOverlay'));
   inspectPhotoId = photoId;
 
   var label = (photo.label || '').toLowerCase();
   var q = hasQualityScore(photo) ? Number(photo.quality_composite) : null;
 
   // Score components
-  var scores = [
+  /** @type {{key: 'focus_score' | 'exposure_score' | 'composition_score' | 'area_score' | 'noise_score'; name: string; weight: number; cls: string}[]} */ var scores = [
     {name: 'Focus', key: 'focus_score', weight: 0.45, cls: 'focus'},
     {name: 'Exposure', key: 'exposure_score', weight: 0.20, cls: 'exposure'},
     {name: 'Composition', key: 'composition_score', weight: 0.15, cls: 'composition'},
@@ -94,7 +98,7 @@ function openInspect(photoId) {
   // no burst data (burst-backed photos route to the GRM above), so encounter
   // scope is the only meaningful group here.
   var encPhotos = (enc && enc.photo_ids)
-    ? enc.photo_ids.map(function(pid) { return findPhotoInResults(pid); }).filter(Boolean)
+    ? enc.photo_ids.map(function(pid) { return findPhotoInResults(pid); }).filter((item) => item != null)
     : [];
   html += buildSpeciesPredictionsHtml(photo, buildBurstConsensus(encPhotos), 'Encounter consensus', minConfidence / 100);
 
@@ -103,7 +107,7 @@ function openInspect(photoId) {
     html += '<div class="score-waterfall">';
     html += '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Quality Score: ' + q.toFixed(3) + '</div>';
     scores.forEach(function(s) {
-      var val = photo[s.key] || 0;
+      var val = Number(requireReviewValue(photo)[s.key]) || 0;
       var weighted = val * s.weight;
       var pct = Math.round(val * 100);
       html += '<div class="score-waterfall-row">';
@@ -161,23 +165,24 @@ function openInspect(photoId) {
 }
 
 function closeInspect() {
-  document.getElementById('inspectOverlay').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('inspectOverlay')).classList.remove('open');
   document.removeEventListener('keydown', inspectKeyHandler);
   inspectPhotoId = null;
 }
 
+/** @param {KeyboardEvent} e */
 function inspectKeyHandler(e) {
-  if (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))) return;
+  if (e.target && (/** @type {HTMLElement} */ (e.target).isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(/** @type {HTMLElement} */ (e.target).tagName))) return;
   if (e.key === 'Escape') { closeInspect(); return; }
   if (pipelineReviewBareKey(e, 'p') || pipelineReviewBareKey(e, 'x')) {
     var flag = pipelineReviewBareKey(e, 'p') ? 'flagged' : 'rejected';
-    setPipelineReviewFlag(inspectPhotoId, flag);
+    if (inspectPhotoId != null) setPipelineReviewFlag(inspectPhotoId, flag);
     e.preventDefault();
     e.stopPropagation();
   }
 }
 
 function toggleMask() {
-  var overlay = document.getElementById('maskOverlay');
+  var overlay = /** @type {HTMLImageElement} */ (document.getElementById('maskOverlay'));
   if (overlay) overlay.classList.toggle('show');
 }

@@ -5,6 +5,21 @@ function isTauri() {
   return !!(window.__TAURI_INTERNALS__);
 }
 
+/** Obtain the current bridge at the invocation boundary, after mode checks. */
+function requireTauriBridge() {
+  var bridge = window.__TAURI_INTERNALS__;
+  if (!bridge) throw new Error('Native bridge is unavailable');
+  return bridge;
+}
+
+/** @param {unknown} error */
+function nativeErrorMessage(error) {
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+    return error.message;
+  }
+  return String(error);
+}
+
 /* ---------- Logging bridge ----------
    Forward webview-side logs and uncaught errors into the native log file
    (~/Library/Logs/com.vireo.app/Vireo.log on macOS) via tauri-plugin-log's
@@ -14,6 +29,7 @@ function isTauri() {
    browser these calls just go to the devtools console. */
 var TAURI_LOG_LEVEL = { trace: 1, debug: 2, info: 3, warn: 4, error: 5 };
 
+/** @param {'trace' | 'debug' | 'info' | 'warn' | 'error'} level @param {unknown} message */
 function tauriLog(level, message) {
   var msg = String(message);
   // Mirror to the devtools console regardless of environment.
@@ -25,7 +41,7 @@ function tauriLog(level, message) {
     // expects a numeric level (Trace=1 … Error=5). Swallow a rejected invoke
     // promise too: an uncaught rejection here would re-enter via the
     // unhandledrejection handler below and loop.
-    var p = window.__TAURI_INTERNALS__.invoke('plugin:log|log', {
+    var p = requireTauriBridge().invoke('plugin:log|log', {
       level: TAURI_LOG_LEVEL[level] || TAURI_LOG_LEVEL.info,
       message: msg,
     });
@@ -33,8 +49,11 @@ function tauriLog(level, message) {
   } catch (e) { /* swallow */ }
 }
 
+/** @param {unknown} message */
 function logInfo(message) { tauriLog('info', message); }
+/** @param {unknown} message */
 function logWarn(message) { tauriLog('warn', message); }
+/** @param {unknown} message */
 function logError(message) { tauriLog('error', message); }
 
 // Capture uncaught errors and unhandled promise rejections so they land in the
@@ -64,7 +83,8 @@ window.addEventListener('unhandledrejection', function(event) {
 async function pickDirectory(title, opts) {
   if (!isTauri()) return null;
   opts = opts || {};
-  var result = await window.__TAURI_INTERNALS__.invoke('plugin:dialog|open', {
+  /** @type {string | string[] | null} */
+  var result = await requireTauriBridge().invoke('plugin:dialog|open', {
     directory: true,
     multiple: !!opts.multiple,
     title: title || 'Select Folder',
@@ -77,13 +97,14 @@ async function pickDirectory(title, opts) {
  * Open a native file picker dialog.
  * @param {object} [opts] - Options
  * @param {string} [opts.title] - Dialog title
- * @param {Array} [opts.filters] - File type filters [{name: 'Name', extensions: ['ext']}]
+ * @param {{name: string, extensions: string[]}[]} [opts.filters] - File type filters [{name: 'Name', extensions: ['ext']}]
  * @returns {Promise<string|null>} Selected file path, or null if cancelled
  */
 async function pickFile(opts) {
   if (!isTauri()) return null;
   opts = opts || {};
-  var result = await window.__TAURI_INTERNALS__.invoke('plugin:dialog|open', {
+  /** @type {string | null} */
+  var result = await requireTauriBridge().invoke('plugin:dialog|open', {
     directory: false,
     multiple: false,
     title: opts.title || 'Select File',
@@ -110,11 +131,11 @@ async function openExternal(url) {
   }
   if (isTauri()) {
     try {
-      await window.__TAURI_INTERNALS__.invoke('open_external_url', { url: url });
+      await requireTauriBridge().invoke('open_external_url', { url: url });
       logInfo('openExternal: opened ' + url);
       return true;
     } catch (e) {
-      logError('openExternal failed for ' + url + ': ' + (e && e.message ? e.message : e));
+      logError('openExternal failed for ' + url + ': ' + nativeErrorMessage(e));
       return false;
     }
   }
@@ -126,12 +147,12 @@ async function openExternal(url) {
     return false;
   }
   try { win.opener = null; } catch (e) {}
-  win.location = url;
+  win.location.href = url;
   return true;
 }
 
 function _ensureExternalOpenModal() {
-  var modal = document.getElementById('externalOpenModal');
+  var modal = /** @type {HTMLElement} */ (document.getElementById('externalOpenModal'));
   if (modal) return modal;
   modal = document.createElement('div');
   modal.id = 'externalOpenModal';
@@ -151,12 +172,12 @@ function _ensureExternalOpenModal() {
       '</div>' +
     '</div>';
   document.body.appendChild(modal);
-  modal.querySelector('#externalOpenCloseBtn').addEventListener('click', closeExternalOpenFailure);
-  modal.querySelector('#externalOpenCopyBtn').addEventListener('click', function() {
-    copyExternalUrl(document.getElementById('externalOpenModalUrl').value);
+  /** @type {HTMLButtonElement} */ (modal.querySelector('#externalOpenCloseBtn')).addEventListener('click', closeExternalOpenFailure);
+  /** @type {HTMLButtonElement} */ (modal.querySelector('#externalOpenCopyBtn')).addEventListener('click', function() {
+    copyExternalUrl(/** @type {HTMLInputElement} */ (document.getElementById('externalOpenModalUrl')).value);
   });
-  modal.querySelector('#externalOpenRetryBtn').addEventListener('click', async function() {
-    var url = document.getElementById('externalOpenModalUrl').value;
+  /** @type {HTMLButtonElement} */ (modal.querySelector('#externalOpenRetryBtn')).addEventListener('click', async function() {
+    var url = /** @type {HTMLInputElement} */ (document.getElementById('externalOpenModalUrl')).value;
     if (await openExternal(url)) {
       closeExternalOpenFailure();
       if (typeof showToast === 'function') showToast('Opened in your browser.', 'success');
@@ -165,19 +186,21 @@ function _ensureExternalOpenModal() {
   return modal;
 }
 
+/** @param {string} url @param {string} [message] */
 function showExternalOpenFailure(url, message) {
   var modal = _ensureExternalOpenModal();
-  document.getElementById('externalOpenModalUrl').value = url || '';
-  document.getElementById('externalOpenModalMessage').textContent = message || 'Vireo stayed on this page. Retry or copy the URL below.';
+  /** @type {HTMLInputElement} */ (document.getElementById('externalOpenModalUrl')).value = url || '';
+  /** @type {HTMLElement} */ (document.getElementById('externalOpenModalMessage')).textContent = message || 'Vireo stayed on this page. Retry or copy the URL below.';
   modal.style.display = 'flex';
-  document.getElementById('externalOpenRetryBtn').focus();
+  /** @type {HTMLElement} */ (document.getElementById('externalOpenRetryBtn')).focus();
 }
 
 function closeExternalOpenFailure() {
-  var modal = document.getElementById('externalOpenModal');
+  var modal = /** @type {HTMLElement} */ (document.getElementById('externalOpenModal'));
   if (modal) modal.style.display = 'none';
 }
 
+/** @param {string} url */
 async function copyExternalUrl(url) {
   var copied = false;
   if (isTauri()) {
@@ -185,12 +208,12 @@ async function copyExternalUrl(url) {
       // Use the native system pasteboard in the packaged app. WebKit's
       // navigator.clipboard and execCommand paths can resolve/return true
       // without putting anything on the macOS clipboard.
-      await window.__TAURI_INTERNALS__.invoke('plugin:clipboard-manager|write_text', {
+      await requireTauriBridge().invoke('plugin:clipboard-manager|write_text', {
         text: url,
       });
       copied = true;
     } catch (e) {
-      logError('Native clipboard write failed: ' + (e && e.message ? e.message : e));
+      logError('Native clipboard write failed: ' + nativeErrorMessage(e));
     }
   }
   if (!copied && navigator.clipboard && navigator.clipboard.writeText) {
@@ -198,7 +221,7 @@ async function copyExternalUrl(url) {
       await navigator.clipboard.writeText(url);
       copied = true;
     } catch (e) {
-      logWarn('Web clipboard write failed: ' + (e && e.message ? e.message : e));
+      logWarn('Web clipboard write failed: ' + nativeErrorMessage(e));
     }
   }
   if (!copied) {
@@ -213,7 +236,7 @@ async function copyExternalUrl(url) {
     temp.focus();
     temp.select();
     try { copied = document.execCommand('copy'); } catch (copyError) {
-      logWarn('DOM clipboard fallback failed: ' + (copyError && copyError.message ? copyError.message : copyError));
+      logWarn('DOM clipboard fallback failed: ' + nativeErrorMessage(copyError));
     }
     temp.remove();
   }
@@ -223,12 +246,14 @@ async function copyExternalUrl(url) {
   return copied;
 }
 
+/** @param {string} url @param {string} [message] */
 async function openExternalWithRecovery(url, message) {
   var opened = await openExternal(url);
   if (!opened) showExternalOpenFailure(url, message);
   return opened;
 }
 
+/** @param {string} rawUrl */
 function _isExternalHttpUrl(rawUrl) {
   try {
     var parsed = new URL(rawUrl, window.location.href);
@@ -244,8 +269,8 @@ function _isExternalHttpUrl(rawUrl) {
 document.addEventListener('click', function(event) {
   if (event.defaultPrevented || event.button !== 0) return;
   var target = event.target;
-  var anchor = target && target.closest ? target.closest('a[href]') : null;
-  if (!anchor || !_isExternalHttpUrl(anchor.href)) return;
+  var anchor = target instanceof Element ? target.closest('a[href]') : null;
+  if (!(anchor instanceof HTMLAnchorElement) || !_isExternalHttpUrl(anchor.href)) return;
   event.preventDefault();
   openExternalWithRecovery(anchor.href);
 });
@@ -258,7 +283,7 @@ document.addEventListener('click', function(event) {
 async function checkForAppUpdate() {
   if (!isTauri()) return null;
   try {
-    return await window.__TAURI_INTERNALS__.invoke('check_for_update');
+    return await requireTauriBridge().invoke('check_for_update');
   } catch (e) {
     console.error('Update check failed:', e);
     return null;
@@ -272,7 +297,7 @@ async function checkForAppUpdate() {
 async function downloadAndInstallUpdate() {
   if (!isTauri()) return false;
   try {
-    await window.__TAURI_INTERNALS__.invoke('install_update');
+    await requireTauriBridge().invoke('install_update');
     return true;
   } catch (e) {
     console.error('Update install failed:', e);
@@ -287,7 +312,7 @@ async function downloadAndInstallUpdate() {
 async function relaunchApp() {
   if (!isTauri()) return;
   try {
-    await window.__TAURI_INTERNALS__.invoke('plugin:process|restart', {});
+    await requireTauriBridge().invoke('plugin:process|restart', {});
   } catch (e) {
     console.error('Relaunch failed:', e);
   }

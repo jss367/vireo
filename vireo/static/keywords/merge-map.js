@@ -2,7 +2,7 @@
 // point plus the kept one.
 // Classic page script; load boot.js after all definitions.
 
-function loadLeaflet() {
+/** @returns {Promise<KeywordLeaflet>} */ function loadLeaflet() {
   if (window._vireoLeafletPromise) return window._vireoLeafletPromise;
   window._vireoLeafletPromise = new Promise(function(resolve, reject) {
     if (window.L) { resolve(window.L); return; }
@@ -13,7 +13,7 @@ function loadLeaflet() {
     const script = document.createElement('script');
     script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
     script.async = true;
-    script.onload = function() { resolve(window.L); };
+    script.onload = function() { if (window.L) resolve(window.L); else reject(new Error('Could not load the map.')); };
     script.onerror = function() { reject(new Error('Could not load the map.')); };
     document.head.appendChild(script);
   });
@@ -23,8 +23,8 @@ function loadLeaflet() {
 /* Plot every selected keyword that has a point, plus the point the merge
    will keep, so "which of these is the right place" is answerable without
    leaving the dialog. */
-async function renderMergeMap(data) {
-  const points = [];
+/** @param {KeywordMergePreview} data */ async function renderMergeMap(data) {
+  /** @type {Array<{latitude:number;longitude:number;label:string;kept:boolean}>} */ const points = [];
   [data.target, ...data.sources].forEach(record => {
     if (record.latitude != null && record.longitude != null) {
       points.push({

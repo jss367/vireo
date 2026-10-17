@@ -3,14 +3,14 @@
    browse/*.js files in dependency order. */
 
 /* ---------- Infinite Scroll ---------- */
-var gridContainer = document.getElementById('gridContainer');
+var gridContainer = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
 var infiniteScrollObserverDisconnected = false;
 var infiniteScrollObserverIsNative = (
   typeof window.IntersectionObserver === 'function' &&
   String(window.IntersectionObserver).indexOf('[native code]') !== -1
 );
 var observer = new IntersectionObserver(function(entries) {
-  if (entries[0].isIntersecting) loadPhotos({ silent: photos.length > 0 });
+  if (entries[0]?.isIntersecting) loadPhotos({ silent: photos.length > 0 });
 }, { root: gridContainer, rootMargin: '3200px 0px' });
 
 var _observerObserve = observer.observe.bind(observer);
@@ -31,7 +31,7 @@ function rearmInfiniteScrollObserver() {
   // transition that may never occur.
   if (infiniteScrollObserverDisconnected) return;
   if (allLoaded || typeof observer === 'undefined') return;
-  var sentinel = document.getElementById('scrollSentinel');
+  var sentinel = /** @type {HTMLElement} */ (document.getElementById('scrollSentinel'));
   if (!sentinel) return;
   observer.unobserve(sentinel);
   observer.observe(sentinel);
@@ -46,7 +46,7 @@ function ensureViewportHydrated() {
   if (photos.length === 0) return;
   var tail = document.getElementById('gridTail');
   if (!tail || !tail.firstElementChild) return;
-  var contRect = document.getElementById('gridContainer').getBoundingClientRect();
+  var contRect = /** @type {HTMLElement} */ (document.getElementById('gridContainer')).getBoundingClientRect();
   var skelRect = tail.firstElementChild.getBoundingClientRect();
   if (skelRect.top - contRect.bottom <= 3200) loadPhotos({ silent: true });
 }
@@ -59,7 +59,7 @@ function ensureViewportHydrated() {
 function ensurePreviousViewportHydrated() {
   if (loading || earliestPage <= 1 || anchorScanDepth > 0) return;
   if (photos.length === 0) return;
-  var grid = document.getElementById('grid');
+  var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var contRect = gridContainer.getBoundingClientRect();
   var gridRect = grid.getBoundingClientRect();
   if (gridRect.top >= contRect.top - 800) {
@@ -68,9 +68,9 @@ function ensurePreviousViewportHydrated() {
 }
 
 window.addEventListener('resize', function() {
-  var sidebar = document.getElementById('browseSidebar');
+  var sidebar = /** @type {HTMLElement} */ (document.getElementById('browseSidebar'));
   if (sidebar) setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, false);
-  var detailPanel = document.getElementById('detailPanel');
+  var detailPanel = /** @type {HTMLElement} */ (document.getElementById('detailPanel'));
   if (detailPanel) setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, false);
   // Column count and card heights change with width — re-estimate the tail
   requestAnimationFrame(updateGridTail);
@@ -105,7 +105,7 @@ function focusedBrowsePhotoId() {
 // target). Grid and lightbox navigation already resolve that focus to the
 // cover — getBrowseShortcutPhoto — so the resize correction does too, instead
 // of giving up and letting the visibly-selected cover reflow off screen.
-function renderedCardForFocus(photoId) {
+function renderedCardForFocus(/** @type {number | null} */ photoId) {
   if (photoId == null) return null;
   var card = getBrowsePhotoElement(photoId);
   if (card) return card;
@@ -127,7 +127,7 @@ function focusedCardBox() {
 }
 
 var gridViewportSize = gridContainer.clientWidth + 'x' + gridContainer.clientHeight;
-var gridSyncBannerHeight = document.getElementById('syncBanner').offsetHeight;
+var gridSyncBannerHeight = (document.getElementById('syncBanner')?.offsetHeight || 0);
 var focusedCardWasOnScreen = false;
 
 // Whether the focused card was on screen *before* the reflow. A ResizeObserver
@@ -162,7 +162,7 @@ if (window.ResizeObserver) {
   // in the same frame as the reflow — the card never visibly jumps away.
   new ResizeObserver(function() {
     var size = gridContainer.clientWidth + 'x' + gridContainer.clientHeight;
-    var bannerHeight = document.getElementById('syncBanner').offsetHeight;
+    var bannerHeight = (document.getElementById('syncBanner')?.offsetHeight || 0);
     var previousSize = gridViewportSize.split('x').map(Number);
     // Saving the first edit reveals the sync banner. That reduces the
     // viewport height, but must not recenter a partly visible selected photo
@@ -171,7 +171,7 @@ if (window.ResizeObserver) {
     var onlySyncBannerChanged = bannerHeight !== gridSyncBannerHeight
       && gridContainer.clientWidth === previousSize[0]
       && Math.abs(gridContainer.clientHeight + bannerHeight
-        - previousSize[1] - gridSyncBannerHeight) <= 1;
+        - (previousSize[1] || 0) - gridSyncBannerHeight) <= 1;
     gridSyncBannerHeight = bannerHeight;
     // A scrollbar appearing counts (it reflows the columns); anything that
     // leaves the viewport box alone cannot have moved the card out of view.
@@ -192,11 +192,11 @@ if (window.ResizeObserver) {
   // resize, which the observer above owns.
   new ResizeObserver(function() {
     noteFocusedCardVisibility();
-  }).observe(document.getElementById('grid'));
+  }).observe(/** @type {HTMLElement} */ (document.getElementById('grid')));
 }
 
 /* ---------- Scroll Position Tracking ---------- */
-var scrollTimer = null;
+/** @type {number | null} */ var scrollTimer = null;
 var lastGridScrollTop = gridContainer.scrollTop;
 gridContainer.addEventListener('scroll', function() {
   var nextScrollTop = gridContainer.scrollTop;

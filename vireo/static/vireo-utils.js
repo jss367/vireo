@@ -2,6 +2,7 @@
 
 window.Vireo = window.Vireo || {};
 window.Vireo.dom = window.Vireo.dom || {
+  /** @param {Element | null | undefined} element @param {string} state @param {string} [message] */
   setStatus: function(element, state, message) {
     if (!element) return;
     element.classList.remove('ok', 'warning', 'error', 'loading');
@@ -10,6 +11,7 @@ window.Vireo.dom = window.Vireo.dom || {
     element.setAttribute('role', state === 'error' ? 'alert' : 'status');
     element.setAttribute('aria-live', state === 'error' ? 'assertive' : 'polite');
   },
+  /** @param {Element | null | undefined} element */
   clear: function(element) {
     if (element) element.replaceChildren();
   },
@@ -25,6 +27,7 @@ window.Vireo.dom = window.Vireo.dom || {
 var VireoViewPreferences = (function() {
   var selector = '[data-view-preference]';
 
+  /** @param {Element | string | null | undefined} elementOrKey */
   function keyFor(elementOrKey) {
     if (typeof elementOrKey === 'string') return elementOrKey;
     return elementOrKey && elementOrKey.getAttribute
@@ -32,25 +35,29 @@ var VireoViewPreferences = (function() {
       : null;
   }
 
+  /** @param {Element | string | null | undefined} elementOrKey */
   function read(elementOrKey) {
     var key = keyFor(elementOrKey);
     if (!key) return null;
     try { return window.localStorage.getItem(key); } catch (e) { return null; }
   }
 
+  /** @param {Element | string | null | undefined} elementOrKey @param {unknown} value */
   function write(elementOrKey, value) {
     var key = keyFor(elementOrKey);
     if (!key) return;
     try { window.localStorage.setItem(key, String(value)); } catch (e) {}
   }
 
+  /** @param {HTMLInputElement | HTMLSelectElement} element @param {string | null | undefined} value @returns {value is string} */
   function validValue(element, value) {
     if (value === null || value === undefined) return false;
-    if (element.tagName === 'SELECT') {
-      return Array.prototype.some.call(element.options, function(option) {
+    if (element instanceof HTMLSelectElement) {
+      return Array.from(element.options).some(function(option) {
         return option.value === value;
       });
     }
+    if (!(element instanceof HTMLInputElement)) return true;
     if (element.type === 'checkbox') return value === '0' || value === '1';
     if (element.type === 'range' || element.type === 'number') {
       var parsed = Number(value);
@@ -61,26 +68,31 @@ var VireoViewPreferences = (function() {
     return true;
   }
 
+  /** @param {Element | null | undefined} element */
   function restore(element) {
-    if (!element) return false;
+    if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLSelectElement)) return false;
     var saved = read(element);
     if (!validValue(element, saved)) return false;
-    if (element.type === 'checkbox') element.checked = saved === '1';
+    if (element instanceof HTMLInputElement && element.type === 'checkbox') element.checked = saved === '1';
     else element.value = saved;
     return true;
   }
 
+  /** @param {Document | Element} [root] */
   function restoreAll(root) {
     var scope = root || document;
-    if (scope.matches && scope.matches(selector)) restore(scope);
+    if (scope instanceof Element && scope.matches(selector)) restore(scope);
     if (scope.querySelectorAll) scope.querySelectorAll(selector).forEach(restore);
   }
 
+  /** @param {EventTarget | null} element */
   function persist(element) {
-    if (!element || !element.matches || !element.matches(selector)) return;
-    write(element, element.type === 'checkbox' ? (element.checked ? '1' : '0') : element.value);
+    if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLSelectElement)) return;
+    if (!element.matches(selector)) return;
+    write(element, element instanceof HTMLInputElement && element.type === 'checkbox' ? (element.checked ? '1' : '0') : element.value);
   }
 
+  /** @param {Event} event */
   function onPreferenceEvent(event) {
     persist(event.target);
   }
@@ -114,13 +126,15 @@ var VireoViewPreferences = (function() {
  * attribute). test_shared_frontend_helpers.py keeps every page on this
  * definition; no other script may declare escapeHtml, escapeAttr or esc.
  */
+/** @param {unknown} str */
 function escapeHtml(str) {
   if (str == null) return '';
   return String(str).replace(/[&<>"']/g, function(ch) {
-    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch];
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch] || ch;
   });
 }
 
+/** @param {unknown} str */
 function escapeAttr(str) {
   return escapeHtml(str);
 }
@@ -132,20 +146,22 @@ function escapeAttr(str) {
  * integers; KB and MB get one decimal, GB and TB two. test_shared_frontend_helpers.py
  * keeps formatBytes to this definition.
  */
+/** @param {unknown} n */
 function formatBytes(n) {
   if (n == null) return '';
-  n = Number(n);
-  if (!isFinite(n)) return '';
-  if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
-  if (n < 1024 * 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
-  return (n / 1024 / 1024 / 1024 / 1024).toFixed(2) + ' TB';
+  var value = Number(n);
+  if (!isFinite(value)) return '';
+  if (value < 1024) return value + ' B';
+  if (value < 1024 * 1024) return (value / 1024).toFixed(1) + ' KB';
+  if (value < 1024 * 1024 * 1024) return (value / 1024 / 1024).toFixed(1) + ' MB';
+  if (value < 1024 * 1024 * 1024 * 1024) return (value / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  return (value / 1024 / 1024 / 1024 / 1024).toFixed(2) + ' TB';
 }
 
 var VireoTextInputs = (function() {
   var selector = 'input[type="text"], input[type="search"], input:not([type]), textarea';
 
+  /** @param {Element | null} el */
   function disableCorrection(el) {
     if (!el || !el.setAttribute) return;
     el.setAttribute('autocomplete', 'off');
@@ -154,9 +170,10 @@ var VireoTextInputs = (function() {
     el.setAttribute('spellcheck', 'false');
   }
 
+  /** @param {Document | Element | null} root */
   function apply(root) {
     if (!root || !root.querySelectorAll) return;
-    if (root.matches && root.matches(selector)) disableCorrection(root);
+    if (root instanceof Element && root.matches(selector)) disableCorrection(root);
     root.querySelectorAll(selector).forEach(disableCorrection);
   }
 
@@ -166,11 +183,11 @@ var VireoTextInputs = (function() {
     var observer = new MutationObserver(function(records) {
       records.forEach(function(record) {
         if (record.type === 'attributes') {
-          if (record.target && record.target.nodeType === 1) apply(record.target);
+          if (record.target && record.target instanceof Element) apply(record.target);
           return;
         }
         record.addedNodes.forEach(function(node) {
-          if (node.nodeType === 1) apply(node);
+          if (node instanceof Element) apply(node);
         });
       });
     });
@@ -195,10 +212,12 @@ var VireoTextInputs = (function() {
 })();
 
 var VireoTextSearch = (function() {
+  /** @param {string} ch */
   function isWordChar(ch) {
     return !!ch && (/[0-9]/.test(ch) || ch.toLowerCase() !== ch.toUpperCase());
   }
 
+  /** @param {string} value @param {string} token */
   function containsWholeToken(value, token) {
     var start = 0;
     while (true) {
@@ -212,6 +231,7 @@ var VireoTextSearch = (function() {
     }
   }
 
+  /** @param {unknown} value @param {unknown} token @param {TextSearchOptions} [options] */
   function tokenMatches(value, token, options) {
     if (value == null || token == null) return false;
     var text = String(value);
@@ -227,10 +247,12 @@ var VireoTextSearch = (function() {
     return text.indexOf(needle) !== -1;
   }
 
+  /** @param {unknown} query */
   function tokens(query) {
     return String(query || '').trim().split(/\s+/).filter(Boolean);
   }
 
+  /** @param {unknown | unknown[]} fields @param {unknown} query @param {TextSearchOptions} [options] */
   function matchesFields(fields, query, options) {
     var parts = tokens(query);
     if (!parts.length) return true;
@@ -242,6 +264,7 @@ var VireoTextSearch = (function() {
     });
   }
 
+  /** @param {string} prefix */
   function readOptions(prefix) {
     var matchCase = document.getElementById(prefix + 'MatchCaseBtn');
     var wholeWord = document.getElementById(prefix + 'WholeWordBtn');
@@ -251,17 +274,20 @@ var VireoTextSearch = (function() {
     };
   }
 
+  /** @param {Element | null} button @param {boolean | undefined} active */
   function applyButton(button, active) {
     if (!button) return;
     button.classList.toggle('active', !!active);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
 
+  /** @param {string} prefix @param {TextSearchOptions} options */
   function renderOptions(prefix, options) {
     applyButton(document.getElementById(prefix + 'MatchCaseBtn'), options.matchCase);
     applyButton(document.getElementById(prefix + 'WholeWordBtn'), options.wholeWord);
   }
 
+  /** @param {string} prefix @param {string} option @param {(options: TextSearchOptions) => void} [onChange] */
   function toggle(prefix, option, onChange) {
     var options = readOptions(prefix);
     if (option === 'match_case') options.matchCase = !options.matchCase;
@@ -271,6 +297,7 @@ var VireoTextSearch = (function() {
     return options;
   }
 
+  /** @param {URLSearchParams} params @param {TextSearchOptions} options @param {string} [matchCaseName] @param {string} [wholeWordName] */
   function appendParams(params, options, matchCaseName, wholeWordName) {
     if (!params || !options) return;
     if (options.matchCase) params.set(matchCaseName || 'match_case', '1');
@@ -297,11 +324,13 @@ var VireoPipelineConfig = (function() {
     return defaults.pipeline;
   }
 
+  /** @param {PipelineDefaults | null | undefined} pipeline @param {string} key */
   function pipelineValue(pipeline, key) {
     if (pipeline && pipeline[key] != null) return pipeline[key];
     return defaultPipeline()[key];
   }
 
+  /** @param {unknown} value @param {string} key */
   function asNumber(value, key) {
     var n = Number(value);
     if (!Number.isFinite(n)) {
@@ -310,10 +339,12 @@ var VireoPipelineConfig = (function() {
     return n;
   }
 
+  /** @param {unknown} value @param {string} key */
   function percent(value, key) {
     return Math.round(asNumber(value, key) * 100);
   }
 
+  /** @param {{pipeline?: PipelineDefaults} | null} [config] */
   function pipelineFromConfig(config) {
     if (!config) return defaultPipeline();
     if (typeof config.pipeline !== 'object' || config.pipeline === null) {
@@ -322,14 +353,17 @@ var VireoPipelineConfig = (function() {
     return config.pipeline;
   }
 
+  /** @param {unknown} threshold */
   function embeddingThresholdToDistancePercent(threshold) {
     return Math.round((1 - asNumber(threshold, 'burst_embedding_threshold')) * 100);
   }
 
+  /** @param {unknown} distancePercent */
   function embeddingDistancePercentToThreshold(distancePercent) {
     return 1 - asNumber(distancePercent, 'burst_embedding_distance') / 100;
   }
 
+  /** @param {{pipeline?: PipelineDefaults} | null} [config] */
   function buildSliderDefaults(config) {
     var p = pipelineFromConfig(config);
     return {

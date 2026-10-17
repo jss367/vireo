@@ -2,7 +2,7 @@
 // Classic page script; load boot.js after all definitions.
 
 /* ---------- Rules ---------- */
-var rulesList = [];
+/** @type {MoveRule[]} */ var rulesList = [];
 
 async function loadRules() {
   try {
@@ -10,12 +10,12 @@ async function loadRules() {
     rulesList = data || [];
     renderRules();
   } catch (e) {
-    document.getElementById('rulesList').innerHTML = '<div class="empty-state">Failed to load rules</div>';
+    /** @type {HTMLElement} */ (document.getElementById('rulesList')).innerHTML = '<div class="empty-state">Failed to load rules</div>';
   }
 }
 
 function renderRules() {
-  var container = document.getElementById('rulesList');
+  var container = /** @type {HTMLElement} */ (document.getElementById('rulesList'));
   if (rulesList.length === 0) {
     container.innerHTML = '<div class="empty-state">No move rules yet. Create one to get started.</div>';
     return;
@@ -23,7 +23,7 @@ function renderRules() {
 
   var html = '';
   rulesList.forEach(function(r) {
-    var criteria = {};
+    /** @type {MoveCriteria} */ var criteria = {};
     try { criteria = typeof r.criteria === 'string' ? JSON.parse(r.criteria) : (r.criteria || {}); } catch(e) {}
     var critSummary = buildCriteriaSummary(criteria);
 
@@ -46,6 +46,7 @@ function renderRules() {
   container.innerHTML = html;
 }
 
+/** @param {MoveCriteria} criteria */
 function buildCriteriaSummary(criteria) {
   var parts = [];
   if (criteria.rating_min) parts.push('Rating >= ' + criteria.rating_min);
@@ -57,11 +58,13 @@ function buildCriteriaSummary(criteria) {
   return parts.join(' | ');
 }
 
+/** @param {number} ruleId */
 function editRule(ruleId) {
   var rule = rulesList.find(function(r) { return r.id === ruleId; });
   if (rule) showRuleForm(rule);
 }
 
+/** @param {number} ruleId */
 async function deleteRule(ruleId) {
   showConfirm('Delete Rule', 'Are you sure you want to delete this rule? This cannot be undone.', async function() {
     try {
@@ -74,11 +77,13 @@ async function deleteRule(ruleId) {
   });
 }
 
+/** @param {number} ruleId */
 async function runRule(ruleId) {
-  var rule = rulesList.find(function(r) { return r.id === ruleId; });
-  if (!rule) return;
+  var foundRule = rulesList.find(function(r) { return r.id === ruleId; });
+  if (!foundRule) return;
+  const rule = foundRule;
 
-  var criteria = {};
+  /** @type {MoveCriteria} */ var criteria = {};
   try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : (rule.criteria || {}); } catch(e) {}
 
   // First, preview to get matching photo IDs
@@ -96,7 +101,7 @@ async function runRule(ruleId) {
 
     if (!moveVisibilityReady) return;
     var names = await refreshMoveVisibility(photoIds);
-    var keepVisible = document.getElementById('moveKeepVisible').checked;
+    var keepVisible = /** @type {HTMLInputElement} */ (document.getElementById('moveKeepVisible')).checked;
     showConfirm(
       'Run Rule: ' + rule.name,
       'Move ' + photoIds.length + ' matching photo' + (photoIds.length !== 1 ? 's' : '') + ' to "' + rule.destination + '"? Other workspaces: ' + (names.join(', ') || 'none') +

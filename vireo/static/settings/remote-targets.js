@@ -1,7 +1,7 @@
 // ---------- Remote targets (SSH) list ----------
 // Source-of-truth for the remote-target editor. Populated by loadConfig()
 // and read back on save via collectRemoteTargets().
-var _remoteTargetsState = [];
+/** @type {SettingsRemoteTarget[]} */ var _remoteTargetsState = [];
 
 function _genTargetId() {
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -10,30 +10,30 @@ function _genTargetId() {
 
 var _rtInputCss = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;';
 
-var _rtFolderInput = null;
-var _rtFolderBrowser = null;
+/** @type {HTMLInputElement|null} */ var _rtFolderInput = null;
+/** @type {VireoFolderBrowser|null} */ var _rtFolderBrowser = null;
 
 function setupSettingsFolderBrowser() {
   _rtFolderBrowser = new VireoFolderBrowser({
     overlayId: 'folderBrowser',
     modes: {
       local: {
-        title: function() { return 'Choose ' + _rtFolderInput.getAttribute('aria-label'); },
-        startPath: function() { return _rtFolderInput.value.trim(); },
+        title: function() { return 'Choose ' + _rtFolderInput?.getAttribute('aria-label'); },
+        startPath: function() { return _rtFolderInput?.value.trim() || ''; },
         onSelect: function(path) { _rtSelectFolder(_rtFolderInput, path); },
       },
     },
   });
 }
 
-function _rtSelectFolder(input, path) {
+/** @param {HTMLInputElement|null} input @param {string|null|undefined} path */ function _rtSelectFolder(input, path) {
   // A target may have been removed while a native dialog was open.
   if (!input || !input.isConnected || !path) return;
-  input.value = path;
+  input.value = String(path);
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-async function _rtBrowseFolder(input, button) {
+/** @param {HTMLInputElement} input @param {HTMLButtonElement} button */ async function _rtBrowseFolder(input, button) {
   button.disabled = true;
   try {
     if (typeof isTauri === 'function' && isTauri()) {
@@ -44,25 +44,25 @@ async function _rtBrowseFolder(input, button) {
       return;
     }
     _rtFolderInput = input;
-    _rtFolderBrowser.open('local');
+    _rtFolderBrowser?.open('local');
   } catch (e) {
-    showToast('Could not open folder picker: ' + e.message, 'error');
+    showToast('Could not open folder picker: ' + settingsErrorMessage(e), 'error');
   } finally {
     button.disabled = false;
   }
 }
 
-function _rtField(label, value, placeholder, onInput, opts) {
+/** @param {string} label @param {string|number|null|undefined} value @param {string} placeholder @param {(value:string)=>void} onInput @param {{flex?:string;width?:string;type?:string;mono?:boolean;folder?:boolean}=} opts */ function _rtField(label, value, placeholder, onInput, opts) {
   opts = opts || {};
   var wrap = document.createElement('div');
   wrap.style.cssText = 'display:flex;flex-direction:column;gap:3px;min-width:0;'
     + (opts.flex ? ('flex:' + opts.flex + ';') : '') + (opts.width ? ('width:' + opts.width + ';') : '');
   var lab = document.createElement('label');
-  lab.textContent = label;
+  lab.textContent = String(label);
   lab.style.cssText = 'font-size:11px;color:var(--text-dim);';
   var inp = document.createElement('input');
   inp.type = opts.type || 'text';
-  inp.value = (value == null ? '' : value);
+  inp.value = (String(value == null ? '' : value));
   inp.placeholder = placeholder || '';
   inp.setAttribute('aria-label', label);
   inp.title = inp.value;
@@ -78,7 +78,7 @@ function _rtField(label, value, placeholder, onInput, opts) {
     var browse = document.createElement('button');
     browse.type = 'button';
     browse.className = 'btn-sm';
-    browse.textContent = 'Browse…';
+    browse.textContent = String('Browse…');
     browse.setAttribute('aria-label', 'Browse for ' + label);
     browse.onclick = function() { _rtBrowseFolder(inp, browse); };
     row.append(inp, browse);
@@ -90,13 +90,13 @@ function _rtField(label, value, placeholder, onInput, opts) {
 }
 
 function renderRemoteTargets() {
-  var container = document.getElementById('cfgRemoteTargetsList');
+  var container = /** @type {HTMLElement} */ (document.getElementById('cfgRemoteTargetsList'));
   if (!container) return;
   container.replaceChildren();
   if (_remoteTargetsState.length === 0) {
     var empty = document.createElement('div');
     empty.style.cssText = 'color:var(--text-dim);font-size:12px;font-style:italic;';
-    empty.textContent = 'No remote targets configured.';
+    empty.textContent = String('No remote targets configured.');
     container.appendChild(empty);
     return;
   }
@@ -104,8 +104,8 @@ function renderRemoteTargets() {
     var card = document.createElement('div');
     card.style.cssText = 'border:1px solid var(--border-secondary);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px;background:var(--bg-secondary);';
 
-    var save = function(field) {
-      return function(v) { t[field] = v; saveConfig(); };
+    /** @param {keyof SettingsRemoteTarget} field */ var save = function(field) {
+      return /** @param {string} v */ function(v) { t[field] = v; saveConfig(); };
     };
 
     var r1 = document.createElement('div');
@@ -134,7 +134,7 @@ function renderRemoteTargets() {
     r4.style.cssText = 'display:flex;align-items:center;gap:10px;';
     var testBtn = document.createElement('button');
     testBtn.type = 'button';
-    testBtn.textContent = 'Test connection';
+    testBtn.textContent = String('Test connection');
     testBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;';
     var statusEl = document.createElement('span');
     statusEl.style.cssText = 'font-size:12px;color:var(--text-dim);flex:1;';
@@ -142,7 +142,7 @@ function renderRemoteTargets() {
 
     var removeBtn = document.createElement('button');
     removeBtn.type = 'button';
-    removeBtn.textContent = 'Remove';
+    removeBtn.textContent = String('Remove');
     removeBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;';
     removeBtn.addEventListener('click', function() {
       _remoteTargetsState.splice(i, 1);
@@ -172,8 +172,8 @@ function addRemoteTarget() {
 function collectRemoteTargets() {
   // Mirror config._coerce_remote_target: drop entries missing host/user/
   // remote_path; coerce numeric fields. Keep ids stable across edits.
-  var asStr = function(v) { return typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()); };
-  var asInt = function(v, d) { var n = parseInt(v, 10); return isNaN(n) ? d : n; };
+  /** @param {unknown} v */ var asStr = function(v) { return typeof v === 'string' ? v.trim() : (v == null ? '' : String(v).trim()); };
+  /** @param {number|string} v @param {number} d */ var asInt = function(v, d) { var n = parseInt(String(v), 10); return isNaN(n) ? d : n; };
   return _remoteTargetsState
     .map(function(t) {
       return {
@@ -188,12 +188,12 @@ function collectRemoteTargets() {
     .filter(function(t) { return t.host && t.user && t.remote_path; });
 }
 
-async function testRemoteTarget(i, btn, statusEl) {
+/** @param {number} i @param {HTMLButtonElement} btn @param {HTMLElement} statusEl */ async function testRemoteTarget(i, btn, statusEl) {
   var t = _remoteTargetsState[i];
   btn.disabled = true;
   var orig = btn.textContent;
-  btn.textContent = 'Testing…';
-  statusEl.textContent = 'Connecting…';
+  btn.textContent = String('Testing…');
+  statusEl.textContent = String('Connecting…');
   statusEl.style.color = 'var(--text-dim)';
   try {
     var res = await safeFetch('/api/remote-targets/test', {
@@ -211,9 +211,9 @@ async function testRemoteTarget(i, btn, statusEl) {
     var archiveRootMissing = !!(res.ok && !archiveRootInvalid && !archiveRootOffline
       && res.archive_root && res.archive_root_present === false);
     var archiveRootProblem = archiveRootInvalid || archiveRootOffline || archiveRootMissing;
-    statusEl.textContent = (res.ok && !archiveRootProblem ? '✓ ' : '⚠ ') + (res.message || '')
+    statusEl.textContent = String((res.ok && !archiveRootProblem ? '✓ ' : '⚠ ') + (res.message || '')
       + (res.mount_path && !res.mount_present
-          ? ' (mount path not currently present — fine if the NAS just isn’t mounted right now.)' : '');
+          ? ' (mount path not currently present — fine if the NAS just isn’t mounted right now.)' : ''));
     statusEl.style.color = res.ok && !archiveRootProblem ? 'var(--success, #4caf50)' : 'var(--warning)';
     appendRsyncInstallCommands(statusEl, res.rsync_install_commands);
     // Only a missing-but-valid root can be fixed by creating it; an invalid
@@ -223,7 +223,7 @@ async function testRemoteTarget(i, btn, statusEl) {
       statusEl.appendChild(document.createTextNode(' '));
       var mk = document.createElement('button');
       mk.type = 'button';
-      mk.textContent = 'Create folder';
+      mk.textContent = String('Create folder');
       mk.style.cssText = 'background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;';
       mk.onclick = async function() {
         mk.disabled = true;
@@ -235,18 +235,18 @@ async function testRemoteTarget(i, btn, statusEl) {
           // Re-run the test so the status reflects the folder now existing.
           await testRemoteTarget(i, btn, statusEl);
         } catch (e) {
-          statusEl.textContent = '⚠ Could not create ' + res.archive_root + ': '
-            + (e && e.message ? e.message : 'unknown error');
+          statusEl.textContent = String('⚠ Could not create ' + res.archive_root + ': '
+            + (e && settingsErrorMessage(e) ? settingsErrorMessage(e) : 'unknown error'));
           statusEl.style.color = 'var(--warning)';
         }
       };
       statusEl.appendChild(mk);
     }
   } catch (e) {
-    statusEl.textContent = '⚠ ' + (e && e.message ? e.message : 'Test failed.');
+    statusEl.textContent = String('⚠ ' + (e && settingsErrorMessage(e) ? settingsErrorMessage(e) : 'Test failed.'));
     statusEl.style.color = 'var(--warning)';
   } finally {
     btn.disabled = false;
-    btn.textContent = orig;
+    btn.textContent = String(orig);
   }
 }

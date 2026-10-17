@@ -3,17 +3,19 @@
 
 // -- Threshold tuning --
 
-var _reflowTimer = null;
-var _regroupTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var _reflowTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var _regroupTimer = null;
 
-var SCORING_DEFAULTS = {};
-var GROUPING_DEFAULTS = {};
+/** @type {Record<string,number>} */ var SCORING_DEFAULTS = {};
+/** @type {Record<string,number>} */ var GROUPING_DEFAULTS = {};
 
+/** @param {string} id */
 function sliderVal(id) {
-  var el = document.getElementById(id);
+  var el = /** @type {HTMLInputElement} */ (document.getElementById(id));
   return el ? parseFloat(el.value) : 0;
 }
 
+/** @param {HTMLInputElement} slider */
 function updateSliderDisplay(slider) {
   var id = slider.id;
   var valEl = document.getElementById('val' + id.substring(2));
@@ -28,7 +30,7 @@ function updateSliderDisplay(slider) {
   if (INT_SLIDERS.indexOf(id) >= 0) {
     valEl.textContent = slider.value;
   } else {
-    valEl.textContent = (slider.value / 100).toFixed(2);
+    valEl.textContent = (Number(slider.value) / 100).toFixed(2);
   }
 }
 
@@ -46,8 +48,8 @@ function getScoringConfig() {
 }
 
 function getGroupingConfig() {
-  function pct(id) { return parseFloat(document.getElementById(id).value) / 100.0; }
-  function num(id) { return parseFloat(document.getElementById(id).value); }
+  function pct(/** @type {string} */ id) { return parseFloat(/** @type {HTMLInputElement} */ (document.getElementById(id)).value) / 100.0; }
+  function num(/** @type {string} */ id) { return parseFloat(/** @type {HTMLInputElement} */ (document.getElementById(id)).value); }
   return {
     w_time: pct('slWTime'),
     w_subj: pct('slWSubj'),
@@ -68,19 +70,21 @@ function getGroupingConfig() {
   };
 }
 
+/** @param {HTMLInputElement} slider */
 function onScoringChange(slider) {
   updateSliderDisplay(slider);
   // Debounce: wait 250ms after last change before calling reflow
-  clearTimeout(_reflowTimer);
-  var indicator = document.getElementById('reflowIndicator');
+  clearTimeout(_reflowTimer || undefined);
+  var indicator = /** @type {HTMLElement} */ (document.getElementById('reflowIndicator'));
   if (indicator) indicator.style.display = 'block';
   _reflowTimer = setTimeout(doReflow, 250);
 }
 
+/** @param {HTMLInputElement} slider */
 function onGroupingChange(slider) {
   updateSliderDisplay(slider);
-  clearTimeout(_regroupTimer);
-  var indicator = document.getElementById('reflowIndicator');
+  clearTimeout(_regroupTimer || undefined);
+  var indicator = /** @type {HTMLElement} */ (document.getElementById('reflowIndicator'));
   if (indicator) { indicator.style.display = 'block'; indicator.textContent = 'Regrouping...'; }
   _regroupTimer = setTimeout(doRegroupLive, 500);
 }
@@ -89,7 +93,7 @@ function doReflow() {
   var config = getScoringConfig();
   var body = reviewScopePayload(config);
   if (!body) {
-    var noBodyIndicator = document.getElementById('reflowIndicator');
+    var noBodyIndicator = /** @type {HTMLElement} */ (document.getElementById('reflowIndicator'));
     if (noBodyIndicator) noBodyIndicator.style.display = 'none';
     return;
   }
@@ -107,14 +111,14 @@ function doReflow() {
   }, { toast: false })
   .then(function(data) {
     if (seq !== reviewScopeRequestSeq) return;
-    var indicator = document.getElementById('reflowIndicator');
+    var indicator = /** @type {HTMLElement} */ (document.getElementById('reflowIndicator'));
     if (indicator) indicator.style.display = 'none';
     if (!data || data.error) return;
     applyReviewResults(data, scopedCacheInfoFor(data));
   })
   .catch(function() {
     if (seq !== reviewScopeRequestSeq) return;
-    var indicator = document.getElementById('reflowIndicator');
+    var indicator = /** @type {HTMLElement} */ (document.getElementById('reflowIndicator'));
     if (indicator) indicator.style.display = 'none';
   });
 }
@@ -123,7 +127,7 @@ function doRegroupLive() {
   var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
   var body = reviewScopePayload(config);
   if (!body) {
-    var noBodyIndicator = document.getElementById('reflowIndicator');
+    var noBodyIndicator = /** @type {HTMLElement} */ (document.getElementById('reflowIndicator'));
     if (noBodyIndicator) noBodyIndicator.style.display = 'none';
     return;
   }
@@ -135,28 +139,28 @@ function doRegroupLive() {
   }, { toast: false })
   .then(function(data) {
     if (seq !== reviewScopeRequestSeq) return;
-    var indicator = document.getElementById('reflowIndicator');
+    var indicator = /** @type {HTMLElement} */ (document.getElementById('reflowIndicator'));
     if (indicator) indicator.style.display = 'none';
     if (!data || data.error) return;
     applyReviewResults(data, scopedCacheInfoFor(data));
   })
   .catch(function() {
     if (seq !== reviewScopeRequestSeq) return;
-    var indicator = document.getElementById('reflowIndicator');
+    var indicator = /** @type {HTMLElement} */ (document.getElementById('reflowIndicator'));
     if (indicator) indicator.style.display = 'none';
   });
 }
 
 function applyScoringDefaults() {
-  document.getElementById('slRejectCrop').value = SCORING_DEFAULTS.reject_crop_complete;
-  document.getElementById('slRejectFocus').value = SCORING_DEFAULTS.reject_focus;
-  document.getElementById('slRejectClip').value = SCORING_DEFAULTS.reject_clip_high;
-  document.getElementById('slRejectComposite').value = SCORING_DEFAULTS.reject_composite;
-  document.getElementById('slBurstLambda').value = SCORING_DEFAULTS.burst_lambda;
-  document.getElementById('slBurstKeep').value = SCORING_DEFAULTS.burst_max_keep;
-  document.getElementById('slEncLambda').value = SCORING_DEFAULTS.encounter_lambda;
-  document.getElementById('slEncKeep').value = SCORING_DEFAULTS.encounter_max_keep;
-  document.querySelectorAll('.sidebar-section input[type="range"]').forEach(function(sl) {
+  /** @type {HTMLInputElement} */ (document.getElementById('slRejectCrop')).value = String(SCORING_DEFAULTS.reject_crop_complete);
+  /** @type {HTMLInputElement} */ (document.getElementById('slRejectFocus')).value = String(SCORING_DEFAULTS.reject_focus);
+  /** @type {HTMLInputElement} */ (document.getElementById('slRejectClip')).value = String(SCORING_DEFAULTS.reject_clip_high);
+  /** @type {HTMLInputElement} */ (document.getElementById('slRejectComposite')).value = String(SCORING_DEFAULTS.reject_composite);
+  /** @type {HTMLInputElement} */ (document.getElementById('slBurstLambda')).value = String(SCORING_DEFAULTS.burst_lambda);
+  /** @type {HTMLInputElement} */ (document.getElementById('slBurstKeep')).value = String(SCORING_DEFAULTS.burst_max_keep);
+  /** @type {HTMLInputElement} */ (document.getElementById('slEncLambda')).value = String(SCORING_DEFAULTS.encounter_lambda);
+  /** @type {HTMLInputElement} */ (document.getElementById('slEncKeep')).value = String(SCORING_DEFAULTS.encounter_max_keep);
+  /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.sidebar-section input[type="range"]')).forEach(function(sl) {
     updateSliderDisplay(sl);
   });
 }
@@ -167,7 +171,7 @@ function resetScoringDefaults() {
 }
 
 function applyGroupingDefaults() {
-  function setVal(id, v) { var el = document.getElementById(id); if (el) el.value = v; }
+  function setVal(/** @type {string} */ id, /** @type {number | undefined} */ v) { var el = /** @type {HTMLInputElement} */ (document.getElementById(id)); if (el) el.value = String(v); }
   // Weights (slider values 0..100)
   setVal('slWTime', GROUPING_DEFAULTS.w_time);
   setVal('slWSubj', GROUPING_DEFAULTS.w_subj);
@@ -186,7 +190,7 @@ function applyGroupingDefaults() {
   // Bursts
   setVal('slBurstTime', GROUPING_DEFAULTS.burst_time_gap);
   setVal('slBurstEmb', GROUPING_DEFAULTS.burst_embedding_distance);
-  document.querySelectorAll('.sidebar-section input[type="range"]').forEach(function(sl) {
+  /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.sidebar-section input[type="range"]')).forEach(function(sl) {
     updateSliderDisplay(sl);
   });
 }

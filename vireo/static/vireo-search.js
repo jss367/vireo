@@ -4,21 +4,23 @@
 
   // ``options.field`` picks what each term matches: 'metadata' (default,
   // every searchable value) or 'keyword' (keyword names only).
+  /** @param {string} text @param {{field?: string}} [options] @returns {SearchRule} */
   function parse(text, options) {
     const field = (options && options.field) || 'metadata';
     if (text.length > 4096) throw new Error('Search is limited to 4,096 characters.');
+    /** @type {{kind: string, value?: string}[]} */
     const tokens = [];
     let i = 0;
     while (i < text.length) {
-      if (/\s/.test(text[i])) { i++; continue; }
-      if ('()'.includes(text[i])) { tokens.push({ kind: text[i++] }); continue; }
-      if (text[i] === '"') {
+      if (/\s/.test(text.charAt(i))) { i++; continue; }
+      if ('()'.includes(text.charAt(i))) { tokens.push({ kind: text.charAt(i++) }); continue; }
+      if (text.charAt(i) === '"') {
         i++;
         let value = '';
-        while (i < text.length && text[i] !== '"') {
+        while (i < text.length && text.charAt(i) !== '"') {
           // Only quote/backslash escapes are special, preserving file paths.
-          if (text[i] === '\\' && ['"', '\\'].includes(text[i + 1])) i++;
-          value += text[i++];
+          if (text.charAt(i) === '\\' && ['"', '\\'].includes(text.charAt(i + 1))) i++;
+          value += text.charAt(i++);
         }
         if (i === text.length) throw new Error('Close the quoted phrase with a double quote.');
         i++;
@@ -26,15 +28,17 @@
         tokens.push({ kind: 'term', value });
       } else {
         const start = i;
-        while (i < text.length && !/[\s()"]/.test(text[i])) i++;
+        while (i < text.length && !/[\s()"]/.test(text.charAt(i))) i++;
         const value = text.slice(start, i);
         tokens.push({ kind: ['AND', 'OR', 'NOT'].includes(value) ? value : 'term', value });
       }
       if (tokens.length > 128) throw new Error('Search is too complex; use fewer words or groups.');
     }
     let pos = 0;
-    const peek = () => tokens[pos] && tokens[pos].kind;
-    const group = (mode, rules) => rules.length === 1 ? rules[0] : { mode, rules };
+    const peek = () => tokens[pos]?.kind || '';
+    /** @param {string} mode @param {SearchRule[]} rules @returns {SearchRule} */
+    const group = (mode, rules) => rules.length === 1 && rules[0] ? rules[0] : { mode, rules };
+    /** @param {number} depth @returns {SearchRule} */
     function unary(depth) {
       if (depth > 16) throw new Error('Search parentheses or NOT operators are nested too deeply.');
       if (peek() === 'NOT') {
@@ -49,8 +53,11 @@
         return node;
       }
       if (peek() !== 'term') throw new Error('Expected a word or quoted phrase.');
-      return { field, op: 'contains', value: tokens[pos++].value };
+      const term = tokens[pos++];
+      if (!term || term.value === undefined) throw new Error('Expected a word or quoted phrase.');
+      return { field, op: 'contains', value: term.value };
     }
+    /** @param {number} depth @returns {SearchRule} */
     function conjunction(depth) {
       const rules = [unary(depth)];
       while (peek() && !['OR', ')'].includes(peek())) {
@@ -59,6 +66,7 @@
       }
       return group('all', rules);
     }
+    /** @param {number} depth @returns {SearchRule} */
     function disjunction(depth) {
       const rules = [conjunction(depth)];
       while (peek() === 'OR') {

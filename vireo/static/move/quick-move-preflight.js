@@ -2,8 +2,9 @@
 // Classic page script; load boot.js after all definitions.
 
 var quickPreflightSeq = 0;
-var quickPreflightTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var quickPreflightTimer = null;
 
+/** @param {number} fid @param {string} destination @param {string} folderTemplate */
 function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
   if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
   var seq = ++quickPreflightSeq;
@@ -14,7 +15,7 @@ function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
   // changes, which is the only input they depend on.
   if (!_isAbsolutePath(destination)) return;
   quickPreflightTimer = setTimeout(async function() {
-    var data;
+    /** @type {MovePreflight} */ var data;
     try {
       var resp = await fetch('/api/move-folder/preflight', {
         method: 'POST',
@@ -37,7 +38,7 @@ function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
     // Same response that drew the folder list above, so the dropdown's
     // examples and that list are always the same dates.
     applyQuickDateSamples(data.template_samples);
-    var status = document.getElementById('quickDestStatus');
+    var status = /** @type {HTMLElement} */ (document.getElementById('quickDestStatus'));
     if (!status) return;
     if (!data.photo_count) {
       status.textContent = 'No tracked photos were found in this folder.';
@@ -57,6 +58,7 @@ function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
   }, 350);
 }
 
+/** @param {number} fid @param {string | null} dest @param {string} remoteId @param {string} subpath @param {string} destinationName */
 function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
   if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
   // Bump the sequence on *every* call, not just when a request starts. Any
@@ -80,6 +82,7 @@ function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
   // looks absolute before asking. Accept POSIX '/...', Windows drive paths
   // ('C:\...'), and Windows UNC paths ('\\server\share') — all of which
   // os.path.isabs() treats as absolute on their respective backends.
+  dest = dest || '';
   var isAbs = dest.charAt(0) === '/' || /^[A-Za-z]:[\\/]/.test(dest) || /^\\\\/.test(dest);
   if (!isAbs) return;
   quickPreflightTimer = setTimeout(function() {
@@ -91,15 +94,16 @@ function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
   }, 350);
 }
 
+/** @param {number} seq @param {MoveDestination} body */
 async function runQuickPreflight(seq, body) {
-  var status = document.getElementById('quickDestStatus');
+  var status = /** @type {HTMLElement} */ (document.getElementById('quickDestStatus'));
   if (status) {
     status.textContent = 'Checking destination…';
     status.style.color = 'var(--text-dim)';
   }
   // Plain fetch (not safeFetch): this fires while the user types, so a
   // transient failure must stay silent rather than raising an error toast.
-  var data;
+  /** @type {MovePreflight} */ var data;
   try {
     var resp = await fetch('/api/move-folder/preflight', {
       method: 'POST',
@@ -113,7 +117,7 @@ async function runQuickPreflight(seq, body) {
     return;
   }
   if (seq !== quickPreflightSeq) return;  // a newer keystroke superseded us
-  status = document.getElementById('quickDestStatus');
+  status = /** @type {HTMLElement} */ (document.getElementById('quickDestStatus'));
   if (!status) return;
   if (data.remote && data.reachable === false) {
     status.textContent = '⚠ Couldn’t reach the target over SSH'
@@ -138,6 +142,7 @@ async function runQuickPreflight(seq, body) {
 // Render the "destination already exists" warning. When `truncated` is true
 // the count is a floor (the fast scan stopped at its cap), so say "at least N"
 // rather than implying an exact total — the line must mean what it says.
+/** @param {HTMLElement} status @param {number} n @param {boolean | undefined} truncated */
 function setDestExistsStatus(status, n, truncated) {
   var countText = truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
   status.textContent = '⚠ Destination already exists — contains ' + countText + ' file' +
@@ -149,6 +154,7 @@ function setDestExistsStatus(status, n, truncated) {
 // result landing after the user has changed the destination is discarded
 // instead of overwriting the line for the wrong path. Stays silent on failure:
 // the capped "at least N" line is already a valid answer.
+/** @param {number | undefined} fid @param {string | undefined} dest @param {string | undefined} destinationName @param {number} seq */
 function requestExactDestCount(fid, dest, destinationName, seq) {
   fetch('/api/move-folder/preflight', {
     method: 'POST',
@@ -164,12 +170,12 @@ function requestExactDestCount(fid, dest, destinationName, seq) {
   }).then(function(data) {
     if (!data || !data.exists) return;
     if (seq !== quickPreflightSeq) return;  // a newer keystroke superseded us
-    var status = document.getElementById('quickDestStatus');
+    var status = /** @type {HTMLElement} */ (document.getElementById('quickDestStatus'));
     if (status) setDestExistsStatus(status, data.file_count, data.file_count_truncated);
   }).catch(function() { /* background nicety — leave the capped line in place */ });
 }
 
 function clearQuickDestStatus() {
-  var status = document.getElementById('quickDestStatus');
+  var status = /** @type {HTMLElement} */ (document.getElementById('quickDestStatus'));
   if (status) status.textContent = '';
 }

@@ -5,9 +5,9 @@
 var _pipelineRunning = false;
 var _pipelineAbort = false;
 var _pipelineCancelling = false;
-var _pipelineEventSource = null;
-var _pipelineResolve = null;
-var _currentPipelineJobId = null;
+/** @type {EventSource | null} */ var _pipelineEventSource = null;
+/** @type {(() => void) | null} */ var _pipelineResolve = null;
+/** @type {number | null} */ var _currentPipelineJobId = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
@@ -22,7 +22,7 @@ async function startPipeline() {
   // invocation, etc.). If a refresh is queued or in-flight, await it now
   // and bail if the fresh plan reports Classify is blocked — never POST
   // /api/jobs/pipeline only to crash at the missing-labels classify step.
-  var classifyEnableCb = document.getElementById('enableClassify');
+  var classifyEnableCb = /** @type {HTMLInputElement} */ (document.getElementById('enableClassify'));
   var classifyOn = classifyEnableCb && classifyEnableCb.checked;
   if (classifyOn && (_pipelinePlan === null || _planRefreshPending)) {
     if (_planDebounceTimer) {
@@ -38,7 +38,7 @@ async function startPipeline() {
     // verify whether Classify will be blocked. Bail with a clear message
     // rather than gamble on a run that may crash mid-pipeline.
     if (_pipelinePlan === null) {
-      var actionStatus = document.getElementById('pipelineActionStatus');
+      var actionStatus = /** @type {HTMLElement} */ (document.getElementById('pipelineActionStatus'));
       if (actionStatus) {
         actionStatus.textContent =
           'Still computing the pipeline plan — try again in a moment.';
@@ -52,13 +52,13 @@ async function startPipeline() {
   _pipelineAbort = false;
   _pipelineCancelling = false;
   _currentPipelineJobId = null;
-  document.getElementById('modelWarningBanner').style.display = 'none';
-  var _prevErrBanner = document.getElementById('pipelineErrorBanner');
+  /** @type {HTMLElement} */ (document.getElementById('modelWarningBanner')).style.display = 'none';
+  var _prevErrBanner = /** @type {HTMLElement} */ (document.getElementById('pipelineErrorBanner'));
   if (_prevErrBanner) _prevErrBanner.style.display = 'none';
-  var _prevNoteBanner = document.getElementById('pipelineNoteBanner');
+  var _prevNoteBanner = /** @type {HTMLElement} */ (document.getElementById('pipelineNoteBanner'));
   if (_prevNoteBanner) _prevNoteBanner.style.display = 'none';
 
-  var btn = document.getElementById('btnStartPipeline');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('btnStartPipeline'));
   btn.textContent = 'Stop Pipeline';
   btn.onclick = stopPipeline;
   btn.disabled = false;
@@ -70,7 +70,7 @@ async function startPipeline() {
   refreshPipelineUI();
 
   // Gather config from the UI
-  var body = {};
+  /** @type {PipelineRequest} */ var body = {};
 
   if (_sourceMode === 'folders') {
     // Scope = selected workspace folders; the server expands each to
@@ -78,10 +78,10 @@ async function startPipeline() {
     // collection (import/process split PR 1).
     body.folder_ids = selectedFolderIds();
   } else {
-    body.collection_id = parseInt(document.getElementById('collectionPicker').value);
+    body.collection_id = parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker')).value);
     // Add excluded photo IDs from preview selection
     if (_previewData && _previewSelected) {
-      var excludedIds = [];
+      /** @type {number[]} */ var excludedIds = [];
       _previewData.files.forEach(function(f) {
         if (!_previewSelected[f.path] && f.photo_id) excludedIds.push(f.photo_id);
       });
@@ -92,19 +92,19 @@ async function startPipeline() {
   // The process page sends explicit stage flags: Run always uses the CURRENT
   // toggle values (whether or not a saved process is selected), including
   // miss_enabled and review_mode which used to be preset-only server-side.
-  var classifyEnabled = document.getElementById('enableClassify').checked;
-  var extractEnabled = document.getElementById('enableExtract').checked;
-  var eyeKeypointsEnabled = document.getElementById('enableEyeKeypoints').checked;
-  var groupEnabled = document.getElementById('enableGroup').checked;
+  var classifyEnabled = /** @type {HTMLInputElement} */ (document.getElementById('enableClassify')).checked;
+  var extractEnabled = /** @type {HTMLInputElement} */ (document.getElementById('enableExtract')).checked;
+  var eyeKeypointsEnabled = /** @type {HTMLInputElement} */ (document.getElementById('enableEyeKeypoints')).checked;
+  var groupEnabled = /** @type {HTMLInputElement} */ (document.getElementById('enableGroup')).checked;
 
   body.skip_classify = !classifyEnabled;
-  body.raw_subject_analysis = !!document.getElementById('chkRawSubjectAnalysis').checked;
+  body.raw_subject_analysis = !!/** @type {HTMLInputElement} */ (document.getElementById('chkRawSubjectAnalysis')).checked;
   body.skip_extract_masks = !extractEnabled;
   body.skip_eye_keypoints = !eyeKeypointsEnabled;
   body.skip_regroup = !groupEnabled;
-  body.miss_enabled = !!document.getElementById('enableMisses').checked;
+  body.miss_enabled = !!/** @type {HTMLInputElement} */ (document.getElementById('enableMisses')).checked;
   body.review_mode =
-    document.getElementById('enableSpeciesReview').checked ? 'species' : null;
+    /** @type {HTMLInputElement} */ (document.getElementById('enableSpeciesReview')).checked ? 'species' : null;
 
   // Only send ``eye_detect_override`` when the checkbox is CHECKED — an
   // explicit per-run opt-in that forces ``pipeline_cfg["eye_detect_enabled"]``
@@ -122,30 +122,30 @@ async function startPipeline() {
 
   // Classification options (only if enabled)
   if (classifyEnabled) {
-    var selectedModels = [];
-    document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
+    /** @type {{id: string; name?: string}[]} */ var selectedModels = [];
+    /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.model-checkbox:checked')).forEach(function(cb) {
       selectedModels.push({id: cb.value, name: cb.dataset.name});
     });
     if (selectedModels.length > 0) {
       // Send every checked model. The backend loops over model_ids in the
       // classify stage; model_id stays for back-compat with older callers.
       body.model_ids = selectedModels.map(function(m) { return m.id; });
-      body.model_id = selectedModels[0].id;
+      body.model_id = selectedModels[0]?.id;
     }
 
-    var labelsFiles = [];
-    document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+    /** @type {string[]} */ var labelsFiles = [];
+    /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.labels-run-cb:checked')).forEach(function(cb) {
       labelsFiles.push(cb.value);
     });
     if (labelsFiles.length > 0) body.labels_files = labelsFiles;
 
-    body.reclassify = !!document.getElementById('chkReclassify').checked;
-    body.download_taxonomy = !!document.getElementById('chkDownloadTaxonomy').checked;
+    body.reclassify = !!/** @type {HTMLInputElement} */ (document.getElementById('chkReclassify')).checked;
+    body.download_taxonomy = !!/** @type {HTMLInputElement} */ (document.getElementById('chkDownloadTaxonomy')).checked;
   }
 
   // Reset all stage cards to pending state
   ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
-    var numEl = document.getElementById('num' + name);
+    var numEl = /** @type {HTMLElement} */ (document.getElementById('num' + name));
     if (numEl) numEl.className = 'stage-num';
   });
 
@@ -157,7 +157,7 @@ async function startPipeline() {
     }, { toast: false });
 
     if (!data || !data.job_id) {
-      document.getElementById('statusSource').textContent = (data && data.error) || 'Failed to start pipeline';
+      /** @type {HTMLElement} */ (document.getElementById('statusSource')).textContent = (data && data.error) || 'Failed to start pipeline';
       return;
     }
     _currentPipelineJobId = data.job_id;
@@ -168,16 +168,16 @@ async function startPipeline() {
 
     // Show model warning banner if returned
     if (data.model_warning) {
-      var banner = document.getElementById('modelWarningBanner');
+      var banner = /** @type {HTMLElement} */ (document.getElementById('modelWarningBanner'));
       banner.dataset.kind = 'model';
-      document.getElementById('modelWarningText').textContent = data.model_warning;
+      /** @type {HTMLElement} */ (document.getElementById('modelWarningText')).textContent = data.model_warning;
       banner.style.display = '';
     }
 
     // Show progress on all cards
-    document.getElementById('card-source').classList.add('expanded');
+    /** @type {HTMLElement} */ (document.getElementById('card-source')).classList.add('expanded');
 
-    await new Promise(function(resolve) {
+    await new Promise(/** @param {(value?: void) => void} resolve */ function(resolve) {
       _pipelineResolve = resolve;
       _pipelineEventSource = safeEventSource('/api/jobs/' + data.job_id + '/stream', {
         onProgress: function(p) {
@@ -197,13 +197,13 @@ async function startPipeline() {
             return;
           }
           _pipelineResolve = null;
-          document.getElementById('statusSource').textContent = 'Connection lost';
+          /** @type {HTMLElement} */ (document.getElementById('statusSource')).textContent = 'Connection lost';
           resolve();
         }
       });
     });
   } catch(e) {
-    document.getElementById('statusSource').textContent = 'Error: ' + e.message;
+    /** @type {HTMLElement} */ (document.getElementById('statusSource')).textContent = 'Error: ' + (e instanceof Error ? e.message : e);
   } finally {
     _pipelineRunning = false;
     _pipelineCancelling = false;
@@ -227,10 +227,10 @@ async function stopPipeline() {
   if (_pipelineCancelling) return;
   _pipelineAbort = true;
   _pipelineCancelling = true;
-  var btn = document.getElementById('btnStartPipeline');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('btnStartPipeline'));
   btn.disabled = true;
   btn.textContent = 'Cancelling...';
-  var actionStatus = document.getElementById('pipelineActionStatus');
+  var actionStatus = /** @type {HTMLElement} */ (document.getElementById('pipelineActionStatus'));
   if (actionStatus) {
     actionStatus.textContent = 'Sending cancellation request...';
     actionStatus.className = 'status-msg';
@@ -244,7 +244,7 @@ async function stopPipeline() {
       method: 'POST',
     });
     if (!resp.ok) {
-      var data = {};
+      /** @type {{error?: string}} */ var data = {};
       try { data = await resp.json(); } catch(e) {}
       throw new Error((data && data.error) || 'Unable to cancel pipeline');
     }
@@ -258,7 +258,7 @@ async function stopPipeline() {
     btn.disabled = false;
     btn.textContent = 'Stop Pipeline';
     if (actionStatus) {
-      actionStatus.textContent = e.message || 'Unable to cancel pipeline';
+      actionStatus.textContent = e instanceof Error ? e.message : 'Unable to cancel pipeline';
       actionStatus.className = 'status-msg error';
     }
   }

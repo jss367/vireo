@@ -23,7 +23,7 @@ var _loadPredictionsEpoch = 0;
 // and each action captures the epoch on entry so a mid-flight reload
 // aborts the loop rather than committing to now-hidden rows.
 var _predictionsReloading = false;
-function _predictionEpochStale(epoch) {
+/** @param {number} epoch */ function _predictionEpochStale(epoch) {
   return epoch !== _loadPredictionsEpoch;
 }
 
@@ -34,13 +34,13 @@ async function loadPredictions() {
   // stale ``predictions`` array while this reload is in flight. The
   // per-card actions are gated inline in their handlers because they
   // are rendered by ``renderGrid()`` and cheaper to guard on click.
-  var _acceptAllReloadBtn = document.getElementById('acceptAllBtn');
+  var _acceptAllReloadBtn = /** @type {HTMLButtonElement} */ (document.getElementById('acceptAllBtn'));
   if (_acceptAllReloadBtn) {
     _acceptAllReloadBtn.disabled = true;
     _acceptAllReloadBtn.textContent = 'Reloading…';
   }
-  document.getElementById('loading').style.display = 'block';
-  document.getElementById('empty').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('loading')).style.display = 'block';
+  /** @type {HTMLElement} */ (document.getElementById('empty')).style.display = 'none';
 
   try {
     var params = new URLSearchParams();
@@ -65,11 +65,11 @@ async function loadPredictions() {
     }
     if (currentPhotoIdFilter != null) params.set('photo_ids', String(currentPhotoIdFilter));
     var qs = params.toString();
-    var predData = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, { toast: false });
+    /** @type {{predictions?:ReviewPrediction[];visual?:unknown}} */ var predData = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, { toast: false });
     if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
     allPredictions = predData.predictions || [];
     if (window.VireoFilter && VireoFilter.setResultTotal) {
-      var uniquePhotos = {};
+      /** @type {Record<number,boolean>} */ var uniquePhotos = {};
       allPredictions.forEach(function(p) { uniquePhotos[p.photo_id] = true; });
       VireoFilter.setResultTotal(Object.keys(uniquePhotos).length);
     }
@@ -83,13 +83,13 @@ async function loadPredictions() {
 
     // Re-apply collection filter if active
     if (currentCollection !== 'all' && collectionPhotoIds) {
-      predictions = allPredictions.filter(function(p) { return collectionPhotoIds.has(p.photo_id); });
+      predictions = allPredictions.filter(function(p) { return collectionPhotoIds?.has(p.photo_id) || false; });
     } else {
       predictions = allPredictions.slice();
     }
 
     // Extract unique models
-    var modelSet = {};
+    /** @type {Record<string,boolean>} */ var modelSet = {};
     allPredictions.forEach(function(p) {
       if (p.model && !modelSet[p.model]) modelSet[p.model] = true;
     });
@@ -108,17 +108,17 @@ async function loadPredictions() {
     var pending = allPredictions.filter(function(p) { return p.status === 'pending'; });
     mode = allPredictions.length > 0 ? 'review' : 'browse';
 
-    document.getElementById('title').textContent =
+    /** @type {HTMLElement} */ (document.getElementById('title')).textContent =
       'Review Predictions (' + pending.length + ' pending)';
     document.title = 'Vireo - Review (' + pending.length + ' pending)';
 
-    document.getElementById('loading').style.display = 'none';
+    /** @type {HTMLElement} */ (document.getElementById('loading')).style.display = 'none';
     _predictionsReloading = false;
     renderAll();
   } catch(err) {
     if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
     _predictionsReloading = false;
-    document.getElementById('loading').textContent = 'Error: ' + err.message;
+    /** @type {HTMLElement} */ (document.getElementById('loading')).textContent = 'Error: ' + (err instanceof Error ? err.message : String(err));
     // Clear the stale ``predictions`` array before re-rendering so Accept
     // All and per-card handlers can't fire against the previous filter
     // or collection's rows under the new visible chips. Without this the
