@@ -86,6 +86,8 @@ Current stable set:
 | GET  | `/api/v1/workspaces` | All workspaces. |
 | POST | `/api/v1/workspaces/<id>/activate` | Switch the active workspace. |
 | GET  | `/api/v1/keywords` | Keyword tree. |
+| POST | `/api/v1/photos/<id>/flag` | Set one photo's flag: `{"flag": "none"\|"flagged"\|"rejected", "source"?: str, "reason"?: str}`. `source` (≤ 60 chars) is who decided, `reason` (≤ 300) why; both land in edit history, so the Undo panel and the photo detail's `flag_note` show them and one Undo reverses the decision. |
+| POST | `/api/v1/batch/flag` | The same for `{"photo_ids": [...], "flag": ..., "source"?, "reason"?}`; one undoable edit. |
 
 Request/response shapes mirror the internal `/api/*` endpoints — see source
 or open `/api/v1/<path>` with the token in your browser's dev tools for

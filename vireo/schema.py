@@ -155,6 +155,32 @@ def _validate_formerly_lazy_tables(conn):
         raise RuntimeError(f"job_history is missing {', '.join(missing)}")
 
 
+EDIT_HISTORY_PROVENANCE_COLUMNS = ("source", "reason")
+
+
+def _edit_history_columns(conn):
+    return {row[1] for row in conn.execute("PRAGMA table_info(edit_history)")}
+
+
+def _add_edit_history_provenance(conn):
+    """Give ``edit_history`` the ``source`` and ``reason`` an edit may carry.
+
+    A flag written by a headless reviewer (an agent adjudicating a burst)
+    records who decided and why, so the Undo panel and the photo detail can
+    show it. Existing rows stay NULL: the user's own clicks have no source.
+    """
+    present = _edit_history_columns(conn)
+    for column in EDIT_HISTORY_PROVENANCE_COLUMNS:
+        if column not in present:
+            conn.execute(f"ALTER TABLE edit_history ADD COLUMN {column} TEXT")
+
+
+def _validate_edit_history_provenance(conn):
+    missing = [c for c in EDIT_HISTORY_PROVENANCE_COLUMNS if c not in _edit_history_columns(conn)]
+    if missing:
+        raise RuntimeError(f"edit_history is missing {', '.join(missing)}")
+
+
 MIGRATIONS = (
     Migration(
         13, "companion_identities_file_mtime",
@@ -170,6 +196,10 @@ MIGRATIONS = (
     Migration(
         18, "formerly_lazy_tables",
         _add_formerly_lazy_tables, _validate_formerly_lazy_tables,
+    ),
+    Migration(
+        19, "edit_history_provenance",
+        _add_edit_history_provenance, _validate_edit_history_provenance,
     ),
 )
 

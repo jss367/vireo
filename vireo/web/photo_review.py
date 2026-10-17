@@ -1,9 +1,42 @@
-"""Workspace-scoped photo rating and flag endpoints."""
+"""Workspace-scoped photo rating and flag endpoints.
+
+A flag write may carry provenance: ``source`` (who decided, e.g. the model
+id of a headless reviewer) and ``reason`` (why). Both land in the edit's
+history row, so the Undo panel, the toast and the photo detail's
+``flag_note`` say who rejected a photo and why, and one Undo reverses it
+like any hand flag. The user's own clicks send neither.
+"""
 
 from flask import Blueprint, jsonify, request
-from services.photo_review import PhotoReviewService
+from services.photo_review import (
+    FLAG_REASON_MAX_CHARS,
+    FLAG_SOURCE_MAX_CHARS,
+    PhotoReviewService,
+)
 
 VALID_FLAGS = ("none", "flagged", "rejected")
+
+
+def flag_provenance(body):
+    """``((source, reason), None)`` from a flag body, or ``(None, message)``.
+
+    Each is optional; when present it must be a string, is stripped, and an
+    empty string counts as absent. ``source`` is capped at
+    ``FLAG_SOURCE_MAX_CHARS`` and ``reason`` at ``FLAG_REASON_MAX_CHARS``.
+    """
+    values = []
+    for key, limit in (("source", FLAG_SOURCE_MAX_CHARS), ("reason", FLAG_REASON_MAX_CHARS)):
+        value = body.get(key)
+        if value is None:
+            values.append(None)
+            continue
+        if not isinstance(value, str):
+            return None, f"{key} must be a string"
+        value = value.strip()
+        if len(value) > limit:
+            return None, f"{key} must be at most {limit} characters"
+        values.append(value or None)
+    return tuple(values), None
 
 
 def create_photo_review_blueprint(get_db, json_error):
@@ -32,8 +65,12 @@ def create_photo_review_blueprint(get_db, json_error):
         flag = body.get("flag", "none")
         if flag not in VALID_FLAGS:
             return json_error("flag must be 'none', 'flagged', or 'rejected'")
+        provenance, message = flag_provenance(body)
+        if message:
+            return json_error(message)
+        source, reason = provenance
         try:
-            PhotoReviewService(get_db()).set_flag(photo_id, flag)
+            PhotoReviewService(get_db()).set_flag(photo_id, flag, source=source, reason=reason)
         except ValueError as exc:
             return json_error(str(exc), 403)
         return jsonify({"ok": True})
@@ -67,8 +104,14 @@ def create_photo_review_blueprint(get_db, json_error):
             return json_error("flag must be 'none', 'flagged', or 'rejected'")
         if not photo_ids:
             return json_error("photo_ids required")
+        provenance, message = flag_provenance(body)
+        if message:
+            return json_error(message)
+        source, reason = provenance
         try:
-            updated = PhotoReviewService(get_db()).set_flags(photo_ids, flag)
+            updated = PhotoReviewService(get_db()).set_flags(
+                photo_ids, flag, source=source, reason=reason,
+            )
         except ValueError as exc:
             return json_error(str(exc), 403)
         return jsonify({"ok": True, "updated": updated})

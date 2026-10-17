@@ -42,6 +42,8 @@
       "POST /api/predictions/<int:pred_id>/reviewed",
       "POST /api/predictions/batch-accept",
       "POST /api/predictions/batch-reject",
+      "POST /api/v1/batch/flag",
+      "POST /api/v1/photos/<int:photo_id>/flag",
       "PUT /api/photos/<int:photo_id>/edit-recipe"
     ]
   },

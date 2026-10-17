@@ -2298,6 +2298,10 @@ _V1_ALIASES = [
     ("/api/v1/workspaces/<int:ws_id>/activate",
      "workspaces.api_activate_workspace", ["POST"]),
     ("/api/v1/keywords", "keywords.api_keywords", ["GET"]),
+    # Flag writes for headless reviewers; both take optional ``source`` and
+    # ``reason`` so a decision records who made it and why.
+    ("/api/v1/photos/<int:photo_id>/flag", "photo_review.set_flag", ["POST"]),
+    ("/api/v1/batch/flag", "photo_review.set_flags", ["POST"]),
 ]
 
 

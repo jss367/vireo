@@ -59,7 +59,11 @@ async function setFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag) {
     await reconcileBrowseStackCovers([photoId]);
     refreshGridCards([photoId]);
     refreshExpandedBrowseStackMembers([photoId]);
-    if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
+    if (selectedPhotoId === photoId) {
+      updateDetailFlagButtons(flag);
+      // A hand flag has no source or reason; the note described the old one.
+      renderDetailFlagNote(flag, null);
+    }
     scheduleCollectionCountsRefresh();
   } catch(e) {}
 }

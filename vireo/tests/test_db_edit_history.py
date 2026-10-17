@@ -1408,7 +1408,7 @@ def test_edit_history_facade_signatures_are_unchanged():
     assert params("record_edit") == [
         ("self", empty), ("action_type", empty), ("description", empty),
         ("new_value", empty), ("items", empty), ("is_batch", False),
-        ("_commit", True),
+        ("_commit", True), ("source", None), ("reason", None),
     ]
     assert params("undo_last_edit") == [("self", empty)]
     assert params("redo_last_undo") == [("self", empty)]

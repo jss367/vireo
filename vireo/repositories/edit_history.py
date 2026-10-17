@@ -111,10 +111,13 @@ class EditHistoryRepository:
     def record(
         self, action_type: str, description: str, new_value: str | None,
         items: Iterable[Mapping[str, Any]], is_batch: bool = False, _commit: bool = True,
+        *, source: str | None = None, reason: str | None = None,
     ) -> int:
         """Insert an edit and its per-photo items; see ``Database.record_edit``.
 
-        The façade runs the history prune after a committed record.
+        ``source`` and ``reason`` are the edit's provenance when the caller
+        stated it (who decided, and why); the user's own clicks leave both
+        NULL. The façade runs the history prune after a committed record.
         """
         ws = self.workspace_id
         # Clear redo stack — new edit invalidates undone entries
@@ -123,8 +126,10 @@ class EditHistoryRepository:
             (ws,),
         )
         cur = self.conn.execute(
-            "INSERT INTO edit_history (workspace_id, action_type, description, new_value, is_batch) VALUES (?, ?, ?, ?, ?)",
-            (ws, action_type, description, new_value, 1 if is_batch else 0),
+            """INSERT INTO edit_history
+                   (workspace_id, action_type, description, new_value, is_batch, source, reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (ws, action_type, description, new_value, 1 if is_batch else 0, source, reason),
         )
         edit_id = cur.lastrowid
         for item in items:
@@ -153,6 +158,27 @@ class EditHistoryRepository:
             if entry['action_type'] == 'pipeline_grouping':
                 entry['new_value'] = None
         return entries
+
+    def latest_flag_note(self, photo_id: int) -> dict[str, Any] | None:
+        """The newest live ``flag`` edit covering ``photo_id`` in the active workspace.
+
+        ``{"edit_id", "description", "created_at", "source", "reason",
+        "new_value"}`` (``new_value`` the flag that edit set on this photo),
+        or None when no un-undone flag edit names the photo. Raises
+        ``RuntimeError`` when no workspace is active.
+        """
+        row = self.conn.execute(
+            """SELECT eh.id AS edit_id, eh.description, eh.created_at,
+                      eh.source, eh.reason, ehi.new_value
+               FROM edit_history eh
+               JOIN edit_history_items ehi ON ehi.edit_id = eh.id
+               WHERE eh.workspace_id = ? AND eh.undone = 0
+                 AND eh.action_type = 'flag' AND ehi.photo_id = ?
+               ORDER BY eh.created_at DESC, eh.id DESC
+               LIMIT 1""",
+            (self.workspace_id, photo_id),
+        ).fetchone()
+        return dict(row) if row else None
 
     def recipe_history_for_photo(self, photo_id: int, limit: int) -> list[sqlite3.Row]:
         """The active workspace's ``edit_recipe`` items for one photo, newest first.

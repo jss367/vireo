@@ -53,6 +53,7 @@ from render_source import (
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
+from services.photo_review import flag_note
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
 from web.app_hooks import claim_search_lane
 from web.background_jobs import make_background_job
@@ -1058,6 +1059,10 @@ def create_photos_blueprint(
         result["location"] = serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
         result["render_key"] = render_key_for_recipe(result["edit_recipe"])
+        # Who set the current flag and why, when a reviewer said so (a
+        # headless adjudicator's reject carries its source and reason); None
+        # for a hand flag or a flag changed since without history.
+        result["flag_note"] = flag_note(db, photo_id, result.get("flag"))
         from camera_denoise import resolve_profile
         result["denoise_profile"] = resolve_profile(photo)
         # The shared lightbox normally warms /original after /full settles.

@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # Schema objects that the code which first wrote them used to create on
 # demand (the job runner's history, the preview cache's "do not adopt"
@@ -641,6 +641,9 @@ class CanonicalSchema:
                 UNIQUE(photo_id, observation_id)
             );
 
+            -- source/reason: who made the edit and why, when the caller said
+            -- (a headless reviewer recording a cull decision). NULL for the
+            -- user's own clicks. Migration 19 adds them to older catalogs.
             CREATE TABLE IF NOT EXISTS edit_history (
                 id           INTEGER PRIMARY KEY,
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -649,7 +652,9 @@ class CanonicalSchema:
                 new_value    TEXT,
                 is_batch     INTEGER DEFAULT 0,
                 undone       INTEGER DEFAULT 0,
-                created_at   TEXT DEFAULT (datetime('now'))
+                created_at   TEXT DEFAULT (datetime('now')),
+                source       TEXT,
+                reason       TEXT
             );
 
             CREATE TABLE IF NOT EXISTS edit_history_items (

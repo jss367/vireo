@@ -8758,7 +8758,10 @@ class Database:
         """
         return self._edit_history_repository()
 
-    def record_edit(self, action_type, description, new_value, items, is_batch=False, _commit=True):
+    def record_edit(
+        self, action_type, description, new_value, items, is_batch=False, _commit=True,
+        *, source=None, reason=None,
+    ):
         """Record an edit action with per-photo before/after values.
 
         Clears the redo stack (any undone entries) since a new action invalidates them.
@@ -8767,10 +8770,12 @@ class Database:
             _commit: If False, skip the internal commit and the history prune
                      (caller is responsible for committing the transaction;
                      prune can be run later).
+            source, reason: the edit's provenance when the caller stated it
+                     (who decided, and why); None for the user's own clicks.
         """
         edit_id = self._edit_history_repository().record(
             action_type, description, new_value, items,
-            is_batch=is_batch, _commit=_commit,
+            is_batch=is_batch, _commit=_commit, source=source, reason=reason,
         )
         if _commit:
             self._prune_edit_history()

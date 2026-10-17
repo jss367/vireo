@@ -400,7 +400,7 @@
    "table",
    "edit_history",
    "edit_history",
-   "CREATE TABLE edit_history (\n                id           INTEGER PRIMARY KEY,\n                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,\n                action_type  TEXT NOT NULL,\n                description  TEXT NOT NULL,\n                new_value    TEXT,\n                is_batch     INTEGER DEFAULT 0,\n                undone       INTEGER DEFAULT 0,\n                created_at   TEXT DEFAULT (datetime('now'))\n            )"
+   "CREATE TABLE edit_history (\n                id           INTEGER PRIMARY KEY,\n                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,\n                action_type  TEXT NOT NULL,\n                description  TEXT NOT NULL,\n                new_value    TEXT,\n                is_batch     INTEGER DEFAULT 0,\n                undone       INTEGER DEFAULT 0,\n                created_at   TEXT DEFAULT (datetime('now')),\n                source       TEXT,\n                reason       TEXT\n            )"
   ],
   [
    "table",

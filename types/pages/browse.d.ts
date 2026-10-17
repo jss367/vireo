@@ -14,7 +14,9 @@ interface BrowsePhoto {
   browse_stack?: BrowseStack | null; detections?: BrowseDetection[];
   _similarity?: number; similarity?: number;
   life_list?: {species: string; is_current_photo?: boolean; is_species_representative?: boolean}[];
+  flag_note?: BrowseFlagNote | null;
 }
+interface BrowseFlagNote {flag: 'none' | 'flagged' | 'rejected'; source: string | null; reason: string | null; description?: string; at?: string | null}
 interface BrowseStack {count: number; kind: string; photo_ids: number[]}
 interface BrowseDetection {x: number; y: number; w: number; h: number; box_x: number; box_y: number; box_w: number; box_h: number; species?: string; category?: string; confidence?: number; detector_confidence?: number}
 interface BrowseKeyword {id: number; name: string; type: string; parent_id?: number | null; place_id?: number | null; photo_count?: number}
