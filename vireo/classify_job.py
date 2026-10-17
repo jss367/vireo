@@ -3492,6 +3492,25 @@ def _finalize_remaining_steps(runner, job_id, step_ids, status, summary):
         runner.update_step(job_id, step_id, status=status, summary=summary)
 
 
+
+def _cached_only_reused_count(db, photo_ids, classifier_model, labels_fingerprint, detector_confidence):
+    """Count covered cached work, including measured no-match outcomes.
+
+    The caller's coverage/identity gate already proved these rows share the
+    requested identity. Read that same stored-output gate again rather than
+    inventing a prediction for a classifier that matched nothing.
+    """
+    from db import _chunks
+
+    run_filter = _cache_run_filter(
+        db, photo_ids, classifier_model, labels_fingerprint, None, None, "no-tax",
+    )
+    return sum(
+        db.model_runs.cache_coverage_counts(chunk, run_filter, detector_confidence)[1]
+        for chunk in _chunks(photo_ids)
+    )
+
+
 def _finalize_cached_only(
     thread_db, runner, job, params, photos,
     classifier_model, labels_fingerprint,
@@ -3563,14 +3582,13 @@ def _finalize_cached_only(
             classifier_model, labels_fingerprint,
         )
     )
-    reused_predictions = len(raw_results)
+    reused_results = _cached_only_reused_count(
+        thread_db, photo_ids, resolved_model, resolved_fingerprint, detector_confidence,
+    )
     runner.update_step(
         job["id"], "classify",
         status="completed",
-        summary=(
-            f"{reused_predictions} cached"
-            if reused_predictions else "No cached predictions"
-        ),
+        summary=f"{reused_results} cached" if reused_results else "No cached results",
     )
 
     group_result = _finalize_cached_results(
@@ -3581,7 +3599,7 @@ def _finalize_cached_only(
         "total": total,
         "predictions_stored": group_result["predictions_stored"],
         "burst_groups": group_result["burst_groups"],
-        "already_classified": reused_predictions,
+        "already_classified": reused_results,
         "already_labeled": group_result["already_labeled"],
         "detected": 0,
         "failed": 0,

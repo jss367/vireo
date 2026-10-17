@@ -30,6 +30,10 @@ class PhotoVisibilityRepository:
         self.workspace_id_fn = workspace_id_fn
         self.chunk_size = chunk_size
 
+    def remap(self, mapping: Mapping[int, int | None]) -> None:
+        """``remap_photo_visibility`` on this connection, in the caller's transaction."""
+        remap_photo_visibility(self.conn, mapping)
+
     def visible_photo_ids(self, photo_ids: Iterable[int]) -> list[int]:
         """Existing, active-workspace-visible ids in caller order, deduplicated."""
         workspace_id = self.workspace_id_fn()

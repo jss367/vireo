@@ -529,7 +529,8 @@ def test_mount_loss_rollback_revokes_duplicate_grants_and_demotes_promotion(tmp_
     unrelated folders are left alone. Regression for Codex P2
     (latest-head review).
     """
-    from import_job import _ImportBatchState, _rollback_on_mount_loss
+    from import_job.preflight import _rollback_on_mount_loss
+    from import_job.state import _ImportBatchState
 
     with Database(str(tmp_path / 'db')) as db:
         workspace = db._active_workspace_id
