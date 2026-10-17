@@ -10,6 +10,7 @@ import threading
 import numpy as np
 from file_replace import replace_file
 from resource_ledger import ResourceWaitCancelled
+from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ TILED_NMS_IOU = 0.45
 TILED_MAX_ADDITIONS_PER_CATEGORY = 20
 
 
+@cache_access
 def ensure_megadetector_weights(progress_callback=None):
     """Ensure MegaDetector V6 ONNX weights are present on disk.
 

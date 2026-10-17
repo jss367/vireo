@@ -20,6 +20,7 @@ import threading
 import numpy as np
 import onnx_runtime
 from file_replace import replace_file
+from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ def weights_status(model_name):
     return "missing"
 
 
+@cache_access
 def ensure_keypoint_weights(model_name, progress_callback=None):
     """Ensure ONNX weights for ``model_name`` are present on disk.
 

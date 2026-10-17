@@ -32,7 +32,11 @@ def _add(hub, relpath, content, rev="rev1"):
 def seeded(app_and_db, tmp_path, monkeypatch):
     """One installed model (DINOv2) and one orphaned one (BioCLIP 2.5) in the cache."""
     import models
+    from services import hf_cache, hf_cache_lock
 
+    lock = hf_cache_lock.SharedDownloadLock(str(tmp_path / "cache-access.lock"))
+    monkeypatch.setattr(hf_cache_lock, "DOWNLOAD_LOCK", lock)
+    monkeypatch.setattr(hf_cache, "DOWNLOAD_LOCK", lock)
     app, _db = app_and_db
     hub = tmp_path / "hub"
     hub.mkdir()
@@ -71,6 +75,7 @@ def test_hf_cache_inventory_route(seeded):
     assert inv["unused_size"] == 5000
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup fails closed without dir_fd")
 def test_remove_unused_frees_orphans_and_returns_fresh_inventory(seeded):
     app, blobs = seeded
     resp = app.test_client().post("/api/storage/hf-cache/remove", json={"unused": True})
@@ -85,6 +90,7 @@ def test_remove_unused_frees_orphans_and_returns_fresh_inventory(seeded):
     assert blobs["live"].exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup fails closed without dir_fd")
 def test_remove_by_key_only_accepts_inventory_keys(seeded):
     app, blobs = seeded
     client = app.test_client()
@@ -117,6 +123,7 @@ def test_storage_page_manages_the_cache_itself(app_and_db):
     assert "hfCacheCardNote" in html
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup fails closed without dir_fd")
 def test_remove_by_key_rechecks_installed_status_server_side(seeded):
     """An entry that became installed after the page loaded answers 409."""
     app, blobs = seeded
@@ -129,6 +136,7 @@ def test_remove_by_key_rechecks_installed_status_server_side(seeded):
     assert blobs["live"].exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup fails closed without dir_fd")
 def test_remove_reports_a_failed_deletion_instead_of_success(seeded, monkeypatch):
     from services import hf_cache
 
@@ -154,6 +162,7 @@ def test_remove_reports_a_failed_deletion_instead_of_success(seeded, monkeypatch
     ]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup fails closed without dir_fd")
 def test_remove_answers_409_while_a_download_is_in_progress(seeded):
     from services import hf_cache
 

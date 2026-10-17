@@ -52,7 +52,11 @@ class FakeHub:
 @pytest.fixture
 def hub(tmp_path, monkeypatch):
     import models
+    from services import hf_cache, hf_cache_lock
 
+    lock = hf_cache_lock.SharedDownloadLock(str(tmp_path / "cache-access.lock"))
+    monkeypatch.setattr(hf_cache_lock, "DOWNLOAD_LOCK", lock)
+    monkeypatch.setattr(hf_cache, "DOWNLOAD_LOCK", lock)
     cache = tmp_path / "hub"
     cache.mkdir()
     monkeypatch.setenv("HF_HUB_CACHE", str(cache))
@@ -144,6 +148,7 @@ def test_inventory_ignores_unrelated_repos(hub):
     assert inv["size"] == directory_bytes(str(hub.root / ONNX_DIR))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_remove_unused_keeps_installed_entries_and_shared_blobs(hub, tmp_path):
     from services import hf_cache
 
@@ -168,12 +173,13 @@ def test_remove_unused_keeps_installed_entries_and_shared_blobs(hub, tmp_path):
     assert shared.exists(), "a blob the installed model still links must survive"
     assert dino_blob.exists()
     snapshot = hub.root / ONNX_DIR / "snapshots" / "rev1"
-    assert not (snapshot / "bioclip-2.5-vith14").exists()
+    assert not (snapshot / "bioclip-2.5-vith14" / "image_encoder.onnx.data").exists()
     assert (snapshot / "dinov2-vit-b14" / "model.onnx").exists()
     assert hf_cache.inventory()["unused_size"] == 0
 
 
-def test_remove_drops_the_repo_dir_when_its_last_snapshot_goes(hub):
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_last_snapshot_removal_retains_directory_anchors_and_metadata(hub):
     from services import hf_cache
 
     hub.add("sam2-small/mask_decoder.onnx", b"m" * 400)
@@ -183,10 +189,11 @@ def test_remove_drops_the_repo_dir_when_its_last_snapshot_goes(hub):
     result = hf_cache.remove(["jss367/vireo-onnx-models/sam2-small"])
 
     assert result == {"removed": ["jss367/vireo-onnx-models/sam2-small"], "failed": [], "freed": 400}
-    assert not (hub.root / ONNX_DIR).exists()
+    assert (hub.root / ONNX_DIR / "refs" / "main").read_text() == "rev1"
     assert hf_cache.inventory()["entries"] == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_remove_rejects_a_key_the_inventory_did_not_hand_out(hub):
     from services import hf_cache
 
@@ -196,19 +203,20 @@ def test_remove_rejects_a_key_the_inventory_did_not_hand_out(hub):
     assert (hub.root / ONNX_DIR / "snapshots" / "rev1" / "sam2-small").exists()
 
 
-def test_remove_handles_a_plain_file_layout(hub):
-    """Where symlinks are unavailable HF copies files into the snapshot."""
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_remove_retains_plain_snapshot_copies_without_a_known_blob_lock(hub):
+    """Do not guess a copied snapshot's hub etag or race its writer."""
     from services import hf_cache
 
     hub.add("sam2-small/mask_decoder.onnx", b"m" * 400, link=False)
-
-    inv = hf_cache.inventory()
-    assert _entries(inv)["jss367/vireo-onnx-models/sam2-small"]["size"] == 400
+    snapshot = hub.root / ONNX_DIR / "snapshots" / "rev1" / "sam2-small" / "mask_decoder.onnx"
     result = hf_cache.remove(["jss367/vireo-onnx-models/sam2-small"])
-    assert result["freed"] == 400
-    assert not (hub.root / ONNX_DIR).exists()
+    assert result["freed"] == 0 and result["removed"] == []
+    assert len(result["failed"]) == 1
+    assert snapshot.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_remove_unreferenced_entry_deletes_only_dangling_blobs(hub):
     from services import hf_cache
 
@@ -222,6 +230,7 @@ def test_remove_unreferenced_entry_deletes_only_dangling_blobs(hub):
     assert live.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_purge_subfolder_skips_an_entry_whose_model_directory_is_back(hub, tmp_path):
     """Settings deletes the directory first; one that exists again is a reinstall."""
     import shutil
@@ -239,6 +248,7 @@ def test_purge_subfolder_skips_an_entry_whose_model_directory_is_back(hub, tmp_p
     assert hf_cache.purge_subfolder("dinov2-vit-b14") == 0
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_purge_model_uses_the_known_models_subfolder(hub):
     from services import hf_cache
 
@@ -251,6 +261,7 @@ def test_purge_model_uses_the_known_models_subfolder(hub):
     assert hf_cache.purge_model("custom-abc") == 0
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_purge_model_does_not_double_delete_when_source_equals_model_str(hub, monkeypatch):
     """bioclip-2 declares the same hf-hub repo for ``model_str`` and ``source``.
 
@@ -277,6 +288,7 @@ def test_purge_model_does_not_double_delete_when_source_equals_model_str(hub, mo
     assert keys == ["imageomics/bioclip-2"], keys
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_remove_model_in_settings_takes_the_cache_copy_along(hub, tmp_path):
     """Settings → Models → Remove must not leave the download in the cache."""
     import models
@@ -294,6 +306,7 @@ def test_remove_model_in_settings_takes_the_cache_copy_along(hub, tmp_path):
     assert hf_cache.inventory()["entries"] == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_remove_registered_model_purges_cache_after_unregistering(hub, tmp_path):
     import models
     from services import hf_cache
@@ -315,6 +328,7 @@ def test_remove_registered_model_purges_cache_after_unregistering(hub, tmp_path)
     assert hf_cache.inventory()["entries"] == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_shared_blob_between_two_unused_entries_counts_once_in_unused_size(hub):
     from services import hf_cache
 
@@ -326,9 +340,10 @@ def test_shared_blob_between_two_unused_entries_counts_once_in_unused_size(hub):
     assert inv["unused_size"] == 502
     result = hf_cache.remove_unused()
     assert result["freed"] == 502
-    assert not (hub.root / ONNX_DIR).exists()
+    assert hf_cache.inventory()["entries"] == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_remove_refuses_a_key_that_now_backs_an_installed_model(hub, tmp_path):
     """The page may have inventoried before the install finished."""
     from services import hf_cache
@@ -341,6 +356,7 @@ def test_remove_refuses_a_key_that_now_backs_an_installed_model(hub, tmp_path):
     assert blob.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_symlinked_snapshot_directories_are_ignored_and_never_deleted_through(hub, tmp_path):
     from services import hf_cache
 
@@ -362,23 +378,19 @@ def test_symlinked_snapshot_directories_are_ignored_and_never_deleted_through(hu
     assert (repo / "snapshots" / "linked-rev").is_symlink()
 
 
-def test_deleting_a_snapshot_file_outside_the_repository_is_refused(hub, tmp_path):
-    """A group whose recorded path escapes snapshots/ is reported, not unlinked."""
+def test_deleting_uncollected_groups_is_refused(hub, tmp_path):
     from services import hf_cache
 
-    hub.add("sam2-small/mask_decoder.onnx", b"m" * 10)
-    victim = tmp_path / "victim.bin"
-    victim.write_bytes(b"v")
-    _total, found = hf_cache._collect(str(hub.root), str(tmp_path / "models"))
-    group = found["jss367/vireo-onnx-models/sam2-small"]
-    group["files"].append(str(victim))
-
-    _freed, failures = hf_cache._delete_groups([group])
-
-    assert victim.exists()
-    assert [f["path"] for f in failures] == [str(victim)]
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"keep")
+    group = {"key": "invented", "repo_dir": str(hub.root / ONNX_DIR),
+             "files": [str(outside)], "blobs": {str(outside): 4}}
+    with pytest.raises(hf_cache.UnsafeCacheCleanup):
+        hf_cache._delete_groups([group])
+    assert outside.read_bytes() == b"keep"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_last_snapshot_removal_keeps_the_repo_while_a_download_is_in_flight(hub):
     from services import hf_cache
 
@@ -393,27 +405,17 @@ def test_last_snapshot_removal_keeps_the_repo_while_a_download_is_in_flight(hub)
     assert (hub.root / ONNX_DIR / "blobs").is_dir()
 
 
-def test_emptied_repo_is_removed_with_rmdir_steps_only(hub):
-    """refs/ and .no_exist/ markers go; anything the hub did not write keeps the repo."""
+def test_emptied_repo_and_metadata_are_never_pruned(hub):
     from services import hf_cache
 
     repo = hub.root / ONNX_DIR
-    (repo / "snapshots").mkdir(parents=True)
-    (repo / "blobs").mkdir()
-    (repo / "refs").mkdir()
+    (repo / "refs").mkdir(parents=True)
     (repo / "refs" / "main").write_text("rev1")
-    (repo / ".no_exist" / "rev1").mkdir(parents=True)
-    (repo / ".no_exist" / "rev1" / "missing.json").write_bytes(b"")
-    assert hf_cache._remove_repo_if_empty(str(repo)) is True
-    assert not repo.exists()
-
-    (repo / "snapshots").mkdir(parents=True)
-    (repo / "unexpected").mkdir()
-    (repo / "unexpected" / "keep.bin").write_bytes(b"k")
     assert hf_cache._remove_repo_if_empty(str(repo)) is False
-    assert (repo / "unexpected" / "keep.bin").exists()
+    assert (repo / "refs" / "main").read_text() == "rev1"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_deletion_failures_are_reported_not_claimed_as_removed(hub, monkeypatch):
     from services import hf_cache
 
@@ -449,6 +451,7 @@ def test_an_empty_model_directory_marks_its_cache_entry_installed(hub, tmp_path)
     assert entry["installed"] is True
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_cleanup_is_refused_while_a_download_holds_the_lock(hub):
     import threading
 
@@ -476,6 +479,7 @@ def test_cleanup_is_refused_while_a_download_holds_the_lock(hub):
     assert hf_cache.remove_unused()["freed"] == 500
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_cleanup_is_refused_while_another_downloader_holds_a_hub_lock(hub):
     """The hub holds a filelock on .locks/<repo>/<etag>.lock during a download."""
     import threading
@@ -506,6 +510,7 @@ def test_cleanup_is_refused_while_another_downloader_holds_a_hub_lock(hub):
     assert hf_cache.remove(["jss367/vireo-onnx-models/bioclip-2.5-vith14"])["freed"] == 500
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_stale_hub_lock_files_do_not_block_cleanup(hub):
     """filelock leaves the lock file behind; presence alone must mean nothing."""
     from services import hf_cache
@@ -520,6 +525,7 @@ def test_stale_hub_lock_files_do_not_block_cleanup(hub):
     assert not blob.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_failed_shared_blob_is_attributed_to_every_selected_owner(hub, monkeypatch):
     from services import hf_cache
 
@@ -543,23 +549,14 @@ def test_failed_shared_blob_is_attributed_to_every_selected_owner(hub, monkeypat
     ]
 
 
-def test_unlink_within_refuses_paths_that_escape_the_root(tmp_path):
+def test_unlink_without_the_collected_tree_is_refused(tmp_path):
     from services import hf_cache
 
-    root = tmp_path / "snapshots"
-    (root / "rev" / "sub").mkdir(parents=True)
-    inner = root / "rev" / "sub" / "file.bin"
+    inner = tmp_path / "file.bin"
     inner.write_bytes(b"x")
-    outside = tmp_path / "outside.bin"
-    outside.write_bytes(b"x")
-
-    hf_cache._unlink_within(str(root), str(inner))
-    assert not inner.exists()
-    with pytest.raises(OSError):
-        hf_cache._unlink_within(str(root), str(outside))
-    with pytest.raises(OSError):
-        hf_cache._unlink_within(str(root), str(root / "rev" / ".." / ".." / "outside.bin"))
-    assert outside.exists()
+    with pytest.raises(hf_cache.UnsafeCacheCleanup):
+        hf_cache._unlink_within(str(tmp_path), str(inner))
+    assert inner.read_bytes() == b"x"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="dir_fd unlink is POSIX-only")
@@ -580,26 +577,17 @@ def test_unlink_within_does_not_follow_a_directory_swapped_for_a_symlink(tmp_pat
     assert victim.exists()
 
 
-def test_rmdir_within_removes_only_an_empty_directory_inside_the_root(tmp_path):
+def test_cache_directory_pruning_is_refused(tmp_path):
     from services import hf_cache
 
-    root = tmp_path / "hub"
-    (root / "repo" / "snapshots").mkdir(parents=True)
-    hf_cache._rmdir_within(str(root), str(root / "repo" / "snapshots"))
-    assert not (root / "repo" / "snapshots").exists()
-    (root / "repo" / "blobs").mkdir()
-    (root / "repo" / "blobs" / "x").write_bytes(b"x")
-    with pytest.raises(OSError):
-        hf_cache._rmdir_within(str(root), str(root / "repo" / "blobs"))
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    with pytest.raises(OSError):
-        hf_cache._rmdir_within(str(root), str(outside))
-    with pytest.raises(OSError):
-        hf_cache._rmdir_within(str(root), str(root))
-    assert outside.exists() and root.exists()
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    with pytest.raises(hf_cache.UnsafeCacheCleanup):
+        hf_cache._rmdir_within(str(tmp_path), str(directory))
+    assert directory.is_dir()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_remove_decides_on_state_collected_under_the_locks(hub, tmp_path, monkeypatch):
     """An install that lands between the page's inventory and the click is seen."""
     from services import hf_cache

@@ -593,6 +593,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
             return json_error(
                 f"A model download is in progress ({exc}); try again when it finishes", 409,
             )
+        except hf_cache_service.UnsafeCacheCleanup as exc:
+            return json_error(f"Cache cleanup refused: {exc}", 409)
         # ``ok`` is the deletion's own verdict: a failed path stays listed in the
         # fresh inventory, and the page must not toast success over it.
         return jsonify({

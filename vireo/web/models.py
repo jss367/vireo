@@ -18,6 +18,7 @@ from classification_readiness import classification_readiness
 from config import read_raw_config_file, settings_write_lock
 from db import Database
 from flask import Blueprint, jsonify, request
+from services.hf_cache_lock import cache_access
 from web.background_jobs import make_background_job
 
 log = logging.getLogger(__name__)
@@ -762,12 +763,13 @@ def create_models_blueprint(
         if model_id not in PIPELINE_MODELS:
             return json_error(f"Unknown pipeline model: {model_id}")
 
+        @cache_access
         def work(job):
             import shutil
 
             from huggingface_hub import hf_hub_download
             from models import ONNX_REPO
-            from services.hf_cache import DOWNLOAD_LOCK
+            from services.hf_cache_lock import DOWNLOAD_LOCK
 
             spec = PIPELINE_MODELS[model_id]
             subfolder = spec["subfolder"]
@@ -1176,6 +1178,7 @@ def create_models_blueprint(
     def api_megadetector_download(ctx):
         """Download MegaDetector ONNX model as a background job."""
 
+        @cache_access
         def work(job):
             from detector import MEGADETECTOR_ONNX_DIR, MEGADETECTOR_ONNX_PATH
             from huggingface_hub import hf_hub_download
@@ -1190,7 +1193,7 @@ def create_models_blueprint(
 
             import shutil
 
-            from services.hf_cache import DOWNLOAD_LOCK
+            from services.hf_cache_lock import DOWNLOAD_LOCK
 
             # Held across fetch and copy so a Storage-page cleanup cannot
             # remove the blob in between.

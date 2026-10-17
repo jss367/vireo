@@ -14,6 +14,7 @@ import threading
 import numpy as np
 import onnx_runtime
 from file_replace import replace_file
+from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
 
@@ -154,6 +155,7 @@ def _promote_dinov2_pair(
                 os.unlink(data_backup_path)
 
 
+@cache_access
 def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
     """Ensure DINOv2 ONNX weights for ``variant`` are on disk.
 

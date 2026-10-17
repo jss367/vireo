@@ -27,40 +27,36 @@ An entry is ``installed`` when a model directory exists for it, even an
 empty one: every download creates the directory before fetching, so the
 directory is the user's intent and the cache entry is what will fill it.
 
-Deletion never follows a symlink: a symlinked repository, ``snapshots`` or
-revision directory is ignored, and on POSIX each unlink walks from the
-validated ``snapshots/`` or ``blobs/`` directory descriptor with
-``O_NOFOLLOW`` (``_unlink_within``), so a directory swapped for a symlink
-between the check and the unlink cannot redirect it (Windows has no
-``dir_fd``; there the pathname checks are the guard). In-process downloads
-hold ``DOWNLOAD_LOCK`` across fetch-and-copy and cleanup takes it without
-blocking, answering "a download is running" instead. Another process's
-``hf_hub_download`` holds a ``filelock`` on ``<cache>/.locks/<repo>/<etag>.lock``
-for its duration; cleanup acquires every such lock file non-blockingly and
-holds them through deletion (the files outlive their locks, so presence alone
-means nothing). A download that starts in another process after that
-acquisition is the residual race, the same one the hub's own
-``delete_revisions`` accepts with no locking at all. A repository directory
-is only removed with ``rmdir`` steps that fail if anything new appears in
-it, once it holds no snapshot and no blob (including a partial
-``.incomplete`` download).
+Cleanup is descriptor-only and fails closed on unsupported platforms. A pinned
+cache tree spans collection, selection and payload deletion. All Vireo cache
+producers share a cross-process lock; the selected blobs' hub lock targets are
+created/acquired even when absent at enumeration. A later download to a different
+blob is unselected and untouched. Directory shells and refs/marker metadata are
+never pruned: newly arriving or unselected contents cannot be swept up. Plain
+snapshot copies without a blob link are retained because their download lock
+cannot be established from the cache entry alone.
+
 """
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
-import stat
-import threading
 import time
+from contextvars import ContextVar
+
+from services.hf_cache_lock import DOWNLOAD_LOCK
+from services.hf_cache_tree import CacheTree, HubLocks, UnsafeCacheCleanup
 
 log = logging.getLogger(__name__)
 
 UNREFERENCED_SUFFIX = "#unreferenced"
-# Held by every in-process model download across ``hf_hub_download`` and the
-# copy into the models directory, and taken (non-blocking) by cleanup.
-DOWNLOAD_LOCK = threading.RLock()
+_ACTIVE_TREE: ContextVar[CacheTree | None] = ContextVar("hf_cache_tree", default=None)
+
+
+def _fs():
+    tree = _ACTIVE_TREE.get()
+    return tree if tree is not None else os
 
 
 class DownloadInProgress(RuntimeError):
@@ -88,14 +84,14 @@ def _repo_dirs(cache_dir):
     """Vireo-relevant ``models--*`` directories under the hub cache (no symlinks)."""
     from services.storage_paths import huggingface_repositories
 
-    if not os.path.isdir(cache_dir):
+    if not _fs().path.isdir(cache_dir):
         return []
     wanted = huggingface_repositories()
     out = []
-    for name in sorted(os.listdir(cache_dir)):
+    for name in sorted(_fs().listdir(cache_dir)):
         if name in wanted or name.startswith(("models--imageomics--", "models--bioclip--")):
             path = os.path.join(cache_dir, name)
-            if os.path.isdir(path) and not os.path.islink(path):
+            if _fs().path.isdir(path) and not _fs().path.islink(path):
                 out.append((name, path))
     return out
 
@@ -116,8 +112,8 @@ def _is_install_dir(path):
 
 def _within(path, root):
     """True when ``path``'s parent resolves to ``root`` or somewhere beneath it."""
-    root = os.path.realpath(root)
-    parent = os.path.realpath(os.path.dirname(path))
+    root = _fs().path.realpath(root)
+    parent = _fs().path.realpath(os.path.dirname(path))
     return parent == root or parent.startswith(root + os.sep)
 
 
@@ -163,9 +159,9 @@ def _display_name(subfolder):
 def _record(entry, path):
     """Add one snapshot file to a group, resolving a symlink to its blob."""
     entry["files"].append(path)
-    target = os.path.realpath(path) if os.path.islink(path) else path
+    target = _fs().path.realpath(path) if _fs().path.islink(path) else path
     try:
-        entry["blobs"][target] = os.lstat(target).st_size
+        entry["blobs"][target] = _fs().lstat(target).st_size
     except OSError:
         entry["blobs"][target] = 0
     return target if target != path else None
@@ -183,14 +179,14 @@ def _scan_repo(repo_dir, onnx):
     groups: dict[str, dict] = {}
     referenced: set[str] = set()
     snapshots = os.path.join(repo_dir, "snapshots")
-    if os.path.islink(snapshots) or not os.path.isdir(snapshots):
+    if _fs().path.islink(snapshots) or not _fs().path.isdir(snapshots):
         return groups, referenced
-    for rev in sorted(os.listdir(snapshots)):
+    for rev in sorted(_fs().listdir(snapshots)):
         rev_dir = os.path.join(snapshots, rev)
-        if os.path.islink(rev_dir) or not os.path.isdir(rev_dir):
+        if _fs().path.islink(rev_dir) or not _fs().path.isdir(rev_dir):
             continue
-        for root, dirs, files in os.walk(rev_dir):
-            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+        for root, dirs, files in _fs().walk(rev_dir):
+            dirs[:] = [d for d in dirs if not _fs().path.islink(os.path.join(root, d))]
             for name in files:
                 path = os.path.join(root, name)
                 rel = os.path.relpath(path, rev_dir)
@@ -205,16 +201,16 @@ def _scan_repo(repo_dir, onnx):
 def _blob_files(repo_dir):
     """``{name: lstat}`` for the regular files directly in ``blobs/``."""
     blobs_dir = os.path.join(repo_dir, "blobs")
-    if os.path.islink(blobs_dir) or not os.path.isdir(blobs_dir):
+    if _fs().path.islink(blobs_dir) or not _fs().path.isdir(blobs_dir):
         return {}
     out = {}
-    for name in os.listdir(blobs_dir):
+    for name in _fs().listdir(blobs_dir):
         path = os.path.join(blobs_dir, name)
         try:
-            st = os.lstat(path)
+            st = _fs().lstat(path)
         except OSError:
             continue
-        if os.path.isfile(path) and not os.path.islink(path):
+        if _fs().path.isfile(path) and not _fs().path.islink(path):
             out[path] = st
     return out
 
@@ -223,11 +219,11 @@ def _unreferenced_blobs(repo_dir, referenced):
     cutoff = time.time() - INCOMPLETE_GRACE_SECS
     out = {}
     for path, st in _blob_files(repo_dir).items():
-        if os.path.realpath(path) in referenced:
+        if _fs().path.realpath(path) in referenced:
             continue
         if path.endswith(".incomplete") and st.st_mtime > cutoff:
             continue
-        out[os.path.realpath(path)] = st.st_size
+        out[_fs().path.realpath(path)] = st.st_size
     return out
 
 
@@ -252,7 +248,7 @@ def _collect(cache_dir, models_dir):
     total = 0
     found = {}
     for dir_name, repo_dir in _repo_dirs(cache_dir):
-        total += directory_bytes(repo_dir)
+        total += directory_bytes(repo_dir) if _ACTIVE_TREE.get() is None else 0
         repo = _repo_id(dir_name)
         onnx = dir_name == onnx_name
         groups, referenced = _scan_repo(repo_dir, onnx)
@@ -314,224 +310,111 @@ def inventory(cache_dir=None, models_dir=None):
     }
 
 
-def _prune_empty_dirs(cache_dir, path, stop):
-    """Remove empty directories from ``path`` up to (not including) ``stop``."""
-    stop = os.path.realpath(stop)
-    while os.path.realpath(path) != stop and os.path.isdir(path):
-        try:
-            _rmdir_within(cache_dir, path)
-        except OSError:
-            return
-        path = os.path.dirname(path)
+def _remove_repo_if_empty(_repo_dir):
+    """Keep directory anchors and metadata, including after the last payload.
 
-
-def _hub_lock_paths(repo_dir):
-    locks = os.path.join(os.path.dirname(repo_dir), ".locks", os.path.basename(repo_dir))
-    if os.path.islink(locks) or not os.path.isdir(locks):
-        return []
-    return [os.path.join(locks, n) for n in sorted(os.listdir(locks)) if n.endswith(".lock")]
-
-
-@contextlib.contextmanager
-def _holding_hub_locks(repo_dirs):
-    """Hold every existing hub download lock for ``repo_dirs`` while deleting.
-
-    ``hf_hub_download`` holds ``filelock`` on ``.locks/<repo>/<etag>.lock``
-    for the length of a download; the file stays behind afterwards, so only
-    acquiring it says whether a download is running. Raises
-    ``DownloadInProgress`` without deleting anything if one is held.
+    Even empty-directory pruning can race a rename replacement. No cleanup
+    path removes directory bindings, refs, markers, or newly arriving files.
     """
-    try:
-        from filelock import FileLock, Timeout
-    except ImportError:  # pragma: no cover - filelock ships with huggingface_hub
-        yield
-        return
-    held = []
-    try:
-        for repo_dir in repo_dirs:
-            for path in _hub_lock_paths(repo_dir):
-                lock = FileLock(path, is_singleton=False)
-                try:
-                    lock.acquire(timeout=0)
-                except Timeout:
-                    raise DownloadInProgress(
-                        f"another process is downloading into {os.path.basename(repo_dir)}"
-                    ) from None
-                held.append(lock)
-        yield
-    finally:
-        for lock in held:
-            lock.release()
-
-
-def _rmdir_tree_of_known_shape(repo_dir):
-    """Remove an emptied repository with ``rmdir`` steps, never recursively.
-
-    Only the layout the hub writes is removed: empty ``snapshots/`` and
-    ``blobs/``, the small ref files under ``refs/``, the marker files under
-    ``.no_exist/<rev>/``, then the repository itself. Each ``rmdir`` fails if
-    anything new has appeared, in which case the repository is left in place
-    and the caller reports that honestly.
-    """
-    cache_dir = os.path.dirname(repo_dir)
-
-    def unlink_files_in(directory):
-        if os.path.islink(directory) or not os.path.isdir(directory):
-            return
-        for name in os.listdir(directory):
-            path = os.path.join(directory, name)
-            if os.path.isfile(path) and not os.path.islink(path):
-                _unlink_within(cache_dir, path)
-        _rmdir_within(cache_dir, directory)
-
-    for sub in ("snapshots", "blobs"):
-        path = os.path.join(repo_dir, sub)
-        if os.path.lexists(path):
-            _rmdir_within(cache_dir, path)
-    unlink_files_in(os.path.join(repo_dir, "refs"))
-    no_exist = os.path.join(repo_dir, ".no_exist")
-    if os.path.isdir(no_exist) and not os.path.islink(no_exist):
-        for rev in os.listdir(no_exist):
-            unlink_files_in(os.path.join(no_exist, rev))
-        _rmdir_within(cache_dir, no_exist)
-    _rmdir_within(cache_dir, repo_dir)
-
-
-def _remove_repo_if_empty(repo_dir):
-    """Remove the repository directory once nothing in it is worth keeping.
-
-    Returns True when it is gone. Any blob, a resumable ``.incomplete``
-    partial included, keeps it; so does content the hub does not write.
-    """
-    if os.path.islink(repo_dir) or not os.path.isdir(repo_dir):
-        return False
-    snapshots = os.path.join(repo_dir, "snapshots")
-    if (os.path.isdir(snapshots) and os.listdir(snapshots)) or _blob_files(repo_dir):
-        return False
-    try:
-        _rmdir_tree_of_known_shape(repo_dir)
-    except OSError as exc:
-        log.info("Left HF cache repo %s in place: %s", repo_dir, exc)
-        return False
-    log.info("Removed empty HF cache repo %s", repo_dir)
-    return True
-
-
-_DIR_FD_UNLINK = (
-    {os.open, os.unlink, os.rmdir} <= os.supports_dir_fd
-    and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
-)
-
-
-def _remove_within(root, path, remove, remove_at):
-    """Remove ``path`` beneath ``root`` without following a symlinked directory.
-
-    ``root`` is the hub cache directory, so the walk covers the repository
-    directory as well as ``snapshots``/``blobs``. On POSIX this opens ``root``
-    and each intermediate directory with ``O_NOFOLLOW`` and removes by name
-    relative to that descriptor (``remove_at(name, dir_fd)``), so a directory
-    swapped for a symlink after the pathname checks cannot redirect the
-    removal outside the cache. ``path`` itself may be a symlink (a snapshot
-    entry); only the link is removed.
-    """
-    rel = os.path.relpath(path, root)
-    parts = rel.split(os.sep)
-    if os.path.isabs(rel) or ".." in parts or "" in parts or parts == ["."]:
-        raise OSError(f"{path} is not inside {root}")
-    if not _DIR_FD_UNLINK:
-        _remove_without_dir_fd(root, parts, remove)
-        return
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    fd = os.open(root, flags)
-    try:
-        for part in parts[:-1]:
-            next_fd = os.open(part, flags, dir_fd=fd)
-            os.close(fd)
-            fd = next_fd
-        remove_at(parts[-1], fd)
-    finally:
-        os.close(fd)
+    return False
 
 
 def _unlink_within(root, path):
-    _remove_within(root, path, os.unlink, lambda name, fd: os.unlink(name, dir_fd=fd))
+    tree = _ACTIVE_TREE.get()
+    if tree is None or os.path.abspath(root) != tree.root:
+        raise UnsafeCacheCleanup("Deletion requires the tree pinned during collection")
+    tree.unlink(path)
 
 
-def _rmdir_within(root, path):
-    _remove_within(root, path, os.rmdir, lambda name, fd: os.rmdir(name, dir_fd=fd))
+def _rmdir_within(_root, _path):
+    raise UnsafeCacheCleanup("Cache directory pruning is disabled")
 
 
-def _remove_without_dir_fd(root, parts, remove):
-    """Windows fallback: no ``dir_fd``, so re-check every ancestor for a
-    reparse point (junction or symlink) immediately before removing by name.
-    Narrower than the descriptor walk, and the best the platform offers."""
-    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    current = root
-    for part in [None, *parts[:-1]]:
-        if part is not None:
-            current = os.path.join(current, part)
-        st = os.lstat(current)
-        if not stat.S_ISDIR(st.st_mode) or (
-            reparse and getattr(st, "st_file_attributes", 0) & reparse
-        ):
-            raise OSError(f"{current} is not a plain directory")
-    remove(os.path.join(current, parts[-1]))
+def _download_lock_targets(found):
+    """Lock both existing hub locks and all blob etags, even absent lockfiles."""
+    targets = set()
+    for repo_dir in dict.fromkeys(group["repo_dir"] for group in found.values()):
+        lock_dir = os.path.join(os.path.dirname(repo_dir), ".locks", os.path.basename(repo_dir))
+        if _fs().path.isdir(lock_dir):
+            targets.update(os.path.join(lock_dir, name) for name in _fs().listdir(lock_dir)
+                           if name.endswith(".lock"))
+        blobs_dir = os.path.join(repo_dir, "blobs")
+        blobs = set(_blob_files(repo_dir))
+        for group in found.values():
+            if group["repo_dir"] == repo_dir:
+                # Broken snapshot links still name future download targets.
+                blobs.update(blob for blob in group["blobs"]
+                             if os.path.dirname(blob) == blobs_dir)
+        for blob in blobs:
+            etag = os.path.basename(blob).removesuffix(".incomplete")
+            targets.add(os.path.join(lock_dir, etag + ".lock"))
+    return targets
 
 
 def _unlink_snapshot_files(group, failures):
-    """Unlink a group's snapshot entries; return the plain-file bytes freed."""
-    freed = 0
+    """Remove selected snapshot links; retain unverifiable plain copies."""
     cache_dir = os.path.dirname(group["repo_dir"])
     snapshots = os.path.join(group["repo_dir"], "snapshots")
     for path in group["files"]:
-        if not _within(path, snapshots) or (os.path.isdir(path) and not os.path.islink(path)):
+        if not _within(path, snapshots) or not _fs().path.islink(path):
             failures.append({"key": group["key"], "path": path,
-                             "error": "not a file inside the repository's snapshots"})
+                             "error": "snapshot is outside the repository or has no verifiable blob lock"})
             continue
         try:
-            size = 0 if os.path.islink(path) else os.lstat(path).st_size
             _unlink_within(cache_dir, path)
-            freed += size
         except OSError as exc:
             log.warning("Could not remove HF cache entry %s: %s", path, exc)
             failures.append({"key": group["key"], "path": path, "error": str(exc)})
             continue
-        _prune_empty_dirs(cache_dir, os.path.dirname(path), snapshots)
-    return freed
+    return 0  # Reclaimable payload bytes are counted at their blob, once.
 
 
 def _delete_groups(groups):
-    """Unlink the groups' snapshot files and any blob they alone referenced.
+    """Private callers cannot supply stale paths outside locked collection."""
+    if _ACTIVE_TREE.get() is None:
+        raise UnsafeCacheCleanup("Groups must be collected inside the cleanup transaction")
+    return _delete_groups_locked(groups)
 
-    Returns ``(freed_bytes, failures)``; a failure names the key and path a
-    deletion could not complete, so callers never report it as removed.
-    Raises ``DownloadInProgress`` without deleting anything while a download
-    holds ``DOWNLOAD_LOCK`` or another process holds a hub lock file.
-    """
-    if not DOWNLOAD_LOCK.acquire(blocking=False):
-        raise DownloadInProgress("a model download is in progress")
-    try:
-        with _holding_hub_locks(dict.fromkeys(g["repo_dir"] for g in groups)):
-            return _delete_groups_locked(groups)
-    finally:
-        DOWNLOAD_LOCK.release()
+
+def _collect_locked(cache_dir, models_dir, locks):
+    # Recollect after acquiring newly discovered targets. A late *different*
+    # blob is never selected without its lock; same-etag writers must wait.
+    for _attempt in range(4):
+        _total, found = _collect(cache_dir, models_dir)
+        targets = _download_lock_targets(found)
+        if targets <= locks.held.keys():
+            return found
+        try:
+            locks.hold(targets)
+        except BlockingIOError:
+            raise DownloadInProgress("another process holds a hub download lock") from None
+    raise DownloadInProgress("cache download targets keep changing")
 
 
 def _delete_selected(cache_dir, models_dir, select):
-    """Take the locks, then collect, select and delete, so the state deleted
-    is the state observed under the same synchronization a download uses.
-
-    ``select(found)`` returns the groups to delete and may raise ``KeyError``
-    or ``ValueError`` for a request the fresh state no longer supports.
-    """
-    if not DOWNLOAD_LOCK.acquire(blocking=False):
+    """Pin first, then collect/select/delete under the same download guards."""
+    try:
+        acquired = DOWNLOAD_LOCK.acquire(blocking=False)
+    except (ImportError, OSError) as exc:
+        raise UnsafeCacheCleanup(f"Cannot establish the shared download guard: {exc}") from exc
+    if not acquired:
         raise DownloadInProgress("a model download is in progress")
     try:
-        with _holding_hub_locks([d for _n, d in _repo_dirs(cache_dir)]):
-            _total, found = _collect(cache_dir, models_dir)
-            groups = select(found)
-            freed, failures = _delete_groups_locked(groups)
-            return _result(groups, freed, failures)
+        if not os.path.lexists(cache_dir):
+            return _result(select({}), 0, [])
+        try:
+            with CacheTree(cache_dir) as tree, HubLocks(tree) as locks:
+                token = _ACTIVE_TREE.set(tree)
+                try:
+                    found = _collect_locked(cache_dir, models_dir, locks)
+                    groups = select(found)
+                    freed, failures = _delete_groups_locked(groups)
+                    return _result(groups, freed, failures)
+                finally:
+                    _ACTIVE_TREE.reset(token)
+        except OSError as exc:
+            raise UnsafeCacheCleanup(f"Cache changed or cannot be safely accessed: {exc}") from exc
+
     finally:
         DOWNLOAD_LOCK.release()
 
@@ -548,15 +431,15 @@ def _delete_groups_locked(groups):
             freed += _unlink_snapshot_files(group, failures)
         blobs_dir = os.path.join(repo_dir, "blobs")
         for blob, size in group["blobs"].items():
-            if _within(blob, blobs_dir) and not os.path.islink(blob):
+            if _within(blob, blobs_dir) and not _fs().path.islink(blob):
                 owners, _size = candidate_blobs.setdefault(repo_dir, {}).setdefault(
                     blob, (set(), size))
                 owners.add(group["key"])
     for repo_dir, blobs in candidate_blobs.items():
         _groups, still_referenced = _scan_repo(repo_dir, onnx=True)
-        cache_root = os.path.realpath(os.path.dirname(repo_dir))  # blobs are realpaths
+        cache_root = _fs().path.realpath(os.path.dirname(repo_dir))  # blobs are realpaths
         for blob, (owners, size) in blobs.items():
-            if blob in still_referenced or not os.path.isfile(blob):
+            if blob in still_referenced or not _fs().path.isfile(blob):
                 continue
             try:
                 _unlink_within(cache_root, blob)
@@ -565,8 +448,6 @@ def _delete_groups_locked(groups):
                 log.warning("Could not remove HF cache blob %s: %s", blob, exc)
                 failures.extend(
                     {"key": key, "path": blob, "error": str(exc)} for key in sorted(owners))
-    for repo_dir in dict.fromkeys(g["repo_dir"] for g in groups):
-        _remove_repo_if_empty(repo_dir)
     return freed, failures
 
 

@@ -15,6 +15,7 @@ import onnx_runtime
 from file_replace import replace_file
 from PIL import Image, ImageFilter
 from resource_ledger import ResourceWaitCancelled
+from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ def sam2_status(variant):
     }
 
 
+@cache_access
 def ensure_sam2_weights(variant="sam2-small", progress_callback=None):
     """Ensure SAM2 ONNX encoder + decoder weights for ``variant`` are on disk.
 

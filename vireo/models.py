@@ -15,6 +15,7 @@ import threading
 
 import model_verify
 from file_replace import replace_file
+from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
 
@@ -688,6 +689,7 @@ def set_active_model(model_id):
         _save_config(config)
 
 
+@cache_access
 def remove_model(model_id):
     """Remove a model's weights from disk and unregister it.
 
@@ -777,6 +779,7 @@ def _purge_hf_cache_for_model(model_id):
         log.warning("Could not purge HF cache for %s: %s", model_id, exc)
 
 
+@cache_access
 def register_model(model_id, name, model_str, weights_path, description="",
                    managed=False):
     """Register a model (custom or after download).
@@ -884,6 +887,7 @@ def _staged_sibling(dest_path):
             os.unlink(tmp_path)
 
 
+@cache_access
 def _hf_download_with_retry(repo_id, filename, local_dir,
                             subfolder=None, progress_callback=None,
                             revision=None):
@@ -975,7 +979,7 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
             # Hold the cache lock across fetch and copy so a Storage-page
             # cleanup cannot remove the cached blob between the two (it
             # answers "a download is in progress" instead).
-            from services.hf_cache import DOWNLOAD_LOCK
+            from services.hf_cache_lock import DOWNLOAD_LOCK
 
             with DOWNLOAD_LOCK:
                 dest_path = _copy_from_hub_cache(
@@ -1061,6 +1065,7 @@ def _copy_from_hub_cache(cached_path, local_dir, filename):
     return dest_path
 
 
+@cache_access
 def download_model(model_id, progress_callback=None):
     """Download a known model from jss367/vireo-onnx-models.
 
@@ -1530,6 +1535,7 @@ def _path_signature(path):
     return (st.st_size, int(st.st_mtime_ns), st.st_ino)
 
 
+@cache_access
 def _load_upstream_timm_config(model_str):
     """Fetch the upstream timm repo's config.json for a hf-hub model_str.
 
@@ -1626,6 +1632,7 @@ def label_descriptions_usable(path):
     return load_label_descriptions(path) is not None
 
 
+@cache_access
 def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None):
     """Self-heal a missing label_descriptions.json for a timm model.
 
@@ -1787,6 +1794,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
     return True
 
 
+@cache_access
 def _purge_hf_cache_file(filename, hf_subdir, revision=None):
     """Delete a cached file from the HuggingFace cache so the next
     hf_hub_download call fetches fresh bytes instead of returning the
@@ -1849,6 +1857,7 @@ def _purge_hf_cache_file(filename, hf_subdir, revision=None):
             log.info("Purged HF cache blob target: %s", blob_target)
 
 
+@cache_access
 def download_hf_model(repo_id, progress_callback=None):
     """Download a model from any HuggingFace repo.
 
