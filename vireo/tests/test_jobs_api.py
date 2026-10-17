@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
+from import_job_patching import patch_import_job
 from page_scripts import page_with_scripts
 from PIL import Image
 from testing.waits import synchronization_timeout
@@ -11574,7 +11575,7 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
     archive = tmp_path / "arch"
 
     partials = {}
-    real_publish = import_job._publish_resume_scope
+    real_publish = import_job.resume._publish_resume_scope
 
     def recording_publish(job, db_, state, source_snapshots, runner=None, **kw):
         published = real_publish(
@@ -11582,7 +11583,7 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
         partials[job["id"]] = job["partial_result"]
         return published
 
-    monkeypatch.setattr(import_job, "_publish_resume_scope", recording_publish)
+    patch_import_job(monkeypatch, "_publish_resume_scope", recording_publish)
 
     with app.test_client() as client:
         parent_id = _post_import(client, card, archive, quick_look_id)
@@ -11685,7 +11686,7 @@ def test_interrupted_import_resume_tags_the_carried_photos(
     tag_name = "Kenya trip"
 
     partials = {}
-    real_publish = import_job._publish_resume_scope
+    real_publish = import_job.resume._publish_resume_scope
 
     def recording_publish(job, db_, state, source_snapshots, runner=None, **kw):
         published = real_publish(
@@ -11693,7 +11694,7 @@ def test_interrupted_import_resume_tags_the_carried_photos(
         partials[job["id"]] = job["partial_result"]
         return published
 
-    monkeypatch.setattr(import_job, "_publish_resume_scope", recording_publish)
+    patch_import_job(monkeypatch, "_publish_resume_scope", recording_publish)
 
     with app.test_client() as client:
         # Parent import with common tags, no chained after-import so the
