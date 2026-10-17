@@ -21,11 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import imagehash
-from db import (
-    KEYWORD_SOURCE_CONFLICT_SQL,
-    KEYWORD_SOURCE_UNKNOWN,
-    commit_with_retry,
-)
+from db import KEYWORD_SOURCE_UNKNOWN
 from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from image_loader import (
     RAW_EXTENSIONS,
@@ -38,7 +34,6 @@ from image_loader import (
 )
 from keyword_identity import (
     drop_stale_vireo_location_keywords,
-    embedded_keyword_associations_for_merge,
     filter_removed_import_aliases,
     validate_import_locations,
 )
@@ -58,7 +53,6 @@ from preview_cache import (
 )
 from render_source import exif_orientation as _exif_orientation_from_data
 from render_source import is_undersized
-from repositories.photo_row_deletion import photo_row_deletion
 from resource_ledger import (
     ResourceRequest,
     cpu_inference_request,
@@ -497,14 +491,7 @@ def backfill_embedded_keywords(db):
     """
     if db.get_meta(EMBEDDED_KEYWORDS_BACKFILL_KEY) == "1":
         return 0
-    # ``exif_data`` is ``json.dumps`` output, so the key spelling is fixed.
-    # The closing quote keeps ``"SubjectDistance"`` and friends out.
-    rows = db.conn.execute(
-        """SELECT id, exif_data FROM photos
-           WHERE exif_data LIKE '%"Subject": %'
-              OR exif_data LIKE '%"HierarchicalSubject": %'
-              OR exif_data LIKE '%"Keywords": %'"""
-    ).fetchall()
+    rows = db.scanning.embedded_keyword_rows()
     imported = 0
     complete = True
     for row in rows:
@@ -530,9 +517,7 @@ def backfill_embedded_keywords(db):
 
 
 def _photo_keyword_count(db, photo_id):
-    return db.conn.execute(
-        "SELECT COUNT(*) FROM photo_keywords WHERE photo_id = ?", (photo_id,),
-    ).fetchone()[0]
+    return db.scanning.keyword_count(photo_id)
 
 
 def _extract_dimensions(exif_group, file_group, extension=None):
@@ -648,14 +633,7 @@ def _pairing_rows_for_stem(db, folder_id, stem):
     group, read through the ``(folder_id, filename)`` index: every name
     whose stem is ``stem`` sorts in ``[stem + ".", stem + "/")``.
     """
-    rows = db.conn.execute(
-        "SELECT id, folder_id, filename, extension, timestamp,"
-        " camera_make, camera_model, companion_path FROM photos"
-        " WHERE folder_id = ? AND filename >= ? AND filename < ?"
-        " AND (companion_path IS NULL OR extension IN"
-        " ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf'))",
-        (folder_id, stem + ".", stem + "/"),
-    ).fetchall()
+    rows = db.companion_pairing.rows_for_stem(folder_id, stem)
     return [
         dict(row) for row in rows
         if os.path.splitext(row["filename"])[0] == stem
@@ -669,14 +647,7 @@ def _group_photos_by_folder_and_stem(db):
     carry a companion_path (so a JPEG photo named like a RAW's companion
     re-pairs with that RAW, never another same-stem one).
     """
-    rows = db.conn.execute(
-        "SELECT id, folder_id, filename, extension, timestamp,"
-        " camera_make, camera_model, companion_path FROM photos"
-        " WHERE companion_path IS NULL"
-        " OR (companion_path IS NOT NULL AND extension IN"
-        " ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf'))"
-        " ORDER BY folder_id, filename"
-    ).fetchall()
+    rows = db.companion_pairing.pairing_candidate_rows()
 
     # Group by folder_id + base name (without extension)
     groups = defaultdict(list)
@@ -819,29 +790,10 @@ def _read_metadata_transfer_rows(db, primary, companion):
 
     Returns ``(primary_full, companion_full)``.
     """
-    # Transfer metadata from companion to primary if primary lacks it.
-    # Includes the promoted EXIF summary columns
-    # (``EXIF_SUMMARY_COLUMNS``) so a RAW row that got merged with its
-    # JPEG companion doesn't lose ``camera_make``/``camera_model``/
-    # ``lens``/``aperture``/``shutter_speed``/``iso`` when the JPEG row
-    # is deleted — otherwise the new universal filters miss the paired
-    # photo even though ExifTool extracted those values.
-    # ``focal_length`` is part of ``EXIF_SUMMARY_COLUMNS`` — do not name it
-    # again here or the loop below would append a second ``focal_length=?``
-    # assignment and SQLite would reject the UPDATE for duplicate columns.
-    transfer_cols = (
-        "timestamp, rating, flag, latitude, longitude, exif_data, "
-        "width, height, "
-        + ", ".join(EXIF_SUMMARY_COLUMNS)
-    )
-    primary_full = db.conn.execute(
-        f"SELECT {transfer_cols} FROM photos WHERE id = ?",
-        (primary["id"],),
-    ).fetchone()
-    companion_full = db.conn.execute(
-        f"SELECT {transfer_cols} FROM photos WHERE id = ?",
-        (companion["id"],),
-    ).fetchone()
+    # The column list, and why it names the EXIF summary columns, is
+    # ``repositories.companion_pairing._TRANSFER_COLUMNS``.
+    primary_full = db.companion_pairing.metadata_transfer_row(primary["id"])
+    companion_full = db.companion_pairing.metadata_transfer_row(companion["id"])
     return primary_full, companion_full
 
 
@@ -851,13 +803,7 @@ def _keep_companion_import_identity(db, primary, companion):
     # it attached to the RAW so re-importing a card still skips both.
     # ``file_mtime`` lets a later scan see the companion unchanged without
     # reading it (see ``_KnownCompanions``).
-    db.conn.execute(
-        "INSERT OR REPLACE INTO companion_identities "
-        "(photo_id, filename, file_size, timestamp, file_hash, file_mtime, needs_sync) "
-        "SELECT ?, filename, file_size, timestamp, file_hash, file_mtime, 0"
-        " FROM photos WHERE id=?",
-        (primary["id"], companion["id"]),
-    )
+    db.companion_pairing.keep_import_identity(primary["id"], companion["id"])
 
 
 def _fill_primary_metadata_gaps(db, primary, primary_full, companion_full):
@@ -909,28 +855,12 @@ def _fill_primary_metadata_gaps(db, primary, primary_full, companion_full):
         updates.append("height = ?")
         params.append(companion_full["height"])
     if updates:
-        params.append(primary["id"])
-        db.conn.execute(
-            f"UPDATE photos SET {', '.join(updates)} WHERE id = ?", params
-        )
+        db.scanning.update_photo(primary["id"], updates, params)
 
 
 def _transfer_companion_keywords(db, primary, companion):
     """Transfer keywords from companion to primary, keeping the stronger provenance."""
-    companion_keywords = embedded_keyword_associations_for_merge(
-        db.conn, companion["id"], primary["id"], include_non_embedded=True,
-    )
-    for kw in companion_keywords:
-        # Move the association's provenance with it: pairing a RAW with
-        # its camera JPEG must not turn the user's hand-added keywords
-        # into "unknown" rows a retirement pass would treat as generated.
-        # The shared conflict clause keeps whichever side's claim is
-        # stronger when the primary already carries the keyword.
-        db.conn.execute(
-            "INSERT INTO photo_keywords (photo_id, keyword_id, source) "
-            "VALUES (?, ?, ?) " + KEYWORD_SOURCE_CONFLICT_SQL,
-            (primary["id"], kw["id"], kw["source"]),
-        )
+    db.keyword_provenance.carry_companion_keywords(companion["id"], primary["id"])
 
 
 def _defer_primary_display_cache_invalidation(
@@ -977,45 +907,7 @@ def _carry_prediction_reviews_to_survivors(db, old_id, new_id):
     # prediction, its row stayed on the old detection id. Preserve any
     # workspace review state by moving it onto the surviving prediction
     # before the old detection delete cascades the duplicate away.
-    db.conn.execute(
-        """INSERT INTO prediction_review
-                 (prediction_id, workspace_id, status, reviewed_at,
-                  individual, group_id, vote_count, total_votes)
-               SELECT survivor.id, pr.workspace_id, pr.status,
-                      pr.reviewed_at, pr.individual, pr.group_id,
-                      pr.vote_count, pr.total_votes
-                 FROM predictions duplicate
-                 JOIN predictions survivor
-                   ON survivor.detection_id = ?
-                  AND survivor.classifier_model = duplicate.classifier_model
-                  AND survivor.labels_fingerprint = duplicate.labels_fingerprint
-                  AND survivor.species IS duplicate.species
-                 JOIN prediction_review pr
-                   ON pr.prediction_id = duplicate.id
-                WHERE duplicate.detection_id = ?
-               ON CONFLICT(prediction_id, workspace_id)
-               DO UPDATE SET status = excluded.status,
-                             reviewed_at = excluded.reviewed_at,
-                             individual = COALESCE(
-                                 excluded.individual,
-                                 prediction_review.individual
-                             ),
-                             group_id = COALESCE(
-                                 excluded.group_id,
-                                 prediction_review.group_id
-                             ),
-                             vote_count = COALESCE(
-                                 excluded.vote_count,
-                                 prediction_review.vote_count
-                             ),
-                             total_votes = COALESCE(
-                                 excluded.total_votes,
-                                 prediction_review.total_votes
-                             )
-                WHERE prediction_review.status = 'pending'
-                  AND excluded.status <> 'pending'""",
-        (new_id, old_id),
-    )
+    db.companion_pairing.carry_prediction_reviews_to_survivors(old_id, new_id)
 
 
 def _rekey_companion_detections_onto_primary(db, primary, companion):
@@ -1033,12 +925,8 @@ def _rekey_companion_detections_onto_primary(db, primary, companion):
     """
     from detection_id import detection_id as _detection_id
 
-    moving = db.conn.execute(
-        "SELECT id, detector_model, box_x, box_y, box_w, box_h,"
-        " detector_confidence, category"
-        " FROM detections WHERE photo_id = ?",
-        (companion["id"],),
-    ).fetchall()
+    pairing = db.companion_pairing
+    moving = pairing.detections_of(companion["id"])
     for det in moving:
         new_id = _detection_id(
             primary["id"], det["detector_model"],
@@ -1047,32 +935,17 @@ def _rekey_companion_detections_onto_primary(db, primary, companion):
         )
         if new_id == det["id"]:
             # Cannot happen in practice (photo_id changed) but defensive.
-            db.conn.execute(
-                "UPDATE detections SET photo_id = ? WHERE id = ?",
-                (primary["id"], det["id"]),
-            )
+            pairing.move_detection(det["id"], primary["id"])
             continue
         # Insert the row under the new id. If the primary already has a
         # detection for the same (model, box, category), the UPSERT no-ops
         # and we just discard the companion's row below.
-        db.conn.execute(
-            "INSERT INTO detections"
-            " (id, photo_id, detector_model, box_x, box_y, box_w, box_h,"
-            "  detector_confidence, category)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT(id) DO NOTHING",
-            (new_id, primary["id"], det["detector_model"],
-             det["box_x"], det["box_y"], det["box_w"], det["box_h"],
-             det["detector_confidence"], det["category"]),
-        )
+        pairing.insert_rekeyed_detection(new_id, primary["id"], det)
         # Redirect predictions to the new detection id. ON CONFLICT in
         # predictions is unlikely (would require the primary already had
         # a prediction for this species against the same detection) but
         # IGNORE keeps us defensive.
-        db.conn.execute(
-            "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
-            (new_id, det["id"]),
-        )
+        pairing.redirect_predictions(det["id"], new_id)
         _carry_prediction_reviews_to_survivors(db, det["id"], new_id)
         # Redirect classifier_runs too — they're the cache key the
         # non-reclassify gate consults. Without this, paired photos with
@@ -1081,18 +954,12 @@ def _rekey_companion_detections_onto_primary(db, primary, companion):
         # after every pair-up. Same OR IGNORE pattern as predictions:
         # primary's own run rows win on (detection_id, classifier_model,
         # labels_fingerprint) conflicts.
-        db.conn.execute(
-            "UPDATE OR IGNORE classifier_runs SET detection_id = ? WHERE detection_id = ?",
-            (new_id, det["id"]),
-        )
+        pairing.redirect_classifier_runs(det["id"], new_id)
         # Drop any predictions/classifier_runs that lost the UPDATE race
         # (duplicate-key) along with the now-orphan companion detection
         # row — CASCADE on both FKs cleans up any remaining rows tied to
         # the old id.
-        db.conn.execute(
-            "DELETE FROM detections WHERE id = ?",
-            (det["id"],),
-        )
+        pairing.delete_detection(det["id"])
 
 
 def _transfer_companion_pending_changes(db, primary, companion):
@@ -1103,10 +970,7 @@ def _transfer_companion_pending_changes(db, primary, companion):
     collision, and duplicate rows from a raw+JPEG pairing are harmless and
     vanishingly unlikely.
     """
-    db.conn.execute(
-        "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
-        (primary["id"], companion["id"]),
-    )
+    db.companion_pairing.transfer_pending_changes(primary["id"], companion["id"])
 
 
 def _transfer_companion_inat_submissions(db, primary, companion):
@@ -1115,17 +979,7 @@ def _transfer_companion_inat_submissions(db, primary, companion):
     Deduplicate on (photo_id, observation_id) before reassigning to avoid
     UNIQUE constraint violation.
     """
-    db.conn.execute(
-        """DELETE FROM inat_submissions
-               WHERE photo_id = ? AND observation_id IN (
-                   SELECT observation_id FROM inat_submissions WHERE photo_id = ?
-               )""",
-        (companion["id"], primary["id"]),
-    )
-    db.conn.execute(
-        "UPDATE inat_submissions SET photo_id = ? WHERE photo_id = ?",
-        (primary["id"], companion["id"]),
-    )
+    db.companion_pairing.transfer_inat_submissions(primary["id"], companion["id"])
 
 
 def _transfer_companion_edit_recipe(
@@ -1138,39 +992,16 @@ def _transfer_companion_edit_recipe(
     primary's derived renders are invalidated (deferred to post-commit when
     ``vireo_dir`` is set, inline DB-only otherwise).
     """
-    transferred_recipe = db.conn.execute(
-        """INSERT OR IGNORE INTO photo_edit_recipes
-                   (photo_id, recipe_json, updated_at)
-               SELECT ?, recipe_json, updated_at
-               FROM photo_edit_recipes
-               WHERE photo_id = ?""",
-        (primary["id"], companion["id"]),
-    )
-    if transferred_recipe.rowcount:
-        db.conn.execute(
-            """UPDATE edit_history_items
-                   SET photo_id = ?
-                   WHERE photo_id = ?
-                     AND edit_id IN (
-                         SELECT id FROM edit_history
-                         WHERE action_type = 'edit_recipe'
-                     )""",
-            (primary["id"], companion["id"]),
-        )
+    if db.companion_pairing.copy_edit_recipe(primary["id"], companion["id"]):
+        db.companion_pairing.transfer_recipe_history(primary["id"], companion["id"])
         if vireo_dir:
             _defer_recipe_snapshot_transfer(
                 db, post_commit_fs_actions, primary, companion,
                 vireo_dir, thumb_cache_dir,
             )
         else:
-            db.conn.execute(
-                "UPDATE photos SET thumb_path = NULL WHERE id = ?",
-                (primary["id"],),
-            )
-            db.conn.execute(
-                "DELETE FROM preview_cache WHERE photo_id = ?",
-                (primary["id"],),
-            )
+            db.caches.clear_thumbnail_path(primary["id"])
+            db.caches.delete_photo_previews(primary["id"])
 
 
 def _defer_recipe_snapshot_transfer(
@@ -1247,7 +1078,7 @@ def _delete_companion_row(db, primary, companion, photo_rows):
     """
     # Remove keyword associations then the duplicate JPEG record
     db._transfer_gps_review_for_merge(companion["id"], primary["id"])
-    db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
+    db.companion_pairing.delete_keyword_associations(companion["id"])
     # Move the embedded-offered suppression onto the survivor so a
     # user removal survives this pairing. The FK on
     # ``photo_embedded_keyword_offered.photo_id`` is non-cascading, so
@@ -1257,9 +1088,7 @@ def _delete_companion_row(db, primary, companion, photo_rows):
     )
     # Transfer effective visibility before cascade deletion removes the
     # companion's photo-only grants. This shares only the surviving ID.
-    from repositories.photo_visibility import remap_photo_visibility
-
-    remap_photo_visibility(db.conn, {companion["id"]: primary["id"]})
+    db.photo_visibility.remap({companion["id"]: primary["id"]})
     photo_rows.delete({companion["id"]: primary["id"]})
 
 
@@ -1313,10 +1142,7 @@ def _merge_companion_into_primary(
     _fill_primary_metadata_gaps(db, primary, primary_full, companion_full)
     _transfer_companion_keywords(db, primary, companion)
 
-    db.conn.execute(
-        "UPDATE photos SET companion_path = ? WHERE id = ?",
-        (companion["filename"], primary["id"]),
-    )
+    db.companion_pairing.set_companion_path(primary["id"], companion["filename"])
     if vireo_dir:
         _defer_primary_display_cache_invalidation(
             post_commit_fs_actions, primary, vireo_dir, thumb_cache_dir,
@@ -1419,7 +1245,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
 
     # The deletion chokepoint batches collection rewrites for all pairs;
     # retain each RAW identity for ownership-checked callback publication.
-    with photo_row_deletion(db.conn) as photo_rows:
+    with db.companion_pairing.row_deletion() as photo_rows:
         for (_folder_id, _base), members in groups.items():
             for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
                 _merge_companion_into_primary(
@@ -1439,15 +1265,15 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
                         thumb_cache_dir, masks_dir=catalog_masks_directory(db._db_path),
                     )
 
-    commit_with_retry(db.conn)
+    db.commit_with_retry()
     # DB state is durable now. Run the collected filesystem operations.
     _run_post_commit_fs_actions(post_commit_fs_actions)
     # ``_invalidate_derived_caches`` inside a deferred action issues DB
     # updates (clears thumb_path / working_copy_path, drops preview_cache
     # rows). Those auto-opened a new transaction; commit it so the state
     # is durable and doesn't leak into the caller's next write.
-    if db.conn.in_transaction:
-        commit_with_retry(db.conn)
+    if db.in_transaction:
+        db.commit_with_retry()
     return merged_ids
 
 
@@ -1504,10 +1330,7 @@ def _invalidate_cached_thumbnails(db, vireo_dir, photo_id, thumb_cache_dir):
         # photos.thumb_path so count_photos_missing_thumb (used by the
         # Thumbnails & Previews plan card) doesn't see a phantom "done"
         # state for a row whose JPEG no longer exists on disk.
-        db.conn.execute(
-            "UPDATE photos SET thumb_path = NULL WHERE id = ?",
-            (photo_id,),
-        )
+        db.caches.clear_thumbnail_path(photo_id)
 
 
 def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
@@ -1554,15 +1377,7 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
     # Also clear any failure markers: a content change is a meaningful
     # input change so the next backfill / scan extraction pass should retry,
     # not be permanently locked out by a stale failure record.
-    db.conn.execute(
-        "UPDATE photos SET working_copy_path = NULL,"
-        " working_copy_evicted_mtime = NULL,"
-        " working_copy_failed_at = NULL,"
-        " working_copy_failed_mtime = NULL,"
-        " working_copy_failed_source = NULL"
-        " WHERE id = ?",
-        (photo_id,),
-    )
+    db.working_copies.reset(photo_id)
 
     _invalidate_raw_display_cache(vireo_dir, photo_id)
 
@@ -1573,9 +1388,7 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
     # stranded file and hands out stale pre-change bytes. Mirrors the
     # self-healing semantics in preview_cache.evict_if_over_quota.
     preview_dir = os.path.join(vireo_dir, "previews")
-    rows = db.conn.execute(
-        "SELECT size FROM preview_cache WHERE photo_id = ?", (photo_id,)
-    ).fetchall()
+    rows = db.caches.preview_sizes(photo_id)
     deleted_sizes = []
     for row in rows:
         size = row["size"]
@@ -1590,10 +1403,7 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
             deleted_sizes.append(size)
 
     if deleted_sizes:
-        db.conn.executemany(
-            "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
-            [(photo_id, s) for s in deleted_sizes],
-        )
+        db.caches.delete_preview_rows([(photo_id, s) for s in deleted_sizes])
 
 
 def _sweep_untracked_previews_for_photos(db, vireo_dir, photo_ids):
@@ -1627,11 +1437,7 @@ def _sweep_untracked_previews_for_photos(db, vireo_dir, photo_ids):
     still_tracked: set[tuple[int, int]] = set()
     for i in range(0, len(ids_list), _CHUNK):
         chunk = ids_list[i : i + _CHUNK]
-        ph = ",".join("?" * len(chunk))
-        rows = db.conn.execute(
-            f"SELECT photo_id, size FROM preview_cache WHERE photo_id IN ({ph})",
-            chunk,
-        ).fetchall()
+        rows = db.caches.preview_keys_for_photos(chunk)
         still_tracked.update((r["photo_id"], r["size"]) for r in rows)
 
     try:
@@ -1793,9 +1599,7 @@ def working_copy_backfill_candidate_count(db):
     if wc_cache_max_mb <= 0:
         return 0
     where, params = _working_copy_candidate_predicate(wc_max_size)
-    return db.conn.execute(
-        f"SELECT COUNT(*) FROM photos WHERE {where}", params
-    ).fetchone()[0]
+    return db.working_copies.candidate_count(where, params)
 
 
 def _snapshot_row_still_current(db, row):
@@ -1828,16 +1632,7 @@ def _snapshot_row_still_current(db, row):
     ``file_size``, ``file_mtime`` and ``companion_path`` may be NULL, so the
     SQL guard built from the identity columns uses ``IS`` (not ``=``).
     """
-    current = db.conn.execute(
-        """
-        SELECT p.folder_id, p.filename, p.companion_path, p.file_size,
-               p.file_mtime, p.working_copy_path, f.path AS folder_path
-          FROM photos p
-          JOIN folders f ON f.id = p.folder_id
-         WHERE p.id = ?
-        """,
-        (row["id"],),
-    ).fetchone()
+    current = db.working_copies.snapshot_row(row["id"])
     if current is None:
         return False
     return (
@@ -1983,30 +1778,6 @@ def _record_published_identity(sink, published_path):
         sink.append(None)
 
 
-# Every catalog write for a candidate row carries the snapshot's full source
-# identity, so a row whose id was reused, or whose companion or folder changed
-# while extraction ran, is never stamped with this batch's result. Parameters:
-# id, then ``_row_identity_params(row)``.
-_WC_ROW_IDENTITY_WHERE = (
-    " WHERE id=? AND folder_id=? AND filename=?"
-    " AND companion_path IS ?"
-    " AND file_size IS ? AND file_mtime IS ?"
-    " AND working_copy_path IS NULL"
-    " AND (SELECT path FROM folders"
-    "        WHERE id = photos.folder_id) IS ?"
-)
-
-
-def _row_identity_params(row):
-    """Parameters for ``_WC_ROW_IDENTITY_WHERE``."""
-    return (
-        row["id"], row["folder_id"], row["filename"],
-        row["companion_path"],
-        row["file_size"], row["file_mtime"],
-        row["folder_path"],
-    )
-
-
 def _working_copy_scope_clause(db, scope):
     """Load ``scope`` into a TEMP table; return the SQL clause matching it."""
     scope_rows = []
@@ -2027,49 +1798,9 @@ def _working_copy_scope_clause(db, scope):
                 (path, "subtree", _subtree_like_pattern(path)),
             )
 
-    # A snapshot can span thousands of exact directories. Expanding one
-    # OR term per directory hits SQLite's default MAX_EXPR_DEPTH=1000.
-    # Keep the scope connection-local in a TEMP table instead; executemany
-    # also avoids the bound-parameter limit. Commit only the transaction
-    # opened here so the subsequent main-WAL read cannot retain a stale
-    # snapshot if another job writes before this extractor does.
-    started_in_transaction = db.conn.in_transaction
-    try:
-        db.conn.execute(
-            """CREATE TEMP TABLE IF NOT EXISTS working_copy_scope (
-                   path TEXT NOT NULL,
-                   mode TEXT NOT NULL,
-                   like_pattern TEXT,
-                   PRIMARY KEY (path, mode)
-               )"""
-        )
-        db.conn.execute(
-            "CREATE INDEX IF NOT EXISTS working_copy_scope_mode "
-            "ON working_copy_scope (mode)"
-        )
-        db.conn.execute("DELETE FROM working_copy_scope")
-        db.conn.executemany(
-            "INSERT OR IGNORE INTO working_copy_scope "
-            "(path, mode, like_pattern) VALUES (?, ?, ?)",
-            scope_rows,
-        )
-        if not started_in_transaction and db.conn.in_transaction:
-            commit_with_retry(db.conn)
-    except Exception:
-        if not started_in_transaction and db.conn.in_transaction:
-            db.conn.rollback()
-        raise
-    return """AND (
-              EXISTS (
-                  SELECT 1 FROM working_copy_scope wcs
-                   WHERE wcs.path = f.path
-              )
-              OR EXISTS (
-                  SELECT 1 FROM working_copy_scope wcs
-                   WHERE wcs.mode = 'subtree'
-                     AND f.path LIKE wcs.like_pattern ESCAPE '\\'
-              )
-           )"""
+    # The TEMP table and why the scope lives there instead of in the WHERE
+    # clause: ``WorkingCopyRepository.load_scope``.
+    return db.working_copies.load_scope(scope_rows)
 
 
 def _working_copy_candidate_rows(db, wc_max_size, scope):
@@ -2084,28 +1815,9 @@ def _working_copy_candidate_rows(db, wc_max_size, scope):
     if scope is not None:
         scope_clause = _working_copy_scope_clause(db, scope)
 
-    rows = db.conn.execute(
-        f"""
-        SELECT p.id, p.folder_id, p.filename, p.companion_path,
-               p.working_copy_path,
-               p.extension, p.width, p.height, p.exif_data, p.file_mtime,
-               p.file_size,
-               f.path AS folder_path
-          FROM photos p
-          JOIN folders f ON f.id = p.folder_id
-         WHERE {candidate_where}
-           {scope_clause}
-         -- Newest import first. A library whose working copies do not all
-         -- fit under the quota gets partial coverage no matter what, so the
-         -- order decides *which* photos are covered — and unordered means
-         -- rowid order, which walks the oldest imports first and leaves the
-         -- shoot the user just brought in for last. Import recency (id) is
-         -- the right proxy here rather than capture time: an archive of
-         -- decade-old files imported today is what is being culled today.
-         ORDER BY p.id DESC
-        """,
-        params,
-    ).fetchall()
+    # Newest import first (``WorkingCopyRepository.candidate_rows`` says
+    # why).
+    rows = db.working_copies.candidate_rows(candidate_where, scope_clause, params)
 
     # Revalidate cataloged paths at execution time. A user-selected source can
     # be replaced with a symlink into a protected macOS library after the API
@@ -2659,7 +2371,7 @@ class _WorkingCopyBatch:
                     row, wc_rel, wc_abs, extraction.published_identities,
                 )
             if not publication.lost and not publication.orphaned:
-                commit_with_retry(self.db.conn)
+                self.db.commit_with_retry()
                 if publication.quota_lowered:
                     # Protect the batch's own writes here too — same
                     # reason as the mid-batch enforce. Without it, a
@@ -2736,28 +2448,8 @@ class _WorkingCopyBatch:
         concurrent on-demand writer that already committed for this id is
         not overwritten.
         """
-        if raw_failed_then_companion:
-            # The companion-derived working copy is usable, but request
-            # paths still need to know the RAW itself failed: edited RAW
-            # render paths gate companion selection on a present "source"
-            # failure marker.
-            return self.db.conn.execute(
-                "UPDATE photos SET working_copy_path=?,"
-                " working_copy_evicted_mtime=NULL,"
-                " working_copy_failed_at=datetime('now'),"
-                " working_copy_failed_mtime=?,"
-                " working_copy_failed_source='source'"
-                + _WC_ROW_IDENTITY_WHERE,
-                (wc_rel, row["file_mtime"], *_row_identity_params(row)),
-            )
-        return self.db.conn.execute(
-            "UPDATE photos SET working_copy_path=?,"
-            " working_copy_evicted_mtime=NULL,"
-            " working_copy_failed_at=NULL,"
-            " working_copy_failed_mtime=NULL,"
-            " working_copy_failed_source=NULL"
-            + _WC_ROW_IDENTITY_WHERE,
-            (wc_rel, *_row_identity_params(row)),
+        return self.db.working_copies.set_working_copy(
+            row, wc_rel, raw_failed_then_companion=raw_failed_then_companion,
         )
 
     def _discard_orphaned_publication(
@@ -2789,11 +2481,7 @@ class _WorkingCopyBatch:
         file_still_ours = self._still_holds_published_bytes(
             wc_abs, published_identities,
         )
-        row_owned_by_replacement = self.db.conn.execute(
-            "SELECT 1 FROM photos WHERE working_copy_path=?"
-            " LIMIT 1",
-            (wc_rel,),
-        ).fetchone() is not None
+        row_owned_by_replacement = self.db.working_copies.path_is_claimed(wc_rel)
         if file_still_ours:
             # Our captured fingerprint matches the current bytes on disk.
             # Two cases collapse into the same action:
@@ -2845,7 +2533,7 @@ class _WorkingCopyBatch:
                 row_owned_by_replacement,
             )
         try:
-            self.db.conn.rollback()
+            self.db.rollback()
         except sqlite3.Error:
             # Nothing was written (rowcount 0), so a failed rollback costs
             # correctness nothing — the next commit_with_retry closes the
@@ -2895,17 +2583,8 @@ class _WorkingCopyBatch:
         # is not its failure. ``working_copy_path IS NULL`` so a concurrent
         # on-demand writer's successful publication is not clobbered with
         # a failure marker.
-        self.db.conn.execute(
-            "UPDATE photos SET working_copy_failed_at=datetime('now'),"
-            " working_copy_failed_mtime=?,"
-            " working_copy_failed_source=?"
-            + _WC_ROW_IDENTITY_WHERE,
-            (
-                row["file_mtime"], extraction.failure_source,
-                *_row_identity_params(row),
-            ),
-        )
-        commit_with_retry(self.db.conn)
+        self.db.working_copies.mark_failed(row, extraction.failure_source)
+        self.db.commit_with_retry()
 
     # -- staying under the quota -------------------------------------
 
@@ -3190,19 +2869,10 @@ class _WorkingCopyBatch:
         # on those new inputs and suppress backfill of the row's current
         # source until the quota or the primary mtime changes.
         remaining = self.rows[i:]
-        deferred_rows = [
-            (row["file_mtime"], *_row_identity_params(row))
-            for row in remaining
-        ]
-        if not deferred_rows:
+        if not remaining:
             return False
-        self.db.conn.executemany(
-            "UPDATE photos SET"
-            " working_copy_evicted_mtime=COALESCE(?, -1)"
-            + _WC_ROW_IDENTITY_WHERE,
-            deferred_rows,
-        )
-        commit_with_retry(self.db.conn)
+        self.db.working_copies.defer(remaining)
+        self.db.commit_with_retry()
 
         return self._undo_deferral_if_quota_raised(remaining)
 
@@ -3231,28 +2901,8 @@ class _WorkingCopyBatch:
         # the row's *previous* source identity is what we wrote, and the
         # row now has different extraction inputs whose backfill the marker
         # never suppressed.
-        deferred_marker_rows = [
-            (
-                row["id"], row["folder_id"], row["filename"],
-                row["companion_path"],
-                row["file_size"], row["file_mtime"],
-                row["file_mtime"],
-                row["folder_path"],
-            )
-            for row in remaining
-        ]
-        self.db.conn.executemany(
-            "UPDATE photos SET working_copy_evicted_mtime=NULL "
-            "WHERE id=? AND folder_id=? AND filename=?"
-            " AND companion_path IS ?"
-            " AND file_size IS ? AND file_mtime IS ?"
-            " AND working_copy_path IS NULL"
-            " AND working_copy_evicted_mtime IS COALESCE(?, -1)"
-            " AND (SELECT path FROM folders"
-            "        WHERE id = photos.folder_id) IS ?",
-            deferred_marker_rows,
-        )
-        commit_with_retry(self.db.conn)
+        self.db.working_copies.undo_deferral(remaining)
+        self.db.commit_with_retry()
         self._adopt_quota(refreshed_quota_mb)
         self.stop_after_current = False
         return True
@@ -3489,36 +3139,8 @@ class _WorkingCopyBatch:
         marker to the new state and a future ``file_mtime`` bump to the
         snapshot value would fail to clear it.
         """
-        deferred_rows = [
-            (
-                snapshot["file_mtime"]
-                if snapshot["file_mtime"] is not None
-                else -1,
-                photo_id,
-                f"working/{photo_id}.jpg",
-                snapshot["folder_id"],
-                snapshot["filename"],
-                snapshot["companion_path"],
-                snapshot["file_size"],
-                snapshot["file_mtime"],
-                snapshot["folder_path"],
-            )
-            for photo_id, snapshot in trimmed
-            if photo_id >= 0 and snapshot is not None
-        ]
-        if deferred_rows:
-            self.db.conn.executemany(
-                "UPDATE photos SET working_copy_path=NULL,"
-                " working_copy_evicted_mtime=?"
-                " WHERE id=? AND working_copy_path IS ?"
-                " AND folder_id=? AND filename=?"
-                " AND companion_path IS ?"
-                " AND file_size IS ? AND file_mtime IS ?"
-                " AND (SELECT path FROM folders"
-                "        WHERE id = photos.folder_id) IS ?",
-                deferred_rows,
-            )
-        commit_with_retry(self.db.conn)
+        self.db.working_copies.defer_trimmed(trimmed)
+        self.db.commit_with_retry()
 
     def _enforce_final_quota(self):
         """Enforce the quota once after the batch.
@@ -3581,9 +3203,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
 
     after_pending = working_copy_backfill_candidate_count(db)
 
-    succeeded = db.conn.execute(
-        "SELECT COUNT(*) FROM photos WHERE working_copy_path IS NOT NULL"
-    ).fetchone()[0]
+    succeeded = db.working_copies.count_with_working_copy()
 
     return {
         "candidates": int(before_pending),
@@ -3608,23 +3228,8 @@ def _incremental_photo_index(db, image_files):
     result = {}
     for start in range(0, len(image_files), 200):
         batch = image_files[start:start + 200]
-        placeholders = ",".join("(?, ?)" for _ in batch)
-        params = [part for path in batch for part in (str(path.parent), path.name)]
-        rows = db.conn.execute(
-            f"WITH requested(folder_path, filename) AS (VALUES {placeholders}) "
-            "SELECT f.path AS folder_path, p.id, p.folder_id, p.filename, "
-            "p.extension, p.file_size, p.file_mtime, p.xmp_mtime, p.timestamp, "
-            "p.width, p.file_hash, p.exif_data IS NOT NULL AS exif_extracted, "
-            "(p.exif_data IS NULL AND p.camera_make IS NULL "
-            "AND p.camera_model IS NULL AND p.lens IS NULL "
-            "AND p.aperture IS NULL AND p.shutter_speed IS NULL "
-            "AND p.iso IS NULL) AS summary_needs_extract "
-            # Preserve os.path.join's match for legacy folder paths ending
-            # in a separator, while retaining indexed equality lookups.
-            "FROM requested r JOIN folders f "
-            "ON f.path IN (r.folder_path, r.folder_path || ?) "
-            "JOIN photos p ON p.folder_id = f.id AND p.filename = r.filename",
-            [*params, os.sep],
+        rows = db.scanning.incremental_baseline_rows(
+            [(str(path.parent), path.name) for path in batch],
         )
         for row in rows:
             result[os.path.join(row["folder_path"], row["filename"])] = row
@@ -3647,18 +3252,6 @@ class _KnownCompanions:
     pairing or deletion that ran since the snapshot is honored.
     """
 
-    _OWNER_SQL = (
-        "SELECT p.id AS owner_id, p.filename AS owner_filename,"
-        " p.folder_id AS folder_id,"
-        " c.file_size, c.file_mtime, c.file_hash, c.needs_sync"
-        " FROM photos p LEFT JOIN companion_identities c"
-        " ON c.photo_id = p.id AND c.filename = p.companion_path"
-        " WHERE p.folder_id = ? AND p.companion_path = ?"
-        # A RAW with a stored identity vouches for the file; legacy pairs
-        # that two RAWs both claim prefer the one that can.
-        " ORDER BY c.photo_id IS NULL, p.id LIMIT 1"
-    )
-
     def __init__(self, db):
         self.db = db
         self._names_by_folder = {}
@@ -3668,31 +3261,18 @@ class _KnownCompanions:
         """The owning RAW and its stored companion identity, or None."""
         names = self._names_by_folder.get(folder_id)
         if names is None:
-            names = {
-                row[0] for row in self.db.conn.execute(
-                    "SELECT companion_path FROM photos"
-                    " WHERE folder_id = ? AND companion_path IS NOT NULL",
-                    (folder_id,),
-                )
-            }
+            names = self.db.companion_pairing.companion_names(folder_id)
             self._names_by_folder[folder_id] = names
         if filename not in names:
             return None
-        return self.db.conn.execute(
-            self._OWNER_SQL, (folder_id, filename),
-        ).fetchone()
+        return self.db.companion_pairing.owner_of(folder_id, filename)
 
     def lookup_path(self, image_path):
         """``lookup`` by path, resolving the folder like ``_incremental_photo_index``."""
         parent = str(image_path.parent)
         folder_ids = self._folder_ids_by_path.get(parent)
         if folder_ids is None:
-            folder_ids = [
-                row[0] for row in self.db.conn.execute(
-                    "SELECT id FROM folders WHERE path IN (?, ?)",
-                    (parent, parent + os.sep),
-                )
-            ]
+            folder_ids = self.db.scanning.folder_ids_at(parent)
             self._folder_ids_by_path[parent] = folder_ids
         for folder_id in folder_ids:
             known = self.lookup(folder_id, image_path.name)
@@ -4592,22 +4172,11 @@ class _ScanRun:
         db = self.db
         scoped_paths = self.scoped_paths
         touched_folder_ids = self.touched_folder_ids
-        guard = " AND status = 'partial'" if only_from_partial else ""
-        if scoped_paths:
-            path_placeholders = ",".join("?" * len(scoped_paths))
-            db.conn.execute(
-                f"UPDATE folders SET status = ? "
-                f"WHERE path IN ({path_placeholders}){guard}",
-                (new_status, *scoped_paths),
-            )
-        if touched_folder_ids:
-            id_placeholders = ",".join("?" * len(touched_folder_ids))
-            db.conn.execute(
-                f"UPDATE folders SET status = ? "
-                f"WHERE id IN ({id_placeholders}){guard}",
-                (new_status, *touched_folder_ids),
-            )
-        commit_with_retry(db.conn)
+        db.scanning.set_folder_status(
+            new_status, paths=scoped_paths, folder_ids=touched_folder_ids,
+            only_from_partial=only_from_partial,
+        )
+        db.commit_with_retry()
 
     # -- pre-pass ----------------------------------------------------
 
@@ -4650,7 +4219,7 @@ class _ScanRun:
             # Route through the same partial-status path as a main-loop failure
             # so users see the badge and can rescan.
             try:
-                self.db.conn.rollback()
+                self.db.rollback()
             except Exception:
                 log.exception("Rollback after pre-pass failure also failed")
             try:
@@ -4795,7 +4364,7 @@ class _ScanRun:
                 xmp_path, known["owner_id"],
             )
             return
-        commit_with_retry(self.db.conn)
+        self.db.commit_with_retry()
 
     def _reuse_existing_row(self, existing, full_path_str, stat, xmp_path, xmp_mtime):
         """``True`` when the cataloged row still vouches for the file."""
@@ -4852,21 +4421,15 @@ class _ScanRun:
         # XMP changed: re-import keywords
         if not xmp_unchanged and xmp_mtime is not None:
             _import_keywords_for_photo(db, existing["id"], str(xmp_path))
-            db.conn.execute(
-                "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
-                (xmp_mtime, existing["id"]),
-            )
-            commit_with_retry(db.conn)
+            db.scanning.set_xmp_mtime(existing["id"], xmp_mtime)
+            db.commit_with_retry()
         elif not xmp_unchanged:
             # Sidecar deleted: clear the stored mtime so the row
             # converges instead of looking "XMP changed" on every
             # later scan (this skip path never reaches the main
             # loop, so nothing else would ever reset it).
-            db.conn.execute(
-                "UPDATE photos SET xmp_mtime = NULL WHERE id = ?",
-                (existing["id"],),
-            )
-            commit_with_retry(db.conn)
+            db.scanning.set_xmp_mtime(existing["id"], None)
+            db.commit_with_retry()
 
         if (
             file_unchanged
@@ -5181,7 +4744,7 @@ class _ScanRun:
             # clean transaction, then flag every folder in scope as 'partial' so
             # callers can detect and re-scan.
             try:
-                self.db.conn.rollback()
+                self.db.rollback()
             except Exception:
                 log.exception("Rollback after scan failure also failed")
             try:
@@ -5246,10 +4809,7 @@ class _ScanRun:
         # the cheaper recycled-rowid probe right after the insert, so
         # a large initial scan doesn't pay for O(N) UPDATE + commit
         # round-trips it has no reason to make.
-        existing_row = db.conn.execute(
-            "SELECT file_hash, flag FROM photos WHERE folder_id = ? AND filename = ?",
-            (folder_id, image_path.name),
-        ).fetchone()
+        existing_row = db.scanning.content_baseline(folder_id, image_path.name)
         row_already_existed = existing_row is not None
         prev_file_hash = existing_row["file_hash"] if existing_row else None
 
@@ -5439,17 +4999,11 @@ class _ScanRun:
             with db._commits_held():
                 # The guarded write takes the writer lock before anything
                 # else, so neither check below can go stale before commit.
-                if db.conn.execute(
-                    "UPDATE photos SET companion_path = ? WHERE id = ?"
-                    " AND folder_id IS ? AND filename = ?"
-                    " AND (companion_path IS NULL OR companion_path = ?)",
-                    (name, owner_id, owner["folder_id"], owner["filename"], name),
-                ).rowcount != 1:
+                if not db.companion_pairing.claim_companion(
+                    owner_id, owner["folder_id"], owner["filename"], name,
+                ):
                     raise _CompanionAttachRefused
-                if db.conn.execute(
-                    "SELECT 1 FROM photos WHERE folder_id = ? AND filename = ?",
-                    (item.folder_id, name),
-                ).fetchone() is not None:
+                if db.companion_pairing.photo_exists(item.folder_id, name):
                     raise _CompanionAttachRefused
                 # Re-check compatibility under the writer lock. The identity
                 # predicates above (id, folder, filename, companion_path)
@@ -5462,12 +5016,9 @@ class _ScanRun:
                 # permanently attach unrelated files.
                 if not self._owner_still_compatible(owner_id, item):
                     raise _CompanionAttachRefused
-                db.conn.execute(
-                    "INSERT OR REPLACE INTO companion_identities"
-                    " (photo_id, filename, file_size, timestamp, file_hash,"
-                    " file_mtime, needs_sync) VALUES (?, ?, ?, ?, ?, ?, 0)",
-                    (owner_id, name, item.file_size, item.meta.timestamp,
-                     item.file_hash, item.file_mtime),
+                db.companion_pairing.record_identity(
+                    owner_id, name, item.file_size, item.meta.timestamp,
+                    item.file_hash, item.file_mtime,
                 )
                 self._apply_companion_gap_fill(
                     owner_id, self._companion_columns(item.meta), ownership,
@@ -5483,7 +5034,7 @@ class _ScanRun:
         except _CompanionAttachRefused:
             # ``_commits_held`` rolled back already, unless the connection
             # cannot hold commits; the refusals precede every other write.
-            db.conn.rollback()
+            db.rollback()
             return False
         self._publish_attached_companion(image_path, owner, ownership)
         if self.progress_callback:
@@ -5497,11 +5048,7 @@ class _ScanRun:
         guarded UPDATE ahead of this already required the row under the
         writer lock.
         """
-        current = self.db.conn.execute(
-            "SELECT timestamp, camera_make, camera_model FROM photos"
-            " WHERE id = ?",
-            (owner_id,),
-        ).fetchone()
+        current = self.db.companion_pairing.capture_columns(owner_id)
         if current is None:
             return True
         jpeg_summary = (
@@ -5671,12 +5218,10 @@ class _ScanRun:
                 known["file_mtime"] is not None
                 and known["owner_id"] not in self.reprocessed_row_ids
             ):
-                self.db.conn.execute(
-                    "UPDATE companion_identities SET file_mtime = ?"
-                    " WHERE photo_id = ? AND filename = ?",
-                    (file_mtime, known["owner_id"], image_path.name),
+                self.db.companion_pairing.set_identity_mtime(
+                    known["owner_id"], image_path.name, file_mtime,
                 )
-            commit_with_retry(self.db.conn)
+            self.db.commit_with_retry()
         else:
             return False
         return self._finish_known_companion(image_path, known)
@@ -5714,11 +5259,9 @@ class _ScanRun:
         the metadata write; the caller's commit releases the lock.
         """
         folder_id, filename, companion = ownership
-        return self.db.conn.execute(
-            "UPDATE photos SET id=id WHERE id=? AND folder_id IS ?"
-            " AND filename=? AND companion_path=?",
-            (owner_id, folder_id, filename, companion),
-        ).rowcount == 1
+        return self.db.companion_pairing.lock_owner(
+            owner_id, folder_id, filename, companion,
+        )
 
     def _apply_companion_gap_fill(self, owner_id, companion_columns, ownership):
         """Fill the owner's gaps from the companion in the current transaction.
@@ -5757,7 +5300,7 @@ class _ScanRun:
             return
         for owner_id, (ownership, columns) in self._pending_companion_fills.items():
             self._apply_companion_gap_fill(owner_id, columns, ownership)
-        commit_with_retry(self.db.conn)
+        self.db.commit_with_retry()
         self._pending_companion_fills = {}
 
     def _read_file_metadata(self, image_path):
@@ -5874,27 +5417,7 @@ class _ScanRun:
         The triggers/function last only as long as the connection and never
         change the persistent catalog schema.
         """
-        conn = self.db.conn
-        if not hasattr(conn, "_scan_collection_revision"):
-            conn._scan_collection_revision = 0
-
-            def collection_changed():
-                conn._scan_collection_revision += 1
-                return 0
-
-            conn.create_function("_scan_collection_changed", 0, collection_changed)
-            for operation in ("INSERT", "UPDATE", "DELETE"):
-                # IF NOT EXISTS keeps this idempotent when a prior scan on
-                # the same sqlite connection has already created the TEMP
-                # triggers — e.g. a test that re-wraps the connection loses
-                # the Python-side counter attribute but the triggers persist
-                # for the lifetime of the connection.
-                conn.execute(
-                    f"CREATE TEMP TRIGGER IF NOT EXISTS "
-                    f"_scan_collection_{operation.lower()} "
-                    f"AFTER {operation} ON main.collections BEGIN "
-                    "SELECT _scan_collection_changed(); END"
-                )
+        self.db.scanning.install_collection_change_counter()
         self._collection_named_ids = None
         self._collection_named_ids_version = None
 
@@ -5913,10 +5436,9 @@ class _ScanRun:
         Check both after the INSERT has acquired its writer lock, so a stale
         UI save between insert commits cannot become a new photo's membership.
         """
-        conn = self.db.conn
         version = (
-            conn.execute("PRAGMA data_version").fetchone()[0],
-            conn._scan_collection_revision,
+            self.db.scanning.data_version(),
+            self.db.scanning.collection_revision(),
         )
         if (
             self._collection_named_ids is None
@@ -5932,8 +5454,10 @@ class _ScanRun:
         rewritten = self.db.remap_collection_photo_ids({photo_id: None})
         # This remap only removed photo_id, already discarded above. Keep
         # the cache current without traversing all other memberships again.
-        self._collection_named_ids_version = (version[0], conn._scan_collection_revision)
-        commit_with_retry(self.db.conn)
+        self._collection_named_ids_version = (
+            version[0], self.db.scanning.collection_revision(),
+        )
+        self.db.commit_with_retry()
         log.warning(
             "New photo %d reused the id of a deleted photo that %d "
             "collection(s) still listed; removed the stale entry so the "
@@ -6008,11 +5532,7 @@ class _ScanRun:
             updates.append("xmp_mtime=?")
             update_params.append(item.xmp_mtime)
         if updates:
-            update_params.append(photo_id)
-            self.db.conn.execute(
-                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
-                update_params,
-            )
+            self.db.scanning.update_photo(photo_id, updates, update_params)
             if (
                 row_already_existed
                 and file_meta
@@ -6028,12 +5548,8 @@ class _ScanRun:
                 # stale stat and re-reads the companion, replaying the
                 # fill. Harmless no-op when the row has no
                 # ``companion_identities`` entry (UPDATE touches 0 rows).
-                self.db.conn.execute(
-                    "UPDATE companion_identities SET file_mtime = NULL "
-                    "WHERE photo_id = ?",
-                    (photo_id,),
-                )
-            commit_with_retry(self.db.conn)
+                self.db.companion_pairing.clear_identity_mtime(photo_id)
+            self.db.commit_with_retry()
 
     def _identity_column_updates(self, item):
         """SET clauses for the file's metadata and content-hash columns."""
@@ -6144,7 +5660,7 @@ class _ScanRun:
                 thumb_cache_dir=self.thumb_cache_dir,
             )
             self.invalidated_photo_ids.add(photo_id)
-            commit_with_retry(self.db.conn)
+            self.db.commit_with_retry()
 
     # -- post-processing ---------------------------------------------
 
@@ -6209,7 +5725,7 @@ class _ScanRun:
                     db, vireo_dir, self.invalidated_photo_ids,
                 )
         except BaseException:
-            db.conn.rollback()
+            db.rollback()
             raise
         finally:
             db.update_folder_counts()
@@ -6225,13 +5741,9 @@ class _ScanRun:
         companion_identities = getattr(merged, "companions", {})
         reported_identities = getattr(self, "_reported_identities", {})
         with self.db._commits_held():
-            self.db.conn.execute("BEGIN IMMEDIATE")
+            self.db.begin_immediate()
             for old_id, new_id in merged.items():
-                row = self.db.conn.execute(
-                    "SELECT p.folder_id, p.filename, f.path FROM photos p"
-                    " JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
-                    (new_id,),
-                ).fetchone()
+                row = self.db.companion_pairing.owner_row(new_id)
                 expected = getattr(merged, "owners", {}).get(new_id)
                 # The merged-away JPEG must still be the same file the
                 # scanner reported under ``old_id``. If a concurrent delete

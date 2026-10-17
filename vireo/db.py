@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from repositories.audit import AuditRepository
     from repositories.caches import CachesRepository
     from repositories.collections import CollectionRepository
+    from repositories.companion_pairing import CompanionPairingRepository
     from repositories.detections import DetectionsRepository
     from repositories.duplicates import DuplicatesRepository
     from repositories.edit_history import EditHistoryRepository
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from repositories.imports import ImportRepository
     from repositories.inat import InatRepository
     from repositories.job_history import JobHistoryRepository
+    from repositories.keyword_provenance import KeywordProvenanceRepository
     from repositories.keywords import KeywordRepository
     from repositories.local_folders import LocalFolderRepository
     from repositories.local_workspaces import LocalWorkspaceRepository
@@ -42,8 +44,10 @@ if TYPE_CHECKING:
     from repositories.photos import PhotoRepository
     from repositories.predictions import PredictionRepository
     from repositories.processes import ProcessesRepository
+    from repositories.scanning import ScanningRepository
     from repositories.stats import StatsRepository
     from repositories.sync import SyncRepository
+    from repositories.working_copies import WorkingCopyRepository
     from repositories.workspace_folders import WorkspaceFolderRepository
     from repositories.workspaces import WorkspaceRepository
 
@@ -5183,6 +5187,67 @@ class Database:
         """
         return self._caches_repository()
 
+    # -- Scanner catalog pass, companion pairing, working copies --
+
+    def _scanning_repository(self):
+        """Build the scanner's catalog-pass repository on this connection.
+
+        A scan catalogs photos globally, so it takes no workspace id.
+        """
+        from repositories.scanning import ScanningRepository
+
+        return ScanningRepository(self.conn)
+
+    @property
+    def scanning(self) -> ScanningRepository:
+        """The scanner's per-file and per-folder catalog SQL: ``db.scanning.update_photo(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_scanning_repository``. Do not hold the returned
+        repository across a connection swap.
+        """
+        return self._scanning_repository()
+
+    def _companion_pairing_repository(self):
+        """Build the RAW+JPEG companion-pairing repository on this connection.
+
+        Pairing is catalog-wide, so it takes no workspace id.
+        """
+        from repositories.companion_pairing import CompanionPairingRepository
+
+        return CompanionPairingRepository(self.conn)
+
+    @property
+    def companion_pairing(self) -> CompanionPairingRepository:
+        """RAW+JPEG pairing: ``db.companion_pairing.claim_companion(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_companion_pairing_repository``. Do not hold the
+        returned repository across a connection swap.
+        """
+        return self._companion_pairing_repository()
+
+    def _working_copy_repository(self):
+        """Build the working-copy extraction repository on this connection.
+
+        The ``working_copy_*`` columns are catalog-wide, so it takes no
+        workspace id. ``commit_with_retry`` is read from this module at call
+        time so a test that patches ``db.commit_with_retry`` still applies.
+        """
+        from repositories.working_copies import WorkingCopyRepository
+
+        return WorkingCopyRepository(self.conn, commit_with_retry=commit_with_retry)
+
+    @property
+    def working_copies(self) -> WorkingCopyRepository:
+        """The working-copy extraction pass: ``db.working_copies.set_working_copy(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_working_copy_repository``. Do not hold the
+        returned repository across a connection swap.
+        """
+        return self._working_copy_repository()
+
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""
         self._photos_repository(scoped=False).update_sharpness(photo_id, sharpness)
@@ -5543,6 +5608,17 @@ class Database:
             decided_prediction_statuses=self.DECIDED_PREDICTION_STATUSES,
             facade=self,
         )
+
+    @property
+    def keyword_provenance(self) -> KeywordProvenanceRepository:
+        """The ``photo_keywords`` writers without a ``Database`` wrapper: ``db.keyword_provenance.carry_companion_keywords(...)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_keyword_provenance_repository``, which resolves
+        the active workspace only when a method needs it. Do not hold the
+        returned repository across ``set_active_workspace``.
+        """
+        return self._keyword_provenance_repository()
 
     def detect_keyword_case_convention(self):
         """Detect the casing convention used by existing species keywords.

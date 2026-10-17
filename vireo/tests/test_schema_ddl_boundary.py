@@ -9,8 +9,8 @@ one ``ALTER`` per new column), which is why ``PRAGMA user_version`` said
 nothing about whether a catalog had those objects. Migration 18 moved the
 last of them; this test keeps new ones from appearing.
 
-Scratch tables (``CREATE TEMP TABLE``, and the index the scanner puts on its
-temp scope table) are not schema and are not counted.
+Scratch tables (``CREATE TEMP TABLE``, and the index the working-copy pass
+puts on its temp scope table) are not schema and are not counted.
 
 Deadline: ``DDL_LIMITS`` is empty by 2026-12-31
 (``docs/plans/2026-10-16-frontend-schema-consolidation-plan.md``).
@@ -29,9 +29,9 @@ SKIPPED_DIRS = {"tests", "testing"}
 # you move one into canonical_schema.py (delete it at zero); never raise one:
 # new objects go in canonical_schema.py with a migration in schema.py.
 DDL_LIMITS = {
-    # An index on the scanner's CREATE TEMP TABLE working_copy_scope: scratch,
-    # but spelled without TEMP so the scan cannot tell.
-    "scanner.py": 1,
+    # An index on the working-copy pass's CREATE TEMP TABLE working_copy_scope:
+    # scratch, but spelled without TEMP so the scan cannot tell.
+    "repositories/working_copies.py": 1,
 }
 
 _DDL_RE = re.compile(
