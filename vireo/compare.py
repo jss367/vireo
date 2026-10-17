@@ -161,49 +161,7 @@ def compare_prediction_to_keywords(prediction, existing_species, taxonomy):
 
     best = None
     for kw in existing_species:
-        keyword_taxon = taxonomy.lookup(kw)
-        rel = taxonomy.relationship(kw, prediction)
-        shared = _shared_rank(pred_taxon, keyword_taxon)
-        if rel == "same":
-            result = {
-                "category": "match",
-                "label": "Match",
-                "detail": "Prediction agrees with the existing species keyword.",
-                "matched_keyword": kw,
-                "shared_rank": shared,
-            }
-        elif rel == "ancestor":
-            result = {
-                "category": "refinement",
-                "label": "Refinement",
-                "detail": "Prediction is more specific than the existing species keyword.",
-                "matched_keyword": kw,
-                "shared_rank": shared,
-            }
-        elif rel == "descendant":
-            result = {
-                "category": "broader",
-                "label": "Broader",
-                "detail": "Prediction is broader than the existing species keyword.",
-                "matched_keyword": kw,
-                "shared_rank": shared,
-            }
-        else:
-            if rel == "sibling":
-                detail = "Prediction and keyword share the same immediate parent."
-            elif shared:
-                detail = f"Prediction and keyword share the same {shared}."
-            elif rel is None:
-                detail = "At least one keyword was not found in the local taxonomy."
-            else:
-                detail = "Prediction and species keyword are taxonomically distant."
-            result = {
-                "category": "conflict",
-                "label": "Conflict",
-                "detail": detail,
-                "matched_keyword": kw,
-                "shared_rank": shared,
-            }
+        result = _keyword_comparison(prediction, pred_taxon, kw, taxonomy)
 
         if (
             best is None
@@ -219,3 +177,51 @@ def compare_prediction_to_keywords(prediction, existing_species, taxonomy):
         "matched_keyword": existing_species[0],
         "shared_rank": None,
     }
+
+
+def _keyword_comparison(prediction, pred_taxon, kw, taxonomy):
+    """Compare a taxonomy-known prediction against one species keyword."""
+    keyword_taxon = taxonomy.lookup(kw)
+    rel = taxonomy.relationship(kw, prediction)
+    shared = _shared_rank(pred_taxon, keyword_taxon)
+    if rel == "same":
+        result = {
+            "category": "match",
+            "label": "Match",
+            "detail": "Prediction agrees with the existing species keyword.",
+            "matched_keyword": kw,
+            "shared_rank": shared,
+        }
+    elif rel == "ancestor":
+        result = {
+            "category": "refinement",
+            "label": "Refinement",
+            "detail": "Prediction is more specific than the existing species keyword.",
+            "matched_keyword": kw,
+            "shared_rank": shared,
+        }
+    elif rel == "descendant":
+        result = {
+            "category": "broader",
+            "label": "Broader",
+            "detail": "Prediction is broader than the existing species keyword.",
+            "matched_keyword": kw,
+            "shared_rank": shared,
+        }
+    else:
+        if rel == "sibling":
+            detail = "Prediction and keyword share the same immediate parent."
+        elif shared:
+            detail = f"Prediction and keyword share the same {shared}."
+        elif rel is None:
+            detail = "At least one keyword was not found in the local taxonomy."
+        else:
+            detail = "Prediction and species keyword are taxonomically distant."
+        result = {
+            "category": "conflict",
+            "label": "Conflict",
+            "detail": detail,
+            "matched_keyword": kw,
+            "shared_rank": shared,
+        }
+    return result
