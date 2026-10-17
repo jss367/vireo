@@ -21,7 +21,7 @@ function clearSelection() {
   updateSelectionBar();
 }
 
-function setSelected(photoId, on) {
+/** @param {number} photoId @param {boolean} on */ function setSelected(photoId, on) {
   if (on) selection.add(photoId);
   else selection.delete(photoId);
   // querySelectorAll: a photo can appear in multiple miss categories at once
@@ -34,32 +34,32 @@ function setSelected(photoId, on) {
 }
 
 function updateSelectionBar() {
-  var bar = document.getElementById('missesSelectionBar');
-  var countEl = document.getElementById('missesSelectionCount');
+  var bar = /** @type {HTMLElement} */ (document.getElementById('missesSelectionBar'));
+  var countEl = /** @type {HTMLElement} */ (document.getElementById('missesSelectionCount'));
   if (!bar || !countEl) return;
   var n = selection.size;
   bar.classList.toggle('active', n > 0);
   countEl.textContent = n + ' selected';
-  var unflagBtn = document.getElementById('missesSelectionUnflagBtn');
+  var unflagBtn = /** @type {HTMLButtonElement} */ (document.getElementById('missesSelectionUnflagBtn'));
   if (unflagBtn) unflagBtn.disabled = previewActive;
-  var browseBtn = document.getElementById('missesSelectionBrowseBtn');
+  var browseBtn = /** @type {HTMLButtonElement} */ (document.getElementById('missesSelectionBrowseBtn'));
   if (browseBtn) browseBtn.disabled = n !== 1;
 }
 
-function selectRangeWithinCategory(cat, fromIdx, toIdx) {
+/** @param {MissCategory} cat @param {number} fromIdx @param {number} toIdx */ function selectRangeWithinCategory(cat, fromIdx, toIdx) {
   var photos = missesData[cat] || [];
   if (!photos.length) return;
   var lo = Math.min(fromIdx, toIdx);
   var hi = Math.max(fromIdx, toIdx);
   for (var i = lo; i <= hi && i < photos.length; i++) {
     if (i < 0) continue;
-    setSelected(photos[i].id, true);
+    var photo = photos[i]; if (photo) setSelected(photo.id, true);
   }
 }
 
-function onCardClick(cat, idx, photoId, e) {
+/** @param {MissCategory} cat @param {number} idx @param {number} photoId @param {MouseEvent=} e */ function onCardClick(cat, idx, photoId, e) {
   // Let the inner unflag button keep its own click behavior.
-  if (e && e.target && e.target.closest('button')) return;
+  if (e && e.target instanceof Element && e.target.closest('button')) return;
   if (e && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     e.stopPropagation();
@@ -85,8 +85,8 @@ function onCardClick(cat, idx, photoId, e) {
   setFocused(cat, idx);
 }
 
-function onCardDoubleClick(cat, idx, e) {
-  if (e && e.target && e.target.closest('button')) return;
+/** @param {MissCategory} cat @param {number} idx @param {MouseEvent=} e */ function onCardDoubleClick(cat, idx, e) {
+  if (e && e.target instanceof Element && e.target.closest('button')) return;
   if (e) {
     e.preventDefault();
     e.stopPropagation();

@@ -11,8 +11,8 @@
 function bindMissLifeListEvents() {
   document.addEventListener('lifelist:changed', function(e) {
     var detail = e && e.detail ? e.detail : {};
-    var species = detail.species;
-    var photoId = detail.photoId;
+    const species = detail.species;
+    const photoId = detail.photoId;
     if (!species || !photoId) return;
     var changed = false;
     CATEGORY_ORDER.forEach(function(cat) {
@@ -60,7 +60,7 @@ function bindMissLifeListEvents() {
 function bindMissLightboxFlagEvents() {
   document.addEventListener('lightbox:flagchanged', function(e) {
     var detail = e && e.detail ? e.detail : {};
-    var photoId = detail.photoId;
+    const photoId = detail.photoId;
     var flag = detail.flag;
     if (photoId == null) return;
     if (_clearMissRepresentativeStateIfIneligible([photoId], flag)) {
