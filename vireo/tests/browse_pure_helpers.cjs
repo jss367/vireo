@@ -48,6 +48,21 @@ test('formatFileSize picks the largest unit below the size', () => {
   assert.equal(formatFileSize(5 * 1073741824), '5.0 GB');
 });
 
+test('flagNoteText names who set the flag and why, only for the flag the photo has now', () => {
+  const {flagNoteText} = load({'detail.js': ['flagNoteText']});
+  const note = {flag: 'rejected', source: 'claude-fable-5-1', reason: 'eye soft at 1:1', at: '2026-10-17 20:15:03'};
+  assert.equal(flagNoteText('rejected', note), 'Rejected \u2014 claude-fable-5-1: eye soft at 1:1 \u00b7 2026-10-17');
+  assert.equal(flagNoteText('flagged', {flag: 'flagged', source: 'claude-fable-5-1', reason: null}), 'Flagged \u2014 by claude-fable-5-1');
+  assert.equal(flagNoteText('none', {flag: 'none', source: null, reason: 'reconsidered'}), 'Flag cleared \u2014 reconsidered');
+  // A hand click records no provenance, so there is nothing to say.
+  assert.equal(flagNoteText('rejected', {flag: 'rejected', source: null, reason: null}), '');
+  assert.equal(flagNoteText('rejected', null), '');
+  assert.equal(flagNoteText('rejected', undefined), '');
+  // A note about a flag the photo no longer carries is stale.
+  assert.equal(flagNoteText('flagged', note), '');
+  assert.equal(flagNoteText(null, {flag: 'none', source: 'x', reason: null}), 'Flag cleared \u2014 by x');
+});
+
 test('cardExtensionLabel names both files of a RAW+JPEG pair', () => {
   const {cardExtensionLabel} = load({'cards.js': ['cardExtensionLabel']});
   assert.equal(cardExtensionLabel({extension: '.nef'}), 'NEF');

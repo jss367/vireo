@@ -174,7 +174,7 @@ def test_classifier_normal_loader_fallback(monkeypatch):
 
     session = Mock()
     session.prepare.return_value = (None, None)
-    monkeypatch.setattr("classify_job.load_image", lambda *a, **k: Image.new("RGB", (100, 100), "red"))
+    monkeypatch.setattr("classify_job.classify_pass.load_image", lambda *a, **k: Image.new("RGB", (100, 100), "red"))
     image, _, _ = _prepare_image(
         {"folder_id": 1, "filename": "unsupported.nef"}, {1: "/photos"}, None,
         raw_analysis=session,
@@ -320,7 +320,11 @@ def test_reports_persist_per_detection_and_cascade(tmp_path):
 
 @pytest.mark.parametrize("kind", ["pending", "match", "grouped"])
 def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, kind):
-    from classify_job import _store_grouped_predictions, _store_match_prediction, _store_pending_detection_prediction
+    from classify_job import _store_grouped_predictions
+    from classify_job.store_predictions import (
+        _store_match_prediction,
+        _store_pending_detection_prediction,
+    )
     from db import Database
 
     db = Database(str(tmp_path / "refresh.db"))
@@ -394,7 +398,7 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
 @pytest.mark.parametrize("status", ["pending", "accepted", "rejected"])
 @pytest.mark.parametrize("new_group", [None, "new-burst"])
 def test_reinference_refreshes_burst_metadata(tmp_path, status, new_group):
-    from classify_job import _store_pending_detection_prediction
+    from classify_job.store_predictions import _store_pending_detection_prediction
     from db import Database
 
     db = Database(str(tmp_path / "burst.db"))
@@ -437,7 +441,7 @@ def test_normal_cache_gate_rejects_reviewed_raw_recipe(tmp_path, status):
     db.add_prediction(detection, "Robin", 0.9, "model", status=status)
     db.model_runs.record_classifier_run(detection, "model", "legacy", 1,
                              runtime_fingerprint="raw-runtime", input_recipe=ra.RECIPE)
-    from classify_job import _all_photos_cache_satisfied
+    from classify_job.cache_coverage import _all_photos_cache_satisfied
 
     assert not _all_photos_cache_satisfied(db, [photo], classifier_model="model", labels_fingerprint="legacy")
     assert db.model_runs.get_classifier_run_keys(detection) == set()

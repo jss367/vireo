@@ -570,7 +570,7 @@ def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
 # keyword (see ``vireo/catalog.py``) and the classifier already treats
 # ancestor tags as "broader labels for the same taxon" rather than
 # separate identifications (see ``_can_auto_accept_detection_prediction``
-# in ``vireo/classify_job.py``). Without a hierarchy filter, a normal
+# in ``vireo/classify_job/store_predictions.py``). Without a hierarchy filter, a normal
 # species-tagged robin would also inflate ``Turdus`` / ``Turdidae`` /
 # ``Aves`` Life List buckets on those catalogs.
 #
@@ -8931,7 +8931,10 @@ class Database:
         """
         return self._edit_history_repository()
 
-    def record_edit(self, action_type, description, new_value, items, is_batch=False, _commit=True):
+    def record_edit(
+        self, action_type, description, new_value, items, is_batch=False, _commit=True,
+        *, source=None, reason=None,
+    ):
         """Record an edit action with per-photo before/after values.
 
         Clears the redo stack (any undone entries) since a new action invalidates them.
@@ -8940,10 +8943,12 @@ class Database:
             _commit: If False, skip the internal commit and the history prune
                      (caller is responsible for committing the transaction;
                      prune can be run later).
+            source, reason: the edit's provenance when the caller stated it
+                     (who decided, and why); None for the user's own clicks.
         """
         edit_id = self._edit_history_repository().record(
             action_type, description, new_value, items,
-            is_batch=is_batch, _commit=_commit,
+            is_batch=is_batch, _commit=_commit, source=source, reason=reason,
         )
         if _commit:
             self._prune_edit_history()
@@ -9574,6 +9579,10 @@ class Database:
         if not pred_id:
             return
         self.update_prediction_status(int(pred_id), "rejected", _commit=False)
+
+    def prune_edit_history(self):
+        """Apply the configured history bound after a caller-owned edit transaction commits."""
+        return self._prune_edit_history()
 
     def _prune_edit_history(self):
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""

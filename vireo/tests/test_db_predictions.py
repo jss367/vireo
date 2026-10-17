@@ -1014,9 +1014,14 @@ def test_predictions_accessor_hands_the_connection_to_the_factory_only():
 
 
 def test_classify_job_reaches_predictions_through_the_accessor():
+    from pathlib import Path
+
     import classify_job
 
-    source = inspect.getsource(classify_job)
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(Path(classify_job.__file__).parent.glob("*.py"))
+    )
     assert "db.predictions.replace_row(" in source
     assert "db.predictions.id_for_key(" in source
 

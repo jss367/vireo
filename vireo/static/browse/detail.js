@@ -99,7 +99,7 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   /** @type {HTMLElement} */ (document.getElementById('detailRating')).innerHTML = ratingHtml;
 
   // Flags
-  updateDetailFlagButtons(photo.flag);
+  updateDetailFlagButtons(photo.flag, photo.flag_note);
 
   // Color labels
   updateDetailColors();
@@ -215,13 +215,51 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   renderMetadataGroups(photo.metadata);
 }
 
-function updateDetailFlagButtons(/** @type {string | null | undefined} */ flag) {
+// Also renders the note under the buttons saying who set the flag and why,
+// when the detail payload carried one. Callers that only know the flag (a
+// hand click, the batch inspector) pass no note, and a hand flag has none.
+function updateDetailFlagButtons(
+  /** @type {string | null | undefined} */ flag,
+  /** @type {BrowseFlagNote | null | undefined} */ note = null,
+) {
   /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.detail-flag-btn')).forEach(function(btn) {
     btn.className = 'detail-flag-btn';
   });
   var flagBtns = /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.detail-flag-btn'));
   if (flag === 'flagged') flagBtns[1]?.classList.add('active-flag');
   else if (flag === 'rejected') flagBtns[2]?.classList.add('active-reject');
+  renderDetailFlagNote(flag, note);
+}
+
+// The line under the flag buttons: "Rejected — claude-fable-5-1: eye soft at
+// 1:1 · 2026-10-17". Pure: the detail payload's flag and flag_note in, text
+// out ('' when the flag was a hand click, which carries no provenance).
+function flagNoteText(
+  /** @type {string | null | undefined} */ flag,
+  /** @type {BrowseFlagNote | null | undefined} */ note,
+) {
+  if (!note || (!note.source && !note.reason)) return '';
+  var normalized = flag || 'none';
+  if ((note.flag || 'none') !== normalized) return '';
+  var verb = normalized === 'rejected' ? 'Rejected'
+    : normalized === 'flagged' ? 'Flagged'
+    : 'Flag cleared';
+  var who = note.source && note.reason ? note.source + ': ' + note.reason
+    : note.source ? 'by ' + note.source
+    : String(note.reason);
+  var when = note.at ? ' \u00b7 ' + String(note.at).slice(0, 10) : '';
+  return verb + ' \u2014 ' + who + when;
+}
+
+function renderDetailFlagNote(
+  /** @type {string | null | undefined} */ flag,
+  /** @type {BrowseFlagNote | null | undefined} */ note,
+) {
+  var el = document.getElementById('detailFlagNote');
+  if (!el) return;
+  var text = flagNoteText(flag, note);
+  el.textContent = text;
+  el.hidden = !text;
 }
 
 function renderMetadataGroups(/** @type {BrowseMetadata | undefined} */ metadata) {

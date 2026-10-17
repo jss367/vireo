@@ -1291,6 +1291,8 @@ body.sidebar-resizing {
 .detail-flag-btn:hover { border-color: var(--accent); }
 .detail-flag-btn.active-flag { background: var(--accent); color: var(--bg-primary); border-color: var(--accent); }
 .detail-flag-btn.active-reject { background: var(--danger); color: var(--text-primary); border-color: var(--danger); }
+.detail-flag-note { font-size: 11px; color: var(--text-muted); margin: -2px 0 8px; line-height: 1.4; }
+.detail-flag-note[hidden] { display: none; }
 .detail-wildlife-btn {
   padding: 5px 12px;
   border: 1px solid var(--border-primary);
@@ -2233,6 +2235,7 @@ body.sidebar-resizing {
           <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
           <button class="detail-flag-btn" onclick="setFlag('rejected')">Reject (X)</button>
         </div>
+        <div class="detail-flag-note single-only" id="detailFlagNote" hidden></div>
       </div>
 
       <div class="detail-section single-only">
