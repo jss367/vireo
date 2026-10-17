@@ -34,7 +34,7 @@ function renderSources() {
       renderSources();
       scheduleImportPreview();
     };
-    if (newImagesSnapshotId !== null) btn.style.display = 'none';
+    if (newImagesSnapshotId !== null) configureNewImagesFolderRow(div, btn, s);
     div.appendChild(span);
     div.appendChild(meta);
     div.appendChild(btn);

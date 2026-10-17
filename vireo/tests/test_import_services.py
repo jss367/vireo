@@ -101,6 +101,33 @@ def test_restart_snapshot_finishes_processing_for_already_cataloged_files(import
     assert service.enqueue_process_job.call_args.kwargs["expanded"] == frozen_process
 
 
+def test_restart_snapshot_keeps_left_out_folders_out(import_service, tmp_path):
+    """A restart replays the parent's exclusions, never the whole capture."""
+    service, db, runner = import_service
+    source = tmp_path / "photos"
+    trip = source / "trip"
+    trip.mkdir(parents=True)
+    kept = source / "kept.jpg"
+    left_out = trip / "left_out.jpg"
+    for path in (kept, left_out):
+        Image.new("RGB", (32, 32), "red").save(path)
+    db.add_folder(str(source), name="photos")
+    snapshot_id = db.workspaces.create_new_images_snapshot(
+        [str(kept), str(left_out)],
+    )
+    parent_id = _interrupted_in_place(db, {
+        "sources": [str(source)], "source_snapshot_id": snapshot_id,
+        "exclude_folders": [str(trip)], "after_import": None,
+    })
+
+    response = service.restart_in_place(db, parent_id)
+    assert isinstance(response, dict), response
+    job = wait_for_job_via_runner(runner, response["job_id"], wait_for_history=True)
+    assert job["status"] == "completed", job
+    assert job["result"]["excluded"] == 1
+    assert {row[0] for row in db.conn.execute("SELECT filename FROM photos")} == {"kept.jpg"}
+
+
 def test_restart_in_place_uses_frozen_snapshot_when_saved_process_deleted(
     import_service, tmp_path,
 ):

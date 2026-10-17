@@ -72,6 +72,8 @@ def restart_import_in_place(service: ImportService, db: Database, job_id: str) -
         # never both. Replaying roots would broaden a frozen file selection.
         if config.get("source_snapshot_id") is not None:
             body["source_snapshot_id"] = config["source_snapshot_id"]
+            if config.get("exclude_folders"):
+                body["exclude_folders"] = config["exclude_folders"]
         else:
             body["sources"] = config.get("sources")
         # A queued processing job swept as never-started after a crash is
@@ -123,9 +125,13 @@ def enqueue_import_in_place(
     )
     if tag_options_err is not None:
         return tag_options_err
+    snapshot_exclusion = None
     if source_snapshot_id is not None:
-        snapshot_paths, snapshot_paths_by_root, snapshot_err = (
-            _resolve_snapshot_paths(service, db, source_snapshot_id)
+        (
+            snapshot_paths, snapshot_paths_by_root, snapshot_exclusion,
+            snapshot_err,
+        ) = _resolve_snapshot_paths(
+            service, db, source_snapshot_id, body.get("exclude_folders"),
         )
         if snapshot_err is not None:
             return snapshot_err
@@ -168,6 +174,7 @@ def enqueue_import_in_place(
             snapshot_paths=snapshot_paths,
             snapshot_paths_by_root=snapshot_paths_by_root,
             source_snapshot_id=source_snapshot_id,
+            snapshot_exclusion=snapshot_exclusion,
             recursive=recursive,
             import_tags=import_tags,
             location_from_gps=location_from_gps,
@@ -199,6 +206,10 @@ def _requested_in_place_sources(service, db, body, source_snapshot_id):
         if snapshot_request_error is not None:
             return None, None, snapshot_request_error
     else:
+        if "exclude_folders" in body:
+            return None, None, ImportFailure(
+                "exclude_folders requires source_snapshot_id"
+            )
         sources_error = _explicit_sources_error(
             service, db, sources, is_excluded_scan_path,
         )
@@ -241,8 +252,8 @@ def _explicit_after_import(service, db, body, restart_config):
 def _admit_in_place_job(
     service, db, body, *, active_ws, created_workspace,
     explicit_after_import, after_import, sources, snapshot_paths,
-    snapshot_paths_by_root, source_snapshot_id, recursive, import_tags,
-    location_from_gps, conflict_paths,
+    snapshot_paths_by_root, source_snapshot_id, snapshot_exclusion,
+    recursive, import_tags, location_from_gps, conflict_paths,
     restart_config=None,
 ):
     """The admission steps after the workspace switch; returns a job id or
@@ -285,6 +296,7 @@ def _admit_in_place_job(
         snapshot_paths=snapshot_paths,
         snapshot_paths_by_root=snapshot_paths_by_root,
         source_snapshot_id=source_snapshot_id,
+        snapshot_exclusion=snapshot_exclusion,
         recursive=recursive,
         import_tags=import_tags,
         location_from_gps=location_from_gps,
@@ -435,18 +447,36 @@ def _preflight_local_copy_conflict(service, db, paths):
     return None
 
 
-def _resolve_snapshot_paths(service, db, source_snapshot_id):
+def _resolve_snapshot_paths(service, db, source_snapshot_id, exclude_folders):
     """The snapshot's frozen paths, grouped by the registered root holding each.
 
-    Returns ``(snapshot_paths, snapshot_paths_by_root, error)``.
+    Files directly in ``exclude_folders`` (folders the user left out on the
+    Import page) are dropped first; the rest of the import only ever sees
+    the kept paths.
+
+    Returns ``(snapshot_paths, snapshot_paths_by_root, exclusion, error)``,
+    where ``exclusion`` is ``{"folders": [...], "files": n}`` or None.
     """
+    from new_images import exclude_snapshot_folders
+
     snap = db.get_new_images_snapshot(source_snapshot_id)
     if snap is None:
-        return None, None, ImportFailure(
+        return None, None, None, ImportFailure(
             f"source_snapshot_id {source_snapshot_id} not found",
             status=404,
         )
-    snapshot_paths = list(snap["file_paths"])
+    try:
+        snapshot_paths = exclude_snapshot_folders(
+            list(snap["file_paths"]), exclude_folders,
+        )
+    except ValueError as e:
+        return None, None, None, ImportFailure(str(e))
+    exclusion = None
+    if exclude_folders:
+        exclusion = {
+            "folders": sorted(set(exclude_folders)),
+            "files": len(snap["file_paths"]) - len(snapshot_paths),
+        }
 
     # Resolve each frozen path to one of the workspace's registered
     # roots. The snapshot was created from these roots, but validate
@@ -470,7 +500,7 @@ def _resolve_snapshot_paths(service, db, source_snapshot_id):
     for path in snapshot_paths:
         root = _registered_root_for(path, registered_roots)
         if root is None:
-            return None, None, ImportFailure(
+            return None, None, None, ImportFailure(
                 "new-images snapshot contains a path outside the "
                 f"active workspace's registered folders: {path}"
             )
@@ -487,8 +517,8 @@ def _resolve_snapshot_paths(service, db, source_snapshot_id):
         service, db, snapshot_paths,
     )
     if conflict_error is not None:
-        return None, None, conflict_error
-    return snapshot_paths, snapshot_paths_by_root, None
+        return None, None, None, conflict_error
+    return snapshot_paths, snapshot_paths_by_root, exclusion, None
 
 
 def _registered_root_for(path, registered_roots):
@@ -521,6 +551,7 @@ class _InPlaceImportJob:
     snapshot_paths: list | None
     snapshot_paths_by_root: dict | None
     source_snapshot_id: int | None
+    snapshot_exclusion: dict | None
     recursive: bool
     import_tags: object
     location_from_gps: object
@@ -531,9 +562,11 @@ class _InPlaceImportJob:
     snapshot_import_lock: object
 
     def job_config(self, body, created_workspace):
+        exclusion = self.snapshot_exclusion
         return {
             "sources": self.sources,
             "source_snapshot_id": self.source_snapshot_id,
+            "exclude_folders": exclusion["folders"] if exclusion else [],
             "destination": None,
             "recursive": self.recursive,
             "after_import": self.after_import,
@@ -1471,6 +1504,7 @@ class _InPlaceImportRun:
 
     def _snapshot_result_fields(self, snapshot_unindexed):
         known_before = set(self.snapshot_known_before)
+        exclusion = self.plan.snapshot_exclusion
         return {
             "source_snapshot_id": self.plan.source_snapshot_id,
             "requested": self.snapshot_requested,
@@ -1482,6 +1516,8 @@ class _InPlaceImportRun:
             "unreadable_paths": self.snapshot_unreadable[:100],
             "unindexed": len(snapshot_unindexed),
             "unindexed_paths": snapshot_unindexed[:100],
+            "excluded_folders": len(exclusion["folders"]) if exclusion else 0,
+            "excluded": exclusion["files"] if exclusion else 0,
         }
 
     def _apply_import_tags(self, result):

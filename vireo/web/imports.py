@@ -24,7 +24,7 @@ from file_identity import catalog_scan_root
 from flask import Blueprint, Response, abort, jsonify, make_response, request
 from jobs import describe_jobs
 from metadata import scan_metadata_warning
-from new_images import invalidate_new_images_after_scan
+from new_images import exclude_snapshot_folders, invalidate_new_images_after_scan
 from services.imports import ImportFailure, ImportService
 from services.local_folder import (
     local_copy_scan_conflict,
@@ -1618,6 +1618,14 @@ def create_imports_blueprint(
             snap = None
         if snap is None:
             abort(404)
+        # The folders the user left out never reach the grid or the count,
+        # so the preview describes exactly what Start will import.
+        try:
+            snapshot_paths = exclude_snapshot_folders(
+                snap["file_paths"], body.get("exclude_folders"),
+            )
+        except ValueError as e:
+            return json_error(str(e), 400)
 
         # Use user-facing roots (not every auto-linked descendant) so
         # grouping matches the source folders. Include roots currently marked
@@ -1641,7 +1649,7 @@ def create_imports_blueprint(
         type_breakdown = {}
         total_size = 0
         unavailable_count = 0
-        for path in snap["file_paths"]:
+        for path in snapshot_paths:
             try:
                 stat = os.stat(path)
             except OSError:
@@ -1674,7 +1682,7 @@ def create_imports_blueprint(
             total_size += stat.st_size
 
         return jsonify({
-            "total_count": snap["file_count"],
+            "total_count": len(snapshot_paths),
             "available_count": len(files) - unavailable_count,
             "unavailable_count": unavailable_count,
             "total_size": total_size,
