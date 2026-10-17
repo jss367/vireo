@@ -8408,6 +8408,149 @@ def test_cached_only_path_publishes_source_when_peek_fails(
     assert "1,327 species" in text
 
 
+def test_cached_only_path_names_source_of_a_run_that_matched_nothing(
+    tmp_path, monkeypatch,
+):
+    """A cached run that matched nothing still names its label list.
+
+    A completed classifier run whose labels all scored under the floor
+    stores no predictions; its ``classifier_match_scores`` row is the
+    output of record, and the cache-coverage check counts it as done.
+    The cached-only finalize must then name the list that run used.
+    It used to look the fingerprint up through predictions alone, find
+    none, and publish "label source unavailable" for a collection the
+    coverage check had just called fully cached.
+    """
+    import classify_job as classify_job_mod
+    import config as cfg
+    from classify_job import ClassifyParams, run_classify_job
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_id = db.save_detections(pid, [{
+        "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    # Nothing in the list cleared the floor: a run row and a measured
+    # match-score summary, no predictions.
+    db.model_runs.record_classifier_run(
+        det_id, "BioCLIP", "fp-no-match", prediction_count=0,
+    )
+    db.model_runs.record_classifier_match_score(
+        det_id, "BioCLIP", "fp-no-match", max_match_score=0.04,
+        top_species="Robin", label_count=1327,
+    )
+    db.model_runs.upsert_labels_fingerprint(
+        fingerprint="fp-no-match",
+        display_name="California, US Birds",
+        sources=["/imported/california.txt"],
+        label_count=1327,
+    )
+    coll_id = db.add_collection(
+        "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    # No models and no label lists: the label peek raises, so the
+    # cached-only finalize recovers the source from the cached runs.
+    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [])
+    monkeypatch.setattr(classify_job_mod, "get_active_model", lambda: None)
+    monkeypatch.setattr(classify_job_mod, "get_saved_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod, "get_active_labels", lambda: [])
+
+    runner = FakeRunner()
+    result = run_classify_job(
+        _make_job(), runner, db_path, ws,
+        ClassifyParams(
+            collection_id=coll_id,
+            labels_files=None, labels_file=None,
+            model_id=None, model_name=None,
+            grouping_window=0, similarity_threshold=0.99,
+            reclassify=False,
+        ),
+    )
+
+    # The coverage check took the cached-only path ...
+    assert result["detected"] == 0 and result["failed"] == 0
+    # ... and the classify step names the list the cached run used.
+    classify_label_sources = [
+        kwargs["label_source"]
+        for step_id, kwargs in runner.steps
+        if step_id == "classify" and "label_source" in kwargs
+    ]
+    assert classify_label_sources
+    text = classify_label_sources[-1]
+    assert "unavailable" not in text
+    assert "california.txt" in text
+    assert "1,327 species" in text
+
+
+def test_describe_cached_label_source_ignores_runs_coverage_ignores(tmp_path):
+    """The named fingerprint is the one whose runs the coverage check counted.
+
+    A RAW-recipe run (``input_recipe`` set) never satisfies the normal-image
+    cache, so the coverage check skips it even when it has predictions. The
+    label-source lookup has to skip it too, or it names the recipe run's
+    list instead of the list the reused no-match run used.
+    """
+    from classify_job import _all_photos_cache_satisfied, _describe_cached_label_source
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_id = db.save_detections(pid, [{
+        "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+        "confidence": 0.9, "category": "animal",
+    }], detector_model="megadetector-v6")[0]
+    db.model_runs.record_classifier_run(
+        det_id, "BioCLIP", "fp-no-match", prediction_count=0,
+    )
+    db.model_runs.record_classifier_match_score(
+        det_id, "BioCLIP", "fp-no-match", max_match_score=0.04,
+    )
+    db.add_prediction(
+        det_id, species="Robin", confidence=0.9,
+        model="BioCLIP", labels_fingerprint="fp-recipe",
+    )
+    db.model_runs.record_classifier_run(
+        det_id, "BioCLIP", "fp-recipe", prediction_count=1,
+        input_recipe="raw-recipe",
+    )
+    db.model_runs.upsert_labels_fingerprint(
+        fingerprint="fp-no-match", display_name="Reused",
+        sources=["/imported/reused.txt"], label_count=12,
+    )
+    db.model_runs.upsert_labels_fingerprint(
+        fingerprint="fp-recipe", display_name="Recipe",
+        sources=["/imported/recipe-only.txt"], label_count=34,
+    )
+
+    assert _all_photos_cache_satisfied(
+        db, [pid], classifier_model="BioCLIP", detector_confidence=0.2,
+    )
+    text = _describe_cached_label_source(
+        db, [pid], classifier_model="BioCLIP", detector_confidence=0.2,
+    )
+    assert text is not None
+    assert "reused.txt" in text
+    assert "recipe-only.txt" not in text
+
+
 def test_describe_cached_label_source_falls_back_when_no_sidecar(
     tmp_path, monkeypatch,
 ):

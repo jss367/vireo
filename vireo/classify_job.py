@@ -781,9 +781,9 @@ def _describe_cached_label_source(
     ``_all_photos_cache_satisfied`` used, so the fingerprint lookup only
     considers the same eligible detections. Without this, a photo also
     carrying runs on sub-threshold detections (or torn runs without any
-    predictions row) could contribute a fingerprint that is not the one
+    stored output) could contribute a fingerprint that is not the one
     actually reused, so the persisted ``label_source`` would name a list
-    that did not produce these predictions.
+    that did not produce these results.
     """
     if not photo_ids:
         return None
@@ -812,26 +812,30 @@ def _describe_cached_label_source(
 
 
 def _cached_labels_fingerprint(db, photo_ids, classifier_model, detector_confidence):
-    """The first labels_fingerprint covering an eligible cached detection.
+    """The labels_fingerprint of the runs the cache-coverage check counted.
 
-    Returns ``None`` when no eligible, prediction-backed classifier run
-    carries one.
+    Reads the same rows as ``_all_photos_cache_satisfied``'s identity gate
+    (``covering_classifier_identities`` under ``_cache_run_filter``), so a
+    run the coverage check accepts, including a completed run that matched
+    nothing and left only a ``classifier_match_scores`` row, names its list
+    here, and a run it skips (a RAW-recipe run, a torn run without output)
+    cannot. The cached-only finalize only gets here when the label peek
+    failed, so there is no full label fingerprint and the filter carries no
+    runtime constraint, as in the coverage check. Returns ``None`` when no
+    covering run carries a fingerprint.
     """
     from db import _chunks
 
-    found_fp = None
-    # Match ``_all_photos_cache_satisfied``'s eligibility filters:
-    # only classifiable detections at the workspace threshold, and
-    # only classifier_runs backed by an actual predictions row
-    # (a torn run without predictions is not a real cache hit).
+    run_filter = _cache_run_filter(
+        db, photo_ids, classifier_model, None, None, None, "no-tax",
+    )
     for chunk in _chunks(photo_ids):
-        fp = db.model_runs.cached_labels_fingerprint(
-            chunk, classifier_model, detector_confidence,
-        )
-        if fp:
-            found_fp = fp
-            break
-    return found_fp
+        for identity_row in db.model_runs.covering_classifier_identities(
+            chunk, run_filter, detector_confidence,
+        ):
+            if identity_row["fp"]:
+                return identity_row["fp"]
+    return None
 
 
 def _cached_label_sidecar_text(sidecar):
