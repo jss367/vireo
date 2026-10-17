@@ -159,7 +159,7 @@ interface Window {VireoBrowseCompare: {create(options: CompareOptions): CompareC
 
 interface FindTextRun {text: string; parts: {node: Text; start: number; end: number}[];}
 interface FindTextSegment {start: number; end: number; group: Element[];}
-interface Window {openSettingsFind?(): void; handleNativeMenuCommand?(command: string): unknown;}
+interface Window {openSettingsFind?(): void; handleNativeMenuCommand(command: string): unknown;}
 
 interface PanoramaDone {
   result?: {path: string; width: number; height: number}; status?: string; errors?: string[];

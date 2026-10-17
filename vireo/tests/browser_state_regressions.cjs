@@ -530,7 +530,29 @@ async function testSavedCollectionPreviewScope() {
   }
 }
 
-Promise.all([testAsyncModalOwnership(), testReadinessAndRegroupRaces(), testSavedCollectionPreviewScope()])
+async function testDeepLinkFailureReleasesLoading() {
+  const source = fn('vireo/static/browse/boot.js', '_runPhotoDeepLink');
+  for (const failure of ['config', 'photo', 'superseded']) {
+    const context = vm.createContext({
+      document: {getElementById: () => ({checked: true})},
+      folderHealthRefreshSeq: 1,
+      loading: false,
+      _cfgPromise: failure === 'config' ? Promise.reject(new Error('offline')) : Promise.resolve({}),
+      applyBrowseConfig() {},
+      safeFetch: async () => {
+        if (failure === 'superseded') context.folderHealthRefreshSeq++;
+        throw new Error('offline');
+      },
+    });
+    vm.runInContext(source, context);
+    await context._runPhotoDeepLink(1);
+    // An early failure releases the grid; a newer health refresh retains
+    // ownership so cleanup cannot allow competing page requests.
+    assert.equal(context.loading, failure === 'superseded', failure);
+  }
+}
+
+Promise.all([testAsyncModalOwnership(), testReadinessAndRegroupRaces(), testSavedCollectionPreviewScope(), testDeepLinkFailureReleasesLoading()])
   .catch(err => { console.error(err); process.exitCode = 1; });
 
 const noteFilter = vm.createContext({});

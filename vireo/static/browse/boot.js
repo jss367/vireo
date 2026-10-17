@@ -401,7 +401,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
   // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
   loading = true;
   var deepLinkLoaded = false;
-  var isDeepLinkDatasetCurrent = function() { return false; };
+  var isDeepLinkDatasetCurrent = /** @type {(() => boolean) | null} */ (null);
   try {
     applyBrowseConfig(await _cfgPromise);
     if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
@@ -453,7 +453,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     var deepLinkScopeGen = browseScopeGen;
     var deepLinkFolderId = photo.folder_id;
     var deepLinkSort = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value;
-    isDeepLinkDatasetCurrent = function() {
+    const datasetIsCurrent = isDeepLinkDatasetCurrent = function() {
       return deepLinkWindowIsCurrent() &&
         browseScopeGen === deepLinkScopeGen &&
         activeFolderId === deepLinkFolderId &&
@@ -473,7 +473,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     initParams.set('focus_photo_id', String(photoId));
     var initData = await safeFetch('/api/browse/init?' + initParams.toString(), {}, { toast: false });
     if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
-    if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
+    if (!datasetIsCurrent()) return wasSuperseded;
     if (initData) {
       // Seed the navbar's missing-folder snapshot from init's workspace-scoped
       // view so the first /api/folders/missing observation has a baseline to
@@ -496,7 +496,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
           'deep-link-reconcile',
           initData.folder_health_version);
         if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
-        if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
+        if (!datasetIsCurrent()) return wasSuperseded;
       }
       // Pin the workspace this tree came from so a later Remove action
       // targets the same workspace even on the deep-link entry point.
@@ -520,7 +520,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
       /** @type {HTMLElement} */ (document.getElementById('loadingState')).style.display = 'none';
       deepLinkLoaded = true;
       hydrateColorLabelsForRenderedPage(function() {
-        return isDeepLinkHealthCurrent() && isDeepLinkDatasetCurrent();
+        return isDeepLinkHealthCurrent() && datasetIsCurrent();
       });
     }
 
@@ -529,18 +529,18 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     // deep target cannot force Browse to render every preceding card. Fall
     // back to the old serial scan for compatibility or if the target vanished.
     if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
-    if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
+    if (!datasetIsCurrent()) return wasSuperseded;
     var el = getGridCard(photoId);
     if (!el) {
       // loadPhotos() honors the setup guard, so release it before the explicit
       // compatibility/reconciliation scan or it would return immediately.
       loading = false;
       el = await loadUntilPhotoRendered(photoId, function() {
-        return isDeepLinkHealthCurrent() && isDeepLinkDatasetCurrent();
+        return isDeepLinkHealthCurrent() && datasetIsCurrent();
       });
     }
     if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
-    if (!isDeepLinkDatasetCurrent()) return wasSuperseded;
+    if (!datasetIsCurrent()) return wasSuperseded;
 
     // Update folder tree active state
     /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item')).forEach(function(el) {
