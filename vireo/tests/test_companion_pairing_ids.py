@@ -62,9 +62,9 @@ def test_pair_survivor_does_not_add_a_second_snapshot_outcome(tmp_path, already_
     imported.snapshot_missing, imported.snapshot_unreadable = [], []
     try:
         imported._photo_cb(jpeg_id, jpeg_path)
-        merged = scanner._pair_raw_jpeg_companions(db)
+        merged = scanner.companions._pair_raw_jpeg_companions(db)
         assert merged == {jpeg_id: raw_id}
-        scanner._ScanRun._report_merged_photos(SimpleNamespace(
+        scanner.scan_run._ScanRun._report_merged_photos(SimpleNamespace(
             db=db, photo_merged_callback=imported._photo_merged_cb,
             _reported_identities={jpeg_id: (folder_id, "PAIR.jpg")},
         ), merged)
@@ -158,7 +158,7 @@ def test_merged_owner_deleted_before_publication_drops_import_membership(
     folder_id = db.add_folder(str(tmp_path))
     raw_id = db.add_photo(folder_id, "IMG_001.cr3", ".cr3", 256, None)
     jpeg_id = db.add_photo(folder_id, "IMG_001.jpg", ".jpg", 256, None)
-    merged = scanner._pair_raw_jpeg_companions(db)
+    merged = scanner.companions._pair_raw_jpeg_companions(db)
     assert merged == {jpeg_id: raw_id}
     writer.delete_photos([raw_id])
     if reuse_id:
@@ -182,7 +182,7 @@ def test_merged_owner_deleted_before_publication_drops_import_membership(
 
     run = SimpleNamespace(db=db, photo_merged_callback=report)
     try:
-        scanner._ScanRun._report_merged_photos(run, merged)
+        scanner.scan_run._ScanRun._report_merged_photos(run, merged)
         assert published == [(jpeg_id, None, None)]
         assert pipeline.collected_photo_ids == []
         assert pipeline.run.stages["scan"]["count"] == 0
@@ -229,7 +229,7 @@ def test_reused_old_id_drops_import_membership_instead_of_substituting(
         folder_id, "OTHER.jpg", ".jpg", 256, None,
     )
     assert reused_jpeg_id == original_jpeg_id
-    merged = scanner._pair_raw_jpeg_companions(db)
+    merged = scanner.companions._pair_raw_jpeg_companions(db)
     assert merged == {reused_jpeg_id: unrelated_raw_id}
 
     substitutions = []
@@ -262,7 +262,7 @@ def test_reused_old_id_drops_import_membership_instead_of_substituting(
         },
     )
     try:
-        scanner._ScanRun._report_merged_photos(run, merged)
+        scanner.scan_run._ScanRun._report_merged_photos(run, merged)
         # Mismatch between what the scanner reported for this id and
         # what pairing merged → drop old_id, do not substitute. If the
         # fix regresses, the publish re-adds ``unrelated_raw_id`` to
@@ -293,7 +293,7 @@ def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
     folder_id = db.add_folder(str(tmp_path))
     raw_id = db.add_photo(folder_id, "IMG_001.cr3", ".cr3", 256, None)
     jpeg_id = db.add_photo(folder_id, "IMG_001.jpg", ".jpg", 256, None)
-    merged = scanner._pair_raw_jpeg_companions(db)
+    merged = scanner.companions._pair_raw_jpeg_companions(db)
     published = []
 
     def report(old_id, new_id, path):
@@ -305,7 +305,7 @@ def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
 
     run = SimpleNamespace(db=db, photo_merged_callback=report)
     try:
-        scanner._ScanRun._report_merged_photos(run, merged)
+        scanner.scan_run._ScanRun._report_merged_photos(run, merged)
         assert published == [(jpeg_id, raw_id, str(tmp_path / "IMG_001.cr3"))]
         writer.delete_photos([raw_id])
         assert db.get_photo(raw_id) is None
@@ -759,7 +759,7 @@ def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
     card = tmp_path / "card"
     _shoot_pairs(card, ["IMG_001"])
     db = Database(str(tmp_path / "test.db"))
-    real_rows = scanner._pairing_rows_for_stem
+    real_rows = scanner.companions._pairing_rows_for_stem
 
     def stale_owner(db_, folder_id, stem):
         rows = real_rows(db_, folder_id, stem)
@@ -767,10 +767,10 @@ def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
             row["filename"] = "renamed meanwhile.cr3"
         return rows
 
-    monkeypatch.setattr(scanner, "_pairing_rows_for_stem", stale_owner)
+    monkeypatch.setattr(scanner.scan_run, "_pairing_rows_for_stem", stale_owner)
     # Keep the end-of-scan pass from pairing the JPEG photo afterwards, so
     # the fallback itself is what the catalog shows.
-    monkeypatch.setattr(scanner, "_pair_raw_jpeg_companions", lambda *a, **k: {})
+    monkeypatch.setattr(scanner.scan_run, "_pair_raw_jpeg_companions", lambda *a, **k: {})
 
     scanner.scan(str(card), db)
 
@@ -973,9 +973,9 @@ def test_attach_companion_refuses_when_owner_metadata_changed_before_commit(
                 meta[p] = {}
         return meta
 
-    monkeypatch.setattr(scanner_mod, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner_mod.scan_run, "extract_metadata", fake_extract)
 
-    real_pick = scanner_mod._pick_compatible_raw_jpeg_pairs
+    real_pick = scanner_mod.companions._pick_compatible_raw_jpeg_pairs
 
     def racing_pick(members, log_conflicts=True):
         pairs = real_pick(members, log_conflicts=log_conflicts)
@@ -995,13 +995,16 @@ def test_attach_companion_refuses_when_owner_metadata_changed_before_commit(
         return pairs
 
     monkeypatch.setattr(
-        scanner_mod, "_pick_compatible_raw_jpeg_pairs", racing_pick,
+        scanner_mod.companions, "_pick_compatible_raw_jpeg_pairs", racing_pick,
+    )
+    monkeypatch.setattr(
+        scanner_mod.scan_run, "_pick_compatible_raw_jpeg_pairs", racing_pick,
     )
     # Keep the end-of-scan pairing pass from re-pairing after the attach
     # refused — the test's assertion is about the attach itself. (It
     # would also see Canon-vs-Nikon as incompatible and still refuse.)
     monkeypatch.setattr(
-        scanner_mod, "_pair_raw_jpeg_companions", lambda *a, **k: {},
+        scanner_mod.scan_run, "_pair_raw_jpeg_companions", lambda *a, **k: {},
     )
 
     callbacks = []
@@ -1055,7 +1058,7 @@ def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
 
-    real_fs_actions = scanner_mod._run_post_commit_fs_actions
+    real_fs_actions = scanner_mod.companions._run_post_commit_fs_actions
 
     def racing_fs_actions(actions):
         real_fs_actions(actions)
@@ -1091,12 +1094,15 @@ def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
             other.commit()
 
     monkeypatch.setattr(
-        scanner_mod, "_run_post_commit_fs_actions", racing_fs_actions,
+        scanner_mod.companions, "_run_post_commit_fs_actions", racing_fs_actions,
+    )
+    monkeypatch.setattr(
+        scanner_mod.scan_run, "_run_post_commit_fs_actions", racing_fs_actions,
     )
     # Keep the end-of-scan pairing pass out: the attach already fired for
     # the JPEG; the assertion is about the publication for THAT attach.
     monkeypatch.setattr(
-        scanner_mod, "_pair_raw_jpeg_companions", lambda *a, **k: {},
+        scanner_mod.scan_run, "_pair_raw_jpeg_companions", lambda *a, **k: {},
     )
 
     jpeg_path = str(card / "IMG_001.jpg")
@@ -1386,7 +1392,7 @@ def test_scan_refreshes_collection_membership_between_insert_commits(tmp_path, s
 
 def test_scan_collection_cache_does_not_reuse_rolled_back_revision(tmp_path):
     from db import Database
-    from scanner import _ScanRun
+    from scanner.scan_run import _ScanRun
 
     db = Database(str(tmp_path / "test.db"))
     try:

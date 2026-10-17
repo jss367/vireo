@@ -140,7 +140,7 @@ def test_reimport_moved_duplicate_grants_only_existing_photo(tmp_path, monkeypat
     from test_import_job import FakeRunner, _make_card, _make_job
 
     monkeypatch.setattr(metadata, "extract_metadata", lambda *args, **kwargs: {})
-    monkeypatch.setattr(scanner, "extract_metadata", lambda *args, **kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda *args, **kwargs: {})
     card = _make_card(tmp_path, [("bird.jpg", datetime(2026, 5, 1))])
     params = ImportParams(sources=[str(card)], destination=str(tmp_path / "library"),
                           trust_likely_duplicates=trust_likely)
@@ -174,7 +174,7 @@ def test_reimport_visibility_failure_reports_failure(tmp_path, monkeypatch):
     from test_import_job import FakeRunner, _make_card, _make_job
 
     monkeypatch.setattr(metadata, "extract_metadata", lambda *args, **kwargs: {})
-    monkeypatch.setattr(scanner, "extract_metadata", lambda *args, **kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda *args, **kwargs: {})
     card = _make_card(tmp_path, [("bird.jpg", datetime(2026, 5, 1))])
     params = ImportParams(sources=[str(card)], destination=str(tmp_path / "library"))
     db_path = str(tmp_path / "catalog.db")
@@ -368,7 +368,7 @@ def test_workspace_folder_transfer_removes_source_grants_atomically(tmp_path, ab
 
 
 def test_raw_jpeg_fold_preserves_photo_grants_without_sibling_access(tmp_path):
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     with Database(str(tmp_path / 'db')) as db:
         b = db.create_workspace('Other')

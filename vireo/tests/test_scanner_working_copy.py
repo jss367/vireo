@@ -236,7 +236,7 @@ def test_extract_working_copies_empty_scope_is_noop(tmp_path, monkeypatch):
 
 def test_subtree_like_pattern_posix():
     """Unix separator: LIKE pattern is the path followed by `/%`."""
-    from scanner import _subtree_like_pattern
+    from scanner.working_copies import _subtree_like_pattern
     assert _subtree_like_pattern("/photos/2024", sep="/") == "/photos/2024/%"
 
 
@@ -250,13 +250,13 @@ def test_subtree_like_pattern_windows_escapes_separator():
       * the trailing separator is also doubled → `\\`
       * the wildcard `%` is appended unescaped.
     """
-    from scanner import _subtree_like_pattern
+    from scanner.working_copies import _subtree_like_pattern
     assert _subtree_like_pattern("C:\\a\\b", sep="\\") == "C:\\\\a\\\\b\\\\%"
 
 
 def test_subtree_like_pattern_escapes_literal_wildcards():
     """`_` and `%` inside folder names are escaped so they match literally."""
-    from scanner import _subtree_like_pattern
+    from scanner.working_copies import _subtree_like_pattern
     assert _subtree_like_pattern("/a/2024_06", sep="/") == "/a/2024\\_06/%"
     assert _subtree_like_pattern("/a/50%off", sep="/") == "/a/50\\%off/%"
 
@@ -267,7 +267,7 @@ def test_subtree_like_pattern_normalizes_trailing_separator():
     Before this guard, `/photos/` produced `"//%"` and the root path `"/"`
     produced `"//%"` — neither matches any real descendant path.
     """
-    from scanner import _subtree_like_pattern
+    from scanner.working_copies import _subtree_like_pattern
     assert _subtree_like_pattern("/photos/", sep="/") == "/photos/%"
     assert _subtree_like_pattern("/photos///", sep="/") == "/photos/%"
     assert _subtree_like_pattern("/", sep="/") == "/%"
@@ -640,7 +640,7 @@ def test_backfill_failure_marker_prevents_retry_loop(tmp_path, monkeypatch):
         calls["n"] += 1
         return False  # always fail
 
-    monkeypatch.setattr(_scanner_mod, "extract_working_copy", counting_extract)
+    monkeypatch.setattr(_scanner_mod.working_copy_batch, "extract_working_copy", counting_extract)
 
     backfill_working_copies(db, str(vireo_dir))
     assert calls["n"] == 1, "first pass should call extract once"
@@ -688,7 +688,7 @@ def test_backfill_failure_retries_when_mtime_changes(tmp_path, monkeypatch):
         calls["n"] += 1
         return False
 
-    monkeypatch.setattr(_scanner_mod, "extract_working_copy", counting_extract)
+    monkeypatch.setattr(_scanner_mod.working_copy_batch, "extract_working_copy", counting_extract)
 
     backfill_working_copies(db, str(vireo_dir))
     assert calls["n"] == 1
@@ -799,7 +799,7 @@ def test_backfill_failure_does_not_retry_within_grace_period(tmp_path, monkeypat
         calls["n"] += 1
         return False
 
-    monkeypatch.setattr(_scanner_mod, "extract_working_copy", counting_extract)
+    monkeypatch.setattr(_scanner_mod.working_copy_batch, "extract_working_copy", counting_extract)
 
     backfill_working_copies(db, str(vireo_dir))
 
@@ -936,7 +936,7 @@ def test_scan_records_failure_marker_for_unreadable_file(tmp_path, monkeypatch):
 
     # Force extraction to fail on the post-scan pass.
     import scanner as _scanner_mod
-    monkeypatch.setattr(_scanner_mod, "extract_working_copy", lambda *a, **k: False)
+    monkeypatch.setattr(_scanner_mod.working_copy_batch, "extract_working_copy", lambda *a, **k: False)
 
     scan(str(root), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
@@ -1190,7 +1190,7 @@ def test_backfill_pause_parks_between_rows_and_resumes(
         tmp_path, monkeypatch, ["a.jpg", "b.jpg", "c.jpg"],
     )
 
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
     first_call_started = threading.Event()
     release_first_call = threading.Event()
     calls = []
@@ -1207,7 +1207,7 @@ def test_backfill_pause_parks_between_rows_and_resumes(
             assert release_first_call.wait(timeout=synchronization_timeout(30)), "test never released row 1"
         return real_extract(*args, **kwargs)
 
-    monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
 
@@ -1275,7 +1275,7 @@ def test_backfill_skips_row_when_id_reused_during_pause(
     )
     stale_id = ids[1]
 
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
     first_call_started = threading.Event()
     release_first_call = threading.Event()
     calls = []
@@ -1290,7 +1290,7 @@ def test_backfill_skips_row_when_id_reused_during_pause(
             assert release_first_call.wait(timeout=synchronization_timeout(30)), "test never released row 1"
         return real_extract(*args, **kwargs)
 
-    monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
 
@@ -1385,7 +1385,7 @@ def test_snapshot_revalidation_covers_relocation_repair_and_publish(
     """
     import config as cfg
     from db import Database
-    from scanner import _snapshot_row_still_current
+    from scanner.working_copy_batch import _snapshot_row_still_current
 
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     folder = tmp_path / "photos"
@@ -1487,7 +1487,7 @@ def test_backfill_discards_orphan_when_id_reused_during_extraction(
     )
     target_id = ids[0]
 
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
     extract_started = threading.Event()
     release_extract = threading.Event()
 
@@ -1503,7 +1503,7 @@ def test_backfill_discards_orphan_when_id_reused_during_extraction(
         )
         return result
 
-    monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
 
@@ -1823,7 +1823,7 @@ def test_capacity_deferral_does_not_mark_reused_photo_id(
                 handle.truncate(600_000)
             return True
 
-        monkeypatch.setattr(scanner, "extract_working_copy", sized_extract)
+        monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", sized_extract)
 
         real_evict = working_copy_cache.evict_if_over_quota
         eviction_calls = 0
@@ -1898,7 +1898,7 @@ def _prepare_capacity_deferral_db(tmp_path, monkeypatch):
             handle.truncate(600_000)
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", sized_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", sized_extract)
     return db, vireo_dir, folder_id, photo_ids
 
 
@@ -2013,7 +2013,7 @@ def test_capacity_deferral_rejects_folder_relocation_on_pending_row(
                 handle.truncate(600_000)
             return True
 
-        monkeypatch.setattr(scanner, "extract_working_copy", sized_extract)
+        monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", sized_extract)
 
         pending_id = photo_ids[0]
         pending_folder_id = folder_ids[0]
@@ -2110,7 +2110,7 @@ def test_oversized_copy_does_not_defer_later_fitting_candidate(
                 handle.truncate(size)
             return True
 
-        monkeypatch.setattr(scanner, "extract_working_copy", sized_extract)
+        monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", sized_extract)
 
         scanner._extract_working_copies(db, str(vireo_dir))
 
@@ -2179,7 +2179,7 @@ def test_backfill_adopts_quota_increase_before_deferring_rows(
             return True
 
         monkeypatch.setattr(
-            scanner, "extract_working_copy", extract_and_raise_quota,
+            scanner.working_copy_batch, "extract_working_copy", extract_and_raise_quota,
         )
 
         scanner._extract_working_copies(db, str(vireo_dir))
@@ -2239,7 +2239,7 @@ def test_backfill_enforces_quota_lowered_during_extraction(
             return True
 
         monkeypatch.setattr(
-            scanner, "extract_working_copy", extract_and_lower_quota,
+            scanner.working_copy_batch, "extract_working_copy", extract_and_lower_quota,
         )
 
         scanner._extract_working_copies(db, str(vireo_dir))
@@ -2295,7 +2295,7 @@ def test_batch_stops_when_quota_rotates_fitting_working_copies(
                 handle.truncate(600_000)
             return True
 
-        monkeypatch.setattr(scanner, "extract_working_copy", fitting_extract)
+        monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fitting_extract)
 
         scanner._extract_working_copies(db, str(vireo_dir))
 
@@ -2352,7 +2352,7 @@ def test_scanner_does_not_track_copy_evicted_before_catalog_commit(
             return True
 
         monkeypatch.setattr(
-            scanner, "extract_working_copy", publish_then_lose,
+            scanner.working_copy_batch, "extract_working_copy", publish_then_lose,
         )
 
         scanner._extract_working_copies(db, str(vireo_dir))
@@ -2405,13 +2405,13 @@ def test_backfill_extracts_newest_imports_first(tmp_path, monkeypatch):
         )
 
     extracted = []
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
 
     def recording_extract(source_path, output_path, **kwargs):
         extracted.append(os.path.basename(output_path))
         return real_extract(source_path, output_path, **kwargs)
 
-    monkeypatch.setattr(scanner, "extract_working_copy", recording_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", recording_extract)
 
     _extract_working_copies(db, str(vireo_dir))
 
@@ -2598,7 +2598,7 @@ def test_extract_update_rejects_companion_swap_during_decode(
     )
     target_id = ids[0]
 
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
     extract_started = threading.Event()
     release_extract = threading.Event()
 
@@ -2613,7 +2613,7 @@ def test_extract_update_rejects_companion_swap_during_decode(
         )
         return result
 
-    monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
     assert extract_started.wait(timeout=synchronization_timeout(30)), "extraction never started"
@@ -2667,7 +2667,7 @@ def test_extract_update_rejects_folder_relocation_during_decode(
     )
     target_id = ids[0]
 
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
     extract_started = threading.Event()
     release_extract = threading.Event()
 
@@ -2679,7 +2679,7 @@ def test_extract_update_rejects_folder_relocation_during_decode(
         )
         return result
 
-    monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
     assert extract_started.wait(timeout=synchronization_timeout(30)), "extraction never started"
@@ -2736,7 +2736,7 @@ def test_orphan_cleanup_preserves_replacement_publishers_bytes(
     )
     target_id = ids[0]
 
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
     extract_started = threading.Event()
     release_extract = threading.Event()
 
@@ -2748,7 +2748,7 @@ def test_orphan_cleanup_preserves_replacement_publishers_bytes(
         )
         return result
 
-    monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
     assert extract_started.wait(timeout=synchronization_timeout(30)), "extraction never started"
@@ -2918,7 +2918,7 @@ def test_orphan_cleanup_preserves_racing_publisher_uncommitted_bytes(
     )
     target_id = ids[0]
 
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
     extract_returned = threading.Event()
     release_after_race = threading.Event()
 
@@ -2933,7 +2933,7 @@ def test_orphan_cleanup_preserves_racing_publisher_uncommitted_bytes(
         )
         return result
 
-    monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
     assert extract_returned.wait(timeout=synchronization_timeout(30)), "extraction never returned"
@@ -3041,7 +3041,7 @@ def test_post_loop_trim_adopts_a_quota_raised_mid_batch(
             handle.truncate(110 * 1024)
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fixed_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fixed_extract)
 
     # The user raises the ceiling after the loop's last quota read.
     import working_copy_cache
@@ -3151,7 +3151,7 @@ def test_small_sweep_near_ceiling_keeps_existing_coverage(
             handle.truncate(110 * 1024)
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fixed_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fixed_extract)
 
     _extract_working_copies(db, str(vireo_dir))
 
@@ -3230,7 +3230,7 @@ def test_post_loop_trim_marks_trimmed_rows_capacity_deferred(
             handle.truncate(110 * 1024)
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fixed_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fixed_extract)
 
     _extract_working_copies(db, str(vireo_dir))
 
@@ -3311,7 +3311,7 @@ def test_post_loop_trim_evicts_lowest_id_first_preserving_newest(
             handle.truncate(110 * 1024)
         return True
 
-    monkeypatch.setattr(_scanner_mod, "extract_working_copy", fixed_extract)
+    monkeypatch.setattr(_scanner_mod.working_copy_batch, "extract_working_copy", fixed_extract)
 
     _extract_working_copies(db, str(vireo_dir))
 
@@ -3397,7 +3397,7 @@ def test_scoped_import_near_ceiling_may_displace_existing_coverage(
             handle.truncate(200 * 1024)
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", small_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", small_extract)
 
     _extract_working_copies(db, str(vireo_dir), scope=[str(card)])
 
@@ -3510,7 +3510,7 @@ def test_post_loop_trim_holds_publication_guard_across_unlink_and_update(
             handle.truncate(110 * 1024)
         return True
 
-    monkeypatch.setattr(_scanner_mod, "extract_working_copy", fixed_extract)
+    monkeypatch.setattr(_scanner_mod.working_copy_batch, "extract_working_copy", fixed_extract)
 
     lock_held_when_removed = []
     real_remove = os.remove
@@ -3526,7 +3526,7 @@ def test_post_loop_trim_holds_publication_guard_across_unlink_and_update(
             pass
         return real_remove(path)
 
-    monkeypatch.setattr(_scanner_mod.os, "remove", spy_remove)
+    monkeypatch.setattr(_scanner_mod.hashing.os, "remove", spy_remove)
 
     _extract_working_copies(db, str(vireo_dir))
 
@@ -3614,7 +3614,7 @@ def test_quota_lowered_during_extraction_protects_batch_writes(
                 drop_triggered.set()
         return True
 
-    monkeypatch.setattr(_scanner_mod, "extract_working_copy", sized_extract)
+    monkeypatch.setattr(_scanner_mod.working_copy_batch, "extract_working_copy", sized_extract)
 
     _scanner_mod._extract_working_copies(db, str(vireo_dir))
 
@@ -3707,7 +3707,7 @@ def test_deferred_row_marker_guards_companion_and_folder_identity(
             handle.truncate(700 * 1024)
         return True
 
-    monkeypatch.setattr(_scanner_mod, "extract_working_copy", sized_extract)
+    monkeypatch.setattr(_scanner_mod.working_copy_batch, "extract_working_copy", sized_extract)
 
     # Between the snapshot fetch and the deferred UPDATE, swap the
     # target's companion_path from NULL to a real value. If the guard
@@ -3820,7 +3820,7 @@ def test_post_loop_trim_verifies_file_identity_before_unlinking(
         return True
 
     monkeypatch.setattr(
-        _scanner_mod, "extract_working_copy", counting_extract,
+        _scanner_mod.working_copy_batch, "extract_working_copy", counting_extract,
     )
 
     def stat_with_replace(path, *args, **kwargs):
@@ -3838,7 +3838,7 @@ def test_post_loop_trim_verifies_file_identity_before_unlinking(
             os.replace(tmp, target_path_str)
         return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(_scanner_mod.os, "stat", stat_with_replace)
+    monkeypatch.setattr(_scanner_mod.hashing.os, "stat", stat_with_replace)
 
     _extract_working_copies(db, str(vireo_dir))
 
@@ -3919,7 +3919,7 @@ def test_post_loop_trim_quota_refresh_covers_pre_existing_overshoot(
         return True
 
     monkeypatch.setattr(
-        _scanner_mod, "extract_working_copy", small_extract,
+        _scanner_mod.working_copy_batch, "extract_working_copy", small_extract,
     )
 
     # Raise the quota between the loop's end and the trim's re-read.
@@ -4019,7 +4019,7 @@ def test_post_loop_trim_quota_refresh_runs_under_publication_guard(
         return True
 
     monkeypatch.setattr(
-        _scanner_mod, "extract_working_copy", fixed_extract,
+        _scanner_mod.working_copy_batch, "extract_working_copy", fixed_extract,
     )
 
     # ``cfg.load`` is called by ``_configured_quota_mb``. Hook it to
@@ -4036,7 +4036,7 @@ def test_post_loop_trim_quota_refresh_runs_under_publication_guard(
         return fixed_extract(source, output, **kwargs)
 
     monkeypatch.setattr(
-        _scanner_mod, "extract_working_copy", counting_extract,
+        _scanner_mod.working_copy_batch, "extract_working_copy", counting_extract,
     )
 
     def spy_load(*args, **kwargs):
@@ -4122,7 +4122,7 @@ def test_post_loop_trim_usage_snapshot_under_publication_guard(
         return True
 
     monkeypatch.setattr(
-        _scanner_mod, "extract_working_copy", fixed_extract,
+        _scanner_mod.working_copy_batch, "extract_working_copy", fixed_extract,
     )
 
     real_stats = working_copy_cache.working_copy_stats
@@ -4227,7 +4227,7 @@ def test_post_loop_trim_revalidates_batch_bytes_under_publication_guard(
         return True
 
     monkeypatch.setattr(
-        _scanner_mod, "extract_working_copy", counting_extract,
+        _scanner_mod.working_copy_batch, "extract_working_copy", counting_extract,
     )
 
     # Simulate a competing publisher reclaiming the lowest-id batch
@@ -4349,7 +4349,7 @@ def test_trim_deferred_marker_carries_snapshot_source_identity(
             handle.truncate(110 * 1024)
         return True
 
-    monkeypatch.setattr(_scanner_mod, "extract_working_copy", fixed_extract)
+    monkeypatch.setattr(_scanner_mod.working_copy_batch, "extract_working_copy", fixed_extract)
 
     # Swap the lowest-id row's ``companion_path`` right when the trim
     # is about to unlink its file — that's a mid-trim mutation, so
@@ -4371,7 +4371,7 @@ def test_trim_deferred_marker_carries_snapshot_source_identity(
             db_mid.close()
         return result
 
-    monkeypatch.setattr(_scanner_mod.os, "remove", remove_then_swap)
+    monkeypatch.setattr(_scanner_mod.hashing.os, "remove", remove_then_swap)
 
     verify_db = Database(str(vireo_dir / "test.db"))
     _extract_working_copies(verify_db, str(vireo_dir))
@@ -4488,7 +4488,7 @@ def test_trim_revalidation_rejects_candidates_without_publisher_fingerprint(
         return True
 
     monkeypatch.setattr(
-        _scanner_mod,
+        _scanner_mod.working_copy_batch,
         "extract_working_copy",
         fingerprint_failing_extract,
     )
@@ -4604,7 +4604,7 @@ def test_success_update_rejects_stale_overwrite_before_commit(
     )
     target_id = ids[0]
 
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
     extract_returned = threading.Event()
     release_after_race = threading.Event()
 
@@ -4616,7 +4616,7 @@ def test_success_update_rejects_stale_overwrite_before_commit(
         )
         return result
 
-    monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
     assert extract_returned.wait(timeout=synchronization_timeout(30)), "extraction never returned"
@@ -4698,7 +4698,7 @@ def test_orphan_cleanup_unlinks_stale_bytes_over_replacement_row(
     )
     target_id = ids[0]
 
-    real_extract = scanner.extract_working_copy
+    real_extract = scanner.working_copy_batch.extract_working_copy
     extract_returned = threading.Event()
     release_after_race = threading.Event()
 
@@ -4710,7 +4710,7 @@ def test_orphan_cleanup_unlinks_stale_bytes_over_replacement_row(
         )
         return result
 
-    monkeypatch.setattr(scanner, "extract_working_copy", gated_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", gated_extract)
 
     _start_backfill(app)
     assert extract_returned.wait(timeout=synchronization_timeout(30)), "extraction never returned"
@@ -4823,7 +4823,7 @@ def test_success_update_rejects_publication_with_none_fingerprint(
         return True
 
     monkeypatch.setattr(
-        _scanner_mod, "extract_working_copy", none_fingerprint_extract,
+        _scanner_mod.working_copy_batch, "extract_working_copy", none_fingerprint_extract,
     )
 
     _start_backfill(app)
