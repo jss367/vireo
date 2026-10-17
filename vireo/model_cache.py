@@ -171,104 +171,12 @@ class ModelCache:
         producer keeps running for other waiters; only this waiter unwinds.
         """
         while True:
-            with self._global_lock:
-                entry = self._entries.get(key)
-                if entry is None:
-                    entry = _Entry(key)
-                    self._entries[key] = entry
-                entry.refcount += 1
-                if entry.idle_timer is not None:
-                    entry.idle_timer.cancel()
-                    entry.idle_timer = None
-                # Invalidate any in-flight stale callback whose cancel() lost
-                # the race with the timer thread firing.
-                entry.evict_token = None
-
-            if entry.load_lock.acquire(blocking=False):
-                # Uncontended fast path: nobody else is producing this
-                # entry, so we own the load_lock immediately without
-                # touching the resource ledger. Uncontended acquires must
-                # not count as waits — track_external_wait() records both
-                # duration and count, and per-photo detection/masking
-                # runs would inflate wait_count with zero-duration entries
-                # on every cache hit or first-caller miss.
-                pass
-            else:
-                # Contended: another caller is already producing this
-                # entry's value under load_lock. That wait can be minutes
-                # long for a cold BioCLIP / SAM2 / DINOv2 load — and if
-                # the producer is itself blocked on the ONNX construction
-                # lease, this waiter is resource-blocked without ever
-                # reaching ResourceLedger.acquire(). Expose it as an
-                # external wait so it feeds the same per-job live and
-                # persisted resource-wait diagnostics as the
-                # session-cache locks in onnx_runtime.
-                from resource_ledger import get_resource_ledger
-
-                with get_resource_ledger().track_external_wait():
-                    if cancel_check is not None:
-                        # Waiter-local cancellation: poll the load_lock so
-                        # this caller can abandon its wait while another
-                        # caller's factory is still running. The other
-                        # caller is unaffected and their factory continues.
-                        while not entry.load_lock.acquire(
-                            timeout=_WAITER_POLL_SECS,
-                        ):
-                            if cancel_check():
-                                self._release_entry(entry)
-                                raise _make_cancellation_error()
-                    else:
-                        entry.load_lock.acquire()
+            entry = self._retain_entry(key)
+            self._wait_for_load_lock(entry, cancel_check)
 
             try:
                 if entry.value is None and entry.load_error is None:
-                    # ``factory()`` typically calls ``create_session`` which
-                    # waits for the construction CPU lease under the bound
-                    # resource cancel probe. That probe parks on pause via
-                    # ``_pause_checkpoint``; the parking would happen while
-                    # this thread still owns ``entry.load_lock``, and any
-                    # unpaused peer waiting for the same cache key would
-                    # then block for the whole pause window (Codex
-                    # discussion_r3790941020 — sibling of the
-                    # ``acquire_session_cache_lock`` fix in ``e3693467``).
-                    # Rebind the resource cancel probe to the pure-cancel
-                    # probe (never parks on pause) for the factory call,
-                    # matching the pattern the session-cache lock's
-                    # ``_post_acquire_recheck`` uses. Cancel still fires;
-                    # pause is observed at the next outer
-                    # ``_pause_checkpoint`` after ``load_lock`` is released.
-                    from resource_ledger import (
-                        bind_resource_cancel_check,
-                        resolve_resource_pure_cancel_check,
-                    )
-
-                    pure_cancel_check = resolve_resource_pure_cancel_check()
-                    factory_ctx = (
-                        bind_resource_cancel_check(pure_cancel_check)
-                        if pure_cancel_check is not None
-                        else contextlib.nullcontext()
-                    )
-                    try:
-                        with factory_ctx:
-                            value = factory()
-                    except BaseException as e:
-                        # Surface to this caller and any waiters under the
-                        # load_lock; remove the entry so future acquires retry.
-                        entry.load_error = e
-                        self._abandon(key, entry)
-                        raise
-                    entry.value = value
-                    if post_load_key is not None:
-                        try:
-                            actual_key = post_load_key(value)
-                        except Exception:
-                            log.exception(
-                                "ModelCache: post_load_key callback raised; "
-                                "leaving entry keyed by the pre-load key"
-                            )
-                            actual_key = key
-                        if actual_key != key:
-                            self._rekey(key, actual_key, entry)
+                    self._load_into_entry(key, entry, factory, post_load_key)
                 elif entry.load_error is not None:
                     # A prior acquirer's factory raised; this acquirer should
                     # also see shared load failures and not get a phantom value.
@@ -283,6 +191,110 @@ class ModelCache:
                 return _Handle(self, entry, entry.value)
             finally:
                 entry.load_lock.release()
+
+    def _retain_entry(self, key):
+        """Find or create the entry for ``key`` and take a reference on it."""
+        with self._global_lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = _Entry(key)
+                self._entries[key] = entry
+            entry.refcount += 1
+            if entry.idle_timer is not None:
+                entry.idle_timer.cancel()
+                entry.idle_timer = None
+            # Invalidate any in-flight stale callback whose cancel() lost
+            # the race with the timer thread firing.
+            entry.evict_token = None
+        return entry
+
+    def _wait_for_load_lock(self, entry, cancel_check):
+        """Take ``entry.load_lock``, recording a contended wait as external."""
+        if entry.load_lock.acquire(blocking=False):
+            # Uncontended fast path: nobody else is producing this
+            # entry, so we own the load_lock immediately without
+            # touching the resource ledger. Uncontended acquires must
+            # not count as waits — track_external_wait() records both
+            # duration and count, and per-photo detection/masking
+            # runs would inflate wait_count with zero-duration entries
+            # on every cache hit or first-caller miss.
+            pass
+        else:
+            # Contended: another caller is already producing this
+            # entry's value under load_lock. That wait can be minutes
+            # long for a cold BioCLIP / SAM2 / DINOv2 load — and if
+            # the producer is itself blocked on the ONNX construction
+            # lease, this waiter is resource-blocked without ever
+            # reaching ResourceLedger.acquire(). Expose it as an
+            # external wait so it feeds the same per-job live and
+            # persisted resource-wait diagnostics as the
+            # session-cache locks in onnx_runtime.
+            from resource_ledger import get_resource_ledger
+
+            with get_resource_ledger().track_external_wait():
+                if cancel_check is not None:
+                    # Waiter-local cancellation: poll the load_lock so
+                    # this caller can abandon its wait while another
+                    # caller's factory is still running. The other
+                    # caller is unaffected and their factory continues.
+                    while not entry.load_lock.acquire(
+                        timeout=_WAITER_POLL_SECS,
+                    ):
+                        if cancel_check():
+                            self._release_entry(entry)
+                            raise _make_cancellation_error()
+                else:
+                    entry.load_lock.acquire()
+
+    def _load_into_entry(self, key, entry, factory, post_load_key):
+        """Run ``factory`` for an empty entry; called holding ``load_lock``."""
+        # ``factory()`` typically calls ``create_session`` which
+        # waits for the construction CPU lease under the bound
+        # resource cancel probe. That probe parks on pause via
+        # ``_pause_checkpoint``; the parking would happen while
+        # this thread still owns ``entry.load_lock``, and any
+        # unpaused peer waiting for the same cache key would
+        # then block for the whole pause window (Codex
+        # discussion_r3790941020 — sibling of the
+        # ``acquire_session_cache_lock`` fix in ``e3693467``).
+        # Rebind the resource cancel probe to the pure-cancel
+        # probe (never parks on pause) for the factory call,
+        # matching the pattern the session-cache lock's
+        # ``_post_acquire_recheck`` uses. Cancel still fires;
+        # pause is observed at the next outer
+        # ``_pause_checkpoint`` after ``load_lock`` is released.
+        from resource_ledger import (
+            bind_resource_cancel_check,
+            resolve_resource_pure_cancel_check,
+        )
+
+        pure_cancel_check = resolve_resource_pure_cancel_check()
+        factory_ctx = (
+            bind_resource_cancel_check(pure_cancel_check)
+            if pure_cancel_check is not None
+            else contextlib.nullcontext()
+        )
+        try:
+            with factory_ctx:
+                value = factory()
+        except BaseException as e:
+            # Surface to this caller and any waiters under the
+            # load_lock; remove the entry so future acquires retry.
+            entry.load_error = e
+            self._abandon(key, entry)
+            raise
+        entry.value = value
+        if post_load_key is not None:
+            try:
+                actual_key = post_load_key(value)
+            except Exception:
+                log.exception(
+                    "ModelCache: post_load_key callback raised; "
+                    "leaving entry keyed by the pre-load key"
+                )
+                actual_key = key
+            if actual_key != key:
+                self._rekey(key, actual_key, entry)
 
     def _release_entry(self, entry):
         """Decrement refcount on the specific entry the caller acquired.
