@@ -218,7 +218,7 @@ class MissingPhotosCancelled(RuntimeError):
 def _present_names_via_listing(folder_path, listing_pass, check_cancelled):
     """NFC names present in ``folder_path``, read through ``listing_pass``.
 
-    Mirrors the direct ``os.scandir`` read in ``get_missing_photos``: a
+    Mirrors the direct ``os.scandir`` read (``_present_names_via_scandir``): a
     symlink whose target is gone does not count as present. A remembered
     listing cannot vouch for a target, so symlinks are checked live whether
     the listing was reused or just read. Raises ``OSError`` like the direct
@@ -235,6 +235,118 @@ def _present_names_via_listing(folder_path, listing_pass, check_cancelled):
             continue
         names.add(_nfc(name))
     return names
+
+
+def _present_names_via_scandir(folder_path, check_cancelled):
+    """NFC names present in ``folder_path``, read with ``os.scandir``.
+
+    A symlink whose target is gone does not count as present. Raises
+    ``OSError`` when the folder cannot be read.
+    """
+    names_set: set[str] = set()
+    with os.scandir(folder_path) as it:
+        for entry in it:
+            check_cancelled()
+            # Broken symlinks: scandir returns the basename
+            # even when the target is gone, but the prior
+            # os.path.exists check returned False. Filter
+            # them so missing originals tracked via
+            # symlinks still surface. is_symlink() uses
+            # cached lstat from scandir, so non-symlinks
+            # don't pay an extra stat.
+            if entry.is_symlink() and not os.path.exists(entry.path):
+                continue
+            names_set.add(_nfc(entry.name))
+    return names_set
+
+
+def _scan_missing_photos(rows, progress_callback, listing_pass, check_cancelled):
+    """The rows of ``get_missing_photos`` whose file is gone from disk."""
+    # One readdir per folder instead of one stat per photo. On a 50k-photo
+    # library across a network volume the per-photo `os.path.exists` was
+    # costing minutes; a single scandir + set-membership check is orders
+    # of magnitude faster and the dominant call site for this endpoint.
+    # Misses fall back to a single os.path.exists to honor FS-specific
+    # case rules without unconditionally case-folding (which would
+    # silently collapse distinct files on case-sensitive volumes).
+    folder_online: dict[int, bool] = {}
+    folder_names: dict[int, set[str] | None] = {}
+    missing = []
+    photos_considered = 0
+    folders_checked = 0
+    reported_folders = set()
+    progress_callback_enabled = True
+
+    def report_progress(current_folder):
+        nonlocal progress_callback_enabled
+        if progress_callback is None or not progress_callback_enabled:
+            return
+        try:
+            progress_callback({
+                "folders_checked": folders_checked,
+                "photos_considered": photos_considered,
+                "missing_found": len(missing),
+                "total_photos": len(rows),
+                "current_folder": current_folder,
+            })
+        except Exception:
+            progress_callback_enabled = False
+            log.exception("Missing photos progress callback failed")
+
+    def report_photo_progress(current_folder):
+        if photos_considered % _MISSING_PHOTOS_PROGRESS_INTERVAL == 0:
+            report_progress(current_folder)
+
+    for row in rows:
+        check_cancelled()
+        fid = row["folder_id"]
+        if fid not in folder_online:
+            folder_online[fid] = os.path.isdir(row["folder_path"])
+        if not folder_online[fid]:
+            # Whole folder is offline — surfaced by missing-folders flow.
+            if fid not in reported_folders:
+                reported_folders.add(fid)
+                folders_checked += 1
+                report_progress(row["folder_path"])
+            continue
+        if fid not in folder_names:
+            try:
+                if listing_pass is not None:
+                    folder_names[fid] = _present_names_via_listing(
+                        row["folder_path"], listing_pass, check_cancelled,
+                    )
+                else:
+                    folder_names[fid] = _present_names_via_scandir(
+                        row["folder_path"], check_cancelled,
+                    )
+            except OSError:
+                # Folder vanished between isdir and scandir, or unreadable;
+                # treat the same as "folder offline" so we don't bulk-flag
+                # every photo as a ghost.
+                folder_names[fid] = None
+            if fid not in reported_folders:
+                reported_folders.add(fid)
+                folders_checked += 1
+                report_progress(row["folder_path"])
+        names = folder_names[fid]
+        photos_considered += 1
+        if names is None:
+            report_photo_progress(row["folder_path"])
+            continue
+        if _nfc(row["filename"]) in names:
+            report_photo_progress(row["folder_path"])
+            continue
+        # NFC miss: defer to the kernel for case rules. On case-insensitive
+        # volumes (APFS default, NTFS) os.path.exists resolves a
+        # case-mismatched name; on case-sensitive volumes (most Linux
+        # filesystems) it correctly reports the file as absent.
+        check_cancelled()
+        if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
+            missing.append(row)
+        report_photo_progress(row["folder_path"])
+    check_cancelled()
+    report_progress("")
+    return missing
 
 
 def _nfc(name: str) -> str:
@@ -2250,6 +2362,36 @@ class Database:
         value = self.get_meta("folder_health_version")
         return int(value or 0)
 
+    def _missing_photos_subtree_clause(self, folder_id, params):
+        """The SQL restricting ``get_missing_photos`` to ``folder_id``'s subtree.
+
+        Appends its parameters to ``params``. Returns ``""`` for the whole
+        workspace and ``None`` when the folder has no subtree to scan.
+        """
+        subtree_clause = ""
+        if folder_id is not None:
+            # Restrict to the folder subtree. Path-prefix expansion (the same
+            # helper used by add_workspace_folder etc.) covers legacy rows
+            # whose parent_id is NULL — a plain recursive walk over parent_id
+            # would silently drop those subfolders.
+            subtree_ids = self._folder_subtree_ids_by_path(folder_id)
+            if not subtree_ids:
+                return None
+            if len(subtree_ids) <= _SQLITE_PARAM_CHUNK_SIZE:
+                placeholders = ",".join("?" for _ in subtree_ids)
+                subtree_clause = f" AND f.id IN ({placeholders})"
+                params.extend(subtree_ids)
+            else:
+                # A workspace root with thousands of descendant folders would
+                # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
+                # in a single IN(...) clause. Stage the ids in a
+                # connection-local temp table and join through that instead.
+                self.stats.stage_scope_ids("missing_subtree_ids", subtree_ids)
+                subtree_clause = (
+                    " AND f.id IN (SELECT id FROM missing_subtree_ids)"
+                )
+        return subtree_clause
+
     def get_missing_photos(
         self,
         folder_id=None,
@@ -2304,130 +2446,17 @@ class Database:
 
         check_cancelled()
         params = [self._ws_id()]
-        subtree_clause = ""
-        if folder_id is not None:
-            # Restrict to the folder subtree. Path-prefix expansion (the same
-            # helper used by add_workspace_folder etc.) covers legacy rows
-            # whose parent_id is NULL — a plain recursive walk over parent_id
-            # would silently drop those subfolders.
-            subtree_ids = self._folder_subtree_ids_by_path(folder_id)
-            if not subtree_ids:
-                return []
-            if len(subtree_ids) <= _SQLITE_PARAM_CHUNK_SIZE:
-                placeholders = ",".join("?" for _ in subtree_ids)
-                subtree_clause = f" AND f.id IN ({placeholders})"
-                params.extend(subtree_ids)
-            else:
-                # A workspace root with thousands of descendant folders would
-                # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
-                # in a single IN(...) clause. Stage the ids in a
-                # connection-local temp table and join through that instead.
-                self.stats.stage_scope_ids("missing_subtree_ids", subtree_ids)
-                subtree_clause = (
-                    " AND f.id IN (SELECT id FROM missing_subtree_ids)"
-                )
+        subtree_clause = self._missing_photos_subtree_clause(folder_id, params)
+        if subtree_clause is None:
+            return []
         check_cancelled()
         rows = self._folder_repository(scoped=False).photos_in_present_folders(
             subtree_clause, params,
         )
         check_cancelled()
-        # One readdir per folder instead of one stat per photo. On a 50k-photo
-        # library across a network volume the per-photo `os.path.exists` was
-        # costing minutes; a single scandir + set-membership check is orders
-        # of magnitude faster and the dominant call site for this endpoint.
-        # Misses fall back to a single os.path.exists to honor FS-specific
-        # case rules without unconditionally case-folding (which would
-        # silently collapse distinct files on case-sensitive volumes).
-        folder_online: dict[int, bool] = {}
-        folder_names: dict[int, set[str] | None] = {}
-        missing = []
-        photos_considered = 0
-        folders_checked = 0
-        reported_folders = set()
-        progress_callback_enabled = True
-
-        def report_progress(current_folder):
-            nonlocal progress_callback_enabled
-            if progress_callback is None or not progress_callback_enabled:
-                return
-            try:
-                progress_callback({
-                    "folders_checked": folders_checked,
-                    "photos_considered": photos_considered,
-                    "missing_found": len(missing),
-                    "total_photos": len(rows),
-                    "current_folder": current_folder,
-                })
-            except Exception:
-                progress_callback_enabled = False
-                log.exception("Missing photos progress callback failed")
-
-        def report_photo_progress(current_folder):
-            if photos_considered % _MISSING_PHOTOS_PROGRESS_INTERVAL == 0:
-                report_progress(current_folder)
-
-        for row in rows:
-            check_cancelled()
-            fid = row["folder_id"]
-            if fid not in folder_online:
-                folder_online[fid] = os.path.isdir(row["folder_path"])
-            if not folder_online[fid]:
-                # Whole folder is offline — surfaced by missing-folders flow.
-                if fid not in reported_folders:
-                    reported_folders.add(fid)
-                    folders_checked += 1
-                    report_progress(row["folder_path"])
-                continue
-            if fid not in folder_names:
-                try:
-                    if listing_pass is not None:
-                        folder_names[fid] = _present_names_via_listing(
-                            row["folder_path"], listing_pass, check_cancelled,
-                        )
-                    else:
-                        names_set: set[str] = set()
-                        with os.scandir(row["folder_path"]) as it:
-                            for entry in it:
-                                check_cancelled()
-                                # Broken symlinks: scandir returns the basename
-                                # even when the target is gone, but the prior
-                                # os.path.exists check returned False. Filter
-                                # them so missing originals tracked via
-                                # symlinks still surface. is_symlink() uses
-                                # cached lstat from scandir, so non-symlinks
-                                # don't pay an extra stat.
-                                if entry.is_symlink() and not os.path.exists(entry.path):
-                                    continue
-                                names_set.add(_nfc(entry.name))
-                        folder_names[fid] = names_set
-                except OSError:
-                    # Folder vanished between isdir and scandir, or unreadable;
-                    # treat the same as "folder offline" so we don't bulk-flag
-                    # every photo as a ghost.
-                    folder_names[fid] = None
-                if fid not in reported_folders:
-                    reported_folders.add(fid)
-                    folders_checked += 1
-                    report_progress(row["folder_path"])
-            names = folder_names[fid]
-            photos_considered += 1
-            if names is None:
-                report_photo_progress(row["folder_path"])
-                continue
-            if _nfc(row["filename"]) in names:
-                report_photo_progress(row["folder_path"])
-                continue
-            # NFC miss: defer to the kernel for case rules. On case-insensitive
-            # volumes (APFS default, NTFS) os.path.exists resolves a
-            # case-mismatched name; on case-sensitive volumes (most Linux
-            # filesystems) it correctly reports the file as absent.
-            check_cancelled()
-            if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
-                missing.append(row)
-            report_photo_progress(row["folder_path"])
-        check_cancelled()
-        report_progress("")
-        return missing
+        return _scan_missing_photos(
+            rows, progress_callback, listing_pass, check_cancelled,
+        )
 
     def nearest_ancestor_folder_id(self, path, exclude_id=None):
         """Return the id of the folder whose stored path is the longest proper
