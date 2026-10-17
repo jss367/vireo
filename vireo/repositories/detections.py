@@ -12,8 +12,10 @@ subject-crop preview applies; ``subjects`` still owns that table's writes.
 
 Callers reach the pass-through operations as ``db.detections`` (a fresh
 repository per access, see ``Database.detections``): ``upsert_rows``,
-``clear``, ``get_ids_for_photos``, ``confidence_summary`` and
-``subject_exposure_ev``. The rest stay behind the ``Database`` methods that
+``clear``, ``get_ids_for_photos``, ``confidence_summary``,
+``subject_exposure_ev`` and ``promote_full_image_runtime`` (the classify
+job's legacy full-image anchor promotion, SQL unchanged from
+``classify_job``). The rest stay behind the ``Database`` methods that
 add the steps above (``save_detections``, ``write_detection_batch``,
 ``get_detections``, ``get_detections_for_photos``,
 ``get_predictions_for_detection``, the misses methods and
@@ -299,6 +301,25 @@ class DetectionsRepository:
                 chunk,
             )
         return affected_subject_photos
+
+    def promote_full_image_runtime(
+        self, photo_id: int, runtime_fingerprint: str,
+    ) -> None:
+        """Stamp a photo's full-image detection with ``runtime_fingerprint``, without committing.
+
+        Rows already carrying it are left alone. The classify job promotes a
+        legacy full-image anchor this way before recording the matching
+        ``detector_runs`` row; the caller commits.
+        """
+        self.conn.execute(
+            """UPDATE detections
+                  SET runtime_fingerprint = ?
+                WHERE photo_id = ?
+                  AND detector_model = 'full-image'
+                  AND (runtime_fingerprint IS NULL
+                       OR runtime_fingerprint != ?)""",
+            (runtime_fingerprint, photo_id, runtime_fingerprint),
+        )
 
     # -- reads --------------------------------------------------------------
 

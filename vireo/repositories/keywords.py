@@ -700,6 +700,19 @@ class KeywordRepository:
             "ORDER BY (name = ? COLLATE NOCASE) DESC, (type = 'taxonomy') DESC, id LIMIT 1",
             (parent_id, source_taxon_id, local_id, name),
         ).fetchone()
+        if existing is None and parent_id is None:
+            # An accept names no parent, but the taxon may already be filed
+            # in the user's tree; bind to that row rather than mint a
+            # top-level twin (see ``_find_add_candidate``).
+            placed = self.conn.execute(
+                "SELECT id, (name = ? COLLATE NOCASE) AS name_match FROM keywords "
+                "WHERE parent_id IS NOT NULL AND type = 'taxonomy' "
+                "AND (source_taxon_id = ? OR (source_taxon_id IS NULL AND taxon_id = ?)) "
+                "ORDER BY name_match DESC, id LIMIT 2",
+                (name, source_taxon_id, local_id),
+            ).fetchall()
+            if len(placed) == 1 or (placed and placed[0]["name_match"] and not placed[1]["name_match"]):
+                existing = placed[0]
         if existing:
             kid = existing["id"]
             self.conn.execute(
@@ -1095,7 +1108,88 @@ class KeywordRepository:
                     "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, parent_id, kw_type, kw_type),
                 ).fetchone()
+        # A top-level add by name (Pipeline Review's Confirm species on a
+        # Browse selection, a flat dc:subject on import) names the species
+        # the user already filed in their tree (``Birds > ... > Western
+        # meadowlark``). Minting a top-level twin instead splits the
+        # species across two rows and queues an XMP add of a keyword the
+        # sidecar already holds. A top-level ``general`` row is passed over
+        # too when taxonomy is asked for: promoting it would mint the twin.
+        if parent_id is None and kw_type in (None, 'taxonomy') and (
+            existing is None
+            or (kw_type == 'taxonomy' and existing['type'] == 'general')
+        ):
+            existing = self._placed_taxonomy_keyword(name) or existing
         return existing
+
+    def _placed_taxonomy_keyword(self, name):
+        """One placed row whose identity agrees with the requested species.
+
+        A name alone cannot reassign a genus or another species homonym.
+        Unknown or conflicting identity stays for an explicit user choice.
+        """
+        # Most top-level adds name nothing in the tree; skip the taxon
+        # lookup for them.
+        if self.conn.execute(
+            "SELECT 1 FROM keywords WHERE name = ? COLLATE NOCASE "
+            "AND parent_id IS NOT NULL AND type = 'taxonomy' LIMIT 1",
+            (name,),
+        ).fetchone() is None:
+            return None
+        requested = self._lookup_taxon_id_for_keyword(name, species_only=True)
+        if requested is None:
+            return None
+        rows = self.conn.execute(
+            "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+            "AND parent_id IS NOT NULL AND type = 'taxonomy' "
+            "AND (taxon_id = ? OR (taxon_id IS NULL AND source_taxon_id = "
+            "(SELECT inat_id FROM taxa WHERE id = ?))) "
+            "AND (source_taxon_id IS NULL OR source_taxon_id = "
+            "(SELECT inat_id FROM taxa WHERE id = ?)) LIMIT 2",
+            (name, requested, requested, requested),
+        ).fetchall()
+        return rows[0] if len(rows) == 1 else None
+
+    def taxonomy_root_twins(self):
+        """Childless root twins with one placed row and consistent identity.
+
+        Group by exact spelling before filtering identities: conflicts between
+        roots or placed rows must not disappear from the ambiguity check.
+        A shared source id proves identity even without a local taxon link.
+        """
+        groups = {}
+        rows = self.conn.execute(
+            "SELECT k.id, k.name, k.parent_id, k.taxon_id, k.source_taxon_id, "
+            "t.inat_id AS local_source, "
+            "EXISTS(SELECT 1 FROM keywords c WHERE c.parent_id = k.id) AS has_children "
+            "FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id "
+            "WHERE k.type = 'taxonomy' AND k.name IS NOT NULL ORDER BY k.id",
+        ).fetchall()
+        for row in rows:
+            groups.setdefault(row["name"], []).append(row)
+        pairs = []
+        for group in groups.values():
+            placed = [row for row in group if row["parent_id"] is not None]
+            local_ids = {row["taxon_id"] for row in group if row["taxon_id"] is not None}
+            sources = {value for row in group for value in
+                       (row["source_taxon_id"], row["local_source"]) if value is not None}
+            if len(placed) != 1 or len(local_ids) > 1 or len(sources) > 1:
+                continue
+            if any(not isinstance(value, int) or value <= 0 for value in sources):
+                continue
+            target = placed[0]
+            target_source = (target["source_taxon_id"] if target["source_taxon_id"] is not None
+                             else target["local_source"])
+            for root in group:
+                if root["parent_id"] is not None or root["has_children"]:
+                    continue
+                root_source = (root["source_taxon_id"] if root["source_taxon_id"] is not None
+                               else root["local_source"])
+                same_local = root["taxon_id"] is not None and root["taxon_id"] == target["taxon_id"]
+                same_source = root_source is not None and root_source == target_source
+                if same_local or same_source:
+                    pairs.append((root["id"], target["id"]))
+        return sorted(pairs)
 
     def merge_duplicates(self):
         """Find and merge normalized duplicate keywords in active workspace.
@@ -1316,19 +1410,20 @@ class KeywordRepository:
         return row["name"] if row else None
 
     def top_level_species_keyword(self, name):
-        """The top-level species keyword ``add_keyword(name, is_species=True)`` matches.
+        """The species keyword ``add_keyword(name, is_species=True)`` matches.
 
         A row (``id``, ``name``) or None: a ``parent_id IS NULL`` taxonomy
         or general keyword named ``name`` case-insensitively, taxonomy
-        first, then lowest id. Other types (individual, location, genre)
-        never match, so a homonym of another kind is not mistaken for the
-        species.
+        first, then lowest id, unless the one taxonomy row of that name
+        filed in the tree stands in for it (see ``_find_add_candidate``).
+        Other types (individual, location, genre) never match, so a
+        homonym of another kind is not mistaken for the species.
         """
+        row = self._find_add_candidate(name, None, 'taxonomy')
+        if row is None:
+            return None
         return self.conn.execute(
-            "SELECT id, name FROM keywords WHERE name = ? COLLATE NOCASE "
-            "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
-            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
-            (name,),
+            "SELECT id, name FROM keywords WHERE id = ?", (row["id"],),
         ).fetchone()
 
     def get_row(self, keyword_id):

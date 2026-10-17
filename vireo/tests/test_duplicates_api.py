@@ -1,4 +1,6 @@
 """API tests for /api/duplicates/scan and /api/duplicates/apply."""
+import os
+
 from wait import wait_for_job_via_client
 
 
@@ -953,13 +955,13 @@ def test_last_scan_counts_groups_resolved_or_grown_since_the_scan(app_and_db):
     assert result["changed_group_count"] == 2
 
 
-def test_last_scan_counts_resolved_group_whose_winner_was_swapped(app_and_db):
-    """A later flag edit that swaps which copy is kept and which is rejected
-    changes what a rescan would show, even though the id set is the same.
+def test_last_scan_shows_resolved_group_whose_winner_was_swapped(app_and_db):
+    """A later flag edit (or "Keep this copy instead") that swaps which copy
+    is kept and which is rejected is shown as the catalog has it now.
 
-    The stored proposal still names the old winner, so its cleanup controls
-    would act on the wrong copy. ``changed_group_count`` must reflect that
-    so the banner tells the user to rescan.
+    The stored proposal names the old winner; served as-is, its KEEP badge
+    and cleanup controls would sit on the wrong copies. The restored group
+    is re-pointed at the copy kept now, so a rescan would show nothing new.
     """
     app, db = app_and_db
     fid = db.add_folder("/tmp/duplastscanswap")
@@ -982,8 +984,20 @@ def test_last_scan_counts_resolved_group_whose_winner_was_swapped(app_and_db):
     db.conn.commit()
 
     result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    (proposal,) = result["proposals"]
+    assert proposal["winner"]["id"] == rejected
+    assert "rejected" not in proposal["winner"]
+    assert [(l["id"], l["rejected"], l["reason"]) for l in proposal["losers"]] == [
+        (kept, True, "kept another copy instead"),
+    ]
     assert result["new_group_count"] == 0
-    assert result["changed_group_count"] == 1
+    assert result["changed_group_count"] == 0
+
+    # A fresh scan agrees, and labels the copy the resolver would have kept.
+    rescanned = _scan_and_restore(client)
+    (proposal,) = rescanned["proposals"]
+    assert proposal["winner"]["id"] == rejected
+    assert proposal["losers"][0]["reason"] == "kept another copy instead"
 
 
 def test_last_scan_counts_unresolved_group_whose_winner_would_change(app_and_db):
@@ -1281,3 +1295,128 @@ def test_ensure_volume_trashes_dir_swallows_oserror(monkeypatch):
     monkeypatch.setattr("os.makedirs", boom)
 
     _ensure_volume_trashes_dir("/Volumes/X/photo.NEF", set())  # must not raise
+
+
+def test_keep_endpoint_switches_the_kept_copy(app_and_db, tmp_path):
+    """"Keep this copy instead" promotes the rejected copy; the catalog
+    cleanup view and the trash endpoint follow the new choice."""
+    app, db = app_and_db
+    kept, rejected, _kept_path, _rejected_path = _seed_pair_with_real_files(
+        db, tmp_path, "HKEEPAPI",
+    )
+    client = app.test_client()
+
+    resp = client.post("/api/duplicates/keep", json={"photo_id": rejected})
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["winner_id"] == rejected
+    assert body["loser_ids"] == [kept]
+    proposal, = client.get("/api/duplicates/cleanup").get_json()["proposals"]
+    assert proposal["winner"]["id"] == rejected
+    assert [l["id"] for l in proposal["losers"]] == [kept]
+    # The chosen copy is no longer a rejected extra, so it can't be trashed.
+    result = client.post(
+        "/api/duplicates/delete-loser-files", json={"photo_ids": [rejected]},
+    ).get_json()
+    assert result["trashed"] == 0
+
+
+def test_keep_endpoint_refuses_copy_missing_on_disk(app_and_db, tmp_path):
+    app, db = app_and_db
+    kept, rejected, _kept_path, rejected_path = _seed_pair_with_real_files(
+        db, tmp_path, "HKEEPMISSING",
+    )
+    os.remove(rejected_path)
+
+    resp = app.test_client().post("/api/duplicates/keep", json={"photo_id": rejected})
+
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert body["error"] == "missing on disk"
+    assert "missing on disk" in body["message"]
+    flag = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (kept,),
+    ).fetchone()["flag"]
+    assert flag != "rejected"
+
+
+def test_keep_endpoint_validates_input(app_and_db):
+    app, _db = app_and_db
+    client = app.test_client()
+    for body in (None, {}, {"photo_id": "1"}, {"photo_id": True}):
+        resp = client.post("/api/duplicates/keep", json=body)
+        assert resp.status_code == 400
+    resp = client.post("/api/duplicates/keep", json={"photo_id": 999999})
+    assert resp.status_code == 404
+
+
+def test_keep_endpoint_waits_out_a_cleanup_in_progress(app_and_db, tmp_path, monkeypatch):
+    """A copy cleanup has already chosen to trash can't be promoted to the
+    kept one while that cleanup is still moving it to Trash."""
+    import threading
+
+    import app as app_module
+    import web.duplicates as duplicates_web
+    from testing.waits import synchronization_timeout
+
+    app, db = app_and_db
+    kept, rejected, _kept_path, rejected_path = _seed_pair_with_real_files(
+        db, tmp_path, "HKEEPRACE",
+    )
+    trashing = threading.Event()
+    release = threading.Event()
+
+    def slow_trash(paths, progress_callback=None, already_missing_out=None,
+                   network_roots=None):
+        trashing.set()
+        assert release.wait(synchronization_timeout())
+        for path in paths:
+            os.remove(path)
+        return len(paths), set(paths), []
+
+    monkeypatch.setattr(app_module, "_trash_paths", slow_trash)
+    monkeypatch.setattr(duplicates_web, "KEEP_CLEANUP_WAIT_SECS", 0.05)
+    cleanup = {}
+
+    def run_cleanup():
+        cleanup["resp"] = app.test_client().post(
+            "/api/duplicates/delete-loser-files", json={"photo_ids": [rejected]},
+        )
+
+    worker = threading.Thread(target=run_cleanup)
+    worker.start()
+    try:
+        assert trashing.wait(synchronization_timeout())
+        resp = app.test_client().post("/api/duplicates/keep", json={"photo_id": rejected})
+        assert resp.status_code == 409
+        assert resp.get_json()["error"] == "cleanup in progress"
+    finally:
+        release.set()
+        worker.join(synchronization_timeout())
+    assert cleanup["resp"].get_json()["trashed"] == 1
+    # The trashed copy is gone, and the other copy is still the kept one.
+    assert db.get_photo(rejected) is None
+    assert not os.path.exists(rejected_path)
+    flag = db.conn.execute("SELECT flag FROM photos WHERE id=?", (kept,)).fetchone()["flag"]
+    assert flag != "rejected"
+
+
+def test_last_scan_shows_live_rating_after_a_switch(app_and_db, tmp_path):
+    """Keeping the other copy merges the old keeper's rating onto it; a
+    restored scan shows that rating, not the one the scan stored."""
+    app, db = app_and_db
+    kept, rejected, _kp, _rp = _seed_pair_with_real_files(db, tmp_path, "HKEEPRATING")
+    db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (kept,))
+    db.conn.commit()
+    client = app.test_client()
+    _scan_and_restore(client)
+
+    assert client.post("/api/duplicates/keep", json={"photo_id": rejected}).status_code == 200
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    (proposal,) = result["proposals"]
+    assert proposal["winner"]["id"] == rejected
+    assert proposal["winner"]["rating"] == 4
+    assert result["changed_group_count"] == 0

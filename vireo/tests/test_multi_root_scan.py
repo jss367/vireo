@@ -8,8 +8,10 @@ serially so there is no contention in the first place.
 import os
 import threading
 import time
+from dataclasses import replace
 
 from PIL import Image
+from scanner import ScanHooks
 from testing.waits import synchronization_timeout
 from wait import wait_for_job_via_client
 
@@ -137,7 +139,8 @@ def test_scan_job_cancel_is_forwarded_to_scanner(app_and_db, tmp_path, monkeypat
     scanned_roots = []
     from scanner import ScanCancelled
 
-    def cancellable_scan(root, db, *args, cancel_check=None, **kwargs):
+    def cancellable_scan(root, db, *args, control=None, **kwargs):
+        cancel_check = control.cancel_check if control is not None else None
         scanned_roots.append(root)
         assert callable(cancel_check), "scan job did not pass cancel_check"
         scan_started.set()
@@ -311,14 +314,15 @@ def test_failed_root_does_not_inflate_cumulative_progress(app_and_db, tmp_path, 
     import scanner as real_scanner
     real_scan = real_scanner.scan
 
-    def flaky_scan(root, db, *args, progress_callback=None, **kwargs):
+    def flaky_scan(root, db, *args, hooks=None, **kwargs):
+        progress_callback = hooks.progress if hooks is not None else None
         if root == root_bad:
             # Report partial progress (3 of 10) then fail, simulating
             # a mid-scan error after some photos were processed.
             if progress_callback is not None:
                 progress_callback(3, 10)
             raise RuntimeError("simulated failure after partial progress")
-        return real_scan(root, db, *args, progress_callback=progress_callback, **kwargs)
+        return real_scan(root, db, *args, hooks=hooks, **kwargs)
 
     monkeypatch.setattr("scanner.scan", flaky_scan)
 
@@ -608,7 +612,8 @@ def test_scan_summary_excludes_files_that_vanished_mid_scan(
     import scanner as real_scanner
     real_scan = real_scanner.scan
 
-    def vanishing_scan(scan_root, sdb, *args, progress_callback=None, **kwargs):
+    def vanishing_scan(scan_root, sdb, *args, hooks=None, **kwargs):
+        progress_callback = hooks.progress if hooks is not None else None
         # Wrap the app's progress callback so two files disappear at the
         # discovery/processing seam — the real scanner then hits real
         # stat() failures, exactly as it did when the SMB mount dropped.
@@ -620,7 +625,9 @@ def test_scan_summary_excludes_files_that_vanished_mid_scan(
                 progress_callback(current, total)
 
         return real_scan(
-            scan_root, sdb, *args, progress_callback=wrapped, **kwargs
+            scan_root, sdb, *args,
+            hooks=replace(hooks or ScanHooks(), progress=wrapped),
+            **kwargs,
         )
 
     monkeypatch.setattr("scanner.scan", vanishing_scan)

@@ -104,6 +104,10 @@ def create_photo_review_blueprint(get_db, json_error):
             return json_error("flag must be 'none', 'flagged', or 'rejected'")
         if not photo_ids:
             return json_error("photo_ids required")
+        if not isinstance(photo_ids, list) or any(
+            isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 for pid in photo_ids
+        ):
+            return json_error("photo_ids must be a list of positive integer IDs")
         provenance, message = flag_provenance(body)
         if message:
             return json_error(message)

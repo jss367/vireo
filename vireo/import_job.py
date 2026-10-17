@@ -102,7 +102,7 @@ from job_contract import progress_event
 # same way everywhere the UI states a count. pipeline_plan imports only
 # stdlib at module level, so this does not cycle back through import_job.
 from pipeline_plan import _plural
-from scanner import EMPTY_FILE_SHA256
+from scanner import EMPTY_FILE_SHA256, ScanControl, ScanOptions
 
 log = logging.getLogger(__name__)
 
@@ -390,18 +390,7 @@ def _capture_photo_fingerprints(db, photo_ids):
         return {}
     fingerprints = {}
     for chunk in _chunks(sorted(int(pid) for pid in photo_ids)):
-        placeholders = ",".join("?" for _ in chunk)
-        rows = db.conn.execute(
-            f"""SELECT p.id AS id,
-                       f.path AS folder_path,
-                       p.filename AS filename,
-                       p.file_size AS file_size,
-                       p.file_hash AS file_hash
-                FROM photos p
-                JOIN folders f ON f.id = p.folder_id
-                WHERE p.id IN ({placeholders})""",
-            list(chunk),
-        ).fetchall()
+        rows = db.imports.landed_fingerprint_rows(chunk)
         for row in rows:
             fp = _fingerprint_for_row(row)
             if fp is None:
@@ -1027,12 +1016,11 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
     mount → makedirs → folder-status promotion. Each step assumes the
     ones above it already passed — in particular ``os.makedirs`` must
     not run until every mount check has, or it recreates the vacated
-    mount point as a local shadow directory. Extracted as ONE function,
-    never five, so the sequence cannot be partially reused out of order.
+    mount point as a local shadow directory. The sequence lives in this
+    ONE function: the step helpers it calls (``_refuse_unmounted_archive``
+    and ``_create_dest_folder``) are called from nowhere else, so it
+    cannot be partially reused out of order.
     """
-    # Function-level import: pipeline_job imports from this module.
-    from pipeline_job import _unmounted_since_baseline
-
     # A detach observed in an earlier batch is sticky for the rest of
     # the run: the intra-run duplicate cache and the job-wide checker
     # hold identities for files whose archive claim was rolled back,
@@ -1104,6 +1092,28 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
             state.emitted, queued,
         )
         return None
+    if _refuse_unmounted_archive(
+        state, emit, rel=rel, batch=batch, queued=queued, ctx=ctx,
+        missing_root_check=missing_root_check,
+    ):
+        return None
+    return _create_dest_folder(
+        state, emit, db, rel=rel, batch=batch, queued=queued,
+        dest_folder=dest_folder,
+    )
+
+
+def _refuse_unmounted_archive(state, emit, *, rel, batch, queued, ctx,
+                              missing_root_check):
+    """``_batch_preflight``'s mount checks: missing mount root, then stale
+    mount. Returns True when the batch was refused (every file booked
+    failed and the refusal phase emitted). Called only from
+    ``_batch_preflight``, after the sticky mount-loss and dest-under-source
+    refusals and before ``_create_dest_folder``.
+    """
+    # Function-level import: pipeline_job imports from this module.
+    from pipeline_job import _unmounted_since_baseline
+
     # Mount-root check: if the archive's mount root has gone (share
     # never attached, or unmounted mid-run), refuse the batch instead
     # of letting ``os.makedirs`` recreate the vacated mount point as a
@@ -1143,7 +1153,7 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
         emit(
             f"{rel}: archive unavailable", state.emitted, queued,
         )
-        return None
+        return True
     # The check above only sees a mount point that VANISHED. Linux
     # keeps ``/mnt/<name>`` as an empty directory after the share
     # detaches, so there the destination still "exists" and
@@ -1170,7 +1180,17 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
         emit(
             f"{rel}: archive unmounted", state.emitted, queued,
         )
-        return None
+        return True
+    return False
+
+
+def _create_dest_folder(state, emit, db, *, rel, batch, queued, dest_folder):
+    """``_batch_preflight``'s last steps: create ``dest_folder`` and promote
+    its folder row out of ``'missing'``. Returns ``dest_folder``, or
+    ``None`` when the folder could not be created (the batch is booked
+    failed and the refusal phase emitted). Called only from
+    ``_batch_preflight``, once every mount check has passed.
+    """
     # A stale-but-registered mount (ismount still true while reads
     # fail), a read-only or permission-changed parent, or a full
     # disk all still surface here — and an uncaught OSError out of
@@ -1206,12 +1226,8 @@ def _batch_preflight(state, emit, db, *, rel, batch, queued, ctx,
     # any row still labelled ``'missing'`` is stale. Preserve
     # ``'partial'`` (a real prior-scan signal that the folder needs a
     # rescan). See PR #1107 / PR #1113 reviews.
-    db.conn.execute(
-        "UPDATE folders SET status = 'ok' "
-        "WHERE path = ? AND status = 'missing'",
-        (dest_folder,),
-    )
-    db.conn.commit()
+    db.imports.promote_missing_folder_at(dest_folder)
+    db.commit()
 
     return dest_folder
 
@@ -1376,7 +1392,7 @@ def _rollback_on_mount_loss(state, batch_st, attests_bytes,
         if batch_st.dup_promoted_folder_ids:
             db.photo_visibility.demote_folders_to_missing(batch_st.dup_promoted_folder_ids)
         if batch_st.dup_granted_photo_ids or batch_st.dup_promoted_folder_ids:
-            db.conn.commit()
+            db.commit()
     batch_st.dup_granted_photo_ids = []
     batch_st.dup_promoted_folder_ids = []
     if extra_rollback is not None:
@@ -1520,10 +1536,10 @@ def _grant_twin_visibility(state, batch_st, db, rel, source_file, rows):
         new_grants, promoted = db.photo_visibility.grant_verified_twins_tracked(
             db.active_workspace_id, rows,
         )
-        db.conn.commit()
+        db.commit()
     except Exception as exc:
         log.exception("Duplicate photo workspace visibility failed")
-        db.conn.rollback()
+        db.rollback()
         _fail(state, rel, source_file, f"duplicate photo workspace visibility failed: {exc}")
         return False
     batch_st.dup_granted_photo_ids.extend(new_grants)
@@ -1708,15 +1724,10 @@ def _catalog_scan_and_prescan(state, batch_st, db, params, scan, destination,
     pre_scan_hashes = {}
     for entry in batch_st.landed:
         dest_path = entry.dest_path
-        row = db.conn.execute(
-            """SELECT p.id, p.file_hash FROM photos p
-               JOIN folders f ON f.id = p.folder_id
-               WHERE f.path = ? AND p.filename = ?""",
-            (
-                os.path.dirname(dest_path),
-                os.path.basename(dest_path),
-            ),
-        ).fetchone()
+        row = db.imports.photo_hash_row(
+            os.path.dirname(dest_path),
+            os.path.basename(dest_path),
+        )
         if row is not None:
             pre_scan_hashes[dest_path] = row["file_hash"]
     try:
@@ -1825,23 +1836,27 @@ def _run_preservation_scan(scan, destination, db, batch_st, landed_paths,
     with bind_resource_cancel_check(None):
         scan(
             destination, db,
-            restrict_dirs=[batch_st.dest_folder],
-            restrict_files=landed_paths,
-            vireo_dir=params.vireo_dir,
-            thumb_cache_dir=params.thumb_cache_dir,
-            skip_working_copies=True,
-            cancel_check=scan_park_only_check,
-            pause_check=scan_pause_check,
-            # Preservation contract: this scan runs to completion
-            # regardless of cancel. Passing an always-False pure
-            # cancel probe lets the scanner use ``_check_cancelled_no_park``
-            # inside ``_claim_worker_count`` — without it a Pause
-            # arriving in the race window between the pause probe
-            # and the parking ``scan_park_only_check`` would park
-            # ``wait_if_paused`` while the hashing pool and CPU
-            # permits are still held, blocking unrelated work
-            # until Resume.
-            cancel_only_check=lambda: False,
+            options=ScanOptions(
+                restrict_dirs=[batch_st.dest_folder],
+                restrict_files=landed_paths,
+                vireo_dir=params.vireo_dir,
+                thumb_cache_dir=params.thumb_cache_dir,
+                skip_working_copies=True,
+            ),
+            control=ScanControl(
+                cancel_check=scan_park_only_check,
+                pause_check=scan_pause_check,
+                # Preservation contract: this scan runs to completion
+                # regardless of cancel. Passing an always-False pure
+                # cancel probe lets the scanner use ``_check_cancelled_no_park``
+                # inside ``_claim_worker_count`` — without it a Pause
+                # arriving in the race window between the pause probe
+                # and the parking ``scan_park_only_check`` would park
+                # ``wait_if_paused`` while the hashing pool and CPU
+                # permits are still held, blocking unrelated work
+                # until Resume.
+                cancel_only_check=lambda: False,
+            ),
         )
 
 
@@ -1883,13 +1898,10 @@ def _stamp_landed_and_validate_catalog(state, batch_st, db, params, rel, *,
     raw_companion_invalidations = set()
     for entry in batch_st.landed:
         dest_path = entry.dest_path
-        row = db.conn.execute(
-            """SELECT p.id, p.file_hash FROM photos p
-               JOIN folders f ON f.id = p.folder_id
-               WHERE f.path = ? AND p.filename = ?""",
-            (os.path.dirname(dest_path),
-             os.path.basename(dest_path)),
-        ).fetchone()
+        row = db.imports.photo_hash_row(
+            os.path.dirname(dest_path),
+            os.path.basename(dest_path),
+        )
         if row is None:
             if not _validate_rowless_landing(
                 state, batch_st, db, rel, entry,
@@ -1924,13 +1936,10 @@ def _validate_rowless_landing(state, batch_st, db, rel, entry,
     # row of its own. Look it up as another row's
     # companion_path before deciding "not cataloged".
     # See PR #1107/#1113 reviews.
-    companion = db.conn.execute(
-        """SELECT p.id FROM photos p
-           JOIN folders f ON f.id = p.folder_id
-           WHERE f.path = ? AND p.companion_path = ?""",
-        (os.path.dirname(dest_path),
-         os.path.basename(dest_path)),
-    ).fetchone()
+    companion = db.imports.photo_with_companion(
+        os.path.dirname(dest_path),
+        os.path.basename(dest_path),
+    )
     if companion is None:
         _reclassify_landed_failed(
             state, rel, entry,
@@ -2104,15 +2113,10 @@ def _invalidate_changed_and_sweep(state, batch_st, db, params,
             verified_hash = entry.verified_hash
             if pre_hash == verified_hash:
                 continue
-            row = db.conn.execute(
-                """SELECT p.id FROM photos p
-                   JOIN folders f ON f.id = p.folder_id
-                   WHERE f.path = ? AND p.filename = ?""",
-                (
-                    os.path.dirname(dest_path),
-                    os.path.basename(dest_path),
-                ),
-            ).fetchone()
+            row = db.imports.photo_hash_row(
+                os.path.dirname(dest_path),
+                os.path.basename(dest_path),
+            )
             if row is None:
                 continue
             _invalidate_derived_caches(
@@ -2132,7 +2136,7 @@ def _invalidate_changed_and_sweep(state, batch_st, db, params,
             )
             invalidated_photo_ids.add(raw_id)
 
-    db.conn.commit()
+    db.commit()
 
     if invalidated_photo_ids:
         # Mirror scanner.scan()'s post-loop untracked-preview
@@ -2430,12 +2434,7 @@ def _recover_parent_landings(state, params, db):
     landed = params.recover_landed_files or {}
     folders = {os.path.dirname(path) for path in landed}
     for folder in folders:
-        rows = db.conn.execute(
-            """SELECT p.id, p.filename, p.companion_path, p.file_hash
-               FROM photos p JOIN folders f ON f.id = p.folder_id
-               WHERE f.path = ?""",
-            (folder,),
-        ).fetchall()
+        rows = db.imports.folder_photo_identities(folder)
         for row in rows:
             if (_is_parent_landing(folder, row["filename"], row["file_hash"], landed)
                     or _is_parent_landing(folder, row["companion_path"], None, landed)):
@@ -2452,15 +2451,7 @@ def _add_carried_working_copy_folders(state, params, db):
     if not params.vireo_dir or not carried:
         return
     for chunk in _chunks(sorted(carried)):
-        placeholders = ",".join("?" for _ in chunk)
-        rows = db.conn.execute(
-            f"""SELECT DISTINCT f.path AS path
-                FROM photos p
-                JOIN folders f ON f.id = p.folder_id
-                WHERE p.id IN ({placeholders})
-                  AND p.working_copy_path IS NULL""",
-            list(chunk),
-        ).fetchall()
+        rows = db.imports.folders_lacking_working_copy(chunk)
         state.wc_dest_folders.update(row["path"] for row in rows)
 
 
@@ -3427,13 +3418,7 @@ def _key_twin_rows(db, key):
     ``stored_metadata_key`` in Python — SQL LOWER() is ASCII-only and
     must not stand in for casefold().
     """
-    rows = db.conn.execute(
-        """SELECT p.id, p.filename, p.file_size, p.timestamp, p.file_hash,
-                  f.path AS folder_path, f.status AS folder_status
-           FROM photos p JOIN folders f ON f.id = p.folder_id
-           WHERE p.file_size = ?""",
-        (key[1],),
-    ).fetchall()
+    rows = db.imports.twin_rows_by_size(key[1])
     return [
         r for r in rows
         if stored_metadata_key(r["filename"], r["file_size"], r["timestamp"]) == key
@@ -3441,13 +3426,7 @@ def _key_twin_rows(db, key):
 
 
 def _hash_twin_rows(db, file_hash):
-    return db.conn.execute(
-        """SELECT p.id, p.filename, p.file_size, f.path AS folder_path,
-                  f.status AS folder_status
-           FROM photos p JOIN folders f ON f.id = p.folder_id
-           WHERE p.file_hash = ?""",
-        (file_hash,),
-    ).fetchall()
+    return db.imports.twin_rows_by_hash(file_hash)
 
 
 def _likely_twin_rows(db, token, source_file, path_under_source):
@@ -3797,23 +3776,16 @@ def _link_duplicate_twin_dirs(db, workspace_id, dup_dirs):
     failures = {}
     for folder_path in sorted(dup_dirs):
         try:
-            folder_row = db.conn.execute(
-                "SELECT id, status FROM folders WHERE path = ?",
-                (folder_path,),
-            ).fetchone()
+            folder_row = db.imports.folder_status_row(folder_path)
             if folder_row is None:
                 raise RuntimeError("folder row not found")
             if folder_row["status"] == "missing":
-                db.conn.execute(
-                    "UPDATE folders SET status = 'ok' WHERE id = ? "
-                    "AND status = 'missing'",
-                    (folder_row["id"],),
-                )
+                db.imports.promote_missing_folder(folder_row["id"])
             db.add_workspace_folder(
                 workspace_id, folder_row["id"], is_root=True,
             )
         except Exception as exc:
-            db.conn.rollback()
+            db.rollback()
             failures[folder_path] = str(exc)
             log.exception(
                 "Linking duplicate-matched folder failed: %s", folder_path,

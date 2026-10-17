@@ -126,6 +126,8 @@ class PhotoReviewService:
             if photo_id in photos_map
         }
         valid_ids = list(old_values)
+        if not valid_ids:
+            return 0
         self.db.photo_review.set_flags(valid_ids, flag)
         for index, photo_id in enumerate(valid_ids):
             self.db.queue_flag_change_if_enabled(

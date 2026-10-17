@@ -153,7 +153,6 @@ ignore = [
 # is classified differently there than locally); unrelated to this PR.
 "vireo/capture_time.py" = ["I001"]
 "vireo/classifier.py" = ["B905"]
-"vireo/classify_job.py" = ["F821", "SIM105"]
 "vireo/culling.py" = ["B007", "F841", "SIM105"]
 "vireo/detector.py" = ["B904"]
 "vireo/dino_embed.py" = ["B904"]

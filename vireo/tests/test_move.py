@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from db import Database
+from scanner import ScanOptions
 
 
 def _tmp_folds_case():
@@ -6563,7 +6564,7 @@ def test_scan_after_a_timestamp_losing_move_recomputes_nothing(tmp_path, monkeyp
     move_folder(db=db, folder_id=fid, destination=str(dst))
 
     computed = _count_feature_computations(monkeypatch)
-    scanner.scan(str(dst / "shoot"), db, incremental=True)
+    scanner.scan(str(dst / "shoot"), db, options=ScanOptions(incremental=True))
 
     assert computed == []
 
@@ -6598,7 +6599,7 @@ def test_move_folder_leaves_a_source_edited_since_its_last_scan_stale(
     ).fetchone()["file_mtime"] == stale
 
     computed = _count_feature_computations(monkeypatch)
-    scanner.scan(str(dst / "shoot"), db, incremental=True)
+    scanner.scan(str(dst / "shoot"), db, options=ScanOptions(incremental=True))
     assert computed == ["a.jpg"]
 
 

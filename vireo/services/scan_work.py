@@ -180,6 +180,8 @@ class _ScanJobRun:
 
     def scan_root(self, root):
         """Scan one root, recording any failure; return True when cancelled."""
+        from scanner import ScanControl, ScanHooks, ScanOptions
+
         job = self.job
         # Counts sink rather than the return value: scan() commits
         # rows as it goes and can raise (or be cancelled) after
@@ -190,16 +192,19 @@ class _ScanJobRun:
         try:
             self.do_scan(
                 root, self.thread_db,
-                progress_callback=self.progress_cb,
-                incremental=self.incremental,
-                extract_full_metadata=self.pipeline_cfg.get("extract_full_metadata", True),
-                status_callback=self.status_cb,
-                vireo_dir=self.vireo_dir,
-                thumb_cache_dir=self.config["THUMB_CACHE_DIR"],
-                cancel_check=self.cancel_check,
-                pause_check=self.pause_check,
-                cancel_only_check=self.cancel_only_check,
-                repair_missing_metadata=self.repair_missing_metadata,
+                options=ScanOptions(
+                    incremental=self.incremental,
+                    extract_full_metadata=self.pipeline_cfg.get("extract_full_metadata", True),
+                    vireo_dir=self.vireo_dir,
+                    thumb_cache_dir=self.config["THUMB_CACHE_DIR"],
+                    repair_missing_metadata=self.repair_missing_metadata,
+                ),
+                hooks=ScanHooks(progress=self.progress_cb, status=self.status_cb),
+                control=ScanControl(
+                    cancel_check=self.cancel_check,
+                    pause_check=self.pause_check,
+                    cancel_only_check=self.cancel_only_check,
+                ),
                 counts=root_counts,
             )
         except Exception as exc:

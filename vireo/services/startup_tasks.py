@@ -129,6 +129,12 @@ class StartupTasks:
                 "Restored %d location hierarchy nodes misclassified as taxonomy",
                 repaired_location_ancestors,
             )
+        # After the location repair, which retypes place nodes that legacy
+        # marking had made taxonomy, so a restored place is no longer a twin.
+        try:
+            init_db.merge_taxonomy_root_twins()
+        except Exception:
+            log.exception("Could not merge top-level species keyword twins")
         init_db.create_default_collections_for_all_workspaces()
         self.prune_collection_ids_of_missing_photos()
 

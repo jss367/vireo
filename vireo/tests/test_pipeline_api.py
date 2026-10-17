@@ -2960,7 +2960,7 @@ def test_import_full_copy_restricts_scan_to_new_subfolders(setup, tmp_path, monk
     def tracking_scan(root, *args, **kwargs):
         calls.append({
             "root": str(root),
-            "restrict_dirs": kwargs.get("restrict_dirs"),
+            "restrict_dirs": kwargs["options"].restrict_dirs,
         })
         return original(root, *args, **kwargs)
 
@@ -3017,7 +3017,7 @@ def test_import_full_copy_false_still_scans_source_root(setup, tmp_path, monkeyp
     def tracking_scan(root, *args, **kwargs):
         calls.append({
             "root": str(root),
-            "restrict_dirs": kwargs.get("restrict_dirs"),
+            "restrict_dirs": kwargs["options"].restrict_dirs,
         })
         return original(root, *args, **kwargs)
 

@@ -8,6 +8,7 @@ from db import Database
 from jobs import JobRunner
 from PIL import Image
 from repositories.processes import ProcessesRepository
+from scanner import ScanOptions
 from services.imports import ImportFailure, ImportService
 from wait import wait_for_job_via_runner
 
@@ -29,7 +30,7 @@ def test_restart_in_place_reuses_catalog_and_restores_settings(import_service, t
     source = tmp_path / "photos"
     source.mkdir()
     Image.new("RGB", (32, 32), "red").save(source / "saved.jpg")
-    scanner.scan(str(source), db, incremental=True)
+    scanner.scan(str(source), db, options=ScanOptions(incremental=True))
     saved_id = db.conn.execute("SELECT id FROM photos WHERE filename='saved.jpg'").fetchone()[0]
     Image.new("RGB", (32, 32), "blue").save(source / "remaining.jpg")
     nested = source / "excluded"
@@ -76,7 +77,7 @@ def test_restart_snapshot_finishes_processing_for_already_cataloged_files(import
     Image.new("RGB", (32, 32), "red").save(selected)
     db.add_folder(str(source), name="photos")
     snapshot_id = db.workspaces.create_new_images_snapshot([str(selected)])
-    scanner.scan(str(source), db, incremental=True)
+    scanner.scan(str(source), db, options=ScanOptions(incremental=True))
     Image.new("RGB", (32, 32), "blue").save(source / "unselected.jpg")
     process_id = db.processes.create("After import")
     frozen_process = db.resolve_process(process_id)
@@ -275,7 +276,7 @@ def test_relocated_descendant_landings_use_native_paths(monkeypatch, path_style,
         service, Mock(), takeover, parent_fingerprints,
     )
     catalog = Mock()
-    catalog.conn.execute.return_value.fetchall.return_value = [{
+    catalog.imports.folder_photo_identities.return_value = [{
         "id": 5, "filename": "bird.jpg", "companion_path": None,
         "file_hash": current_hash,
     }]
@@ -286,8 +287,7 @@ def test_relocated_descendant_landings_use_native_paths(monkeypatch, path_style,
     )
     assert state.recovered_photo_ids == ({5} if same_bytes else set())
     if same_bytes:
-        catalog.conn.execute.assert_called_once()
-        assert catalog.conn.execute.call_args.args[1] == (folder,)
+        catalog.imports.folder_photo_identities.assert_called_once_with(folder)
         # Persisted fingerprint strings retain their existing format.
         assert parent_fingerprints[5] == fingerprint
     else:

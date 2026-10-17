@@ -950,6 +950,77 @@ def test_count_workspace_predictions_counts_visible_photos_only(db, cat):
         db.count_workspace_predictions()
 
 
+# -- classify job (db.predictions) --------------------------------------------------------
+
+
+def test_replace_row_upserts_raw_output_without_committing(db, cat):
+    det = _det(db, cat["p"][0])
+    tax = {"kingdom": "K", "genus": "G", "scientific_name": "S", "taxon_id": 7}
+    db.set_active_workspace(None)  # catalog-wide: needs no workspace
+    db.predictions.replace_row(det, "m1", "fp1", "Robin", 0.4, "new", tax, 1.5)
+    assert db.in_transaction
+    assert _visible(db, "SELECT COUNT(*) FROM predictions") == [(0,)]
+    db.commit()
+    first = _pred_id(db, det, "Robin")
+    db.predictions.replace_row(det, "m1", "fp1", "Robin", 0.8, "match", {}, None)
+    db.commit()
+    assert _visible(
+        db,
+        "SELECT confidence, category, taxonomy_kingdom, scientific_name, "
+        "source_taxon_id, match_score FROM predictions",
+    ) == [(0.8, "match", None, None, None, None)]
+    # REPLACE deletes and reinserts: the row keeps its key, not its id.
+    assert _pred_id(db, det, "Robin") != first
+    assert db.conn.execute("SELECT COUNT(*) FROM prediction_review").fetchone()[0] == 0
+
+
+def test_id_for_key_matches_the_full_cache_key(db, cat):
+    det = _det(db, cat["p"][0])
+    db.add_prediction(det, "Robin", 0.5, "m1", labels_fingerprint="fp1")
+    pred = _pred_id(db, det, "Robin")
+    db.set_active_workspace(None)
+    assert db.predictions.id_for_key(det, "m1", "fp1", "Robin") == pred
+    assert db.predictions.id_for_key(det, "m2", "fp1", "Robin") is None
+    assert db.predictions.id_for_key(det, "m1", "fp2", "Robin") is None
+    assert db.predictions.id_for_key(det, "m1", "fp1", "Wren") is None
+
+
+def test_predictions_is_a_fresh_repository_on_the_connection_per_access(db, monkeypatch):
+    import db as db_module
+    from repositories.predictions import PredictionRepository
+
+    first, second = db.predictions, db.predictions
+    assert isinstance(first, PredictionRepository)
+    assert first is not second
+    assert first.conn is db.conn
+    assert first.commit_with_retry is db_module.commit_with_retry
+    monkeypatch.setattr(db_module, "commit_with_retry", lambda conn: None)
+    assert db.predictions.commit_with_retry is not first.commit_with_retry
+    # The workspace is still resolved lazily, at each read.
+    db.set_active_workspace(None)
+    repo = db.predictions
+    with pytest.raises(RuntimeError, match="No active workspace"):
+        repo.workspace_id  # noqa: B018
+    db.set_active_workspace(cat_ws := db.create_workspace("Other"))
+    assert repo.workspace_id == cat_ws
+
+
+def test_predictions_accessor_hands_the_connection_to_the_factory_only():
+    accessor = Database.__dict__["predictions"]
+    assert isinstance(accessor, property)
+    attrs = _self_attrs(accessor.fget)
+    assert "_prediction_repository" in attrs
+    assert "conn" not in attrs
+
+
+def test_classify_job_reaches_predictions_through_the_accessor():
+    import classify_job
+
+    source = inspect.getsource(classify_job)
+    assert "db.predictions.replace_row(" in source
+    assert "db.predictions.id_for_key(" in source
+
+
 # -- structure ----------------------------------------------------------------------------
 
 
