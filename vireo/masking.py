@@ -264,6 +264,85 @@ def _get_sam2_sessions(variant="sam2-small"):
         return enc_sess, dec_sess
 
 
+def _sam2_box_prompt(bx, by, bw, bh, orig_w, orig_h):
+    """Encode a pixel-space box as SAM2 box-prompt arrays."""
+    # Step 2: Encode box prompt as numpy arrays
+    # The image encoder resizes to SAM2_INPUT_SIZE x SAM2_INPUT_SIZE,
+    # so the decoder expects prompt coordinates in that same space.
+    # Scale the original-pixel box into encoder input coordinates.
+    scale_x = SAM2_INPUT_SIZE / orig_w
+    scale_y = SAM2_INPUT_SIZE / orig_h
+    enc_x1 = bx * scale_x
+    enc_y1 = by * scale_y
+    enc_x2 = (bx + bw) * scale_x
+    enc_y2 = (by + bh) * scale_y
+
+    # For box prompts: point_coords has shape (1, 2, 2) with top-left
+    # and bottom-right corners; point_labels has shape (1, 2) with
+    # values [2, 3] (SAM2 box prompt markers)
+    point_coords = np.array(
+        [[[enc_x1, enc_y1], [enc_x2, enc_y2]]], dtype=np.float32
+    )  # (1, 2, 2)
+    point_labels = np.array([[2, 3]], dtype=np.float32)  # (1, 2)
+    return point_coords, point_labels
+
+
+def _sam2_decoder_inputs(
+    decoder_session, enc_outputs, point_coords, point_labels, orig_h, orig_w,
+):
+    """Build the mask decoder feed from encoder outputs and the box prompt."""
+    image_embeddings = enc_outputs[0]  # (1, C, H', W')
+    # Encoder also outputs high-res FPN features for the mask decoder
+    high_res_feat_0 = enc_outputs[1] if len(enc_outputs) > 1 else None
+    high_res_feat_1 = enc_outputs[2] if len(enc_outputs) > 2 else None
+
+    # No previous mask input
+    mask_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
+    has_mask_input = np.array([0], dtype=np.float32)
+    orig_im_size = np.array([orig_h, orig_w], dtype=np.int64)
+
+    # Build decoder input dict from session input names
+    decoder_inputs = {}
+    dec_input_names = [inp.name for inp in decoder_session.get_inputs()]
+
+    # Map expected input names to our arrays
+    input_map = {
+        "image_embeddings": image_embeddings,
+        "high_res_feat_0": high_res_feat_0,
+        "high_res_feat_1": high_res_feat_1,
+        "point_coords": point_coords,
+        "point_labels": point_labels,
+        "mask_input": mask_input,
+        "has_mask_input": has_mask_input,
+        "orig_im_size": orig_im_size,
+    }
+    for name in dec_input_names:
+        if name in input_map:
+            decoder_inputs[name] = input_map[name]
+    return decoder_inputs
+
+
+def _best_sam2_mask(masks, scores, orig_h, orig_w):
+    """Pick the highest-scoring decoder mask at the original image size."""
+    # Step 4: Pick highest-scoring mask
+    best_idx = int(np.argmax(scores.flatten()))
+
+    # Extract the best mask and resize to original dimensions if needed
+    best_mask = masks[0, best_idx]  # (H_out, W_out)
+
+    if best_mask.shape != (orig_h, orig_w):
+        # Resize mask to original image dimensions
+        mask_img = Image.fromarray(
+            (best_mask > 0).astype(np.uint8) * 255, mode="L"
+        )
+        mask_img = mask_img.resize(
+            (orig_w, orig_h), Image.BILINEAR
+        )
+        best_mask = np.array(mask_img) > 127
+
+    return best_mask.astype(bool)
+
+
 def generate_mask(image, detection_box, variant="sam2-small"):
     """Generate a pixel-level mask from a MegaDetector bounding box using SAM2.
 
@@ -301,78 +380,22 @@ def generate_mask(image, detection_box, variant="sam2-small"):
         enc_input_name = encoder_session.get_inputs()[0].name
         with acquire_inference_resources(encoder_session):
             enc_outputs = encoder_session.run(None, {enc_input_name: input_tensor})
-        image_embeddings = enc_outputs[0]  # (1, C, H', W')
-        # Encoder also outputs high-res FPN features for the mask decoder
-        high_res_feat_0 = enc_outputs[1] if len(enc_outputs) > 1 else None
-        high_res_feat_1 = enc_outputs[2] if len(enc_outputs) > 2 else None
-
-        # Step 2: Encode box prompt as numpy arrays
-        # The image encoder resizes to SAM2_INPUT_SIZE x SAM2_INPUT_SIZE,
-        # so the decoder expects prompt coordinates in that same space.
-        # Scale the original-pixel box into encoder input coordinates.
-        scale_x = SAM2_INPUT_SIZE / orig_w
-        scale_y = SAM2_INPUT_SIZE / orig_h
-        enc_x1 = bx * scale_x
-        enc_y1 = by * scale_y
-        enc_x2 = (bx + bw) * scale_x
-        enc_y2 = (by + bh) * scale_y
-
-        # For box prompts: point_coords has shape (1, 2, 2) with top-left
-        # and bottom-right corners; point_labels has shape (1, 2) with
-        # values [2, 3] (SAM2 box prompt markers)
-        point_coords = np.array(
-            [[[enc_x1, enc_y1], [enc_x2, enc_y2]]], dtype=np.float32
-        )  # (1, 2, 2)
-        point_labels = np.array([[2, 3]], dtype=np.float32)  # (1, 2)
-
-        # No previous mask input
-        mask_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
-        has_mask_input = np.array([0], dtype=np.float32)
-        orig_im_size = np.array([orig_h, orig_w], dtype=np.int64)
+        point_coords, point_labels = _sam2_box_prompt(
+            bx, by, bw, bh, orig_w, orig_h,
+        )
 
         # Step 3: Run mask decoder
-        # Build decoder input dict from session input names
-        decoder_inputs = {}
-        dec_input_names = [inp.name for inp in decoder_session.get_inputs()]
-
-        # Map expected input names to our arrays
-        input_map = {
-            "image_embeddings": image_embeddings,
-            "high_res_feat_0": high_res_feat_0,
-            "high_res_feat_1": high_res_feat_1,
-            "point_coords": point_coords,
-            "point_labels": point_labels,
-            "mask_input": mask_input,
-            "has_mask_input": has_mask_input,
-            "orig_im_size": orig_im_size,
-        }
-        for name in dec_input_names:
-            if name in input_map:
-                decoder_inputs[name] = input_map[name]
-
+        decoder_inputs = _sam2_decoder_inputs(
+            decoder_session, enc_outputs, point_coords, point_labels,
+            orig_h, orig_w,
+        )
         with acquire_inference_resources(decoder_session):
             dec_outputs = decoder_session.run(None, decoder_inputs)
         # Outputs: masks (1, N, H, W) and scores (1, N)
         masks = dec_outputs[0]  # (1, N, H, W)
         scores = dec_outputs[1]  # (1, N)
 
-        # Step 4: Pick highest-scoring mask
-        best_idx = int(np.argmax(scores.flatten()))
-
-        # Extract the best mask and resize to original dimensions if needed
-        best_mask = masks[0, best_idx]  # (H_out, W_out)
-
-        if best_mask.shape != (orig_h, orig_w):
-            # Resize mask to original image dimensions
-            mask_img = Image.fromarray(
-                (best_mask > 0).astype(np.uint8) * 255, mode="L"
-            )
-            mask_img = mask_img.resize(
-                (orig_w, orig_h), Image.BILINEAR
-            )
-            best_mask = np.array(mask_img) > 127
-
-        return best_mask.astype(bool)
+        return _best_sam2_mask(masks, scores, orig_h, orig_w)
     except ResourceWaitCancelled:
         # Cooperative cancellation while waiting for the CPU inference
         # lease is not a mask failure — swallowing it would let the

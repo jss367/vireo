@@ -451,6 +451,72 @@ def clear_verified_cache(model_id: str) -> None:
         _verify_error_cache.pop(model_id, None)
 
 
+def _hash_fetch_failed(weights_path: str, e: VerifyError) -> VerifyResult:
+    """Record a failed hash fetch and return the result reported for it."""
+    write_verify_skipped(weights_path, str(e))
+    return VerifyResult(ok=False, missing=[f"<hash fetch failed: {e}>"])
+
+
+def _verify_legacy_install(m: dict, weights_path: str, opt_files) -> VerifyResult:
+    """Verify an unpinned install against current main; pin it on success."""
+    model_id = m["id"]
+    # Legacy install — resolve current main SHA so we verify
+    # against an explicit revision, not the moving "main" ref.
+    try:
+        latest_rev = fetch_latest_revision(ONNX_REPO)
+    except VerifyError as e:
+        return _hash_fetch_failed(weights_path, e)
+    try:
+        result = verify_model(
+            weights_path, m["hf_subdir"], revision=latest_rev,
+            optional_files=opt_files,
+        )
+    except VerifyError as e:
+        return _hash_fetch_failed(weights_path, e)
+    if result.ok:
+        write_pinned_revision(weights_path, latest_rev)
+        _mark_verified(model_id)
+        clear_verify_skipped(weights_path)
+    else:
+        # Mismatch is ambiguous for unpinned installs — don't
+        # write .verify_failed, just report to the caller. But
+        # do clear any stale .verify_skipped: the hash fetch
+        # succeeded this round, so the old "couldn't reach HF"
+        # reason no longer reflects reality. Without this, a
+        # previously-unverified model stays stuck with an
+        # outdated network-error badge and makes Retry look
+        # ineffective even though verification actually ran.
+        _mark_unverified(model_id)
+        clear_verify_skipped(weights_path)
+    return result
+
+
+def _verify_pinned_install(m: dict, weights_path: str, opt_files) -> VerifyResult:
+    """Verify a pinned install; a mismatch writes the .verify_failed sentinel."""
+    model_id = m["id"]
+    # --- Pinned install: hard-fail on mismatch ---
+    try:
+        result = verify_model(
+            weights_path, m["hf_subdir"], optional_files=opt_files,
+        )
+    except VerifyError as e:
+        return _hash_fetch_failed(weights_path, e)
+    if not result.ok:
+        sentinel = os.path.join(weights_path, VERIFY_FAILED_SENTINEL)
+        try:
+            with open(sentinel, "w") as f:
+                f.write(
+                    f"{result.missing}|{result.mismatches}\n"
+                )
+        except OSError:
+            pass
+        _mark_unverified(model_id)
+    else:
+        _mark_verified(model_id)
+        clear_verify_skipped(weights_path)
+    return result
+
+
 def verify_all_models(progress_callback=None, pause_callback=None) -> dict[str, VerifyResult]:
     """Verify every installed known-model that's in the 'ok' state.
 
@@ -497,71 +563,8 @@ def verify_all_models(progress_callback=None, pause_callback=None) -> dict[str, 
         # is intact.
         opt_files = m.get("optional_files") or ()
 
-        pinned = _has_pinned_revision(weights_path)
-
-        if not pinned:
-            # Legacy install — resolve current main SHA so we verify
-            # against an explicit revision, not the moving "main" ref.
-            try:
-                latest_rev = fetch_latest_revision(ONNX_REPO)
-            except VerifyError as e:
-                write_verify_skipped(weights_path, str(e))
-                results[model_id] = VerifyResult(
-                    ok=False, missing=[f"<hash fetch failed: {e}>"]
-                )
-                continue
-            try:
-                result = verify_model(
-                    weights_path, m["hf_subdir"], revision=latest_rev,
-                    optional_files=opt_files,
-                )
-            except VerifyError as e:
-                write_verify_skipped(weights_path, str(e))
-                results[model_id] = VerifyResult(
-                    ok=False, missing=[f"<hash fetch failed: {e}>"]
-                )
-                continue
-            results[model_id] = result
-            if result.ok:
-                write_pinned_revision(weights_path, latest_rev)
-                _mark_verified(model_id)
-                clear_verify_skipped(weights_path)
-            else:
-                # Mismatch is ambiguous for unpinned installs — don't
-                # write .verify_failed, just report to the caller. But
-                # do clear any stale .verify_skipped: the hash fetch
-                # succeeded this round, so the old "couldn't reach HF"
-                # reason no longer reflects reality. Without this, a
-                # previously-unverified model stays stuck with an
-                # outdated network-error badge and makes Retry look
-                # ineffective even though verification actually ran.
-                _mark_unverified(model_id)
-                clear_verify_skipped(weights_path)
-            continue
-
-        # --- Pinned install: hard-fail on mismatch ---
-        try:
-            result = verify_model(
-                weights_path, m["hf_subdir"], optional_files=opt_files,
-            )
-        except VerifyError as e:
-            write_verify_skipped(weights_path, str(e))
-            results[model_id] = VerifyResult(
-                ok=False, missing=[f"<hash fetch failed: {e}>"]
-            )
-            continue
-        results[model_id] = result
-        if not result.ok:
-            sentinel = os.path.join(weights_path, VERIFY_FAILED_SENTINEL)
-            try:
-                with open(sentinel, "w") as f:
-                    f.write(
-                        f"{result.missing}|{result.mismatches}\n"
-                    )
-            except OSError:
-                pass
-            _mark_unverified(model_id)
+        if _has_pinned_revision(weights_path):
+            results[model_id] = _verify_pinned_install(m, weights_path, opt_files)
         else:
-            _mark_verified(model_id)
-            clear_verify_skipped(weights_path)
+            results[model_id] = _verify_legacy_install(m, weights_path, opt_files)
     return results

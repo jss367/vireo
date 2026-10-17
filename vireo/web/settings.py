@@ -186,6 +186,427 @@ def _validate_config_snapshot(body):
     return None
 
 
+# Distinguishes "key absent" from a stored ``None`` in settings payloads.
+_MISSING = object()
+
+
+def _translate_legacy_default_strategy(pipeline_payload, get_db):
+    """Rewrite a backup's ``default_strategy`` as ``default_process_id``.
+
+    ``pipeline_payload`` is the import payload's ``pipeline`` value (any
+    type); it is changed in place.
+    """
+    # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
+    # name) to the current ``pipeline.default_process_id`` before schema
+    # validation runs. Startup migration does the same for
+    # ~/.vireo/config.json, but importing an older settings backup would
+    # otherwise write the legacy key through as a non-schema value (the
+    # import endpoints only read ``default_process_id``) and silently fall
+    # back to import-only until a restart. Mirror the migration's mapping
+    # exactly: unknown/removed legacy names -> null (import only). If both
+    # keys are present (e.g. a hand-edited backup), the new key wins and
+    # the legacy key is dropped so it can't reappear on a later export.
+    if (
+        isinstance(pipeline_payload, dict)
+        and "default_strategy" in pipeline_payload
+    ):
+        import process_strategies as ps
+
+        legacy = pipeline_payload.pop("default_strategy")
+        if "default_process_id" not in pipeline_payload:
+            seed_name = (
+                ps.LEGACY_STRATEGY_NAMES.get(legacy)
+                if isinstance(legacy, str) else None
+            )
+            translated_pid = None
+            if seed_name is not None:
+                match = next(
+                    (
+                        p for p in get_db().processes.list_all()
+                        if p["name"] == seed_name
+                    ),
+                    None,
+                )
+                if match is not None:
+                    translated_pid = match["id"]
+            pipeline_payload["default_process_id"] = translated_pid
+
+
+def _translate_portable_default_process(pipeline_payload, get_db):
+    """Resolve a backup's portable default-process identity to a local id.
+
+    ``pipeline_payload`` is the import payload's ``pipeline`` value (any
+    type); it is changed in place.
+    """
+    # Translate the portable ``pipeline.default_process_name`` (emitted by
+    # /api/settings/export alongside the id) to the target DB's id.
+    # ``saved_processes`` rows are DB-local — the raw id doesn't transfer
+    # across databases (seed ids 1-4 collide, custom ids collide by
+    # chance), so a foreign backup that only carried ``default_process_id``
+    # would silently point at whatever unrelated row happens to share that
+    # id. Match by name AND by full flag snapshot when the exporter emits
+    # ``default_process_flags``: the name alone is not a stable identity
+    # (users rename processes, unrelated custom processes across DBs can
+    # share a label, and even a seed named "Full" may have been edited on
+    # one side). If the exporter didn't ship flags (older backup), fall
+    # back to name-only match. Any mismatch — no name row, no flag-equal
+    # row, or the flags entry is malformed — resolves to null (import
+    # only) instead of silently activating a divergent process. The name
+    # and flag fields are stripped from the payload so they don't persist
+    # to ~/.vireo/config.json as non-schema keys.
+    if isinstance(pipeline_payload, dict) and (
+        "default_process_name" in pipeline_payload
+        or "default_process_flags" in pipeline_payload
+    ):
+        import process_strategies as ps
+
+        name_val = pipeline_payload.pop("default_process_name", None)
+        flags_val = pipeline_payload.pop("default_process_flags", None)
+        if name_val is None:
+            pipeline_payload["default_process_id"] = None
+        elif isinstance(name_val, str):
+            candidates = [
+                p for p in get_db().processes.list_all()
+                if p["name"] == name_val
+            ]
+            translated_pid = None
+            if isinstance(flags_val, dict):
+                for cand in candidates:
+                    if all(
+                        cand.get(k) == flags_val.get(k)
+                        for k in ps.FLAG_FIELDS
+                    ):
+                        translated_pid = cand["id"]
+                        break
+            elif candidates:
+                translated_pid = candidates[0]["id"]
+            pipeline_payload["default_process_id"] = translated_pid
+        else:
+            pipeline_payload["default_process_id"] = None
+
+
+def _schema_import_errors(payload, get_db):
+    """Validate and coerce, in place, every schema setting in an import.
+
+    Returns the per-key error map (empty when every value is valid).
+    """
+    import config_schema as schema
+
+    # Iterate the schema directly rather than relying on flatten() — empty
+    # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
+    # to nothing and would otherwise be written as-is, replacing a numeric
+    # leaf with {} on disk and breaking downstream consumers.
+    errors = {}
+
+    # 1. Reject scalars where a schema-backed object subtree is expected
+    #    (e.g. {"pipeline": 5}).
+    for prefix in schema.schema_parent_prefixes():
+        val = schema.get_dotted(payload, prefix, default=_MISSING)
+        if val is _MISSING or isinstance(val, dict):
+            continue
+        errors[prefix] = f"{prefix} must be a JSON object"
+
+    # 2. For every schema leaf actually present in the payload, reject any
+    #    object (empty or otherwise) and run the usual value validation.
+    for schema_key in schema.SCHEMA:
+        val = schema.get_dotted(payload, schema_key, default=_MISSING)
+        if val is _MISSING:
+            continue
+        if isinstance(val, dict):
+            errors[schema_key] = f"{schema_key} must be a JSON scalar, not an object"
+            continue
+        try:
+            coerced = schema.validate_value(schema_key, val)
+            schema.set_dotted(payload, schema_key, coerced)
+        except schema.ValidationError as e:
+            errors[schema_key] = str(e)
+
+    # default_process_id points into saved_processes; config_schema only
+    # coerces it to int/null. An imported config carrying an id from
+    # another DB — or a stale id after a process was deleted — would
+    # silently write through here and then hit the "unknown process id"
+    # 400 at every import that inherits this global default. Mirror the
+    # global PATCH check so the failure surfaces at the import layer.
+    pid_key = "pipeline.default_process_id"
+    if pid_key not in errors:
+        pid_val = schema.get_dotted(payload, pid_key, default=_MISSING)
+        if (
+            pid_val is not _MISSING
+            and pid_val is not None
+            and get_db().processes.get(pid_val) is None
+        ):
+            errors[pid_key] = f"unknown process id: {pid_val}"
+    return errors
+
+
+def _structured_import_errors(payload, errors):
+    """Add shape errors for the non-schema keyboard shortcuts and recents."""
+    # Structured non-schema keys still need shape validation, otherwise a
+    # malformed payload would write through to the file and crash
+    # downstream UI consumers that assume a specific shape.
+    if "keyboard_shortcuts" in payload:
+        # shortcuts.html dereferences `cfg.keyboard_shortcuts.<ctx>.<action>`
+        # and assumes a dict tree.
+        ks = payload["keyboard_shortcuts"]
+        if not isinstance(ks, dict):
+            errors["keyboard_shortcuts"] = "keyboard_shortcuts must be a JSON object"
+        else:
+            for ctx_name, actions in ks.items():
+                if not isinstance(actions, dict):
+                    errors[f"keyboard_shortcuts.{ctx_name}"] = (
+                        f"keyboard_shortcuts.{ctx_name} must be a JSON object"
+                    )
+                    continue
+                for action, key_str in actions.items():
+                    if not isinstance(key_str, str):
+                        errors[f"keyboard_shortcuts.{ctx_name}.{action}"] = (
+                            "must be a string"
+                        )
+
+    # ingest.recent_destinations is also EXCLUDED from SCHEMA but is a
+    # structured value (list[str]). pipeline.html calls
+    # `recents.forEach(...)` on it, so a non-list value would crash the
+    # pipeline page after a bad import.
+    ingest_section = payload.get("ingest")
+    if isinstance(ingest_section, dict) and "recent_destinations" in ingest_section:
+        recents = ingest_section["recent_destinations"]
+        if not isinstance(recents, list):
+            errors["ingest.recent_destinations"] = (
+                "ingest.recent_destinations must be a JSON array"
+            )
+        else:
+            for i, item in enumerate(recents):
+                if not isinstance(item, str):
+                    errors[f"ingest.recent_destinations[{i}]"] = (
+                        "must be a string"
+                    )
+                    break
+
+
+def _normalize_imported_export_presets(payload, errors):
+    """Validate and normalize, in place, an import's ``export_presets``."""
+    if "export_presets" in payload:
+        from export import (
+            normalize_export_preset_name,
+            normalize_export_preset_settings,
+        )
+
+        raw_presets = payload["export_presets"]
+        normalized_presets = []
+        seen_preset_names = set()
+        if not isinstance(raw_presets, list):
+            errors["export_presets"] = "export_presets must be a JSON array"
+        else:
+            for i, entry in enumerate(raw_presets):
+                entry_key = f"export_presets[{i}]"
+                if not isinstance(entry, dict):
+                    errors[entry_key] = "export preset must be a JSON object"
+                    continue
+                try:
+                    name = normalize_export_preset_name(entry.get("name"))
+                except ValueError as exc:
+                    errors[f"{entry_key}.name"] = str(exc)
+                    name = None
+                if name is not None:
+                    if name in seen_preset_names:
+                        errors[f"{entry_key}.name"] = (
+                            f"duplicate export preset name {name!r}"
+                        )
+                        name = None
+                    else:
+                        seen_preset_names.add(name)
+                try:
+                    settings = normalize_export_preset_settings(
+                        entry.get("settings")
+                    )
+                except ValueError as exc:
+                    errors[f"{entry_key}.settings"] = str(exc)
+                    settings = None
+                if name is not None and settings is not None:
+                    normalized_presets.append({"name": name, "settings": settings})
+            normalized_presets.sort(
+                key=lambda preset: preset["name"].casefold()
+            )
+            payload["export_presets"] = normalized_presets
+
+
+def _normalize_imported_filter_shortcuts(payload, errors):
+    """Validate and normalize, in place, an import's ``filter_shortcuts``."""
+    # filter_shortcuts is EXCLUDED from SCHEMA (custom Settings UI) but
+    # the filter bar renders it on five pages, so a malformed import must
+    # not reach the template. Normalize like /api/config does: unusable
+    # entries are dropped rather than rendered as dead buttons.
+    if "filter_shortcuts" in payload:
+        raw_shortcuts = payload["filter_shortcuts"]
+        if not isinstance(raw_shortcuts, list):
+            errors["filter_shortcuts"] = "filter_shortcuts must be a JSON array"
+        elif len(raw_shortcuts) > filter_shortcuts.MAX_SHORTCUTS:
+            errors["filter_shortcuts"] = (
+                f"at most {filter_shortcuts.MAX_SHORTCUTS} quick filters"
+            )
+        elif filter_shortcuts.find_duplicate(raw_shortcuts):
+            twins = filter_shortcuts.find_duplicate(raw_shortcuts)
+            errors["filter_shortcuts"] = (
+                f"{twins[0]!r} and {twins[1]!r} apply the same rule"
+            )
+        else:
+            payload["filter_shortcuts"] = filter_shortcuts.for_storage(
+                filter_shortcuts.normalize(raw_shortcuts)
+            )
+
+
+def _keep_install_local_settings(payload, current_raw):
+    """Carry this machine's migration markers and omitted secrets into ``payload``.
+
+    Called under ``settings_write_lock`` with the on-disk config.
+    """
+    import config as cfg
+    import config_schema as schema
+
+    # Export deliberately omits install-local migration markers.
+    # Restore must not make already completed migrations run again.
+    payload["_migrations_applied"] = list(dict.fromkeys(
+        cfg._migrations_applied(current_raw) + cfg._migrations_applied(payload)
+    ))
+    # Exports omit secret values (see /api/settings/export), so a
+    # restored backup must not wipe the tokens already configured on
+    # this machine: absent secret keys keep their current on-disk
+    # value; explicitly supplied ones write through.
+    for secret_key in schema.secret_keys():
+        if schema.get_dotted(payload, secret_key, default=_MISSING) is not _MISSING:
+            continue
+        existing = schema.get_dotted(current_raw, secret_key, default=_MISSING)
+        if existing is not _MISSING:
+            schema.set_dotted(payload, secret_key, existing)
+
+
+def _apply_config_keyboard_shortcuts(body, current):
+    """Merge a ``/api/config`` body's valid keyboard shortcuts into ``current``."""
+    import config as cfg
+
+    # Handle keyboard_shortcuts with validation
+    if "keyboard_shortcuts" in body:
+        shortcuts = body["keyboard_shortcuts"]
+        if isinstance(shortcuts, dict):
+            valid_contexts = cfg.DEFAULTS["keyboard_shortcuts"]
+            validated = {}
+            for ctx_name, actions in shortcuts.items():
+                if ctx_name in valid_contexts and isinstance(actions, dict):
+                    validated[ctx_name] = {}
+                    for action, key_str in actions.items():
+                        if action in valid_contexts[ctx_name] and isinstance(key_str, str):
+                            validated[ctx_name][action] = key_str.strip().lower()
+            current["keyboard_shortcuts"] = cfg._deep_merge(
+                cfg.DEFAULTS["keyboard_shortcuts"], validated
+            )
+
+
+def _apply_config_remote_targets(body, current):
+    """Store a ``/api/config`` body's remote targets in their read-time shape."""
+    import config as cfg
+
+    # Normalize remote_targets on save (assign stable ids, coerce
+    # field types, drop unusable entries) so stored entries always
+    # have the shape get_remote_targets() guarantees on read.
+    if "remote_targets" in body:
+        raw_targets = body["remote_targets"]
+        normalized = []
+        if isinstance(raw_targets, list):
+            import uuid
+            for entry in raw_targets:
+                coerced = cfg._coerce_remote_target(entry)
+                if coerced is None:
+                    continue
+                # A client-supplied id wins (stable across edits);
+                # otherwise mint one so future edits can key the row.
+                if not (isinstance(entry, dict) and (entry.get("id") or "").strip()):
+                    coerced["id"] = uuid.uuid4().hex
+                normalized.append(coerced)
+        current["remote_targets"] = normalized
+
+
+def _apply_config_filter_shortcuts(body, current):
+    """Store a ``/api/config`` body's quick filters; the refusal message or None."""
+    # Quick-filter buttons are rule expressions, so validate them
+    # against the field registry here rather than rendering a button
+    # that could never match anything.
+    if "filter_shortcuts" in body:
+        raw_shortcuts = body["filter_shortcuts"]
+        if isinstance(raw_shortcuts, list):
+            # Over the cap is refused, not trimmed: a silently dropped
+            # button looks saved until the page is reloaded.
+            if len(raw_shortcuts) > filter_shortcuts.MAX_SHORTCUTS:
+                return (
+                    "filter_shortcuts: at most "
+                    f"{filter_shortcuts.MAX_SHORTCUTS} quick filters"
+                )
+            # Two buttons applying one expression cannot be told
+            # apart on the bar, so refuse rather than store a pair
+            # where clicking either lights both.
+            twins = filter_shortcuts.find_duplicate(raw_shortcuts)
+            if twins:
+                return (
+                    f"filter_shortcuts: {twins[0]!r} and {twins[1]!r} "
+                    "apply the same rule"
+                )
+            current["filter_shortcuts"] = filter_shortcuts.for_storage(
+                filter_shortcuts.normalize(raw_shortcuts)
+            )
+    return None
+
+
+def _merge_config_body(body, current):
+    """Copy every remaining known key of a ``/api/config`` body into ``current``."""
+    import config as cfg
+
+    for key in body:
+        # export_presets is validated and written only by the
+        # /api/export/presets endpoints; skip it here so a full-config
+        # snapshot save can't overwrite presets unvalidated.
+        if key in ("keyboard_shortcuts", "remote_targets", "export_presets",
+                   "filter_shortcuts"):
+            continue
+        if key in cfg.DEFAULTS:
+            # Deep-merge for nested-dict config sections so a curated
+            # payload that only ships a subset of keys (settings.html's
+            # saveConfig posts a ``pipeline`` block with just the
+            # weights/miss/eye sliders it renders) doesn't wipe the
+            # keys it didn't include. Without this, the global
+            # ``pipeline.default_process_id`` would silently reset to
+            # null on every autosave and workspaces inheriting it
+            # would go back to import-only.
+            if (
+                isinstance(cfg.DEFAULTS[key], dict)
+                and isinstance(body[key], dict)
+                and isinstance(current.get(key), dict)
+            ):
+                current[key] = cfg._deep_merge(current[key], body[key])
+            else:
+                current[key] = body[key]
+
+
+def _default_process_id_error(current, get_db):
+    """The refusal message for a bad ``pipeline.default_process_id``, or None."""
+    # default_process_id points into saved_processes; _merge_config_body
+    # can carry a stale or foreign id into the global config.
+    # Reject it here like the settings PATCH/import paths, else
+    # workspaces inheriting this global default hit "unknown process
+    # id" in _validate_after_import on their next import instead of
+    # starting it.
+    pipeline_current = current.get("pipeline")
+    if isinstance(pipeline_current, dict):
+        pid = pipeline_current.get("default_process_id")
+        if pid is not None:
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                return (
+                    "pipeline.default_process_id must be an integer "
+                    "or null"
+                )
+            if get_db().processes.get(pid) is None:
+                return f"unknown process id: {pid}"
+    return None
+
+
 def create_settings_blueprint(
     get_db,
     json_error,
@@ -376,112 +797,15 @@ def create_settings_blueprint(
                 if confirmation is not None:
                     return confirmation
 
-            # Handle keyboard_shortcuts with validation
-            if "keyboard_shortcuts" in body:
-                shortcuts = body["keyboard_shortcuts"]
-                if isinstance(shortcuts, dict):
-                    valid_contexts = cfg.DEFAULTS["keyboard_shortcuts"]
-                    validated = {}
-                    for ctx_name, actions in shortcuts.items():
-                        if ctx_name in valid_contexts and isinstance(actions, dict):
-                            validated[ctx_name] = {}
-                            for action, key_str in actions.items():
-                                if action in valid_contexts[ctx_name] and isinstance(key_str, str):
-                                    validated[ctx_name][action] = key_str.strip().lower()
-                    current["keyboard_shortcuts"] = cfg._deep_merge(
-                        cfg.DEFAULTS["keyboard_shortcuts"], validated
-                    )
-
-            # Normalize remote_targets on save (assign stable ids, coerce
-            # field types, drop unusable entries) so stored entries always
-            # have the shape get_remote_targets() guarantees on read.
-            if "remote_targets" in body:
-                raw_targets = body["remote_targets"]
-                normalized = []
-                if isinstance(raw_targets, list):
-                    import uuid
-                    for entry in raw_targets:
-                        coerced = cfg._coerce_remote_target(entry)
-                        if coerced is None:
-                            continue
-                        # A client-supplied id wins (stable across edits);
-                        # otherwise mint one so future edits can key the row.
-                        if not (isinstance(entry, dict) and (entry.get("id") or "").strip()):
-                            coerced["id"] = uuid.uuid4().hex
-                        normalized.append(coerced)
-                current["remote_targets"] = normalized
-
-            # Quick-filter buttons are rule expressions, so validate them
-            # against the field registry here rather than rendering a button
-            # that could never match anything.
-            if "filter_shortcuts" in body:
-                raw_shortcuts = body["filter_shortcuts"]
-                if isinstance(raw_shortcuts, list):
-                    # Over the cap is refused, not trimmed: a silently dropped
-                    # button looks saved until the page is reloaded.
-                    if len(raw_shortcuts) > filter_shortcuts.MAX_SHORTCUTS:
-                        return json_error(
-                            "filter_shortcuts: at most "
-                            f"{filter_shortcuts.MAX_SHORTCUTS} quick filters",
-                            status=400,
-                        )
-                    # Two buttons applying one expression cannot be told
-                    # apart on the bar, so refuse rather than store a pair
-                    # where clicking either lights both.
-                    twins = filter_shortcuts.find_duplicate(raw_shortcuts)
-                    if twins:
-                        return json_error(
-                            f"filter_shortcuts: {twins[0]!r} and {twins[1]!r} "
-                            "apply the same rule",
-                            status=400,
-                        )
-                    current["filter_shortcuts"] = filter_shortcuts.for_storage(
-                        filter_shortcuts.normalize(raw_shortcuts)
-                    )
-
-            for key in body:
-                # export_presets is validated and written only by the
-                # /api/export/presets endpoints; skip it here so a full-config
-                # snapshot save can't overwrite presets unvalidated.
-                if key in ("keyboard_shortcuts", "remote_targets", "export_presets",
-                           "filter_shortcuts"):
-                    continue
-                if key in cfg.DEFAULTS:
-                    # Deep-merge for nested-dict config sections so a curated
-                    # payload that only ships a subset of keys (settings.html's
-                    # saveConfig posts a ``pipeline`` block with just the
-                    # weights/miss/eye sliders it renders) doesn't wipe the
-                    # keys it didn't include. Without this, the global
-                    # ``pipeline.default_process_id`` would silently reset to
-                    # null on every autosave and workspaces inheriting it
-                    # would go back to import-only.
-                    if (
-                        isinstance(cfg.DEFAULTS[key], dict)
-                        and isinstance(body[key], dict)
-                        and isinstance(current.get(key), dict)
-                    ):
-                        current[key] = cfg._deep_merge(current[key], body[key])
-                    else:
-                        current[key] = body[key]
-            # default_process_id points into saved_processes; the deep-merge
-            # above can carry a stale or foreign id into the global config.
-            # Reject it here like the settings PATCH/import paths, else
-            # workspaces inheriting this global default hit "unknown process
-            # id" in _validate_after_import on their next import instead of
-            # starting it.
-            pipeline_current = current.get("pipeline")
-            if isinstance(pipeline_current, dict):
-                pid = pipeline_current.get("default_process_id")
-                if pid is not None:
-                    if not isinstance(pid, int) or isinstance(pid, bool):
-                        return json_error(
-                            "pipeline.default_process_id must be an integer "
-                            "or null", status=400,
-                        )
-                    if get_db().processes.get(pid) is None:
-                        return json_error(
-                            f"unknown process id: {pid}", status=400
-                        )
+            _apply_config_keyboard_shortcuts(body, current)
+            _apply_config_remote_targets(body, current)
+            invalid = _apply_config_filter_shortcuts(body, current)
+            if invalid is not None:
+                return json_error(invalid, status=400)
+            _merge_config_body(body, current)
+            invalid = _default_process_id_error(current, get_db)
+            if invalid is not None:
+                return json_error(invalid, status=400)
             cfg.save(current)
             # The curated form sends the token on every autosave; only a
             # changed value supersedes an in-flight modal validation.
@@ -828,7 +1152,6 @@ def create_settings_blueprint(
         backups capture global state only.
         """
         import config as cfg
-        import config_schema as schema
 
         body = request.get_json(silent=True) or {}
         raw_text = body.get("json", "")
@@ -844,240 +1167,14 @@ def create_settings_blueprint(
         # Bookkeeping marker written by /api/settings/export; never persist it.
         payload.pop("_secrets_omitted", None)
 
-        # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
-        # name) to the current ``pipeline.default_process_id`` before schema
-        # validation runs. Startup migration does the same for
-        # ~/.vireo/config.json, but importing an older settings backup would
-        # otherwise write the legacy key through as a non-schema value (the
-        # import endpoints only read ``default_process_id``) and silently fall
-        # back to import-only until a restart. Mirror the migration's mapping
-        # exactly: unknown/removed legacy names -> null (import only). If both
-        # keys are present (e.g. a hand-edited backup), the new key wins and
-        # the legacy key is dropped so it can't reappear on a later export.
         pipeline_payload = payload.get("pipeline")
-        if (
-            isinstance(pipeline_payload, dict)
-            and "default_strategy" in pipeline_payload
-        ):
-            import process_strategies as ps
+        _translate_legacy_default_strategy(pipeline_payload, get_db)
+        _translate_portable_default_process(pipeline_payload, get_db)
 
-            legacy = pipeline_payload.pop("default_strategy")
-            if "default_process_id" not in pipeline_payload:
-                seed_name = (
-                    ps.LEGACY_STRATEGY_NAMES.get(legacy)
-                    if isinstance(legacy, str) else None
-                )
-                translated_pid = None
-                if seed_name is not None:
-                    match = next(
-                        (
-                            p for p in get_db().processes.list_all()
-                            if p["name"] == seed_name
-                        ),
-                        None,
-                    )
-                    if match is not None:
-                        translated_pid = match["id"]
-                pipeline_payload["default_process_id"] = translated_pid
-
-        # Translate the portable ``pipeline.default_process_name`` (emitted by
-        # /api/settings/export alongside the id) to the target DB's id.
-        # ``saved_processes`` rows are DB-local — the raw id doesn't transfer
-        # across databases (seed ids 1-4 collide, custom ids collide by
-        # chance), so a foreign backup that only carried ``default_process_id``
-        # would silently point at whatever unrelated row happens to share that
-        # id. Match by name AND by full flag snapshot when the exporter emits
-        # ``default_process_flags``: the name alone is not a stable identity
-        # (users rename processes, unrelated custom processes across DBs can
-        # share a label, and even a seed named "Full" may have been edited on
-        # one side). If the exporter didn't ship flags (older backup), fall
-        # back to name-only match. Any mismatch — no name row, no flag-equal
-        # row, or the flags entry is malformed — resolves to null (import
-        # only) instead of silently activating a divergent process. The name
-        # and flag fields are stripped from the payload so they don't persist
-        # to ~/.vireo/config.json as non-schema keys.
-        if isinstance(pipeline_payload, dict) and (
-            "default_process_name" in pipeline_payload
-            or "default_process_flags" in pipeline_payload
-        ):
-            import process_strategies as ps
-
-            name_val = pipeline_payload.pop("default_process_name", None)
-            flags_val = pipeline_payload.pop("default_process_flags", None)
-            if name_val is None:
-                pipeline_payload["default_process_id"] = None
-            elif isinstance(name_val, str):
-                candidates = [
-                    p for p in get_db().processes.list_all()
-                    if p["name"] == name_val
-                ]
-                translated_pid = None
-                if isinstance(flags_val, dict):
-                    for cand in candidates:
-                        if all(
-                            cand.get(k) == flags_val.get(k)
-                            for k in ps.FLAG_FIELDS
-                        ):
-                            translated_pid = cand["id"]
-                            break
-                elif candidates:
-                    translated_pid = candidates[0]["id"]
-                pipeline_payload["default_process_id"] = translated_pid
-            else:
-                pipeline_payload["default_process_id"] = None
-
-        # Iterate the schema directly rather than relying on flatten() — empty
-        # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
-        # to nothing and would otherwise be written as-is, replacing a numeric
-        # leaf with {} on disk and breaking downstream consumers.
-        _MISSING = object()
-        errors = {}
-
-        # 1. Reject scalars where a schema-backed object subtree is expected
-        #    (e.g. {"pipeline": 5}).
-        for prefix in schema.schema_parent_prefixes():
-            val = schema.get_dotted(payload, prefix, default=_MISSING)
-            if val is _MISSING or isinstance(val, dict):
-                continue
-            errors[prefix] = f"{prefix} must be a JSON object"
-
-        # 2. For every schema leaf actually present in the payload, reject any
-        #    object (empty or otherwise) and run the usual value validation.
-        for schema_key in schema.SCHEMA:
-            val = schema.get_dotted(payload, schema_key, default=_MISSING)
-            if val is _MISSING:
-                continue
-            if isinstance(val, dict):
-                errors[schema_key] = f"{schema_key} must be a JSON scalar, not an object"
-                continue
-            try:
-                coerced = schema.validate_value(schema_key, val)
-                schema.set_dotted(payload, schema_key, coerced)
-            except schema.ValidationError as e:
-                errors[schema_key] = str(e)
-
-        # default_process_id points into saved_processes; config_schema only
-        # coerces it to int/null. An imported config carrying an id from
-        # another DB — or a stale id after a process was deleted — would
-        # silently write through here and then hit the "unknown process id"
-        # 400 at every import that inherits this global default. Mirror the
-        # global PATCH check so the failure surfaces at the import layer.
-        pid_key = "pipeline.default_process_id"
-        if pid_key not in errors:
-            pid_val = schema.get_dotted(payload, pid_key, default=_MISSING)
-            if (
-                pid_val is not _MISSING
-                and pid_val is not None
-                and get_db().processes.get(pid_val) is None
-            ):
-                errors[pid_key] = f"unknown process id: {pid_val}"
-
-        # Structured non-schema keys still need shape validation, otherwise a
-        # malformed payload would write through to the file and crash
-        # downstream UI consumers that assume a specific shape.
-        if "keyboard_shortcuts" in payload:
-            # shortcuts.html dereferences `cfg.keyboard_shortcuts.<ctx>.<action>`
-            # and assumes a dict tree.
-            ks = payload["keyboard_shortcuts"]
-            if not isinstance(ks, dict):
-                errors["keyboard_shortcuts"] = "keyboard_shortcuts must be a JSON object"
-            else:
-                for ctx_name, actions in ks.items():
-                    if not isinstance(actions, dict):
-                        errors[f"keyboard_shortcuts.{ctx_name}"] = (
-                            f"keyboard_shortcuts.{ctx_name} must be a JSON object"
-                        )
-                        continue
-                    for action, key_str in actions.items():
-                        if not isinstance(key_str, str):
-                            errors[f"keyboard_shortcuts.{ctx_name}.{action}"] = (
-                                "must be a string"
-                            )
-
-        # ingest.recent_destinations is also EXCLUDED from SCHEMA but is a
-        # structured value (list[str]). pipeline.html calls
-        # `recents.forEach(...)` on it, so a non-list value would crash the
-        # pipeline page after a bad import.
-        ingest_section = payload.get("ingest")
-        if isinstance(ingest_section, dict) and "recent_destinations" in ingest_section:
-            recents = ingest_section["recent_destinations"]
-            if not isinstance(recents, list):
-                errors["ingest.recent_destinations"] = (
-                    "ingest.recent_destinations must be a JSON array"
-                )
-            else:
-                for i, item in enumerate(recents):
-                    if not isinstance(item, str):
-                        errors[f"ingest.recent_destinations[{i}]"] = (
-                            "must be a string"
-                        )
-                        break
-
-        if "export_presets" in payload:
-            from export import (
-                normalize_export_preset_name,
-                normalize_export_preset_settings,
-            )
-
-            raw_presets = payload["export_presets"]
-            normalized_presets = []
-            seen_preset_names = set()
-            if not isinstance(raw_presets, list):
-                errors["export_presets"] = "export_presets must be a JSON array"
-            else:
-                for i, entry in enumerate(raw_presets):
-                    entry_key = f"export_presets[{i}]"
-                    if not isinstance(entry, dict):
-                        errors[entry_key] = "export preset must be a JSON object"
-                        continue
-                    try:
-                        name = normalize_export_preset_name(entry.get("name"))
-                    except ValueError as exc:
-                        errors[f"{entry_key}.name"] = str(exc)
-                        name = None
-                    if name is not None:
-                        if name in seen_preset_names:
-                            errors[f"{entry_key}.name"] = (
-                                f"duplicate export preset name {name!r}"
-                            )
-                            name = None
-                        else:
-                            seen_preset_names.add(name)
-                    try:
-                        settings = normalize_export_preset_settings(
-                            entry.get("settings")
-                        )
-                    except ValueError as exc:
-                        errors[f"{entry_key}.settings"] = str(exc)
-                        settings = None
-                    if name is not None and settings is not None:
-                        normalized_presets.append({"name": name, "settings": settings})
-                normalized_presets.sort(
-                    key=lambda preset: preset["name"].casefold()
-                )
-                payload["export_presets"] = normalized_presets
-
-        # filter_shortcuts is EXCLUDED from SCHEMA (custom Settings UI) but
-        # the filter bar renders it on five pages, so a malformed import must
-        # not reach the template. Normalize like /api/config does: unusable
-        # entries are dropped rather than rendered as dead buttons.
-        if "filter_shortcuts" in payload:
-            raw_shortcuts = payload["filter_shortcuts"]
-            if not isinstance(raw_shortcuts, list):
-                errors["filter_shortcuts"] = "filter_shortcuts must be a JSON array"
-            elif len(raw_shortcuts) > filter_shortcuts.MAX_SHORTCUTS:
-                errors["filter_shortcuts"] = (
-                    f"at most {filter_shortcuts.MAX_SHORTCUTS} quick filters"
-                )
-            elif filter_shortcuts.find_duplicate(raw_shortcuts):
-                twins = filter_shortcuts.find_duplicate(raw_shortcuts)
-                errors["filter_shortcuts"] = (
-                    f"{twins[0]!r} and {twins[1]!r} apply the same rule"
-                )
-            else:
-                payload["filter_shortcuts"] = filter_shortcuts.for_storage(
-                    filter_shortcuts.normalize(raw_shortcuts)
-                )
+        errors = _schema_import_errors(payload, get_db)
+        _structured_import_errors(payload, errors)
+        _normalize_imported_export_presets(payload, errors)
+        _normalize_imported_filter_shortcuts(payload, errors)
 
         if errors:
             return jsonify({"error": "validation failed", "errors": errors}), 400
@@ -1087,19 +1184,10 @@ def create_settings_blueprint(
             # Exports omit secret values (see /api/settings/export), so a
             # restored backup must not wipe the tokens already configured on
             # this machine: absent secret keys keep their current on-disk
-            # value; explicitly supplied ones write through.
+            # value; explicitly supplied ones write through. Install-local
+            # migration markers are kept too.
             current_raw = read_raw_config_file()
-            # Export deliberately omits install-local migration markers.
-            # Restore must not make already completed migrations run again.
-            payload["_migrations_applied"] = list(dict.fromkeys(
-                cfg._migrations_applied(current_raw) + cfg._migrations_applied(payload)
-            ))
-            for secret_key in schema.secret_keys():
-                if schema.get_dotted(payload, secret_key, default=_MISSING) is not _MISSING:
-                    continue
-                existing = schema.get_dotted(current_raw, secret_key, default=_MISSING)
-                if existing is not _MISSING:
-                    schema.set_dotted(payload, secret_key, existing)
+            _keep_install_local_settings(payload, current_raw)
             confirmation = _working_copy_quota_confirmation_required(
                 previous,
                 payload.get(

@@ -54,6 +54,152 @@ def _collection_accepts_manual_photos(rules):
     return False
 
 
+def _collection_list_entry(db, c):
+    """One ``/api/collections`` row: counts, degraded state and add support."""
+    d = dict(c)
+    # A single collection with an unresolvable rule must not 500 the
+    # whole list — that blanks every collection dropdown in the UI.
+    # Degrade to an unknown count and flag it so the client can show
+    # the collection instead of hiding all of them.
+    #
+    # Only rule-validation failures degrade to count_error: the pickers
+    # tell users to fix the rule, so labelling a locked/corrupt DB or a
+    # bad generated query as count_error would send them to edit rules
+    # that aren't the actual problem. ValueError covers both malformed
+    # rules (raised by _build_query_from_rules) and malformed JSON in
+    # the rules column (json.JSONDecodeError is a ValueError subclass).
+    # Anything else bubbles up as a 500 so real infra failures surface.
+    #
+    # Visual collections narrow the result set at open time via the
+    # filter bar's visual clause; ``count_collection_photos`` only
+    # evaluates ``rules``, so a saved visual collection with e.g.
+    # ``rules: []`` would return the workspace-wide metadata count
+    # here while Browse shows a much smaller set on reopen
+    # (Codex review r3620935217). Resolving the visual clause on
+    # every listing would run the embedding for every visual
+    # collection on every page load — too expensive. Omit the count
+    # instead: the sidebar (browse.html) renders an empty count
+    # span for null photo_count, and the ✦ visual marker already
+    # tells users this collection is visually resolved.
+    #
+    # Still validate the metadata rules though — skipping the count
+    # was also the only validation path that caught malformed JSON
+    # or unresolvable rule fields. Without this check, a visual
+    # collection with degraded rules would look healthy in the
+    # sidebar and only 400 later when Browse routes those bad rules
+    # through ``/api/photos/query`` (Codex review r3621304875).
+    if c["visual_json"] is not None:
+        d["photo_count"] = None
+        d["available_photo_count"] = None
+        d["offline_photo_count"] = None
+        _, degraded = collection_rules_state(db, c["rules"])
+        if degraded:
+            d["count_error"] = True
+            current_app.logger.warning(
+                "Visual collection %s (%s) has unresolvable rules; marking degraded",
+                c["id"],
+                c["name"],
+            )
+    else:
+        try:
+            counts = db.count_collection_photo_availability(c["id"])
+            d["photo_count"] = counts["total"]
+            d["available_photo_count"] = counts["available"]
+            d["offline_photo_count"] = counts["offline"]
+        except ValueError:
+            current_app.logger.exception(
+                "Failed to count photos for collection %s (%s)",
+                c["id"],
+                c["name"],
+            )
+            d["photo_count"] = None
+            d["available_photo_count"] = None
+            d["offline_photo_count"] = None
+            d["count_error"] = True
+    # Degraded rows must never advertise manual-add support: the
+    # add-to-collection modal filters only on can_add_photos, and
+    # /api/collections/<id>/add-photos calls set(ids_rule["value"])
+    # on the existing rule — which 500s on any malformed photo_ids
+    # payload (non-scalar entries, non-list value, etc.). If the
+    # rule is bad enough to fail count, it isn't safe to merge into.
+    if d.get("count_error"):
+        d["can_add_photos"] = False
+    elif c["visual_json"] is not None:
+        # Visual collections store ``rules: []`` which
+        # ``_collection_accepts_manual_photos`` treats as addable,
+        # but ``/add-photos`` would only append to ``photo_ids``
+        # and leave ``visual_json`` alone — the manually added
+        # photos would only surface in the reopened collection
+        # if they also matched the hidden visual prompt, so
+        # the add is silently ineffective (Codex r3620791304).
+        d["can_add_photos"] = False
+    else:
+        try:
+            d["can_add_photos"] = _collection_accepts_manual_photos(
+                json.loads(c["rules"])
+            )
+        except (TypeError, ValueError):
+            d["can_add_photos"] = False
+    # ``has_visual`` lets clients that funnel a collection through
+    # the legacy rules-only path (``/api/collections/<id>/photos``,
+    # ``/photo-ids``, pipeline/Misses ``collection_id`` callers) hide,
+    # disable, or reject visual collections. Those paths
+    # evaluate ``rules`` only — a visual-only collection would
+    # otherwise silently widen the scope to every metadata match.
+    # Browse opens the same collection into the filter bar, where
+    # the visual clause IS resolved (see collectionsById /
+    # loadExpression), so surfacing the flag here lets the two
+    # flows behave differently without every caller re-parsing
+    # ``visual_json``.
+    d["has_visual"] = c["visual_json"] is not None
+    return d
+
+
+def _parse_focus_photo_ids(raw):
+    """``(ids, error message)`` for a ``focus_photo_ids`` query value."""
+    raw_focus_ids = (raw or "").strip()
+    focus_photo_ids = []
+    if raw_focus_ids:
+        try:
+            focus_photo_ids = [
+                int(part) for part in raw_focus_ids.split(",") if part.strip()
+            ]
+        except ValueError:
+            return None, (
+                "focus_photo_ids must be a comma-separated list of integers"
+            )
+        if len(focus_photo_ids) > MAX_FOCUS_PHOTO_IDS:
+            return None, (
+                "focus_photo_ids must hold at most "
+                f"{MAX_FOCUS_PHOTO_IDS} integers"
+            )
+    return focus_photo_ids, None
+
+
+def _collection_photos_page(
+    db, collection_id, *, stacks, stack_cfg, sort, page, per_page,
+    underlying_total,
+):
+    """``(photos, total, stack_count)`` for one page of a collection."""
+    stack_count = None
+    if stacks:
+        photos = db.query_browse_stacks(
+            [], collection_id=collection_id, sort=sort,
+            page=page, per_page=per_page, stack_config=stack_cfg,
+        )
+        stack_totals = db.browse_stack_totals(
+            [], collection_id=collection_id, stack_config=stack_cfg,
+        )
+        total = stack_totals["total"]
+        stack_count = stack_totals["stack_count"]
+    else:
+        photos = db.get_collection_photos(
+            collection_id, page=page, per_page=per_page, sort=sort,
+        )
+        total = underlying_total
+    return photos, total, stack_count
+
+
 def create_collections_blueprint(get_db, json_error):
     """Build the collections blueprint.
 
@@ -69,103 +215,7 @@ def create_collections_blueprint(get_db, json_error):
         collections = db.get_collections()
         result = []
         for c in collections:
-            d = dict(c)
-            # A single collection with an unresolvable rule must not 500 the
-            # whole list — that blanks every collection dropdown in the UI.
-            # Degrade to an unknown count and flag it so the client can show
-            # the collection instead of hiding all of them.
-            #
-            # Only rule-validation failures degrade to count_error: the pickers
-            # tell users to fix the rule, so labelling a locked/corrupt DB or a
-            # bad generated query as count_error would send them to edit rules
-            # that aren't the actual problem. ValueError covers both malformed
-            # rules (raised by _build_query_from_rules) and malformed JSON in
-            # the rules column (json.JSONDecodeError is a ValueError subclass).
-            # Anything else bubbles up as a 500 so real infra failures surface.
-            #
-            # Visual collections narrow the result set at open time via the
-            # filter bar's visual clause; ``count_collection_photos`` only
-            # evaluates ``rules``, so a saved visual collection with e.g.
-            # ``rules: []`` would return the workspace-wide metadata count
-            # here while Browse shows a much smaller set on reopen
-            # (Codex review r3620935217). Resolving the visual clause on
-            # every listing would run the embedding for every visual
-            # collection on every page load — too expensive. Omit the count
-            # instead: the sidebar (browse.html) renders an empty count
-            # span for null photo_count, and the ✦ visual marker already
-            # tells users this collection is visually resolved.
-            #
-            # Still validate the metadata rules though — skipping the count
-            # was also the only validation path that caught malformed JSON
-            # or unresolvable rule fields. Without this check, a visual
-            # collection with degraded rules would look healthy in the
-            # sidebar and only 400 later when Browse routes those bad rules
-            # through ``/api/photos/query`` (Codex review r3621304875).
-            if c["visual_json"] is not None:
-                d["photo_count"] = None
-                d["available_photo_count"] = None
-                d["offline_photo_count"] = None
-                _, degraded = collection_rules_state(db, c["rules"])
-                if degraded:
-                    d["count_error"] = True
-                    current_app.logger.warning(
-                        "Visual collection %s (%s) has unresolvable rules; marking degraded",
-                        c["id"],
-                        c["name"],
-                    )
-            else:
-                try:
-                    counts = db.count_collection_photo_availability(c["id"])
-                    d["photo_count"] = counts["total"]
-                    d["available_photo_count"] = counts["available"]
-                    d["offline_photo_count"] = counts["offline"]
-                except ValueError:
-                    current_app.logger.exception(
-                        "Failed to count photos for collection %s (%s)",
-                        c["id"],
-                        c["name"],
-                    )
-                    d["photo_count"] = None
-                    d["available_photo_count"] = None
-                    d["offline_photo_count"] = None
-                    d["count_error"] = True
-            # Degraded rows must never advertise manual-add support: the
-            # add-to-collection modal filters only on can_add_photos, and
-            # /api/collections/<id>/add-photos calls set(ids_rule["value"])
-            # on the existing rule — which 500s on any malformed photo_ids
-            # payload (non-scalar entries, non-list value, etc.). If the
-            # rule is bad enough to fail count, it isn't safe to merge into.
-            if d.get("count_error"):
-                d["can_add_photos"] = False
-            elif c["visual_json"] is not None:
-                # Visual collections store ``rules: []`` which
-                # ``_collection_accepts_manual_photos`` treats as addable,
-                # but ``/add-photos`` would only append to ``photo_ids``
-                # and leave ``visual_json`` alone — the manually added
-                # photos would only surface in the reopened collection
-                # if they also matched the hidden visual prompt, so
-                # the add is silently ineffective (Codex r3620791304).
-                d["can_add_photos"] = False
-            else:
-                try:
-                    d["can_add_photos"] = _collection_accepts_manual_photos(
-                        json.loads(c["rules"])
-                    )
-                except (TypeError, ValueError):
-                    d["can_add_photos"] = False
-            # ``has_visual`` lets clients that funnel a collection through
-            # the legacy rules-only path (``/api/collections/<id>/photos``,
-            # ``/photo-ids``, pipeline/Misses ``collection_id`` callers) hide,
-            # disable, or reject visual collections. Those paths
-            # evaluate ``rules`` only — a visual-only collection would
-            # otherwise silently widen the scope to every metadata match.
-            # Browse opens the same collection into the filter bar, where
-            # the visual clause IS resolved (see collectionsById /
-            # loadExpression), so surfacing the flag here lets the two
-            # flows behave differently without every caller re-parsing
-            # ``visual_json``.
-            d["has_visual"] = c["visual_json"] is not None
-            result.append(d)
+            result.append(_collection_list_entry(db, c))
         return jsonify(result)
 
     @blueprint.route("/api/collections", methods=["POST"])
@@ -402,23 +452,11 @@ def create_collections_blueprint(get_db, json_error):
         # may not contain it at all. ``focus_photo_ids`` is the several-frame
         # form — any frame of a selected stack places the same card.
         focus_photo_id = request.args.get("focus_photo_id", None, type=int)
-        raw_focus_ids = (request.args.get("focus_photo_ids") or "").strip()
-        focus_photo_ids = []
-        if raw_focus_ids:
-            try:
-                focus_photo_ids = [
-                    int(part) for part in raw_focus_ids.split(",") if part.strip()
-                ]
-            except ValueError:
-                return json_error(
-                    "focus_photo_ids must be a comma-separated list of integers",
-                    400,
-                )
-            if len(focus_photo_ids) > MAX_FOCUS_PHOTO_IDS:
-                return json_error(
-                    "focus_photo_ids must hold at most "
-                    f"{MAX_FOCUS_PHOTO_IDS} integers", 400,
-                )
+        focus_photo_ids, invalid = _parse_focus_photo_ids(
+            request.args.get("focus_photo_ids"),
+        )
+        if invalid is not None:
+            return json_error(invalid, 400)
         focus_candidates = focus_candidate_ids(focus_photo_id, focus_photo_ids)
         # Offset pagination is only self-consistent within one snapshot. A
         # commit landing between the position lookup and the page fetch can
@@ -453,21 +491,11 @@ def create_collections_blueprint(get_db, json_error):
                 if found is not None:
                     focus_resolved_id, focus_index = found
                     page = focus_index // per_page + 1
-            if stacks:
-                photos = db.query_browse_stacks(
-                    [], collection_id=collection_id, sort=sort,
-                    page=page, per_page=per_page, stack_config=stack_cfg,
-                )
-                stack_totals = db.browse_stack_totals(
-                    [], collection_id=collection_id, stack_config=stack_cfg,
-                )
-                total = stack_totals["total"]
-                stack_count = stack_totals["stack_count"]
-            else:
-                photos = db.get_collection_photos(
-                    collection_id, page=page, per_page=per_page, sort=sort,
-                )
-                total = underlying_total
+            photos, total, stack_count = _collection_photos_page(
+                db, collection_id, stacks=stacks, stack_cfg=stack_cfg,
+                sort=sort, page=page, per_page=per_page,
+                underlying_total=underlying_total,
+            )
         except ValueError as e:
             current_app.logger.exception(
                 "Collection %s has unresolvable rules", collection_id
