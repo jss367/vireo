@@ -2400,7 +2400,7 @@ def _mark_unused_import_stages(stages, params):
 def _retired_archive_stage(params):
     """Retired import/archive path guard.
 
-    Importing photos now runs through import_job.py and
+    Importing photos now runs through the import_job package and
     /api/jobs/import-photos. The old local-processing archive stage
     intentionally has no cleanup/deindex path left here: orphaned
     staging folders are reconciled by staging_recovery.py before any

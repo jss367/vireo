@@ -257,6 +257,88 @@ class PhotoRepository:
             (self.workspace_id, *photo_ids),
         ).fetchall()
 
+    def best_batch_sequence_rows(self, folder_id, filename_prefix):
+        """Best Batch rows of one folder whose filename starts with ``filename_prefix``.
+
+        Same columns and workspace/online-folder scope as
+        ``best_batch_rows_by_ids``, ordered by filename then id. The caller
+        narrows to the frames that share the seed's digit width and extension.
+        """
+        return self.conn.execute(
+            """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
+                      p.flag, p.rating, p.quality_score, p.sharpness
+               FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ? AND p.folder_id = ? AND p.filename LIKE ?
+               ORDER BY p.filename ASC, p.id ASC""",
+            (self.workspace_id, folder_id, f"{filename_prefix}%"),
+        ).fetchall()
+
+    def best_batch_folder_rows(self, folder_id, *, limit=None):
+        """Best Batch rows of one folder in capture-time order (untimed last).
+
+        Same columns and scope as ``best_batch_rows_by_ids``. Serves the
+        capture-time fallback of ``best_batch_scope`` and the folder burst
+        listing, which re-sorts by filename sequence itself.
+        """
+        sql = """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
+                        p.flag, p.rating, p.quality_score, p.sharpness
+                 FROM photos p
+                 JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+                 JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+                 WHERE wf.workspace_id = ? AND p.folder_id = ?
+                 ORDER BY p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC"""
+        params = [self.workspace_id, folder_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return self.conn.execute(sql, params).fetchall()
+
+    def count_folder_photos(self, folder_id):
+        """How many photos of one folder the workspace sees in an online folder."""
+        return self.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ? AND p.folder_id = ?""",
+            (self.workspace_id, folder_id),
+        ).fetchone()[0]
+
+    def analysis_evidence_rows(self, photo_ids, min_conf):
+        """``{photo_id: Row}`` of the analysis state the burst evidence pack reports.
+
+        Each row carries ``id``, ``has_mask``, ``has_quality``, ``has_eye``
+        (0/1 for ``mask_path``, ``subject_tenengrad`` and ``eye_tenengrad``
+        being set), ``crop_complete``, ``subject_size`` and
+        ``detection_count``: the photo's animal boxes from a real detector
+        (not the ``full-image`` fallback) at or above ``min_conf``. Not
+        workspace-scoped; callers pass ids they have already resolved.
+        """
+        result = {}
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT p.id,
+                           (p.mask_path IS NOT NULL) AS has_mask,
+                           (SELECT pm.variant FROM photo_masks pm
+                             WHERE pm.photo_id = p.id
+                               AND pm.variant = p.active_mask_variant
+                               AND pm.path = p.mask_path LIMIT 1) AS mask_variant,
+                           (p.subject_tenengrad IS NOT NULL) AS has_quality,
+                           (p.eye_tenengrad IS NOT NULL) AS has_eye,
+                           p.crop_complete, p.subject_size,
+                           (SELECT COUNT(*) FROM detections d
+                             WHERE d.photo_id = p.id
+                               AND d.category = 'animal'
+                               AND d.detector_model != 'full-image'
+                               AND d.detector_confidence >= ?) AS detection_count
+                      FROM photos p WHERE p.id IN ({placeholders})""",
+                (min_conf, *chunk),
+            ).fetchall()
+            result.update({r["id"]: r for r in rows})
+        return result
+
     def flags_ratings_and_eyes(self, photo_ids):
         """``{photo_id: Row}`` with ``id``, ``flag``, ``rating`` and the eye fields.
 
@@ -970,7 +1052,39 @@ class PhotoRepository:
             "unclassified": filtered_total - classified,
             "top_species": [{"species": r["species"], "count": r["count"]} for r in top_species],
             "folder_counts": [{"folder_id": r["folder_id"], "name": r["name"], "count": r["count"]} for r in folder_counts],
+            "analysis": self._browse_analysis_coverage(min_conf),
         }
+
+    def _browse_analysis_coverage(self, min_conf):
+        """Recorded runs and results over this request's filtered TEMP ids.
+
+        A consistent run follows the existing model-run cache gate: an empty
+        result or at least one remaining detection for the recorded model.
+        Qualifying animal boxes are a separate, threshold-dependent metric.
+        """
+        row = self.conn.execute(
+            """SELECT
+                 SUM(EXISTS (
+                     SELECT 1 FROM detections det
+                      WHERE det.photo_id = s.id AND det.category = 'animal'
+                        AND det.detector_model != 'full-image'
+                        AND det.detector_confidence >= ?)) AS with_detection,
+                 SUM(EXISTS (
+                     SELECT 1 FROM detector_runs dr
+                      WHERE dr.photo_id = s.id AND dr.detector_model != 'full-image'
+                        AND (dr.box_count = 0 OR EXISTS (
+                            SELECT 1 FROM detections d
+                             WHERE d.photo_id = dr.photo_id
+                               AND d.detector_model = dr.detector_model)))) AS with_detection_run,
+                 SUM(p.subject_tenengrad IS NOT NULL) AS with_quality,
+                 SUM(p.eye_tenengrad IS NOT NULL) AS with_eye,
+                 SUM(p.miss_computed_at IS NOT NULL) AS with_misses
+               FROM _browse_summary_ids s JOIN photos p ON p.id = s.id""",
+            (min_conf,),
+        ).fetchone()
+        return {key: int(row[key] or 0) for key in (
+            "with_detection", "with_detection_run", "with_quality", "with_eye", "with_misses",
+        )}
 
     # -- companions and deletion ---------------------------------------------
 

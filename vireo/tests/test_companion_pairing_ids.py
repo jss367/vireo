@@ -54,7 +54,9 @@ def test_pair_survivor_does_not_add_a_second_snapshot_outcome(tmp_path, already_
     imported = _InPlaceImportRun.__new__(_InPlaceImportRun)
     imported.photo_ids, imported.seen_photo_ids, imported.indexed_paths = [], set(), set()
     imported.runner = SimpleNamespace(update_step=lambda *a, **k: None)
-    imported.job, imported.plan = {"id": "snapshot-import"}, SimpleNamespace(source_snapshot_id="frozen")
+    imported.job, imported.plan = {"id": "snapshot-import"}, SimpleNamespace(
+        source_snapshot_id="frozen", snapshot_exclusion=None,
+    )
     imported.snapshot_known_before = {jpeg_path: jpeg_id} if already_cataloged else {}
     imported.snapshot_requested = 1
     imported.snapshot_missing, imported.snapshot_unreadable = [], []
