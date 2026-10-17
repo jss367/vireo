@@ -10,6 +10,7 @@ photo-detail highlight badges in ``web.photos``.
 
 import math
 import re
+from dataclasses import dataclass, field
 
 from db import text_search_match
 from photo_payload import attach_edit_recipes
@@ -761,59 +762,82 @@ def _limit_highlight_buckets(db, buckets, unidentified_photos, limit_per_bucket)
     return limited_buckets, unidentified_limited
 
 
-def build_highlights_payload(
-    db,
-    scope="folder",
-    folder_id=None,
-    min_quality=0.0,
-    confidence_threshold=0.70,
-    limit_per_bucket=20,
-    species_filter="",
-    species_match_case=False,
-    species_whole_word=False,
-    search_query="",
-    search_match_case=False,
-    search_whole_word=False,
-    confirmation_filter="all",
-    highlight_filter="all",
-    representative_filter="all",
-):
+@dataclass(frozen=True)
+class TextMatch:
+    """A text filter as the filter bar sends it: the text and its toggles."""
+
+    text: str = ""
+    match_case: bool = False
+    whole_word: bool = False
+
+
+@dataclass(frozen=True)
+class HighlightsQuery:
+    """What one Highlights payload covers and how it is filtered and paged.
+
+    The defaults are the Highlights page's: the most recent folder with
+    quality data, every species and section, twenty photos per section.
+    """
+
+    scope: str = "folder"
+    """``"workspace"`` for every folder, else one folder (``folder_id``, or
+    the most recent folder with quality data when that is None)."""
+    folder_id: int | None = None
+    min_quality: float = 0.0
+    confidence_threshold: float = 0.70
+    limit_per_bucket: int = 20
+    """Photos per section on the first page, clamped to 1..100."""
+    species: TextMatch = field(default_factory=TextMatch)
+    """Keeps only the species sections whose name matches."""
+    search: TextMatch = field(default_factory=TextMatch)
+    """The free-text search over sections and photos."""
+    confirmation_filter: str = "all"
+    highlight_filter: str = "all"
+    representative_filter: str = "all"
+
+
+def build_highlights_payload(db, query=None):
+    """The Highlights payload for ``query`` (a ``HighlightsQuery``; None
+    for the page defaults)."""
+    if query is None:
+        query = HighlightsQuery()
     folders = db.get_folders_with_quality_data()
-    if scope == "workspace":
+    folder_id = query.folder_id
+    if query.scope == "workspace":
         folder_id = None
     elif folder_id is None and folders:
         folder_id = folders[0]["id"]  # Most recent
-    limit_per_bucket = max(1, min(int(limit_per_bucket), 100))
-    species_filter = (species_filter or "").strip()
+    limit_per_bucket = max(1, min(int(query.limit_per_bucket), 100))
+    species_filter = (query.species.text or "").strip()
     confirmation_filter = normalize_highlight_confirmation_filter(
-        confirmation_filter
+        query.confirmation_filter
     )
-    highlight_filter = _normalize_highlight_presence_filter(highlight_filter)
+    highlight_filter = _normalize_highlight_presence_filter(query.highlight_filter)
     representative_filter = _normalize_highlight_presence_filter(
-        representative_filter
+        query.representative_filter
     )
 
-    candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
+    candidates = db.get_highlights_candidates(folder_id, min_quality=query.min_quality)
     total_in_scope = db.count_filtered_photos(folder_id=folder_id)
 
     buckets, unidentified_photos = collect_highlight_buckets(
-        candidates, confidence_threshold, confirmation_filter,
+        candidates, query.confidence_threshold, confirmation_filter,
         canonicalize_species=species_canonicalizer(db),
     )
     eligible_count = sum(b["photo_count"] for b in buckets) + len(
         unidentified_photos
     )
     buckets, unidentified_photos = _filter_highlights_by_species(
-        buckets, unidentified_photos, species_filter, species_match_case,
-        species_whole_word,
+        buckets, unidentified_photos, species_filter, query.species.match_case,
+        query.species.whole_word,
     )
 
     buckets, unidentified_photos = filter_highlight_sections(
         buckets,
         unidentified_photos,
-        search_query,
-        search_match_case,
-        search_whole_word,
+        query.search.text,
+        query.search.match_case,
+        query.search.whole_word,
     )
     apply_ordered_highlights(db, buckets)
     apply_highlight_preferences(db, buckets)
@@ -848,7 +872,7 @@ def build_highlights_payload(
             "confirmation": confirmation_filter,
             "highlight_selection": highlight_filter,
             "species_representative": representative_filter,
-            "search": (search_query or "").strip(),
+            "search": (query.search.text or "").strip(),
         },
         "scope": "workspace" if folder_id is None else "folder",
     }
