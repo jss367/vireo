@@ -2,8 +2,8 @@
 // Classic page script; load boot.js after all definitions.
 
 function populateTypeFilter() {
-  var sel = document.getElementById('filterType');
-  var types = {};
+  var sel = jobsElement('filterType', HTMLSelectElement);
+  /** @type {Record<string,boolean>} */ var types = {};
   historyJobs.forEach(function(j) { types[j.type] = true; });
   activeJobs.forEach(function(j) { types[j.type] = true; });
   var current = sel.value;
@@ -19,9 +19,9 @@ window.applyFilters = function() {
 };
 
 function updateList() {
-  var container = document.getElementById('jobListContent');
-  var typeFilter = document.getElementById('filterType').value;
-  var statusFilter = document.getElementById('filterStatus').value;
+  var container = jobsElement('jobListContent', HTMLElement);
+  var typeFilter = jobsElement('filterType', HTMLSelectElement).value;
+  var statusFilter = jobsElement('filterStatus', HTMLSelectElement).value;
   var html = '';
 
   // Active = running OR queued. Queued pipelines waiting behind a busy
@@ -51,7 +51,7 @@ function updateList() {
   container.innerHTML = html;
 }
 
-function renderListItem(j, source) {
+/** @param {JobsRow} j @param {string} source */ function renderListItem(j, source) {
   var selected = j.id === selectedJobId ? ' selected' : '';
   var dot = j.status || 'completed';
   var time = '';
@@ -100,17 +100,18 @@ function updateRunningBadge() {
   var running = activeJobs.filter(function(j) {
     return isLiveStatus(j.status);
   });
-  var badge = document.getElementById('runningBadge');
-  if (running.length > 0) { badge.textContent = running.length; badge.style.display = ''; }
+  var badge = jobsElement('runningBadge', HTMLElement);
+  if (running.length > 0) { badge.textContent = String(running.length); badge.style.display = ''; }
   else { badge.style.display = 'none'; }
 }
 
 // Event delegation for job list clicks
 function bindJobListClicks() {
-  document.getElementById('jobListContent').addEventListener('click', function(e) {
+  jobsElement('jobListContent', HTMLElement).addEventListener('click', function(e) {
+    if (!(e.target instanceof Element)) return;
     var viewItem = e.target.closest('[data-view]');
     if (viewItem) {
-      currentView = viewItem.getAttribute('data-view');
+      currentView = viewItem.getAttribute('data-view') || 'active';
       selectedJobId = null;
       selectedSource = null;
       if (sseSource) { sseSource.close(); sseSource = null; }
@@ -119,6 +120,6 @@ function bindJobListClicks() {
       return;
     }
     var item = e.target.closest('[data-job-id]');
-    if (item) selectJob(item.getAttribute('data-job-id'), item.getAttribute('data-job-source'));
+    if (item) selectJob(item.getAttribute('data-job-id') || '', item.getAttribute('data-job-source') || '');
   });
 }

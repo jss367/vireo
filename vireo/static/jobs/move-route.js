@@ -11,7 +11,7 @@ var DATE_FOLDER_ROWS = 8;
 // list reads as the date folders themselves ("2026-09-12") rather than
 // repeating the root on every row. Falls back to the full path when the
 // path does not sit under the root we were given.
-function pathUnderRoot(path, root) {
+/** @param {string | undefined} path @param {string | undefined} root */ function pathUnderRoot(path, root) {
   if (!path) return '';
   if (root && path.indexOf(root) === 0) {
     var rest = path.slice(root.length).replace(/^[/\\]+/, '');
@@ -34,14 +34,14 @@ function pathUnderRoot(path, root) {
 // finished route is drawn from the result and the config snapshot supplies
 // only the template and the selected root. That way history can never
 // describe a folder the move didn't use.
-function moveDateView(cfg, job) {
+/** @param {JobsConfig} cfg @param {JobsRow} job */ function moveDateView(cfg, job) {
   var root = cfg.destination || '';
   var plannedFolders = Array.isArray(cfg.date_destinations)
     ? cfg.date_destinations : [];
   var plannedFolderCount = cfg.date_destination_count || 0;
   var plannedPhotos = cfg.date_photo_count || 0;
   var planView = {
-    actual: false,
+    actual: false, alreadyInPlace: 0,
     destination: cfg.resolved_destination,
     folderCount: plannedFolderCount,
     listTotal: plannedFolderCount,
@@ -58,7 +58,7 @@ function moveDateView(cfg, job) {
     }),
   };
 
-  var result = job && job.result;
+  var result = job.result || {};
   var dests = result && Array.isArray(result.destinations)
     ? result.destinations : null;
   if (isLiveStatus(job && job.status) || !dests ||
@@ -90,7 +90,7 @@ function moveDateView(cfg, job) {
     // name it. Several means there is no single landing path and the root
     // is the honest answer, with the folders listed underneath.
     destination: dests.length === 1
-      ? dests[0].path : (root || cfg.resolved_destination),
+      ? dests[0]?.path : (root || cfg.resolved_destination),
     folderCount: landed.length,
     listTotal: dests.length,
     photoCount: result.moved + (result.already_in_place || 0),
@@ -125,7 +125,7 @@ function moveDateView(cfg, job) {
 // fans out, so this has to say which of the two it is and name the folders
 // involved. Jobs enqueued before the plan snapshot existed carry no counts;
 // they fall back to the template-only sentence.
-function moveDateNote(cfg, job) {
+/** @param {JobsConfig} cfg @param {JobsRow} job */ function moveDateNote(cfg, job) {
   var template = '<code>' + escapeHtml(cfg.folder_template) + '</code>';
   if (!(cfg.date_destination_count || 0)) {
     return '<span class="job-move-route-note">Organizing photos into ' +
@@ -195,7 +195,7 @@ function moveDateNote(cfg, job) {
   return html;
 }
 
-function renderMoveRoute(job) {
+/** @param {JobsRow} job */ function renderMoveRoute(job) {
   if (!job || job.type !== 'move-folder') return '';
   var cfg = jobConfig(job);
   var source = cfg.source_path;

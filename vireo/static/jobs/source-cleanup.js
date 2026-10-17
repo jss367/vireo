@@ -1,9 +1,9 @@
 // Original-folder cleanup after a date-organized move: review and Trash.
 // Classic page script; load boot.js after all definitions.
 
-var sourceCleanupReviews = {};
+/** @type {Record<string,JobsSourceCleanup>} */ var sourceCleanupReviews = {};
 
-function renderSourceCleanup(job) {
+/** @param {JobsRow} job */ function renderSourceCleanup(job) {
   var cfg = jobConfig(job);
   var result = job.result || {};
   if (job.type !== 'move-folder' || job.status !== 'completed' ||
@@ -57,7 +57,7 @@ function renderSourceCleanup(job) {
   return html + '</section>';
 }
 
-function refreshCleanupDetail(jobId) {
+/** @param {string} jobId */ function refreshCleanupDetail(jobId) {
   if (selectedJobId !== jobId) return;
   var job = activeJobs.concat(historyJobs).find(function(item) { return item.id === jobId; });
   if (job) {
@@ -66,13 +66,13 @@ function refreshCleanupDetail(jobId) {
   }
 }
 
-async function requestSourceCleanup(jobId, clean, summary) {
+/** @param {string} jobId @param {boolean} clean @param {boolean=} summary */ async function requestSourceCleanup(jobId, clean, summary) {
   var prior = sourceCleanupReviews[jobId] || {};
   if (prior.busy || (clean && !prior.confirmed)) return;
   sourceCleanupReviews[jobId] = Object.assign({}, prior, {busy: true, error: null});
   refreshCleanupDetail(jobId);
   try {
-    var data = await safeFetch('/api/jobs/' + encodeURIComponent(jobId) + '/source-cleanup' +
+    /** @type {JobsSourceCleanup} */ var data = await safeFetch('/api/jobs/' + encodeURIComponent(jobId) + '/source-cleanup' +
       (summary ? '?summary=1' : ''), clean ? {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({confirm_trash: true, review_token: prior.review_token}),
@@ -80,24 +80,25 @@ async function requestSourceCleanup(jobId, clean, summary) {
     if (clean && data.state !== 'removed') {
       data.message = (data.trashed || 0) + ' files moved to Trash. Review the remaining files to retry.';
       if ((data.failures || []).length) {
-        data.error = data.failures.map(function(item) { return item.path + ': ' + item.error; }).join('; ');
+        data.error = (data.failures || []).map(function(item) { return item.path + ': ' + item.error; }).join('; ');
       }
     }
     sourceCleanupReviews[jobId] = data;
   } catch (error) {
     // A failed or stale review never leaves an armed cleanup button.
-    sourceCleanupReviews[jobId] = {error: error.message};
+    sourceCleanupReviews[jobId] = {error: error instanceof Error ? error.message : String(error)};
   }
   refreshCleanupDetail(jobId);
 }
 
 function bindSourceCleanupConfirm() {
-  document.getElementById('jobDetailPane').addEventListener('change', function(e) {
-    var checkbox = e.target.closest('[data-confirm-source-cleanup]');
+  jobsElement('jobDetailPane', HTMLElement).addEventListener('change', function(e) {
+    if (!(e.target instanceof Element)) return;
+    var checkbox = /** @type {HTMLInputElement | null} */ (e.target.closest('[data-confirm-source-cleanup]'));
     if (!checkbox) return;
-    var id = checkbox.getAttribute('data-confirm-source-cleanup');
-    if (sourceCleanupReviews[id]) sourceCleanupReviews[id].confirmed = checkbox.checked;
-    var button = checkbox.closest('.move-cleanup').querySelector('[data-clean-source]');
+    var id = checkbox.getAttribute('data-confirm-source-cleanup'); if (!id) return;
+    var review = sourceCleanupReviews[id]; if (review) review.confirmed = checkbox.checked;
+    var button = checkbox.closest('.move-cleanup')?.querySelector(/** @type {'button'} */ ('button[data-clean-source]'));
     if (button) button.disabled = !checkbox.checked;
   });
 }
