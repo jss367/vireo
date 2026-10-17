@@ -20,7 +20,9 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import dir_listing_cache
 from db import Database, MissingPhotosCancelled
@@ -100,6 +102,51 @@ def resolve_folder_id(db, folder_id):
 
 def cache_key(db, folder_id):
     return (db._db_path, db.active_workspace_id, folder_id)
+
+
+@dataclass(frozen=True)
+class _ScanRun:
+    """One started Missing Originals scan, as its work function sees it."""
+
+    key: tuple
+    token: object
+    generation: int
+    started_at: float
+    runner: Any
+    ws_id: int | None
+    db_file: str
+    folder_id: int | None
+    automatic: bool
+    scope_label: str
+
+
+def _scan_progress_callback(runner, job):
+    """Build the ``get_missing_photos`` progress callback for a scan job."""
+
+    def progress(payload):
+        current = int(payload.get("photos_considered") or 0)
+        total = int(payload.get("total_photos") or 0)
+        missing_found = int(payload.get("missing_found") or 0)
+        folders_checked = int(payload.get("folders_checked") or 0)
+        current_folder = payload.get("current_folder") or ""
+        job["progress"]["current"] = current
+        job["progress"]["total"] = total
+        job["progress"]["current_file"] = current_folder
+        phase = (
+            f"{folders_checked:,} folders checked, "
+            f"{current:,} photos considered, "
+            f"{missing_found:,} missing"
+        )
+        runner.push_event(job["id"], "progress", {
+            "current": current,
+            "total": total,
+            "current_file": current_folder,
+            "folders_checked": folders_checked,
+            "missing_found": missing_found,
+            "phase": phase,
+        })
+
+    return progress
 
 
 class MissingOriginals:
@@ -318,8 +365,76 @@ class MissingOriginals:
     def start_scan(self, db, folder_id=None, automatic=False):
         key = cache_key(db, folder_id)
         scan_started_at = time.monotonic()
-        now = scan_started_at
         token = object()
+        early_payload = self._skipped_scan_payload(
+            db, key, folder_id, automatic, scan_started_at,
+        )
+        if early_payload is not None:
+            return early_payload
+        scan_generation = 0
+        reuse_existing = False
+        with self.lock:
+            inflight = self.inflight.get(key)
+            if inflight:
+                reuse_existing = True
+            else:
+                self.inflight[key] = token
+                scan_generation = self.generation.get(key, 0)
+        if reuse_existing:
+            return self.payload(db, folder_id)
+
+        runner = self._get_runner()
+        ws_id = db.active_workspace_id
+        scan = _ScanRun(
+            key=key,
+            token=token,
+            generation=scan_generation,
+            started_at=scan_started_at,
+            runner=runner,
+            ws_id=ws_id,
+            db_file=db._db_path,
+            folder_id=folder_id,
+            automatic=automatic,
+            scope_label=(
+                "workspace" if folder_id is None else f"folder #{folder_id}"
+            ),
+        )
+
+        def work(job):
+            return self._run_scan_job(job, scan)
+
+        try:
+            job_id = runner.start(
+                "missing_originals_scan",
+                work,
+                workspace_id=ws_id,
+                config={"scope": scan.scope_label, "folder_id": folder_id},
+                ephemeral=False,
+                counts_for_badge=True,
+            )
+        except Exception:
+            with self.lock:
+                if self.inflight.get(key) is token:
+                    self.inflight.pop(key, None)
+            raise
+
+        with self.lock:
+            if self.inflight.get(key) is token:
+                self.inflight[key] = job_id
+        payload = self.payload(db, folder_id)
+        if payload.get("status") != "ready":
+            payload["job_id"] = job_id
+            payload["pending"] = True
+            payload["status"] = "pending"
+        return payload
+
+    def _skipped_scan_payload(self, db, key, folder_id, automatic, now):
+        """The payload to answer with when no new scan should start, or None.
+
+        A scan already in flight is reused; an automatic scan is skipped
+        while the cache is fresh, during an error backoff, and while heavy
+        work is running.
+        """
         suppressed_reason = None
         reuse_existing = False
         fresh_cache = False
@@ -366,153 +481,100 @@ class MissingOriginals:
             if suppressed_reason == "heavy_job_active":
                 payload["status"] = "skipped"
             return payload
-        scan_generation = 0
-        with self.lock:
-            inflight = self.inflight.get(key)
-            if inflight:
-                reuse_existing = True
-            else:
-                self.inflight[key] = token
-                scan_generation = self.generation.get(key, 0)
-        if reuse_existing:
-            return self.payload(db, folder_id)
+        return None
 
-        runner = self._get_runner()
-        ws_id = db.active_workspace_id
-        db_file = db._db_path
-        scope_label = "workspace" if folder_id is None else f"folder #{folder_id}"
-
-        def work(job):
-            thread_db = None
-            try:
-                thread_db = Database(db_file)
-                if ws_id is not None:
-                    thread_db.set_active_workspace(ws_id)
-
-                def progress(payload):
-                    current = int(payload.get("photos_considered") or 0)
-                    total = int(payload.get("total_photos") or 0)
-                    missing_found = int(payload.get("missing_found") or 0)
-                    folders_checked = int(payload.get("folders_checked") or 0)
-                    current_folder = payload.get("current_folder") or ""
-                    job["progress"]["current"] = current
-                    job["progress"]["total"] = total
-                    job["progress"]["current_file"] = current_folder
-                    phase = (
-                        f"{folders_checked:,} folders checked, "
-                        f"{current:,} photos considered, "
-                        f"{missing_found:,} missing"
-                    )
-                    runner.push_event(job["id"], "progress", {
-                        "current": current,
-                        "total": total,
-                        "current_file": current_folder,
-                        "folders_checked": folders_checked,
-                        "missing_found": missing_found,
-                        "phase": phase,
-                    })
-
-                def cancel_check():
-                    return runner.is_cancelled(job["id"])
-
-                # The 30-minute automatic check reuses the listing of every
-                # folder unchanged since it was last read; a check the user
-                # asked for reads every folder, and records what it read.
-                listing_pass = dir_listing_cache.ListingPass(
-                    dir_listing_cache.get_shared(), reuse=automatic,
-                )
-                photos = self.build_rows(
-                    thread_db,
-                    folder_id=folder_id,
-                    progress_callback=progress,
-                    cancel_callback=cancel_check,
-                    listing_pass=listing_pass,
-                )
-                if cancel_check():
-                    return {"cancelled": True, "scope": scope_label}
-                checked_at = _utc_iso_now()
-                stale = False
-                with self.lock:
-                    current_gen = self.generation.get(key, 0)
-                    if cancel_check():
-                        return {"cancelled": True, "scope": scope_label}
-                    if current_gen != scan_generation:
-                        # A batch delete (or other invalidation) fired
-                        # while this scan was walking the disk. Its photo
-                        # list reflects the pre-delete library, so writing
-                        # it back would resurrect just-removed photos in
-                        # the banner. Drop the result and let the next
-                        # scan recompute.
-                        stale = True
-                    else:
-                        self.cache[key] = {
-                            "photos": photos,
-                            "checked_at": checked_at,
-                            "set_at": time.monotonic(),
-                            "started_at": scan_started_at,
-                        }
-                        self.errors.pop(key, None)
-                return {
-                    "missing_count": len(photos),
-                    "checked_at": checked_at,
-                    "scope": scope_label,
-                    "stale": stale,
-                    # Which folders were read from disk and which were
-                    # reused unchanged since the last look.
-                    "folders_read": listing_pass.read,
-                    "folders_unchanged": listing_pass.unchanged,
-                }
-            except MissingPhotosCancelled:
-                raise
-            except Exception as exc:
-                checked_at = _utc_iso_now()
-                with self.lock:
-                    current_gen = self.generation.get(key, 0)
-                    if current_gen == scan_generation:
-                        self.errors[key] = {
-                            "error": str(exc) or exc.__class__.__name__,
-                            "checked_at": checked_at,
-                            "set_at": time.monotonic(),
-                            "backoff_until": (
-                                time.monotonic()
-                                + BACKOFF_SECONDS
-                            ),
-                        }
-                raise
-            finally:
-                if thread_db is not None:
-                    thread_db.close()
-                with self.lock:
-                    if self.inflight.get(key) in (
-                        token,
-                        job["id"],
-                    ):
-                        self.inflight.pop(key, None)
-
+    def _run_scan_job(self, job, scan):
+        """The ``missing_originals_scan`` work function."""
+        key = scan.key
+        runner = scan.runner
+        thread_db = None
         try:
-            job_id = runner.start(
-                "missing_originals_scan",
-                work,
-                workspace_id=ws_id,
-                config={"scope": scope_label, "folder_id": folder_id},
-                ephemeral=False,
-                counts_for_badge=True,
-            )
-        except Exception:
-            with self.lock:
-                if self.inflight.get(key) is token:
-                    self.inflight.pop(key, None)
-            raise
+            thread_db = Database(scan.db_file)
+            if scan.ws_id is not None:
+                thread_db.set_active_workspace(scan.ws_id)
 
+            progress = _scan_progress_callback(runner, job)
+
+            def cancel_check():
+                return runner.is_cancelled(job["id"])
+
+            # The 30-minute automatic check reuses the listing of every
+            # folder unchanged since it was last read; a check the user
+            # asked for reads every folder, and records what it read.
+            listing_pass = dir_listing_cache.ListingPass(
+                dir_listing_cache.get_shared(), reuse=scan.automatic,
+            )
+            photos = self.build_rows(
+                thread_db,
+                folder_id=scan.folder_id,
+                progress_callback=progress,
+                cancel_callback=cancel_check,
+                listing_pass=listing_pass,
+            )
+            if cancel_check():
+                return {"cancelled": True, "scope": scan.scope_label}
+            checked_at = _utc_iso_now()
+            stale = False
+            with self.lock:
+                current_gen = self.generation.get(key, 0)
+                if cancel_check():
+                    return {"cancelled": True, "scope": scan.scope_label}
+                if current_gen != scan.generation:
+                    # A batch delete (or other invalidation) fired
+                    # while this scan was walking the disk. Its photo
+                    # list reflects the pre-delete library, so writing
+                    # it back would resurrect just-removed photos in
+                    # the banner. Drop the result and let the next
+                    # scan recompute.
+                    stale = True
+                else:
+                    self.cache[key] = {
+                        "photos": photos,
+                        "checked_at": checked_at,
+                        "set_at": time.monotonic(),
+                        "started_at": scan.started_at,
+                    }
+                    self.errors.pop(key, None)
+            return {
+                "missing_count": len(photos),
+                "checked_at": checked_at,
+                "scope": scan.scope_label,
+                "stale": stale,
+                # Which folders were read from disk and which were
+                # reused unchanged since the last look.
+                "folders_read": listing_pass.read,
+                "folders_unchanged": listing_pass.unchanged,
+            }
+        except MissingPhotosCancelled:
+            raise
+        except Exception as exc:
+            self._record_scan_error(scan, exc)
+            raise
+        finally:
+            if thread_db is not None:
+                thread_db.close()
+            with self.lock:
+                if self.inflight.get(key) in (
+                    scan.token,
+                    job["id"],
+                ):
+                    self.inflight.pop(key, None)
+
+    def _record_scan_error(self, scan, exc):
+        """Record a failed scan and its backoff, unless invalidated since."""
+        checked_at = _utc_iso_now()
         with self.lock:
-            if self.inflight.get(key) is token:
-                self.inflight[key] = job_id
-        payload = self.payload(db, folder_id)
-        if payload.get("status") != "ready":
-            payload["job_id"] = job_id
-            payload["pending"] = True
-            payload["status"] = "pending"
-        return payload
+            current_gen = self.generation.get(scan.key, 0)
+            if current_gen == scan.generation:
+                self.errors[scan.key] = {
+                    "error": str(exc) or exc.__class__.__name__,
+                    "checked_at": checked_at,
+                    "set_at": time.monotonic(),
+                    "backoff_until": (
+                        time.monotonic()
+                        + BACKOFF_SECONDS
+                    ),
+                }
 
     def folder_health_loop(self):
         """Periodically check folder health."""
