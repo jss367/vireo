@@ -220,7 +220,9 @@ def _raw_connection_closes(tree, *, exempt=()):
     offenders = []
     module_aliases = _module_aliases(tree)
 
-    def visit(node, aliases, qualname, class_enclosing=None):
+    def visit(node, aliases, qualname, class_enclosing=None, shadowed=frozenset()):
+        # ``shadowed``: names bound by an enclosing function scope, which hide
+        # a module alias of the same name from everything nested inside.
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
             name = getattr(node, "name", "<lambda>")
             inner = f"{qualname}.{name}" if qualname else name
@@ -237,7 +239,7 @@ def _raw_connection_closes(tree, *, exempt=()):
                 if getattr(node, "returns", None) is not None:
                     outer_parts.append(node.returns)
             for part in outer_parts:
-                visit(part, aliases, qualname, class_enclosing)
+                visit(part, aliases, qualname, class_enclosing, shadowed)
             if inner in exempt:
                 return
             if isinstance(node, ast.ClassDef):
@@ -246,32 +248,33 @@ def _raw_connection_closes(tree, *, exempt=()):
                 # from the containing class's.
                 class_aliases = enclosing.copy()
                 for child in node.body:
-                    visit(child, class_aliases, inner, enclosing)
+                    visit(child, class_aliases, inner, enclosing, shadowed)
                 return
             bindings = _scope_bindings(node)
-            # Module aliases are visible from any function body that does not
-            # shadow them, with or without a ``global`` declaration, and
-            # resolve at call time (hence the module pre-pass).
-            aliases = (enclosing | module_aliases) - bindings
+            inner_shadowed = shadowed | bindings
+            # Module aliases are visible from any function body unless this
+            # or an enclosing function binds the name; they resolve at call
+            # time (hence the module pre-pass). ``global`` bypasses shadows.
+            aliases = (enclosing - bindings) | (module_aliases - inner_shadowed)
             aliases |= _declared_globals(node) & module_aliases
             body = node.body if isinstance(node.body, list) else [node.body]
             for child in body:
-                visit(child, aliases, inner)
+                visit(child, aliases, inner, None, inner_shadowed)
             return
         if isinstance(node, COMPREHENSIONS):
             # The first iterable is evaluated in the enclosing scope; the
             # comprehension's own targets shadow aliases everywhere else.
             first, *rest = node.generators
-            visit(first.iter, aliases, qualname, class_enclosing)
+            visit(first.iter, aliases, qualname, class_enclosing, shadowed)
             bound = {
                 n.id for g in node.generators for n in ast.walk(g.target)
                 if isinstance(n, ast.Name)
             }
             comp_aliases = aliases - bound
             for part in first.ifs + [x for g in rest for x in [g.iter, *g.ifs]]:
-                visit(part, comp_aliases, qualname, class_enclosing)
+                visit(part, comp_aliases, qualname, class_enclosing, shadowed)
             for part in [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]:
-                visit(part, comp_aliases, qualname, class_enclosing)
+                visit(part, comp_aliases, qualname, class_enclosing, shadowed)
             return
         if isinstance(node, ast.Assign) and _is_conn_read(node.value):
             aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
@@ -288,7 +291,7 @@ def _raw_connection_closes(tree, *, exempt=()):
         ):
             offenders.append(node.lineno)
         for child in ast.iter_child_nodes(node):
-            visit(child, aliases, qualname, class_enclosing)
+            visit(child, aliases, qualname, class_enclosing, shadowed)
 
     visit(tree, set(), "")
     return offenders
@@ -429,6 +432,11 @@ def test_raw_close_scan_includes_docs_prototypes(tmp_path, monkeypatch):
     ("def cleanup():\n conn.close()\nconn = db.conn", [2]),
     ("def cleanup():\n conn = other\n conn.close()\nconn = db.conn", []),
     ("(conn := db.conn).close()", [1]),
+    ("conn = db.conn\ndef outer(conn):\n def cleanup():\n  conn.close()", []),
+    ("conn = db.conn\ndef outer():\n conn = other\n def cleanup():\n  conn.close()", []),
+    ("conn = db.conn\ndef outer():\n import conn\n def cleanup():\n  conn.close()", []),
+    ("conn = db.conn\ndef outer(conn):\n def cleanup():\n  global conn\n  conn.close()", [5]),
+    ("conn = db.conn\ndef outer(x):\n def cleanup():\n  conn.close()", [4]),
     ("conn = sqlite3.connect(path)\nconn.close()", []),
     ("db.close()\nother.close()", []),
 ])
