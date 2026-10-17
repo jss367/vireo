@@ -1074,8 +1074,9 @@ class _ClassifyPass:
             # detections whose no-match verdict was already recorded and
             # can replace an authoritative "nothing in this list fits"
             # outcome with a fresh inference (Codex P2 on a1be510). The
-            # preflight already counted this photo as cached because the
-            # classifier-run key exists, so no overcount to reconcile.
+            # preflight counts a match-score-backed run as cached too
+            # (``ModelRunsRepository.get_classifier_run_cache_hits``), so
+            # there is no overcount to reconcile.
             if thread_db.model_runs.has_classifier_match_score(
                 detection["id"], spec.model_name, spec.fp,
             ):

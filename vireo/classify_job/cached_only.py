@@ -6,6 +6,7 @@ or an earlier run), so no model has to load.
 
 import os
 
+from classify_job.cache_coverage import _cache_run_filter
 from classify_job.common import _photo_timestamp
 from classify_job.label_source import _describe_cached_label_source, describe_label_source
 from classify_job.store_predictions import _cached_prediction_taxonomy, _store_grouped_predictions
@@ -22,6 +23,23 @@ def _finalize_remaining_steps(runner, job_id, step_ids, status, summary):
     for step_id in step_ids:
         runner.update_step(job_id, step_id, status=status, summary=summary)
 
+
+def _cached_only_reused_count(db, photo_ids, classifier_model, labels_fingerprint, detector_confidence):
+    """Count covered cached work, including measured no-match outcomes.
+
+    The caller's coverage/identity gate already proved these rows share the
+    requested identity. Read that same stored-output gate again rather than
+    inventing a prediction for a classifier that matched nothing.
+    """
+    from db import _chunks
+
+    run_filter = _cache_run_filter(
+        db, photo_ids, classifier_model, labels_fingerprint, None, None, "no-tax",
+    )
+    return sum(
+        db.model_runs.cache_coverage_counts(chunk, run_filter, detector_confidence)[1]
+        for chunk in _chunks(photo_ids)
+    )
 
 def _finalize_cached_only(
     thread_db, runner, job, params, photos,
@@ -91,17 +109,16 @@ def _finalize_cached_only(
     raw_results, resolved_model, resolved_fingerprint = (
         _cached_only_raw_results(
             thread_db, photos, folders, detection_map,
-            classifier_model, labels_fingerprint,
+            classifier_model, labels_fingerprint, detector_confidence,
         )
     )
-    reused_predictions = len(raw_results)
+    reused_results = _cached_only_reused_count(
+        thread_db, photo_ids, classifier_model, labels_fingerprint, detector_confidence,
+    )
     runner.update_step(
         job["id"], "classify",
         status="completed",
-        summary=(
-            f"{reused_predictions} cached"
-            if reused_predictions else "No cached predictions"
-        ),
+        summary=f"{reused_results} cached" if reused_results else "No cached results",
     )
 
     group_result = _finalize_cached_results(
@@ -112,7 +129,7 @@ def _finalize_cached_only(
         "total": total,
         "predictions_stored": group_result["predictions_stored"],
         "burst_groups": group_result["burst_groups"],
-        "already_classified": reused_predictions,
+        "already_classified": reused_results,
         "already_labeled": group_result["already_labeled"],
         "detected": 0,
         "failed": 0,
@@ -231,18 +248,48 @@ def _cached_only_detection_map(thread_db, photo_ids):
     return detection_map
 
 
+def _cached_only_identity(thread_db, photo_ids, classifier_model, labels_fingerprint, detector_confidence):
+    """Resolve the single identity accepted by the caller's coverage gate.
+
+    Predictions outside that gate (for example RAW recipes) cannot choose
+    the identity for normal-image reconstruction, even if they score higher.
+    A vanished or newly mixed identity safely produces no reconstructed rows.
+    """
+    from db import _chunks
+
+    run_filter = _cache_run_filter(
+        thread_db, photo_ids, classifier_model, labels_fingerprint, None, None, "no-tax",
+    )
+    identities = set()
+    for chunk in _chunks(photo_ids):
+        identities.update(
+            (row["m"], row["fp"])
+            for row in thread_db.model_runs.covering_classifier_identities(
+                chunk, run_filter, detector_confidence,
+            )
+        )
+        if len(identities) > 1:
+            return None
+    return next(iter(identities)) if identities else None
+
+
 def _cached_only_raw_results(
     thread_db, photos, folders, detection_map,
-    classifier_model, labels_fingerprint,
+    classifier_model, labels_fingerprint, detector_confidence=0.0,
 ):
     """Rebuild raw classifier results from each detection's cached top-1.
 
     Returns ``(raw_results, resolved_model, resolved_fingerprint)``; one
     raw result per reused prediction.
     """
+    identity = _cached_only_identity(
+        thread_db, [photo["id"] for photo in photos],
+        classifier_model, labels_fingerprint, detector_confidence,
+    )
+    if identity is None:
+        return [], classifier_model, labels_fingerprint
+    resolved_model, resolved_fingerprint = identity
     raw_results = []
-    resolved_model = classifier_model
-    resolved_fingerprint = labels_fingerprint
     for photo in photos:
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
@@ -250,22 +297,13 @@ def _cached_only_raw_results(
         for detection in detection_map.get(photo["id"], []):
             cached = thread_db.get_predictions_for_detection(
                 detection["id"],
-                classifier_model=classifier_model,
-                labels_fingerprint=labels_fingerprint,
+                classifier_model=resolved_model,
+                labels_fingerprint=resolved_fingerprint,
                 min_classifier_conf=0,
             )
             if not cached:
                 continue
             top = cached[0]
-            # When the caller didn't request a specific (model, fp), the
-            # satisfaction check accepts any classifier's cached row.
-            # Adopt the first cached row's identity so the reconcile
-            # UPDATE below hits the same rows we consumed from — passing
-            # None here would leave the reconcile matching zero rows.
-            if resolved_model is None:
-                resolved_model = top["classifier_model"]
-            if resolved_fingerprint is None:
-                resolved_fingerprint = top["labels_fingerprint"]
             raw_results.append({
                 "photo": photo,
                 "detection_id": detection["id"],

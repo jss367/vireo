@@ -554,6 +554,44 @@ def test_cache_hits_ignore_negative_confidence_predictions_and_other_keys(db):
     ) == set()
 
 
+def test_cache_hits_count_runs_that_matched_nothing(db):
+    """A completed run with no predictions but a match-score row is a cache hit.
+
+    The classify loop skips such a detection (its
+    ``classifier_match_scores`` row is the run's output of record), so the
+    preflight's cached estimate has to count it too, on every branch.
+    A torn run with neither predictions nor a match score stays uncached.
+    """
+    fid = _folder(db)
+    normal = _photo(db, "normal.jpg", fid)
+    weak = _photo(db, "weak.jpg", fid)
+    anchor = _photo(db, "anchor.jpg", fid)
+    fresh_photo = _photo(db, "fresh.jpg", fid)
+    torn = _photo(db, "torn.jpg", fid)
+
+    def _no_match(det):
+        db.model_runs.record_classifier_run(det, MODEL, "fp-a", 0)
+        db.model_runs.record_classifier_match_score(det, MODEL, "fp-a", 0.04)
+
+    _no_match(_det(db, normal))
+    _no_match(_det(db, weak, "megadetector-v6", conf=0.1))
+    _no_match(_det(db, anchor, "full-image", conf=0))
+    fresh_det = _det(db, fresh_photo, "megadetector-v6")
+    _no_match(fresh_det)
+    db.model_runs.record_classifier_run(_det(db, torn), MODEL, "fp-a", 0)
+
+    ids = [normal, weak, anchor, fresh_photo, torn]
+    assert db.get_classifier_run_cache_hits(
+        ids, MODEL, "fp-a",
+        contextual_weak_photo_ids={weak}, weak_confidence=0.05,
+        fresh_detections_by_photo={fresh_photo: [
+            {"id": fresh_det, "detector_model": "megadetector-v6",
+             "confidence": 0.9},
+        ]},
+        fresh_processed_photo_ids={fresh_photo},
+    ) == {normal, weak, anchor, fresh_photo}
+
+
 def test_cache_hits_chunk_large_id_lists(db):
     fid = _folder(db)
     normal = _photo(db, "normal.jpg", fid)
@@ -1012,16 +1050,34 @@ def test_cache_coverage_counts_and_covering_identities(db):
     assert identities == [(MODEL, "fp-a")]
 
 
-def test_cached_labels_fingerprint_needs_a_prediction_backed_run(db):
-    pid = _photo(db, "a.jpg")
-    det = _det(db, pid)
-    db.model_runs.record_classifier_run(det, MODEL, "fp-torn", 0)
-    assert db.model_runs.cached_labels_fingerprint([pid], None, 0.2) is None
-    _usable(db, det, "fp-a")
-    assert db.model_runs.cached_labels_fingerprint([pid], None, 0.2) == "fp-a"
-    assert db.model_runs.cached_labels_fingerprint([pid], MODEL, 0.2) == "fp-a"
-    assert db.model_runs.cached_labels_fingerprint([pid], "other", 0.2) is None
-    assert db.model_runs.cached_labels_fingerprint([pid], None, 0.95) is None
+def test_covering_identities_count_runs_with_stored_output_only(db):
+    """A run covers when it stored predictions or a match-score summary.
+
+    A completed run that matched nothing keeps only its
+    ``classifier_match_scores`` row; it covers the detection and names its
+    label set. A torn run with neither does not, and neither does a
+    RAW-recipe run, which never satisfies the normal-image cache.
+    """
+    fid = _folder(db)
+    a, b, c = (_photo(db, f"{n}.jpg", fid) for n in "abc")
+    det_a, det_b, det_c = _det(db, a), _det(db, b), _det(db, c)
+    db.model_runs.record_classifier_run(det_a, MODEL, "fp-no-match", 0)
+    db.model_runs.record_classifier_match_score(det_a, MODEL, "fp-no-match", 0.04)
+    db.model_runs.record_classifier_run(det_b, MODEL, "fp-torn", 0)
+    _pred(db, det_c, "fp-recipe")
+    db.model_runs.record_classifier_run(
+        det_c, MODEL, "fp-recipe", 1, input_recipe="raw-recipe",
+    )
+    run_filter = db.model_runs.classifier_cache_run_filter(None, None, set(), True)
+
+    assert db.model_runs.cache_coverage_counts([a, b, c], run_filter, 0.2) == (3, 1, 3)
+    identities = [
+        (r["m"], r["fp"]) for r in db.model_runs.covering_classifier_identities(
+            [a, b, c], run_filter, 0.2,
+        )
+    ]
+    assert identities == [(MODEL, "fp-no-match")]
+    assert not list(db.model_runs.covering_classifier_identities([a], run_filter, 0.95))
 
 
 def test_release_incomplete_classifier_run_needs_stored_output_and_leaves_commit(db):
@@ -1060,7 +1116,7 @@ def test_classify_job_reaches_model_runs_through_the_accessor():
         "detector_source_identity", "detector_runtime_fingerprint",
         "detector_runtime_fingerprints", "classifier_cache_run_filter",
         "cache_coverage_counts", "covering_classifier_identities",
-        "cached_labels_fingerprint", "release_incomplete_classifier_run",
+        "release_incomplete_classifier_run",
     ):
         assert f"model_runs.{name}(" in source, name
     tree = ast.parse(source)

@@ -18,9 +18,11 @@ The classify job's run lookups and cache-coverage reads came from
 ``classify_job`` with their SQL unchanged: a photo's detector-source identity
 (``detector_source_identity``, the ``photos`` columns a detector run's input
 fingerprint is derived from), stored detector runtimes, the classifier_runs
-filter and coverage counts behind ``_all_photos_cache_satisfied``, the cached
-label set's fingerprint, and the release of a reserved ``'incomplete'``
-classifier run once its predictions are stored.
+filter, coverage counts and covering identities behind
+``_all_photos_cache_satisfied`` (the identities also name the cached label
+set, so the label-source line and the coverage check count the same runs),
+and the release of a reserved ``'incomplete'`` classifier run once its
+predictions are stored.
 
 Callers reach it as ``db.model_runs`` (a fresh repository per access, see
 ``Database.model_runs``). ``Database.detector_run_is_pinned`` is the one
@@ -47,15 +49,32 @@ _UNCLASSIFIABLE_CHUNK = 500
 # install without model weights and (b) needlessly re-run inference on an
 # install that has them, discarding exactly the "nothing in your list fits"
 # verdict this feature exists to preserve (Codex P2 on 22cc0ac).
+_CACHE_MATCH_SCORE_EXISTS_SQL = (
+    "EXISTS (SELECT 1 FROM classifier_match_scores cms "
+    "WHERE cms.detection_id = cr.detection_id "
+    "AND cms.classifier_model = cr.classifier_model "
+    "AND cms.labels_fingerprint = cr.labels_fingerprint)"
+)
 CACHE_PREDICTIONS_EXIST_SQL = (
     "(EXISTS (SELECT 1 FROM predictions pr "
     "WHERE pr.detection_id = cr.detection_id "
     "AND pr.classifier_model = cr.classifier_model "
     "AND pr.labels_fingerprint = cr.labels_fingerprint)"
-    " OR EXISTS (SELECT 1 FROM classifier_match_scores cms "
-    "WHERE cms.detection_id = cr.detection_id "
-    "AND cms.classifier_model = cr.classifier_model "
-    "AND cms.labels_fingerprint = cr.labels_fingerprint))"
+    f" OR {_CACHE_MATCH_SCORE_EXISTS_SQL})"
+)
+# The classify preflight's form of the same rule, for ``_CacheHitQuery``.
+# It mirrors the per-detection gate the classify loop applies
+# (``_use_cached_result`` in ``pipeline_stages/classification.py``): cached
+# predictions read at ``min_classifier_conf=0``, else a measured match-score
+# summary for the same run key. A run that matched nothing is skipped at
+# runtime, so the preflight's cached estimate must count it as well.
+_CACHE_HIT_OUTPUT_SQL = (
+    "(EXISTS (SELECT 1 FROM predictions p "
+    "WHERE p.detection_id = cr.detection_id "
+    "AND p.classifier_model = cr.classifier_model "
+    "AND p.labels_fingerprint = cr.labels_fingerprint "
+    "AND p.confidence >= 0)"
+    f" OR {_CACHE_MATCH_SCORE_EXISTS_SQL})"
 )
 CACHE_CLASSIFIABLE_DETECTION_SQL = (
     "(d.detector_model = 'full-image' OR "
@@ -948,53 +967,6 @@ class ModelRunsRepository:
             list(photo_ids) + [detector_confidence] + filter_args + runtime_args,
         )
 
-    def cached_labels_fingerprint(
-        self,
-        photo_ids: Sequence[int],
-        classifier_model: str | None,
-        detector_confidence: float,
-    ) -> str | None:
-        """The first labels_fingerprint covering one chunk's eligible detections.
-
-        The caller chunks ``photo_ids``. Matches
-        ``cache_coverage_counts``' eligibility filters: only classifiable
-        detections at the workspace threshold, and only classifier_runs
-        backed by an actual predictions row (a torn run without predictions
-        is not a real cache hit). None when no such run carries one.
-        """
-        filter_sql = ""
-        filter_args: list[Any] = []
-        if classifier_model is not None:
-            filter_sql = " AND cr.classifier_model = ?"
-            filter_args.append(classifier_model)
-        classifiable_detection = (
-            "(d.detector_model = 'full-image' OR "
-            "(d.detector_model != 'full-image' "
-            "AND COALESCE(d.category, 'animal') = 'animal' "
-            "AND d.detector_confidence >= ?))"
-        )
-        predictions_exists = (
-            "EXISTS (SELECT 1 FROM predictions p "
-            "WHERE p.detection_id = cr.detection_id "
-            "AND p.classifier_model = cr.classifier_model "
-            "AND p.labels_fingerprint = cr.labels_fingerprint)"
-        )
-        placeholders = ",".join("?" for _ in photo_ids)
-        row = self.conn.execute(
-            f"""SELECT DISTINCT cr.labels_fingerprint AS fp
-                 FROM detections d
-                 JOIN classifier_runs cr
-                   ON cr.detection_id = d.id{filter_sql}
-                WHERE d.photo_id IN ({placeholders})
-                  AND {classifiable_detection}
-                  AND {predictions_exists}
-                  AND cr.runtime_fingerprint != 'incomplete'
-                  AND cr.labels_fingerprint IS NOT NULL
-                LIMIT 1""",
-            filter_args + list(photo_ids) + [detector_confidence],
-        ).fetchone()
-        return row["fp"] if row else None
-
     def release_incomplete_classifier_run(
         self, detection_id: int, classifier_model: str, labels_fingerprint: str,
     ) -> None:
@@ -1300,14 +1272,7 @@ class _CacheHitQuery:
                      WHERE cr.detection_id IN ({placeholders})
                        AND cr.classifier_model = ?
                        AND cr.labels_fingerprint = ?
-                       AND EXISTS (
-                             SELECT 1 FROM predictions p
-                              WHERE p.detection_id = cr.detection_id
-                                AND p.classifier_model = cr.classifier_model
-                                AND p.labels_fingerprint
-                                    = cr.labels_fingerprint
-                                AND p.confidence >= 0
-                           )""" + self.rt_predicate_sql,
+                       AND {_CACHE_HIT_OUTPUT_SQL}""" + self.rt_predicate_sql,
                 [*chunk, self.classifier_model, self.labels_fingerprint,
                  *self.rt_predicate_params],
             ).fetchall()
@@ -1357,15 +1322,7 @@ class _CacheHitQuery:
                 f"        WHERE cr.detection_id = d2.id "
                 f"          AND cr.classifier_model = ? "
                 f"          AND cr.labels_fingerprint = ? "
-                f"          AND EXISTS ( "
-                f"              SELECT 1 FROM predictions p "
-                f"              WHERE p.detection_id = cr.detection_id "
-                f"                AND p.classifier_model "
-                f"                    = cr.classifier_model "
-                f"                AND p.labels_fingerprint "
-                f"                    = cr.labels_fingerprint "
-                f"                AND p.confidence >= 0 "
-                f"          ) "
+                f"          AND {_CACHE_HIT_OUTPUT_SQL} "
                 + self.rt_predicate_sql +
                 "      ) "
                 "  )",
@@ -1424,14 +1381,7 @@ class _CacheHitQuery:
                        AND cr.classifier_model = ?
                        AND cr.labels_fingerprint = ?
                      WHERE td.rn = 1
-                       AND EXISTS (
-                             SELECT 1 FROM predictions p
-                              WHERE p.detection_id = cr.detection_id
-                                AND p.classifier_model = cr.classifier_model
-                                AND p.labels_fingerprint
-                                    = cr.labels_fingerprint
-                                AND p.confidence >= 0
-                           )""" + self.rt_predicate_sql,
+                       AND {_CACHE_HIT_OUTPUT_SQL}""" + self.rt_predicate_sql,
                 [self.weak_conf, *chunk, self.classifier_model,
                  self.labels_fingerprint, *self.rt_predicate_params],
             ).fetchall()
@@ -1475,14 +1425,7 @@ class _CacheHitQuery:
                                 AND d.detector_model != 'full-image'
                                 AND d.detector_confidence >= ?
                            )
-                       AND EXISTS (
-                             SELECT 1 FROM predictions p
-                              WHERE p.detection_id = cr.detection_id
-                                AND p.classifier_model = cr.classifier_model
-                                AND p.labels_fingerprint
-                                    = cr.labels_fingerprint
-                                AND p.confidence >= 0
-                           )""" + self.rt_predicate_sql,
+                       AND {_CACHE_HIT_OUTPUT_SQL}""" + self.rt_predicate_sql,
                 [*chunk, self.classifier_model, self.labels_fingerprint,
                  self.min_conf, *self.rt_predicate_params],
             ).fetchall()
