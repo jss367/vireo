@@ -974,7 +974,7 @@ def test_eviction_reads_atime_as_recency_alongside_mtime(tmp_path):
         db.conn.commit()
 
         result = evict_if_over_quota(db, str(vireo_dir))
-        db.conn.close()
+        db.close()
 
         # Under max(mtime, atime): A's recency = fresh atime > B's
         # aged (atime, mtime). So B should evict first.
