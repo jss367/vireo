@@ -3,24 +3,24 @@
 
 var readinessRequestSequence = 0;
 async function updateReadiness() {
-  var panel = document.getElementById('readinessPanel');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('readinessPanel'));
   var requestSequence = ++readinessRequestSequence;
-  var modelIds = Array.from(document.querySelectorAll('.model-checkbox:checked')).map(function(cb) { return cb.value; });
+  var modelIds = Array.from(/** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.model-checkbox:checked'))).map(function(cb) { return cb.value; });
   if (!modelIds.length) modelIds = [''];
-  var labelsFiles = [];
-  document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+  /** @type {string[]} */ var labelsFiles = [];
+  /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.labels-run-cb:checked')).forEach(function(cb) {
     labelsFiles.push(cb.value);
   });
 
   try {
-    var readiness = await Promise.all(modelIds.map(function(modelId) {
+    /** @type {PipelineReadiness[]} */ var readiness = await Promise.all(modelIds.map(function(modelId) {
       var params = [];
       if (modelId) params.push('model_id=' + encodeURIComponent(modelId));
       labelsFiles.forEach(function(f) { params.push('labels_files=' + encodeURIComponent(f)); });
-      return safeFetch('/api/classify/readiness' + (params.length ? '?' + params.join('&') : ''), {}, {toast: false});
+      return /** @type {Promise<PipelineReadiness>} */ (safeFetch('/api/classify/readiness' + (params.length ? '?' + params.join('&') : ''), {}, {toast: false}));
     }));
     if (requestSequence !== readinessRequestSequence) return;
-    var sections = [];
+    /** @type {string[]} */ var sections = [];
     readiness.forEach(function(r) {
     var items = [];
 
@@ -83,11 +83,12 @@ async function updateReadiness() {
     panel.style.display = sections.length ? '' : 'none';
   } catch(e) {
     if (requestSequence !== readinessRequestSequence) return;
-    panel.textContent = 'Could not check model readiness: ' + (e.message || e);
+    panel.textContent = 'Could not check model readiness: ' + (e instanceof Error ? e.message : e);
     panel.style.display = '';
   }
 }
 
+/** @param {HTMLButtonElement} btn */
 async function installExiftool(btn) {
   var origText = btn.textContent;
   btn.textContent = 'Installing...';

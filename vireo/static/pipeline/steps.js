@@ -1,21 +1,22 @@
 // Standalone Classify and Extract step runs.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {number} collectionId */
 async function runClassifyStep(collectionId) {
-  var selectedModels = [];
-  document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
+  /** @type {{id: string; name?: string}[]} */ var selectedModels = [];
+  /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.model-checkbox:checked')).forEach(function(cb) {
     selectedModels.push({id: cb.value, name: cb.dataset.name});
   });
   if (selectedModels.length === 0) {
-    document.getElementById('statusClassify').textContent = 'No models selected \u2014 skipping';
+    /** @type {HTMLElement} */ (document.getElementById('statusClassify')).textContent = 'No models selected \u2014 skipping';
     return false;
   }
 
-  var num = document.getElementById('numClassify');
-  var status = document.getElementById('statusClassify');
-  var progressWrap = document.getElementById('progressClassify');
-  var fill = document.getElementById('fillClassify');
-  var text = document.getElementById('textClassify');
+  var num = /** @type {HTMLElement} */ (document.getElementById('numClassify'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('statusClassify'));
+  var progressWrap = /** @type {HTMLElement} */ (document.getElementById('progressClassify'));
+  var fill = /** @type {HTMLElement} */ (document.getElementById('fillClassify'));
+  var text = /** @type {HTMLElement} */ (document.getElementById('textClassify'));
 
   num.className = 'stage-num running';
   status.textContent = 'Starting classification...';
@@ -23,11 +24,11 @@ async function runClassifyStep(collectionId) {
   fill.style.width = '0%';
 
   // Expand card
-  document.getElementById('card-classify').classList.add('expanded');
+  /** @type {HTMLElement} */ (document.getElementById('card-classify')).classList.add('expanded');
 
   var labelsFiles = (function() {
-    var files = [];
-    document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) { files.push(cb.value); });
+    /** @type {string[]} */ var files = [];
+    /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.labels-run-cb:checked')).forEach(function(cb) { files.push(cb.value); });
     return files.length > 0 ? files : undefined;
   })();
 
@@ -37,7 +38,7 @@ async function runClassifyStep(collectionId) {
 
   for (var i = 0; i < selectedModels.length; i++) {
     if (_pipelineAbort) return false;
-    var model = selectedModels[i];
+    const model = selectedModels[i]; if (!model) continue;
     status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ': ' : '') + 'Starting ' + model.name + '...';
 
     try {
@@ -48,12 +49,13 @@ async function runClassifyStep(collectionId) {
           collection_id: collectionId,
           model_id: model.id,
           labels_files: labelsFiles,
-          reclassify: !!document.getElementById('chkReclassify').checked,
+          reclassify: !!/** @type {HTMLInputElement} */ (document.getElementById('chkReclassify')).checked,
         }),
       }, { toast: false });
 
       var ok = await new Promise(function(resolve) {
         var resolved = false;
+        /** @param {boolean} success */
         function done(success) { if (!resolved) { resolved = true; if (success) completed++; resolve(success); } }
         safeEventSource('/api/jobs/' + data.job_id + '/stream', {
           onProgress: function(p) {
@@ -80,7 +82,7 @@ async function runClassifyStep(collectionId) {
         });
       });
     } catch(e) {
-      status.textContent = 'Error (' + model.name + '): ' + e.message;
+      status.textContent = 'Error (' + model.name + '): ' + (e instanceof Error ? e.message : e);
     }
   }
 
@@ -90,7 +92,7 @@ async function runClassifyStep(collectionId) {
     num.className = 'stage-num complete';
     status.textContent = 'Done!';
     status.className = 'status-msg ok';
-    document.getElementById('txtDetections').textContent = totalPredictions + ' detections';
+    /** @type {HTMLElement} */ (document.getElementById('txtDetections')).textContent = totalPredictions + ' detections';
     return true;
   } else {
     num.className = 'stage-num';
@@ -100,18 +102,19 @@ async function runClassifyStep(collectionId) {
   }
 }
 
+/** @param {number} collectionId */
 async function runExtractStep(collectionId) {
-  var num = document.getElementById('numExtract');
-  var status = document.getElementById('statusExtract');
-  var progressWrap = document.getElementById('progressExtract');
-  var fill = document.getElementById('fillExtract');
-  var text = document.getElementById('textExtract');
+  var num = /** @type {HTMLElement} */ (document.getElementById('numExtract'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('statusExtract'));
+  var progressWrap = /** @type {HTMLElement} */ (document.getElementById('progressExtract'));
+  var fill = /** @type {HTMLElement} */ (document.getElementById('fillExtract'));
+  var text = /** @type {HTMLElement} */ (document.getElementById('textExtract'));
 
   num.className = 'stage-num running';
   status.textContent = 'Starting feature extraction...';
   progressWrap.style.display = '';
   fill.style.width = '0%';
-  document.getElementById('card-extract').classList.add('expanded');
+  /** @type {HTMLElement} */ (document.getElementById('card-extract')).classList.add('expanded');
 
   try {
     var data = await safeFetch('/api/jobs/extract-masks', {
@@ -144,7 +147,7 @@ async function runExtractStep(collectionId) {
             result.status, result.result, result.errors,
           );
           if (result.result) {
-            document.getElementById('txtMasks').textContent = outcome.summary;
+            /** @type {HTMLElement} */ (document.getElementById('txtMasks')).textContent = outcome.summary;
           }
           fill.style.width = '100%';
           text.textContent = outcome.clean ? 'Complete' : 'Finished with problems';
@@ -161,7 +164,7 @@ async function runExtractStep(collectionId) {
       });
     });
   } catch(e) {
-    status.textContent = 'Error: ' + e.message;
+    status.textContent = 'Error: ' + (e instanceof Error ? e.message : e);
     num.className = 'stage-num';
     progressWrap.style.display = 'none';
     return false;
