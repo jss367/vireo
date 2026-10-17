@@ -1,4 +1,4 @@
-var SETTINGS_FIND_STATE = {
+/** @type {{marks:HTMLElement[];activeIndex:number;observer:MutationObserver|null;refreshTimer:ReturnType<typeof setTimeout>|null}} */ var SETTINGS_FIND_STATE = {
   marks: [],
   activeIndex: -1,
   observer: null,
@@ -6,7 +6,7 @@ var SETTINGS_FIND_STATE = {
 };
 
 function setupSettingsFind() {
-  var input = document.getElementById('settingsFindInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
   if (!input) return;
   input.addEventListener('input', function() {
     refreshSettingsFind(this.value, 0);
@@ -33,13 +33,13 @@ function setupSettingsFind() {
 }
 
 function isSettingsFindOpen() {
-  var panel = document.getElementById('settingsFindPanel');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('settingsFindPanel'));
   return !!panel && panel.classList.contains('open');
 }
 
 function openSettingsFind() {
-  var panel = document.getElementById('settingsFindPanel');
-  var input = document.getElementById('settingsFindInput');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('settingsFindPanel'));
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
   if (!panel || !input) return;
   panel.classList.add('open');
   input.focus();
@@ -48,19 +48,19 @@ function openSettingsFind() {
 }
 
 function closeSettingsFind() {
-  var panel = document.getElementById('settingsFindPanel');
-  var input = document.getElementById('settingsFindInput');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('settingsFindPanel'));
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
   if (panel) panel.classList.remove('open');
-  if (input) input.value = '';
+  if (input) input.value = String('');
   disconnectSettingsFindObserver();
-  clearTimeout(SETTINGS_FIND_STATE.refreshTimer);
+  clearTimeout(SETTINGS_FIND_STATE.refreshTimer ?? undefined);
   SETTINGS_FIND_STATE.refreshTimer = null;
   clearSettingsFindMarks();
   updateSettingsFindStatus();
 }
 
 function getSettingsFindRoot() {
-  return document.querySelector('.content');
+  return document.querySelector(/** @type {'div'} */ ('.content'));
 }
 
 function disconnectSettingsFindObserver() {
@@ -72,10 +72,10 @@ function disconnectSettingsFindObserver() {
 
 function connectSettingsFindObserver() {
   var root = getSettingsFindRoot();
-  var input = document.getElementById('settingsFindInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
   if (!root || !input || !input.value.trim()) return;
   SETTINGS_FIND_STATE.observer = new MutationObserver(function() {
-    clearTimeout(SETTINGS_FIND_STATE.refreshTimer);
+    clearTimeout(SETTINGS_FIND_STATE.refreshTimer ?? undefined);
     SETTINGS_FIND_STATE.refreshTimer = setTimeout(function() {
       refreshSettingsFind(input.value, SETTINGS_FIND_STATE.activeIndex);
     }, 100);
@@ -85,7 +85,7 @@ function connectSettingsFindObserver() {
 
 function clearSettingsFindMarks() {
   disconnectSettingsFindObserver();
-  document.querySelectorAll('mark.settings-find-mark').forEach(function(mark) {
+  document.querySelectorAll(/** @type {'div'} */ ('mark.settings-find-mark')).forEach(function(mark) {
     var parent = mark.parentNode;
     if (!parent) return;
     parent.replaceChild(document.createTextNode(mark.textContent), mark);
@@ -95,16 +95,16 @@ function clearSettingsFindMarks() {
   SETTINGS_FIND_STATE.activeIndex = -1;
 }
 
-function shouldSkipSettingsFindTextNode(node) {
+/** @param {Node} node */ function shouldSkipSettingsFindTextNode(node) {
   if (!node.nodeValue || !node.nodeValue.trim()) return true;
   var el = node.parentElement;
   if (!el) return true;
-  if (el.closest('.settings-find-panel')) return true;
-  if (el.closest('script, style, noscript, textarea, input, select, option, mark.settings-find-mark')) return true;
+  if (el.closest(/** @type {'div'} */ ('.settings-find-panel'))) return true;
+  if (el.closest(/** @type {'div'} */ ('script, style, noscript, textarea, input, select, option, mark.settings-find-mark'))) return true;
   return isSettingsFindTextHidden(el);
 }
 
-function isSettingsFindTextHidden(el) {
+/** @param {Element|null} el */ function isSettingsFindTextHidden(el) {
   var root = getSettingsFindRoot();
   var current = el;
   while (current && current !== root) {
@@ -121,7 +121,7 @@ function isSettingsFindTextHidden(el) {
   return false;
 }
 
-function refreshSettingsFind(query, preferredIndex) {
+/** @param {string} query @param {number=} preferredIndex */ function refreshSettingsFind(query, preferredIndex) {
   var root = getSettingsFindRoot();
   if (!root) return;
   disconnectSettingsFindObserver();
@@ -136,7 +136,7 @@ function refreshSettingsFind(query, preferredIndex) {
   var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: function(node) {
       if (shouldSkipSettingsFindTextNode(node)) return NodeFilter.FILTER_REJECT;
-      return node.nodeValue.toLowerCase().indexOf(qLower) !== -1
+      return (node.nodeValue || '').toLowerCase().indexOf(qLower) !== -1
         ? NodeFilter.FILTER_ACCEPT
         : NodeFilter.FILTER_REJECT;
     }
@@ -146,7 +146,7 @@ function refreshSettingsFind(query, preferredIndex) {
   while ((current = walker.nextNode())) nodes.push(current);
 
   nodes.forEach(function(node) {
-    var text = node.nodeValue;
+    var text = node.nodeValue || '';
     var lower = text.toLowerCase();
     var frag = document.createDocumentFragment();
     var pos = 0;
@@ -155,14 +155,14 @@ function refreshSettingsFind(query, preferredIndex) {
       if (idx > pos) frag.appendChild(document.createTextNode(text.slice(pos, idx)));
       var mark = document.createElement('mark');
       mark.className = 'settings-find-mark';
-      mark.textContent = text.slice(idx, idx + q.length);
+      mark.textContent = String(text.slice(idx, idx + q.length));
       frag.appendChild(mark);
       SETTINGS_FIND_STATE.marks.push(mark);
       pos = idx + q.length;
       idx = lower.indexOf(qLower, pos);
     }
     if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
-    node.parentNode.replaceChild(frag, node);
+    node.parentNode?.replaceChild(frag, node);
   });
 
   if (SETTINGS_FIND_STATE.marks.length) {
@@ -174,7 +174,7 @@ function refreshSettingsFind(query, preferredIndex) {
   connectSettingsFindObserver();
 }
 
-function setSettingsFindActive(index) {
+/** @param {number} index */ function setSettingsFindActive(index) {
   var marks = SETTINGS_FIND_STATE.marks;
   marks.forEach(function(mark) { mark.classList.remove('active'); });
   if (!marks.length) {
@@ -183,32 +183,32 @@ function setSettingsFindActive(index) {
     return;
   }
   SETTINGS_FIND_STATE.activeIndex = ((index % marks.length) + marks.length) % marks.length;
-  var active = marks[SETTINGS_FIND_STATE.activeIndex];
+  var active = marks[SETTINGS_FIND_STATE.activeIndex]; if (!active) return;
   active.classList.add('active');
   revealSettingsFindMatch(active);
   updateSettingsFindStatus();
 }
 
-function revealSettingsFindMatch(mark) {
-  var body = mark.closest('.collapsible-body');
+/** @param {HTMLElement} mark */ function revealSettingsFindMatch(mark) {
+  var body = mark.closest(/** @type {'div'} */ ('.collapsible-body'));
   while (body) {
     body.classList.add('open');
     var header = body.previousElementSibling;
     if (header && header.classList.contains('collapsible-header')) header.classList.add('open');
-    body = body.parentElement ? body.parentElement.closest('.collapsible-body') : null;
+    body = body.parentElement ? body.parentElement.closest(/** @type {'div'} */ ('.collapsible-body')) : null;
   }
-  var advanced = mark.closest('#advancedContent');
+  var advanced = mark.closest(/** @type {'div'} */ ('#advancedContent'));
   if (advanced) {
     advanced.style.display = '';
     var advancedTitle = advanced.previousElementSibling;
-    var icon = advancedTitle ? advancedTitle.querySelector('span') : null;
-    if (icon) icon.textContent = '\u25BC';
+    var icon = advancedTitle ? advancedTitle.querySelector(/** @type {'div'} */ ('span')) : null;
+    if (icon) icon.textContent = String('\u25BC');
   }
   mark.scrollIntoView({ block: 'center', inline: 'nearest' });
 }
 
-function moveSettingsFind(delta) {
-  var input = document.getElementById('settingsFindInput');
+/** @param {number} delta */ function moveSettingsFind(delta) {
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('settingsFindInput'));
   if (!isSettingsFindOpen()) openSettingsFind();
   if (!SETTINGS_FIND_STATE.marks.length && input && input.value.trim()) {
     refreshSettingsFind(input.value, 0);
@@ -218,27 +218,27 @@ function moveSettingsFind(delta) {
 }
 
 function updateSettingsFindStatus() {
-  var status = document.getElementById('settingsFindStatus');
+  var status = /** @type {HTMLElement} */ (document.getElementById('settingsFindStatus'));
   if (!status) return;
   var total = SETTINGS_FIND_STATE.marks.length;
   if (!total) {
-    status.textContent = '0 results';
+    status.textContent = String('0 results');
   } else {
-    status.textContent = (SETTINGS_FIND_STATE.activeIndex + 1) + ' of ' + total;
+    status.textContent = String((SETTINGS_FIND_STATE.activeIndex + 1) + ' of ' + total);
   }
 }
 
-function toggleSection(header) {
+/** @param {HTMLElement} header */ function toggleSection(header) {
   header.classList.toggle('open');
   var body = header.nextElementSibling;
-  body.classList.toggle('open');
+  body?.classList.toggle('open');
 }
 
 /* ---------- Theme Picker ---------- */
 function loadThemePicker() {
   var themes = window.getThemeList ? window.getThemeList() : [];
   var current = document.documentElement.getAttribute('data-theme') || 'vireo-dark';
-  var picker = document.getElementById('themePicker');
+  var picker = /** @type {HTMLElement} */ (document.getElementById('themePicker'));
   if (!picker || themes.length === 0) return;
 
   var html = '';
@@ -254,4 +254,9 @@ function loadThemePicker() {
     '</button>';
   });
   picker.innerHTML = html;
+}
+
+/** @param {unknown} error */
+function settingsErrorMessage(error) {
+  return error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message : '';
 }
