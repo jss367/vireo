@@ -6,6 +6,7 @@
  * openLinkPlaceFromUrl after the first loadKeywords(). The parameter is
  * dropped from the URL so a later reload does not reopen the dialog.
  */
+/** @param {{id: number, name: string}[]} keywords @param {(id: number, name: string) => void} openLinkPlaceModal */
 function openLinkPlaceFromUrl(keywords, openLinkPlaceModal) {
   var url = new URL(window.location.href);
   var raw = url.searchParams.get('link_place');

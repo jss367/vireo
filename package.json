@@ -6,8 +6,8 @@
   "scripts": {
     "tauri": "tauri",
     "lint:frontend": "eslint vireo/static",
-    "typecheck:frontend": "tsc --project tsconfig.frontend.json",
-    "test:frontend-checks": "node --test tests/frontend/checks.test.mjs tests/frontend/duplicates-categories.test.mjs tests/frontend/numbered-navigation.test.mjs tests/frontend/function-length.test.mjs tests/frontend/jobs-polling.test.mjs tests/frontend/review-photo-actions.test.mjs tests/frontend/grouped-predictions.test.mjs",
+    "typecheck:frontend": "tsc --project tsconfig.frontend.json && tsc --project tsconfig.frontend-pages/shared-utilities.json",
+    "test:frontend-checks": "node --test tests/frontend/checks.test.mjs tests/frontend/duplicates-categories.test.mjs tests/frontend/numbered-navigation.test.mjs tests/frontend/function-length.test.mjs tests/frontend/jobs-polling.test.mjs tests/frontend/review-photo-actions.test.mjs tests/frontend/grouped-predictions.test.mjs tests/frontend/typecheck-coverage.test.mjs",
     "check:frontend": "npm run lint:frontend && npm run typecheck:frontend && npm run test:frontend-checks"
   },
   "devDependencies": {

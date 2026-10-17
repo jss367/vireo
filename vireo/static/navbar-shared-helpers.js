@@ -65,8 +65,12 @@ function openExternalLink(event, url) {
 }
 
 /* ---------- Safe Fetch ---------- */
+/** @template [T=unknown] @param {RequestInfo | URL} url @param {RequestInit} [opts]
+ * @param {{toast?: boolean}} [options] @returns {Promise<T>} */
 async function safeFetch(url, opts, options) {
-  return window.Vireo.api.json(url, opts, options);
+  var api = window.Vireo && window.Vireo.api;
+  if (!api) throw new Error('Browser transport is unavailable');
+  return api.json(url, opts, options);
 }
 
 /* ---------- Native Menu Commands ----------
