@@ -1034,6 +1034,101 @@ class _XmpSyncRun:
         return failures
 
 
+def _read_sidecar_keywords(db, photo_id, xmp_path):
+    """Read a sidecar's keywords, minus stale locations and pending removals.
+
+    Returns ``(xmp_keywords, xmp_keywords_by_key, imported_hierarchies,
+    pending_removals, pending_hierarchical_removals)``.
+    """
+    # Read current XMP keywords. Compare with a normalized match key on
+    # both sides so an XMP variant like `‘apapane` matches a DB row
+    # stored as `apapane` (add_keyword normalizes on insert). A plain
+    # `.lower()` comparison would treat them as different names, making
+    # the add-side an INSERT-OR-IGNORE no-op and then prune the DB tag
+    # because the raw DB name is not in the raw XMP set -- leaving the
+    # photo untagged.
+    #
+    # Skip XMP entries whose normalized match key is empty (e.g. a
+    # lone ASCII or smart quote). add_keyword() now raises ValueError
+    # for names that normalize to empty, so keeping such entries would
+    # abort the whole sidecar reconcile on a malformed edge-quote
+    # keyword instead of ignoring it and processing the rest.
+    xmp_keywords = read_keywords(xmp_path)
+    sidecar_hierarchies = read_hierarchical_keywords(xmp_path)
+    # Vireo-written location keywords for a place the user has since
+    # changed describe the sidecar's past, not the photo's present.
+    xmp_keywords, sidecar_hierarchies = drop_stale_vireo_location_keywords(
+        db, photo_id, xmp_path, xmp_keywords, sidecar_hierarchies,
+    )
+    pending_removals = db.pending_changes.keyword_removal_keys(photo_id)
+    pending_hierarchical_removals = db.pending_changes.keyword_removal_keys(
+        photo_id, hierarchical=True,
+    )
+    # Chained, not re-read: the alias filter runs on the hierarchy
+    # list the stale-location filter already pruned, so a queued
+    # location change still suppresses the sidecar's old place.
+    xmp_keywords, imported_hierarchies = filter_removed_import_aliases(
+        db, photo_id, xmp_keywords, sidecar_hierarchies,
+        pending_removals, pending_hierarchical_removals,
+    )
+    xmp_keywords_by_key = {}
+    for kw in xmp_keywords:
+        key = keyword_match_key(kw)
+        if not key or key in pending_removals:
+            continue
+        xmp_keywords_by_key.setdefault(key, kw)
+    return (
+        xmp_keywords, xmp_keywords_by_key, imported_hierarchies,
+        pending_removals, pending_hierarchical_removals,
+    )
+
+
+def _confirmed_hierarchy_aliases(
+    db, photo_id, xmp_keywords_by_key, imported_hierarchies,
+    pending_hierarchical_removals,
+):
+    """Keyword ids the sidecar's confirmed hierarchies resolve to, by leaf key."""
+    # Confirmed imported paths remain valid even if the linked place
+    # was subsequently renamed. Preserve the resolved association
+    # during the removal pass as well as the add pass.
+    aliases_by_key = defaultdict(set)
+    hierarchical_keywords = [
+        hierarchy for hierarchy in imported_hierarchies
+        if not any(keyword_match_key(part) in pending_hierarchical_removals
+                   for part in hierarchy.split('|'))
+    ]
+    validate_import_locations(db, photo_id, list(xmp_keywords_by_key.values()),
+                              hierarchical_keywords, additive=False)
+    for hierarchy in hierarchical_keywords:
+        parts = hierarchy.split('|')
+        resolved = resolve_import_path(db, parts)
+        if resolved is not None:
+            aliases_by_key[keyword_match_key(parts[-1])].add(resolved)
+    return aliases_by_key
+
+
+def _untag_keywords_missing_from_sidecar(
+    db, photo_id, db_keywords, xmp_keywords_by_key, resolved_ids,
+    pending_flat_only_removals,
+):
+    """Drop the photo's non-location keywords the sidecar no longer carries."""
+    for kw in db_keywords:
+        kw_key = keyword_match_key(kw["name"])
+        preserve_hierarchy = (
+            kw["parent_id"] is not None
+            and kw_key in pending_flat_only_removals
+        )
+        # A location is assigned in Vireo and only copied outward, and
+        # whether it appears in the sidecar at all depends on a
+        # setting. Pruning it here would let a reconcile silently
+        # unassign the place -- including every place assigned while
+        # location keyword writes were off.
+        if kw["type"] == "location":
+            continue
+        if kw_key not in xmp_keywords_by_key and kw['id'] not in resolved_ids and not preserve_hierarchy:
+            db.untag_photo(photo_id, kw["id"], _commit=False)
+
+
 def sync_from_xmp(db, photo_ids):
     """Re-read XMP sidecars and update database keywords.
 
@@ -1061,68 +1156,23 @@ def sync_from_xmp(db, photo_ids):
         # snapshot between this read and the final xmp_mtime update.
         db.conn.execute("BEGIN IMMEDIATE")
         try:
-            # Read current XMP keywords. Compare with a normalized match key on
-            # both sides so an XMP variant like `‘apapane` matches a DB row
-            # stored as `apapane` (add_keyword normalizes on insert). A plain
-            # `.lower()` comparison would treat them as different names, making
-            # the add-side an INSERT-OR-IGNORE no-op and then prune the DB tag
-            # because the raw DB name is not in the raw XMP set -- leaving the
-            # photo untagged.
-            #
-            # Skip XMP entries whose normalized match key is empty (e.g. a
-            # lone ASCII or smart quote). add_keyword() now raises ValueError
-            # for names that normalize to empty, so keeping such entries would
-            # abort the whole sidecar reconcile on a malformed edge-quote
-            # keyword instead of ignoring it and processing the rest.
-            xmp_keywords = read_keywords(xmp_path)
-            sidecar_hierarchies = read_hierarchical_keywords(xmp_path)
-            # Vireo-written location keywords for a place the user has since
-            # changed describe the sidecar's past, not the photo's present.
-            xmp_keywords, sidecar_hierarchies = drop_stale_vireo_location_keywords(
-                db, photo_id, xmp_path, xmp_keywords, sidecar_hierarchies,
-            )
-            pending_removals = db.pending_changes.keyword_removal_keys(photo_id)
-            pending_hierarchical_removals = db.pending_changes.keyword_removal_keys(
-                photo_id, hierarchical=True,
-            )
-            # Chained, not re-read: the alias filter runs on the hierarchy
-            # list the stale-location filter already pruned, so a queued
-            # location change still suppresses the sidecar's old place.
-            xmp_keywords, imported_hierarchies = filter_removed_import_aliases(
-                db, photo_id, xmp_keywords, sidecar_hierarchies,
+            (
+                xmp_keywords, xmp_keywords_by_key, imported_hierarchies,
                 pending_removals, pending_hierarchical_removals,
-            )
+            ) = _read_sidecar_keywords(db, photo_id, xmp_path)
             pending_flat_only_removals = (
                 pending_removals - pending_hierarchical_removals
             )
-            xmp_keywords_by_key = {}
-            for kw in xmp_keywords:
-                key = keyword_match_key(kw)
-                if not key or key in pending_removals:
-                    continue
-                xmp_keywords_by_key.setdefault(key, kw)
 
             # Get current DB keywords
             db_keywords = db.get_photo_keywords(photo_id)
             db_keywords_by_key = {
                 keyword_match_key(k["name"]): k for k in db_keywords
             }
-            # Confirmed imported paths remain valid even if the linked place
-            # was subsequently renamed. Preserve the resolved association
-            # during the removal pass as well as the add pass.
-            aliases_by_key = defaultdict(set)
-            hierarchical_keywords = [
-                hierarchy for hierarchy in imported_hierarchies
-                if not any(keyword_match_key(part) in pending_hierarchical_removals
-                           for part in hierarchy.split('|'))
-            ]
-            validate_import_locations(db, photo_id, list(xmp_keywords_by_key.values()),
-                                      hierarchical_keywords, additive=False)
-            for hierarchy in hierarchical_keywords:
-                parts = hierarchy.split('|')
-                resolved = resolve_import_path(db, parts)
-                if resolved is not None:
-                    aliases_by_key[keyword_match_key(parts[-1])].add(resolved)
+            aliases_by_key = _confirmed_hierarchy_aliases(
+                db, photo_id, xmp_keywords_by_key, imported_hierarchies,
+                pending_hierarchical_removals,
+            )
             resolved_ids = set()
 
             # A confirmed hierarchical alias is sufficient even when the
@@ -1145,21 +1195,10 @@ def sync_from_xmp(db, photo_ids):
                         _commit=False,
                     )
 
-            for kw in db_keywords:
-                kw_key = keyword_match_key(kw["name"])
-                preserve_hierarchy = (
-                    kw["parent_id"] is not None
-                    and kw_key in pending_flat_only_removals
-                )
-                # A location is assigned in Vireo and only copied outward, and
-                # whether it appears in the sidecar at all depends on a
-                # setting. Pruning it here would let a reconcile silently
-                # unassign the place -- including every place assigned while
-                # location keyword writes were off.
-                if kw["type"] == "location":
-                    continue
-                if kw_key not in xmp_keywords_by_key and kw['id'] not in resolved_ids and not preserve_hierarchy:
-                    db.untag_photo(photo_id, kw["id"], _commit=False)
+            _untag_keywords_missing_from_sidecar(
+                db, photo_id, db_keywords, xmp_keywords_by_key, resolved_ids,
+                pending_flat_only_removals,
+            )
 
             # Update xmp_mtime in the same transaction as reconciliation.
             xmp_mtime = os.path.getmtime(xmp_path)

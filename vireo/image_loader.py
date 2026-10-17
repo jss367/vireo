@@ -444,6 +444,108 @@ def safe_iter_dir(top, onerror=None):
         )
 
 
+def _open_walk_listing(top, onerror, listing_pass):
+    """Open ``top`` for :func:`safe_scan_walk`, replaying a cached listing.
+
+    Returns ``(scandir_it, entries_it, listing_token, cached_listing)``, or
+    ``None`` after reporting an error through ``onerror``.
+    """
+    listing_token = cached_listing = None
+    if listing_pass is not None:
+        try:
+            listing_token, cached_listing = listing_pass.begin(top)
+        except OSError as exc:
+            if onerror is not None:
+                onerror(exc)
+            return None
+    if cached_listing is not None:
+        scandir_it = contextlib.nullcontext()
+        entries_it = cached_listing.entries(top)
+    else:
+        try:
+            scandir_it = os.scandir(top)
+        except OSError as exc:
+            if listing_pass is not None:
+                listing_pass.failed()
+            if onerror is not None:
+                onerror(exc)
+            return None
+        entries_it = scandir_it
+    return scandir_it, entries_it, listing_token, cached_listing
+
+
+def _read_walk_entries(
+    scandir_it, entries_it, record, *, onerror, cancel_check,
+    on_scandir_batch, on_entry,
+):
+    """Classify one directory's entries for :func:`safe_scan_walk`.
+
+    Returns ``(dirs, nondirs, skipped, record_complete)``; appends each raw
+    entry to ``record`` when it is not ``None``. An ``OSError`` raised while
+    iterating propagates to the caller.
+    """
+    record_complete = True
+    dirs = []
+    nondirs = []
+    skipped = []
+    seen = set()
+    with scandir_it:
+        for i, entry in enumerate(entries_it):
+            if on_entry is not None:
+                on_entry()
+            # Poll cancellation while we're still filling the buffer.
+            # A directory with millions of entries would otherwise finish
+            # the whole ``scandir`` loop before yielding, leaving pause
+            # and cancel stuck for the full enumeration. 256 is small
+            # enough that a big-mount stat batch still gets checked
+            # promptly, cheap enough that the check adds no measurable
+            # overhead to normal folders.
+            if i and (i & 0xFF) == 0:
+                if cancel_check is not None and cancel_check():
+                    raise ScanCancelled("directory walk cancelled")
+                # Same checkpoint fires a heartbeat: the outer per-yield
+                # progress loop can't advance while this scandir call is
+                # still buffering, so a single huge directory would look
+                # stalled to the Jobs UI without this.
+                if on_scandir_batch is not None:
+                    on_scandir_batch()
+            name = entry.name
+            if name in seen:
+                continue
+            seen.add(name)
+            if record is not None:
+                try:
+                    record.append((
+                        name,
+                        entry.is_dir(follow_symlinks=False),
+                        entry.is_symlink(),
+                    ))
+                except OSError:
+                    record_complete = False
+            # Name-based exclusion catches direct bundle entries
+            # (``Photos Library.photoslibrary``) without any stat.
+            if is_excluded_scan_dir(name):
+                skipped.append(name)
+                continue
+            # Symlink whose target names an excluded bundle. os.readlink
+            # is textual and never follows the link, so this is safe even
+            # when the target is a protected macOS bundle.
+            if _symlink_target_is_excluded(entry):
+                skipped.append(name)
+                continue
+            try:
+                entry_is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError as exc:
+                if onerror is not None:
+                    onerror(exc)
+                entry_is_dir = False
+            if entry_is_dir:
+                dirs.append(name)
+            else:
+                nondirs.append(name)
+    return dirs, nondirs, skipped, record_complete
+
+
 def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
                    on_entry=None, listing_pass=None):
     """Yield ``(dirpath, dirnames, filenames)`` like ``os.walk(top,
@@ -500,90 +602,19 @@ def safe_scan_walk(top, onerror=None, cancel_check=None, on_scandir_batch=None,
     """
     if cancel_check is not None and cancel_check():
         raise ScanCancelled("directory walk cancelled")
-    listing_token = cached_listing = None
-    if listing_pass is not None:
-        try:
-            listing_token, cached_listing = listing_pass.begin(top)
-        except OSError as exc:
-            if onerror is not None:
-                onerror(exc)
-            return
-    if cached_listing is not None:
-        scandir_it = contextlib.nullcontext()
-        entries_it = cached_listing.entries(top)
-    else:
-        try:
-            scandir_it = os.scandir(top)
-        except OSError as exc:
-            if listing_pass is not None:
-                listing_pass.failed()
-            if onerror is not None:
-                onerror(exc)
-            return
-        entries_it = scandir_it
+    opened = _open_walk_listing(top, onerror, listing_pass)
+    if opened is None:
+        return
+    scandir_it, entries_it, listing_token, cached_listing = opened
     # Raw entries of a fresh read, recorded for the next pass. A read with
     # any per-entry error is not recorded, so it is read again next time.
     record = [] if listing_pass is not None and cached_listing is None else None
-    record_complete = True
-    dirs = []
-    nondirs = []
-    skipped = []
-    seen = set()
     try:
-        with scandir_it:
-            for i, entry in enumerate(entries_it):
-                if on_entry is not None:
-                    on_entry()
-                # Poll cancellation while we're still filling the buffer.
-                # A directory with millions of entries would otherwise finish
-                # the whole ``scandir`` loop before yielding, leaving pause
-                # and cancel stuck for the full enumeration. 256 is small
-                # enough that a big-mount stat batch still gets checked
-                # promptly, cheap enough that the check adds no measurable
-                # overhead to normal folders.
-                if i and (i & 0xFF) == 0:
-                    if cancel_check is not None and cancel_check():
-                        raise ScanCancelled("directory walk cancelled")
-                    # Same checkpoint fires a heartbeat: the outer per-yield
-                    # progress loop can't advance while this scandir call is
-                    # still buffering, so a single huge directory would look
-                    # stalled to the Jobs UI without this.
-                    if on_scandir_batch is not None:
-                        on_scandir_batch()
-                name = entry.name
-                if name in seen:
-                    continue
-                seen.add(name)
-                if record is not None:
-                    try:
-                        record.append((
-                            name,
-                            entry.is_dir(follow_symlinks=False),
-                            entry.is_symlink(),
-                        ))
-                    except OSError:
-                        record_complete = False
-                # Name-based exclusion catches direct bundle entries
-                # (``Photos Library.photoslibrary``) without any stat.
-                if is_excluded_scan_dir(name):
-                    skipped.append(name)
-                    continue
-                # Symlink whose target names an excluded bundle. os.readlink
-                # is textual and never follows the link, so this is safe even
-                # when the target is a protected macOS bundle.
-                if _symlink_target_is_excluded(entry):
-                    skipped.append(name)
-                    continue
-                try:
-                    entry_is_dir = entry.is_dir(follow_symlinks=False)
-                except OSError as exc:
-                    if onerror is not None:
-                        onerror(exc)
-                    entry_is_dir = False
-                if entry_is_dir:
-                    dirs.append(name)
-                else:
-                    nondirs.append(name)
+        dirs, nondirs, skipped, record_complete = _read_walk_entries(
+            scandir_it, entries_it, record, onerror=onerror,
+            cancel_check=cancel_check, on_scandir_batch=on_scandir_batch,
+            on_entry=on_entry,
+        )
     except OSError as exc:
         # Mirror ``os.walk``: an error raised *while iterating* (not just
         # when opening) is reported and the directory is abandoned. macOS
@@ -815,6 +846,84 @@ def _restore_working_copy_access_time(wc_path, preserved_times_ns):
         os.utime(wc_path, ns=preserved_times_ns)
 
 
+def _load_working_copy_image(wc_path, max_size, record_access):
+    """Decode an existing working copy, keeping its eviction recency honest.
+
+    Stamps access when ``record_access``; otherwise restores the atime the
+    read may have bumped. Returns ``None`` when the decode failed.
+    """
+    # Snapshot atime before the decode so a job caller that
+    # opted out of recording access does not accidentally
+    # advance the eviction key. ``_evict_once`` sorts by
+    # ``max(mtime, atime)``; on strictatime mounts (and on
+    # relatime once the daily bump condition trips) PIL's
+    # ``open`` inside ``_load_standard`` advances ``atime``
+    # even when we pass ``record_access=False``. Without a
+    # restore, a background library traversal — sharpness,
+    # classify, culling — would refresh every copy it walks
+    # and flatten the LRU signal the interactive callers
+    # rely on. Snapshot before the read so we can put atime
+    # back to whatever it was; a concurrent publisher shows
+    # up as an mtime change, and we skip the restore in that
+    # case so their write isn't erased.
+    #
+    # Known residual: if an interactive read stamps this same
+    # copy between our snapshot and our restore, the restore
+    # puts the older value back and that stamp is lost, so a
+    # photo the user just viewed can look staler than it is and
+    # be evicted early (it regenerates on demand — no data loss).
+    # Not worth a third layer of compensation on top of an
+    # overload we intend to remove: the fix is to stop deriving
+    # recency from stat metadata at all and keep it in a
+    # ``working_copy_access(photo_id, accessed_at)`` table, the
+    # shape the preview cache already uses. Tracked as a
+    # follow-up rather than grown here.
+    preserved_times_ns = None
+    if not record_access:
+        try:
+            pre_stat = os.stat(wc_path)
+            preserved_times_ns = (
+                pre_stat.st_atime_ns, pre_stat.st_mtime_ns,
+            )
+        except OSError:
+            preserved_times_ns = None
+    working_image = _load_standard(wc_path, max_size)
+    if working_image is not None:
+        if record_access:
+            # Only the touch takes
+            # ``working_copy_publication_guard``, so it cannot
+            # land between the quota pass's directory scan and
+            # its unlink (an identity-skipped file leaves the
+            # cache above a lowered quota).
+            #
+            # The decode deliberately stays outside that guard.
+            # It is a process-wide lock that eviction holds
+            # across a scandir of the entire cache, so guarding
+            # every interactive decode with it would serialize
+            # all of the app's image reads against each other
+            # and against eviction — the exact stall this work
+            # is meant to remove. The residual races are benign:
+            # an unlink in the exists/open window falls through
+            # to the original source in the caller, and a publisher
+            # replacing the path between decode and touch costs
+            # one misattributed recency stamp on a file that is
+            # being actively used either way.
+            _record_working_copy_access(wc_path)
+        elif preserved_times_ns is not None:
+            _restore_working_copy_access_time(
+                wc_path, preserved_times_ns,
+            )
+        return working_image
+    if preserved_times_ns is not None:
+        # Even a failed decode may have bumped atime; put it
+        # back so eviction doesn't see a cold file as fresh
+        # just because we tried to read it.
+        _restore_working_copy_access_time(
+            wc_path, preserved_times_ns,
+        )
+    return None
+
+
 def load_working_image(
     photo, vireo_dir, max_size=1024, folders=None, *, return_source=False,
     record_access=False,
@@ -851,75 +960,11 @@ def load_working_image(
     if photo.get("working_copy_path"):
         wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
         if os.path.exists(wc_path):
-            # Snapshot atime before the decode so a job caller that
-            # opted out of recording access does not accidentally
-            # advance the eviction key. ``_evict_once`` sorts by
-            # ``max(mtime, atime)``; on strictatime mounts (and on
-            # relatime once the daily bump condition trips) PIL's
-            # ``open`` inside ``_load_standard`` advances ``atime``
-            # even when we pass ``record_access=False``. Without a
-            # restore, a background library traversal — sharpness,
-            # classify, culling — would refresh every copy it walks
-            # and flatten the LRU signal the interactive callers
-            # rely on. Snapshot before the read so we can put atime
-            # back to whatever it was; a concurrent publisher shows
-            # up as an mtime change, and we skip the restore in that
-            # case so their write isn't erased.
-            #
-            # Known residual: if an interactive read stamps this same
-            # copy between our snapshot and our restore, the restore
-            # puts the older value back and that stamp is lost, so a
-            # photo the user just viewed can look staler than it is and
-            # be evicted early (it regenerates on demand — no data loss).
-            # Not worth a third layer of compensation on top of an
-            # overload we intend to remove: the fix is to stop deriving
-            # recency from stat metadata at all and keep it in a
-            # ``working_copy_access(photo_id, accessed_at)`` table, the
-            # shape the preview cache already uses. Tracked as a
-            # follow-up rather than grown here.
-            preserved_times_ns = None
-            if not record_access:
-                try:
-                    pre_stat = os.stat(wc_path)
-                    preserved_times_ns = (
-                        pre_stat.st_atime_ns, pre_stat.st_mtime_ns,
-                    )
-                except OSError:
-                    preserved_times_ns = None
-            working_image = _load_standard(wc_path, max_size)
+            working_image = _load_working_copy_image(
+                wc_path, max_size, record_access,
+            )
             if working_image is not None:
-                if record_access:
-                    # Only the touch takes
-                    # ``working_copy_publication_guard``, so it cannot
-                    # land between the quota pass's directory scan and
-                    # its unlink (an identity-skipped file leaves the
-                    # cache above a lowered quota).
-                    #
-                    # The decode deliberately stays outside that guard.
-                    # It is a process-wide lock that eviction holds
-                    # across a scandir of the entire cache, so guarding
-                    # every interactive decode with it would serialize
-                    # all of the app's image reads against each other
-                    # and against eviction — the exact stall this work
-                    # is meant to remove. The residual races are benign:
-                    # an unlink in the exists/open window falls through
-                    # to the original source below, and a publisher
-                    # replacing the path between decode and touch costs
-                    # one misattributed recency stamp on a file that is
-                    # being actively used either way.
-                    _record_working_copy_access(wc_path)
-                elif preserved_times_ns is not None:
-                    _restore_working_copy_access_time(
-                        wc_path, preserved_times_ns,
-                    )
                 return _result(working_image, "working_copy")
-            if preserved_times_ns is not None:
-                # Even a failed decode may have bumped atime; put it
-                # back so eviction doesn't see a cold file as fresh
-                # just because we tried to read it.
-                _restore_working_copy_access_time(
-                    wc_path, preserved_times_ns,
-                )
 
     # No usable working copy — load original (may be JPEG or RAW). This also
     # closes the exists/open race with quota eviction: a failed working-copy
@@ -1017,6 +1062,63 @@ def extract_working_copy(
                 img.close()
 
 
+def _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
+    """Whether the camera's embedded JPEG can stand in for a demosaic."""
+    # JPEG-first browsing uses the embedded preview when it covers the
+    # requested size. Full-resolution camera-rendered browsing also accepts
+    # a preview whose two axes are within 1% of the active sensor area; many
+    # cameras omit a narrow border (for example 8256x5504 vs 8288x5520).
+    # That JPEG is the rendition used by thumbnails and fit-to-window views,
+    # so retaining it at 1:1 prevents a visible tone jump.
+    sensor_dims = sorted((raw.sizes.width, raw.sizes.height), reverse=True)
+    embedded_dims = sorted(embedded.size, reverse=True) if embedded else None
+    embedded_is_near_full = bool(
+        embedded_dims
+        and sensor_dims[0]
+        and sensor_dims[1]
+        and embedded_dims[0] >= sensor_dims[0] * 0.99
+        and embedded_dims[1] >= sensor_dims[1] * 0.99
+    )
+    embedded_covers_request = bool(
+        embedded is not None
+        and max_size
+        and max_size > 0
+        and max(embedded.size) >= max_size
+    )
+    return bool(
+        raw_decode in (RAW_DECODE_JPEG_FIRST, RAW_DECODE_CAMERA_RENDERED)
+        and embedded is not None
+        and (
+            embedded_covers_request
+            or (
+                raw_decode == RAW_DECODE_CAMERA_RENDERED
+                and not max_size
+                and embedded_is_near_full
+            )
+        )
+    )
+
+
+def _full_camera_output_qualifier(raw, embedded):
+    """The log suffix for an embedded JPEG that is the full camera output."""
+    # Only claim "full camera output" when the embedded JPEG
+    # actually matches the sensor's active dimensions on both
+    # axes (e.g. Nikon HE*/TicoRAW). A long-edge-only check
+    # would still mislabel cropped/aspect-mismatched previews
+    # like 6000×3376 against a 6000×4000 sensor.
+    sensor_dims = sorted(
+        (raw.sizes.width, raw.sizes.height), reverse=True
+    )
+    embedded_dims = sorted(embedded.size, reverse=True)
+    return (
+        ", full camera output"
+        if sensor_dims[0]
+        and embedded_dims[0] >= sensor_dims[0]
+        and embedded_dims[1] >= sensor_dims[1]
+        else ""
+    )
+
+
 def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
     """Load a RAW file using the requested decode strategy.
 
@@ -1044,39 +1146,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
             None if raw_decode == RAW_DECODE_LINEAR else _extract_embedded_jpeg(raw)
         )
 
-        # JPEG-first browsing uses the embedded preview when it covers the
-        # requested size. Full-resolution camera-rendered browsing also accepts
-        # a preview whose two axes are within 1% of the active sensor area; many
-        # cameras omit a narrow border (for example 8256x5504 vs 8288x5520).
-        # That JPEG is the rendition used by thumbnails and fit-to-window views,
-        # so retaining it at 1:1 prevents a visible tone jump.
-        sensor_dims = sorted((raw.sizes.width, raw.sizes.height), reverse=True)
-        embedded_dims = sorted(embedded.size, reverse=True) if embedded else None
-        embedded_is_near_full = bool(
-            embedded_dims
-            and sensor_dims[0]
-            and sensor_dims[1]
-            and embedded_dims[0] >= sensor_dims[0] * 0.99
-            and embedded_dims[1] >= sensor_dims[1] * 0.99
-        )
-        embedded_covers_request = bool(
-            embedded is not None
-            and max_size
-            and max_size > 0
-            and max(embedded.size) >= max_size
-        )
-        if (
-            raw_decode in (RAW_DECODE_JPEG_FIRST, RAW_DECODE_CAMERA_RENDERED)
-            and embedded is not None
-            and (
-                embedded_covers_request
-                or (
-                    raw_decode == RAW_DECODE_CAMERA_RENDERED
-                    and not max_size
-                    and embedded_is_near_full
-                )
-            )
-        ):
+        if _embedded_preview_suffices(raw, embedded, max_size, raw_decode):
             return embedded
 
         # Otherwise demosaic the sensor data, falling back to the embedded
@@ -1097,22 +1167,7 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
                 with rawpy.imread(str(path)) as fresh:
                     embedded = _extract_embedded_jpeg(fresh)
             if embedded is not None:
-                # Only claim "full camera output" when the embedded JPEG
-                # actually matches the sensor's active dimensions on both
-                # axes (e.g. Nikon HE*/TicoRAW). A long-edge-only check
-                # would still mislabel cropped/aspect-mismatched previews
-                # like 6000×3376 against a 6000×4000 sensor.
-                sensor_dims = sorted(
-                    (raw.sizes.width, raw.sizes.height), reverse=True
-                )
-                embedded_dims = sorted(embedded.size, reverse=True)
-                qualifier = (
-                    ", full camera output"
-                    if sensor_dims[0]
-                    and embedded_dims[0] >= sensor_dims[0]
-                    and embedded_dims[1] >= sensor_dims[1]
-                    else ""
-                )
+                qualifier = _full_camera_output_qualifier(raw, embedded)
                 log.info(
                     "libraw cannot decode %s (%s); using embedded JPEG "
                     "(%dx%d%s)",

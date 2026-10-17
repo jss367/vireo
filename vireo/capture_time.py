@@ -291,6 +291,95 @@ def _refresh_photo_metadata(db, photo_id, metadata_path, *, refresh_file_identit
     db.conn.execute("UPDATE photos SET " + update_clause + " WHERE id=?", params)
 
 
+def _capture_time_command(exiftool, paths, photo_shift, target_offset_str, keep_backups):
+    """The ExifTool argv that shifts one photo's files and sets their offset."""
+    cmd = [exiftool]
+    if not keep_backups:
+        cmd.append("-overwrite_original")
+    if photo_shift:
+        cmd.append(_shift_arg(photo_shift))
+    if target_offset_str:
+        cmd.extend(
+            [
+                f"-OffsetTime={target_offset_str}",
+                f"-OffsetTimeOriginal={target_offset_str}",
+                f"-OffsetTimeDigitized={target_offset_str}",
+            ]
+        )
+    cmd.append("--")
+    cmd.extend(paths)
+    return cmd
+
+
+def _write_capture_time(db, cmd, photo, paths, catalog_paths):
+    """Run ExifTool on one photo's files and refresh its catalog metadata.
+
+    Raises ``RuntimeError`` when ExifTool reports a failed write; the caller
+    rolls back the catalog transaction on any exception.
+    """
+    log.info(
+        "Running ExifTool capture-time adjustment for photo %s on %d file(s)",
+        photo["id"],
+        len(paths),
+    )
+    log.debug("ExifTool command: %s", cmd)
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        **no_window_kwargs(),
+    )
+    if result.returncode != 0:
+        # ExifTool exits 0 on success (warnings included) and 1 when
+        # any error occurred — e.g. "0 image files updated, 1 files
+        # weren't updated due to errors" for a read-only file. This
+        # is a per-photo write, so exit 1 means the write failed;
+        # don't copy the read path's (0, 1) tolerance from
+        # metadata.py, which only accepts 1 for partial batch output.
+        raise RuntimeError((result.stderr or result.stdout or "ExifTool failed").strip())
+    # The primary may be offline while its companion is available.
+    # Companion EXIF can refresh capture metadata, never RAW identity.
+    _refresh_photo_metadata(
+        db, photo["id"], paths[0],
+        refresh_file_identity=paths[0] == catalog_paths[0],
+    )
+    # Invalidate only a companion that was actually edited. An offline
+    # companion still needs its saved identity for import deduplication.
+    if any(path in paths for path in catalog_paths[1:]):
+        db.conn.execute("DELETE FROM companion_identities WHERE photo_id=?", (photo["id"],))
+    db.conn.commit()
+    log.debug("ExifTool stdout: %s", result.stdout.strip())
+    if result.stderr:
+        log.debug("ExifTool stderr: %s", result.stderr.strip())
+
+
+def _capture_time_summary(
+    written, skipped, failed, failures, shifts_used, target_offset_str,
+    keep_backups,
+):
+    """The job result of a capture-time adjustment run."""
+    unanimous = bool(shifts_used) and all(s == shifts_used[0] for s in shifts_used)
+    summary_shift = shifts_used[0] if unanimous else None
+    log.info(
+        "Capture-time adjustment finished: %d updated, %d skipped, %d failed",
+        written,
+        skipped,
+        failed,
+    )
+
+    return {
+        "updated": written,
+        "skipped": skipped,
+        "failed": failed,
+        "failures": failures[:20],
+        "shift_minutes": summary_shift,
+        "shifts_vary": not unanimous and len(shifts_used) > 1,
+        "target_offset": target_offset_str,
+        "backup_files": bool(keep_backups),
+    }
+
+
 def adjust_capture_time(
     db,
     photo_ids,
@@ -362,58 +451,12 @@ def adjust_capture_time(
                 progress_callback(index, total, photo["filename"])
             continue
 
-        cmd = [exiftool]
-        if not keep_backups:
-            cmd.append("-overwrite_original")
-        if photo_shift:
-            cmd.append(_shift_arg(photo_shift))
-        if target_offset_str:
-            cmd.extend(
-                [
-                    f"-OffsetTime={target_offset_str}",
-                    f"-OffsetTimeOriginal={target_offset_str}",
-                    f"-OffsetTimeDigitized={target_offset_str}",
-                ]
-            )
-        cmd.append("--")
-        cmd.extend(paths)
+        cmd = _capture_time_command(
+            exiftool, paths, photo_shift, target_offset_str, keep_backups,
+        )
 
         try:
-            log.info(
-                "Running ExifTool capture-time adjustment for photo %s on %d file(s)",
-                photo["id"],
-                len(paths),
-            )
-            log.debug("ExifTool command: %s", cmd)
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                **no_window_kwargs(),
-            )
-            if result.returncode != 0:
-                # ExifTool exits 0 on success (warnings included) and 1 when
-                # any error occurred — e.g. "0 image files updated, 1 files
-                # weren't updated due to errors" for a read-only file. This
-                # is a per-photo write, so exit 1 means the write failed;
-                # don't copy the read path's (0, 1) tolerance from
-                # metadata.py, which only accepts 1 for partial batch output.
-                raise RuntimeError((result.stderr or result.stdout or "ExifTool failed").strip())
-            # The primary may be offline while its companion is available.
-            # Companion EXIF can refresh capture metadata, never RAW identity.
-            _refresh_photo_metadata(
-                db, photo["id"], paths[0],
-                refresh_file_identity=paths[0] == catalog_paths[0],
-            )
-            # Invalidate only a companion that was actually edited. An offline
-            # companion still needs its saved identity for import deduplication.
-            if any(path in paths for path in catalog_paths[1:]):
-                db.conn.execute("DELETE FROM companion_identities WHERE photo_id=?", (photo["id"],))
-            db.conn.commit()
-            log.debug("ExifTool stdout: %s", result.stdout.strip())
-            if result.stderr:
-                log.debug("ExifTool stderr: %s", result.stderr.strip())
+            _write_capture_time(db, cmd, photo, paths, catalog_paths)
             written += 1
             shifts_used.append(photo_shift)
         except (subprocess.TimeoutExpired, RuntimeError, OSError) as exc:
@@ -433,22 +476,7 @@ def adjust_capture_time(
     # Retain completed work if cancellation arrives while this checkpoint parks.
     if cancel_check:
         cancel_check()
-    unanimous = bool(shifts_used) and all(s == shifts_used[0] for s in shifts_used)
-    summary_shift = shifts_used[0] if unanimous else None
-    log.info(
-        "Capture-time adjustment finished: %d updated, %d skipped, %d failed",
-        written,
-        skipped,
-        failed,
+    return _capture_time_summary(
+        written, skipped, failed, failures, shifts_used, target_offset_str,
+        keep_backups,
     )
-
-    return {
-        "updated": written,
-        "skipped": skipped,
-        "failed": failed,
-        "failures": failures[:20],
-        "shift_minutes": summary_shift,
-        "shifts_vary": not unanimous and len(shifts_used) > 1,
-        "target_offset": target_offset_str,
-        "backup_files": bool(keep_backups),
-    }

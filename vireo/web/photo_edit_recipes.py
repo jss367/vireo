@@ -64,6 +64,99 @@ def _local_mask_stale(db, photo_id, recipe):
     return local_masks.is_stale(recipe, mask_row)
 
 
+def _unique_photo_ids(raw_ids):
+    """``raw_ids`` in order without duplicates; ``None`` if any is not an int."""
+    seen = set()
+    ids = []
+    for pid in raw_ids:
+        if isinstance(pid, bool) or not isinstance(pid, int):
+            return None
+        if pid not in seen:
+            seen.add(pid)
+            ids.append(pid)
+    return ids
+
+
+def _attach_target_local_mask(db, pid, target_recipe, vireo_dir, photo):
+    """Freeze ``pid``'s own mask into ``target_recipe``; the error text on failure."""
+    try:
+        target_mask = _create_current_local_mask_snapshot(
+            db,
+            pid,
+            vireo_dir=vireo_dir,
+            native_size=_recipe_source_dimensions(photo),
+        )
+    except (ValueError, OSError) as e:
+        # OSError covers disk-write failures inside create_snapshot
+        # (os.makedirs, f.write, os.replace) so a transient I/O
+        # hiccup on one target doesn't abort the whole batch.
+        return str(e)
+    target_local_mask = dict(
+        target_recipe["local"].get("mask") or {}
+    )
+    target_local_mask.pop("corrected", None)
+    target_local_mask.update(target_mask)
+    target_recipe["local"]["mask"] = target_local_mask
+    return None
+
+
+def _compose_bulk_targets(
+    db, ids, visible_set, photos, old_recipes, recipe, fields, mode,
+    has_local, vireo_dir,
+):
+    """Compose and normalize the pasted recipe for every requested photo.
+
+    Returns ``(items, applied, skipped, local_errors, applied_recipes)``;
+    ``items`` are the history entries for photos whose recipe changes.
+    """
+    from edit_batch import compose_recipe
+    from image_edits import RecipeError, normalize_recipe, recipe_to_json
+
+    items = []
+    applied = []
+    skipped = []
+    local_errors = {}
+    applied_recipes = {}
+    for pid in ids:
+        if pid not in visible_set:
+            skipped.append(pid)
+            continue
+        photo = photos.get(pid) or {}
+        old_recipe = old_recipes.get(pid)
+        target_recipe = compose_recipe(
+            old_recipe, recipe, fields, mode, native_size=_recipe_source_dimensions(photo),
+        ) or {}
+        if has_local and target_recipe.get("local"):
+            # Local adjustments reference a photo-specific mask, so each
+            # target gets its OWN snapshot (frozen from its active mask);
+            # the slider values copy, the mask does not. Photos without a
+            # usable mask are skipped and reported, not silently given a
+            # wrong mask.
+            error = _attach_target_local_mask(
+                db, pid, target_recipe, vireo_dir, photo,
+            )
+            if error is not None:
+                skipped.append(pid)
+                local_errors[str(pid)] = error
+                continue
+        old_value = recipe_to_json(old_recipe) or ""
+        try:
+            new_recipe = normalize_recipe(target_recipe)
+        except (RecipeError, ValueError):
+            skipped.append(pid)
+            continue
+        new_value = recipe_to_json(new_recipe) or ""
+        applied.append(pid)
+        applied_recipes[str(pid)] = new_recipe
+        if old_value != new_value:
+            items.append({
+                "photo_id": pid,
+                "old_value": old_value,
+                "new_value": new_value,
+            })
+    return items, applied, skipped, local_errors, applied_recipes
+
+
 def create_photo_edit_recipes_blueprint(
     get_db,
     json_error,
@@ -282,7 +375,7 @@ def create_photo_edit_recipes_blueprint(
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
             return json_error("request body must be a JSON object")
-        from edit_batch import compose_recipe, validate_operation
+        from edit_batch import validate_operation
 
         recipe = body.get("recipe")
         fields = body.get("fields")
@@ -294,16 +387,11 @@ def create_photo_edit_recipes_blueprint(
         raw_ids = body.get("photo_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             return json_error("photo_ids must be a non-empty list")
-        seen = set()
-        ids = []
-        for pid in raw_ids:
-            if isinstance(pid, bool) or not isinstance(pid, int):
-                return json_error("photo_ids must be integers")
-            if pid not in seen:
-                seen.add(pid)
-                ids.append(pid)
+        ids = _unique_photo_ids(raw_ids)
+        if ids is None:
+            return json_error("photo_ids must be integers")
 
-        from image_edits import RecipeError, normalize_recipe, recipe_to_json
+        from image_edits import RecipeError, recipe_to_json
 
         # Validate the incoming recipe once up front so a bad payload fails
         # cleanly before we touch any rows.
@@ -327,61 +415,12 @@ def create_photo_edit_recipes_blueprint(
         # dimensions, loaded in chunks only for those operations.
         needs_dimensions = has_local or bool(fields and {"rotation", "flip"}.intersection(fields))
         photos = db.get_photos_by_ids(visible_ids, include_exif=True) if needs_dimensions else {}
-        items = []
-        applied = []
-        skipped = []
-        local_errors = {}
-        applied_recipes = {}
-        for pid in ids:
-            if pid not in visible_set:
-                skipped.append(pid)
-                continue
-            photo = photos.get(pid) or {}
-            old_recipe = old_recipes.get(pid)
-            target_recipe = compose_recipe(
-                old_recipe, recipe, fields, mode, native_size=_recipe_source_dimensions(photo),
-            ) or {}
-            if has_local and target_recipe.get("local"):
-                # Local adjustments reference a photo-specific mask, so each
-                # target gets its OWN snapshot (frozen from its active mask);
-                # the slider values copy, the mask does not. Photos without a
-                # usable mask are skipped and reported, not silently given a
-                # wrong mask.
-                try:
-                    target_mask = _create_current_local_mask_snapshot(
-                        db,
-                        pid,
-                        vireo_dir=vireo_dir,
-                        native_size=_recipe_source_dimensions(photo),
-                    )
-                except (ValueError, OSError) as e:
-                    # OSError covers disk-write failures inside create_snapshot
-                    # (os.makedirs, f.write, os.replace) so a transient I/O
-                    # hiccup on one target doesn't abort the whole batch.
-                    skipped.append(pid)
-                    local_errors[str(pid)] = str(e)
-                    continue
-                target_local_mask = dict(
-                    target_recipe["local"].get("mask") or {}
-                )
-                target_local_mask.pop("corrected", None)
-                target_local_mask.update(target_mask)
-                target_recipe["local"]["mask"] = target_local_mask
-            old_value = recipe_to_json(old_recipe) or ""
-            try:
-                new_recipe = normalize_recipe(target_recipe)
-            except (RecipeError, ValueError):
-                skipped.append(pid)
-                continue
-            new_value = recipe_to_json(new_recipe) or ""
-            applied.append(pid)
-            applied_recipes[str(pid)] = new_recipe
-            if old_value != new_value:
-                items.append({
-                    "photo_id": pid,
-                    "old_value": old_value,
-                    "new_value": new_value,
-                })
+        items, applied, skipped, local_errors, applied_recipes = (
+            _compose_bulk_targets(
+                db, ids, visible_set, photos, old_recipes, recipe, fields,
+                mode, has_local, vireo_dir,
+            )
+        )
 
         if items:
             # Commit recipes, sidecar intents, and the single undo record

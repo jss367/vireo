@@ -214,6 +214,28 @@ def _is_reusable_apprun(apprun, source_binary):
         return False
 
 
+def _write_source_marker(binary, extract_dir):
+    """Record ``binary``'s fingerprint beside its extraction; ``False`` on failure.
+
+    A tree whose marker could not be written is discarded.
+    """
+    try:
+        with open(
+            os.path.join(extract_dir, _APPIMAGE_SOURCE_MARKER), "w"
+        ) as f:
+            f.write(_source_fingerprint(binary))
+    except OSError as e:
+        log.warning(
+            "AppImage extraction succeeded but source-fingerprint marker "
+            "could not be written for %s: %s; discarding tree so the "
+            "caller falls back to per-photo extraction",
+            binary, e,
+        )
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        return False
+    return True
+
+
 def _extract_appimage_once(binary):
     """Extract ``binary`` once and return the path to its AppRun, or None.
 
@@ -306,19 +328,7 @@ def _extract_appimage_once(binary):
         # discard it rather than let a subsequent call read a stale or
         # absent marker as "the source must have changed" and re-unpack
         # every photo.
-        try:
-            with open(
-                os.path.join(extract_dir, _APPIMAGE_SOURCE_MARKER), "w"
-            ) as f:
-                f.write(_source_fingerprint(binary))
-        except OSError as e:
-            log.warning(
-                "AppImage extraction succeeded but source-fingerprint marker "
-                "could not be written for %s: %s; discarding tree so the "
-                "caller falls back to per-photo extraction",
-                binary, e,
-            )
-            shutil.rmtree(extract_dir, ignore_errors=True)
+        if not _write_source_marker(binary, extract_dir):
             return None
         return apprun
 
@@ -665,6 +675,98 @@ def convert_to_dng(dng_converter_bin, input_path, output_dir):
         return {"success": False, "output_path": output_path, "error": f"DNG converter binary not found at {binary}"}
 
 
+def _run_darktable(binary, cmd):
+    """Run darktable-cli, working around a missing FUSE for AppImage builds.
+
+    Returns the ``subprocess.CompletedProcess``; ``TimeoutExpired`` and
+    ``FileNotFoundError`` propagate to the caller.
+    """
+    is_appimage = _is_appimage(binary)
+
+    # AppImages need FUSE2 to self-mount, and many current distros ship
+    # only FUSE3. APPIMAGE_EXTRACT_AND_RUN=1 makes the runtime bypass FUSE
+    # and unpack the whole ~178 MB squashfs into a temp dir — a working
+    # workaround when FUSE is missing, but a heavy cost when it is not,
+    # because this function runs once per photo. So probe once per binary
+    # and cache: try direct execution first, and on a real FUSE failure
+    # switch to a persistent extraction (_extract_appimage_once) whose
+    # AppRun the batch reuses without unpacking anything again. The old
+    # APPIMAGE_EXTRACT_AND_RUN behaviour only survives as a last-resort
+    # fallback if the one-time extraction itself fails.
+    def _run(cmd_to_run, env):
+        return subprocess.run(
+            cmd_to_run, capture_output=True, text=True, timeout=120,
+            env=env, **no_window_kwargs()
+        )
+
+    env = dict(os.environ)
+    cmd_to_run = cmd
+    cached_mode = _APPIMAGE_MODE_CACHE.get(binary) if is_appimage else None
+
+    if is_appimage and cached_mode == "extracted":
+        apprun = _APPIMAGE_APPRUN_CACHE.get(binary)
+        # Same predicate as _extract_appimage_once, so a source AppImage
+        # replaced in place (in-place Vireo update, manual overwrite)
+        # invalidates the cached tree here too — the source-fingerprint
+        # marker no longer matches — instead of silently running the
+        # old darktable until the process restarts.
+        if apprun and _is_reusable_apprun(apprun, binary):
+            # Reuse the one-time extraction: swap the AppImage entry point
+            # for its AppRun and keep every following argv slot (including
+            # the "darktable-cli" selector build_command inserted). No
+            # env-var toggle needed — AppRun runs the extracted binary
+            # with the full CAMLIBS/IOLIBS/GIO_EXTRA_MODULES setup.
+            cmd_to_run = [apprun] + cmd[1:]
+        else:
+            # Extraction is stale (source replaced) or gone (user cleaned
+            # tmp, reinstall, whatever). Reset and re-probe from scratch;
+            # _extract_appimage_once will re-run --appimage-extract for
+            # the new source under the per-binary lock.
+            _APPIMAGE_MODE_CACHE.pop(binary, None)
+            _APPIMAGE_APPRUN_CACHE.pop(binary, None)
+            cached_mode = None
+    elif is_appimage and cached_mode == "extract-per-run":
+        env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+
+    result = _run(cmd_to_run, env)
+
+    if (
+        is_appimage
+        and cached_mode is None
+        and result.returncode != 0
+        and _looks_like_appimage_fuse_failure(result.stdout, result.stderr)
+    ):
+        # FUSE is the problem. Extract once to a persistent tree so this
+        # cost is paid a single time for the whole batch, then rerun
+        # against the extracted AppRun.
+        log.info(
+            "AppImage FUSE probe failed for %s; extracting once", binary,
+        )
+        apprun = _extract_appimage_once(binary)
+        if apprun is not None:
+            extracted_cmd = [apprun] + cmd[1:]
+            result = _run(extracted_cmd, env)
+            if result.returncode == 0:
+                _APPIMAGE_MODE_CACHE[binary] = "extracted"
+                _APPIMAGE_APPRUN_CACHE[binary] = apprun
+        else:
+            # Extraction itself failed — dir not writable, subprocess
+            # blew up, etc. Fall back to the runtime workaround so
+            # develop still succeeds; the cost is per-photo unpacking,
+            # but that beats reporting the whole batch as broken.
+            log.warning(
+                "AppImage extraction failed for %s; falling back to "
+                "APPIMAGE_EXTRACT_AND_RUN per photo", binary,
+            )
+            env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+            result = _run(cmd, env)
+            if result.returncode == 0:
+                _APPIMAGE_MODE_CACHE[binary] = "extract-per-run"
+    elif is_appimage and cached_mode is None and result.returncode == 0:
+        _APPIMAGE_MODE_CACHE[binary] = "direct"
+    return result
+
+
 def develop_photo(
     darktable_bin,
     input_path,
@@ -717,89 +819,7 @@ def develop_photo(
 
     try:
         log.info("Developing %s -> %s", os.path.basename(input_path), output_path)
-        is_appimage = _is_appimage(binary)
-
-        # AppImages need FUSE2 to self-mount, and many current distros ship
-        # only FUSE3. APPIMAGE_EXTRACT_AND_RUN=1 makes the runtime bypass FUSE
-        # and unpack the whole ~178 MB squashfs into a temp dir — a working
-        # workaround when FUSE is missing, but a heavy cost when it is not,
-        # because this function runs once per photo. So probe once per binary
-        # and cache: try direct execution first, and on a real FUSE failure
-        # switch to a persistent extraction (_extract_appimage_once) whose
-        # AppRun the batch reuses without unpacking anything again. The old
-        # APPIMAGE_EXTRACT_AND_RUN behaviour only survives as a last-resort
-        # fallback if the one-time extraction itself fails.
-        def _run(cmd_to_run, env):
-            return subprocess.run(
-                cmd_to_run, capture_output=True, text=True, timeout=120,
-                env=env, **no_window_kwargs()
-            )
-
-        env = dict(os.environ)
-        cmd_to_run = cmd
-        cached_mode = _APPIMAGE_MODE_CACHE.get(binary) if is_appimage else None
-
-        if is_appimage and cached_mode == "extracted":
-            apprun = _APPIMAGE_APPRUN_CACHE.get(binary)
-            # Same predicate as _extract_appimage_once, so a source AppImage
-            # replaced in place (in-place Vireo update, manual overwrite)
-            # invalidates the cached tree here too — the source-fingerprint
-            # marker no longer matches — instead of silently running the
-            # old darktable until the process restarts.
-            if apprun and _is_reusable_apprun(apprun, binary):
-                # Reuse the one-time extraction: swap the AppImage entry point
-                # for its AppRun and keep every following argv slot (including
-                # the "darktable-cli" selector build_command inserted). No
-                # env-var toggle needed — AppRun runs the extracted binary
-                # with the full CAMLIBS/IOLIBS/GIO_EXTRA_MODULES setup.
-                cmd_to_run = [apprun] + cmd[1:]
-            else:
-                # Extraction is stale (source replaced) or gone (user cleaned
-                # tmp, reinstall, whatever). Reset and re-probe from scratch;
-                # _extract_appimage_once will re-run --appimage-extract for
-                # the new source under the per-binary lock.
-                _APPIMAGE_MODE_CACHE.pop(binary, None)
-                _APPIMAGE_APPRUN_CACHE.pop(binary, None)
-                cached_mode = None
-        elif is_appimage and cached_mode == "extract-per-run":
-            env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
-
-        result = _run(cmd_to_run, env)
-
-        if (
-            is_appimage
-            and cached_mode is None
-            and result.returncode != 0
-            and _looks_like_appimage_fuse_failure(result.stdout, result.stderr)
-        ):
-            # FUSE is the problem. Extract once to a persistent tree so this
-            # cost is paid a single time for the whole batch, then rerun
-            # against the extracted AppRun.
-            log.info(
-                "AppImage FUSE probe failed for %s; extracting once", binary,
-            )
-            apprun = _extract_appimage_once(binary)
-            if apprun is not None:
-                extracted_cmd = [apprun] + cmd[1:]
-                result = _run(extracted_cmd, env)
-                if result.returncode == 0:
-                    _APPIMAGE_MODE_CACHE[binary] = "extracted"
-                    _APPIMAGE_APPRUN_CACHE[binary] = apprun
-            else:
-                # Extraction itself failed — dir not writable, subprocess
-                # blew up, etc. Fall back to the runtime workaround so
-                # develop still succeeds; the cost is per-photo unpacking,
-                # but that beats reporting the whole batch as broken.
-                log.warning(
-                    "AppImage extraction failed for %s; falling back to "
-                    "APPIMAGE_EXTRACT_AND_RUN per photo", binary,
-                )
-                env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
-                result = _run(cmd, env)
-                if result.returncode == 0:
-                    _APPIMAGE_MODE_CACHE[binary] = "extract-per-run"
-        elif is_appimage and cached_mode is None and result.returncode == 0:
-            _APPIMAGE_MODE_CACHE[binary] = "direct"
+        result = _run_darktable(binary, cmd)
 
         if result.returncode != 0:
             # darktable-cli writes init/IO failures to stdout, not stderr.

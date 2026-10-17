@@ -48,148 +48,135 @@ class PreviewMaterialization:
     published: bool
 
 
-def render_preview_bytes(
-    db,
-    photo,
-    folder_path,
-    *,
-    size,
-    vireo_dir,
-    preview_quality,
-    recipe=None,
-    pair_source=None,
-    pair_source_path=None,
+def _select_and_load_preview_source(
+    photo, folder_path, original_abs, folders, *, size, vireo_dir, recipe,
+    pair_source, pair_source_path, load_image,
 ):
-    """Render one preview using the same RAW/edit fallback rules everywhere."""
-    from image_edits import apply_recipe_to_loaded_image
-    from image_loader import (
-        RAW_DECODE_LINEAR,
-        RAW_EXTENSIONS,
-        load_image,
-    )
+    """Pick the preview source and decode it.
 
-    photo_id = photo["id"]
-    if not pair_source_path and not folder_path:
-        raise PreviewSourceUnavailable(
-            f"source folder for photo {photo_id} is unavailable"
-        )
-    folders = {photo["folder_id"]: folder_path}
+    Returns ``(canonical, using_working_copy, selected_ext, load_max_size,
+    img)``; ``img`` is ``None`` when the decode failed. Raises
+    ``PreviewSourceUnavailable`` when the RAW already failed at its current
+    mtime.
+    """
+    from image_loader import RAW_DECODE_LINEAR, RAW_EXTENSIONS
 
-    original_abs = (
-        os.path.join(folder_path, photo["filename"]) if folder_path else ""
-    )
-
-    def _select_and_load_source():
-        if pair_source_path:
-            canonical = pair_source_path
-            using_working_copy = False
-        elif (
-            not recipe
-            and os.path.splitext(photo["filename"])[1].lower()
-            in RAW_EXTENSIONS
+    if pair_source_path:
+        canonical = pair_source_path
+        using_working_copy = False
+    elif (
+        not recipe
+        and os.path.splitext(photo["filename"])[1].lower()
+        in RAW_EXTENSIONS
+    ):
+        source_path = original_abs
+        if (
+            os.path.exists(source_path)
+            and not has_current_working_copy_failure(
+                photo,
+                vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=source_path,
+                folder_path=folder_path,
+            )
         ):
-            source_path = original_abs
-            if (
-                os.path.exists(source_path)
-                and not has_current_working_copy_failure(
-                    photo,
-                    vireo_dir,
-                    trust_existing_working_copy=False,
-                    live_source_path=source_path,
-                    folder_path=folder_path,
-                )
-            ):
-                canonical = source_path
-                using_working_copy = False
-            else:
-                canonical, using_working_copy = recipe_render_source(
-                    photo, recipe, size, vireo_dir, folders,
-                )
+            canonical = source_path
+            using_working_copy = False
         else:
             canonical, using_working_copy = recipe_render_source(
                 photo, recipe, size, vireo_dir, folders,
             )
+    else:
+        canonical, using_working_copy = recipe_render_source(
+            photo, recipe, size, vireo_dir, folders,
+        )
 
-        selected_ext = os.path.splitext(canonical)[1].lower()
-        if (
-            not using_working_copy
-            and selected_ext in RAW_EXTENSIONS
-            and has_current_working_copy_failure(
-                photo,
-                vireo_dir,
-                trust_existing_working_copy=False,
-                live_source_path=canonical,
-                folder_path=folder_path,
-            )
-        ):
-            raise PreviewSourceUnavailable(
-                f"RAW source for photo {photo_id} already failed at its current mtime"
-            )
+    selected_ext = os.path.splitext(canonical)[1].lower()
+    if (
+        not using_working_copy
+        and selected_ext in RAW_EXTENSIONS
+        and has_current_working_copy_failure(
+            photo,
+            vireo_dir,
+            trust_existing_working_copy=False,
+            live_source_path=canonical,
+            folder_path=folder_path,
+        )
+    ):
+        raise PreviewSourceUnavailable(
+            f"RAW source for photo {photo['id']} already failed at its current mtime"
+        )
 
-        load_max_size = None if recipe and recipe.get("crop") else size
-        raw_decode = (
+    load_max_size = None if recipe and recipe.get("crop") else size
+    raw_decode = (
+        RAW_DECODE_LINEAR
+        if selected_ext in RAW_EXTENSIONS and (recipe or pair_source == "raw")
+        else None
+    )
+    load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
+    img = load_image(canonical, max_size=load_max_size, **load_kwargs)
+    return canonical, using_working_copy, selected_ext, load_max_size, img
+
+
+def _retry_original_after_eviction(
+    photo, folder_path, original_abs, canonical, *, vireo_dir, recipe,
+    pair_source, load_max_size, load_image,
+):
+    """Retry the primary source when the working copy vanished before decode.
+
+    Returns ``(img, canonical, selected_ext)`` for the original, or ``None``
+    when it is unusable or did not decode either.
+    """
+    from image_loader import RAW_DECODE_LINEAR, RAW_EXTENSIONS
+
+    # The working copy may be evicted after source selection but before
+    # ``load_image`` opens it. Retry the primary source once when it is
+    # usable, mirroring export/crop recovery instead of surfacing a
+    # PreviewMaterializationError for a benign quota race.
+    original_ext = os.path.splitext(original_abs)[1].lower()
+    original_is_raw = original_ext in RAW_EXTENSIONS
+    original_failure_current = original_is_raw and (
+        has_current_working_copy_failure(
+            photo,
+            vireo_dir,
+            trust_existing_working_copy=False,
+            live_source_path=original_abs,
+            folder_path=folder_path,
+        )
+    )
+    if (
+        os.path.abspath(original_abs) != os.path.abspath(canonical)
+        and os.path.isfile(original_abs)
+        and not original_failure_current
+    ):
+        fallback_raw_decode = (
             RAW_DECODE_LINEAR
-            if selected_ext in RAW_EXTENSIONS and (recipe or pair_source == "raw")
+            if original_is_raw and (recipe or pair_source == "raw")
             else None
         )
-        load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
-        img = load_image(canonical, max_size=load_max_size, **load_kwargs)
-        return canonical, using_working_copy, selected_ext, load_max_size, img
-
-    # With the original volume offline, the working copy is the only usable
-    # preview source and retry-to-original cannot recover an eviction race.
-    # Pin it from source selection through decode; the returned PIL image no
-    # longer depends on the pathname after load_image completes.
-    source_guard = contextlib.nullcontext()
-    if (
-        not pair_source_path
-        and photo["working_copy_path"]
-        and not os.path.isfile(original_abs)
-    ):
-        source_guard = working_copy_publication_guard()
-    with source_guard:
-        (
-            canonical, using_working_copy, selected_ext, load_max_size, img,
-        ) = _select_and_load_source()
-
-    if img is None and using_working_copy and not pair_source_path:
-        # The working copy may be evicted after source selection but before
-        # ``load_image`` opens it. Retry the primary source once when it is
-        # usable, mirroring export/crop recovery instead of surfacing a
-        # PreviewMaterializationError for a benign quota race.
-        original_ext = os.path.splitext(original_abs)[1].lower()
-        original_is_raw = original_ext in RAW_EXTENSIONS
-        original_failure_current = original_is_raw and (
-            has_current_working_copy_failure(
-                photo,
-                vireo_dir,
-                trust_existing_working_copy=False,
-                live_source_path=original_abs,
-                folder_path=folder_path,
-            )
+        fallback_kwargs = (
+            {"raw_decode": fallback_raw_decode}
+            if fallback_raw_decode else {}
         )
-        if (
-            os.path.abspath(original_abs) != os.path.abspath(canonical)
-            and os.path.isfile(original_abs)
-            and not original_failure_current
-        ):
-            fallback_raw_decode = (
-                RAW_DECODE_LINEAR
-                if original_is_raw and (recipe or pair_source == "raw")
-                else None
-            )
-            fallback_kwargs = (
-                {"raw_decode": fallback_raw_decode}
-                if fallback_raw_decode else {}
-            )
-            img = load_image(
-                original_abs, max_size=load_max_size, **fallback_kwargs,
-            )
-            if img is not None:
-                canonical = original_abs
-                selected_ext = original_ext
-                using_working_copy = False
+        img = load_image(
+            original_abs, max_size=load_max_size, **fallback_kwargs,
+        )
+        if img is not None:
+            return img, original_abs, original_ext
+    return None
 
+
+def _replace_undersized_raw_preview(
+    img, photo, folder_path, canonical, *, size, selected_ext, pair_source,
+    load_max_size, load_image,
+):
+    """Swap an undersized embedded RAW preview for a larger companion JPEG.
+
+    Returns ``(img, canonical)``, unchanged when no companion qualifies.
+    """
+    from image_loader import RAW_EXTENSIONS
+
+    photo_id = photo["id"]
     if (
         img is not None
         and selected_ext in RAW_EXTENSIONS
@@ -223,46 +210,59 @@ def render_preview_bytes(
                         canonical = companion_abs
                     elif companion_img is not None:
                         companion_img.close()
+    return img, canonical
 
-    if img is None and selected_ext in RAW_EXTENSIONS and pair_source != "raw":
-        companion_rel = photo["companion_path"]
-        if companion_rel:
-            companion_abs = os.path.join(folder_path, companion_rel)
-            if os.path.exists(companion_abs) and companion_abs != canonical:
-                log.info(
-                    "RAW decode failed for photo %s preview at size=%s; "
-                    "falling back to companion JPEG",
-                    photo_id, size,
-                )
-                record_working_copy_failure(db, photo, canonical)
-                img = load_image(companion_abs, max_size=load_max_size)
-                if img is not None:
-                    canonical = companion_abs
 
-        if img is None:
-            working_copy = working_copy_path_if_satisfies(
-                photo, recipe, size, vireo_dir, rel_slack=0.01,
+def _load_raw_failure_fallback(
+    db, photo, folder_path, canonical, *, size, vireo_dir, recipe,
+    load_max_size, load_image,
+):
+    """After a RAW decode failure, try the companion JPEG then the working copy.
+
+    Returns ``(img, canonical)``; ``img`` stays ``None`` when neither loads.
+    """
+    photo_id = photo["id"]
+    img = None
+    companion_rel = photo["companion_path"]
+    if companion_rel:
+        companion_abs = os.path.join(folder_path, companion_rel)
+        if os.path.exists(companion_abs) and companion_abs != canonical:
+            log.info(
+                "RAW decode failed for photo %s preview at size=%s; "
+                "falling back to companion JPEG",
+                photo_id, size,
             )
-            if (
-                working_copy
-                and os.path.abspath(working_copy) != os.path.abspath(canonical)
-            ):
-                log.info(
-                    "RAW decode failed for photo %s preview at size=%s; "
-                    "falling back to JPEG working copy",
-                    photo_id, size,
-                )
-                record_working_copy_failure(db, photo, canonical)
-                img = load_image(working_copy, max_size=load_max_size)
-                if img is not None:
-                    canonical = working_copy
+            record_working_copy_failure(db, photo, canonical)
+            img = load_image(companion_abs, max_size=load_max_size)
+            if img is not None:
+                canonical = companion_abs
 
     if img is None:
-        record_working_copy_failure(db, photo, canonical)
-        raise PreviewMaterializationError(
-            f"could not load a preview source for photo {photo_id}"
+        working_copy = working_copy_path_if_satisfies(
+            photo, recipe, size, vireo_dir, rel_slack=0.01,
         )
+        if (
+            working_copy
+            and os.path.abspath(working_copy) != os.path.abspath(canonical)
+        ):
+            log.info(
+                "RAW decode failed for photo %s preview at size=%s; "
+                "falling back to JPEG working copy",
+                photo_id, size,
+            )
+            record_working_copy_failure(db, photo, canonical)
+            img = load_image(working_copy, max_size=load_max_size)
+            if img is not None:
+                canonical = working_copy
+    return img, canonical
 
+
+def _encode_preview(
+    img, photo, *, size, vireo_dir, recipe, preview_quality,
+    apply_recipe_to_loaded_image,
+):
+    """Apply the recipe (if any) and JPEG-encode; always closes ``img``."""
+    photo_id = photo["id"]
     try:
         if recipe:
             import local_masks
@@ -288,6 +288,130 @@ def render_preview_bytes(
         # Cleanup must not replace the render's own exception.
         with contextlib.suppress(Exception):
             img.close()
+
+
+def render_preview_bytes(
+    db,
+    photo,
+    folder_path,
+    *,
+    size,
+    vireo_dir,
+    preview_quality,
+    recipe=None,
+    pair_source=None,
+    pair_source_path=None,
+):
+    """Render one preview using the same RAW/edit fallback rules everywhere."""
+    from image_edits import apply_recipe_to_loaded_image
+    from image_loader import (
+        RAW_EXTENSIONS,
+        load_image,
+    )
+
+    photo_id = photo["id"]
+    if not pair_source_path and not folder_path:
+        raise PreviewSourceUnavailable(
+            f"source folder for photo {photo_id} is unavailable"
+        )
+    folders = {photo["folder_id"]: folder_path}
+
+    original_abs = (
+        os.path.join(folder_path, photo["filename"]) if folder_path else ""
+    )
+
+    # With the original volume offline, the working copy is the only usable
+    # preview source and retry-to-original cannot recover an eviction race.
+    # Pin it from source selection through decode; the returned PIL image no
+    # longer depends on the pathname after load_image completes.
+    source_guard = contextlib.nullcontext()
+    if (
+        not pair_source_path
+        and photo["working_copy_path"]
+        and not os.path.isfile(original_abs)
+    ):
+        source_guard = working_copy_publication_guard()
+    with source_guard:
+        (
+            canonical, using_working_copy, selected_ext, load_max_size, img,
+        ) = _select_and_load_preview_source(
+            photo, folder_path, original_abs, folders, size=size,
+            vireo_dir=vireo_dir, recipe=recipe, pair_source=pair_source,
+            pair_source_path=pair_source_path, load_image=load_image,
+        )
+
+    if img is None and using_working_copy and not pair_source_path:
+        retried = _retry_original_after_eviction(
+            photo, folder_path, original_abs, canonical, vireo_dir=vireo_dir,
+            recipe=recipe, pair_source=pair_source,
+            load_max_size=load_max_size, load_image=load_image,
+        )
+        if retried is not None:
+            img, canonical, selected_ext = retried
+            using_working_copy = False
+
+    img, canonical = _replace_undersized_raw_preview(
+        img, photo, folder_path, canonical, size=size,
+        selected_ext=selected_ext, pair_source=pair_source,
+        load_max_size=load_max_size, load_image=load_image,
+    )
+
+    if img is None and selected_ext in RAW_EXTENSIONS and pair_source != "raw":
+        img, canonical = _load_raw_failure_fallback(
+            db, photo, folder_path, canonical, size=size, vireo_dir=vireo_dir,
+            recipe=recipe, load_max_size=load_max_size, load_image=load_image,
+        )
+
+    if img is None:
+        record_working_copy_failure(db, photo, canonical)
+        raise PreviewMaterializationError(
+            f"could not load a preview source for photo {photo_id}"
+        )
+
+    return _encode_preview(
+        img, photo, size=size, vireo_dir=vireo_dir, recipe=recipe,
+        preview_quality=preview_quality,
+        apply_recipe_to_loaded_image=apply_recipe_to_loaded_image,
+    )
+
+
+def _publish_preview(
+    db, photo_id, size, data, cache_path, *, publication_guard,
+    publish_best_effort,
+):
+    """Atomically write rendered bytes to ``cache_path`` and track them.
+
+    Returns whether the file was published. A write failure is raised unless
+    ``publish_best_effort``; a tracking failure only logs.
+    """
+    published = False
+    if cache_path:
+        guard = (
+            publication_guard() if publication_guard
+            else contextlib.nullcontext()
+        )
+        with guard:
+            try:
+                atomic_write_bytes(data, cache_path)
+            except Exception:
+                if not publish_best_effort:
+                    raise
+                log.warning(
+                    "Failed to persist preview cache %s", cache_path,
+                    exc_info=True,
+                )
+            else:
+                published = True
+        if published:
+            try:
+                # Standalone renders (no catalog) pass db=None.
+                if db is not None:
+                    db.caches.preview_insert(photo_id, size, len(data))
+            except sqlite3.Error:
+                # The file is published; an untracked preview is adopted
+                # on its next hit. Usually the photo was deleted (FK).
+                log.debug("Could not track preview for photo %s", photo_id, exc_info=True)
+    return published
 
 
 def materialize_preview(
@@ -352,33 +476,11 @@ def materialize_preview(
             pair_source=pair_source,
             pair_source_path=pair_source_path,
         )
-        published = False
-        if cache_path:
-            guard = (
-                publication_guard() if publication_guard
-                else contextlib.nullcontext()
-            )
-            with guard:
-                try:
-                    atomic_write_bytes(data, cache_path)
-                except Exception:
-                    if not publish_best_effort:
-                        raise
-                    log.warning(
-                        "Failed to persist preview cache %s", cache_path,
-                        exc_info=True,
-                    )
-                else:
-                    published = True
-            if published:
-                try:
-                    # Standalone renders (no catalog) pass db=None.
-                    if db is not None:
-                        db.caches.preview_insert(photo_id, size, len(data))
-                except sqlite3.Error:
-                    # The file is published; an untracked preview is adopted
-                    # on its next hit. Usually the photo was deleted (FK).
-                    log.debug("Could not track preview for photo %s", photo_id, exc_info=True)
+        published = _publish_preview(
+            db, photo_id, size, data, cache_path,
+            publication_guard=publication_guard,
+            publish_best_effort=publish_best_effort,
+        )
         return PreviewMaterialization(
             data=data, generated=True, published=published,
         )

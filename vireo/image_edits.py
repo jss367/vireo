@@ -339,26 +339,8 @@ def _normalize_crop(crop):
     return {"x": x, "y": y, "w": w, "h": h}
 
 
-def normalize_recipe(recipe):
-    """Validate and canonicalize a non-destructive image edit recipe.
-
-    The crop rectangle uses normalized coordinates in the image space after
-    rotation, flips, and straightening have been applied. Rotation is limited
-    to right angles; straightening is a small arbitrary clockwise angle applied
-    in-place so crop coordinates remain stable.
-    """
-    if recipe in (None, "", {}):
-        return None
-    if isinstance(recipe, str):
-        try:
-            recipe = json.loads(recipe)
-        except (TypeError, ValueError) as exc:
-            raise RecipeError("recipe must be valid JSON") from exc
-    if not isinstance(recipe, dict):
-        raise RecipeError("recipe must be an object")
-
-    out = {"version": SCHEMA_VERSION}
-
+def _normalize_geometry(recipe, out):
+    """Validate rotation, straighten and flip into ``out``, in that order."""
     rotation = recipe.get("rotation", 0)
     if isinstance(rotation, bool) or not isinstance(rotation, int | float):
         raise RecipeError("rotation must be one of 0, 90, 180, or 270")
@@ -398,15 +380,28 @@ def normalize_recipe(recipe):
     if normalized_flip:
         out["flip"] = normalized_flip
 
-    crop = _normalize_crop(recipe.get("crop"))
-    if crop is not None:
-        out["crop"] = crop
 
-    adjustments = recipe.get("adjustments")
-    if adjustments is None:
-        adjustments = {}
-    if not isinstance(adjustments, dict):
-        raise RecipeError("adjustments must be an object")
+def _normalize_white_balance(adjustments):
+    """The canonical white-balance block (nested or legacy flat keys)."""
+    white_balance = adjustments.get("white_balance")
+    if white_balance is None:
+        white_balance = {
+            key: adjustments[key]
+            for key in _WHITE_BALANCE_RANGES
+            if key in adjustments
+        }
+    if white_balance in (None, "", {}):
+        white_balance = {}
+    if not isinstance(white_balance, dict):
+        raise RecipeError("white_balance adjustment must be an object")
+    normalized_wb = _normalize_ranged(
+        white_balance, _WHITE_BALANCE_RANGES, "white_balance.{name} adjustment",
+    )
+    return normalized_wb
+
+
+def _normalize_adjustments(adjustments):
+    """Canonicalize the ``adjustments`` object of a recipe."""
     normalized_adjustments = _normalize_ranged(
         adjustments, _ADJUSTMENT_RANGES, "{name} adjustment",
     )
@@ -428,20 +423,7 @@ def normalize_recipe(recipe):
             if abs(radius - SHARPEN_RADIUS_DEFAULT) > 1e-9:
                 normalized_adjustments["sharpen_radius"] = radius
 
-    white_balance = adjustments.get("white_balance")
-    if white_balance is None:
-        white_balance = {
-            key: adjustments[key]
-            for key in _WHITE_BALANCE_RANGES
-            if key in adjustments
-        }
-    if white_balance in (None, "", {}):
-        white_balance = {}
-    if not isinstance(white_balance, dict):
-        raise RecipeError("white_balance adjustment must be an object")
-    normalized_wb = _normalize_ranged(
-        white_balance, _WHITE_BALANCE_RANGES, "white_balance.{name} adjustment",
-    )
+    normalized_wb = _normalize_white_balance(adjustments)
     if normalized_wb:
         normalized_adjustments["white_balance"] = normalized_wb
 
@@ -460,7 +442,41 @@ def normalize_recipe(recipe):
     color_grading = _normalize_color_grading(adjustments.get("color_grading"))
     if color_grading:
         normalized_adjustments["color_grading"] = color_grading
+    return normalized_adjustments
 
+
+def normalize_recipe(recipe):
+    """Validate and canonicalize a non-destructive image edit recipe.
+
+    The crop rectangle uses normalized coordinates in the image space after
+    rotation, flips, and straightening have been applied. Rotation is limited
+    to right angles; straightening is a small arbitrary clockwise angle applied
+    in-place so crop coordinates remain stable.
+    """
+    if recipe in (None, "", {}):
+        return None
+    if isinstance(recipe, str):
+        try:
+            recipe = json.loads(recipe)
+        except (TypeError, ValueError) as exc:
+            raise RecipeError("recipe must be valid JSON") from exc
+    if not isinstance(recipe, dict):
+        raise RecipeError("recipe must be an object")
+
+    out = {"version": SCHEMA_VERSION}
+
+    _normalize_geometry(recipe, out)
+
+    crop = _normalize_crop(recipe.get("crop"))
+    if crop is not None:
+        out["crop"] = crop
+
+    adjustments = recipe.get("adjustments")
+    if adjustments is None:
+        adjustments = {}
+    if not isinstance(adjustments, dict):
+        raise RecipeError("adjustments must be an object")
+    normalized_adjustments = _normalize_adjustments(adjustments)
     if normalized_adjustments:
         out["adjustments"] = normalized_adjustments
 
@@ -583,6 +599,49 @@ _ADJUST_TILE_PIXELS = 4_000_000
 _ADVANCED_COLOR_TILE_PIXELS = 1_000_000
 
 
+def _adjust_tile_shape(width, height, *, spatial, color_ops):
+    """``(columns_per_tile, rows_per_tile)`` for the tiled tone pass."""
+    # Bound working memory on full-resolution originals/exports (45MP+).
+    # The guided range filter needs a halo on every tile edge; all remaining
+    # tone/color operations are per-pixel.
+    tile_budget = _ADJUST_TILE_PIXELS
+    if spatial:
+        tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
+    if color_ops:
+        # HSL conversion and curve indexing keep several additional float
+        # planes alive. Smaller tiles bound peak memory on 45MP+ exports while
+        # preserving byte-identical output because every operation is per-pixel.
+        tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
+    # Full-width strips become very short at native resolution: a 1MP strip
+    # on an 8K-wide photo has almost as many halo rows as useful rows. Square
+    # spatial tiles minimize repeated filtering without increasing the budget.
+    # Keep the contiguous row path for pointwise edits, which need no halo.
+    columns_per_tile = width
+    if spatial and width * height > tile_budget:
+        columns_per_tile = min(width, max(1, math.isqrt(tile_budget)))
+    rows_per_tile = max(1, tile_budget // max(1, columns_per_tile))
+    return columns_per_tile, rows_per_tile
+
+
+def _promote_to_rgb(img):
+    """Convert ``img`` to RGB, or RGBA when it carries any transparency."""
+    has_alpha = "A" in img.getbands() or "transparency" in img.info
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGBA" if has_alpha else "RGB")
+    elif img.mode == "RGB" and "transparency" in img.info:
+        img = img.convert("RGBA")
+    return img
+
+
+def _adjusted_image(output, img, floating):
+    """Wrap the tone pass's output buffer in the source's image type."""
+    if floating:
+        return FloatImage(output, encoding="srgb")
+    if img.mode == "RGBA":
+        return Image.fromarray(output, "RGBA")
+    return Image.fromarray(output, "RGB")
+
+
 def _apply_adjustments(
     img, adjustments, local_weight=None, local_subject=None,
     local_background=None, range_scale=1.0,
@@ -601,11 +660,7 @@ def _apply_adjustments(
     except ImportError:
         from tone import RANGE_RADIUS, apply_adjustments
 
-    has_alpha = "A" in img.getbands() or "transparency" in img.info
-    if img.mode not in ("RGB", "RGBA"):
-        img = img.convert("RGBA" if has_alpha else "RGB")
-    elif img.mode == "RGB" and "transparency" in img.info:
-        img = img.convert("RGBA")
+    img = _promote_to_rgb(img)
 
     exposure = adjustments.get("exposure", 0.0)
     white_balance = adjustments.get("white_balance")
@@ -637,25 +692,10 @@ def _apply_adjustments(
     channels = src.shape[2]
     output = np.empty((height, width, channels), dtype=np.float32 if floating else np.uint8)
 
-    # Bound working memory on full-resolution originals/exports (45MP+).
-    # The guided range filter needs a halo on every tile edge; all remaining
-    # tone/color operations are per-pixel.
-    tile_budget = _ADJUST_TILE_PIXELS
-    if spatial:
-        tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
-    if tone_curve or point_curves or point_color or hsl or color_grading:
-        # HSL conversion and curve indexing keep several additional float
-        # planes alive. Smaller tiles bound peak memory on 45MP+ exports while
-        # preserving byte-identical output because every operation is per-pixel.
-        tile_budget = min(tile_budget, _ADVANCED_COLOR_TILE_PIXELS)
-    # Full-width strips become very short at native resolution: a 1MP strip
-    # on an 8K-wide photo has almost as many halo rows as useful rows. Square
-    # spatial tiles minimize repeated filtering without increasing the budget.
-    # Keep the contiguous row path for pointwise edits, which need no halo.
-    columns_per_tile = width
-    if spatial and width * height > tile_budget:
-        columns_per_tile = min(width, max(1, math.isqrt(tile_budget)))
-    rows_per_tile = max(1, tile_budget // max(1, columns_per_tile))
+    columns_per_tile, rows_per_tile = _adjust_tile_shape(
+        width, height, spatial=spatial,
+        color_ops=tone_curve or point_curves or point_color or hsl or color_grading,
+    )
     for top in range(0, height, rows_per_tile):
         bottom = min(top + rows_per_tile, height)
         start, end = max(0, top - halo), min(height, bottom + halo)
@@ -698,11 +738,7 @@ def _apply_adjustments(
                 # identity for 8-bit values).
                 output[top:bottom, x:stop, 3] = src[top:bottom, x:stop, 3]
 
-    if floating:
-        return FloatImage(output, encoding="srgb")
-    if img.mode == "RGBA":
-        return Image.fromarray(output, "RGBA")
-    return Image.fromarray(output, "RGB")
+    return _adjusted_image(output, img, floating)
 
 
 def _apply_geometry(image, normalized):
@@ -941,6 +977,58 @@ def _combine_detail(adjustments, region):
     }
 
 
+def _camera_denoise_kwargs(adjustments, camera_metadata):
+    """``apply_detail`` keywords for camera-aware denoising, or ``{}``."""
+    if adjustments.get("denoise_mode") == "camera":
+        try:
+            from .camera_denoise import resolve_profile
+        except ImportError:
+            from camera_denoise import resolve_profile
+        return {"denoise_mode": "camera", "noise_profile": resolve_profile(camera_metadata)}
+    return {}
+
+
+def _apply_local_detail(
+    result, adjustments, local, mask_geo, subject_detail, background_detail,
+    scale, denoise_kwargs,
+):
+    """Run the subject and background detail branches and blend them."""
+    import numpy as np
+
+    try:
+        from .detail import apply_detail
+    except ImportError:
+        from detail import apply_detail
+
+    subject_params = _combine_detail(adjustments, subject_detail)
+    background_params = _combine_detail(adjustments, background_detail)
+    if subject_params == background_params:
+        if subject_params["sharpen"] or subject_params["noise_reduction"]:
+            result = apply_detail(result, scale=scale, **subject_params, **denoise_kwargs)
+        return result
+    subject_out = apply_detail(result, scale=scale, **subject_params, **denoise_kwargs)
+    background_out = apply_detail(result, scale=scale, **background_params, **denoise_kwargs)
+    feather = (local["mask"].get("feather") or 0.0) * scale
+    weight = _feathered_weight(
+        mask_geo.resize(subject_out.size, Image.Resampling.BILINEAR),
+        feather,
+    )[..., None]
+    subject_arr = np.asarray(subject_out).astype(np.float32)
+    background_arr = np.asarray(background_out).astype(np.float32)
+    blended = subject_arr.copy()
+    blended[..., :3] = (
+        subject_arr[..., :3] * weight
+        + background_arr[..., :3] * (1.0 - weight)
+    )
+    if isinstance(subject_out, FloatImage):
+        return FloatImage(blended, encoding="srgb")
+    out8 = np.clip(blended + 0.5, 0, 255).astype(np.uint8)
+    if out8.shape[-1] == 4:
+        # Alpha passes through unchanged (identical in both branches).
+        out8[..., 3] = np.asarray(subject_out)[..., 3]
+    return Image.fromarray(out8, subject_out.mode)
+
+
 def apply_recipe_to_loaded_image(
     img, recipe, max_size=None, native_size=None, detail_scale=None,
     local_mask=None, camera_metadata=None,
@@ -994,13 +1082,7 @@ def apply_recipe_to_loaded_image(
         if detail_scale is not None
         else detail_render_scale(result.size, native_size, normalized)
     )
-    denoise_kwargs = {}
-    if adjustments.get("denoise_mode") == "camera":
-        try:
-            from .camera_denoise import resolve_profile
-        except ImportError:
-            from camera_denoise import resolve_profile
-        denoise_kwargs = {"denoise_mode": "camera", "noise_profile": resolve_profile(camera_metadata)}
+    denoise_kwargs = _camera_denoise_kwargs(adjustments, camera_metadata)
 
     # Global presence runs before the two local detail branches so neither
     # branch can discard it when subject/background sharpening is active.
@@ -1017,40 +1099,10 @@ def apply_recipe_to_loaded_image(
         if (local and mask_geo is not None) else ({}, {})
     )
     if subject_detail or background_detail:
-        import numpy as np
-
-        try:
-            from .detail import apply_detail
-        except ImportError:
-            from detail import apply_detail
-
-        subject_params = _combine_detail(adjustments, subject_detail)
-        background_params = _combine_detail(adjustments, background_detail)
-        if subject_params == background_params:
-            if subject_params["sharpen"] or subject_params["noise_reduction"]:
-                result = apply_detail(result, scale=scale, **subject_params, **denoise_kwargs)
-            return result
-        subject_out = apply_detail(result, scale=scale, **subject_params, **denoise_kwargs)
-        background_out = apply_detail(result, scale=scale, **background_params, **denoise_kwargs)
-        feather = (local["mask"].get("feather") or 0.0) * scale
-        weight = _feathered_weight(
-            mask_geo.resize(subject_out.size, Image.Resampling.BILINEAR),
-            feather,
-        )[..., None]
-        subject_arr = np.asarray(subject_out).astype(np.float32)
-        background_arr = np.asarray(background_out).astype(np.float32)
-        blended = subject_arr.copy()
-        blended[..., :3] = (
-            subject_arr[..., :3] * weight
-            + background_arr[..., :3] * (1.0 - weight)
+        return _apply_local_detail(
+            result, adjustments, local, mask_geo, subject_detail,
+            background_detail, scale, denoise_kwargs,
         )
-        if isinstance(subject_out, FloatImage):
-            return FloatImage(blended, encoding="srgb")
-        out8 = np.clip(blended + 0.5, 0, 255).astype(np.uint8)
-        if out8.shape[-1] == 4:
-            # Alpha passes through unchanged (identical in both branches).
-            out8[..., 3] = np.asarray(subject_out)[..., 3]
-        return Image.fromarray(out8, subject_out.mode)
 
     sharpen = adjustments.get("sharpen", 0.0)
     noise_reduction = adjustments.get("noise_reduction", 0.0)
