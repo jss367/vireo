@@ -4,8 +4,18 @@ The package's modules, by responsibility:
 
 - ``options``: ``ScanOptions``, ``ScanHooks`` and ``ScanControl``, the
   arguments ``scan()`` takes besides the root and the database.
-- ``scan_run``: ``scan()`` and ``_ScanRun``, the discovery, metadata,
-  hashing and per-file catalog pass.
+- ``scan_run``: ``scan()`` and ``_ScanRun``, the orchestrator that runs one
+  scan's phases in order, plus metadata extraction and the end-of-scan
+  pairing and working-copy pass.
+- ``run_state``: the cancel/status signals and the progress/counts tally
+  every phase shares.
+- ``discovery``: the files a scan considers.
+- ``folders``: the folder rows a scan creates, links and stamps.
+- ``triage``: the incremental pre-pass.
+- ``features``: hashing the work queue under a CPU lease.
+- ``indexing``: the per-file catalog writes.
+- ``companion_keep`` and ``companion_attach``: companion JPEGs already on
+  their RAW's row, and pairing a JPEG before it gets a row.
 - ``hashing``: content hashes and the CPU lease the hashing pool runs under.
 - ``status``: calling a status callback with or without phase keywords.
 - ``exif_fields``: dimensions and capture time from ExifTool's groups.

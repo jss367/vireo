@@ -6525,7 +6525,7 @@ def _count_feature_computations(monkeypatch):
         computed.append(os.path.basename(path_str))
         return real(path_str)
 
-    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", counting)
+    monkeypatch.setattr(scanner.features, "_compute_file_features", counting)
     return computed
 
 

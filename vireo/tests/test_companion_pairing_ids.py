@@ -64,10 +64,11 @@ def test_pair_survivor_does_not_add_a_second_snapshot_outcome(tmp_path, already_
         imported._photo_cb(jpeg_id, jpeg_path)
         merged = scanner.companions._pair_raw_jpeg_companions(db)
         assert merged == {jpeg_id: raw_id}
-        scanner.scan_run._ScanRun._report_merged_photos(SimpleNamespace(
-            db=db, photo_merged_callback=imported._photo_merged_cb,
-            _reported_identities={jpeg_id: (folder_id, "PAIR.jpg")},
-        ), merged)
+        scanner.run_state._ScanTally(
+            {}, progress_callback=None, photo_callback=None,
+            photo_merged_callback=imported._photo_merged_cb,
+            reported_identities={jpeg_id: (folder_id, "PAIR.jpg")},
+        ).report_merged_photos(db, merged)
         result = imported._snapshot_result_fields([])
         assert result["imported"] == (0 if already_cataloged else 1)
         assert result["already_cataloged"] == (1 if already_cataloged else 0)
@@ -180,9 +181,12 @@ def test_merged_owner_deleted_before_publication_drops_import_membership(
         _ScanPass._on_merged_photo(pipeline, old_id, new_id, path)
         _InPlaceImportRun._photo_merged_cb(imported, old_id, new_id, path)
 
-    run = SimpleNamespace(db=db, photo_merged_callback=report)
+    tally = scanner.run_state._ScanTally(
+        {}, progress_callback=None, photo_callback=None,
+        photo_merged_callback=report,
+    )
     try:
-        scanner.scan_run._ScanRun._report_merged_photos(run, merged)
+        tally.report_merged_photos(db, merged)
         assert published == [(jpeg_id, None, None)]
         assert pipeline.collected_photo_ids == []
         assert pipeline.run.stages["scan"]["count"] == 0
@@ -252,17 +256,17 @@ def test_reused_old_id_drops_import_membership_instead_of_substituting(
         _ScanPass._on_merged_photo(pipeline, old_id, new_id, path)
         _InPlaceImportRun._photo_merged_cb(imported, old_id, new_id, path)
 
-    run = SimpleNamespace(
-        db=db,
+    tally = scanner.run_state._ScanTally(
+        {}, progress_callback=None, photo_callback=None,
         photo_merged_callback=report,
-        _reported_identities={
+        reported_identities={
             original_jpeg_id: (
                 original_jpeg_folder, original_jpeg_filename,
             ),
         },
     )
     try:
-        scanner.scan_run._ScanRun._report_merged_photos(run, merged)
+        tally.report_merged_photos(db, merged)
         # Mismatch between what the scanner reported for this id and
         # what pairing merged → drop old_id, do not substitute. If the
         # fix regresses, the publish re-adds ``unrelated_raw_id`` to
@@ -281,7 +285,6 @@ def test_reused_old_id_drops_import_membership_instead_of_substituting(
 def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
     tmp_path,
 ):
-    from types import SimpleNamespace
 
     import scanner
     from db import Database
@@ -303,9 +306,12 @@ def test_merged_owner_is_committed_and_cannot_be_deleted_during_publication(
         writer.conn.rollback()
         published.append((old_id, new_id, path))
 
-    run = SimpleNamespace(db=db, photo_merged_callback=report)
+    tally = scanner.run_state._ScanTally(
+        {}, progress_callback=None, photo_callback=None,
+        photo_merged_callback=report,
+    )
     try:
-        scanner.scan_run._ScanRun._report_merged_photos(run, merged)
+        tally.report_merged_photos(db, merged)
         assert published == [(jpeg_id, raw_id, str(tmp_path / "IMG_001.cr3"))]
         writer.delete_photos([raw_id])
         assert db.get_photo(raw_id) is None
@@ -767,7 +773,7 @@ def test_jpeg_becomes_its_own_photo_when_its_raw_changes_under_it(
             row["filename"] = "renamed meanwhile.cr3"
         return rows
 
-    monkeypatch.setattr(scanner.scan_run, "_pairing_rows_for_stem", stale_owner)
+    monkeypatch.setattr(scanner.companion_attach, "_pairing_rows_for_stem", stale_owner)
     # Keep the end-of-scan pass from pairing the JPEG photo afterwards, so
     # the fallback itself is what the catalog shows.
     monkeypatch.setattr(scanner.scan_run, "_pair_raw_jpeg_companions", lambda *a, **k: {})
@@ -998,7 +1004,7 @@ def test_attach_companion_refuses_when_owner_metadata_changed_before_commit(
         scanner_mod.companions, "_pick_compatible_raw_jpeg_pairs", racing_pick,
     )
     monkeypatch.setattr(
-        scanner_mod.scan_run, "_pick_compatible_raw_jpeg_pairs", racing_pick,
+        scanner_mod.companion_attach, "_pick_compatible_raw_jpeg_pairs", racing_pick,
     )
     # Keep the end-of-scan pairing pass from re-pairing after the attach
     # refused — the test's assertion is about the attach itself. (It
@@ -1097,7 +1103,7 @@ def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
         scanner_mod.companions, "_run_post_commit_fs_actions", racing_fs_actions,
     )
     monkeypatch.setattr(
-        scanner_mod.scan_run, "_run_post_commit_fs_actions", racing_fs_actions,
+        scanner_mod.companion_attach, "_run_post_commit_fs_actions", racing_fs_actions,
     )
     # Keep the end-of-scan pairing pass out: the attach already fired for
     # the JPEG; the assertion is about the publication for THAT attach.
@@ -1392,28 +1398,26 @@ def test_scan_refreshes_collection_membership_between_insert_commits(tmp_path, s
 
 def test_scan_collection_cache_does_not_reuse_rolled_back_revision(tmp_path):
     from db import Database
-    from scanner.scan_run import _ScanRun
+    from scanner.indexing import _CollectionMembership
 
     db = Database(str(tmp_path / "test.db"))
     try:
         collection = db.add_collection(
             "Selection", json.dumps([{"field": "photo_ids", "value": [101]}]),
         )
-        scanner = _ScanRun.__new__(_ScanRun)
-        scanner.db = db
-        scanner._init_collection_membership_cache()
+        scanner = _CollectionMembership(db)
         # Read a modified rule inside a transaction that later rolls back.
         db.conn.execute("UPDATE collections SET rules=? WHERE id=?", (
             json.dumps([{"field": "photo_ids", "value": [102]}]), collection,
         ))
-        scanner._drop_inherited_collection_membership(999)
+        scanner.drop_inherited_collection_membership(999)
         db.conn.rollback()
         # A transactional counter could reuse the same version for this
         # different update, missing newly saved stale membership 103.
         db.conn.execute("UPDATE collections SET rules=? WHERE id=?", (
             json.dumps([{"field": "photo_ids", "value": [103]}]), collection,
         ))
-        scanner._drop_inherited_collection_membership(103)
+        scanner.drop_inherited_collection_membership(103)
         assert _collection_photo_ids(db, collection) == []
         # Tracking is entirely connection-local.
         assert not db.conn.execute(
