@@ -27,18 +27,18 @@ async function initImportPage() {
   // default (Add in place).
   const menuParams = new URLSearchParams(window.location.search);
   if (menuParams.get('mode') === 'copy') {
-    const copyRadio = document.getElementById('modeCopy');
+    const copyRadio = /** @type {HTMLInputElement} */ (document.getElementById('modeCopy'));
     if (copyRadio) copyRadio.checked = true;
   }
   // Volume suggestions for the source input.
   try {
     const resp = await fetch('/api/volumes');
     if (resp.ok) {
-      const volumes = await resp.json();
-      const dl = document.getElementById('volumeDatalist');
+      /** @type {({path: string} | string)[]} */ const volumes = await resp.json();
+      const dl = /** @type {HTMLElement} */ (document.getElementById('volumeDatalist'));
       (volumes || []).forEach((v) => {
         const opt = document.createElement('option');
-        opt.value = v.path || v;
+        opt.value = typeof v === 'string' ? v : v.path;
         dl.appendChild(opt);
       });
     }
@@ -47,8 +47,8 @@ async function initImportPage() {
   // config_overrides merged over it (templates are Jinja-free by
   // convention, so the merge happens here, matching
   // db.get_effective_config's pipeline/ingest sub-dict behavior).
-  let cfg = {};
-  let overrides = {};
+  /** @type {ImportConfig} */ let cfg = {};
+  /** @type {ImportConfig} */ let overrides = {};
   let cfgOk = false;
   let overridesOk = false;
   try {
@@ -58,8 +58,8 @@ async function initImportPage() {
   try {
     const resp = await fetch('/api/workspaces/active');
     if (resp.ok) {
-      const ws = await resp.json();
-      const activeName = document.getElementById('activeWorkspaceName');
+      /** @type {{name?: string; config_overrides?: ImportConfig | string}} */ const ws = await resp.json();
+      const activeName = /** @type {HTMLElement} */ (document.getElementById('activeWorkspaceName'));
       if (activeName && ws.name) activeName.textContent = '(' + ws.name + ')';
       const raw = ws.config_overrides;
       overrides = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
@@ -72,8 +72,8 @@ async function initImportPage() {
   const pipelineCfg = Object.assign(
     {}, cfg.pipeline || {}, (overrides || {}).pipeline || {},
   );
-  const gpsCheckbox = document.getElementById('chkLocationFromGps');
-  const gpsHint = document.getElementById('locationGpsHint');
+  const gpsCheckbox = /** @type {HTMLInputElement} */ (document.getElementById('chkLocationFromGps'));
+  const gpsHint = /** @type {HTMLElement} */ (document.getElementById('locationGpsHint'));
   if (cfgOk && !String(cfg.google_maps_api_key || '').trim()) {
     gpsCheckbox.disabled = true;
     gpsHint.textContent =
@@ -83,7 +83,7 @@ async function initImportPage() {
   const recents = Array.isArray(ingestCfg.recent_destinations)
     ? ingestCfg.recent_destinations.filter((destination) => typeof destination === 'string')
     : [];
-  const dl = document.getElementById('recentDestinationOptions');
+  const dl = /** @type {HTMLElement} */ (document.getElementById('recentDestinationOptions'));
   recents.forEach((d) => {
     const opt = document.createElement('option');
     opt.value = d;
@@ -99,7 +99,7 @@ async function initImportPage() {
   await loadAfterImportProcesses();
 
   // Preselect the workspace's default process (null -> import only).
-  const sel = document.getElementById('afterImportSelect');
+  const sel = /** @type {HTMLSelectElement} */ (document.getElementById('afterImportSelect'));
   const def = pipelineCfg.default_process_id;
   sel.value = (def != null) ? String(def) : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
