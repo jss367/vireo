@@ -7,10 +7,10 @@ document.addEventListener('DOMContentLoaded', _syncReviewDetectionBoxesBtn);
 
 (async function() {
   try {
-    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    /** @type {{keyboard_shortcuts?:Record<string,{accept:string;skip:string}>}} */ var cfg = await safeFetch('/api/config', {}, { toast: false });
     _shortcuts = (cfg.keyboard_shortcuts || {}).review || {accept: 'a', skip: 's'};
     window._vireoShortcuts = cfg.keyboard_shortcuts || {};
-    var el = document.getElementById('kbdHintReview');
+    var el = /** @type {HTMLElement} */ (document.getElementById('kbdHintReview'));
     if (el && _shortcuts) el.textContent = 'Keyboard: ' + formatShortcut(_shortcuts.accept) + ' = accept, ' + formatShortcut(_shortcuts.skip) + ' = skip';
   } catch(e) {
     _shortcuts = {accept: 'a', skip: 's'};
@@ -18,15 +18,15 @@ document.addEventListener('DOMContentLoaded', _syncReviewDetectionBoxesBtn);
 })();
 
 /* ---------- Bootstrap ---------- */
-VireoViewPreferences.restoreAll(document.getElementById('reviewBar'));
-currentSort = document.getElementById('sortSelect').value;
-updateThumbSize(document.getElementById('thumbSizeSlider').value);
+VireoViewPreferences.restoreAll(/** @type {HTMLElement} */ (document.getElementById('reviewBar')));
+currentSort = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value;
+updateThumbSize(/** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider')).value);
 applyReviewQueryParams();
 loadPredictions();
 loadCollectionFilter();
 VireoFilter.init({
   page: 'review',
-  root: document.getElementById('vireoFilterBar'),
+  root: /** @type {HTMLElement} */ (document.getElementById('vireoFilterBar')),
   scopeLabel: 'Review \u00b7 Predictions',
   onChange: loadPredictions,
   // Review keeps its collection scope outside the filter tree and passes

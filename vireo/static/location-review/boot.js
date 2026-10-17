@@ -3,17 +3,17 @@
 'use strict';
 
 // Preserve the inline script's order: bind every control, then initialize().
-document.getElementById('locationReviewBack').addEventListener('click', returnToBrowse);
-document.getElementById('locationReviewEmptyBack').addEventListener('click', returnToBrowse);
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewBack')).addEventListener('click', returnToBrowse);
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewEmptyBack')).addEventListener('click', returnToBrowse);
 
-document.getElementById('locationReviewCollection').addEventListener('change', function(event) {
-  var value = event.target.value;
+/** @type {HTMLSelectElement} */ (document.getElementById('locationReviewCollection')).addEventListener('change', function(event) {
+  var value = /** @type {HTMLSelectElement} */ (event.currentTarget).value;
   if (!value) return;
   changeReviewSource(value === 'all' ? {scope: 'all'} : value === '__selection__'
     ? state.source : {collection_id: Number(value)});
 });
 ['locationReviewMode', 'locationReviewGap', 'locationReviewDistance', 'locationReviewIncludeKept'].forEach(function(id) {
-  document.getElementById(id).addEventListener('change', function() { changeReviewSource(state.source); });
+  document.getElementById(id)?.addEventListener('change', function() { changeReviewSource(state.source); });
 });
 
 document.addEventListener('lightbox:photodeleted', function(event) {
@@ -58,7 +58,7 @@ document.addEventListener('lightbox:photodeleted', function(event) {
       updateAssignmentProgress(
         state.assignment.completed, state.assignment.total, true
       );
-      var pendingAssign = document.getElementById('locationReviewAssign');
+      var pendingAssign = /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewAssign'));
       if (pendingAssign) {
         pendingAssign.textContent =
           'Retry ' + formatNumber(pendingRemaining) + ' remaining';
@@ -76,43 +76,43 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   renderCurrentGroup();
 });
 
-document.getElementById('locationReviewSearch').addEventListener('input', function() {
+/** @type {HTMLInputElement} */ (document.getElementById('locationReviewSearch')).addEventListener('input', function() {
   if (state.mode === 'time') renderSavedTimeLocations();
 });
 
-document.getElementById('locationReviewShowAll').addEventListener('click', function() {
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewShowAll')).addEventListener('click', function() {
   if (state.isAssigning || hasPartialAssignmentProgress() || !currentGroup()) return;
   state.inspectAll = !state.inspectAll;
   state.photoPage = 0;
-  renderThumbnails(currentGroup());
+  var group = currentGroup(); if (group) renderThumbnails(group);
 });
 ['Previous', 'Next'].forEach(function(direction) {
-  document.getElementById('locationReviewPage' + direction).addEventListener('click', function() {
+  document.getElementById('locationReviewPage' + direction)?.addEventListener('click', function() {
     if (state.isAssigning || hasPartialAssignmentProgress() || !currentGroup()) return;
     state.photoPage = Math.max(0, state.photoPage + (direction === 'Next' ? 1 : -1));
-    renderThumbnails(currentGroup());
+    var group = currentGroup(); if (group) renderThumbnails(group);
   });
 });
 
-document.getElementById('locationReviewKeep').addEventListener('click', function() { resolveDiscrepancies('keep'); });
-document.getElementById('locationReviewSelectAll').addEventListener('click', function() {
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewKeep')).addEventListener('click', function() { resolveDiscrepancies('keep'); });
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewSelectAll')).addEventListener('click', function() {
   if (state.isAssigning || !currentGroup()) return;
-  state.selectedGpsPhotos = new Set(currentGroup().photo_ids);
+  state.selectedGpsPhotos = new Set(currentGroup()?.photo_ids || []);
   updateDiscrepancySelection();
 });
-document.getElementById('locationReviewSelectNone').addEventListener('click', function() {
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewSelectNone')).addEventListener('click', function() {
   if (state.isAssigning) return;
   state.selectedGpsPhotos.clear();
   updateDiscrepancySelection();
 });
 
-document.getElementById('locationReviewPrevious').addEventListener('click', function() { moveGroup(-1); });
-document.getElementById('locationReviewNext').addEventListener('click', function() { moveGroup(1); });
-document.getElementById('locationReviewIncludeCoordinates').addEventListener('change', function(event) {
-  state.includeCoordinates = event.target.checked;
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewPrevious')).addEventListener('click', function() { moveGroup(-1); });
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewNext')).addEventListener('click', function() { moveGroup(1); });
+/** @type {HTMLInputElement} */ (document.getElementById('locationReviewIncludeCoordinates')).addEventListener('change', function(event) {
+  state.includeCoordinates = /** @type {HTMLInputElement} */ (event.currentTarget).checked;
   renderCandidates();
 });
-document.getElementById('locationReviewSkip').addEventListener('click', function() {
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewSkip')).addEventListener('click', function() {
   if (state.isAssigning || hasPartialAssignmentProgress()) return;
   var group = currentGroup();
   if (!group) return;
@@ -121,22 +121,22 @@ document.getElementById('locationReviewSkip').addEventListener('click', function
   if (state.currentIndex >= state.groups.length) state.currentIndex = Math.max(0, state.groups.length - 1);
   renderCurrentGroup();
 });
-document.getElementById('locationReviewAssign').addEventListener('click', assignCurrentGroup);
-document.querySelectorAll('[data-suggestion-mode]').forEach(function(button) {
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewAssign')).addEventListener('click', assignCurrentGroup);
+document.querySelectorAll(/** @type {'button'} */ ('[data-suggestion-mode]')).forEach(function(button) {
   button.addEventListener('click', function() {
-    setSuggestionMode(button.dataset.suggestionMode);
+    setSuggestionMode(button.dataset.suggestionMode || '');
   });
 });
-document.getElementById('locationReviewCustom').addEventListener('click', function() {
-  var name = document.getElementById('locationReviewSearch').value.trim();
+/** @type {HTMLButtonElement} */ (document.getElementById('locationReviewCustom')).addEventListener('click', function() {
+  var name = /** @type {HTMLInputElement} */ (document.getElementById('locationReviewSearch')).value.trim();
   if (!name) { showToast('Enter a friendly location name first.', 'error'); return; }
   state.searchedCandidate = normalizeCandidate({kind: 'custom', name: name});
   selectChoice(state.searchedCandidate);
 });
-document.getElementById('locationReviewSearch').addEventListener('keydown', function(event) {
+/** @type {HTMLInputElement} */ (document.getElementById('locationReviewSearch')).addEventListener('keydown', function(event) {
   if (event.key === 'Enter' && state.mapMode !== 'google') {
     event.preventDefault();
-    document.getElementById('locationReviewCustom').click();
+    /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewCustom')).click();
   }
 });
 

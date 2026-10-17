@@ -1,17 +1,17 @@
 /* ---------- Pointer drag-reorder over the unified strip ---------- */
 (function() {
-  function strip() { return document.getElementById('navTabStrip'); }
+  function strip() { return /** @type {HTMLElement} */ (document.getElementById('navTabStrip')); }
   function tabAnchors() {
     const s = strip();
-    return s ? Array.from(s.querySelectorAll('.nav-tab:not(.is-ephemeral)')) : [];
+    return s ? Array.from(/** @type {NodeListOf<HTMLAnchorElement>} */ (s.querySelectorAll('.nav-tab:not(.is-ephemeral)'))) : [];
   }
 
-  let draggedEl = null;
-  let pressedEl = null;
-  let pointerId = null;
+  /** @type {HTMLAnchorElement | null} */ let draggedEl = null;
+  /** @type {HTMLAnchorElement | null} */ let pressedEl = null;
+  /** @type {number | null} */ let pointerId = null;
   let startX = 0;
   let startY = 0;
-  let indicator = null;
+  /** @type {HTMLElement | null} */ let indicator = null;
   let suppressClick = false;
   const DRAG_THRESHOLD = 4;
 
@@ -27,6 +27,7 @@
   function visibleDropAnchors() {
     return tabAnchors().filter(a => a !== draggedEl && a.style.display !== 'none');
   }
+  /** @param {number} clientX */
   function dropReference(clientX) {
     const anchors = visibleDropAnchors();
     if (!anchors.length) return null;
@@ -34,8 +35,9 @@
       const rect = anchor.getBoundingClientRect();
       if (clientX < rect.left + rect.width / 2) return anchor;
     }
-    return anchors[anchors.length - 1].nextSibling;
+    return anchors[anchors.length - 1]?.nextSibling || null;
   }
+  /** @param {number} clientX */
   function showDropIndicator(clientX) {
     const s = strip();
     if (!s) return;
@@ -44,9 +46,10 @@
     s.insertBefore(indicator, dropReference(clientX));
   }
   function persistCurrentOrder() {
-    const newOrder = tabAnchors().map(a => a.dataset.navId);
+    const newOrder = tabAnchors().map(a => a.dataset.navId).filter((id) => typeof id === 'string');
     if (window._navTabs) window._navTabs.setTabs(newOrder);
   }
+  /** @param {number} clientX @param {number} clientY */
   function pointInsideStrip(clientX, clientY) {
     const s = strip();
     if (!s) return false;
@@ -54,6 +57,7 @@
     return clientX >= rect.left && clientX <= rect.right &&
       clientY >= rect.top && clientY <= rect.bottom;
   }
+  /** @param {number} clientX */
   function commitReorder(clientX) {
     const s = strip();
     if (!s || !draggedEl) return;
@@ -78,8 +82,8 @@
     // through release, including when the pointer leaves the navbar.
     s.addEventListener('pointerdown', function(e) {
       if (e.button !== 0 || !e.isPrimary) return;
-      if (e.target.closest('.nav-tab-close, .nav-tab-pin')) return;
-      const link = e.target.closest('.nav-tab:not(.is-ephemeral)');
+      if (/** @type {HTMLElement} */ (e.target).closest('.nav-tab-close, .nav-tab-pin')) return;
+      const link = /** @type {HTMLAnchorElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('.nav-tab:not(.is-ephemeral)'));
       if (!link || !s.contains(link)) return;
       pressedEl = link;
       pointerId = e.pointerId;
@@ -132,7 +136,7 @@
 /* ---------- Navigation Hotkeys ---------- */
 (function() {
   // Map from navigation shortcut key → href path
-  var NAV_ROUTES = {
+  /** @type {Record<string,string>} */ var NAV_ROUTES = {
     pipeline: '/pipeline', lightroom: '/lightroom', pipeline_review: '/pipeline/review',
     review: '/review', cull: '/cull', browse: '/browse', map: '/map',
     dashboard: '/dashboard', storage: '/storage', audit: '/audit',
@@ -140,22 +144,24 @@
     settings: '/settings', keywords: '/keywords'
   };
 
-  var NAV_DEFAULTS = {
+  /** @type {Record<string,string>} */ var NAV_DEFAULTS = {
     pipeline: '', lightroom: '', pipeline_review: '', review: '',
     cull: '', browse: '', map: '',
     dashboard: '', storage: '', audit: '', id_conflicts: '', workspace: '',
     shortcuts: '', settings: '', keywords: ''
   };
 
+  /** @param {string | undefined} keyStr */
   function isBareShortcut(keyStr) {
     if (!keyStr) return false;
     var sc = parseShortcut(keyStr);
     return !sc.ctrl && !sc.meta && !sc.shift && !sc.alt;
   }
 
+  /** @param {string | undefined} keyStr @param {Record<string,Record<string,string>>} shortcuts */
   function isBarePageShortcut(keyStr, shortcuts) {
     if (!isBareShortcut(keyStr)) return false;
-    var key = parseShortcut(keyStr).key;
+    var key = parseShortcut(keyStr || '').key;
 
     // Bare navigation shortcuts are intentionally limited to unused letters.
     // Non-letter keys retain their browser or page behavior unless combined
@@ -177,33 +183,34 @@
       var pageShortcuts = shortcuts[ctx] || {};
       for (var action in pageShortcuts) {
         var shortcut = pageShortcuts[action];
-        if (isBareShortcut(shortcut) && parseShortcut(shortcut).key === key) return true;
+        if (isBareShortcut(shortcut) && parseShortcut(shortcut || '').key === key) return true;
       }
     }
     return false;
   }
 
+  /** @param {string | undefined} keyStr @param {Record<string,Record<string,string>>} shortcuts */
   function navigationShortcutOrEmpty(keyStr, shortcuts) {
-    return isBarePageShortcut(keyStr, shortcuts) ? '' : keyStr;
+    return isBarePageShortcut(keyStr, shortcuts) ? '' : (keyStr || '');
   }
 
   // Build reverse map: href → shortcut action name
-  var hrefToAction = {};
-  for (var action in NAV_ROUTES) hrefToAction[NAV_ROUTES[action]] = action;
+  /** @type {Record<string,string>} */ var hrefToAction = {};
+  for (var action in NAV_ROUTES) hrefToAction[NAV_ROUTES[action] || ''] = action;
 
   // Replace the leading label text node of a dynamic .nav-tab anchor
   // with a label fragment, preserving sibling elements (badge, close
   // button, etc.). Returns true if a label node was found+replaced.
+  /** @param {HTMLElement} link @param {DocumentFragment} fragment */
   function replaceTabLabel(link, fragment) {
     // Remove any existing .hk / .hk-suffix from a previous run
-    var hk = link.querySelector('.hk');
+    var hk = /** @type {HTMLElement | null} */ (link.querySelector('.hk'));
     if (hk && hk.parentNode === link) hk.remove();
-    var hkSuf = link.querySelector('.hk-suffix');
+    var hkSuf = /** @type {HTMLElement | null} */ (link.querySelector('.hk-suffix'));
     if (hkSuf && hkSuf.parentNode === link) hkSuf.remove();
     // Find the leading text node and replace it.
-    for (var i = 0; i < link.childNodes.length; i++) {
-      var n = link.childNodes[i];
-      if (n.nodeType === 3 /* Node.TEXT_NODE */ && n.textContent.trim().length > 0) {
+    for (const n of link.childNodes) {
+      if (n.nodeType === 3 /* Node.TEXT_NODE */ && (n.textContent || '').trim().length > 0) {
         link.replaceChild(fragment, n);
         return true;
       }
@@ -211,12 +218,12 @@
     return false;
   }
 
+  /** @param {Record<string,string>} navShortcuts */
   function applyHotkeyHints(navShortcuts) {
-    var navLinks = document.querySelectorAll('.navbar a[href]:not(.brand):not(.nav-icon):not([data-tab])');
-    for (var i = 0; i < navLinks.length; i++) {
-      var link = navLinks[i];
+    var navLinks = /** @type {NodeListOf<HTMLAnchorElement>} */ (document.querySelectorAll('.navbar a[href]:not(.brand):not(.nav-icon):not([data-tab])'));
+    for (const link of navLinks) {
       var href = link.getAttribute('href');
-      var action = hrefToAction[href];
+      var action = hrefToAction[href || ''];
       if (!action) continue;
       var keyStr = navShortcuts[action];
       if (!keyStr) continue;
@@ -227,15 +234,14 @@
         // Dynamic tabs have label as a leading text node; siblings are
         // badge / close-button spans we must preserve.
         var labelNode = null;
-        for (var j = 0; j < link.childNodes.length; j++) {
-          var cn = link.childNodes[j];
-          if (cn.nodeType === 3 && cn.textContent.trim().length > 0) {
+        for (const cn of link.childNodes) {
+          if (cn.nodeType === 3 && (cn.textContent || '').trim().length > 0) {
             labelNode = cn; break;
           }
         }
-        label = labelNode ? labelNode.textContent.trim() : link.textContent.trim();
+        label = labelNode ? (labelNode.textContent || '').trim() : (link.textContent || '').trim();
       } else {
-        label = link.textContent.trim();
+        label = (link.textContent || '').trim();
       }
 
       var sc = parseShortcut(keyStr);
@@ -287,6 +293,7 @@
   // navigation chord while the lightbox is open would close it AND navigate.
   var OVERLAY_SELECTOR = '.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active';
 
+  /** @param {Record<string,string>} navShortcuts */
   function setupNavKeydown(navShortcuts) {
     if (!window.Keymap || !window.Keymap.register) return;
 
@@ -294,6 +301,7 @@
       var key = navShortcuts[action];
       if (!key) return;
       var route = NAV_ROUTES[action];
+      if (!route) return;
       window.Keymap.register('global', {
         key: key,
         name: action,
@@ -319,7 +327,7 @@
           }
           // Don't navigate if we're already on this page.
           if (window.location.pathname === route) return false;
-          window.location.href = window.vireoResolveNavigationHref(route);
+          window.location.href = window.vireoResolveNavigationHref(route || '/browse');
         }
       });
     });
@@ -329,7 +337,7 @@
   // any /api/config fetch resolves. Otherwise page-scoped shortcuts registered
   // by other scripts would race the fetch and dispatch on the wrong scope.
   var _path = location.pathname;
-  var _pageCtx = null;
+  /** @type {string | null} */ var _pageCtx = null;
   if (_path === '/browse') _pageCtx = 'browse';
   else if (_path === '/review') _pageCtx = 'review';
   else if (_path.startsWith('/pipeline/rapid-review')) _pageCtx = 'pipeline_rapid_review';
@@ -342,9 +350,9 @@
   // this script. A fast /api/config answer used to land first, and the
   // ReferenceError, swallowed below, left the page with no navigation
   // shortcuts at all. Wait until every script has run.
-  var scriptsLoaded = new Promise(function(resolve) {
+  /** @type {Promise<void>} */ var scriptsLoaded = new Promise(function(resolve) {
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', resolve, { once: true });
+      document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
     } else {
       resolve();
     }
@@ -354,21 +362,21 @@
   fetch('/api/config')
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(cfg) { return scriptsLoaded.then(function() { return cfg; }); })
-    .then(function(cfg) {
+    .then(function(/** @type {{numbered_navigation_mode: string; keyboard_shortcuts?: Record<string,Record<string,string>>} | null} */ cfg) {
       if (!cfg) return;
       window.vireoSetNumberedNavigationMode(cfg.numbered_navigation_mode);
       var shortcuts = cfg.keyboard_shortcuts || {};
-      var navShortcuts = {};
+      /** @type {Record<string,string>} */ var navShortcuts = {};
       // Merge defaults with user overrides
-      for (var key in NAV_DEFAULTS) navShortcuts[key] = NAV_DEFAULTS[key];
+      for (var key in NAV_DEFAULTS) navShortcuts[key] = NAV_DEFAULTS[key] || '';
       if (shortcuts.navigation) {
-        for (key in shortcuts.navigation) navShortcuts[key] = shortcuts.navigation[key];
+        for (key in shortcuts.navigation) navShortcuts[key] = shortcuts.navigation[key] || '';
       }
       for (key in navShortcuts) {
         navShortcuts[key] = navigationShortcutOrEmpty(navShortcuts[key], shortcuts);
       }
       // Store for other scripts to access
-      if (!window._vireoShortcuts) window._vireoShortcuts = shortcuts;
+      window._vireoShortcuts = window._vireoShortcuts || shortcuts;
       window._vireoShortcuts.navigation = navShortcuts;
 
       // Expose so renderStrip() (in another IIFE) can re-apply hints
@@ -382,7 +390,7 @@
 
 /* ---------- Shortcuts Cheat Sheet (?) ---------- */
 (function() {
-  var SC_LABELS = {
+  /** @type {Record<string,Record<string,string>>} */ var SC_LABELS = {
     global: {
       _title: 'Global',
       open_shortcuts: 'Open keyboard shortcuts',
@@ -449,7 +457,7 @@
     },
   };
 
-  var SC_DEFAULTS = {
+  /** @type {NavShortcutDefaults} */ var SC_DEFAULTS = {
     global: {
       open_shortcuts: '?',
       command_palette: 'ctrl+k',
@@ -505,6 +513,7 @@
     },
   };
 
+  /** @param {Record<string,Record<string,string>>} shortcuts @param {string} ctx @param {string} action */
   function sheetShortcutValue(shortcuts, ctx, action) {
     // Misses and Lightbox intentionally reuse configurable Browse bindings
     // for photo flag actions. Show the effective key and contextual label
@@ -543,32 +552,33 @@
     var html = '';
     for (var ctx in SC_LABELS) {
       var labels = SC_LABELS[ctx];
+      if (!labels) continue;
       html += '<div class="sc-group-title">' + labels._title + '</div>';
       for (var action in labels) {
         if (action === '_title') continue;
         var key = sheetShortcutValue(shortcuts, ctx, action);
         html += '<div class="sc-row">' +
-          '<span class="sc-key">' + formatShortcut(key) + '</span>' +
+          '<span class="sc-key">' + formatShortcut(key || '') + '</span>' +
           '<span class="sc-label">' + labels[action] + '</span>' +
           '</div>';
       }
     }
-    document.getElementById('shortcutsSheetContent').innerHTML = html;
+    /** @type {HTMLElement} */ (document.getElementById('shortcutsSheetContent')).innerHTML = html;
   }
 
   window.openShortcutsSheet = function() {
     var alreadyOpen = !!window._sheetEscToken;
-    if (alreadyOpen) Keymap.popEsc(window._sheetEscToken);
+    if (alreadyOpen) Keymap.popEsc(window._sheetEscToken ?? -1);
     window._sheetEscToken = Keymap.pushEsc(function() { closeShortcutsSheet(); });
     renderSheet();
-    document.getElementById('shortcutsCheatSheet').classList.add('open');
+    /** @type {HTMLElement} */ (document.getElementById('shortcutsCheatSheet')).classList.add('open');
     if (!alreadyOpen) Keymap.lockBodyScroll();
   };
 
   window.closeShortcutsSheet = function() {
     var wasOpen = !!window._sheetEscToken;
-    if (wasOpen) { Keymap.popEsc(window._sheetEscToken); window._sheetEscToken = null; }
-    document.getElementById('shortcutsCheatSheet').classList.remove('open');
+    if (wasOpen) { Keymap.popEsc(window._sheetEscToken ?? -1); window._sheetEscToken = null; }
+    /** @type {HTMLElement} */ (document.getElementById('shortcutsCheatSheet')).classList.remove('open');
     if (wasOpen) Keymap.unlockBodyScroll();
   };
 
@@ -576,13 +586,13 @@
   // only opens the sheet on '?' and consumes non-Esc keys while the sheet is
   // open so page handlers (rating, navigation, etc.) don't also fire.
   document.addEventListener('keydown', function(e) {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-    if (document.querySelector('.pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active')) return;
-    var lightboxOverlay = document.getElementById('lightboxOverlay');
+    if (/** @type {HTMLElement} */ (e.target).tagName === 'INPUT' || /** @type {HTMLElement} */ (e.target).tagName === 'TEXTAREA' || /** @type {HTMLElement} */ (e.target).tagName === 'SELECT') return;
+    if (/** @type {HTMLElement | null} */ (document.querySelector('.pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active'))) return;
+    var lightboxOverlay = /** @type {HTMLElement} */ (document.getElementById('lightboxOverlay'));
     if (lightboxOverlay && (document.fullscreenElement === lightboxOverlay || document.webkitFullscreenElement === lightboxOverlay)) return;
     // When sheet is open, consume non-Esc keys so page handlers don't fire.
     // Esc is handled by the Keymap.pushEsc stack and must reach the dispatcher.
-    if (document.getElementById('shortcutsCheatSheet').classList.contains('open')) {
+    if (/** @type {HTMLElement} */ (document.getElementById('shortcutsCheatSheet')).classList.contains('open')) {
       if (e.key === 'Escape') return;
       e.preventDefault();
       e.stopImmediatePropagation();

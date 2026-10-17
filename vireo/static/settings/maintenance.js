@@ -2,10 +2,10 @@
 
 /* ---------- Embedding Matrix ---------- */
 async function loadEmbeddingMatrix() {
-  var matrixEl = document.getElementById('matrixContent');
+  var matrixEl = /** @type {HTMLElement} */ (document.getElementById('matrixContent'));
   if (!matrixEl) return;
   try {
-    var data = await safeFetch('/api/embedding-matrix', {}, { toast: false });
+    /** @type {{models?:SettingsModel[];matrix?:{labels_name:string;labels_file:string;species_count:number;unusable?:boolean;skipped?:number;models:Record<string,{cached?:boolean}>}[]}} */ var data = await safeFetch('/api/embedding-matrix', {}, { toast: false });
     var models = data.models || [];
     var matrix = data.matrix || [];
 
@@ -54,7 +54,7 @@ async function loadEmbeddingMatrix() {
   }
 }
 
-async function precomputeEmbeddings(modelId, labelsFile) {
+/** @param {string} modelId @param {string} labelsFile */ async function precomputeEmbeddings(modelId, labelsFile) {
   try {
     var data = await safeFetch('/api/jobs/precompute-embeddings', {
       method: 'POST',
@@ -72,45 +72,45 @@ async function precomputeEmbeddings(modelId, labelsFile) {
 
 /* ---------- Preview Cache ---------- */
 async function loadPreviewCacheStatus() {
-  var statusEl = document.getElementById('previewCacheStatus');
-  var warnEl = document.getElementById('previewCacheWarning');
+  var statusEl = /** @type {HTMLElement} */ (document.getElementById('previewCacheStatus'));
+  var warnEl = /** @type {HTMLElement} */ (document.getElementById('previewCacheWarning'));
   if (!statusEl) return;
   try {
     var d = await safeFetch('/api/preview-cache', {}, { toast: false });
     var usedMb = (d.total_size / 1024 / 1024).toFixed(1);
     var quotaMb = Math.round(d.quota_bytes / 1024 / 1024);
     var fileWord = d.count === 1 ? 'file' : 'files';
-    statusEl.textContent = 'Current: ' + usedMb + ' / ' + quotaMb + ' MB (' + d.count + ' ' + fileWord + ')';
+    statusEl.textContent = String('Current: ' + usedMb + ' / ' + quotaMb + ' MB (' + d.count + ' ' + fileWord + ')');
     if (warnEl) {
       var rec = d.recommended_mb || 0;
       // Quota=0 means "disabled" — that's a deliberate user choice, not a warning case.
       if (rec > 0 && quotaMb > 0 && quotaMb < rec) {
-        warnEl.textContent = 'Cache is smaller than your library — previews will regenerate from RAW on every pipeline run. Recommended: ' + rec.toLocaleString() + ' MB.';
+        warnEl.textContent = String('Cache is smaller than your library — previews will regenerate from RAW on every pipeline run. Recommended: ' + rec.toLocaleString() + ' MB.');
         warnEl.style.display = 'block';
       } else {
         warnEl.style.display = 'none';
       }
     }
   } catch(e) {
-    statusEl.textContent = 'Failed to load';
+    statusEl.textContent = String('Failed to load');
     if (warnEl) warnEl.style.display = 'none';
   }
 }
 
 async function clearPreviewCache() {
   if (!confirm('Clear all cached preview images? They will regenerate on demand from the originals.')) return;
-  var btn = document.getElementById('clearPreviewCacheBtn');
-  if (btn) btn.disabled = true;
+  var btn = /** @type {HTMLElement} */ (document.getElementById('clearPreviewCacheBtn'));
+  if (btn) if (btn instanceof HTMLButtonElement) btn.disabled = true;
   try {
     await safeFetch('/api/preview-cache/clear', { method: 'POST' });
   } catch(e) {}
-  if (btn) btn.disabled = false;
+  if (btn) if (btn instanceof HTMLButtonElement) btn.disabled = false;
   loadPreviewCacheStatus();
 }
 
 /* ---------- Detection Cache ---------- */
 async function loadDetectionCacheStats() {
-  var el = document.getElementById('detectionCacheStats');
+  var el = /** @type {HTMLElement} */ (document.getElementById('detectionCacheStats'));
   if (!el) return;
   try {
     var d = await safeFetch('/api/detection-cache/stats', {}, { toast: false });
@@ -118,32 +118,32 @@ async function loadDetectionCacheStats() {
     var mc = d.model_count || 0;
     var photoWord = pc === 1 ? 'photo' : 'photos';
     var modelWord = mc === 1 ? 'model' : 'models';
-    el.textContent = pc + ' ' + photoWord + ' \u00D7 ' + mc + ' ' + modelWord + ' cached';
+    el.textContent = String(pc + ' ' + photoWord + ' \u00D7 ' + mc + ' ' + modelWord + ' cached');
   } catch(e) {
-    el.textContent = 'Failed to load';
+    el.textContent = String('Failed to load');
   }
 }
 
 /* ---------- Portable Computation Cache ---------- */
 async function loadComputationCacheStatus() {
-  var el = document.getElementById('computationCacheStatus');
+  var el = /** @type {HTMLElement} */ (document.getElementById('computationCacheStatus'));
   if (!el) return;
   try {
     var data = await safeFetch('/api/computation-cache', {}, { toast: false });
     var exportable = data.exportable || {};
     var runs = (exportable.detector_runs || 0) + (exportable.classifier_runs || 0);
     var stored = data.object_count || 0;
-    el.textContent = runs.toLocaleString() + ' exportable runs; ' +
-      stored.toLocaleString() + ' imported/local objects (' + formatBytes(data.total_bytes || 0) + ')';
+    el.textContent = String(runs.toLocaleString() + ' exportable runs; ' +
+      stored.toLocaleString() + ' imported/local objects (' + formatBytes(data.total_bytes || 0) + ')');
   } catch (e) {
-    el.textContent = 'Status unavailable';
+    el.textContent = String('Status unavailable');
   }
 }
 
 function selectedComputationCacheTypes() {
   var types = [];
-  if (document.getElementById('cacheExportDetections').checked) types.push('detection');
-  if (document.getElementById('cacheExportClassifications').checked) types.push('classification');
+  if (/** @type {HTMLInputElement} */ (document.getElementById('cacheExportDetections')).checked) types.push('detection');
+  if (/** @type {HTMLInputElement} */ (document.getElementById('cacheExportClassifications')).checked) types.push('classification');
   return types;
 }
 
@@ -153,21 +153,21 @@ function exportComputationCache() {
     alert('Select at least one result type to export.');
     return;
   }
-  var action = document.getElementById('computationCacheAction');
-  action.textContent = 'Preparing download…';
+  var action = /** @type {HTMLElement} */ (document.getElementById('computationCacheAction'));
+  action.textContent = String('Preparing download…');
   window.location.href = '/api/computation-cache/export?types=' + encodeURIComponent(types.join(','));
   window.setTimeout(function() {
-    action.textContent = 'Download requested. Legacy results without a portable runtime identity are skipped.';
+    action.textContent = String('Download requested. Legacy results without a portable runtime identity are skipped.');
   }, 500);
 }
 
-async function importComputationCache(file) {
+/** @param {File} file */ async function importComputationCache(file) {
   if (!file) return;
-  var button = document.getElementById('computationCacheImportBtn');
-  var action = document.getElementById('computationCacheAction');
+  var button = /** @type {HTMLButtonElement} */ (document.getElementById('computationCacheImportBtn'));
+  var action = /** @type {HTMLElement} */ (document.getElementById('computationCacheAction'));
   button.disabled = true;
   action.style.color = 'var(--text-dim)';
-  action.textContent = 'Validating and applying ' + file.name + '…';
+  action.textContent = String('Validating and applying ' + file.name + '…');
   var form = new FormData();
   form.append('file', file, file.name);
   try {
@@ -178,10 +178,10 @@ async function importComputationCache(file) {
     var data = await response.json().catch(function() { return {}; });
     if (!response.ok) throw new Error(data.error || response.statusText || 'Import failed');
     action.style.color = 'var(--accent)';
-    action.textContent = 'Imported ' + (data.added || 0).toLocaleString() +
+    action.textContent = String('Imported ' + (data.added || 0).toLocaleString() +
       ' new objects; applied ' + (data.detector_runs_applied || 0).toLocaleString() +
       ' detector and ' + (data.classifier_runs_applied || 0).toLocaleString() +
-      ' classifier runs to ' + (data.matched_photos || 0).toLocaleString() + ' matching photos.';
+      ' classifier runs to ' + (data.matched_photos || 0).toLocaleString() + ' matching photos.');
     if (data.pinned_older_runtime) {
       action.textContent += ' ' + data.pinned_older_runtime.toLocaleString() +
         ' reviewed older results were preserved.';
@@ -201,7 +201,7 @@ async function importComputationCache(file) {
     await loadComputationCacheStatus();
   } catch (error) {
     action.style.color = 'var(--danger)';
-    action.textContent = error && error.message ? error.message : 'Import failed';
+    action.textContent = String(error && settingsErrorMessage(error) ? settingsErrorMessage(error) : 'Import failed');
   } finally {
     button.disabled = false;
   }
@@ -210,16 +210,16 @@ async function importComputationCache(file) {
 /* ---------- Embedding Cache ---------- */
 async function loadEmbeddingCache() {
   try {
-    var d = await safeFetch('/api/embedding-cache', {}, { toast: false });
-    document.getElementById('embeddingCacheSize').textContent = formatBytes(d.total_size);
+    /** @type {{total_size:number;entries?:{label_count?:number}[]}} */ var d = await safeFetch('/api/embedding-cache', {}, { toast: false });
+    /** @type {HTMLElement} */ (document.getElementById('embeddingCacheSize')).textContent = String(formatBytes(d.total_size));
     var entries = d.entries || [];
     var count = entries.filter(entry => !entry.label_count).length;
     var labels = entries.reduce((sum, entry) => sum + (entry.label_count || 0), 0);
     var parts = [];
     if (count) parts.push(count + ' cached label ' + (count === 1 ? 'set' : 'sets'));
     if (labels) parts.push(labels.toLocaleString() + ' reusable species labels');
-    document.getElementById('embeddingCacheCount').textContent = parts.join(' · ') || 'empty';
-    document.getElementById('clearCacheBtn').style.display = entries.length > 0 ? '' : 'none';
+    /** @type {HTMLElement} */ (document.getElementById('embeddingCacheCount')).textContent = String(parts.join(' · ') || 'empty');
+    /** @type {HTMLElement} */ (document.getElementById('clearCacheBtn')).style.display = entries.length > 0 ? '' : 'none';
   } catch(e) {}
 }
 
@@ -234,10 +234,10 @@ async function clearEmbeddingCache() {
 /* ---------- Scan Roots ---------- */
 async function loadScanRoots() {
   try {
-    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    /** @type {SettingsConfig} */ var cfg = await safeFetch('/api/config', {}, { toast: false });
     var roots = cfg.scan_roots || [];
     if (roots.length === 0) {
-      document.getElementById('scanRootsContent').innerHTML = '<span style="color:var(--text-faint);font-size:13px;">No directories scanned yet. Scan a folder on the Import page to save it here.</span>';
+      /** @type {HTMLElement} */ (document.getElementById('scanRootsContent')).innerHTML = '<span style="color:var(--text-faint);font-size:13px;">No directories scanned yet. Scan a folder on the Import page to save it here.</span>';
       return;
     }
     var html = '';
@@ -247,15 +247,15 @@ async function loadScanRoots() {
       html += '<button onclick="removeScanRoot(' + i + ')" style="background:none;border:none;color:var(--text-faint);font-size:14px;cursor:pointer;padding:2px 6px;" title="Remove">&times;</button>';
       html += '</div>';
     });
-    document.getElementById('scanRootsContent').innerHTML = html;
+    /** @type {HTMLElement} */ (document.getElementById('scanRootsContent')).innerHTML = html;
   } catch(e) {
-    document.getElementById('scanRootsContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+    /** @type {HTMLElement} */ (document.getElementById('scanRootsContent')).innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
-async function removeScanRoot(index) {
+/** @param {number} index */ async function removeScanRoot(index) {
   try {
-    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    /** @type {SettingsConfig} */ var cfg = await safeFetch('/api/config', {}, { toast: false });
     var roots = cfg.scan_roots || [];
     roots.splice(index, 1);
     await safeFetch('/api/config', {
@@ -268,13 +268,13 @@ async function removeScanRoot(index) {
 }
 
 async function cleanKeywords() {
-  var status = document.getElementById('cleanKeywordsStatus');
-  status.textContent = 'Checking...';
+  var status = /** @type {HTMLElement} */ (document.getElementById('cleanKeywordsStatus'));
+  status.textContent = String('Checking...');
   status.style.color = '';
   try {
-    var dupes = await safeFetch('/api/keywords/duplicates', {}, { toast: false });
+    /** @type {{variants:{name:string;photo_count:number}[];keep:string}[]} */ var dupes = await safeFetch('/api/keywords/duplicates', {}, { toast: false });
     if (dupes.length === 0) {
-      status.textContent = 'No duplicates found';
+      status.textContent = String('No duplicates found');
       status.style.color = 'var(--text-dim)';
       return;
     }
@@ -290,16 +290,16 @@ async function cleanKeywords() {
     msg += '\nMerge all duplicates?';
 
     if (!confirm(msg)) {
-      status.textContent = 'Cancelled';
+      status.textContent = String('Cancelled');
       status.style.color = 'var(--text-dim)';
       return;
     }
 
     var data = await safeFetch('/api/keywords/clean', {method: 'POST'}, { toast: false });
-    status.textContent = 'Merged ' + data.merged + ' duplicate(s)';
+    status.textContent = String('Merged ' + data.merged + ' duplicate(s)');
     status.style.color = 'var(--accent)';
   } catch(e) {
-    status.textContent = 'Error: ' + e.message;
+    status.textContent = String('Error: ' + settingsErrorMessage(e));
     status.style.color = 'var(--danger)';
   }
 }

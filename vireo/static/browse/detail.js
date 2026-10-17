@@ -4,10 +4,10 @@
 
 /* ---------- Undo / Redo ---------- */
 async function undoLast() {
-  return window.doUndo();
+  return window.doUndo?.();
 }
 async function redoLast() {
-  return window.doRedo();
+  return window.doRedo?.();
 }
 
 async function showUndoToast() {
@@ -19,7 +19,7 @@ async function showUndoToast() {
 
 /* showToast is now provided globally by _navbar.html */
 
-async function loadDetail(id) {
+async function loadDetail(/** @type {number} */ id) {
   // If a multi-selection is already active, skip this single-photo load — it
   // would strip .batch-mode and rewire the sidebar (rating stars → setRating(id))
   // to the anchor while the user still has N photos selected. Common flow:
@@ -27,9 +27,9 @@ async function loadDetail(id) {
   // stays A, so both the sync class removal below and the post-await
   // renderDetail(A) would overwrite the batch inspector the Cmd-click just set up.
   if (selectedPhotos.size > 1) return;
-  Vireo.browse.panelRequests.detailPredictions.invalidate();
-  document.getElementById('summaryPanel').classList.add('hidden');
-  var detail = document.getElementById('detailContent');
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.detailPredictions.invalidate();
+  /** @type {HTMLElement} */ (document.getElementById('summaryPanel')).classList.add('hidden');
+  var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
   // Loading a single photo's detail always exits batch mode.
   if (detail) detail.classList.remove('batch-mode');
   if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
@@ -65,7 +65,7 @@ async function loadDetail(id) {
   } catch(e) {}
 }
 
-function renderDetail(photo) {
+function renderDetail(/** @type {BrowsePhoto} */ photo) {
   window._detailPhotoId = photo.id;
   // Single-photo view: clear any Mixed markers left over from batch mode.
   _batchToggleMixed('ratingMixed', false);
@@ -86,17 +86,17 @@ function renderDetail(photo) {
     window.vireoUpdatePairSourceControls(photo.id);
   }
   var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
-  document.getElementById('detailImg').src = detailThumb;
-  document.getElementById('detailFilename').textContent = photo.filename;
+  /** @type {HTMLImageElement} */ (document.getElementById('detailImg')).src = detailThumb;
+  /** @type {HTMLElement} */ (document.getElementById('detailFilename')).textContent = photo.filename;
   renderCoordinateStatus(photo);
 
   // Rating stars
   var ratingHtml = '';
   for (var i = 1; i <= 5; i++) {
-    var cls = i <= photo.rating ? 'detail-star active' : 'detail-star';
+    var cls = i <= (photo.rating || 0) ? 'detail-star active' : 'detail-star';
     ratingHtml += '<span class="' + cls + '" onclick="setRating(' + photo.id + ',' + i + ')">&#9733;</span>';
   }
-  document.getElementById('detailRating').innerHTML = ratingHtml;
+  /** @type {HTMLElement} */ (document.getElementById('detailRating')).innerHTML = ratingHtml;
 
   // Flags
   updateDetailFlagButtons(photo.flag);
@@ -108,8 +108,8 @@ function renderDetail(photo) {
   updateDetailWildlifeExcluded(photo);
 
   // Keywords
-  var kwTypeIcons = {general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'};
-  var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'};
+  var kwTypeIcons = /** @type {Record<string, string>} */ ({general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'});
+  var kwTypeLabels = /** @type {Record<string, string>} */ ({general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'});
   _rememberKeywordNames(photo.keywords || []);
   var kwHtml = '';
   (photo.keywords || []).forEach(function(k) {
@@ -126,7 +126,7 @@ function renderDetail(photo) {
       escapeHtml(k.name) +
       '<span class="remove-kw" onclick="removeKeyword(' + photo.id + ',' + k.id + ')">&times;</span></span>';
   });
-  document.getElementById('detailKeywords').innerHTML = kwHtml;
+  /** @type {HTMLElement} */ (document.getElementById('detailKeywords')).innerHTML = kwHtml;
 
   // Location section
   if (photo.location) {
@@ -137,7 +137,7 @@ function renderDetail(photo) {
   }
 
   // XMP sidecar
-  var xmpEl = document.getElementById('detailXmp');
+  var xmpEl = /** @type {HTMLElement} */ (document.getElementById('detailXmp'));
   if (photo.xmp_exists === false) {
     xmpEl.innerHTML = '<span style="color:var(--text-ghost);">No .xmp sidecar file</span>';
   } else if (photo.xmp_keywords && photo.xmp_keywords.length > 0) {
@@ -204,29 +204,29 @@ function renderDetail(photo) {
     var sz = photo.file_size;
     summary += 'File: ' + (sz >= 1048576 ? (sz / 1048576).toFixed(1) + ' MB' : Math.round(sz / 1024) + ' KB') + '<br>';
   }
-  document.getElementById('detailSummary').innerHTML = summary;
+  /** @type {HTMLElement} */ (document.getElementById('detailSummary')).innerHTML = summary;
 
   // Path
-  document.getElementById('detailPath').textContent = photo.filename;
+  /** @type {HTMLElement} */ (document.getElementById('detailPath')).textContent = photo.filename;
 
   // Clear search and render metadata groups
-  var searchInput = document.getElementById('metadataSearch');
+  var searchInput = /** @type {HTMLInputElement} */ (document.getElementById('metadataSearch'));
   if (searchInput) searchInput.value = '';
   renderMetadataGroups(photo.metadata);
 }
 
-function updateDetailFlagButtons(flag) {
-  document.querySelectorAll('.detail-flag-btn').forEach(function(btn) {
+function updateDetailFlagButtons(/** @type {string | null | undefined} */ flag) {
+  /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.detail-flag-btn')).forEach(function(btn) {
     btn.className = 'detail-flag-btn';
   });
-  var flagBtns = document.querySelectorAll('.detail-flag-btn');
-  if (flag === 'flagged') flagBtns[1].classList.add('active-flag');
-  else if (flag === 'rejected') flagBtns[2].classList.add('active-reject');
+  var flagBtns = /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.detail-flag-btn'));
+  if (flag === 'flagged') flagBtns[1]?.classList.add('active-flag');
+  else if (flag === 'rejected') flagBtns[2]?.classList.add('active-reject');
 }
 
-function renderMetadataGroups(metadata) {
-  var container = document.getElementById('metadataGroups');
-  var section = document.getElementById('detailMetadataSection');
+function renderMetadataGroups(/** @type {BrowseMetadata | undefined} */ metadata) {
+  var container = /** @type {HTMLElement} */ (document.getElementById('metadataGroups'));
+  var section = /** @type {HTMLElement} */ (document.getElementById('detailMetadataSection'));
   container.innerHTML = '';
 
   if (!metadata) {
@@ -245,7 +245,7 @@ function renderMetadataGroups(metadata) {
 
   // Skip groups with 0 tags
   groups = groups.filter(function(g) {
-    return Object.keys(metadata[g]).length > 0;
+    return Object.keys(metadata[g] || {}).length > 0;
   });
 
   if (groups.length === 0) {
@@ -256,7 +256,7 @@ function renderMetadataGroups(metadata) {
   section.style.display = '';
 
   groups.forEach(function(group) {
-    var tags = metadata[group];
+    var tags = metadata[group] || {};
     var tagNames = Object.keys(tags).sort();
 
     var div = document.createElement('div');
@@ -288,22 +288,22 @@ function renderMetadataGroups(metadata) {
   });
 }
 
-function filterMetadata(query) {
+function filterMetadata(/** @type {string} */ query) {
   var q = query.toLowerCase().trim();
-  var groups = document.querySelectorAll('#metadataGroups .meta-group');
+  var groups = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#metadataGroups .meta-group'));
 
   groups.forEach(function(group) {
     if (!q) {
       // Reset: show all groups, collapse all
       group.style.display = '';
       group.classList.remove('open');
-      group.querySelectorAll('.meta-tag-row').forEach(function(row) {
+      /** @type {NodeListOf<HTMLElement>} */ (group.querySelectorAll('.meta-tag-row')).forEach(function(row) {
         row.style.display = '';
       });
       return;
     }
 
-    var rows = group.querySelectorAll('.meta-tag-row');
+    var rows = /** @type {NodeListOf<HTMLElement>} */ (group.querySelectorAll('.meta-tag-row'));
     var hasMatch = false;
 
     rows.forEach(function(row) {
@@ -329,8 +329,8 @@ function filterMetadata(query) {
 }
 
 function hideDetailPanel() {
-  document.getElementById('detailContent').classList.remove('visible');
-  document.getElementById('summaryPanel').classList.remove('hidden');
+  /** @type {HTMLElement} */ (document.getElementById('detailContent')).classList.remove('visible');
+  /** @type {HTMLElement} */ (document.getElementById('summaryPanel')).classList.remove('hidden');
 }
 
 // Trading a single-photo detail focus for a batch. The panel is not the only
@@ -380,11 +380,11 @@ function closeDetail() {
 
 function buildSummaryParams() {
   var params = new URLSearchParams();
-  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (activeFolderId) params.set('folder_id', String(activeFolderId));
   var rules = getBrowseRules();
   if (rules) params.set('rules', JSON.stringify(rules));
   appendVisualScopeParams(params);
-  if (activeCollectionId) params.set('collection_id', activeCollectionId);
+  if (activeCollectionId) params.set('collection_id', String(activeCollectionId));
   return params;
 }
 
@@ -396,7 +396,7 @@ function reconcileSummaryLoadRenders() {
     if (state.status === 'success') {
       var currentKey = buildSummaryParams().toString();
       summaryRenderDecisionGen = gen;
-      if (state.key === currentKey) renderSummary(state.data);
+      if (state.key === currentKey) state.data && renderSummary(state.data);
       Object.keys(summaryLoadStates).forEach(function(key) {
         if (Number(key) <= summaryLoadGen) delete summaryLoadStates[key];
       });
@@ -416,7 +416,7 @@ async function loadSummary() {
 
   try {
     var data = await safeFetch('/api/browse/summary?' + params.toString(), {
-      headers: Vireo.api.searchLaneHeaders(
+      headers: Vireo?.api?.searchLaneHeaders(
         'summary', searchLaneSeq(summaryLane, params.toString())),
     }, { toast: false });
     var state = summaryLoadStates[gen];
@@ -435,19 +435,19 @@ async function loadSummary() {
   }
 }
 
-function renderSummary(data) {
+function renderSummary(/** @type {BrowseSummary} */ data) {
   var isFiltered = data.filtered_total !== data.total;
 
-  document.getElementById('summaryPhotoCount').textContent = data.filtered_total.toLocaleString();
-  document.getElementById('summaryFilterNote').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('summaryPhotoCount')).textContent = data.filtered_total.toLocaleString();
+  /** @type {HTMLElement} */ (document.getElementById('summaryFilterNote')).textContent =
     isFiltered ? 'of ' + data.total.toLocaleString() + ' total' : '';
 
-  document.getElementById('summaryClassified').textContent = data.classified.toLocaleString() + ' classified';
-  document.getElementById('summaryUnclassified').textContent = data.unclassified.toLocaleString() + ' unclassified';
+  /** @type {HTMLElement} */ (document.getElementById('summaryClassified')).textContent = data.classified.toLocaleString() + ' classified';
+  /** @type {HTMLElement} */ (document.getElementById('summaryUnclassified')).textContent = data.unclassified.toLocaleString() + ' unclassified';
 
   // Top species
-  var speciesSection = document.getElementById('summarySpeciesSection');
-  var speciesList = document.getElementById('summarySpeciesList');
+  var speciesSection = /** @type {HTMLElement} */ (document.getElementById('summarySpeciesSection'));
+  var speciesList = /** @type {HTMLElement} */ (document.getElementById('summarySpeciesList'));
   speciesList.replaceChildren();
   var species = data.top_species || [];
   speciesSection.style.display = species.length ? '' : 'none';
@@ -461,7 +461,7 @@ function renderSummary(data) {
     name.textContent = s.species;
     var count = document.createElement('span');
     count.className = 'summary-species-count';
-    count.textContent = s.count;
+    count.textContent = String(s.count);
     row.append(name, count);
     row.addEventListener('click', function() { filterByTopSpecies(s.species); });
     row.addEventListener('keydown', function(event) {
@@ -472,7 +472,7 @@ function renderSummary(data) {
   });
 }
 
-async function filterByTopSpecies(species) {
+async function filterByTopSpecies(/** @type {string} */ species) {
   var scopeGen = ++browseScopeGen;
   if (!VireoFilter.isReady()) {
     if (!browseFilterInitPromise) return;
@@ -486,7 +486,7 @@ async function filterByTopSpecies(species) {
   // Compose with legacy collection deep links instead of dropping their scope.
   if (activeCollectionId) dashboardCollectionScope = true;
   var rules = VireoFilter.getUserRules();
-  if (rules.mode && rules.mode !== 'all' && rules.rules.length) {
+  if (rules && rules.mode && rules.mode !== 'all' && rules.rules.length) {
     // Narrow an OR collection as a whole, rather than adding another OR arm.
     VireoFilter.loadExpression({mode: 'all', rules: [
       rules, {field: 'top_predicted_species', op: 'is', value: species}

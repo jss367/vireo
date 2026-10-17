@@ -1,5 +1,5 @@
 /* Undo working photo edits without requiring a saved checkpoint. */
-var editorHistory = {undo: [], redo: [], current: null, gesture: null, recordedGesture: null};
+/** @type {{undo:EditorHistorySnapshot[];redo:EditorHistorySnapshot[];current:EditorHistorySnapshot|null;gesture:EditorHistoryGesture|null;recordedGesture:EditorHistoryGesture|null}} */ var editorHistory = {undo: [], redo: [], current: null, gesture: null, recordedGesture: null};
 
 function editorHistorySnapshot() {
   return {
@@ -20,17 +20,17 @@ function resetEditorHistory() {
 }
 
 function refreshEditorHistoryLocalStaleness() {
-  var savedMask = (editorState.savedRecipe.local || {}).mask;
+  const savedMask = (editorState.savedRecipe.local || {}).mask;
   if (!savedMask) return;
   // Staleness describes the mask snapshot, not an editing step. A delayed
   // status read must update every matching undo/redo state without changing
   // the status of a newer mask selected while that read was in flight.
-  var gesture = editorHistory.gesture || {};
-  editorHistory.undo.concat(editorHistory.redo, gesture.undoBefore || [], gesture.redoBefore || [],
-    [editorHistory.current, editorState]).forEach(function(snapshot) {
+  var gesture = editorHistory.gesture;
+  editorHistory.undo.concat(editorHistory.redo, gesture?.undoBefore || [], gesture?.redoBefore || [],
+    [...(editorHistory.current ? [editorHistory.current] : []), editorState]).forEach(function(snapshot) {
     var mask = snapshot && (snapshot.recipe.local || {}).mask;
     if (mask && mask.ref === savedMask.ref && mask.source_digest === savedMask.source_digest) {
-      snapshot.localStale = editorState.savedLocalStale;
+      if (snapshot) snapshot.localStale = editorState.savedLocalStale;
     }
   });
 }
@@ -64,8 +64,8 @@ function finishEditorHistoryGesture() {
   var previous = editorHistory.undo[editorHistory.undo.length - 1];
   if (editorHistory.gesture && editorHistory.recordedGesture === editorHistory.gesture &&
       previous && recipeKey(previous.recipe) === recipeKey(editorState.recipe)) {
-    editorHistory.undo = editorHistory.gesture.undoBefore;
-    editorHistory.redo = editorHistory.gesture.redoBefore;
+    editorHistory.undo = editorHistory.gesture.undoBefore || [];
+    editorHistory.redo = editorHistory.gesture.redoBefore || [];
   }
   editorHistory.gesture = null;
   editorHistory.recordedGesture = null;
@@ -99,7 +99,7 @@ window.changeLocalHistory = function(operation) {
   var source = editorHistory[operation];
   if (!source.length) return false;
   editorHistory[operation === 'undo' ? 'redo' : 'undo'].push(editorHistorySnapshot());
-  var snapshot = source.pop();
+  var snapshot = source.pop(); if (!snapshot) return false;
   cancelMaskBrush();
   // Invalidate pending mask/picker work before restoring the working recipe.
   editorState.localMaskUpdateSeq++;
@@ -121,11 +121,11 @@ window.changeLocalHistory = function(operation) {
   return true;
 };
 
-function editorHistoryOwnsEvent(event) {
-  var target = event.target;
+/** @param {{target:EventTarget|null}} event */ function editorHistoryOwnsEvent(event) {
+  var target = event.target instanceof HTMLElement ? event.target : null;
   // Text fields retain their own native text undo; sliders still edit photos.
   if (target && (target.isContentEditable || target.closest('textarea, select') ||
-      (target.tagName === 'INPUT' && !['range', 'checkbox', 'radio', 'button'].includes(target.type)))) return false;
+      (target instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button'].includes(target.type)))) return false;
   return !document.querySelector('.modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active, .folder-browser-overlay.open, .shortcuts-overlay.open, .export-preset-dialog-overlay.open');
 }
 
@@ -148,7 +148,7 @@ document.addEventListener('beforeinput', function(event) {
 
 document.addEventListener('pointerdown', function(event) {
   finishEditorHistoryGesture();
-  if (event.button === 0 && event.target.closest('.editor-shell')) {
+  if (event.button === 0 && event.target instanceof Element && event.target.closest('.editor-shell')) {
     // Opening the crop or receiving mask staleness can change UI state without
     // changing the recipe. Capture that state at the start of the next gesture.
     if (editorHistory.current && recipeKey(editorHistory.current.recipe) === recipeKey(editorState.recipe)) {
@@ -157,7 +157,7 @@ document.addEventListener('pointerdown', function(event) {
     editorHistory.gesture = {pointerId: event.pointerId};
   }
 }, true);
-['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function(type) {
+/** @type {('pointerup'|'pointercancel'|'lostpointercapture')[]} */ (['pointerup', 'pointercancel', 'lostpointercapture']).forEach(function(type) {
   document.addEventListener(type, function(event) {
     if (editorHistory.gesture && editorHistory.gesture.pointerId === event.pointerId) {
       finishEditorHistoryGesture();

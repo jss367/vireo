@@ -34,8 +34,8 @@ REMAINING_COPIES = {
 }
 
 _DECLARATION_RE = re.compile(
-    r"^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\("
-    r"|^\s*(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>)",
+    r"^\s*(?:/\*\*[^\n]*?\*/\s*)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\("
+    r"|^\s*(?:/\*\*[^\n]*?\*/\s*)?(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>)",
     re.M,
 )
 _SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)

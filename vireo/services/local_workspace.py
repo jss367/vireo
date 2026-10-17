@@ -32,6 +32,7 @@ import time
 import unicodedata
 from contextlib import suppress
 from pathlib import Path
+from typing import NoReturn
 
 from file_replace import replace_file
 
@@ -460,7 +461,7 @@ def _sha256(path: str, cancel_check=None) -> str:
     return digest.hexdigest()
 
 
-def _raise_walk_error(error: OSError) -> None:
+def _raise_walk_error(error: OSError) -> NoReturn:
     raise LocalWorkspaceError(f"Could not read workspace directory: {error}") from error
 
 
@@ -476,6 +477,84 @@ def _dest_case_insensitive(local_base: Path) -> bool:
     base = local_base.parent
     base.mkdir(parents=True, exist_ok=True)
     return destination_case_insensitive(base)
+
+
+def _open_walk_directory(dirpath: str, root: str, directory_st) -> tuple[int | None, os.stat_result | None]:
+    """Open ``dirpath`` with ``O_NOFOLLOW`` for enumeration.
+
+    Returns ``(dir_fd, swapped_st)``. ``dir_fd`` is None where the platform
+    has no ``O_NOFOLLOW`` (enumerate by path then). ``swapped_st`` is set
+    when a queued child stopped being a directory before the open: the
+    caller yields it with that fresh stat instead of descending.
+    """
+    if not hasattr(os, "O_NOFOLLOW"):
+        return None, None
+    open_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        open_flags |= os.O_DIRECTORY
+    try:
+        return os.open(dirpath, open_flags), None
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR, errno.ENOENT}:
+            # dirpath became a symlink, changed type, or was removed
+            # between our lstat and this open. Re-lstat so the caller
+            # sees the fresh type; a queued child is yielded with its
+            # new stat while a root topology change is fatal.
+            try:
+                swapped_st = os.lstat(dirpath)
+            except OSError as swapped_err:
+                _raise_walk_error(swapped_err)
+            if directory_st is None:
+                raise LocalWorkspaceError(
+                    f"Workspace root changed during directory scan: {root}"
+                ) from error
+            if stat.S_ISDIR(swapped_st.st_mode):
+                # A transient open failure followed by a directory
+                # lstat is ambiguous: skipping it would silently omit
+                # the entire subtree from size checks and staging.
+                raise LocalWorkspaceError(
+                    f"Workspace directory changed during directory scan: {dirpath}"
+                ) from error
+            return None, swapped_st
+        _raise_walk_error(error)
+
+
+def _scan_walk_directory(dirpath: str, root: str, dir_fd: int | None, child_directories: list, cancel_check=None):
+    """Yield the non-directory entries of one directory; queue its subdirectories.
+
+    Enumerates through ``dir_fd`` when one is open (and closes it), else by
+    path. Subdirectories are appended to ``child_directories`` with their
+    ``lstat`` for the caller to descend into.
+    """
+    scan_target = dir_fd if dir_fd is not None else dirpath
+    try:
+        entries = os.scandir(scan_target)
+        with entries:
+            iterator = iter(entries)
+            while True:
+                if cancel_check and cancel_check():
+                    raise LocalWorkspaceCancelled("Folder scan cancelled")
+                try:
+                    entry = next(iterator)
+                except StopIteration:
+                    break
+                if cancel_check and cancel_check():
+                    raise LocalWorkspaceCancelled("Folder scan cancelled")
+                full = os.path.join(dirpath, entry.name)
+                # entry.stat with the fd-based scandir routes through
+                # fstatat on the parent descriptor, so an intermediate
+                # swap cannot redirect the stat of the final component.
+                st = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    child_directories.append((full, st))
+                else:
+                    yield _relative(full, root), full, st
+    except OSError as error:
+        _raise_walk_error(error)
+    finally:
+        if dir_fd is not None:
+            with suppress(OSError):
+                os.close(dir_fd)
 
 
 def _walk_entries(root: str, *, cancel_check=None):
@@ -535,69 +614,14 @@ def _walk_entries(root: str, *, cancel_check=None):
         # an intermediate ancestor swap cannot escape either. On Windows
         # (no O_NOFOLLOW) NTFS symlink creation requires elevation, so fall
         # back to the direct path.
-        dir_fd = None
-        if hasattr(os, "O_NOFOLLOW"):
-            open_flags = os.O_RDONLY | os.O_NOFOLLOW
-            if hasattr(os, "O_DIRECTORY"):
-                open_flags |= os.O_DIRECTORY
-            try:
-                dir_fd = os.open(dirpath, open_flags)
-            except OSError as error:
-                if error.errno in {errno.ELOOP, errno.ENOTDIR, errno.ENOENT}:
-                    # dirpath became a symlink, changed type, or was removed
-                    # between our lstat and this open. Re-lstat so the caller
-                    # sees the fresh type; a queued child is yielded with its
-                    # new stat while a root topology change is fatal.
-                    try:
-                        swapped_st = os.lstat(dirpath)
-                    except OSError as swapped_err:
-                        _raise_walk_error(swapped_err)
-                    if directory_st is None:
-                        raise LocalWorkspaceError(
-                            f"Workspace root changed during directory scan: {root}"
-                        ) from error
-                    if stat.S_ISDIR(swapped_st.st_mode):
-                        # A transient open failure followed by a directory
-                        # lstat is ambiguous: skipping it would silently omit
-                        # the entire subtree from size checks and staging.
-                        raise LocalWorkspaceError(
-                            f"Workspace directory changed during directory scan: {dirpath}"
-                        ) from error
-                    yield _relative(dirpath, root), dirpath, swapped_st
-                    continue
-                _raise_walk_error(error)
+        dir_fd, swapped_st = _open_walk_directory(dirpath, root, directory_st)
+        if swapped_st is not None:
+            yield _relative(dirpath, root), dirpath, swapped_st
+            continue
         if directory_st is not None:
             yield _relative(dirpath, root), dirpath, current_st
-        scan_target = dir_fd if dir_fd is not None else dirpath
         child_directories = []
-        try:
-            entries = os.scandir(scan_target)
-            with entries:
-                iterator = iter(entries)
-                while True:
-                    if cancel_check and cancel_check():
-                        raise LocalWorkspaceCancelled("Folder scan cancelled")
-                    try:
-                        entry = next(iterator)
-                    except StopIteration:
-                        break
-                    if cancel_check and cancel_check():
-                        raise LocalWorkspaceCancelled("Folder scan cancelled")
-                    full = os.path.join(dirpath, entry.name)
-                    # entry.stat with the fd-based scandir routes through
-                    # fstatat on the parent descriptor, so an intermediate
-                    # swap cannot redirect the stat of the final component.
-                    st = entry.stat(follow_symlinks=False)
-                    if stat.S_ISDIR(st.st_mode):
-                        child_directories.append((full, st))
-                    else:
-                        yield _relative(full, root), full, st
-        except OSError as error:
-            _raise_walk_error(error)
-        finally:
-            if dir_fd is not None:
-                with suppress(OSError):
-                    os.close(dir_fd)
+        yield from _scan_walk_directory(dirpath, root, dir_fd, child_directories, cancel_check)
 
         # Stack order preserves scandir's depth-first ordering.
         for child in reversed(child_directories):
@@ -933,6 +957,31 @@ def _delete_state_rows(db, workspace_id: int) -> None:
     db.local_workspaces.delete_state(workspace_id)
 
 
+def _copy_staged_entries(
+    roots: list[dict], entries_per_root: dict[int, list], manifest: dict, *, progress=None, cancel_check=None
+) -> None:
+    """Copy every collected source entry locally, recording each in ``manifest["files"]``."""
+    total_files = manifest["total_files"]
+    total_bytes = manifest["total_bytes"]
+    copied = 0
+    copied_bytes = 0
+    for root_index, root in enumerate(roots):
+        os.makedirs(root["local_path"], exist_ok=True)
+        for rel, source, st in entries_per_root[root_index]:
+            if cancel_check and cancel_check():
+                raise LocalWorkspaceCancelled("Local workspace transfer cancelled")
+            destination = os.path.join(root["local_path"], rel)
+            record = _copy_entry(source, destination, st, root["source_path"], cancel_check)
+            if record is None:
+                continue
+            record.update({"root": root_index, "path": rel})
+            manifest["files"].append(record)
+            copied += 1
+            copied_bytes += record.get("size", 0)
+            if progress:
+                progress(copied, total_files, copied_bytes, total_bytes, rel)
+
+
 def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, cancel_check=None, begin_commit=None) -> dict:
     """Copy a workspace locally and atomically rebase its catalog paths."""
     with _workspace_lock(workspace_id):
@@ -964,8 +1013,6 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
                 db.rollback()
                 raise
 
-        copied = 0
-        copied_bytes = 0
         try:
             # The (slow) source enumeration happens outside the global stage
             # guard so a large workspace doesn't block other stages; a
@@ -983,21 +1030,7 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
                 ],
                 "files": [],
             }
-            for root_index, root in enumerate(roots):
-                os.makedirs(root["local_path"], exist_ok=True)
-                for rel, source, st in entries_per_root[root_index]:
-                    if cancel_check and cancel_check():
-                        raise LocalWorkspaceCancelled("Local workspace transfer cancelled")
-                    destination = os.path.join(root["local_path"], rel)
-                    record = _copy_entry(source, destination, st, root["source_path"], cancel_check)
-                    if record is None:
-                        continue
-                    record.update({"root": root_index, "path": rel})
-                    manifest["files"].append(record)
-                    copied += 1
-                    copied_bytes += record.get("size", 0)
-                    if progress:
-                        progress(copied, total_files, copied_bytes, total_bytes, rel)
+            _copy_staged_entries(roots, entries_per_root, manifest, progress=progress, cancel_check=cancel_check)
 
             if cancel_check and cancel_check():
                 raise LocalWorkspaceCancelled("Local workspace transfer cancelled")
@@ -1373,6 +1406,198 @@ def _restore_catalog(db, workspace_id: int) -> None:
     db.invalidate_new_images_cache_for_workspace(workspace_id)
 
 
+def _verify_sync_roots(manifest: dict) -> None:
+    """Refuse to sync unless every source and managed local root is intact."""
+    for root in manifest["roots"]:
+        try:
+            source_st = os.lstat(root["source_path"])
+        except OSError:
+            raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}") from None
+        # os.path.isdir follows symlinks; a root replaced with a symlink
+        # to another directory after staging would let sync publish and
+        # delete through the link into a tree outside the recorded
+        # workspace. Reject any non-directory or symlinked root here.
+        if stat.S_ISLNK(source_st.st_mode):
+            raise LocalWorkspaceError(
+                f"Source storage changed shape after staging (now a symlink): {root['source_path']}"
+            )
+        if not stat.S_ISDIR(source_st.st_mode):
+            raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}")
+        local_state_kind = _managed_root_state(root["local_path"])
+        if local_state_kind == "symlink":
+            raise LocalWorkspaceError(
+                f"Managed local folder is now a symlink and cannot be trusted: {root['local_path']}. "
+                "Discard restores the catalog without touching source files."
+            )
+        if local_state_kind != "ok":
+            raise LocalWorkspaceError(
+                f"Managed local folder is unavailable: {root['local_path']}. "
+                "Restore it or discard the local workspace; source files were not changed."
+            )
+
+
+def _add_recovery_republish(changed: list, local: dict, resuming: bool, recovery_confirmed: set | None) -> set:
+    """Queue confirmed deletions restored locally for republishing.
+
+    Appends the restored keys to ``changed`` in place and returns them.
+    """
+    # When resuming a partially-completed sync, the first attempt may have
+    # already unlinked confirmed-deletion source files. Any such key that
+    # the user has since restored in the managed local copy must be
+    # republished: falling through as "unchanged" (metadata matching
+    # baseline) would leave the source deleted and the local restore
+    # silently discarded, while a modified-metadata restore would raise
+    # a source-missing conflict that recovery cannot get out of. Both
+    # cases finish the previously-confirmed operation by writing the
+    # current local file back to source.
+    recovery_republish: set = set()
+    if resuming and recovery_confirmed:
+        changed_set = set(changed)
+        for key in recovery_confirmed:
+            if key in local:
+                recovery_republish.add(key)
+                if key not in changed_set:
+                    changed.append(key)
+                    changed_set.add(key)
+    return recovery_republish
+
+
+def _check_deletion_confirmation(
+    deleted: list,
+    *,
+    allow_deletions: bool,
+    confirmed_deletions: int | None,
+    resuming: bool,
+    recovery_confirmed: set | None,
+) -> bool:
+    """Refuse source deletions the user has not confirmed.
+
+    Returns whether a resumed sync carries a fresh count-bound confirmation.
+    """
+    if deleted and not allow_deletions:
+        raise LocalWorkspaceError(f"Local work deleted {len(deleted)} file(s); confirm deletions before syncing")
+    # Fresh count-bound check applies to both initial and resumed syncs:
+    # if the caller sent a count and it no longer matches the current
+    # deletion set, force the UI to re-prompt against the current facts.
+    if confirmed_deletions is not None and len(deleted) > confirmed_deletions:
+        raise LocalWorkspaceError(
+            f"Local deletions changed since you confirmed: {len(deleted)} file(s) would now be "
+            "deleted from the source. Review and confirm again."
+        )
+    # Resume path: any deletion that appeared after the first attempt was
+    # interrupted was NOT part of the user's original count-bound
+    # confirmation. A caller providing a fresh ``confirmed_deletions`` that
+    # matches the current deletion count counts as re-confirming the
+    # current set; sync_back rewrites the recovery marker so a second
+    # interruption resumes against those same deletions. Without a fresh
+    # count the marker gate refuses instead of silently authorizing extra
+    # source deletions when "Finish Sync-back" is clicked.
+    fresh_confirmation = (
+        resuming and confirmed_deletions is not None and confirmed_deletions == len(deleted)
+    )
+    if resuming and recovery_confirmed is not None and not fresh_confirmation:
+        new_deletions = [key for key in deleted if key not in recovery_confirmed]
+        if new_deletions:
+            raise LocalWorkspaceError(
+                f"Local deletions changed since sync was interrupted: "
+                f"{len(new_deletions)} file(s) would now be deleted from the source "
+                "that were not part of your original confirmation. Review and confirm again."
+            )
+    return fresh_confirmation
+
+
+def _sync_conflicts(
+    manifest: dict,
+    baseline: dict,
+    local: dict,
+    changed: list,
+    deleted: list,
+    recovery_republish: set,
+    cancel_check=None,
+) -> list[str]:
+    """Source paths a sync would clobber: outside edits and blocked targets."""
+    # Conflict scan. Only paths sync would write or delete can clobber
+    # anything, so only those are verified — by full content hash, since
+    # a source edit can preserve size and mtime. Unchanged local files
+    # are never published, so a source-side edit to them simply survives.
+    conflicts = []
+    at_risk = [key for key in changed if key in baseline] + list(deleted)
+    for key in at_risk:
+        root_index, rel = key
+        original = baseline[key]
+        remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
+        remote_matches, remote_sha = _source_state(remote_path, original, cancel_check)
+        if remote_matches:
+            continue
+        entry = local.get(key)
+        local_path = entry[0] if entry else None
+        # A prior interrupted sync may already have published this exact
+        # result. Treat it as resumable, not as an outside conflict.
+        if local_path is None and not os.path.lexists(remote_path):
+            continue
+        # A prior interrupted sync may already have unlinked a
+        # confirmed-deletion source file that the user then restored in
+        # the managed local copy. Republishing the restored local file
+        # completes the previously-confirmed operation instead of leaving
+        # the source deleted; the missing remote is not an outside
+        # conflict here.
+        if key in recovery_republish and not os.path.lexists(remote_path):
+            continue
+        if local_path and _matches_remote(local_path, remote_path, remote_sha, cancel_check):
+            continue
+        conflicts.append(remote_path)
+
+    deleted_set = set(deleted)
+    for key in changed:
+        if key in baseline:
+            continue
+        root_index, rel = key
+        remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
+        if not os.path.lexists(remote_path):
+            continue
+        if os.path.isdir(remote_path) and not os.path.islink(remote_path):
+            # A local edit replaced this directory with a file. That is
+            # only safe if the deletions about to run empty the source
+            # directory completely; anything else there is outside work.
+            conflicts.extend(
+                full
+                for entry_rel, full, st in _walk_entries(remote_path)
+                if not stat.S_ISDIR(st.st_mode)
+                and (root_index, os.path.join(rel, entry_rel)) not in deleted_set
+            )
+        elif not _same_content(local[key][0], remote_path, cancel_check):
+            conflicts.append(remote_path)
+
+    conflicts.extend(
+        _ancestor_conflicts(list(changed) + list(deleted), manifest, deleted_set)
+    )
+    return conflicts
+
+
+def _publish_sync_changes(manifest: dict, local: dict, changed: list, deleted: list, progress=None) -> None:
+    """Apply local deletions, then publish created and modified files to source."""
+    total = len(changed) + len(deleted)
+    done = 0
+    # Deletions first: a local rename of a directory to a file (or vice
+    # versa) needs the old source entries gone before publishes create
+    # their replacements.
+    for root_index, rel in deleted:
+        remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
+        with suppress(FileNotFoundError):
+            os.unlink(remote_path)
+        done += 1
+        if progress:
+            progress(done, total, rel)
+    for key in changed:
+        root_index, rel = key
+        remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
+        _prepare_publish_target(remote_path)
+        _atomic_publish(local[key][0], remote_path)
+        done += 1
+        if progress:
+            progress(done, total, rel)
+
+
 def sync_back(
     db,
     workspace_id: int,
@@ -1408,136 +1633,20 @@ def sync_back(
                 "Discard restores the catalog without touching source files."
             )
 
-        for root in manifest["roots"]:
-            try:
-                source_st = os.lstat(root["source_path"])
-            except OSError:
-                raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}") from None
-            # os.path.isdir follows symlinks; a root replaced with a symlink
-            # to another directory after staging would let sync publish and
-            # delete through the link into a tree outside the recorded
-            # workspace. Reject any non-directory or symlinked root here.
-            if stat.S_ISLNK(source_st.st_mode):
-                raise LocalWorkspaceError(
-                    f"Source storage changed shape after staging (now a symlink): {root['source_path']}"
-                )
-            if not stat.S_ISDIR(source_st.st_mode):
-                raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}")
-            local_state_kind = _managed_root_state(root["local_path"])
-            if local_state_kind == "symlink":
-                raise LocalWorkspaceError(
-                    f"Managed local folder is now a symlink and cannot be trusted: {root['local_path']}. "
-                    "Discard restores the catalog without touching source files."
-                )
-            if local_state_kind != "ok":
-                raise LocalWorkspaceError(
-                    f"Managed local folder is unavailable: {root['local_path']}. "
-                    "Restore it or discard the local workspace; source files were not changed."
-                )
+        _verify_sync_roots(manifest)
 
         baseline, local, changed, deleted = _local_changes(manifest)
-        # When resuming a partially-completed sync, the first attempt may have
-        # already unlinked confirmed-deletion source files. Any such key that
-        # the user has since restored in the managed local copy must be
-        # republished: falling through as "unchanged" (metadata matching
-        # baseline) would leave the source deleted and the local restore
-        # silently discarded, while a modified-metadata restore would raise
-        # a source-missing conflict that recovery cannot get out of. Both
-        # cases finish the previously-confirmed operation by writing the
-        # current local file back to source.
-        recovery_republish: set = set()
-        if resuming and recovery_confirmed:
-            changed_set = set(changed)
-            for key in recovery_confirmed:
-                if key in local:
-                    recovery_republish.add(key)
-                    if key not in changed_set:
-                        changed.append(key)
-                        changed_set.add(key)
-        if deleted and not allow_deletions:
-            raise LocalWorkspaceError(f"Local work deleted {len(deleted)} file(s); confirm deletions before syncing")
-        # Fresh count-bound check applies to both initial and resumed syncs:
-        # if the caller sent a count and it no longer matches the current
-        # deletion set, force the UI to re-prompt against the current facts.
-        if confirmed_deletions is not None and len(deleted) > confirmed_deletions:
-            raise LocalWorkspaceError(
-                f"Local deletions changed since you confirmed: {len(deleted)} file(s) would now be "
-                "deleted from the source. Review and confirm again."
-            )
-        # Resume path: any deletion that appeared after the first attempt was
-        # interrupted was NOT part of the user's original count-bound
-        # confirmation. A caller providing a fresh ``confirmed_deletions`` that
-        # matches the current deletion count counts as re-confirming the
-        # current set; the recovery marker is rewritten below so a second
-        # interruption resumes against those same deletions. Without a fresh
-        # count the marker gate refuses instead of silently authorizing extra
-        # source deletions when "Finish Sync-back" is clicked.
-        fresh_confirmation = (
-            resuming and confirmed_deletions is not None and confirmed_deletions == len(deleted)
+        recovery_republish = _add_recovery_republish(changed, local, resuming, recovery_confirmed)
+        fresh_confirmation = _check_deletion_confirmation(
+            deleted,
+            allow_deletions=allow_deletions,
+            confirmed_deletions=confirmed_deletions,
+            resuming=resuming,
+            recovery_confirmed=recovery_confirmed,
         )
-        if resuming and recovery_confirmed is not None and not fresh_confirmation:
-            new_deletions = [key for key in deleted if key not in recovery_confirmed]
-            if new_deletions:
-                raise LocalWorkspaceError(
-                    f"Local deletions changed since sync was interrupted: "
-                    f"{len(new_deletions)} file(s) would now be deleted from the source "
-                    "that were not part of your original confirmation. Review and confirm again."
-                )
 
-        # Conflict scan. Only paths sync would write or delete can clobber
-        # anything, so only those are verified — by full content hash, since
-        # a source edit can preserve size and mtime. Unchanged local files
-        # are never published, so a source-side edit to them simply survives.
-        conflicts = []
-        at_risk = [key for key in changed if key in baseline] + list(deleted)
-        for key in at_risk:
-            root_index, rel = key
-            original = baseline[key]
-            remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
-            remote_matches, remote_sha = _source_state(remote_path, original, cancel_check)
-            if remote_matches:
-                continue
-            entry = local.get(key)
-            local_path = entry[0] if entry else None
-            # A prior interrupted sync may already have published this exact
-            # result. Treat it as resumable, not as an outside conflict.
-            if local_path is None and not os.path.lexists(remote_path):
-                continue
-            # A prior interrupted sync may already have unlinked a
-            # confirmed-deletion source file that the user then restored in
-            # the managed local copy. Republishing the restored local file
-            # completes the previously-confirmed operation instead of leaving
-            # the source deleted; the missing remote is not an outside
-            # conflict here.
-            if key in recovery_republish and not os.path.lexists(remote_path):
-                continue
-            if local_path and _matches_remote(local_path, remote_path, remote_sha, cancel_check):
-                continue
-            conflicts.append(remote_path)
-
-        deleted_set = set(deleted)
-        for key in changed:
-            if key in baseline:
-                continue
-            root_index, rel = key
-            remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
-            if not os.path.lexists(remote_path):
-                continue
-            if os.path.isdir(remote_path) and not os.path.islink(remote_path):
-                # A local edit replaced this directory with a file. That is
-                # only safe if the deletions about to run empty the source
-                # directory completely; anything else there is outside work.
-                conflicts.extend(
-                    full
-                    for entry_rel, full, st in _walk_entries(remote_path)
-                    if not stat.S_ISDIR(st.st_mode)
-                    and (root_index, os.path.join(rel, entry_rel)) not in deleted_set
-                )
-            elif not _same_content(local[key][0], remote_path, cancel_check):
-                conflicts.append(remote_path)
-
-        conflicts.extend(
-            _ancestor_conflicts(list(changed) + list(deleted), manifest, deleted_set)
+        conflicts = _sync_conflicts(
+            manifest, baseline, local, changed, deleted, recovery_republish, cancel_check
         )
         if conflicts:
             raise LocalWorkspaceConflict(sorted(set(conflicts)))
@@ -1562,26 +1671,7 @@ def sync_back(
         elif fresh_confirmation:
             _write_sync_recovery(vireo_dir, workspace_id, deleted)
 
-        total = len(changed) + len(deleted)
-        done = 0
-        # Deletions first: a local rename of a directory to a file (or vice
-        # versa) needs the old source entries gone before publishes create
-        # their replacements.
-        for root_index, rel in deleted:
-            remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
-            with suppress(FileNotFoundError):
-                os.unlink(remote_path)
-            done += 1
-            if progress:
-                progress(done, total, rel)
-        for key in changed:
-            root_index, rel = key
-            remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
-            _prepare_publish_target(remote_path)
-            _atomic_publish(local[key][0], remote_path)
-            done += 1
-            if progress:
-                progress(done, total, rel)
+        _publish_sync_changes(manifest, local, changed, deleted, progress)
 
         _restore_catalog(db, workspace_id)
         _remove_workspace_dir(vireo_dir, workspace_id)

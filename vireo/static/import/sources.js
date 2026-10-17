@@ -2,7 +2,7 @@
 // Classic page script; load boot.js after all definitions.
 
 function renderSources() {
-  const list = document.getElementById('sourceList');
+  const list = /** @type {HTMLElement} */ (document.getElementById('sourceList'));
   list.innerHTML = '';
   sources.forEach((s, i) => {
     const div = document.createElement('div');
@@ -29,7 +29,7 @@ function renderSources() {
         // this is deliberately NOT in clearImportPreviewGrid(): ordinary
         // re-previews clear the grid too and must keep the opt-in.
         retireHideDuplicatesOptIn();
-        document.getElementById('previewSummary').textContent = '';
+        /** @type {HTMLElement} */ (document.getElementById('previewSummary')).textContent = '';
       }
       renderSources();
       scheduleImportPreview();
@@ -49,27 +49,29 @@ function renderSources() {
 // removable drive) — the walker emits heartbeats while it makes progress.
 let SOURCE_SCAN_STALL_MS = 15000;
 
+/** @param {ImportSourceCount} state */
 function sourceScanLooksStalled(state) {
   return state.status === 'loading' &&
     state.storage !== 'local' &&
     Number.isFinite(state.lastEventAt) &&
-    Date.now() - state.lastEventAt > SOURCE_SCAN_STALL_MS;
+    Date.now() - Number(state.lastEventAt) > SOURCE_SCAN_STALL_MS;
 }
 
+/** @param {ImportSourceCount | undefined} state */
 function sourceCountRowText(state) {
   if (!state) return 'Waiting to scan';
   if (state.status === 'queued') {
     return 'Waiting · ' + state.position + ' of ' + state.total;
   }
   if (state.status === 'loading') {
-    const elapsed = Math.max(0, Math.floor((Date.now() - state.startedAt) / 1000));
+    const elapsed = Math.max(0, Math.floor((Date.now() - Number(state.startedAt)) / 1000));
     let text = 'Scanning…' + (elapsed ? ' ' + elapsed + 's' : '');
-    if (['metadata', 'capture_dates'].includes(state.stage) && state.found) {
+    if (['metadata', 'capture_dates'].includes(state.stage || '') && state.found) {
       text = (state.stage === 'capture_dates' ? 'Reading capture dates…' : 'Reading file info…') +
         (elapsed ? ' ' + elapsed + 's' : '') +
         ' · ' + Number(state.checked).toLocaleString() + ' of ' +
         Number(state.found).toLocaleString();
-    } else if (Number.isFinite(state.checked) && state.checked > 0) {
+    } else if (Number.isFinite(state.checked) && Number(state.checked) > 0) {
       text += ' · ' + Number(state.checked).toLocaleString() + ' checked' +
         (state.found
           ? ' (' + Number(state.found).toLocaleString() + ' photos)'
@@ -82,7 +84,7 @@ function sourceCountRowText(state) {
 }
 
 function renderSourceCountProgress() {
-  const el = document.getElementById('sourceCountProgress');
+  const el = /** @type {HTMLElement} */ (document.getElementById('sourceCountProgress'));
   if (!el) return;
   // Snapshot mode never runs folder-count scans — the per-source rows show
   // "Captured source folder" text with no `count`, so summing them would
@@ -93,7 +95,7 @@ function renderSourceCountProgress() {
     el.classList.remove('visible');
     return;
   }
-  const states = sources.map(path => sourceCounts[path]).filter(Boolean);
+  const states = sources.map(path => sourceCounts[path]).filter((state) => state !== undefined);
   const active = states.filter(state => state.status === 'loading');
   const queued = states.filter(state => state.status === 'queued').length;
   const loaded = states.filter(state => state.status === 'loaded');
@@ -101,7 +103,7 @@ function renderSourceCountProgress() {
   const photos = loaded.reduce((sum, state) => sum + Number(state.count || 0), 0);
 
   if (active.length) {
-    const oldestStart = Math.min(...active.map(state => state.startedAt));
+    const oldestStart = Math.min(...active.map(state => Number(state.startedAt)));
     const elapsed = Math.max(0, Math.floor((Date.now() - oldestStart) / 1000));
     const counted = loaded.length + errors;
     const countedText = counted
@@ -110,17 +112,17 @@ function renderSourceCountProgress() {
       : 'no folders finished yet';
     const positions = active.map(state => state.position).join(' and ');
     const storageKinds = new Set(active.map(state => state.storage).filter(Boolean));
-    const storageLabels = {
+    /** @type {Record<string, string>} */ const storageLabels = {
       local: ' on local storage',
       network: ' on network storage',
       removable: ' on removable storage',
     };
     const storageLabel = storageKinds.size === 1
-      ? (storageLabels[[...storageKinds][0]] || '')
+      ? (storageLabels[[...storageKinds][0] || ''] || '')
       : '';
     const stalled = active.some(sourceScanLooksStalled);
     el.textContent = 'Scanning folder' + (active.length === 1 ? ' ' : 's ') +
-      positions + ' of ' + active[0].total + storageLabel +
+      positions + ' of ' + active[0]?.total + storageLabel +
       ' · ' + countedText + (queued ? ' · ' + queued + ' waiting' : '') +
       (elapsed ? ' · ' + elapsed + 's elapsed' : '') +
       (stalled
@@ -151,10 +153,11 @@ function selectedSourceCountOptions() {
   const copyMode = newImagesSnapshotId === null && selectedImportMode() === 'copy';
   return {
     file_types: copyMode ? selectedFileTypes() : 'both',
-    recursive: document.getElementById('chkRecursive').checked,
+    recursive: /** @type {HTMLInputElement} */ (document.getElementById('chkRecursive')).checked,
   };
 }
 
+/** @param {number | undefined} n */
 function formatPhotoCount(n) {
   const count = Number(n || 0);
   return count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');
@@ -181,7 +184,7 @@ function stopSourceCountClock() {
 }
 
 function updateSourceCountClock() {
-  const metas = document.querySelectorAll('#sourceList .source-meta');
+  const metas = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#sourceList .source-meta'));
   sources.forEach((sourcePath, index) => {
     if (metas[index]) metas[index].textContent =
       sourceCountRowText(sourceCounts[sourcePath]);
@@ -201,6 +204,7 @@ function updateSourceCountClock() {
 // concurrency decided server-side, and narrates the walk as frames. These
 // appliers translate frames into the per-folder row states.
 
+/** @param {ImportScanFrame} frame */
 function applyFolderPreviewStreamFrame(frame) {
   if (frame.type === 'policy') {
     (frame.sources || []).forEach(src => {
@@ -252,7 +256,7 @@ function totalDiscoveredSoFar() {
     if (!state) return sum;
     if (state.status === 'loaded') return sum + Number(state.count || 0);
     if (state.status === 'loading' && Number.isFinite(state.found)) {
-      return sum + state.found;
+      return sum + Number(state.found);
     }
     return sum;
   }, 0);
@@ -261,24 +265,25 @@ function totalDiscoveredSoFar() {
 // Reads the folder-preview stream, applying scan-progress frames as they
 // arrive, and returns the final done payload (the old synchronous
 // folder-preview response shape) — or null if the stream ended without one.
+/** @param {Response} resp @param {number} requestSeq */
 async function readFolderPreviewStream(resp, requestSeq) {
-  const reader = resp.body.getReader();
+  const reader = /** @type {ReadableStream<Uint8Array>} */ (resp.body).getReader();
   const decoder = new TextDecoder();
-  const summary = document.getElementById('previewSummary');
+  const summary = /** @type {HTMLElement} */ (document.getElementById('previewSummary'));
   let buffer = '';
-  let done = null;
+  /** @type {ImportPreviewPayload | null} */ let done = null;
   for (;;) {
     const r = await reader.read();
     if (r.done) break;
     buffer += decoder.decode(r.value, { stream: true });
     const parts = buffer.split('\n\n');
-    buffer = parts.pop();
+    buffer = parts.pop() || '';
     for (const part of parts) {
       const m = part.match(/^data: (.+)$/m);
       if (!m) continue;
-      let frame;
+      /** @type {ImportPreviewPayload} */ let frame;
       try {
-        frame = JSON.parse(m[1]);
+        frame = JSON.parse(m[1] || '');
       } catch (e) {
         continue; // partial frame
       }
@@ -338,6 +343,7 @@ function resetActiveSourceScans() {
 // Belt-and-suspenders against a stream whose per-folder frames were missed
 // (e.g. a stub or proxy that only delivers the final frame): the done
 // payload's per-source totals settle any row still waiting or scanning.
+/** @param {Record<string, number> | undefined} counts */
 function applyDoneFrameSourceCounts(counts) {
   if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return;
   let changed = false;
@@ -356,6 +362,7 @@ function applyDoneFrameSourceCounts(counts) {
   if (changed) renderSources();
 }
 
+/** @param {string} path */
 function addSourcePath(path) {
   const v = (path || '').trim();
   if (!v) return false;
@@ -370,7 +377,7 @@ function addSourcePath(path) {
 }
 
 function addSource() {
-  const input = document.getElementById('sourceInput');
+  const input = /** @type {HTMLInputElement} */ (document.getElementById('sourceInput'));
   const v = (input.value || '').trim();
   if (!v) return;
   addSourcePath(v);

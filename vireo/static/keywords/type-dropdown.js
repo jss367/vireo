@@ -3,8 +3,8 @@
 
 // -- Inline type change via badge click --
 function bindKeywordTypeBadges() {
-  document.getElementById('kwBody').addEventListener('click', function(e) {
-    const badge = e.target.closest('.kw-type-badge');
+  /** @type {HTMLElement} */ (document.getElementById('kwBody')).addEventListener('click', function(e) {
+    if (!(e.target instanceof Element)) return; const badge = e.target.closest(/** @type {'span'} */ ('.kw-type-badge'));
     if (!badge || !badge.dataset.id) return;
     e.stopPropagation();
     closeDropdown();
@@ -40,7 +40,7 @@ function closeDropdown() {
   if (activeDropdown) { activeDropdown.remove(); activeDropdown = null; }
 }
 
-async function updateType(kwId, newType) {
+/** @param {number} kwId @param {string} newType */ async function updateType(kwId, newType) {
   try {
     const resp = await fetch('/api/keywords/' + kwId, {
       method: 'PUT',
@@ -51,7 +51,7 @@ async function updateType(kwId, newType) {
     // deletes this keyword row and merges it into the peer's id. Refetch
     // instead of the local optimistic update, or allKeywords keeps a
     // phantom entry pointing at a deleted id.
-    const data = await resp.json().catch(() => ({}));
+    /** @type {KeywordMutation} */ const data = await resp.json().catch(() => ({}));
     if (data && data.merged) {
       await loadKeywords();
       return;

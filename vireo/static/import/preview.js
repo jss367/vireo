@@ -64,10 +64,10 @@ function importPreviewSignature() {
     source_snapshot_id: newImagesSnapshotId,
     mode: copyMode ? 'copy' : 'in_place',
     file_types: copyMode ? selectedFileTypes() : 'both',
-    recursive: document.getElementById('chkRecursive').checked,
-    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
-    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
-    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
+    recursive: /** @type {HTMLInputElement} */ (document.getElementById('chkRecursive')).checked,
+    skip_duplicates: /** @type {HTMLInputElement} */ (document.getElementById('chkSkipDuplicates')).checked,
+    verify_by_hash: /** @type {HTMLInputElement} */ (document.getElementById('chkVerifyByHash')).checked,
+    trust_likely_duplicates: /** @type {HTMLInputElement} */ (document.getElementById('chkTrustLikelyDuplicates')).checked,
     // The dup stream's "already at destination" verdicts are computed
     // against the planned destination folders, so the preview no longer
     // describes the form once the destination or template changes —
@@ -78,6 +78,7 @@ function importPreviewSignature() {
   });
 }
 
+/** @param {string} signature */
 function importPreviewSignatureChanged(signature) {
   return signature !== importPreviewSignature();
 }
@@ -86,6 +87,7 @@ function importPreviewSignatureChanged(signature) {
 // superseded run finishing (its fetch finally failing, its stream draining)
 // must not hand the user an enabled Start while the newer run is still
 // walking the disk behind a cleared grid.
+/** @param {number} requestSeq */
 function endImportPreviewFlight(requestSeq) {
   if (requestSeq !== importPreviewSeq) return;
   importPreviewInFlight = false;
@@ -93,6 +95,7 @@ function endImportPreviewFlight(requestSeq) {
   updateStartGate();
 }
 
+/** @param {{automatic?: boolean} | undefined} [opts] */
 async function previewImport(opts) {
   // Abort before advancing the sequence. abort() only schedules the rejected
   // fetch continuation; this synchronous function advances importPreviewSeq
@@ -119,7 +122,7 @@ async function previewImport(opts) {
   importDupStreamPending = false;
   importPreviewFailed = false;
   updateStartGate();
-  const summary = document.getElementById('previewSummary');
+  const summary = /** @type {HTMLElement} */ (document.getElementById('previewSummary'));
   // Both bail-outs below are settled: the run stops before discovery, so
   // nothing can be hidden and the opt-in must not linger behind the
   // now-hidden row. (Contrast the in-flight path further down, which
@@ -145,7 +148,7 @@ async function previewImport(opts) {
     return;
   }
   const requestSignature = importPreviewSignature();
-  const btnPreview = document.getElementById('btnPreview');
+  const btnPreview = /** @type {HTMLButtonElement} */ (document.getElementById('btnPreview'));
   if (btnPreview) btnPreview.disabled = true;
   summary.textContent = 'Discovering files…';
   const previewAbort = new AbortController();
@@ -155,7 +158,7 @@ async function previewImport(opts) {
     // Duplicate/recovery preparation already reads capture metadata. Only
     // ask discovery to read it when no follow-up check will run.
     const captureDatesDuringDiscovery = copyMode &&
-      !document.getElementById('chkSkipDuplicates').checked && !resolvedCopyDestination();
+      !/** @type {HTMLInputElement} */ (document.getElementById('chkSkipDuplicates')).checked && !resolvedCopyDestination();
     const resp = await fetch(
       snapshotMode
         ? '/api/import/new-images-preview'
@@ -168,7 +171,7 @@ async function previewImport(opts) {
       } : {
           folders: sources,
           file_types: fileTypes,
-          recursive: document.getElementById('chkRecursive').checked,
+          recursive: /** @type {HTMLInputElement} */ (document.getElementById('chkRecursive')).checked,
           include_capture_dates: captureDatesDuringDiscovery,
         }),
     });
@@ -177,7 +180,7 @@ async function previewImport(opts) {
     // source rows) and resolves to the same payload the old synchronous
     // endpoint returned. Snapshot previews read captured rows, not disk,
     // so they stay a plain JSON response.
-    const data = snapshotMode
+    /** @type {ImportPreviewPayload | null} */ const data = snapshotMode
       ? await resp.json()
       : await readFolderPreviewStream(resp, requestSeq);
     // A newer previewImport() started while this response was in flight —
@@ -191,12 +194,12 @@ async function previewImport(opts) {
     if (!data) throw new Error('preview stream ended unexpectedly');
     if (!snapshotMode) applyDoneFrameSourceCounts(data.source_counts);
     const files = data.files || [];
-    const filesByPath = new Map();
+    /** @type {Map<string, ImportPreviewFile[]>} */ const filesByPath = new Map();
     files.forEach(file => {
       if (!filesByPath.has(file.path)) filesByPath.set(file.path, []);
-      filesByPath.get(file.path).push(file);
+      filesByPath.get(file.path)?.push(file);
     });
-    function applyCaptureDates(dates) {
+    /** @param {Record<string,string> | undefined} dates */ function applyCaptureDates(dates) {
       Object.entries(dates || {}).forEach(([path, date]) => {
         (filesByPath.get(path) || []).forEach(file => { file.capture_date = date; });
       });
@@ -253,7 +256,7 @@ async function previewImport(opts) {
       summary.textContent = files.length + ' files found · originals will stay in place';
       return;
     }
-    if (!document.getElementById('chkSkipDuplicates').checked) {
+    if (!/** @type {HTMLInputElement} */ (document.getElementById('chkSkipDuplicates')).checked) {
       retireHideDuplicatesOptIn();
       // With duplicate-skipping OFF the run doesn't consult the library
       // checker, but crash-recovery adoption of byte-identical files at
@@ -301,7 +304,7 @@ async function previewImport(opts) {
         signal: previewAbort.signal,
         body: JSON.stringify({
           paths: files.map(f => f.path),
-          verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+          verify_by_hash: /** @type {HTMLInputElement} */ (document.getElementById('chkVerifyByHash')).checked,
           skip_duplicates: false,
           include_capture_dates: true,
           destination: recoveryDestNoDedup,
@@ -309,21 +312,21 @@ async function previewImport(opts) {
         }),
       });
       if (!recResp.ok) throw new Error('recovery check failed');
-      const recReader = recResp.body.getReader();
+      const recReader = /** @type {ReadableStream<Uint8Array>} */ (recResp.body).getReader();
       const recDecoder = new TextDecoder();
       let recBuffer = '';
-      const recoveredPathsNoDedup = [];
+      /** @type {string[]} */ const recoveredPathsNoDedup = [];
       for (;;) {
         const r = await recReader.read();
         if (r.done) break;
         recBuffer += recDecoder.decode(r.value, { stream: true });
         const parts = recBuffer.split('\n\n');
-        recBuffer = parts.pop();
+        recBuffer = parts.pop() || '';
         for (const part of parts) {
           const m = part.match(/^data: (.+)$/m);
           if (!m) continue;
           try {
-            const d = JSON.parse(m[1]);
+            /** @type {ImportDuplicateFrame} */ const d = JSON.parse(m[1] || '');
             applyCaptureDates(d.capture_dates);
             if (d.recovered) recoveredPathsNoDedup.push(...d.recovered);
             if (!d.done && requestSeq === importPreviewSeq &&
@@ -387,7 +390,7 @@ async function previewImport(opts) {
       signal: previewAbort.signal,
       body: JSON.stringify({
         paths: files.map(f => f.path),
-        verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+        verify_by_hash: /** @type {HTMLInputElement} */ (document.getElementById('chkVerifyByHash')).checked,
         include_capture_dates: true,
         ...(recoveryDestination ? {
           destination: recoveryDestination,
@@ -396,22 +399,22 @@ async function previewImport(opts) {
       }),
     });
     if (!dupResp.ok) throw new Error('duplicate check failed');
-    const reader = dupResp.body.getReader();
+    const reader = /** @type {ReadableStream<Uint8Array>} */ (dupResp.body).getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    const duplicatePaths = [];
-    const recoveredPaths = [];
+    /** @type {string[]} */ const duplicatePaths = [];
+    /** @type {string[]} */ const recoveredPaths = [];
     for (;;) {
       const r = await reader.read();
       if (r.done) break;
       buffer += decoder.decode(r.value, { stream: true });
       const parts = buffer.split('\n\n');
-      buffer = parts.pop();
+      buffer = parts.pop() || '';
       for (const part of parts) {
         const m = part.match(/^data: (.+)$/m);
         if (!m) continue;
         try {
-          const d = JSON.parse(m[1]);
+          /** @type {ImportDuplicateFrame} */ const d = JSON.parse(m[1] || '');
           applyCaptureDates(d.capture_dates);
           if (d.duplicates) duplicatePaths.push(...d.duplicates);
           if (d.recovered) recoveredPaths.push(...d.recovered);
@@ -495,7 +498,7 @@ async function previewImport(opts) {
     // A superseding preview deliberately aborts every request owned by this
     // run. Its successor owns the summary / error state, so cancellation is
     // a normal lifecycle event rather than a user-facing failure.
-    if (e && e.name === 'AbortError') return;
+    if (e instanceof Error && e.name === 'AbortError') return;
     // Don't let a stale run's error clobber a newer preview's summary
     // or surface a stale error banner — the newer run owns the UI.
     if (requestSeq !== importPreviewSeq) return;
@@ -504,7 +507,7 @@ async function previewImport(opts) {
     // the list doesn't advertise a scan nothing is running.
     failActiveSourceScans();
     summary.textContent = '';
-    showError(String(e.message || e));
+    showError(String(e instanceof Error ? e.message : e));
     // The grid was cleared at the top and nothing replaced it, so the screen
     // shows no preview at all while the signature still matches — the
     // staleness check would call that "current". Say so explicitly.

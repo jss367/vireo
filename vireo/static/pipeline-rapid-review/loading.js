@@ -59,6 +59,7 @@ function registerRapidHistoryHooks() {
   };
 }
 
+/** @returns {Promise<void>} */
 async function retryRapidReview() {
   if (rapid.applying) return;
   try {
@@ -73,9 +74,9 @@ async function initRapidReview() {
   try {
     rapid.results = await safeFetch('/api/pipeline/results', {}, { toast: false });
   } catch (e) {
-    document.getElementById('burstTitle').textContent = 'No pipeline results';
-    document.getElementById('burstSubtitle').innerHTML = '<a class="rapid-link" href="/pipeline">Open Pipeline</a>';
-    document.getElementById('reviewSurface').innerHTML = '<div class="empty-state">Run pipeline review results first.</div>';
+    /** @type {HTMLElement} */ (document.getElementById('burstTitle')).textContent = 'No pipeline results';
+    /** @type {HTMLElement} */ (document.getElementById('burstSubtitle')).innerHTML = '<a class="rapid-link" href="/pipeline">Open Pipeline</a>';
+    /** @type {HTMLElement} */ (document.getElementById('reviewSurface')).innerHTML = '<div class="empty-state">Run pipeline review results first.</div>';
     return;
   }
   rapid.photoMap = {};
@@ -113,11 +114,11 @@ function showEmptyQueue() {
   rapid.currentIndex = -1;
   rapid.seeded = false;
   var queue = QUEUE_FILTERS[rapid.queue.filter] || QUEUE_FILTERS.all;
-  document.getElementById('burstTitle').textContent = queue.label;
-  document.getElementById('burstSubtitle').textContent = '0 matching bursts';
-  var img = document.getElementById('currentPhoto');
-  var empty = document.getElementById('stageEmpty');
-  var pill = document.getElementById('statusPill');
+  /** @type {HTMLElement} */ (document.getElementById('burstTitle')).textContent = queue.label;
+  /** @type {HTMLElement} */ (document.getElementById('burstSubtitle')).textContent = '0 matching bursts';
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('currentPhoto'));
+  var empty = /** @type {HTMLElement} */ (document.getElementById('stageEmpty'));
+  var pill = /** @type {HTMLElement} */ (document.getElementById('statusPill'));
   if (img) {
     img.removeAttribute('src');
     img.style.display = 'none';
@@ -127,30 +128,31 @@ function showEmptyQueue() {
     empty.textContent = queue.empty;
   }
   if (pill) pill.style.display = 'none';
-  document.getElementById('speciesInput').value = '';
-  document.getElementById('filename').textContent = '-';
-  document.getElementById('metricQuality').textContent = '-';
-  document.getElementById('metricSharpness').textContent = '-';
-  document.getElementById('metricLabel').textContent = '-';
-  document.getElementById('metricReviewed').textContent = '0/0';
-  document.getElementById('filmstrip').innerHTML = '';
-  document.getElementById('pickLane').innerHTML = '';
-  document.getElementById('reviewLane').innerHTML = '';
-  document.getElementById('rejectLane').innerHTML = '';
-  document.getElementById('pickCount').textContent = '0';
-  document.getElementById('reviewCount').textContent = '0';
-  document.getElementById('rejectCount').textContent = '0';
+  /** @type {HTMLInputElement} */ (document.getElementById('speciesInput')).value = '';
+  /** @type {HTMLElement} */ (document.getElementById('filename')).textContent = '-';
+  /** @type {HTMLElement} */ (document.getElementById('metricQuality')).textContent = '-';
+  /** @type {HTMLElement} */ (document.getElementById('metricSharpness')).textContent = '-';
+  /** @type {HTMLElement} */ (document.getElementById('metricLabel')).textContent = '-';
+  /** @type {HTMLElement} */ (document.getElementById('metricReviewed')).textContent = '0/0';
+  /** @type {HTMLElement} */ (document.getElementById('filmstrip')).innerHTML = '';
+  /** @type {HTMLElement} */ (document.getElementById('pickLane')).innerHTML = '';
+  /** @type {HTMLElement} */ (document.getElementById('reviewLane')).innerHTML = '';
+  /** @type {HTMLElement} */ (document.getElementById('rejectLane')).innerHTML = '';
+  /** @type {HTMLElement} */ (document.getElementById('pickCount')).textContent = '0';
+  /** @type {HTMLElement} */ (document.getElementById('reviewCount')).textContent = '0';
+  /** @type {HTMLElement} */ (document.getElementById('rejectCount')).textContent = '0';
   renderBurstList();
   renderQueueControls();
   renderApplyState();
 }
 
+/** @param {number} index @returns {Promise<void>} */
 async function openSession(index) {
   if (rapid.historyRefreshFailed) return retryRapidReview();
   if (index < 0 || index >= rapid.sessions.length) return;
   rapid.sessionIndex = index;
-  var session = rapid.sessions[index];
-  rapid.items = session.ids.map(function(id) { return rapid.photoMap[id]; }).filter(Boolean);
+  var session = /** @type {RapidSession} */ (rapid.sessions[index]);
+  rapid.items = /** @type {RapidPhoto[]} */ (session.ids.map(function(id) { return rapid.photoMap[id]; }).filter(Boolean));
   rapid.picks = new Set();
   rapid.rejects = new Set();
   rapid.reviewed = new Set();
@@ -169,7 +171,7 @@ async function openSession(index) {
   // openSession lands as stale and gets ignored when it resolves.
   var token = (rapid.openToken || 0) + 1;
   rapid.openToken = token;
-  document.getElementById('speciesInput').value = session.species || '';
+  /** @type {HTMLInputElement} */ (document.getElementById('speciesInput')).value = session.species || '';
   renderAll();
 
   try {

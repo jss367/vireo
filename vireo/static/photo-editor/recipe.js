@@ -1,11 +1,11 @@
 // Recipe values, save normalization, dirty state, summary, and control sync.
 // Classic page script; load boot.js after all definitions.
 
-var TONE_CURVE_DEFAULTS = {black: 0, shadows: 25, midtones: 50, highlights: 75, white: 100};
+/** @type {Record<string,number>} */ var TONE_CURVE_DEFAULTS = {black: 0, shadows: 25, midtones: 50, highlights: 75, white: 100};
 var HSL_COLORS = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'];
-var COLOR_GRADE_ZONES = ['shadows', 'midtones', 'highlights'];
+/** @type {EditorGradeZone[]} */ var COLOR_GRADE_ZONES = ['shadows', 'midtones', 'highlights'];
 
-function adjustmentValues(recipe) {
+/** @param {EditorRecipe} recipe */ function adjustmentValues(recipe) {
   var adj = recipe && recipe.adjustments || {};
   var wb = adj.white_balance || {};
   return {
@@ -28,13 +28,13 @@ function adjustmentValues(recipe) {
   };
 }
 
-function advancedColorValues(recipe) {
+/** @param {EditorRecipe} recipe */ function advancedColorValues(recipe) {
   var adj = recipe && recipe.adjustments || {};
   var curveIn = adj.tone_curve || {};
-  var curve = {};
+  /** @type {Record<string,number>} */ var curve = {};
   Object.keys(TONE_CURVE_DEFAULTS).forEach(function(key) {
     curve[key] = Object.prototype.hasOwnProperty.call(curveIn, key)
-      ? Number(curveIn[key]) : TONE_CURVE_DEFAULTS[key];
+      ? Number(curveIn[key]) : TONE_CURVE_DEFAULTS[key] || 0;
   });
   return {
     tone_curve: curve,
@@ -43,7 +43,7 @@ function advancedColorValues(recipe) {
   };
 }
 
-function recipeForSave(recipe) {
+/** @param {EditorRecipe} recipe */ function recipeForSave(recipe) {
   var out = cloneRecipe(recipe);
   delete out.version;
   if (!Number(out.rotation)) delete out.rotation;
@@ -73,9 +73,9 @@ function recipeForSave(recipe) {
   }
 
   var vals = adjustmentValues(out);
-  var adj = {};
+  /** @type {EditorAdjustments} */ var adj = {};
   if ((out.adjustments || {}).denoise_mode === 'camera') adj.denoise_mode = 'camera';
-  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction'].forEach(function(key) {
+  /** @type {EditorNumericKey[]} */ (['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation', 'texture', 'clarity', 'dehaze', 'sharpen', 'noise_reduction']).forEach(function(key) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) adj[key] = Number(vals[key]);
   });
   // Radius only rides along with active sharpening, and its 1.0 default is
@@ -84,24 +84,24 @@ function recipeForSave(recipe) {
   if (adj.sharpen && Math.abs(Number(vals.sharpen_radius) - 1) > 0.000001) {
     adj.sharpen_radius = Number(vals.sharpen_radius);
   }
-  var wb = {};
-  ['temperature', 'tint'].forEach(function(key) {
+  /** @type {Record<string,number>} */ var wb = {};
+  /** @type {('temperature'|'tint')[]} */ (['temperature', 'tint']).forEach(function(key) {
     if (Math.abs(Number(vals[key] || 0)) > 0.000001) wb[key] = Number(vals[key]);
   });
   if (Object.keys(wb).length) adj.white_balance = wb;
 
   var advanced = advancedColorValues(out);
-  var curve = {};
+  /** @type {Record<string,number>} */ var curve = {};
   Object.keys(TONE_CURVE_DEFAULTS).forEach(function(key) {
     var value = Number(advanced.tone_curve[key]);
-    if (Math.abs(value - TONE_CURVE_DEFAULTS[key]) > 0.000001) curve[key] = value;
+    if (Math.abs(value - (TONE_CURVE_DEFAULTS[key] || 0)) > 0.000001) curve[key] = value;
   });
   if (Object.keys(curve).length) adj.tone_curve = curve;
 
-  var hsl = {};
+  /** @type {Record<string,Record<string,number>>} */ var hsl = {};
   HSL_COLORS.forEach(function(color) {
     var source = advanced.hsl[color] || {};
-    var section = {};
+    /** @type {Record<string,number>} */ var section = {};
     ['hue', 'saturation', 'luminance'].forEach(function(key) {
       var value = Number(source[key] || 0);
       if (Math.abs(value) > 0.000001) section[key] = value;
@@ -110,7 +110,7 @@ function recipeForSave(recipe) {
   });
   if (Object.keys(hsl).length) adj.hsl = hsl;
 
-  var grading = {};
+  /** @type {EditorColorGrading} */ var grading = {};
   COLOR_GRADE_ZONES.forEach(function(zone) {
     var source = advanced.color_grading[zone] || {};
     var saturation = Number(source.saturation || 0);
@@ -130,13 +130,13 @@ function recipeForSave(recipe) {
   return out;
 }
 
-function recipeKey(recipe) {
+/** @param {EditorRecipe|null} recipe */ function recipeKey(recipe) {
   return JSON.stringify(recipeForSave(recipe || {}));
 }
 
 function updateDirtyState() {
   var dirty = recipeKey(editorState.recipe) !== recipeKey(editorState.savedRecipe);
-  document.getElementById('saveBtn').disabled = !dirty;
+  /** @type {HTMLButtonElement} */ (document.getElementById('saveBtn')).disabled = !dirty;
   if (dirty) setStatus('Unsaved');
   else setStatus('');
   updateRecipeSummary();
@@ -168,15 +168,15 @@ function updateRecipeSummary() {
       parts.push('local ' + entry.region);
     });
   }
-  document.getElementById('recipeSummary').textContent = parts.length ? parts.join(' | ') : 'No edits';
+  /** @type {HTMLElement} */ (document.getElementById('recipeSummary')).textContent = parts.length ? parts.join(' | ') : 'No edits';
 }
 
 function syncControls() {
   var r = editorState.recipe;
   var vals = adjustmentValues(r);
-  var set = function(id, value, fixed) {
-    var input = document.getElementById(id + 'Range');
-    var label = document.getElementById(id + 'Value');
+  /** @param {string} id @param {number} value @param {boolean=} fixed */ var set = function(id, value, fixed) {
+    var input = /** @type {HTMLInputElement} */ (document.getElementById(id + 'Range'));
+    var label = /** @type {HTMLElement} */ (document.getElementById(id + 'Value'));
     if (input) input.value = String(value || 0);
     if (label) label.textContent = fixed ? Number(value || 0).toFixed(1) : String(Math.round(Number(value || 0)));
   };
@@ -199,7 +199,7 @@ function syncControls() {
   syncDenoiseControls();
   syncAdvancedColorControls();
   var straight = Number(r.straighten || 0);
-  var straightInput = document.getElementById('straightenRange');
+  var straightInput = /** @type {HTMLInputElement} */ (document.getElementById('straightenRange'));
   // The recipe schema allows ±45° (pasted/API recipes), wider than the ±10°
   // slider. Widen the slider to fit an out-of-range value instead of letting
   // the browser silently clamp the thumb while the label shows the real number.
@@ -207,14 +207,14 @@ function syncControls() {
   straightInput.min = String(-straightLimit);
   straightInput.max = String(straightLimit);
   straightInput.value = String(straight);
-  document.getElementById('straightenValue').textContent = straight.toFixed(1);
+  /** @type {HTMLElement} */ (document.getElementById('straightenValue')).textContent = straight.toFixed(1);
   syncLocalControls();
   renderCropBox();
   updateAspectButtons();
   updateDirtyState();
 }
 
-function previewRecipeFor(recipe, applyCrop) {
+/** @param {EditorRecipe} recipe @param {boolean} applyCrop */ function previewRecipeFor(recipe, applyCrop) {
   var r = recipeForSave(recipe || {});
   if (!applyCrop) delete r.crop;
   return r;

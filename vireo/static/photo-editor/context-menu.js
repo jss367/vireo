@@ -211,12 +211,12 @@ function buildPhotoEditorContextMenu() {
 }
 
 function initEditorContextMenu() {
-  var shell = document.querySelector('.editor-shell');
+  var shell = document.querySelector(/** @type {'div'} */ ('.editor-shell'));
   if (!shell || typeof window.openContextMenu !== 'function') return;
   shell.addEventListener('contextmenu', function(e) {
     // Keep the browser's native spelling/copy/paste menu anywhere text can be
     // entered or selected. The Vireo menu owns the rest of the editor surface.
-    var target = e.target;
+    var target = e.target instanceof Element ? e.target : null;
     if (target && target.closest &&
         target.closest('input, textarea, select, [contenteditable]')) return;
     var selection = window.getSelection ? window.getSelection() : null;

@@ -26,7 +26,7 @@ async function browseForDestination() {
     if (result) {
       const path = Array.isArray(result) ? result[0] : result;
       if (path) {
-        const destination = document.getElementById('destInput');
+        const destination = /** @type {HTMLInputElement} */ (document.getElementById('destInput'));
         destination.value = path;
         // Notify destInput listeners (dest-structure invalidation, NAS-move
         // row) exactly like a manual edit would — matches
@@ -62,9 +62,9 @@ function createImportFolderBrowser() {
         title: 'Select Destination Folder',
         multiple: false,
         showCounts: false,
-        startPath: () => (document.getElementById('destInput').value || '').trim(),
+        startPath: () => (/** @type {HTMLInputElement} */ (document.getElementById('destInput')).value || '').trim(),
         onSelect: (path) => {
-          const destination = document.getElementById('destInput');
+          const destination = /** @type {HTMLInputElement} */ (document.getElementById('destInput'));
           destination.value = path;
           // Notify destination-preview listeners exactly like a manual edit.
           destination.dispatchEvent(new Event('input', { bubbles: true }));
@@ -76,6 +76,7 @@ function createImportFolderBrowser() {
 
 // Compatibility wrappers keep existing inline callers, deep-link behavior,
 // and browser-level tests stable while all behavior lives in the shared module.
+/** @param {string} mode @param {ImportFolderBrowserOptions} opts */
 function openImportFolderBrowser(mode, opts = {}) {
   importFolderBrowser.open(mode === 'destination' ? 'destination' : 'source', opts);
 }
@@ -84,6 +85,7 @@ function closeImportFolderBrowser() {
   importFolderBrowser.close();
 }
 
+/** @param {string} path */
 function browseImportFolderTo(path) {
   return importFolderBrowser.browse(path);
 }

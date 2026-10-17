@@ -3,6 +3,7 @@
 // inline script, which calls mapStatusHtml with each /api/photos/geo response.
 'use strict';
 
+/** @param {MapGeoResponse} data @returns {string} */
 function mapStatusHtml(data) {
   if (data.selection) return mapSelectionStatusHtml(data);
   var missingCoordinates = data.total_without_coordinates;
@@ -36,9 +37,12 @@ function mapStatusHtml(data) {
 
 // A Browse selection opened with View on Map: the counts partition the
 // selection, so every selected photo the map leaves off is accounted for.
+/** @param {MapGeoResponse} data @returns {string} */
 function mapSelectionStatusHtml(data) {
   var sel = data.selection;
+  if (!sel) return mapStatusHtml(data);
   var drawn = data.photos.length;
+  /** @param {number} n @param {string} one @param {string} many */
   var plural = function(n, one, many) {
     return n.toLocaleString() + ' ' + (n === 1 ? one : many);
   };

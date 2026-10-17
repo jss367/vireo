@@ -6,9 +6,9 @@ function bindPipelineReviewPhotoEvents() {
     // encounter and Group Review state. Remove the completed deletion from every
     // local structure before rendering or applying staged changes again.
     document.addEventListener('lightbox:photodeleted', function(e) {
-      var photoId = Number(e && e.detail && e.detail.photoId);
+      var photoId = Number(e && /** @type {CustomEvent<ReviewPhotoEvent>} */ (e).detail && /** @type {CustomEvent<ReviewPhotoEvent>} */ (e).detail.photoId);
       if (!Number.isFinite(photoId) || !pipelineResults) return;
-      var groupOverlay = document.getElementById('grmOverlay');
+      var groupOverlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
       var groupWasOpen = !!(
         groupOverlay && groupOverlay.classList.contains('open') && grmState
       );
@@ -38,10 +38,10 @@ function bindPipelineReviewPhotoEvents() {
       }
       if (inspectPhotoId === photoId) closeInspect();
 
-      pipelineResults.photos = (pipelineResults.photos || []).filter(function(photo) {
+      currentReviewResults().photos = (currentReviewResults().photos || []).filter(function(photo) {
         return photo.id !== photoId;
       });
-      (pipelineResults.encounters || []).forEach(function(encounter) {
+      (currentReviewResults().encounters || []).forEach(function(encounter) {
         encounter.photo_ids = (encounter.photo_ids || []).filter(function(id) {
           return id !== photoId;
         });
@@ -52,7 +52,7 @@ function bindPipelineReviewPhotoEvents() {
           var filtered = ids.filter(function(id) { return id !== photoId; });
           if (burst.photo_ids) burst.photo_ids = filtered;
           else {
-            burst.splice(0, burst.length);
+            if (Array.isArray(burst)) burst.splice(0, burst.length);
             Array.prototype.push.apply(burst, filtered);
           }
         });
@@ -62,20 +62,20 @@ function bindPipelineReviewPhotoEvents() {
         });
         encounter.burst_count = encounter.bursts.length;
       });
-      pipelineResults.encounters = (pipelineResults.encounters || []).filter(function(encounter) {
+      currentReviewResults().encounters = (currentReviewResults().encounters || []).filter(function(encounter) {
         return encounter.photo_ids && encounter.photo_ids.length > 0;
       });
       _focusedEncounterIdx = null;
 
       if (grmState && Array.isArray(grmState.items)) {
         grmState.items = grmState.items.filter(function(photo) { return photo.id !== photoId; });
-        ['picks', 'rejects', 'removed', 'selectedIds', 'touched'].forEach(function(name) {
+        /** @type {const} */ (['picks', 'rejects', 'removed', 'selectedIds', 'touched']).forEach(function(name) {
           if (grmState[name] && typeof grmState[name].delete === 'function') {
             grmState[name].delete(photoId);
           }
         });
-        ['dbState', 'selectedSubjectByPhoto'].forEach(function(name) {
-          if (grmState[name]) delete grmState[name][String(photoId)];
+        /** @type {const} */ (['dbState', 'selectedSubjectByPhoto']).forEach(function(name) {
+          if (name === 'dbState') delete grmState.dbState[photoId]; else delete grmState.selectedSubjectByPhoto[photoId];
         });
         if (grmState.selectionAnchor === photoId) grmState.selectionAnchor = null;
       }
@@ -88,13 +88,13 @@ function bindPipelineReviewPhotoEvents() {
         var nextEncIdx = -1;
         var nextBurstIdx = -1;
         for (var encIdx = 0;
-             encIdx < pipelineResults.encounters.length && nextEncIdx < 0;
+             encIdx < currentReviewResults().encounters.length && nextEncIdx < 0;
              encIdx++) {
-          var bursts = pipelineResults.encounters[encIdx].bursts || [];
+          var bursts = currentReviewResults().encounters[encIdx]?.bursts || [];
           for (var burstIdx = 0; burstIdx < bursts.length; burstIdx++) {
-            var burstIds = bursts[burstIdx].photo_ids || bursts[burstIdx];
+            var burstIds = bursts[burstIdx]?.photo_ids || bursts[burstIdx];
             if (Array.isArray(burstIds) && memberIds.every(function(id) {
-              return burstIds.indexOf(id) !== -1;
+              return (Array.isArray(burstIds) ? burstIds : requireReviewValue(burstIds).photo_ids).indexOf(id) !== -1;
             })) {
               nextEncIdx = encIdx;
               nextBurstIdx = burstIdx;
@@ -129,18 +129,18 @@ function bindPipelineReviewPhotoEvents() {
     // lifelist:changed event and updates its own caches. Without this listener the
     // pipeline cards keep the pre-change value of p.is_species_representative, so
     // the newly assigned photo stays un-badged and any previously visible former
-    // representative keeps its badge until a full reload. Walk pipelineResults.photos
+    // representative keeps its badge until a full reload. Walk currentReviewResults().photos
     // in place and flip the species entry's flags, then rerender the grid. If the
     // burst modal happens to be open on the matching species, also update its
     // dbState so the modal's Representative badge stays honest.
     document.addEventListener('lifelist:changed', function(e) {
-      var detail = e && e.detail ? e.detail : {};
+      var detail = e && /** @type {CustomEvent<ReviewPhotoEvent>} */ (e).detail ? /** @type {CustomEvent<ReviewPhotoEvent>} */ (e).detail : {};
       var species = detail.species;
       var photoId = detail.photoId;
       if (!species || !photoId) return;
-      if (!pipelineResults || !Array.isArray(pipelineResults.photos)) return;
+      if (!pipelineResults || !Array.isArray(currentReviewResults().photos)) return;
       var changed = false;
-      pipelineResults.photos.forEach(function(p) {
+      currentReviewResults().photos.forEach(function(p) {
         var entries = Array.isArray(p.life_list) ? p.life_list : [];
         var touched = false;
         entries.forEach(function(entry) {
@@ -169,7 +169,7 @@ function bindPipelineReviewPhotoEvents() {
       if (grmState && grmState.dbState && grmState.keywordStateSpecies === species) {
         Object.keys(grmState.dbState).forEach(function(pidStr) {
           var pid = parseInt(pidStr, 10);
-          var st = grmState.dbState[pid];
+          var st = grmState.dbState?.[pid];
           if (!st) return;
           var next = (pid === photoId);
           if (st.is_species_representative !== next) {
@@ -181,7 +181,7 @@ function bindPipelineReviewPhotoEvents() {
       if (changed) {
         renderResults();
         if (typeof renderGroupModal === 'function') {
-          var overlay = document.getElementById('grmOverlay');
+          var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
           if (overlay && overlay.classList.contains('open')) renderGroupModal();
         }
       }

@@ -1,24 +1,24 @@
 async function loadConfig() {
   try {
-    var cfg = await safeFetch('/api/config', {}, { toast: false });
-    document.getElementById('cfgNumberedNavigationMode').value =
-      cfg.numbered_navigation_mode === 'fixed_pages' ? 'fixed_pages' : 'tab_order';
-    window.vireoSetNumberedNavigationMode(document.getElementById('cfgNumberedNavigationMode').value);
+    /** @type {SettingsConfig} */ var cfg = await safeFetch('/api/config', {}, { toast: false });
+    /** @type {HTMLSelectElement} */ (document.getElementById('cfgNumberedNavigationMode')).value =
+      String(cfg.numbered_navigation_mode === 'fixed_pages' ? 'fixed_pages' : 'tab_order');
+    window.vireoSetNumberedNavigationMode(/** @type {HTMLSelectElement} */ (document.getElementById('cfgNumberedNavigationMode')).value);
     var pct = Math.round((cfg.classification_threshold != null ? cfg.classification_threshold : 0.4) * 100);
-    document.getElementById('cfgThreshold').value = pct;
-    document.getElementById('cfgThresholdVal').textContent = pct + '%';
-    document.getElementById('cfgGroupingWindow').value = cfg.grouping_window_seconds != null ? cfg.grouping_window_seconds : 10;
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgThreshold')).value = String(pct);
+    /** @type {HTMLElement} */ (document.getElementById('cfgThresholdVal')).textContent = String(pct + '%');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgGroupingWindow')).value = String(cfg.grouping_window_seconds != null ? cfg.grouping_window_seconds : 10);
     var simPct = Math.round((cfg.similarity_threshold != null ? cfg.similarity_threshold : 0.85) * 100);
-    document.getElementById('cfgSimilarity').value = simPct;
-    document.getElementById('cfgSimilarityVal').textContent = simPct + '%';
-    document.getElementById('cfgHfToken').value = cfg.hf_token || '';
-    document.getElementById('cfgInatToken').value = cfg.inat_token || '';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgSimilarity')).value = String(simPct);
+    /** @type {HTMLElement} */ (document.getElementById('cfgSimilarityVal')).textContent = String(simPct + '%');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgHfToken')).value = String(cfg.hf_token || '');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgInatToken')).value = String(cfg.inat_token || '');
     if (cfg.inat_token) validateInatToken();
-    document.getElementById('cfgGoogleMapsApiKey').value = cfg.google_maps_api_key || '';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgGoogleMapsApiKey')).value = String(cfg.google_maps_api_key || '');
     _rememberSavedSecrets(_readSecretFields());
-    document.getElementById('cfgGoogleMapsPreferEnglish').checked = cfg.google_maps_prefer_english !== false;
-    document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
-    document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgGoogleMapsPreferEnglish')).checked = cfg.google_maps_prefer_english !== false;
+    /** @type {HTMLSelectElement} */ (document.getElementById('cfgKeywordCase')).value = String(cfg.keyword_case || 'auto');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgMaxEditHistory')).value = String(cfg.max_edit_history != null ? cfg.max_edit_history : 1000);
     // Load editor list. Synthesize from the legacy single string if the user
     // hasn't migrated yet — saving from the new UI completes the migration.
     // Defend against malformed entries (non-string path/name from hand-edited
@@ -60,133 +60,133 @@ async function loadConfig() {
       });
     });
     renderRemoteTargets();
-    document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
-    document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
-    document.getElementById('cfgDarktableFormat').value = cfg.darktable_output_format || 'jpg';
-    document.getElementById('cfgDarktableOutputDir').value = cfg.darktable_output_dir || '';
-    document.getElementById('cfgDarktableAutoConvertDng').checked = cfg.darktable_auto_convert_dng === true;
-    document.getElementById('cfgDngConverterBin').value = cfg.dng_converter_bin || '';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableBin')).value = String(cfg.darktable_bin || '');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableStyle')).value = String(cfg.darktable_style || '');
+    /** @type {HTMLSelectElement} */ (document.getElementById('cfgDarktableFormat')).value = String(cfg.darktable_output_format || 'jpg');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableOutputDir')).value = String(cfg.darktable_output_dir || '');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableAutoConvertDng')).checked = cfg.darktable_auto_convert_dng === true;
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgDngConverterBin')).value = String(cfg.dng_converter_bin || '');
     loadDarktableStatus();
     // Load display settings
-    document.getElementById('cfgPhotosPerPage').value = cfg.photos_per_page != null ? cfg.photos_per_page : 50;
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgPhotosPerPage')).value = String(cfg.photos_per_page != null ? cfg.photos_per_page : 50);
     var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
-    document.getElementById('cfgBrowseThumbDefault').value = bt;
-    document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
-    document.getElementById('cfgOpenInBrowser').checked = cfg.open_in_browser === true;
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgBrowseThumbDefault')).value = String(bt);
+    /** @type {HTMLElement} */ (document.getElementById('cfgBrowseThumbVal')).textContent = String(bt + 'px');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgOpenInBrowser')).checked = cfg.open_in_browser === true;
     // Load browse card fields
     loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "location_status", "rating", "flag", "sharpness"]);
     // Load the filter bar's quick-filter buttons
     loadFilterShortcuts(cfg.filter_shortcuts);
     // Load detection settings
     var dc = Math.round((cfg.detector_confidence != null ? cfg.detector_confidence : 0.20) * 100);
-    document.getElementById('cfgDetectorConf').value = dc;
-    document.getElementById('cfgDetectorConfVal').textContent = (dc / 100).toFixed(2);
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgDetectorConf')).value = String(dc);
+    /** @type {HTMLElement} */ (document.getElementById('cfgDetectorConfVal')).textContent = String((dc / 100).toFixed(2));
     var dp = Math.round((cfg.detection_padding != null ? cfg.detection_padding : 0.20) * 100);
-    document.getElementById('cfgDetectionPadding').value = dp;
-    document.getElementById('cfgDetectionPaddingVal').textContent = (dp / 100).toFixed(2);
-    document.getElementById('cfgTopK').value = cfg.top_k_predictions != null ? cfg.top_k_predictions : 5;
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgDetectionPadding')).value = String(dp);
+    /** @type {HTMLElement} */ (document.getElementById('cfgDetectionPaddingVal')).textContent = String((dp / 100).toFixed(2));
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgTopK')).value = String(cfg.top_k_predictions != null ? cfg.top_k_predictions : 5);
     var rd = Math.round((cfg.redundancy_threshold != null ? cfg.redundancy_threshold : 0.88) * 100);
-    document.getElementById('cfgRedundancy').value = rd;
-    document.getElementById('cfgRedundancyVal').textContent = (rd / 100).toFixed(2);
-    document.getElementById('cfgCullTimeWindow').value = cfg.cull_time_window != null ? cfg.cull_time_window : 60;
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgRedundancy')).value = String(rd);
+    /** @type {HTMLElement} */ (document.getElementById('cfgRedundancyVal')).textContent = String((rd / 100).toFixed(2));
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgCullTimeWindow')).value = String(cfg.cull_time_window != null ? cfg.cull_time_window : 60);
     var cph = cfg.cull_phash_threshold != null ? cfg.cull_phash_threshold : 19;
-    document.getElementById('cfgCullPhash').value = cph;
-    document.getElementById('cfgCullPhashVal').textContent = cph;
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgCullPhash')).value = String(cph);
+    /** @type {HTMLElement} */ (document.getElementById('cfgCullPhashVal')).textContent = String(cph);
     // Load pipeline settings
     var p = VireoPipelineConfig.pipelineFromConfig(cfg);
     var wf = VireoPipelineConfig.percent(p.w_focus, 'w_focus');
-    document.getElementById('cfgWFocus').value = wf;
-    document.getElementById('cfgWFocusVal').textContent = wf + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWFocus')).value = String(wf);
+    /** @type {HTMLElement} */ (document.getElementById('cfgWFocusVal')).textContent = String(wf + '%');
     var we = VireoPipelineConfig.percent(p.w_exposure, 'w_exposure');
-    document.getElementById('cfgWExposure').value = we;
-    document.getElementById('cfgWExposureVal').textContent = we + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWExposure')).value = String(we);
+    /** @type {HTMLElement} */ (document.getElementById('cfgWExposureVal')).textContent = String(we + '%');
     var wc = VireoPipelineConfig.percent(p.w_composition, 'w_composition');
-    document.getElementById('cfgWComposition').value = wc;
-    document.getElementById('cfgWCompositionVal').textContent = wc + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWComposition')).value = String(wc);
+    /** @type {HTMLElement} */ (document.getElementById('cfgWCompositionVal')).textContent = String(wc + '%');
     var wa = VireoPipelineConfig.percent(p.w_area, 'w_area');
-    document.getElementById('cfgWArea').value = wa;
-    document.getElementById('cfgWAreaVal').textContent = wa + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWArea')).value = String(wa);
+    /** @type {HTMLElement} */ (document.getElementById('cfgWAreaVal')).textContent = String(wa + '%');
     var wn = VireoPipelineConfig.percent(p.w_noise, 'w_noise');
-    document.getElementById('cfgWNoise').value = wn;
-    document.getElementById('cfgWNoiseVal').textContent = wn + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWNoise')).value = String(wn);
+    /** @type {HTMLElement} */ (document.getElementById('cfgWNoiseVal')).textContent = String(wn + '%');
     var rc = VireoPipelineConfig.percent(p.reject_crop_complete, 'reject_crop_complete');
-    document.getElementById('cfgRejectCrop').value = rc;
-    document.getElementById('cfgRejectCropVal').textContent = rc + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectCrop')).value = String(rc);
+    /** @type {HTMLElement} */ (document.getElementById('cfgRejectCropVal')).textContent = String(rc + '%');
     var rf = VireoPipelineConfig.percent(p.reject_focus, 'reject_focus');
-    document.getElementById('cfgRejectFocus').value = rf;
-    document.getElementById('cfgRejectFocusVal').textContent = rf + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectFocus')).value = String(rf);
+    /** @type {HTMLElement} */ (document.getElementById('cfgRejectFocusVal')).textContent = String(rf + '%');
     var rcl = VireoPipelineConfig.percent(p.reject_clip_high, 'reject_clip_high');
-    document.getElementById('cfgRejectClip').value = rcl;
-    document.getElementById('cfgRejectClipVal').textContent = rcl + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectClip')).value = String(rcl);
+    /** @type {HTMLElement} */ (document.getElementById('cfgRejectClipVal')).textContent = String(rcl + '%');
     var rco = VireoPipelineConfig.percent(p.reject_composite, 'reject_composite');
-    document.getElementById('cfgRejectComposite').value = rco;
-    document.getElementById('cfgRejectCompositeVal').textContent = rco + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectComposite')).value = String(rco);
+    /** @type {HTMLElement} */ (document.getElementById('cfgRejectCompositeVal')).textContent = String(rco + '%');
 
     // Miss detection tunables
-    document.getElementById('cfgMissEnabled').checked = p.miss_enabled !== false;
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgMissEnabled')).checked = p.miss_enabled !== false;
     var mdc = VireoPipelineConfig.percent(p.miss_det_confidence, 'miss_det_confidence');
-    document.getElementById('cfgMissDetConf').value = mdc;
-    document.getElementById('cfgMissDetConfVal').textContent = mdc + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgMissDetConf')).value = String(mdc);
+    /** @type {HTMLElement} */ (document.getElementById('cfgMissDetConfVal')).textContent = String(mdc + '%');
     var mbm = Math.round(VireoPipelineConfig.asNumber(p.miss_bbox_area_min, 'miss_bbox_area_min') * 1000);
-    document.getElementById('cfgMissBboxMin').value = mbm;
-    document.getElementById('cfgMissBboxMinVal').textContent = (mbm / 1000).toFixed(3);
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgMissBboxMin')).value = String(mbm);
+    /** @type {HTMLElement} */ (document.getElementById('cfgMissBboxMinVal')).textContent = String((mbm / 1000).toFixed(3));
     var mor = VireoPipelineConfig.percent(p.miss_oof_ratio, 'miss_oof_ratio');
-    document.getElementById('cfgMissOofRatio').value = mor;
-    document.getElementById('cfgMissOofRatioVal').textContent = (mor / 100).toFixed(2);
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgMissOofRatio')).value = String(mor);
+    /** @type {HTMLElement} */ (document.getElementById('cfgMissOofRatioVal')).textContent = String((mor / 100).toFixed(2));
 
     // Eye-focus detection tunables
-    document.getElementById('cfgEyeDetectEnabled').checked =
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectEnabled')).checked =
       p.eye_detect_enabled === true;  // default false
     var ecg = VireoPipelineConfig.percent(p.eye_classifier_conf_gate, 'eye_classifier_conf_gate');
-    document.getElementById('cfgEyeClassifierConfGate').value = ecg;
-    document.getElementById('cfgEyeClassifierConfGateVal').textContent = ecg + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeClassifierConfGate')).value = String(ecg);
+    /** @type {HTMLElement} */ (document.getElementById('cfgEyeClassifierConfGateVal')).textContent = String(ecg + '%');
     var edg = VireoPipelineConfig.percent(p.eye_detection_conf_gate, 'eye_detection_conf_gate');
-    document.getElementById('cfgEyeDetectionConfGate').value = edg;
-    document.getElementById('cfgEyeDetectionConfGateVal').textContent = edg + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectionConfGate')).value = String(edg);
+    /** @type {HTMLElement} */ (document.getElementById('cfgEyeDetectionConfGateVal')).textContent = String(edg + '%');
     var ewk = VireoPipelineConfig.percent(p.eye_window_k, 'eye_window_k');
-    document.getElementById('cfgEyeWindowK').value = ewk;
-    document.getElementById('cfgEyeWindowKVal').textContent = (ewk / 100).toFixed(2);
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeWindowK')).value = String(ewk);
+    /** @type {HTMLElement} */ (document.getElementById('cfgEyeWindowKVal')).textContent = String((ewk / 100).toFixed(2));
     var rejectEye = VireoPipelineConfig.percent(p.reject_eye_focus, 'reject_eye_focus');
-    document.getElementById('cfgRejectEyeFocus').value = rejectEye;
-    document.getElementById('cfgRejectEyeFocusVal').textContent = rejectEye + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgRejectEyeFocus')).value = String(rejectEye);
+    /** @type {HTMLElement} */ (document.getElementById('cfgRejectEyeFocusVal')).textContent = String(rejectEye + '%');
     var btg = VireoPipelineConfig.asNumber(p.burst_time_gap, 'burst_time_gap');
-    document.getElementById('cfgBurstTimeGap').value = btg;
-    document.getElementById('cfgBurstTimeGapVal').textContent = btg + 's';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstTimeGap')).value = String(btg);
+    /** @type {HTMLElement} */ (document.getElementById('cfgBurstTimeGapVal')).textContent = String(btg + 's');
     var bemb = VireoPipelineConfig.embeddingThresholdToDistancePercent(
       p.burst_embedding_threshold
     );
-    document.getElementById('cfgBurstEmb').value = bemb;
-    document.getElementById('cfgBurstEmbVal').textContent = bemb + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstEmb')).value = String(bemb);
+    /** @type {HTMLElement} */ (document.getElementById('cfgBurstEmbVal')).textContent = String(bemb + '%');
     var bl = VireoPipelineConfig.percent(p.burst_lambda, 'burst_lambda');
-    document.getElementById('cfgBurstLambda').value = bl;
-    document.getElementById('cfgBurstLambdaVal').textContent = bl + '%';
-    document.getElementById('cfgBurstMaxKeep').value = VireoPipelineConfig.asNumber(p.burst_max_keep, 'burst_max_keep');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstLambda')).value = String(bl);
+    /** @type {HTMLElement} */ (document.getElementById('cfgBurstLambdaVal')).textContent = String(bl + '%');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstMaxKeep')).value = String(VireoPipelineConfig.asNumber(p.burst_max_keep, 'burst_max_keep'));
     var el = VireoPipelineConfig.percent(p.encounter_lambda, 'encounter_lambda');
-    document.getElementById('cfgEncLambda').value = el;
-    document.getElementById('cfgEncLambdaVal').textContent = el + '%';
-    document.getElementById('cfgEncMaxKeep').value = VireoPipelineConfig.asNumber(p.encounter_max_keep, 'encounter_max_keep');
-    document.getElementById('cfgWTime').value = VireoPipelineConfig.percent(p.w_time, 'w_time');
-    document.getElementById('cfgWSubj').value = VireoPipelineConfig.percent(p.w_subj, 'w_subj');
-    document.getElementById('cfgWGlobal').value = VireoPipelineConfig.percent(p.w_global, 'w_global');
-    document.getElementById('cfgWSpecies').value = VireoPipelineConfig.percent(p.w_species, 'w_species');
-    document.getElementById('cfgWMeta').value = VireoPipelineConfig.percent(p.w_meta, 'w_meta');
-    document.getElementById('cfgHardCutTime').value = VireoPipelineConfig.asNumber(p.hard_cut_time, 'hard_cut_time');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgEncLambda')).value = String(el);
+    /** @type {HTMLElement} */ (document.getElementById('cfgEncLambdaVal')).textContent = String(el + '%');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgEncMaxKeep')).value = String(VireoPipelineConfig.asNumber(p.encounter_max_keep, 'encounter_max_keep'));
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWTime')).value = String(VireoPipelineConfig.percent(p.w_time, 'w_time'));
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWSubj')).value = String(VireoPipelineConfig.percent(p.w_subj, 'w_subj'));
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWGlobal')).value = String(VireoPipelineConfig.percent(p.w_global, 'w_global'));
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWSpecies')).value = String(VireoPipelineConfig.percent(p.w_species, 'w_species'));
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgWMeta')).value = String(VireoPipelineConfig.percent(p.w_meta, 'w_meta'));
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutTime')).value = String(VireoPipelineConfig.asNumber(p.hard_cut_time, 'hard_cut_time'));
     var hcs = VireoPipelineConfig.percent(p.hard_cut_score, 'hard_cut_score');
-    document.getElementById('cfgHardCutScore').value = hcs;
-    document.getElementById('cfgHardCutScoreVal').textContent = hcs + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutScore')).value = String(hcs);
+    /** @type {HTMLElement} */ (document.getElementById('cfgHardCutScoreVal')).textContent = String(hcs + '%');
     var scs = VireoPipelineConfig.percent(p.soft_cut_score, 'soft_cut_score');
-    document.getElementById('cfgSoftCutScore').value = scs;
-    document.getElementById('cfgSoftCutScoreVal').textContent = scs + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgSoftCutScore')).value = String(scs);
+    /** @type {HTMLElement} */ (document.getElementById('cfgSoftCutScoreVal')).textContent = String(scs + '%');
     var ms = VireoPipelineConfig.percent(p.merge_score, 'merge_score');
-    document.getElementById('cfgMergeScore').value = ms;
-    document.getElementById('cfgMergeScoreVal').textContent = ms + '%';
-    document.getElementById('cfgMergeMaxGap').value = VireoPipelineConfig.asNumber(p.merge_max_gap, 'merge_max_gap');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgMergeScore')).value = String(ms);
+    /** @type {HTMLElement} */ (document.getElementById('cfgMergeScoreVal')).textContent = String(ms + '%');
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgMergeMaxGap')).value = String(VireoPipelineConfig.asNumber(p.merge_max_gap, 'merge_max_gap'));
   } catch(e) {
     console.warn('Could not load settings config:', e);
     var fallbackDistance = VireoPipelineConfig.buildSliderDefaults()
       .grouping.burst_embedding_distance;
-    document.getElementById('cfgBurstEmb').value = fallbackDistance;
-    document.getElementById('cfgBurstEmbVal').textContent = fallbackDistance + '%';
+    /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstEmb')).value = String(fallbackDistance);
+    /** @type {HTMLElement} */ (document.getElementById('cfgBurstEmbVal')).textContent = String(fallbackDistance + '%');
     _markSettingsInitialLoad('config');
     return false;
   }
@@ -210,8 +210,8 @@ var CARD_FIELD_OPTIONS = [
   { id: 'prediction_confidence', label: 'Prediction confidence', desc: 'Score of the strongest current species prediction' },
 ];
 
-function loadCardFieldCheckboxes(activeFields) {
-  var container = document.getElementById('cfgCardFieldsContainer');
+/** @param {string[]} activeFields */ function loadCardFieldCheckboxes(activeFields) {
+  var container = /** @type {HTMLElement} */ (document.getElementById('cfgCardFieldsContainer'));
   container.innerHTML = '';
   CARD_FIELD_OPTIONS.forEach(function(opt) {
     var checked = activeFields.indexOf(opt.id) !== -1 ? ' checked' : '';
@@ -225,15 +225,15 @@ function loadCardFieldCheckboxes(activeFields) {
 }
 
 function getSelectedCardFields() {
-  var fields = [];
+  /** @type {string[]} */ var fields = [];
   CARD_FIELD_OPTIONS.forEach(function(opt) {
-    var cb = document.getElementById('cfgCardField_' + opt.id);
+    var cb = /** @type {HTMLInputElement} */ (document.getElementById('cfgCardField_' + opt.id));
     if (cb && cb.checked) fields.push(opt.id);
   });
   return fields;
 }
 
-function _saveConfigNow(gen) {
+/** @param {number=} gen */ function _saveConfigNow(gen) {
     // Direct callers (NAS wizard, etc.) don't hand us a generation, so mint
     // one here. Threading a fresh gen through inflight/ok/error keeps the
     // autosave pill honest when this call overlaps a debounced write.
@@ -253,45 +253,45 @@ function _saveConfigNow(gen) {
 // write back the token the page loaded with, over one saved since, and
 // cancel an in-flight iNat token validation. Only a field the user changed
 // here is sent; the server keeps the stored value for an absent key.
-var _SECRET_FIELDS = {
+/** @type {Record<string,string>} */ var _SECRET_FIELDS = {
   hf_token: 'cfgHfToken',
   inat_token: 'cfgInatToken',
   google_maps_api_key: 'cfgGoogleMapsApiKey',
 };
-var _savedSecrets = {};
+/** @type {Record<string,string>} */ var _savedSecrets = {};
 
 function _readSecretFields() {
-  var values = {};
+  /** @type {Record<string,string>} */ var values = {};
   Object.keys(_SECRET_FIELDS).forEach(function(key) {
-    values[key] = document.getElementById(_SECRET_FIELDS[key]).value.trim();
+    values[key] = /** @type {HTMLInputElement} */ (document.getElementById(_SECRET_FIELDS[key] || '')).value.trim();
   });
   return values;
 }
 
 function _editedSecrets() {
   var current = _readSecretFields();
-  var edited = {};
+  /** @type {Record<string,string>} */ var edited = {};
   Object.keys(current).forEach(function(key) {
-    if (current[key] !== _savedSecrets[key]) edited[key] = current[key];
+    if (current[key] !== _savedSecrets[key]) edited[key] = current[key] || '';
   });
   return edited;
 }
 
-function _rememberSavedSecrets(values) {
-  Object.keys(values).forEach(function(key) { _savedSecrets[key] = values[key]; });
+/** @param {Record<string,string>} values */ function _rememberSavedSecrets(values) {
+  Object.keys(values).forEach(function(key) { _savedSecrets[key] = values[key] || ''; });
 }
 
-async function _postConfigSnapshot(gen) {
+/** @param {number} gen */ async function _postConfigSnapshot(gen) {
     // Runs only once any earlier config POST has settled; reads the form
     // now so the snapshot reflects every edit made while waiting.
-    var threshold = parseInt(document.getElementById('cfgThreshold').value, 10) / 100;
-    var grouping = parseInt(document.getElementById('cfgGroupingWindow').value, 10);
+    var threshold = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgThreshold')).value, 10) / 100;
+    var grouping = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgGroupingWindow')).value, 10);
     if (isNaN(grouping)) grouping = 10;
-    var similarity = parseInt(document.getElementById('cfgSimilarity').value, 10) / 100;
+    var similarity = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgSimilarity')).value, 10) / 100;
     var secrets = _editedSecrets();
-    var keywordCase = document.getElementById('cfgKeywordCase').value;
-    var numberedNavigationMode = document.getElementById('cfgNumberedNavigationMode').value;
-    var maxEditHistory = parseInt(document.getElementById('cfgMaxEditHistory').value, 10);
+    var keywordCase = /** @type {HTMLSelectElement} */ (document.getElementById('cfgKeywordCase')).value;
+    var numberedNavigationMode = /** @type {HTMLSelectElement} */ (document.getElementById('cfgNumberedNavigationMode')).value;
+    var maxEditHistory = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMaxEditHistory')).value, 10);
     if (isNaN(maxEditHistory)) maxEditHistory = 1000;
     _saveStatusMark('config', 'inflight', gen);
     try {
@@ -305,7 +305,7 @@ async function _postConfigSnapshot(gen) {
           keyword_case: keywordCase,
           numbered_navigation_mode: numberedNavigationMode,
           max_edit_history: maxEditHistory,
-          google_maps_prefer_english: document.getElementById('cfgGoogleMapsPreferEnglish').checked,
+          google_maps_prefer_english: /** @type {HTMLInputElement} */ (document.getElementById('cfgGoogleMapsPreferEnglish')).checked,
           external_editors: collectExternalEditors(),
           remote_targets: collectRemoteTargets(),
           // Always clear the legacy single-editor field when we save the new
@@ -315,34 +315,34 @@ async function _postConfigSnapshot(gen) {
           // whenever the new list is empty, so the old value keeps haunting
           // them. Saving from the new UI is the migration completion step.
           external_editor: '',
-          darktable_bin: document.getElementById('cfgDarktableBin').value.trim(),
-          darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
-          darktable_output_format: document.getElementById('cfgDarktableFormat').value,
-          darktable_output_dir: document.getElementById('cfgDarktableOutputDir').value.trim(),
-          darktable_auto_convert_dng: document.getElementById('cfgDarktableAutoConvertDng').checked,
-          dng_converter_bin: document.getElementById('cfgDngConverterBin').value.trim(),
-          photos_per_page: parseInt(document.getElementById('cfgPhotosPerPage').value, 10) || 50,
-          browse_thumb_default: parseInt(document.getElementById('cfgBrowseThumbDefault').value, 10) || 220,
-          open_in_browser: document.getElementById('cfgOpenInBrowser').checked,
+          darktable_bin: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableBin')).value.trim(),
+          darktable_style: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableStyle')).value.trim(),
+          darktable_output_format: /** @type {HTMLSelectElement} */ (document.getElementById('cfgDarktableFormat')).value,
+          darktable_output_dir: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableOutputDir')).value.trim(),
+          darktable_auto_convert_dng: /** @type {HTMLInputElement} */ (document.getElementById('cfgDarktableAutoConvertDng')).checked,
+          dng_converter_bin: /** @type {HTMLInputElement} */ (document.getElementById('cfgDngConverterBin')).value.trim(),
+          photos_per_page: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgPhotosPerPage')).value, 10) || 50,
+          browse_thumb_default: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBrowseThumbDefault')).value, 10) || 220,
+          open_in_browser: /** @type {HTMLInputElement} */ (document.getElementById('cfgOpenInBrowser')).checked,
           browse_card_fields: getSelectedCardFields(),
           filter_shortcuts: collectFilterShortcuts(),
-          detector_confidence: parseInt(document.getElementById('cfgDetectorConf').value, 10) / 100,
-          detection_padding: parseInt(document.getElementById('cfgDetectionPadding').value, 10) / 100,
-          top_k_predictions: parseInt(document.getElementById('cfgTopK').value, 10) || 5,
-          redundancy_threshold: parseInt(document.getElementById('cfgRedundancy').value, 10) / 100,
-          cull_time_window: parseInt(document.getElementById('cfgCullTimeWindow').value, 10) || 60,
-          cull_phash_threshold: parseInt(document.getElementById('cfgCullPhash').value, 10) || 19,
+          detector_confidence: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgDetectorConf')).value, 10) / 100,
+          detection_padding: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgDetectionPadding')).value, 10) / 100,
+          top_k_predictions: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgTopK')).value, 10) || 5,
+          redundancy_threshold: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRedundancy')).value, 10) / 100,
+          cull_time_window: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgCullTimeWindow')).value, 10) || 60,
+          cull_phash_threshold: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgCullPhash')).value, 10) || 19,
           pipeline: {
-            w_focus: parseInt(document.getElementById('cfgWFocus').value, 10) / 100,
-            w_exposure: parseInt(document.getElementById('cfgWExposure').value, 10) / 100,
-            w_composition: parseInt(document.getElementById('cfgWComposition').value, 10) / 100,
-            w_area: parseInt(document.getElementById('cfgWArea').value, 10) / 100,
-            w_noise: parseInt(document.getElementById('cfgWNoise').value, 10) / 100,
-            reject_crop_complete: parseInt(document.getElementById('cfgRejectCrop').value, 10) / 100,
-            reject_focus: parseInt(document.getElementById('cfgRejectFocus').value, 10) / 100,
-            reject_clip_high: parseInt(document.getElementById('cfgRejectClip').value, 10) / 100,
-            reject_composite: parseInt(document.getElementById('cfgRejectComposite').value, 10) / 100,
-            miss_enabled: document.getElementById('cfgMissEnabled').checked,
+            w_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWFocus')).value, 10) / 100,
+            w_exposure: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWExposure')).value, 10) / 100,
+            w_composition: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWComposition')).value, 10) / 100,
+            w_area: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWArea')).value, 10) / 100,
+            w_noise: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWNoise')).value, 10) / 100,
+            reject_crop_complete: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectCrop')).value, 10) / 100,
+            reject_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectFocus')).value, 10) / 100,
+            reject_clip_high: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectClip')).value, 10) / 100,
+            reject_composite: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectComposite')).value, 10) / 100,
+            miss_enabled: /** @type {HTMLInputElement} */ (document.getElementById('cfgMissEnabled')).checked,
             // Keep paired thresholds consistent: the UI exposes one slider
             // per pair, but classify_miss reads the sibling value (burst
             // vs singleton) independently. If we only save one side, the
@@ -360,8 +360,8 @@ async function _postConfigSnapshot(gen) {
             //     aggressively (higher threshold). Default bbox_min=0.005 /
             //     bbox_min_singleton=0.002 → singleton = 0.40 * burst.
             ...(function() {
-              var det = parseInt(document.getElementById('cfgMissDetConf').value, 10) / 100;
-              var bbox = parseInt(document.getElementById('cfgMissBboxMin').value, 10) / 1000;
+              var det = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissDetConf')).value, 10) / 100;
+              var bbox = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissBboxMin')).value, 10) / 1000;
               return {
                 miss_det_confidence: det,
                 miss_det_confidence_burst: +(det * 0.60).toFixed(4),
@@ -369,30 +369,30 @@ async function _postConfigSnapshot(gen) {
                 miss_bbox_area_min_singleton: +(bbox * 0.40).toFixed(5),
               };
             })(),
-            miss_oof_ratio: parseInt(document.getElementById('cfgMissOofRatio').value, 10) / 100,
-            eye_detect_enabled: document.getElementById('cfgEyeDetectEnabled').checked,
-            eye_classifier_conf_gate: parseInt(document.getElementById('cfgEyeClassifierConfGate').value, 10) / 100,
-            eye_detection_conf_gate: parseInt(document.getElementById('cfgEyeDetectionConfGate').value, 10) / 100,
-            eye_window_k: parseInt(document.getElementById('cfgEyeWindowK').value, 10) / 100,
-            reject_eye_focus: parseInt(document.getElementById('cfgRejectEyeFocus').value, 10) / 100,
-            burst_time_gap: parseInt(document.getElementById('cfgBurstTimeGap').value, 10) || 3,
+            miss_oof_ratio: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMissOofRatio')).value, 10) / 100,
+            eye_detect_enabled: /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectEnabled')).checked,
+            eye_classifier_conf_gate: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeClassifierConfGate')).value, 10) / 100,
+            eye_detection_conf_gate: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectionConfGate')).value, 10) / 100,
+            eye_window_k: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEyeWindowK')).value, 10) / 100,
+            reject_eye_focus: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgRejectEyeFocus')).value, 10) / 100,
+            burst_time_gap: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstTimeGap')).value, 10) || 3,
             burst_embedding_threshold: VireoPipelineConfig.embeddingDistancePercentToThreshold(
-              parseInt(document.getElementById('cfgBurstEmb').value, 10)
+              parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstEmb')).value, 10)
             ),
-            burst_lambda: parseInt(document.getElementById('cfgBurstLambda').value, 10) / 100,
-            burst_max_keep: parseInt(document.getElementById('cfgBurstMaxKeep').value, 10) || 3,
-            encounter_lambda: parseInt(document.getElementById('cfgEncLambda').value, 10) / 100,
-            encounter_max_keep: parseInt(document.getElementById('cfgEncMaxKeep').value, 10) || 5,
-            w_time: parseInt(document.getElementById('cfgWTime').value, 10) / 100,
-            w_subj: parseInt(document.getElementById('cfgWSubj').value, 10) / 100,
-            w_global: parseInt(document.getElementById('cfgWGlobal').value, 10) / 100,
-            w_species: parseInt(document.getElementById('cfgWSpecies').value, 10) / 100,
-            w_meta: parseInt(document.getElementById('cfgWMeta').value, 10) / 100,
-            hard_cut_time: parseInt(document.getElementById('cfgHardCutTime').value, 10) || 180,
-            hard_cut_score: parseInt(document.getElementById('cfgHardCutScore').value, 10) / 100,
-            soft_cut_score: parseInt(document.getElementById('cfgSoftCutScore').value, 10) / 100,
-            merge_score: parseInt(document.getElementById('cfgMergeScore').value, 10) / 100,
-            merge_max_gap: parseInt(document.getElementById('cfgMergeMaxGap').value, 10) || 60,
+            burst_lambda: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstLambda')).value, 10) / 100,
+            burst_max_keep: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgBurstMaxKeep')).value, 10) || 3,
+            encounter_lambda: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEncLambda')).value, 10) / 100,
+            encounter_max_keep: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgEncMaxKeep')).value, 10) || 5,
+            w_time: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWTime')).value, 10) / 100,
+            w_subj: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWSubj')).value, 10) / 100,
+            w_global: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWGlobal')).value, 10) / 100,
+            w_species: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWSpecies')).value, 10) / 100,
+            w_meta: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgWMeta')).value, 10) / 100,
+            hard_cut_time: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutTime')).value, 10) || 180,
+            hard_cut_score: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutScore')).value, 10) / 100,
+            soft_cut_score: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgSoftCutScore')).value, 10) / 100,
+            merge_score: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMergeScore')).value, 10) / 100,
+            merge_max_gap: parseInt(/** @type {HTMLInputElement} */ (document.getElementById('cfgMergeMaxGap')).value, 10) || 60,
           },
         })),
       });
@@ -425,7 +425,7 @@ function saveConfig() {
     _editedWhileSuspended = true;
     return;
   }
-  clearTimeout(_saveTimer);
+  clearTimeout(_saveTimer ?? undefined);
   var gen = _nextSaveGen();
   _saveStatusMark('config', 'pending', gen);
   _saveTimer = setTimeout(function() {
@@ -435,13 +435,13 @@ function saveConfig() {
 
 function resetPipelineDefaults() {
   var p = VireoPipelineConfig.defaultPipeline();
-  function setPercent(id, key) {
+  /** @param {string} id @param {string} key */ function setPercent(id, key) {
     setValue(id, VireoPipelineConfig.percent(p[key], key), '%');
   }
-  function setValue(id, val, suffix) {
-    document.getElementById(id).value = val;
-    var span = document.getElementById(id + 'Val');
-    if (span) span.textContent = val + suffix;
+  /** @param {string} id @param {number} val @param {string} suffix */ function setValue(id, val, suffix) {
+    /** @type {HTMLInputElement} */ (document.getElementById(id)).value = String(val);
+    var span = /** @type {HTMLElement} */ (document.getElementById(id + 'Val'));
+    if (span) span.textContent = String(val + suffix);
   }
   setPercent('cfgWFocus', 'w_focus');
   setPercent('cfgWExposure', 'w_exposure');
@@ -455,7 +455,7 @@ function resetPipelineDefaults() {
   setPercent('cfgEyeClassifierConfGate', 'eye_classifier_conf_gate');
   setPercent('cfgEyeDetectionConfGate', 'eye_detection_conf_gate');
   setPercent('cfgRejectEyeFocus', 'reject_eye_focus');
-  setValue('cfgBurstTimeGap', p.burst_time_gap, 's');
+  setValue('cfgBurstTimeGap', Number(p.burst_time_gap), 's');
   setValue(
     'cfgBurstEmb',
     VireoPipelineConfig.embeddingThresholdToDistancePercent(
@@ -469,52 +469,52 @@ function resetPipelineDefaults() {
   setPercent('cfgSoftCutScore', 'soft_cut_score');
   setPercent('cfgMergeScore', 'merge_score');
   var eyeWindow = VireoPipelineConfig.percent(p.eye_window_k, 'eye_window_k');
-  document.getElementById('cfgEyeWindowK').value = eyeWindow;
-  document.getElementById('cfgEyeWindowKVal').textContent =
-    (eyeWindow / 100).toFixed(2);
-  document.getElementById('cfgEyeDetectEnabled').checked = p.eye_detect_enabled === true;
-  document.getElementById('cfgMissEnabled').checked = p.miss_enabled !== false;
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeWindowK')).value = String(eyeWindow);
+  /** @type {HTMLElement} */ (document.getElementById('cfgEyeWindowKVal')).textContent =
+    String((eyeWindow / 100).toFixed(2));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgEyeDetectEnabled')).checked = p.eye_detect_enabled === true;
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMissEnabled')).checked = p.miss_enabled !== false;
   setPercent('cfgMissDetConf', 'miss_det_confidence');
   var bboxMin = Math.round(
     VireoPipelineConfig.asNumber(p.miss_bbox_area_min, 'miss_bbox_area_min') * 1000
   );
-  document.getElementById('cfgMissBboxMin').value = bboxMin;
-  document.getElementById('cfgMissBboxMinVal').textContent =
-    (bboxMin / 1000).toFixed(3);
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMissBboxMin')).value = String(bboxMin);
+  /** @type {HTMLElement} */ (document.getElementById('cfgMissBboxMinVal')).textContent =
+    String((bboxMin / 1000).toFixed(3));
   var missOofRatio = VireoPipelineConfig.percent(p.miss_oof_ratio, 'miss_oof_ratio');
-  document.getElementById('cfgMissOofRatio').value = missOofRatio;
-  document.getElementById('cfgMissOofRatioVal').textContent =
-    (missOofRatio / 100).toFixed(2);
-  document.getElementById('cfgBurstMaxKeep').value = p.burst_max_keep;
-  document.getElementById('cfgEncMaxKeep').value = p.encounter_max_keep;
-  document.getElementById('cfgWTime').value =
-    VireoPipelineConfig.percent(p.w_time, 'w_time');
-  document.getElementById('cfgWSubj').value =
-    VireoPipelineConfig.percent(p.w_subj, 'w_subj');
-  document.getElementById('cfgWGlobal').value =
-    VireoPipelineConfig.percent(p.w_global, 'w_global');
-  document.getElementById('cfgWSpecies').value =
-    VireoPipelineConfig.percent(p.w_species, 'w_species');
-  document.getElementById('cfgWMeta').value =
-    VireoPipelineConfig.percent(p.w_meta, 'w_meta');
-  document.getElementById('cfgHardCutTime').value = p.hard_cut_time;
-  document.getElementById('cfgMergeMaxGap').value = p.merge_max_gap;
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMissOofRatio')).value = String(missOofRatio);
+  /** @type {HTMLElement} */ (document.getElementById('cfgMissOofRatioVal')).textContent =
+    String((missOofRatio / 100).toFixed(2));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgBurstMaxKeep')).value = String(p.burst_max_keep);
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgEncMaxKeep')).value = String(p.encounter_max_keep);
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWTime')).value =
+    String(VireoPipelineConfig.percent(p.w_time, 'w_time'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWSubj')).value =
+    String(VireoPipelineConfig.percent(p.w_subj, 'w_subj'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWGlobal')).value =
+    String(VireoPipelineConfig.percent(p.w_global, 'w_global'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWSpecies')).value =
+    String(VireoPipelineConfig.percent(p.w_species, 'w_species'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgWMeta')).value =
+    String(VireoPipelineConfig.percent(p.w_meta, 'w_meta'));
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgHardCutTime')).value = String(p.hard_cut_time);
+  /** @type {HTMLInputElement} */ (document.getElementById('cfgMergeMaxGap')).value = String(p.merge_max_gap);
   saveConfig();
 }
 
 function toggleInatTokenVisibility() {
-  var inp = document.getElementById('cfgInatToken');
+  var inp = /** @type {HTMLInputElement} */ (document.getElementById('cfgInatToken'));
   inp.type = inp.type === 'password' ? 'text' : 'password';
 }
 
 function toggleGoogleMapsKeyVisibility() {
-  var inp = document.getElementById('cfgGoogleMapsApiKey');
+  var inp = /** @type {HTMLInputElement} */ (document.getElementById('cfgGoogleMapsApiKey'));
   inp.type = inp.type === 'password' ? 'text' : 'password';
 }
 
 async function validateInatToken() {
-  var token = document.getElementById('cfgInatToken').value.trim();
-  var status = document.getElementById('inatTokenStatus');
+  var token = /** @type {HTMLInputElement} */ (document.getElementById('cfgInatToken')).value.trim();
+  var status = /** @type {HTMLElement} */ (document.getElementById('inatTokenStatus'));
   if (!token) { status.innerHTML = ''; return; }
   status.innerHTML = '<span style="color:var(--text-dim);">Validating...</span>';
   try {
@@ -529,7 +529,7 @@ async function validateInatToken() {
       status.innerHTML = '<span style="color:var(--accent);">&#10003; Logged in as <strong>' + escapeHtml(data.login) + '</strong></span>';
     }
   } catch(e) {
-    status.innerHTML = '<span style="color:var(--danger);">&#10007; ' + escapeHtml(e.message) + '</span>';
+    status.innerHTML = '<span style="color:var(--danger);">&#10007; ' + escapeHtml(settingsErrorMessage(e)) + '</span>';
   }
 }
 

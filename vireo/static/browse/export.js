@@ -5,10 +5,10 @@
 /* ---------- Export Modal ---------- */
 var exportRequestGeneration = 0;
 var exportDismissible = true;
-var _exportPhotoIds = null;
+var _exportPhotoIds = /** @type {number[] | null} */ (null);
 
-function setExportControlsBusy(busy) {
-  document.querySelectorAll('#exportOverlay input, #exportOverlay select, #exportOverlay button').forEach(function(control) {
+function setExportControlsBusy(/** @type {boolean} */ busy) {
+  /** @type {NodeListOf<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>} */ (document.querySelectorAll('#exportOverlay input, #exportOverlay select, #exportOverlay button')).forEach(function(control) {
     if (control.id === 'exportSubmitBtn' || control.hasAttribute('data-export-cancel')) return;
     if (busy) {
       control.setAttribute('data-export-was-disabled', control.disabled ? '1' : '0');
@@ -20,9 +20,9 @@ function setExportControlsBusy(busy) {
   });
 }
 
-function setExportDismissible(dismissible) {
+function setExportDismissible(/** @type {boolean} */ dismissible) {
   exportDismissible = dismissible;
-  document.querySelectorAll('#exportOverlay [data-export-cancel]').forEach(function(control) {
+  /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('#exportOverlay [data-export-cancel]')).forEach(function(control) {
     control.disabled = !dismissible;
   });
 }
@@ -41,7 +41,7 @@ function migrateExportCaptureDateTimePreference() {
   );
 }
 
-function openExportModal(photoIds) {
+function openExportModal(/** @type {number[] | undefined} */ photoIds = undefined) {
   var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
   if (activeIds.length === 0) return;
   exportRequestGeneration++;
@@ -62,20 +62,20 @@ function openExportModal(photoIds) {
   // tracked afterwards and cannot be issued twice.
   _exportPreviewPhotos = {};
   _exportPreviewFetches = {};
-  document.getElementById('exportSubmitBtn').textContent = 'Export ' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's');
-  document.getElementById('exportSubmitBtn').disabled = false;
-  document.getElementById('exportPreset').value = 'original-jpg';
+  /** @type {HTMLButtonElement} */ (document.getElementById('exportSubmitBtn')).textContent = 'Export ' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's');
+  /** @type {HTMLButtonElement} */ (document.getElementById('exportSubmitBtn')).disabled = false;
+  /** @type {HTMLSelectElement} */ (document.getElementById('exportPreset')).value = 'original-jpg';
   applyExportPreset('original-jpg');
-  document.getElementById('exportTemplate').value = '{original}';
-  document.querySelectorAll('.export-metadata-option input').forEach(function(input) {
+  /** @type {HTMLInputElement} */ (document.getElementById('exportTemplate')).value = '{original}';
+  /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.export-metadata-option input')).forEach(function(input) {
     input.checked = false;
   });
-  document.getElementById('exportDest').value = '';
-  document.getElementById('exportSubfolder').checked = false;
-  document.getElementById('exportSubfolderName').value = 'exported';
+  /** @type {HTMLInputElement} */ (document.getElementById('exportDest')).value = '';
+  /** @type {HTMLInputElement} */ (document.getElementById('exportSubfolder')).checked = false;
+  /** @type {HTMLInputElement} */ (document.getElementById('exportSubfolderName')).value = 'exported';
   migrateExportCaptureDateTimePreference();
-  VireoViewPreferences.restoreAll(document.getElementById('exportOverlay'));
-  document.getElementById('exportOverlay').classList.add('open');
+  VireoViewPreferences.restoreAll(/** @type {HTMLElement} */ (document.getElementById('exportOverlay')));
+  /** @type {HTMLElement} */ (document.getElementById('exportOverlay')).classList.add('open');
   // Re-applies the last-used preset (saved or built-in) over the defaults
   // and view preferences restored above; async but near-instant locally.
   VireoExportPresets.modalOpened();
@@ -86,15 +86,15 @@ function openExportModal(photoIds) {
 // this capability. Other pages use openExportModal for unrelated exports
 // (for example Life List data), so the context menu must not key off that
 // generic function name.
-function openPhotoExportModal(photoIds) {
-  if (document.getElementById('lightboxOverlay').classList.contains('active')) {
+function openPhotoExportModal(/** @type {number[]} */ photoIds) {
+  if (/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) {
     closeLightbox();
   }
   openExportModal(photoIds);
 }
 
 function selectedExportMetadataFields() {
-  return Array.from(document.querySelectorAll('.export-metadata-option input:checked'))
+  return Array.from(/** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.export-metadata-option input:checked')))
     .reduce(function(fields, input) {
       if (input.value === 'capture_date_time') {
         // A preset saved in Photo Editor may specify just date or just time.
@@ -102,7 +102,7 @@ function selectedExportMetadataFields() {
         // honor it instead of quietly promoting the box to "both". Manual
         // edits clear the stash, at which point the combined box means both.
         if (input.dataset.presetFields) {
-          input.dataset.presetFields.split(',').forEach(function(field) {
+          input.dataset.presetFields.split(',').forEach(function(/** @type {string} */ field) {
             if (field) fields.push(field);
           });
         } else {
@@ -112,7 +112,7 @@ function selectedExportMetadataFields() {
         fields.push(input.value);
       }
       return fields;
-    }, []);
+    }, /** @type {string[]} */ ([]));
 }
 
 function closeExportModal() {
@@ -120,7 +120,7 @@ function closeExportModal() {
   exportRequestGeneration++;
   VireoExportCollisions.reset();
   setExportControlsBusy(false);
-  document.getElementById('exportOverlay').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('exportOverlay')).classList.remove('open');
   _exportPhotoIds = null;
 }
 
@@ -132,18 +132,18 @@ const exportFolderBrowser = new VireoFolderBrowser({
       title: 'Choose Panorama Folder',
       multiple: false,
       showCounts: false,
-      startPath: function() { return document.getElementById('panoramaDestination').value.trim(); },
-      onSelect: function(path) { document.getElementById('panoramaDestination').value = path; },
+      startPath: function() { return /** @type {HTMLInputElement} */ (document.getElementById('panoramaDestination')).value.trim(); },
+      onSelect: function(/** @type {string} */ path) { /** @type {HTMLInputElement} */ (document.getElementById('panoramaDestination')).value = path; },
     },
     destination: {
       title: 'Select Export Folder',
       multiple: false,
       showCounts: false,
       startPath: function() {
-        return document.getElementById('exportDest').value.trim();
+        return /** @type {HTMLInputElement} */ (document.getElementById('exportDest')).value.trim();
       },
-      onSelect: function(path) {
-        document.getElementById('exportDest').value = path;
+      onSelect: function(/** @type {string} */ path) {
+        /** @type {HTMLInputElement} */ (document.getElementById('exportDest')).value = path;
         VireoExportPresets.markCustom();
         VireoExportCollisions.schedule();
       },
@@ -152,7 +152,7 @@ const exportFolderBrowser = new VireoFolderBrowser({
 });
 
 async function browseForExportDestination() {
-  var destination = document.getElementById('exportDest');
+  var destination = /** @type {HTMLInputElement} */ (document.getElementById('exportDest'));
   if (typeof pickDirectory === 'function') {
     var seqBeforePicker = exportFolderBrowser.sequence;
     var result = await pickDirectory('Select export folder', {
@@ -173,10 +173,10 @@ async function browseForExportDestination() {
   exportFolderBrowser.open('destination');
 }
 
-function insertTemplateVar(v) {
-  var input = document.getElementById('exportTemplate');
-  var start = input.selectionStart;
-  var end = input.selectionEnd;
+function insertTemplateVar(/** @type {string} */ v) {
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('exportTemplate'));
+  var start = input.selectionStart || 0;
+  var end = input.selectionEnd || 0;
   var val = input.value;
   input.value = val.substring(0, start) + v + val.substring(end);
   input.selectionStart = input.selectionEnd = start + v.length;
@@ -185,19 +185,19 @@ function insertTemplateVar(v) {
   updateExportPreview();
 }
 
-function exportExtensionForFormat(format) {
+function exportExtensionForFormat(/** @type {string} */ format) {
   if (format === 'png') return 'png';
   if (format === 'tiff') return 'tiff';
   return 'jpg';
 }
 
 function updateExportFormatControls() {
-  var isJpeg = document.getElementById('exportFormat').value === 'jpg';
-  document.getElementById('exportQualityLabel').style.display = isJpeg ? 'block' : 'none';
-  document.getElementById('exportQualityRow').style.display = isJpeg ? 'flex' : 'none';
+  var isJpeg = /** @type {HTMLSelectElement} */ (document.getElementById('exportFormat')).value === 'jpg';
+  /** @type {HTMLElement} */ (document.getElementById('exportQualityLabel')).style.display = isJpeg ? 'block' : 'none';
+  /** @type {HTMLElement} */ (document.getElementById('exportQualityRow')).style.display = isJpeg ? 'flex' : 'none';
 }
 
-function applyExportPreset(preset) {
+function applyExportPreset(/** @type {string} */ preset) {
   var resize = '';
   var customResize = '';
   var format = 'jpg';
@@ -215,18 +215,18 @@ function applyExportPreset(preset) {
   } else if (preset === 'custom') {
     return;
   }
-  document.getElementById('exportFormat').value = format;
-  document.getElementById('exportResize').value = resize;
-  document.getElementById('exportResizeCustom').value = customResize;
-  document.getElementById('exportResizeCustom').style.display = resize === 'custom' ? 'block' : 'none';
-  document.getElementById('exportQuality').value = quality;
-  document.getElementById('exportQualityVal').textContent = String(quality);
+  /** @type {HTMLSelectElement} */ (document.getElementById('exportFormat')).value = format;
+  /** @type {HTMLSelectElement} */ (document.getElementById('exportResize')).value = resize;
+  /** @type {HTMLInputElement} */ (document.getElementById('exportResizeCustom')).value = customResize;
+  /** @type {HTMLInputElement} */ (document.getElementById('exportResizeCustom')).style.display = resize === 'custom' ? 'block' : 'none';
+  /** @type {HTMLInputElement} */ (document.getElementById('exportQuality')).value = String(quality);
+  /** @type {HTMLElement} */ (document.getElementById('exportQualityVal')).textContent = String(quality);
   updateExportFormatControls();
   updateExportPreview();
 }
 
 function markExportCustom() {
-  document.getElementById('exportPreset').value = 'custom';
+  /** @type {HTMLSelectElement} */ (document.getElementById('exportPreset')).value = 'custom';
 }
 
 // Photos fetched on demand for the export preview, keyed by id (null means
@@ -237,10 +237,10 @@ function markExportCustom() {
 // list the export worker names files with, so the preview matches the file
 // on disk. Cleared each time the modal opens so a renamed photo cannot show
 // a stale name (Codex P2 on PR #1561).
-var _exportPreviewPhotos = {};
-var _exportPreviewFetches = {};
+var _exportPreviewPhotos = /** @type {Record<string, BrowsePhoto | null>} */ ({});
+var _exportPreviewFetches = /** @type {Record<string, Promise<void>>} */ ({});
 
-function hydrateExportPreviewPhoto(photoId) {
+function hydrateExportPreviewPhoto(/** @type {number} */ photoId) {
   if (photoId == null) return;
   var key = String(photoId);
   if (_exportPreviewFetches[key]) return;
@@ -269,7 +269,7 @@ function hydrateExportPreviewPhoto(photoId) {
       if (generation !== exportRequestGeneration) return;
       // Only repaint while the modal is still open; a closed modal has
       // already dropped _exportPhotoIds and would preview a stale id.
-      if (document.getElementById('exportOverlay').classList.contains('open')) {
+      if (/** @type {HTMLElement} */ (document.getElementById('exportOverlay')).classList.contains('open')) {
         updateExportPreview();
       }
     });
@@ -281,11 +281,11 @@ function updateExportPreview() {
   // Programmatic control changes (presets, inserted template variables)
   // repaint through here without firing input events.
   VireoExportCollisions.schedule();
-  var template = document.getElementById('exportTemplate').value;
-  if (!template) { document.getElementById('exportPreview').textContent = ''; return; }
+  var template = /** @type {HTMLInputElement} */ (document.getElementById('exportTemplate')).value;
+  if (!template) { /** @type {HTMLElement} */ (document.getElementById('exportPreview')).textContent = ''; return; }
   // Use first selected photo for preview
   var firstId = (_exportPhotoIds || getActiveSelection())[0];
-  if (firstId == null) { document.getElementById('exportPreview').textContent = ''; return; }
+  if (firstId == null) { /** @type {HTMLElement} */ (document.getElementById('exportPreview')).textContent = ''; return; }
   var photo = findBrowsePhoto(firstId);
   // Find Similar and other shared-lightbox entry points can display photos
   // outside Browse's currently loaded page. Their metadata remains available
@@ -300,25 +300,25 @@ function updateExportPreview() {
   // export will never write, which is exactly the kind of plausible-looking
   // proxy CORE_PHILOSOPHY forbids (Codex P2 on PR #1561).
   if (!photo && Object.prototype.hasOwnProperty.call(_exportPreviewPhotos, String(firstId))) {
-    photo = _exportPreviewPhotos[String(firstId)];
+    photo = _exportPreviewPhotos[String(firstId)] || null;
     if (!photo) {
-      document.getElementById('exportPreview').textContent =
+      /** @type {HTMLElement} */ (document.getElementById('exportPreview')).textContent =
         'Preview unavailable: could not load photo ' + firstId + '.';
       return;
     }
   }
   if (!photo) {
     hydrateExportPreviewPhoto(firstId);
-    document.getElementById('exportPreview').textContent =
+    /** @type {HTMLElement} */ (document.getElementById('exportPreview')).textContent =
       'Preview: loading photo ' + firstId + '\u2026';
     return;
   }
-  if (!photo.filename) { document.getElementById('exportPreview').textContent = ''; return; }
+  if (!photo.filename) { /** @type {HTMLElement} */ (document.getElementById('exportPreview')).textContent = ''; return; }
   var stem = photo.filename.replace(/\.[^.]+$/, '');
   var ts = photo.timestamp || '';
   var datePart = ts ? ts.substring(0, 10) : 'unknown-date';
   var timePart = ts && ts.length >= 19 ? ts.substring(11, 19).replace(/:/g, '') : '000000';
-  var species = (photo.species && photo.species.length > 0) ? photo.species[0] : 'unknown';
+  var species = (photo.species && photo.species.length > 0) ? photo.species[0] || 'unknown' : 'unknown';
   var preview = template
     .replace('{original}', stem)
     .replace('{date}', datePart)
@@ -327,57 +327,58 @@ function updateExportPreview() {
     .replace('{rating}', String(photo.rating || 0))
     .replace('{seq}', '0001')
     .replace('{folder}', '');
-  var ext = exportExtensionForFormat(document.getElementById('exportFormat').value);
-  var subPrefix = document.getElementById('exportSubfolder').checked
+  var ext = exportExtensionForFormat(/** @type {HTMLSelectElement} */ (document.getElementById('exportFormat')).value);
+  var subPrefix = /** @type {HTMLInputElement} */ (document.getElementById('exportSubfolder')).checked
     ? VireoExportPresets.subfolderName() + '/'
     : '';
-  document.getElementById('exportPreview').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('exportPreview')).textContent =
     'Preview: ' + subPrefix + preview + '.' + ext;
 }
 
-document.getElementById('exportTemplate').addEventListener('input', updateExportPreview);
+/** @type {HTMLInputElement} */ (document.getElementById('exportTemplate')).addEventListener('input', updateExportPreview);
 
 // The preset dropdown's change handling (built-in and saved presets) lives
 // in the shared vireo-export-presets.js module.
 
-document.getElementById('exportFormat').addEventListener('change', function() {
+/** @type {HTMLSelectElement} */ (document.getElementById('exportFormat')).addEventListener('change', function() {
   markExportCustom();
   updateExportFormatControls();
   updateExportPreview();
 });
 
-document.getElementById('exportResize').addEventListener('change', function() {
+/** @type {HTMLSelectElement} */ (document.getElementById('exportResize')).addEventListener('change', function() {
   markExportCustom();
-  document.getElementById('exportResizeCustom').style.display =
+  /** @type {HTMLInputElement} */ (document.getElementById('exportResizeCustom')).style.display =
     this.value === 'custom' ? 'block' : 'none';
   updateExportPreview();
 });
 
-document.getElementById('exportQuality').addEventListener('input', function() {
+/** @type {HTMLInputElement} */ (document.getElementById('exportQuality')).addEventListener('input', function() {
   markExportCustom();
-  document.getElementById('exportQualityVal').textContent = this.value;
+  /** @type {HTMLElement} */ (document.getElementById('exportQualityVal')).textContent = this.value;
 });
 
 // The settings that decide where each file lands and what it is called:
 // everything the filename-collision preflight needs.
+/** @returns {BrowseExportRequest | null} */
 function buildExportPreflightRequest() {
   var activeIds = (_exportPhotoIds || getActiveSelection()).slice();
   if (activeIds.length === 0) return null;
-  var resizeSelect = document.getElementById('exportResize').value;
+  var resizeSelect = /** @type {HTMLSelectElement} */ (document.getElementById('exportResize')).value;
   var maxSize = null;
   if (resizeSelect === 'custom') {
-    maxSize = parseInt(document.getElementById('exportResizeCustom').value) || null;
+    maxSize = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('exportResizeCustom')).value) || null;
   } else if (resizeSelect) {
     maxSize = parseInt(resizeSelect);
   }
   return {
     photo_ids: activeIds,
-    destination: document.getElementById('exportDest').value.trim(),
-    export_to_subfolder: document.getElementById('exportSubfolder').checked,
+    destination: /** @type {HTMLInputElement} */ (document.getElementById('exportDest')).value.trim(),
+    export_to_subfolder: /** @type {HTMLInputElement} */ (document.getElementById('exportSubfolder')).checked,
     subfolder_name: VireoExportPresets.subfolderName(),
-    naming_template: document.getElementById('exportTemplate').value || '{original}',
+    naming_template: /** @type {HTMLInputElement} */ (document.getElementById('exportTemplate')).value || '{original}',
     max_size: maxSize,
-    format: document.getElementById('exportFormat').value || 'jpg',
+    format: /** @type {HTMLSelectElement} */ (document.getElementById('exportFormat')).value || 'jpg',
   };
 }
 
@@ -385,11 +386,11 @@ async function startExport() {
   var requestGeneration = ++exportRequestGeneration;
   var exportRequest = buildExportPreflightRequest();
   if (!exportRequest) return;
-  exportRequest.quality = parseInt(document.getElementById('exportQuality').value) || 92;
+  exportRequest.quality = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('exportQuality')).value) || 92;
   exportRequest.metadata_fields = selectedExportMetadataFields();
-  exportRequest.reveal_after_export = document.getElementById('exportRevealAfter').checked;
+  exportRequest.reveal_after_export = /** @type {HTMLInputElement} */ (document.getElementById('exportRevealAfter')).checked;
 
-  var btn = document.getElementById('exportSubmitBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('exportSubmitBtn'));
   var count = exportRequest.photo_ids.length;
   var buttonLabel = 'Export ' + count + ' photo' + (count === 1 ? '' : 's');
   btn.disabled = true;
@@ -406,14 +407,14 @@ async function startExport() {
     }, {toast: false});
   } catch (err) {
     if (requestGeneration !== exportRequestGeneration) return;
-    alert('Export check failed: ' + err.message);
+    alert('Export check failed: ' + (err instanceof Error ? err.message : String(err)));
     setExportControlsBusy(false);
     btn.disabled = false;
     btn.textContent = buttonLabel;
     return;
   }
   if (requestGeneration !== exportRequestGeneration ||
-      !document.getElementById('exportOverlay').classList.contains('open')) return;
+      !/** @type {HTMLElement} */ (document.getElementById('exportOverlay')).classList.contains('open')) return;
   if (preflight.error) {
     alert('Export check failed: ' + preflight.error);
     setExportControlsBusy(false);
@@ -439,7 +440,7 @@ async function startExport() {
       body: JSON.stringify(exportRequest),
     });
     if (requestGeneration !== exportRequestGeneration ||
-        !document.getElementById('exportOverlay').classList.contains('open')) return;
+        !/** @type {HTMLElement} */ (document.getElementById('exportOverlay')).classList.contains('open')) return;
     if (data.error) {
       setExportDismissible(true);
       alert('Export error: ' + data.error);
@@ -455,7 +456,7 @@ async function startExport() {
   } catch(err) {
     if (requestGeneration !== exportRequestGeneration) return;
     setExportDismissible(true);
-    alert('Export failed: ' + err.message);
+    alert('Export failed: ' + (err instanceof Error ? err.message : String(err)));
     setExportControlsBusy(false);
     btn.disabled = false;
     btn.textContent = buttonLabel;
@@ -481,14 +482,14 @@ async function makeAvailableOffline() {
       'info'
     );
   } catch(err) {
-    showToast('Offline cache failed: ' + err.message, 'error');
+    showToast('Offline cache failed: ' + (err instanceof Error ? err.message : String(err)), 'error');
   }
 }
 
-var _prepareFullResolutionJobId = null;
+var _prepareFullResolutionJobId = /** @type {string | null} */ (null);
 
-function _setPrepareFullResolutionButton(running, current, total) {
-  var btn = document.getElementById('prepareFullResolutionBtn');
+function _setPrepareFullResolutionButton(/** @type {boolean} */ running, /** @type {number | undefined} */ current = undefined, /** @type {number | undefined} */ total = undefined) {
+  var btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('prepareFullResolutionBtn'));
   if (!btn) return;
   btn.disabled = !!running;
   if (running && current != null && total) {
@@ -500,7 +501,7 @@ function _setPrepareFullResolutionButton(running, current, total) {
   }
 }
 
-async function prepareFullResolutionSelection(photoIds) {
+async function prepareFullResolutionSelection(/** @type {number[]} */ photoIds) {
   var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
   if (!activeIds.length || _prepareFullResolutionJobId) return;
   _setPrepareFullResolutionButton(true);
@@ -571,13 +572,13 @@ async function prepareFullResolutionSelection(photoIds) {
     _prepareFullResolutionJobId = null;
     _setPrepareFullResolutionButton(false);
     showToast(
-      'Could not start full-resolution preparation: ' + err.message,
+      'Could not start full-resolution preparation: ' + (err instanceof Error ? err.message : String(err)),
       'error'
     );
   }
 }
 
 // Close on overlay click
-document.getElementById('exportOverlay').addEventListener('click', function(e) {
+/** @type {HTMLElement} */ (document.getElementById('exportOverlay')).addEventListener('click', function(e) {
   if (e.target === this) closeExportModal();
 });

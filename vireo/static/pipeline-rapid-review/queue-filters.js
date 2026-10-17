@@ -2,12 +2,13 @@
 // picks), the sidebar reason chips, and rebuilding the filtered sessions.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {RapidSession} session */
 function hasMixedSpecies(session) {
   // Frames disagree when their confirmed species *sets* differ; a frame
   // holding both a teal and a wigeon is not "mixed" with an identical frame.
-  var seen = {};
+  var seen = /** @type {Record<string,boolean>} */ ({});
   queueIncludedPhotos(session).forEach(function(p) {
-    var confirmed = {};
+    var confirmed = /** @type {Record<string,string>} */ ({});
     (p.confirmed_species_identities || []).forEach(function(entry) { confirmed[entry.name] = entry.key; });
     var key = photoSpeciesList(p).map(function(name) {
       if (confirmed[name]) return confirmed[name];
@@ -19,6 +20,7 @@ function hasMixedSpecies(session) {
   return Object.keys(seen).length > 1;
 }
 
+/** @param {RapidSession} session */
 function needsSpecies(session) {
   var photos = queueIncludedPhotos(session);
   if (!photos.length) return false;
@@ -29,6 +31,7 @@ function needsSpecies(session) {
   });
 }
 
+/** @param {RapidSession} session */
 function cullingState(session) {
   var photos = queueIncludedPhotos(session);
   var nonRejected = photos.filter(function(p) { return photoFlag(p) !== 'rejected'; });
@@ -43,10 +46,12 @@ function cullingState(session) {
   return { needs: false, reason: '' };
 }
 
+/** @param {RapidSession} session */
 function needsCulling(session) {
   return cullingState(session).needs;
 }
 
+/** @param {RapidSession} session */
 function unreviewed(session) {
   var photos = queueIncludedPhotos(session);
   if (!photos.length) return false;
@@ -56,6 +61,7 @@ function unreviewed(session) {
   });
 }
 
+/** @param {RapidSession} session */
 function reviewPicks(session) {
   var photos = queueIncludedPhotos(session);
   if (!photos.length) return false;
@@ -65,6 +71,7 @@ function reviewPicks(session) {
   });
 }
 
+/** @param {RapidSession} session */
 function sessionMatchesQueue(session) {
   if (rapid.queue.multiOnly && queueIncludedPhotos(session).length < 2) return false;
   if (rapid.queue.filter === 'all') return true;
@@ -75,6 +82,7 @@ function sessionMatchesQueue(session) {
   return true;
 }
 
+/** @param {RapidSession} session */
 function sessionReasonChips(session) {
   var chips = [];
   if (needsSpecies(session)) chips.push('No species');

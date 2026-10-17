@@ -2,14 +2,14 @@
 // Classic page script; load boot.js after all definitions.
 
 function selectedFolderTemplate() {
-  const preset = document.getElementById('folderTemplatePreset');
+  const preset = /** @type {HTMLSelectElement} */ (document.getElementById('folderTemplatePreset'));
   if (preset.value !== '__custom__') return preset.value;
-  return (document.getElementById('folderTemplate').value || '').trim();
+  return (/** @type {HTMLInputElement} */ (document.getElementById('folderTemplate')).value || '').trim();
 }
 
 function updateFolderTemplateControls() {
-  const preset = document.getElementById('folderTemplatePreset');
-  const custom = document.getElementById('folderTemplate');
+  const preset = /** @type {HTMLSelectElement} */ (document.getElementById('folderTemplatePreset'));
+  const custom = /** @type {HTMLInputElement} */ (document.getElementById('folderTemplate'));
   if (!preset || !custom) return;
   custom.style.display = preset.value === '__custom__' ? '' : 'none';
   if (preset.value === '__custom__') custom.focus();
@@ -22,8 +22,9 @@ function updateFolderTemplateControls() {
 // table instead of contradicting it. Passing null resets to bare patterns,
 // which is what we show whenever the real dates aren't known yet: a stale or
 // invented example is worse than none.
+/** @param {{samples?: Record<string,string>; dated_count?: number} | null} templateSamples */
 function applyFolderTemplateSamples(templateSamples) {
-  const preset = document.getElementById('folderTemplatePreset');
+  const preset = /** @type {HTMLSelectElement} */ (document.getElementById('folderTemplatePreset'));
   if (!preset) return;
   const samples = (templateSamples && templateSamples.samples) || {};
   Array.from(preset.options).forEach((option) => {
@@ -34,9 +35,10 @@ function applyFolderTemplateSamples(templateSamples) {
   });
 }
 
+/** @param {string} template */
 function setFolderTemplate(template) {
-  const preset = document.getElementById('folderTemplatePreset');
-  const custom = document.getElementById('folderTemplate');
+  const preset = /** @type {HTMLSelectElement} */ (document.getElementById('folderTemplatePreset'));
+  const custom = /** @type {HTMLInputElement} */ (document.getElementById('folderTemplate'));
   const commonOption = Array.from(preset.options)
     .some((option) => option.value === template && option.value !== '__custom__');
   preset.value = commonOption ? template : '__custom__';
@@ -44,14 +46,16 @@ function setFolderTemplate(template) {
   updateFolderTemplateControls();
 }
 
+/** @param {string} path */
 function recentDestinationLabel(path) {
   const trimmed = path.replace(/[\\/]+$/, '');
   const parts = trimmed.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || path;
 }
 
+/** @param {string} path */
 function selectRecentDestination(path) {
-  const destination = document.getElementById('destInput');
+  const destination = /** @type {HTMLInputElement} */ (document.getElementById('destInput'));
   destination.value = path;
   // Match a manually entered destination so an already-rendered preview
   // cannot remain visible for the previous folder.
@@ -59,9 +63,10 @@ function selectRecentDestination(path) {
   destination.focus();
 }
 
+/** @param {string[]} recents */
 function renderRecentDestinations(recents) {
-  const section = document.getElementById('recentDestinations');
-  const list = document.getElementById('recentDestinationList');
+  const section = /** @type {HTMLElement} */ (document.getElementById('recentDestinations'));
+  const list = /** @type {HTMLElement} */ (document.getElementById('recentDestinationList'));
   if (!section || !list) return;
   list.replaceChildren();
   recents.forEach((path) => {
@@ -84,7 +89,7 @@ function wireDestStructureInvalidation() {
     'folderTemplatePreset', 'folderTemplate', 'newWorkspaceName',
     'chkAllowMissingExiftool',
   ].forEach((id) => {
-    const el = document.getElementById(id);
+    const el = /** @type {HTMLElement} */ (document.getElementById(id));
     if (!el) return;
     const onPreviewOptionChange = () => {
       hideDestStructure();
@@ -101,7 +106,7 @@ function wireDestStructureInvalidation() {
     el.addEventListener('change', onPreviewOptionChange);
     el.addEventListener('input', onPreviewOptionChange);
   });
-  document.querySelectorAll('.file-ext').forEach((el) => {
+  /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.file-ext')).forEach((el) => {
     el.addEventListener('change', () => {
       hideDestStructure();
       scheduleImportPreview();
@@ -111,7 +116,7 @@ function wireDestStructureInvalidation() {
 }
 
 function importRemoteTargetId() {
-  const el = document.getElementById('destMode');
+  const el = /** @type {HTMLSelectElement} */ (document.getElementById('destMode'));
   const v = el ? el.value : 'local';
   return v.indexOf('remote:') === 0 ? v.slice(7) : '';
 }
@@ -122,6 +127,7 @@ function importRemoteTarget() {
   return importRemoteTargets.find(t => t.id === id) || null;
 }
 
+/** @param {string} raw */
 function normalizeRemoteSubpath(raw) {
   const trimmed = (raw || '').trim();
   if (!trimmed) return {value: '', error: ''};
@@ -138,16 +144,19 @@ function normalizeRemoteSubpath(raw) {
   return {value: parts.join('/'), error: ''};
 }
 
+/** @param {string | undefined} p */
 function importIsAbsolutePath(p) {
   if (!p) return false;
   return p.charAt(0) === '/' || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
 }
 
+/** @param {string} user @param {string} host @param {string} path */
 function rsyncDestSpec(user, host, path) {
   const hostToken = host && host.indexOf(':') !== -1 ? '[' + host + ']' : host;
   return user + '@' + hostToken + ':' + path;
 }
 
+/** @param {string} text */
 function remotePreviewWarn(text) {
   const d = document.createElement('div');
   d.style.color = 'var(--warning,#bf8700)';
@@ -156,11 +165,11 @@ function remotePreviewWarn(text) {
 }
 
 function updateRemoteDestPreview() {
-  const el = document.getElementById('remoteDestPreview');
+  const el = /** @type {HTMLElement} */ (document.getElementById('remoteDestPreview'));
   if (!el) return;
   el.textContent = '';
-  const input = document.getElementById('remoteSubpath');
-  const errorEl = document.getElementById('remoteSubpathError');
+  const input = /** @type {HTMLInputElement} */ (document.getElementById('remoteSubpath'));
+  const errorEl = /** @type {HTMLElement} */ (document.getElementById('remoteSubpathError'));
   const t = importRemoteTarget();
   if (!t) {
     if (errorEl) {
@@ -218,12 +227,12 @@ function remoteArchiveSelectionReady() {
   const t = importRemoteTarget();
   if (!t || !importRsyncAvailable) return false;
   if (!t.mount_path || !importIsAbsolutePath(t.mount_path)) return false;
-  const subResult = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+  const subResult = normalizeRemoteSubpath(/** @type {HTMLInputElement} */ (document.getElementById('remoteSubpath')).value);
   return !subResult.error && !!subResult.value;
 }
 
 function updateDestinationModeHint() {
-  const hint = document.getElementById('destModeHint');
+  const hint = /** @type {HTMLElement} */ (document.getElementById('destModeHint'));
   if (!hint) return;
   if (localProcessingRequest()) {
     hint.textContent = deferNasTransferRequest()
@@ -238,7 +247,7 @@ function updateDestinationModeHint() {
     return;
   }
   const destination =
-    (document.getElementById('destInput')?.value || '').trim();
+    (/** @type {HTMLInputElement} */ (document.getElementById('destInput'))?.value || '').trim();
   const mountedTarget = importRemoteTargets.find((item) => {
     const mount = String(item.mount_path || '').replace(/\/+$/, '');
     return mount && (
@@ -253,8 +262,8 @@ function updateDestinationModeHint() {
 
 function onImportDestModeChange() {
   const remoteId = importRemoteTargetId();
-  const localRows = document.getElementById('destLocalRows');
-  const remoteRows = document.getElementById('destRemoteRows');
+  const localRows = /** @type {HTMLElement} */ (document.getElementById('destLocalRows'));
+  const remoteRows = /** @type {HTMLElement} */ (document.getElementById('destRemoteRows'));
   if (localRows) localRows.style.display = remoteId ? 'none' : '';
   if (remoteRows) remoteRows.style.display = remoteId ? '' : 'none';
   updateDestinationModeHint();
@@ -275,6 +284,7 @@ function onImportDestModeChange() {
 // in between, the older snapshot must lose regardless of arrival order.
 let _remoteTargetsRequestSeq = 0;
 let _remoteTargetsAppliedSeq = 0;
+/** @returns {Promise<ImportRemoteResponse>} */
 async function fetchImportRemoteTargets() {
   const seq = ++_remoteTargetsRequestSeq;
   const ctrl = new AbortController();
@@ -289,6 +299,7 @@ async function fetchImportRemoteTargets() {
   return { seq, data: await resp.json() };
 }
 
+/** @param {ImportRemoteResponse} res */
 function remoteTargetsResponseIsStale(res) {
   return !res || res.seq < _remoteTargetsAppliedSeq;
 }
@@ -298,7 +309,8 @@ function remoteTargetsResponseIsStale(res) {
 // leaving importRsyncAvailable/importSshAvailable at their initial false
 // while repopulating the dropdown would block the very SSH destinations it
 // just restored.
-let _previousRemoteTargets = [];
+/** @type {ImportRemoteTarget[]} */ let _previousRemoteTargets = [];
+/** @param {ImportRemoteResponse} res */
 function applyImportRemoteTargets(res) {
   const data = res.data;
   _remoteTargetsAppliedSeq = Math.max(_remoteTargetsAppliedSeq, res.seq);
@@ -309,8 +321,9 @@ function applyImportRemoteTargets(res) {
   _afterMoveTargetsCheckedAt = Date.now();
 }
 
+/** @param {boolean} failed */
 function renderRemoteTargetsError(failed) {
-  const errEl = document.getElementById('remoteTargetsError');
+  const errEl = /** @type {HTMLElement} */ (document.getElementById('remoteTargetsError'));
   if (!errEl) return;
   errEl.textContent = '';
   errEl.dataset.kind = failed ? 'load-failed' : '';
@@ -331,7 +344,7 @@ function renderRemoteTargetsError(failed) {
 }
 
 function remoteTargetsLoadFailed() {
-  const errEl = document.getElementById('remoteTargetsError');
+  const errEl = /** @type {HTMLElement} */ (document.getElementById('remoteTargetsError'));
   return !!(errEl && errEl.classList.contains('visible')
     && errEl.dataset.kind === 'load-failed');
 }
@@ -363,7 +376,7 @@ async function loadImportRemoteTargets() {
 // for the Retry link and for the after-move refresh: a filled-in remote
 // form must not reset itself when the list is re-fetched).
 function renderImportDestModes() {
-  const sel = document.getElementById('destMode');
+  const sel = /** @type {HTMLSelectElement} */ (document.getElementById('destMode'));
   if (!sel) return;
   const prevValue = sel.value;
   const prevTarget = _previousRemoteTargets.find(
@@ -411,6 +424,7 @@ function renderImportDestModes() {
 // before the refresh (same NAS path under a different port/key/mount) is
 // a different target, not a migration — treating it as one would keep a
 // selection pointing at a configuration the user never chose.
+/** @param {ImportRemoteTarget} prev @param {ImportRemoteTarget[]} targets @param {ImportRemoteTarget[]} previousTargets */
 function migratedRemoteTarget(prev, targets, previousTargets) {
   if (!prev) return null;
   const known = new Set((previousTargets || []).map((t) => t.id));
@@ -421,8 +435,9 @@ function migratedRemoteTarget(prev, targets, previousTargets) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+/** @param {string} name */
 function noteRemoteSelectionLost(name) {
-  const errEl = document.getElementById('remoteTargetsError');
+  const errEl = /** @type {HTMLElement} */ (document.getElementById('remoteTargetsError'));
   if (!errEl) return;
   errEl.textContent = (name ? '"' + name + '"' : 'The selected SSH destination')
     + ' is no longer configured under Settings › Remote targets. '
@@ -440,7 +455,7 @@ function hideDestStructure() {
   // and resetting only there would leave the dropdown advertising dates from
   // a source that is no longer selected.
   applyFolderTemplateSamples(null);
-  const el = document.getElementById('destStructure');
+  const el = /** @type {HTMLElement} */ (document.getElementById('destStructure'));
   if (!el) return;
   el.style.display = 'none';
   el.innerHTML = '';
@@ -456,7 +471,7 @@ function resolvedCopyDestination() {
   if (importRemoteTargetId()) {
     const t = importRemoteTarget();
     if (!t || !t.mount_path || !importIsAbsolutePath(t.mount_path)) return '';
-    const sub = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+    const sub = normalizeRemoteSubpath(/** @type {HTMLInputElement} */ (document.getElementById('remoteSubpath')).value);
     // The mount root by itself is not a valid remote selection: the SSH
     // importer requires a folder below the configured remote root. Rendering
     // a destination preview for the bare mount made an invalid form look
@@ -466,10 +481,11 @@ function resolvedCopyDestination() {
     const base = t.mount_path.replace(/\/+$/, '');
     return base + '/' + sub.value;
   }
-  const local = (document.getElementById('destInput').value || '').trim();
+  const local = (/** @type {HTMLInputElement} */ (document.getElementById('destInput')).value || '').trim();
   return importIsAbsolutePath(local) ? local : '';
 }
 
+/** @param {string} destination @param {string | string[]} fileTypes @param {boolean} recursive @param {string[] | undefined} excludePaths */
 function destStructureSignature(destination, fileTypes, recursive, excludePaths) {
   return JSON.stringify({
     sources: sources.slice(),
@@ -477,9 +493,9 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
     folder_template: selectedFolderTemplate(),
     file_types: fileTypes,
     recursive: recursive,
-    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
-    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
-    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
+    skip_duplicates: /** @type {HTMLInputElement} */ (document.getElementById('chkSkipDuplicates')).checked,
+    verify_by_hash: /** @type {HTMLInputElement} */ (document.getElementById('chkVerifyByHash')).checked,
+    trust_likely_duplicates: /** @type {HTMLInputElement} */ (document.getElementById('chkTrustLikelyDuplicates')).checked,
     exclude_paths: (excludePaths || []).slice().sort(),
   });
 }
@@ -491,6 +507,7 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
 // the duplicate summary above is never clobbered. ``excludePaths`` are the
 // source files that will be skipped as duplicates — excluding them keeps the
 // new/existing folder counts matching the files that actually land.
+/** @param {string[] | undefined} [excludePaths] @param {AbortSignal | undefined} [signal] */
 async function renderDestStructure(excludePaths, signal) {
   // hideDestStructure() also drops the previous run's example folder names.
   // Unlike the move page — where the examples depend only on the selected
@@ -502,11 +519,11 @@ async function renderDestStructure(excludePaths, signal) {
   const destination = resolvedCopyDestination();
   if (!destination) return null;
   const fileTypes = selectedFileTypes();
-  const recursive = document.getElementById('chkRecursive').checked;
+  const recursive = /** @type {HTMLInputElement} */ (document.getElementById('chkRecursive')).checked;
   const requestSeq = destStructureSeq;
   const requestSignature = destStructureSignature(
     destination, fileTypes, recursive, excludePaths);
-  let data;
+  /** @type {ImportDestinationPreview} */ let data;
   try {
     const resp = await fetch('/api/import/destination-preview', {
       method: 'POST',
@@ -526,12 +543,12 @@ async function renderDestStructure(excludePaths, signal) {
   } catch (e) {
     return null;  // structure preview is optional; keep the summary intact
   }
-  const el = document.getElementById('destStructure');
+  const el = /** @type {HTMLElement} */ (document.getElementById('destStructure'));
   if (
     requestSeq !== destStructureSeq ||
     requestSignature !== destStructureSignature(
       resolvedCopyDestination(), selectedFileTypes(),
-      document.getElementById('chkRecursive').checked, excludePaths)
+      /** @type {HTMLInputElement} */ (document.getElementById('chkRecursive')).checked, excludePaths)
   ) {
     return;
   }

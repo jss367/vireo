@@ -1,42 +1,43 @@
 // Page initialization, empty states, readiness, and Browse handoff.
 // Classic page script; shared globals are initialized before boot.js runs.
 
+/** @param {ReviewReadiness | null} readiness */
 function renderEmptyState(readiness) {
-  var heading = document.getElementById('emptyStateHeading');
-  var body = document.getElementById('emptyStateBody');
-  var stages = document.getElementById('readinessStages');
-  var actions = document.getElementById('readinessActions');
-  document.getElementById('emptyState').style.display = '';
+  var heading = /** @type {HTMLElement} */ (document.getElementById('emptyStateHeading'));
+  var body = /** @type {HTMLElement} */ (document.getElementById('emptyStateBody'));
+  var stages = /** @type {HTMLElement} */ (document.getElementById('readinessStages'));
+  var actions = /** @type {HTMLElement} */ (document.getElementById('readinessActions'));
+  /** @type {HTMLElement} */ (document.getElementById('emptyState')).style.display = '';
 
   // Per-stage rows
-  var rows = [
-    ['Photos', readiness.total_photos, readiness.total_photos],
-    ['Masks', readiness.with_masks, readiness.mask_target_photos || readiness.total_photos],
-    ['Embeddings', readiness.with_embeddings, readiness.embedding_target_photos || readiness.total_photos],
-    ['Eye keypoints', readiness.with_eye_keypoint_attempts != null
-      ? readiness.with_eye_keypoint_attempts
-      : readiness.with_eye_keypoints,
-      readiness.eye_keypoint_target_photos != null
-        ? readiness.eye_keypoint_target_photos
-        : readiness.total_photos],
-    ['Species predictions', readiness.with_predictions, readiness.prediction_target_photos || readiness.total_photos],
+  /** @type {[string, number, number][]} */ var rows = [
+    ['Photos', requireReviewValue(readiness).total_photos, requireReviewValue(readiness).total_photos],
+    ['Masks', requireReviewValue(readiness).with_masks, requireReviewValue(readiness).mask_target_photos || requireReviewValue(readiness).total_photos],
+    ['Embeddings', requireReviewValue(readiness).with_embeddings, requireReviewValue(readiness).embedding_target_photos || requireReviewValue(readiness).total_photos],
+    ['Eye keypoints', requireReviewValue(readiness).with_eye_keypoint_attempts != null
+      ? (requireReviewValue(readiness).with_eye_keypoint_attempts || 0)
+      : requireReviewValue(readiness).with_eye_keypoints,
+      requireReviewValue(readiness).eye_keypoint_target_photos != null
+        ? (requireReviewValue(readiness).eye_keypoint_target_photos || 0)
+        : requireReviewValue(readiness).total_photos],
+    ['Species predictions', requireReviewValue(readiness).with_predictions, requireReviewValue(readiness).prediction_target_photos || requireReviewValue(readiness).total_photos],
   ];
   stages.innerHTML = rows.map(function(r) {
     var name = r[0], n = r[1], total = r[2];
-    var cls = (n === total && total > 0) ? 'stage-ok'
-            : (n > 0 ? 'stage-partial' : 'stage-missing');
+    var cls = (n === total && requireReviewValue(total) > 0) ? 'stage-ok'
+            : (requireReviewValue(n) > 0 ? 'stage-partial' : 'stage-missing');
     return '<span class="stage-name">' + name + '</span>'
          + '<span class="stage-count ' + cls + '">' + n + ' / ' + total + '</span>';
   }).join('');
 
-  if (readiness.state === 'empty') {
+  if (requireReviewValue(readiness).state === 'empty') {
     heading.textContent = 'No photos in this workspace';
     body.textContent = 'Add folders to this workspace from the Folders page.';
     actions.innerHTML = '';
     return;
   }
 
-  if (readiness.state === 'insufficient') {
+  if (requireReviewValue(readiness).state === 'insufficient') {
     heading.textContent = 'Not enough features to compute results yet';
     body.textContent = 'Run mask extraction on the Process page first '
       + '— the review page needs masks to score photo quality.';
@@ -47,7 +48,7 @@ function renderEmptyState(readiness) {
 
   // state === 'computable'
   heading.textContent = 'Ready to compute results';
-  var enhancing = readiness.enhancing_missing || [];
+  var enhancing = requireReviewValue(readiness).enhancing_missing || [];
   if (enhancing.length === 0) {
     body.textContent = 'All upstream stages are complete. '
       + 'Click below to group, score, and triage your photos.';
@@ -66,7 +67,7 @@ function renderEmptyState(readiness) {
 }
 
 function computeReviewNow() {
-  var btn = document.querySelector('.readiness-actions .compute-btn');
+  var btn = /** @type {HTMLButtonElement | null} */ (document.querySelector('.readiness-actions .compute-btn'));
   if (btn) { btn.disabled = true; btn.textContent = 'Computing…'; }
   safeFetch('/api/pipeline/regroup-live', {
     method: 'POST',
@@ -78,7 +79,7 @@ function computeReviewNow() {
       return;
     }
     // Hide empty state, render results inline
-    document.getElementById('emptyState').style.display = 'none';
+    /** @type {HTMLElement} */ (document.getElementById('emptyState')).style.display = 'none';
     resultsCacheInfo = {
       workspace_photo_count: reviewReadiness ? reviewReadiness.total_photos : data.summary.total_photos,
       cached_photo_count: data.summary.total_photos,
@@ -96,8 +97,8 @@ function computeReviewNow() {
     // Parity with initPipelineReviewPage's happy path:
     if (workspaceOverrides && workspaceOverrides.review_min_confidence != null) {
       minConfidence = workspaceOverrides.review_min_confidence;
-      document.getElementById('confSlider').value = minConfidence;
-      document.getElementById('confSliderVal').textContent = minConfidence + '%';
+      /** @type {HTMLInputElement} */ (document.getElementById('confSlider')).value = String(minConfidence);
+      /** @type {HTMLElement} */ (document.getElementById('confSliderVal')).textContent = minConfidence + '%';
     }
     restorePipelineReviewViewState();
     applyReviewResults(data, resultsCacheInfo);
@@ -129,11 +130,11 @@ function loadPipelinePageInit() {
     reviewReadiness = (data && data.review_readiness) || null;
     if (!data || !data.results) {
       renderEmptyState(data && data.review_readiness ? data.review_readiness
-                                                     : {state: 'empty', total_photos: 0});
+                                                     : {state: 'empty', total_photos: 0, with_masks: 0, with_embeddings: 0, with_eye_keypoints: 0, with_predictions: 0});
       return;
     }
     // Hide empty state, show results UI
-    var empty = document.getElementById('emptyState');
+    var empty = /** @type {HTMLElement} */ (document.getElementById('emptyState'));
     if (empty) empty.style.display = 'none';
 
     resultsCacheInfo = data.results_cache_info || null;
@@ -142,8 +143,8 @@ function loadPipelinePageInit() {
 
     if (data.workspace_overrides && data.workspace_overrides.review_min_confidence != null) {
       minConfidence = data.workspace_overrides.review_min_confidence;
-      document.getElementById('confSlider').value = minConfidence;
-      document.getElementById('confSliderVal').textContent = minConfidence + '%';
+      /** @type {HTMLInputElement} */ (document.getElementById('confSlider')).value = String(minConfidence);
+      /** @type {HTMLElement} */ (document.getElementById('confSliderVal')).textContent = minConfidence + '%';
     }
 
     restorePipelineReviewViewState();
@@ -151,7 +152,7 @@ function loadPipelinePageInit() {
     openRequestedGroupReviewFromUrl();
     loadReviewScopeOptions();
   }).catch(function(error) {
-    var empty = document.getElementById('emptyState');
+    var empty = /** @type {HTMLElement} */ (document.getElementById('emptyState'));
     if (empty) {
       empty.style.display = '';
       empty.textContent = 'Could not load review: ' + (error.message || error) + '. Reload to try again.';
@@ -162,18 +163,18 @@ function loadPipelinePageInit() {
 
 /* Show a "Review misses (N)" shortcut in the summary bar when the current
  * pipeline run actually recomputed miss flags. Gated on
- * pipelineResults.miss_computed_at (set by pipeline_job's miss_stage);
+ * currentReviewResults().miss_computed_at (set by pipeline_job's miss_stage);
  * without the marker we'd surface stale miss flags from a prior run as
  * current-run misses — e.g. when miss_enabled=false or the stage was
  * skipped. The link is scoped to that same timestamp so /misses only
  * shows misses written during this run. */
 function refreshMissesReviewBtn() {
-  var btn = document.getElementById('missesReviewBtn');
+  var btn = /** @type {HTMLAnchorElement} */ (document.getElementById('missesReviewBtn'));
   if (!btn || !pipelineResults) return;
-  var sinceTs = pipelineResults.miss_computed_at;
+  var sinceTs = currentReviewResults().miss_computed_at;
   if (!sinceTs) return;  // miss stage didn't run this pipeline
 
-  fetch('/api/misses?since=' + encodeURIComponent(sinceTs)).then(function(r) {
+  fetch('/api/misses?since=' + encodeURIComponent(sinceTs || '')).then(function(r) {
     if (!r.ok) return null;
     return r.json();
   }).then(function(data) {
@@ -181,8 +182,8 @@ function refreshMissesReviewBtn() {
     var all = (data.no_subject || []).concat(data.clipped || []).concat(data.oof || []);
     var count = all.length;
     if (count === 0) return;  // stays hidden
-    document.getElementById('missesReviewCount').textContent = count;
-    btn.href = '/misses?since=' + encodeURIComponent(sinceTs);
+    /** @type {HTMLElement} */ (document.getElementById('missesReviewCount')).textContent = count;
+    btn.href = '/misses?since=' + encodeURIComponent(sinceTs || '');
     btn.style.display = '';
   }).catch(function() { /* no-op */ });
 }
@@ -197,8 +198,8 @@ function browseBurstStoredIds() {
     var raw = window.sessionStorage.getItem('vireo.browseBurstReviewIds');
     var parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
-    var seen = {};
-    return parsed.map(function(id) { return parseInt(id, 10); })
+    /** @type {Record<number,boolean>} */ var seen = {};
+    return parsed.map(function(id) { return parseInt(String(id), 10); })
       .filter(function(id) {
         if (!Number.isInteger(id) || seen[id]) return false;
         seen[id] = true;
@@ -210,15 +211,15 @@ function browseBurstStoredIds() {
 }
 
 function renderBrowseBurstReviewShell() {
-  var empty = document.getElementById('emptyState');
+  var empty = /** @type {HTMLElement} */ (document.getElementById('emptyState'));
   if (empty) empty.style.display = 'none';
-  var sb = document.getElementById('summaryBar');
+  var sb = /** @type {HTMLElement} */ (document.getElementById('summaryBar'));
   if (sb) sb.style.display = '';
-  var fb = document.getElementById('filterBar');
+  var fb = /** @type {HTMLElement} */ (document.getElementById('filterBar'));
   if (fb) fb.style.display = '';
-  var ss = document.getElementById('sidebarScoring');
+  var ss = /** @type {HTMLElement} */ (document.getElementById('sidebarScoring'));
   if (ss) ss.style.display = 'none';
-  var sg = document.getElementById('sidebarGrouping');
+  var sg = /** @type {HTMLElement} */ (document.getElementById('sidebarGrouping'));
   if (sg) sg.style.display = 'none';
 }
 
@@ -238,6 +239,7 @@ function clearBrowseBurstHandoff() {
 // the user on an empty page reachable only from Browse. Clear the one-shot
 // handoff state and degrade to the standard page-init flow so the route
 // stays self-recoverable on reload.
+/** @param {string} message */
 function fallbackToNormalPipelineReview(message) {
   clearBrowseBurstHandoff();
   if (message) showToast(message, 'error');
@@ -261,13 +263,13 @@ function openBrowseBurstReviewFromStorage() {
       return;
     }
 
-    var target = null;
+    /** @type {{encIdx: number; burstIdx: number; photoId: number} | null} */ var target = null;
     data.encounters.some(function(enc, encIdx) {
       var bursts = Array.isArray(enc.bursts) ? enc.bursts : [];
       return bursts.some(function(burst, burstIdx) {
         var firstIds = burst && (burst.photo_ids || burst);
         if (!firstIds || !firstIds.length) return false;
-        target = { encIdx: encIdx, burstIdx: burstIdx, photoId: firstIds[0] };
+        target = { encIdx: encIdx, burstIdx: burstIdx, photoId: requireReviewValue(firstIds[0]) };
         return true;
       });
     });
@@ -277,17 +279,17 @@ function openBrowseBurstReviewFromStorage() {
     }
 
     pipelineResults = data;
-    pipelineResults.source = 'browse-selection';
+    currentReviewResults().source = 'browse-selection';
 
     collapsedEncounters = new Set();
     renderBrowseBurstReviewShell();
-    updateSummaryBar(pipelineResults.summary);
+    updateSummaryBar(currentReviewResults().summary);
     renderResults();
     // Keep the handoff state (session storage + ?browse_burst=1) in place so
     // closing the modal via Esc/× or hitting the /group/state retry path stays
     // recoverable across a plain reload. clearBrowseBurstHandoff() runs only
     // once the user applies (workflow complete) or we fall back to normal review.
-    openGroupReview(target.encIdx, target.burstIdx, target.photoId);
+    /** @type {{encIdx: number; burstIdx: number; photoId: number}} */ const selectedTarget = requireReviewValue(target); openGroupReview(selectedTarget.encIdx, selectedTarget.burstIdx, selectedTarget.photoId);
   }).catch(function() {
     fallbackToNormalPipelineReview('Could not open burst review — showing the latest pipeline review instead.');
   });
@@ -297,8 +299,8 @@ function openBrowseBurstReviewFromStorage() {
 // in memory (same-page Esc/× or /group/state failure), just reopen it.
 // Otherwise (e.g. after a reload) re-run the handoff from session storage.
 function reopenBrowseBurstReview() {
-  if (pipelineResults && pipelineResults.source === 'browse-selection') {
-    var enc = pipelineResults.encounters && pipelineResults.encounters[0];
+  if (pipelineResults && currentReviewResults().source === 'browse-selection') {
+    var enc = currentReviewResults().encounters && currentReviewResults().encounters[0];
     var firstId = enc && enc.photo_ids && enc.photo_ids[0];
     if (firstId) {
       renderBrowseBurstReviewShell();

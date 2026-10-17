@@ -72,8 +72,9 @@ def create_moves_blueprint(get_db, json_error):
     """Build the move-rules and move-folder preflight blueprint.
 
     These routes need only the database and the JSON error helper; the
-    destination walk they use, ``_scan_dir_file_count``, is module-level
-    here because nothing else calls it.
+    destination walk they use, ``_scan_dir_file_count``, and the
+    preflight's per-destination-kind responses are module-level here
+    because nothing else calls them.
     """
     blueprint = Blueprint("moves", __name__)
 
@@ -182,7 +183,6 @@ def create_moves_blueprint(get_db, json_error):
           with millions of unrelated files.
         """
         import move as move_mod
-        from move import preview_merge, resolve_folder_dest
 
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -224,47 +224,11 @@ def create_moves_blueprint(get_db, json_error):
                     "Organizing one folder into capture-date folders is only "
                     "available for local or mounted-drive destinations."
                 )
-            import posixpath
-
-            import config as cfg
-            target = cfg.get_remote_target(remote_target_id)
-            if not target:
-                return json_error("Remote target not found", status=404)
-            effective_cfg = get_db().get_effective_config(cfg.load())
-            ssh_bin = move_mod.resolve_ssh_bin(
-                effective_cfg.get("ssh_bin", "") or "")
-            if not ssh_bin:
-                return json_error(
-                    "OpenSSH Client was not found. Install it or configure ssh.exe in Settings."
-                )
-            target = dict(target)
-            target["ssh_bin"] = ssh_bin
-            try:
-                spec = move_mod.build_remote_move_spec(target, subpath, "", ssh_bin)
-            except ValueError as exc:
-                return json_error(str(exc))
-            # The NAS path is POSIX, so the preview/probe path must join with
-            # '/' even when this server runs on Windows — resolve_folder_dest
-            # uses os.path.join and would produce ``/volume1/Photo\trip``,
-            # which the SSH ``test -d`` probe would then look up at a
-            # different remote path than the actual transfer (move_folder
-            # uses posixpath.join), so an existing destination would be
-            # reported as new and the first non-merge move would fail.
-            landing_name = destination_name or folder["name"] \
-                or os.path.basename(folder["path"].rstrip("/\\"))
-            resolved = posixpath.join(spec["ssh_dest_base"], landing_name)
-            exists, fcount, truncated, reachable, err = \
-                move_mod.remote_preflight(target, resolved)
-            return jsonify({
-                "resolved_dest": move_mod.rsync_dest_spec(target, resolved),
-                "exists": exists,
-                "file_count": fcount,
-                "file_count_truncated": truncated,
-                "remote": True,
-                "reachable": reachable,
-                "error": err,
-                "mount_path_set": bool(target.get("mount_path")),
-            })
+            return _remote_preflight_response(
+                get_db, json_error, folder,
+                remote_target_id=remote_target_id, subpath=subpath,
+                destination_name=destination_name,
+            )
 
         if not isinstance(destination, str):
             return json_error("destination must be a string")
@@ -274,73 +238,136 @@ def create_moves_blueprint(get_db, json_error):
             return json_error("destination must be an absolute path")
 
         if folder_template:
-            from ingest import folder_template_samples
-            try:
-                plan, capture_dts = \
-                    move_mod.plan_folder_date_moves_with_capture_dates(
-                        get_db(), folder_id, destination, folder_template,
-                    )
-            except ValueError as exc:
-                return json_error(str(exc))
-            destinations = [
-                {
-                    "path": item["destination"],
-                    "relative_path": item["relative_path"],
-                    "photo_count": item["photo_count"],
-                    "exists": os.path.isdir(item["destination"]),
-                }
-                for item in plan
-            ]
-            return jsonify({
-                "resolved_dest": destination,
-                "date_organized": True,
-                "folder_template": folder_template,
-                "destinations": destinations,
-                "destination_count": len(destinations),
-                "photo_count": sum(item["photo_count"] for item in plan),
-                "exists": any(item["exists"] for item in destinations),
-                "file_count": 0,
-                "file_count_truncated": False,
-                # Example folder names for the format dropdown, rendered from
-                # the very capture dates that produced ``destinations`` above.
-                # Same scan, same code path — so the label a user reads as
-                # "my folder will be called this" cannot disagree with the
-                # folder list it sits beside.
-                "template_samples": folder_template_samples(capture_dts),
-            })
+            return _date_organized_preflight_response(
+                get_db, json_error, folder_id, destination, folder_template)
 
-        resolved = resolve_folder_dest(
-            folder["path"], folder["name"], destination, destination_name)
-        exists = os.path.isdir(resolved)
-        file_count = 0
-        file_count_truncated = False
-        if exists:
-            if mode == "exact":
-                # Generous cap, not uncapped: requestExactDestCount fires from
-                # the keystroke-driven path, and an unbounded walk on a NAS
-                # target with millions of files would pin a Flask worker for
-                # minutes (the UI seq guard only discards stale replies, not
-                # server-side work). 100k/50k is large enough that any
-                # realistic photo library reports its true count, and small
-                # enough that the worst case is seconds, not minutes.
-                file_count, file_count_truncated = _scan_dir_file_count(
-                    resolved, file_limit=100000, dir_limit=50000)
-            else:
-                # Both "quick" and "preview" cap the destination scan. The
-                # merge dialog uses preview_merge's copy/skip counts, not
-                # this number, so walking the destination uncapped here
-                # would block a Flask worker for no UI benefit.
-                file_count, file_count_truncated = _scan_dir_file_count(
-                    resolved, file_limit=1000, dir_limit=2000)
-
-        result = {
-            "resolved_dest": resolved,
-            "exists": exists,
-            "file_count": file_count,
-            "file_count_truncated": file_count_truncated,
-        }
-        if mode == "preview" and exists:
-            result["preview"] = preview_merge(folder["path"], resolved)
-        return jsonify(result)
+        return _local_preflight_response(
+            folder, destination, destination_name, mode)
 
     return blueprint
+
+
+def _remote_preflight_response(get_db, json_error, folder, *,
+                               remote_target_id, subpath, destination_name):
+    """Answer the move-folder preflight for a remote (SSH) target."""
+    import posixpath
+
+    import config as cfg
+    import move as move_mod
+    target = cfg.get_remote_target(remote_target_id)
+    if not target:
+        return json_error("Remote target not found", status=404)
+    effective_cfg = get_db().get_effective_config(cfg.load())
+    ssh_bin = move_mod.resolve_ssh_bin(
+        effective_cfg.get("ssh_bin", "") or "")
+    if not ssh_bin:
+        return json_error(
+            "OpenSSH Client was not found. Install it or configure ssh.exe in Settings."
+        )
+    target = dict(target)
+    target["ssh_bin"] = ssh_bin
+    try:
+        spec = move_mod.build_remote_move_spec(target, subpath, "", ssh_bin)
+    except ValueError as exc:
+        return json_error(str(exc))
+    # The NAS path is POSIX, so the preview/probe path must join with
+    # '/' even when this server runs on Windows — resolve_folder_dest
+    # uses os.path.join and would produce ``/volume1/Photo\trip``,
+    # which the SSH ``test -d`` probe would then look up at a
+    # different remote path than the actual transfer (move_folder
+    # uses posixpath.join), so an existing destination would be
+    # reported as new and the first non-merge move would fail.
+    landing_name = destination_name or folder["name"] \
+        or os.path.basename(folder["path"].rstrip("/\\"))
+    resolved = posixpath.join(spec["ssh_dest_base"], landing_name)
+    exists, fcount, truncated, reachable, err = \
+        move_mod.remote_preflight(target, resolved)
+    return jsonify({
+        "resolved_dest": move_mod.rsync_dest_spec(target, resolved),
+        "exists": exists,
+        "file_count": fcount,
+        "file_count_truncated": truncated,
+        "remote": True,
+        "reachable": reachable,
+        "error": err,
+        "mount_path_set": bool(target.get("mount_path")),
+    })
+
+
+def _date_organized_preflight_response(get_db, json_error, folder_id,
+                                       destination, folder_template):
+    """Answer the move-folder preflight for a capture-date organized move."""
+    import move as move_mod
+    from ingest import folder_template_samples
+    try:
+        plan, capture_dts = \
+            move_mod.plan_folder_date_moves_with_capture_dates(
+                get_db(), folder_id, destination, folder_template,
+            )
+    except ValueError as exc:
+        return json_error(str(exc))
+    destinations = [
+        {
+            "path": item["destination"],
+            "relative_path": item["relative_path"],
+            "photo_count": item["photo_count"],
+            "exists": os.path.isdir(item["destination"]),
+        }
+        for item in plan
+    ]
+    return jsonify({
+        "resolved_dest": destination,
+        "date_organized": True,
+        "folder_template": folder_template,
+        "destinations": destinations,
+        "destination_count": len(destinations),
+        "photo_count": sum(item["photo_count"] for item in plan),
+        "exists": any(item["exists"] for item in destinations),
+        "file_count": 0,
+        "file_count_truncated": False,
+        # Example folder names for the format dropdown, rendered from
+        # the very capture dates that produced ``destinations`` above.
+        # Same scan, same code path — so the label a user reads as
+        # "my folder will be called this" cannot disagree with the
+        # folder list it sits beside.
+        "template_samples": folder_template_samples(capture_dts),
+    })
+
+
+def _local_preflight_response(folder, destination, destination_name, mode):
+    """Answer the move-folder preflight for a local-path destination."""
+    from move import preview_merge, resolve_folder_dest
+
+    resolved = resolve_folder_dest(
+        folder["path"], folder["name"], destination, destination_name)
+    exists = os.path.isdir(resolved)
+    file_count = 0
+    file_count_truncated = False
+    if exists:
+        if mode == "exact":
+            # Generous cap, not uncapped: requestExactDestCount fires from
+            # the keystroke-driven path, and an unbounded walk on a NAS
+            # target with millions of files would pin a Flask worker for
+            # minutes (the UI seq guard only discards stale replies, not
+            # server-side work). 100k/50k is large enough that any
+            # realistic photo library reports its true count, and small
+            # enough that the worst case is seconds, not minutes.
+            file_count, file_count_truncated = _scan_dir_file_count(
+                resolved, file_limit=100000, dir_limit=50000)
+        else:
+            # Both "quick" and "preview" cap the destination scan. The
+            # merge dialog uses preview_merge's copy/skip counts, not
+            # this number, so walking the destination uncapped here
+            # would block a Flask worker for no UI benefit.
+            file_count, file_count_truncated = _scan_dir_file_count(
+                resolved, file_limit=1000, dir_limit=2000)
+
+    result = {
+        "resolved_dest": resolved,
+        "exists": exists,
+        "file_count": file_count,
+        "file_count_truncated": file_count_truncated,
+    }
+    if mode == "preview" and exists:
+        result["preview"] = preview_merge(folder["path"], resolved)
+    return jsonify(result)

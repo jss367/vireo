@@ -11,7 +11,7 @@ function editorPreviewAppliesCrop() {
   return editorState.showBefore || !editorState.cropEditing;
 }
 
-function editorImageMatchesZoomRecipe(img) {
+/** @param {HTMLImageElement} img */ function editorImageMatchesZoomRecipe(img) {
   if (!img || !editorState.photoId) return false;
   try {
     var url = new URL(img.currentSrc || img.src, window.location.href);
@@ -29,22 +29,22 @@ function editorImageMatchesZoomRecipe(img) {
   }
 }
 
-function editorMetadataOrientation(metadata) {
+/** @param {unknown} metadata */ function editorMetadataOrientation(metadata) {
   if (!metadata || typeof metadata !== 'object') return null;
   var groups = ['EXIF', 'IFD0', 'TIFF', 'File'];
   for (var i = 0; i < groups.length; i++) {
-    var group = metadata[groups[i]];
-    if (group && Object.prototype.hasOwnProperty.call(group, 'Orientation')) {
+    var group = /** @type {Record<string,unknown>} */ (metadata)[groups[i] || ''];
+    if (group && typeof group === 'object' && 'Orientation' in group) {
       return group.Orientation;
     }
   }
-  if (Object.prototype.hasOwnProperty.call(metadata, 'Orientation')) {
+  if ('Orientation' in metadata) {
     return metadata.Orientation;
   }
   return null;
 }
 
-function editorOrientationSwapsAxes(orientation) {
+/** @param {unknown} orientation */ function editorOrientationSwapsAxes(orientation) {
   if (orientation == null || typeof orientation === 'boolean') return false;
   if (typeof orientation === 'number') {
     return [5, 6, 7, 8].indexOf(Math.round(orientation)) !== -1;
@@ -58,8 +58,8 @@ function editorOrientationSwapsAxes(orientation) {
   return text.indexOf('90') !== -1 || text.indexOf('270') !== -1;
 }
 
-function editorNativeRecipeDimensions(recipe, applyCrop) {
-  var photo = editorState.photo || {};
+/** @param {EditorRecipe} recipe @param {boolean} applyCrop */ function editorNativeRecipeDimensions(recipe, applyCrop) {
+  /** @type {Partial<EditorPhoto>} */ var photo = editorState.photo || {};
   var width = Number(photo.width) || 0;
   var height = Number(photo.height) || 0;
   if (!width || !height) return null;
@@ -92,7 +92,7 @@ function editorNativeDisplayDimensions() {
   var width = dims ? dims.width : 0;
   var height = dims ? dims.height : 0;
   if (!width || !height) {
-    var fallback = document.getElementById('editorImg');
+    var fallback = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
     return fallback && fallback.naturalWidth && fallback.naturalHeight
       ? {width: fallback.naturalWidth, height: fallback.naturalHeight}
       : null;
@@ -100,7 +100,7 @@ function editorNativeDisplayDimensions() {
   // Straightening can alter the rendered aspect slightly. Preserve the
   // source's native long edge while following the preview's authoritative
   // post-transform aspect ratio once it is available.
-  var img = document.getElementById('editorImg');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
   if (img && img.complete && img.naturalWidth && img.naturalHeight &&
       editorImageMatchesZoomRecipe(img)) {
     var nativeLong = Math.max(width, height);
@@ -130,7 +130,7 @@ function editorNativeDisplayDimensions() {
 }
 
 function editorFitZoomPercent() {
-  var wrap = document.getElementById('editorCanvasWrap');
+  var wrap = /** @type {HTMLElement} */ (document.getElementById('editorCanvasWrap'));
   var dims = editorNativeDisplayDimensions();
   if (!wrap || !dims || !dims.width || !dims.height) return 100;
   var style = getComputedStyle(wrap);
@@ -143,7 +143,7 @@ function editorFitZoomPercent() {
     availableH / dims.height * 100));
 }
 
-function editorZoomSliderPosition(percent) {
+/** @param {number} percent */ function editorZoomSliderPosition(percent) {
   var fit = editorFitZoomPercent();
   if (!Number.isFinite(percent) || percent <= fit) return 0;
   if (EDITOR_MAX_ZOOM_PERCENT <= fit) return 0;
@@ -151,7 +151,7 @@ function editorZoomSliderPosition(percent) {
     Math.log(percent / fit) / Math.log(EDITOR_MAX_ZOOM_PERCENT / fit) * 1000));
 }
 
-function editorZoomFromSliderPosition(position) {
+/** @param {number|string} position */ function editorZoomFromSliderPosition(position) {
   var pos = Math.max(0, Math.min(1000, Number(position) || 0));
   if (pos <= 0) return null;
   var fit = editorFitZoomPercent();
@@ -194,12 +194,12 @@ function editorFitUsesNativeRender() {
 }
 
 function updateEditorZoomControl() {
-  var slider = document.getElementById('editorZoomSlider');
-  var fitStop = document.getElementById('fitBtn');
-  var actualStop = document.getElementById('actualBtn');
-  var zoomOut = document.getElementById('editorZoomOut');
-  var zoomIn = document.getElementById('editorZoomIn');
-  var value = document.getElementById('editorZoomValue');
+  var slider = /** @type {HTMLInputElement} */ (document.getElementById('editorZoomSlider'));
+  var fitStop = /** @type {HTMLButtonElement} */ (document.getElementById('fitBtn'));
+  var actualStop = /** @type {HTMLButtonElement} */ (document.getElementById('actualBtn'));
+  var zoomOut = /** @type {HTMLButtonElement} */ (document.getElementById('editorZoomOut'));
+  var zoomIn = /** @type {HTMLButtonElement} */ (document.getElementById('editorZoomIn'));
+  var value = /** @type {HTMLElement} */ (document.getElementById('editorZoomValue'));
   var hasPhoto = !!editorState.photoId && !!editorState.photo;
   var disabled = !hasPhoto || !!editorState.loading;
   var fit = editorFitZoomPercent();
@@ -235,8 +235,8 @@ function updateEditorZoomControl() {
 }
 
 function applyEditorZoom() {
-  var wrap = document.getElementById('editorCanvasWrap');
-  var img = document.getElementById('editorImg');
+  var wrap = /** @type {HTMLElement} */ (document.getElementById('editorCanvasWrap'));
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
   if (!wrap || !img) return;
   editorClampCustomZoomToFit();
   var custom = editorState.zoomMode !== 'fit';
@@ -288,7 +288,7 @@ function applyEditorZoom() {
   if (typeof updateMaskBrushCursor === 'function') updateMaskBrushCursor();
 }
 
-function setEditorZoom(percent) {
+/** @param {number|'fit'|null} percent */ function setEditorZoom(percent) {
   var wasMode = editorState.zoomMode;
   var wasPercent = editorState.zoomPercent;
   if (percent === null || percent === 'fit') {
@@ -307,7 +307,7 @@ function setEditorZoom(percent) {
   if (changed && editorState.photoId && !editorState.loading) schedulePreview();
 }
 
-function setEditorZoomFromSlider(position) {
+/** @param {string} position */ function setEditorZoomFromSlider(position) {
   setEditorZoom(editorZoomFromSliderPosition(position));
 }
 
@@ -319,7 +319,7 @@ function setEditorZoomToActual() {
   setEditorZoom(100);
 }
 
-function stepEditorZoom(direction) {
+/** @param {number} direction */ function stepEditorZoom(direction) {
   var fit = editorFitZoomPercent();
   var current = editorState.zoomMode === 'fit' ? fit : editorState.zoomPercent;
   var next = current * (direction > 0 ? 1.25 : 0.8);
@@ -329,7 +329,7 @@ function stepEditorZoom(direction) {
 
 // Backward-compatible entry point for the old two-button control and any
 // saved browser automation that invokes it directly.
-function setZoomMode(mode) {
+/** @param {string} mode */ function setZoomMode(mode) {
   if (mode === 'actual') setEditorZoomToActual();
   else setEditorZoomToFit();
 }

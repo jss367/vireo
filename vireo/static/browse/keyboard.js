@@ -7,10 +7,10 @@ document.addEventListener('keydown', function(e) {
   // The shared folder browser installs its Escape handler when it opens.
   // Leave the underlying export modal alone so that handler can dismiss only
   // the topmost picker and preserve the user's export settings.
-  if (document.querySelector('.folder-browser-overlay.open')) return;
+  if (/** @type {HTMLElement | null} */ (document.querySelector('.folder-browser-overlay.open'))) return;
   // Same split for the export-preset save/delete dialog: its own Escape
   // handler dismisses just that dialog and leaves the export modal open.
-  if (document.querySelector('.export-preset-dialog-overlay.open')) return;
+  if (/** @type {HTMLElement | null} */ (document.querySelector('.export-preset-dialog-overlay.open'))) return;
 
   if (browseCompare.isOpen()) {
     if (e.key === 'Escape') {
@@ -32,7 +32,7 @@ document.addEventListener('keydown', function(e) {
   }
 
   // Suppress browse shortcuts while any modal is open
-  var openModal = document.querySelector('.modal-overlay.open');
+  var openModal = /** @type {HTMLElement | null} */ (document.querySelector('.modal-overlay.open'));
   if (openModal) {
     if (e.key === 'Escape') {
       if (openModal.id === 'batchKeywordModal') hideBatchKeywordModal();
@@ -45,9 +45,9 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  if (document.getElementById('lightboxOverlay').classList.contains('active')) return;
+  if (/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) return;
 
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  if (e.target instanceof Element && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) return;
 
   if (e.key === 'Escape') {
     closeDetail();
@@ -117,7 +117,7 @@ document.addEventListener('keydown', function(e) {
     for (var r = 0; r <= 5; r++) {
       if (matchesShortcut(e, _shortcuts['rate_' + r])) {
         if (useBatch) batchSetRating(r);
-        else setRating(selectedPhotoId, r);
+        else if (selectedPhotoId != null) setRating(selectedPhotoId, r);
         return;
       }
     }
@@ -150,7 +150,7 @@ document.addEventListener('keydown', function(e) {
     }
     if (browseViewKey === 'g') {
       if (typeof exitLightboxFullscreen === 'function') exitLightboxFullscreen();
-      if (document.getElementById('lightboxOverlay').classList.contains('active')) closeLightbox();
+      if (/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) closeLightbox();
       e.preventDefault();
       return;
     }
@@ -158,30 +158,30 @@ document.addEventListener('keydown', function(e) {
 });
 
 function getBrowseGridColumnCount() {
-  var grid = document.getElementById('grid');
+  var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   if (grid) {
     var template = window.getComputedStyle(grid).gridTemplateColumns || '';
     var tracks = template.trim().split(/\s+/).filter(Boolean);
     if (tracks.length && template !== 'none') return tracks.length;
   }
 
-  var cards = grid ? grid.querySelectorAll('.grid-card') : document.querySelectorAll('.grid-card');
+  var cards = grid ? /** @type {NodeListOf<HTMLElement>} */ (grid.querySelectorAll('.grid-card')) : /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.grid-card'));
   if (!cards.length) return 1;
 
-  var firstTop = cards[0].offsetTop;
+  var firstTop = cards[0]?.offsetTop || 0;
   var count = 0;
   for (var i = 0; i < cards.length; i++) {
-    if (Math.abs(cards[i].offsetTop - firstTop) > 2) break;
+    if (Math.abs((cards[i]?.offsetTop || 0) - firstTop) > 2) break;
     count++;
   }
   return Math.max(1, count);
 }
 
-async function moveBrowseSelection(delta, e) {
+async function moveBrowseSelection(/** @type {number} */ delta, /** @type {KeyboardEvent | undefined} */ e = undefined) {
   var nextIndex = selectedIndex < 0 && delta > 0 ? 0 : selectedIndex + delta;
   while (true) {
     while (nextIndex >= 0 && nextIndex < photos.length && photos[nextIndex] &&
-           !browsePhotoIsAvailable(photos[nextIndex])) {
+           !browsePhotoIsAvailable(/** @type {BrowsePhoto} */ (photos[nextIndex]))) {
       nextIndex += delta > 0 ? 1 : -1;
     }
     if (nextIndex >= 0 && nextIndex < photos.length && photos[nextIndex]) break;
@@ -199,11 +199,12 @@ async function moveBrowseSelection(delta, e) {
     metaKey: !!(e && e.metaKey),
     ctrlKey: !!(e && e.ctrlKey),
   };
-  selectPhoto(selectionEvent, photos[nextIndex].id, nextIndex);
+  var photo = photos[nextIndex]; if (!photo) return;
+  selectPhoto(selectionEvent, photo.id, nextIndex);
   scrollToCard(selectedIndex);
 }
 
-function scrollToCard(idx) {
-  var cards = document.querySelectorAll('.grid-card');
-  if (cards[idx]) cards[idx].scrollIntoView({ block: 'nearest', behavior: preferredScrollBehavior() });
+function scrollToCard(/** @type {number} */ idx) {
+  var cards = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.grid-card'));
+  var card = cards[idx]; if (card) card.scrollIntoView({ block: 'nearest', behavior: preferredScrollBehavior() });
 }

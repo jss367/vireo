@@ -2,8 +2,8 @@
 // openMergeDialog, and the dialog's target, cancel, close and confirm handlers.
 // Classic page script; load boot.js after all definitions.
 
-function scheduleMergePreview(immediate) {
-  clearTimeout(mergeDebounce);
+/** @param {boolean} immediate */ function scheduleMergePreview(immediate) {
+  if (mergeDebounce) clearTimeout(mergeDebounce);
   if (immediate) { refreshMergePreview(); return; }
   mergeConfirm.disabled = true;
   mergeDebounce = setTimeout(refreshMergePreview, 300);
@@ -22,7 +22,7 @@ async function refreshMergePreview() {
       body: JSON.stringify({keyword_ids: mergeIds, target_id: targetId,
                             overrides: mergeOverrides})
     });
-    const data = await response.json();
+    /** @type {KeywordMergePreview} */ const data = await response.json();
     if (requestId !== mergeRequest || !mergeDialog.open) return;
     if (!response.ok) throw new Error(data.error || 'Could not preview merge.');
     if (mergeFieldsFor !== targetId) {
@@ -39,12 +39,12 @@ async function refreshMergePreview() {
   } catch (error) {
     if (requestId !== mergeRequest || !mergeDialog.open) return;
     if (mergeFieldsFor === null) mergePreview.textContent = '';
-    mergeError.textContent = error.message;
+    mergeError.textContent = keywordErrorMessage(error);
     mergeError.hidden = false;
   }
 }
 
-function openMergeDialog(ids) {
+/** @param {number[]} ids */ function openMergeDialog(ids) {
   if (ids.length < 2) return;
   mergeIds = [...ids];
   mergeOverrides = {};
@@ -52,14 +52,14 @@ function openMergeDialog(ids) {
   mergeFields.innerHTML = '';
   mergeMapEl.hidden = true;
   mergeMapNote.hidden = true;
-  const records = mergeIds.map(id => allKeywords.find(k => k.id === id)).filter(Boolean);
+  const records = mergeIds.map(id => allKeywords.find(k => k.id === id)).filter(/** @returns {record is KeywordRecord} */ record => record !== undefined);
   // Prefer the record carrying a place/taxon link, then coordinates.
-  const score = k => (k.place_id ? 8 : 0) + (k.taxon_id ? 4 : 0) +
+  /** @param {KeywordRecord} k */ const score = k => (k.place_id ? 8 : 0) + (k.taxon_id ? 4 : 0) +
     (k.type === 'location' ? 2 : 0) + (k.latitude != null && k.longitude != null ? 1 : 0);
   records.sort((a, b) => score(b) - score(a));
   mergeTarget.replaceChildren(...records.map(k => {
     const option = document.createElement('option');
-    option.value = k.id;
+    option.value = String(k.id);
     option.textContent = (k.path || [k.name]).join(' → ') + ' · ' + k.type + (k.place_id ? ' · linked place' : '');
     return option;
   }));
@@ -68,7 +68,7 @@ function openMergeDialog(ids) {
 }
 
 function bindMergeDialog() {
-  document.getElementById('kwBulkMerge').addEventListener('click', () => openMergeDialog([...selectedIds]));
+  /** @type {HTMLButtonElement} */ (document.getElementById('kwBulkMerge')).addEventListener('click', () => openMergeDialog([...selectedIds]));
   mergeTarget.addEventListener('change', function() {
     // A different surviving record has its own defaults; keeping the old
     // picks would silently apply one record's identity to another.
@@ -80,7 +80,7 @@ function bindMergeDialog() {
   mergeDialog.addEventListener('cancel', event => { if (mergeSaving) event.preventDefault(); });
   mergeDialog.addEventListener('close', () => {
     ++mergeRequest;
-    clearTimeout(mergeDebounce);
+    if (mergeDebounce) clearTimeout(mergeDebounce);
     mergeToken = null;
     if (mergeMap) { mergeMap.remove(); mergeMap = null; mergeMapLayer = null; }
   });
@@ -97,16 +97,16 @@ function bindMergeDialog() {
         body: JSON.stringify({keyword_ids: mergeIds, target_id: Number(mergeTarget.value),
                               preview_token: mergeToken, overrides: mergeOverrides})
       });
-      const data = await response.json();
+      /** @type {KeywordMergePreview} */ const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not merge keywords.');
       mergeDialog.close();
       selectedIds.clear();
       await loadKeywords();
-      if (!document.getElementById('kwLocationReview').hidden) await loadLocationMatches();
+      if (!/** @type {HTMLElement} */ (document.getElementById('kwLocationReview')).hidden) await loadLocationMatches();
       showToast('Keywords merged into “' + data.resolved.name + '”.', 'success');
     } catch (error) {
       await refreshMergePreview();
-      mergeError.textContent = error.message;
+      mergeError.textContent = keywordErrorMessage(error);
       mergeError.hidden = false;
     } finally {
       mergeSaving = false;

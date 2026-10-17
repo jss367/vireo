@@ -3,18 +3,18 @@
    browse/*.js files in dependency order. */
 
 /* ---------- Collection Modal ---------- */
-var collectionDialog = VireoDialog.create(document.getElementById('collectionModal'), {
-  initialFocus: document.getElementById('collectionName'),
+var collectionDialog = VireoDialog.create(/** @type {HTMLElement} */ (document.getElementById('collectionModal')), {
+  initialFocus: /** @type {HTMLInputElement} */ (document.getElementById('collectionName')),
   onDismiss: hideCollectionModal,
 });
-var collectionEditorRoot = {mode: 'all', rules: []};
-var collectionEditingId = null;
+/** @type {BrowseRuleGroup} */ var collectionEditorRoot = {mode: 'all', rules: []};
+/** @type {number | null} */ var collectionEditingId = null;
 // Cached dropdown sources for the rule editor. Filled on first modal open
 // and reused across rule rows so toggling field=Extension or field=Folder
 // doesn't refetch on every render. Re-fetched each time the modal opens
 // so newly-imported folders/extensions show up without a page reload.
-var collectionExtensions = [];
-var collectionFolders = [];
+/** @type {string[]} */ var collectionExtensions = [];
+/** @type {BrowseFolder[]} */ var collectionFolders = [];
 
 /* Fields whose rule value is a number: they get a number input, default to
    0, and are parsed with parseFloat on save. One list rather than three
@@ -34,7 +34,7 @@ var NUMERIC_OPS = ['is', 'is not', '>=', '<=', '>', '<', 'between'];
 /* Valid ops per field — must mirror vireo/db.py::_build_collection_query.
    The UI only shows ops the backend handles; non-matching combos used to
    silently produce zero matches. */
-var FIELD_OPS = {
+/** @type {Record<string, string[]>} */ var FIELD_OPS = {
   all:         ['equals'],
   metadata:    ['contains', 'not_contains'],
   keyword:     ['is', 'is not', 'contains', 'not_contains'],
@@ -64,7 +64,7 @@ var FIELD_OPS = {
   prediction_status: ['is', 'is not'],
   needs_review: ['equals'],
 };
-var FIELD_LABELS = {
+/** @type {Record<string, string>} */ var FIELD_LABELS = {
   all: 'All Photos',
   metadata: 'All metadata',
   keyword: 'Keyword',
@@ -94,7 +94,7 @@ var FIELD_LABELS = {
   prediction_status: 'Prediction Status',
   needs_review: 'Needs Review',
 };
-var OP_LABELS = {
+/** @type {Record<string, string>} */ var OP_LABELS = {
   'equals':       'is',
   'is':           'is',
   'is not':       'is not',
@@ -110,7 +110,7 @@ var OP_LABELS = {
   'recent_days':  'in the last',
 };
 
-function defaultValueForRule(field, op) {
+function defaultValueForRule(/** @type {string} */ field, /** @type {string | undefined} */ op) {
   if (field === 'all') return 1;
   if (field === 'color_label') return 'red';
   if (field === 'flag') return 'flagged';
@@ -132,7 +132,8 @@ function defaultValueForRule(field, op) {
   return '';
 }
 
-function normalizeCollectionRules(rawRules) {
+/** @returns {BrowseRuleGroup} */
+function normalizeCollectionRules(/** @type {string | BrowseRule | BrowseRule[] | null | undefined} */ rawRules) {
   var parsed = rawRules;
   if (typeof parsed === 'string') {
     try { parsed = JSON.parse(parsed); } catch (e) { parsed = []; }
@@ -140,14 +141,14 @@ function normalizeCollectionRules(rawRules) {
   if (Array.isArray(parsed)) return {mode: 'all', rules: parsed};
   if (parsed && typeof parsed === 'object' && Array.isArray(parsed.rules)) {
     return {
-      mode: (['all', 'any', 'none'].indexOf(parsed.mode) !== -1) ? parsed.mode : 'all',
+      mode: (['all', 'any', 'none'].indexOf(parsed.mode || '') !== -1) ? parsed.mode || 'all' : 'all',
       rules: parsed.rules,
     };
   }
   return {mode: 'all', rules: []};
 }
 
-function walkRuleTree(node, fn) {
+function walkRuleTree(/** @type {BrowseRule | BrowseRule[] | null | undefined} */ node, /** @type {(rule: BrowseRule) => void} */ fn) {
   if (!node) return;
   if (Array.isArray(node)) {
     node.forEach(function(child) { walkRuleTree(child, fn); });
@@ -174,19 +175,19 @@ async function loadCollectionEditorSources() {
   }
 }
 
-async function showCollectionModal(collection, returnFocus) {
+async function showCollectionModal(/** @type {BrowseCollection} */ collection, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
   // Cancel any pending/in-flight preview from a previous session before
   // resetting state — otherwise a stale response can land on the DOM and
   // briefly show the previous rule set's count in the freshly opened modal.
   resetPreviewState();
   collectionEditingId = collection && collection.id ? collection.id : null;
   collectionEditorRoot = normalizeCollectionRules(collection ? collection.rules : []);
-  document.getElementById('collectionModalTitle').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('collectionModalTitle')).textContent =
     collectionEditingId ? 'Edit Smart Collection' : 'New Smart Collection';
-  document.getElementById('collectionSaveBtn').textContent =
+  /** @type {HTMLButtonElement} */ (document.getElementById('collectionSaveBtn')).textContent =
     collectionEditingId ? 'Update' : 'Save';
-  document.getElementById('rulePreview').textContent = '';
-  document.getElementById('collectionName').value = collection ? (collection.name || '') : '';
+  /** @type {HTMLElement} */ (document.getElementById('rulePreview')).textContent = '';
+  /** @type {HTMLInputElement} */ (document.getElementById('collectionName')).value = collection ? (collection.name || '') : '';
   // Clear the rule-row DOM before awaiting the dropdown fetches. Without
   // this, a slow/failed fetch leaves the previous session's <select>s
   // visible and interactive while editor state is already reset, so
@@ -212,7 +213,7 @@ async function showCollectionModal(collection, returnFocus) {
   // keyword/contains/"" row tacked on when fetches resolve, silently
   // changing the saved collection's semantics.
   if (collectionEditorRoot.rules.length === 0 &&
-      document.getElementById('collectionModal').classList.contains('open')) {
+      /** @type {HTMLElement} */ (document.getElementById('collectionModal')).classList.contains('open')) {
     addRuleRow();
   } else {
     // Re-render so any rows added during the await (which were drawn with
@@ -227,30 +228,30 @@ function hideCollectionModal() {
   collectionDialog.close();
 }
 
-function getRuleContainer(path) {
+function getRuleContainer(/** @type {string} */ path) {
   if (!path) return collectionEditorRoot;
   var parts = path.split('.').filter(Boolean).map(function(p) { return parseInt(p, 10); });
-  var node = collectionEditorRoot;
-  parts.forEach(function(idx) { node = node.rules[idx]; });
+  /** @type {BrowseRule | undefined} */ var node = collectionEditorRoot;
+  parts.forEach(function(/** @type {number} */ idx) { node = node?.rules?.[idx]; });
   return node;
 }
 
-function getRuleParent(path) {
+function getRuleParent(/** @type {string} */ path) {
   var parts = path.split('.').filter(Boolean);
-  var idx = parseInt(parts.pop(), 10);
+  var idx = parseInt(parts.pop() || '', 10);
   var parent = parts.length ? getRuleContainer(parts.join('.')) : collectionEditorRoot;
   return {parent: parent, index: idx};
 }
 
-function addRuleRow(groupPath) {
-  var group = getRuleContainer(groupPath || '');
+function addRuleRow(/** @type {string | undefined} */ groupPath = undefined) {
+  var group = getRuleContainer(groupPath || ''); if (!group) return;
   if (!group.rules) group.rules = [];
   group.rules.push({field: 'keyword', op: 'contains', value: ''});
   renderRules();
 }
 
-function addRuleGroup(groupPath) {
-  var group = getRuleContainer(groupPath || '');
+function addRuleGroup(/** @type {string | undefined} */ groupPath = undefined) {
+  var group = getRuleContainer(groupPath || ''); if (!group) return;
   if (!group.rules) group.rules = [];
   group.rules.push({mode: 'all', rules: [
     {field: 'keyword', op: 'contains', value: ''}
@@ -258,13 +259,13 @@ function addRuleGroup(groupPath) {
   renderRules();
 }
 
-function removeRule(path) {
+function removeRule(/** @type {string} */ path) {
   var ref = getRuleParent(path);
-  ref.parent.rules.splice(ref.index, 1);
+  ref.parent?.rules?.splice(ref.index, 1);
   renderRules();
 }
 
-function updateRule(path, key, val) {
+function updateRule(/** @type {string} */ path, /** @type {'mode' | 'field' | 'op' | 'value' | 'value_from' | 'value_to'} */ key, /** @type {string} */ val) {
   var r = getRuleContainer(path);
   if (!r) return;
   if (key === 'mode') {
@@ -279,7 +280,7 @@ function updateRule(path, key, val) {
     var ops = FIELD_OPS[val] || [];
     // If current op isn't valid for the new field, default to the field's
     // first listed op. Otherwise keep the user's selection.
-    if (ops.indexOf(r.op) === -1) {
+    if (ops.indexOf(r.op || '') === -1) {
       r.op = ops[0] || '';
     }
     r.value = defaultValueForRule(val, r.op);
@@ -295,7 +296,7 @@ function updateRule(path, key, val) {
     // stale shape reaches the backend (a scalar under `between` hit
     // value[0] in _numeric_condition and 500'd).
     if (r.field === 'timestamp' || wasPair !== (val === 'between')) {
-      r.value = defaultValueForRule(r.field, val);
+      r.value = defaultValueForRule(r.field || '', val);
     }
     renderRules();
     return;
@@ -314,12 +315,12 @@ function updateRule(path, key, val) {
     schedulePreviewUpdate();
     return;
   }
-  r[key] = val;
+  if (key === 'value') r.value = val;
   schedulePreviewUpdate();
 }
 
 /* ---------- Live match-count preview ---------- */
-var _previewTimer = null;
+/** @type {number | null} */ var _previewTimer = null;
 var _previewSeq = 0;
 
 function schedulePreviewUpdate() {
@@ -340,7 +341,7 @@ function resetPreviewState() {
 
 async function updatePreviewNow() {
   _previewTimer = null;
-  var el = document.getElementById('rulePreview');
+  var el = /** @type {HTMLElement} */ (document.getElementById('rulePreview'));
   if (!el) return;
   var rules = serializeCollectionRules();
   var seq = ++_previewSeq;
@@ -361,9 +362,9 @@ async function updatePreviewNow() {
   }
 }
 
-function commitRuleOnEnter(e) {
+function commitRuleOnEnter(/** @type {KeyboardEvent} */ e) {
   if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
-  var t = e.currentTarget || e.target;
+  const t = e.currentTarget || e.target; if (!(t instanceof HTMLInputElement)) return;
   if (t && t.type === 'date') {
     // Native date pickers use Enter to commit the highlighted date;
     // cancelling it would close the picker without applying the selection.
@@ -375,14 +376,14 @@ function commitRuleOnEnter(e) {
   t.blur();
 }
 
-function renderRuleValueInput(r, i) {
+function renderRuleValueInput(/** @type {BrowseRule} */ r, /** @type {string} */ i) {
   var p = escapeAttr(i);
   if (r.field === 'all') {
     return '<span style="flex:1;color:var(--text-ghost);font-size:12px;">Matches every photo in this workspace</span>';
   }
   if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
        'location_keyword_missing', 'inat_submitted', 'is_duplicate',
-       'needs_review'].indexOf(r.field) !== -1) {
+       'needs_review'].indexOf(r.field || '') !== -1) {
     var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
     return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
         '<option value="1"' + (boolVal==='1'?' selected':'') + '>Yes</option>' +
@@ -422,7 +423,7 @@ function renderRuleValueInput(r, i) {
         (collectionExtensions.length === 0
           ? '<option value="">(no extensions yet — scan a folder)</option>'
           : '') +
-        (r.value && collectionExtensions.indexOf(r.value) === -1
+        (r.value && !collectionExtensions.some(function(ext) { return ext === r.value; })
           ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
           : '') +
         collectionExtensions.map(function(ext) {
@@ -436,7 +437,7 @@ function renderRuleValueInput(r, i) {
     // basenames collide across folders and a smart-collection author
     // can't disambiguate "January" between /2023/January and /2024.
     var paths = collectionFolders.map(function(f){ return f.path; });
-    var stickyFolder = (r.value && paths.indexOf(r.value) === -1)
+    var stickyFolder = (r.value && !paths.some(function(path) { return path === r.value; }))
       ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
       : '';
     return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
@@ -467,7 +468,7 @@ function renderRuleValueInput(r, i) {
         '</div>';
     }
   }
-  var numeric = NUMERIC_RULE_FIELDS.indexOf(r.field) !== -1;
+  var numeric = NUMERIC_RULE_FIELDS.indexOf(r.field || '') !== -1;
   if (numeric && r.op === 'between') {
     // Two inputs, matching the [low, high] pair the backend expects. A
     // single input here dropped the upper bound on save.
@@ -486,14 +487,14 @@ function renderRuleValueInput(r, i) {
     ' placeholder="value" style="flex:1;">';
 }
 
-function renderFieldOptions(selected) {
+function renderFieldOptions(/** @type {string | undefined} */ selected) {
   return Object.keys(FIELD_LABELS).map(function(field) {
     return '<option value="' + escapeAttr(field) + '"' + (selected === field ? ' selected' : '') + '>' +
-      escapeHtml(FIELD_LABELS[field]) + '</option>';
+      escapeHtml(FIELD_LABELS[field] || field) + '</option>';
   }).join('');
 }
 
-function renderRuleNode(node, path, depth) {
+function renderRuleNode(/** @type {BrowseRule} */ node, /** @type {string} */ path, /** @type {number} */ depth) {
   var p = escapeAttr(path);
   var indent = Math.min(depth, 4) * 12;
   if (node.rules && !node.field) {
@@ -510,7 +511,7 @@ function renderRuleNode(node, path, depth) {
       groupHtml += '<span class="remove-rule" onclick="removeRule(\'' + p + '\')">&times;</span>';
     }
     groupHtml += '</div>';
-    (node.rules || []).forEach(function(child, idx) {
+    (node.rules || []).forEach(function(child, /** @type {number} */ idx) {
       groupHtml += renderRuleNode(child, path ? path + '.' + idx : String(idx), depth + 1);
     });
     groupHtml += '<button onclick="addRuleRow(\'' + p + '\')" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;margin-right:4px;">+ Rule</button>' +
@@ -518,10 +519,10 @@ function renderRuleNode(node, path, depth) {
       '</div>';
     return groupHtml;
   }
-  var ops = FIELD_OPS[node.field] || [];
+  var ops = FIELD_OPS[node.field || ''] || [];
   // Preserve newer filter-bar expressions instead of presenting a text
   // input that flattens a value list on edit, or a misleading field/op.
-  if (!FIELD_OPS[node.field] || ops.indexOf(node.op) === -1) {
+  if (!FIELD_OPS[node.field || ''] || ops.indexOf(node.op || '') === -1) {
     var description = window.VireoFilter
       ? VireoFilter.describeRule(node) : node.field + ' ' + node.op;
     return '<div class="rule-row" style="margin-left:' + indent + 'px;">' +
@@ -545,23 +546,24 @@ function renderRuleNode(node, path, depth) {
 }
 
 function renderRules() {
-  document.getElementById('ruleRows').innerHTML = renderRuleNode(collectionEditorRoot, '', 0);
+  /** @type {HTMLElement} */ (document.getElementById('ruleRows')).innerHTML = renderRuleNode(collectionEditorRoot, '', 0);
   schedulePreviewUpdate();
 }
 
-function coerceRuleForSave(node) {
-  function num(v) {
-    var n = parseFloat(v);
+/** @returns {BrowseRule} */
+function coerceRuleForSave(/** @type {BrowseRule} */ node) {
+  function num(/** @type {BrowseRuleValue | undefined} */ v) {
+    var n = parseFloat(String(v));
     return isNaN(n) ? 0 : n;
   }
   if (node.rules && !node.field) {
     return {
-      mode: (['all', 'any', 'none'].indexOf(node.mode) !== -1) ? node.mode : 'all',
+      mode: (['all', 'any', 'none'].indexOf(node.mode || '') !== -1) ? node.mode : 'all',
       rules: (node.rules || []).map(coerceRuleForSave),
     };
   }
   var val = node.value;
-  if (NUMERIC_RULE_FIELDS.indexOf(node.field) !== -1) {
+  if (NUMERIC_RULE_FIELDS.indexOf(node.field || '') !== -1) {
     if (node.op === 'between') {
       var pair = Array.isArray(val) ? val : [val, val];
       val = [num(pair[0]), num(pair[1])];
@@ -570,16 +572,16 @@ function coerceRuleForSave(node) {
     }
   } else if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword',
               'location_keyword_missing', 'inat_submitted', 'is_duplicate',
-              'needs_review', 'all'].indexOf(node.field) !== -1) {
+              'needs_review', 'all'].indexOf(node.field || '') !== -1) {
     val = (val === true || val === 1 || val === '1' || val === 'true') ? 1 : 0;
   } else if (node.field === 'timestamp' && node.op === 'recent_days') {
-    val = parseInt(val, 10) || 0;
+    val = parseInt(String(val), 10) || 0;
   } else if (node.field === 'timestamp' && node.op === 'between') {
       var from = Array.isArray(val) ? (val[0] || '') : '';
       var to   = Array.isArray(val) ? (val[1] || '') : '';
       val = [from, to];
   }
-  var saved = {field: node.field, op: node.op, value: val};
+  /** @type {BrowseRule} */ var saved = {field: node.field, op: node.op, value: val};
   if (typeof node.value_label === 'string') saved.value_label = node.value_label;
   return saved;
 }
@@ -588,7 +590,7 @@ function serializeCollectionRules() {
   return coerceRuleForSave(collectionEditorRoot);
 }
 
-async function editCollection(cid, returnFocus) {
+async function editCollection(/** @type {number} */ cid, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
   var collection = collectionsById[cid];
   if (!collection) {
     var list = await safeFetch('/api/collections', {}, {toast: false});
@@ -599,7 +601,7 @@ async function editCollection(cid, returnFocus) {
 }
 
 async function saveCollection() {
-  var name = document.getElementById('collectionName').value.trim();
+  var name = /** @type {HTMLInputElement} */ (document.getElementById('collectionName')).value.trim();
   if (!name) return;
   var rules = serializeCollectionRules();
 
@@ -613,7 +615,7 @@ async function saveCollection() {
     // leaving visual_json in place would silently apply a hidden visual
     // prompt on reopen that the user just previewed without (Codex review
     // r3623087112). Clear it so the saved collection matches the preview.
-    var body = {name: name, rules: rules};
+    /** @type {{name: string, rules: BrowseRule, visual?: null}} */ var body = {name: name, rules: rules};
     if (editedId) body.visual = null;
     await safeFetch(url, {
       method: editedId ? 'PUT' : 'POST',
@@ -643,7 +645,7 @@ async function saveCollection() {
       // being detached and jerk focus back to the edited row.
       var restoredOpener = document.activeElement;
       var userMovedFocus = false;
-      var onFocusIn = function(e) {
+      var onFocusIn = function(/** @type {FocusEvent} */ e) {
         if (e.target !== restoredOpener) userMovedFocus = true;
       };
       document.addEventListener('focusin', onFocusIn, true);
@@ -666,8 +668,8 @@ async function saveCollection() {
         var orphaned = !active || active === document.body ||
             !(active instanceof HTMLElement) || !active.isConnected;
         if (!orphaned) return false;
-        var replacement = document.querySelector(
-          '#collectionList .tree-item[data-collection-id="' + editedId + '"]');
+        var replacement = /** @type {HTMLElement | null} */ (document.querySelector(
+          '#collectionList .tree-item[data-collection-id="' + editedId + '"]'));
         if (replacement && typeof replacement.focus === 'function') {
           replacement.focus({preventScroll: true});
           return true;
@@ -677,10 +679,10 @@ async function saveCollection() {
       if (tryRestoreCollectionRowFocus()) {
         removeFocusListener();
       } else {
-        var list = document.getElementById('collectionList');
+        var list = /** @type {HTMLElement} */ (document.getElementById('collectionList'));
         if (list && typeof MutationObserver === 'function') {
-          var observer;
-          var ticker;
+          /** @type {MutationObserver | undefined} */ var observer;
+          /** @type {number | undefined} */ var ticker;
           var tornDown = false;
           var teardown = function() {
             if (tornDown) return;

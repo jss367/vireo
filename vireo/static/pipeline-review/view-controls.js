@@ -1,9 +1,10 @@
 // Sidebar, sorting, searching, filters, and display preferences.
 // Classic page script; shared globals are initialized before boot.js runs.
 
+/** @param {boolean} collapsed @param {boolean} [persist] */
 function setPipelineSidebarCollapsed(collapsed, persist) {
-  var layout = document.getElementById('pipelineLayout');
-  var toggle = document.getElementById('pipelineSidebarToggle');
+  var layout = /** @type {HTMLElement} */ (document.getElementById('pipelineLayout'));
+  var toggle = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineSidebarToggle'));
   if (!layout || !toggle) return;
   layout.classList.toggle('sidebar-collapsed', !!collapsed);
   toggle.textContent = collapsed ? '\u203a' : '\u2039';
@@ -18,7 +19,7 @@ function setPipelineSidebarCollapsed(collapsed, persist) {
 }
 
 function togglePipelineSidebar() {
-  var layout = document.getElementById('pipelineLayout');
+  var layout = /** @type {HTMLElement} */ (document.getElementById('pipelineLayout'));
   setPipelineSidebarCollapsed(!(layout && layout.classList.contains('sidebar-collapsed')));
 }
 
@@ -31,7 +32,7 @@ function initPipelineSidebarState() {
 }
 
 function persistPipelineReviewViewState() {
-  var speciesInput = document.getElementById('speciesFilterInput');
+  var speciesInput = /** @type {HTMLInputElement} */ (document.getElementById('speciesFilterInput'));
   try {
     window.localStorage.setItem(PIPELINE_VIEW_STATE_STORAGE_KEY, JSON.stringify({
       activeFilter: activeFilter,
@@ -41,36 +42,36 @@ function persistPipelineReviewViewState() {
       hideWithoutSuggestions: !!hideWithoutSuggestions,
       encounterSort: encounterSort,
       showPhotoLabels: !!showPhotoLabels,
-      thumbSize: document.getElementById('thumbSizeSlider')
-        ? document.getElementById('thumbSizeSlider').value
+      thumbSize: /** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider'))
+        ? /** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider')).value
         : null,
     }));
   } catch (e) {}
 }
 
 function applyPipelineReviewToolbarState() {
-  document.querySelectorAll('.filter-btn[data-filter]').forEach(function(btn) {
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.filter-btn[data-filter]')).forEach(function(btn) {
     btn.classList.toggle('active', btn.getAttribute('data-filter') === activeFilter);
   });
 
-  var hideBtn = document.getElementById('hideConfirmedBtn');
+  var hideBtn = /** @type {HTMLButtonElement} */ (document.getElementById('hideConfirmedBtn'));
   if (hideBtn) hideBtn.classList.toggle('active', hideConfirmed);
 
-  var hideWithoutSuggestionsBtn = document.getElementById('hideWithoutSuggestionsBtn');
+  var hideWithoutSuggestionsBtn = /** @type {HTMLButtonElement} */ (document.getElementById('hideWithoutSuggestionsBtn'));
   if (hideWithoutSuggestionsBtn) {
     hideWithoutSuggestionsBtn.classList.toggle('active', hideWithoutSuggestions);
   }
 
-  var input = document.getElementById('speciesFilterInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('speciesFilterInput'));
   if (input) input.value = speciesFilterText || '';
-  var clearBtn = document.getElementById('speciesFilterClear');
+  var clearBtn = /** @type {HTMLButtonElement} */ (document.getElementById('speciesFilterClear'));
   if (clearBtn) clearBtn.style.display = speciesFilter ? 'block' : 'none';
   VireoTextSearch.renderOptions('speciesFilter', speciesFilterSearchOptions);
 
-  var sortSel = document.getElementById('encounterSortSelect');
+  var sortSel = /** @type {HTMLSelectElement} */ (document.getElementById('encounterSortSelect'));
   if (sortSel) sortSel.value = encounterSort;
 
-  var labelsChk = document.getElementById('showPhotoLabelsChk');
+  var labelsChk = /** @type {HTMLInputElement} */ (document.getElementById('showPhotoLabelsChk'));
   if (labelsChk) labelsChk.checked = !!showPhotoLabels;
 }
 
@@ -106,7 +107,7 @@ function restorePipelineReviewViewState() {
   var thumbSize = parseInt(state.thumbSize, 10);
   if (!isNaN(thumbSize)) {
     thumbSize = Math.max(100, Math.min(320, thumbSize));
-    var slider = document.getElementById('thumbSizeSlider');
+    var slider = /** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider'));
     if (slider) slider.value = String(thumbSize);
     updateThumbSize(thumbSize, false);
   }
@@ -114,6 +115,7 @@ function restorePipelineReviewViewState() {
   applyPipelineReviewToolbarState();
 }
 
+/** @param {string} val */
 function setEncounterSort(val) {
   if (PIPELINE_ENCOUNTER_SORTS.indexOf(val) === -1) return;
   encounterSort = val;
@@ -122,24 +124,24 @@ function setEncounterSort(val) {
 }
 
 // Returns the order in which encounters should be displayed, as a list of
-// ORIGINAL indices into pipelineResults.encounters. Never mutates the array,
+// ORIGINAL indices into currentReviewResults().encounters. Never mutates the array,
 // so every encounter's canonical index stays stable. Falls back to natural
 // (chronological) order for 'default'. Ties break on original index so the
 // result is deterministic regardless of Array.sort stability.
 function encounterSortOrder() {
-  var encs = (pipelineResults && pipelineResults.encounters) || [];
+  var encs = (pipelineResults && currentReviewResults().encounters) || [];
   var order = encs.map(function(_, i) { return i; });
   if (encounterSort === 'default') return order;
-  var tsByPhoto = null;
+  /** @type {Record<number,string> | null} */ var tsByPhoto = null;
   function photoTimestamps() {
     if (tsByPhoto) return tsByPhoto;
     tsByPhoto = {};
-    ((pipelineResults && pipelineResults.photos) || []).forEach(function(p) {
-      if (p && p.timestamp) tsByPhoto[p.id] = p.timestamp;
+    ((pipelineResults && currentReviewResults().photos) || []).forEach(function(p) {
+      if (p && p.timestamp) requireReviewValue(tsByPhoto)[p.id] = p.timestamp;
     });
     return tsByPhoto;
   }
-  function startTime(e) {
+  function startTime(/** @type {ReviewEncounter | undefined} */ e) {
     if (e && e.time_range && e.time_range[0]) return e.time_range[0];
     // No stored range (e.g. a freshly detached burst): fall back to the
     // earliest contained photo timestamp so time sorts place it
@@ -151,13 +153,13 @@ function encounterSortOrder() {
     });
     return best;
   }
-  function cmpStr(a, b) { return a < b ? -1 : (a > b ? 1 : 0); }
+  function cmpStr(/** @type {string} */ a, /** @type {string} */ b) { return a < b ? -1 : (a > b ? 1 : 0); }
   order.sort(function(ia, ib) {
     var a = encs[ia], b = encs[ib], d = 0;
     switch (encounterSort) {
-      case 'photos_desc': d = (b.photo_count || 0) - (a.photo_count || 0); break;
-      case 'photos_asc':  d = (a.photo_count || 0) - (b.photo_count || 0); break;
-      case 'bursts_desc': d = (b.burst_count || 0) - (a.burst_count || 0); break;
+      case 'photos_desc': d = (requireReviewValue(b).photo_count || 0) - (requireReviewValue(a).photo_count || 0); break;
+      case 'photos_asc':  d = (requireReviewValue(a).photo_count || 0) - (requireReviewValue(b).photo_count || 0); break;
+      case 'bursts_desc': d = (requireReviewValue(b).burst_count || 0) - (requireReviewValue(a).burst_count || 0); break;
       case 'time_desc':   d = cmpStr(startTime(b), startTime(a)); break;
       case 'time_asc':    d = cmpStr(startTime(a), startTime(b)); break;
     }
@@ -166,11 +168,13 @@ function encounterSortOrder() {
   return order;
 }
 
+/** @param {ReviewEncounter | null | undefined} enc */
 function encounterKey(enc) {
   if (!enc || !enc.photo_ids || !enc.photo_ids.length) return null;
   return enc.photo_ids.slice().sort(function(a, b) { return a - b; }).join(',');
 }
 
+/** @param {[string | null, string | null] | undefined} timeRange */
 function formatEncounterTimeRange(timeRange) {
   if (!timeRange || !timeRange[0]) return '';
 
@@ -178,16 +182,16 @@ function formatEncounterTimeRange(timeRange) {
     'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
   ];
-  function timestampParts(value) {
+  function timestampParts(/** @type {string | null | undefined} */ value) {
     var match = String(value || '').match(
       /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)/
     );
     if (!match) return null;
-    var monthIndex = parseInt(match[2], 10) - 1;
+    var monthIndex = Number(match[2]) - 1;
     if (monthIndex < 0 || monthIndex >= monthNames.length) return null;
     return {
       dayKey: match[1] + '-' + match[2] + '-' + match[3],
-      date: monthNames[monthIndex] + ' ' + parseInt(match[3], 10) + ', ' + match[1],
+      date: monthNames[monthIndex] + ' ' + Number(match[3]) + ', ' + match[1],
       time: match[4],
     };
   }
@@ -212,23 +216,26 @@ function formatEncounterTimeRange(timeRange) {
   return start.date + ' ' + start.time + ' – ' + end.date + ' ' + end.time;
 }
 
+/** @param {string} name */
 function speciesNameArg(name) {
   if (name == null) return "''";
   return "'" + escapeHtml(String(name).replace(/\\/g, '\\\\').replace(/'/g, "\\'")) + "'";
 }
 
-var _speciesFilterRenderTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var _speciesFilterRenderTimer = null;
 
+/** @param {string} val */
 function setSpeciesFilter(val) {
   speciesFilterText = val;
   speciesFilter = val;
-  var clearBtn = document.getElementById('speciesFilterClear');
+  var clearBtn = /** @type {HTMLButtonElement} */ (document.getElementById('speciesFilterClear'));
   if (clearBtn) clearBtn.style.display = val ? 'block' : 'none';
   persistPipelineReviewViewState();
-  clearTimeout(_speciesFilterRenderTimer);
+  clearTimeout(_speciesFilterRenderTimer || undefined);
   _speciesFilterRenderTimer = setTimeout(renderResults, 120);
 }
 
+/** @param {'matchCase' | 'wholeWord'} option */
 function toggleSpeciesFilterSearchOption(option) {
   VireoTextSearch.toggle('speciesFilter', option, function(options) {
     speciesFilterSearchOptions = options;
@@ -240,14 +247,15 @@ function toggleSpeciesFilterSearchOption(option) {
 function clearSpeciesFilter() {
   speciesFilter = '';
   speciesFilterText = '';
-  var input = document.getElementById('speciesFilterInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('speciesFilterInput'));
   if (input) input.value = '';
-  var clearBtn = document.getElementById('speciesFilterClear');
+  var clearBtn = /** @type {HTMLButtonElement} */ (document.getElementById('speciesFilterClear'));
   if (clearBtn) clearBtn.style.display = 'none';
   persistPipelineReviewViewState();
   renderResults();
 }
 
+/** @param {ReviewEncounter} enc @param {Record<number,ReviewPhoto>} [photoMap] @param {(photoId: number) => boolean} [inScope] */
 function encounterMatchesSearch(enc, photoMap, inScope) {
   if (!speciesFilter) return true;
   if (typeof inScope !== 'function') inScope = function() { return true; };
@@ -263,10 +271,10 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
   // hidden burst's species or filename surfaces the encounter and shows only
   // the unrelated visible burst's content.
   var bursts = enc.bursts || [];
-  function burstInScope(burst) {
-    return (burst && burst.photo_ids || burst || []).some(inScope);
+  function burstInScope(/** @type {ReviewBurst} */ burst) {
+    return (burst && burst.photo_ids || burst || []).some(inScope || (() => true));
   }
-  function burstVisible(burst) {
+  function burstVisible(/** @type {ReviewBurst} */ burst) {
     if (hideConfirmed && isBurstConfirmed(enc, burst)) return false;
     if (!burstInScope(burst)) return false;
     return true;
@@ -341,18 +349,18 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
     && visibleBursts.every(function(burst) {
       return burst && Array.isArray(burst.species_predictions);
     });
-  var visibleBurstSpecies = null;
+  /** @type {Set<string> | null} */ var visibleBurstSpecies = null;
   if (anyBurstHidden && visibleBurstsAllCarryPredictions) {
     visibleBurstSpecies = new Set();
     visibleBursts.forEach(function(burst) {
       if (burst && burst.species_override && burst.species_override.confirmed === true
           && burst.species_override.species) {
-        visibleBurstSpecies.add(burst.species_override.species);
+        requireReviewValue(visibleBurstSpecies).add(burst.species_override.species);
       }
       (burst && burst.species_predictions || []).forEach(function(sp) {
         if (!sp || !sp.species) return;
         if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
-          visibleBurstSpecies.add(sp.species);
+          requireReviewValue(visibleBurstSpecies).add(sp.species);
         }
       });
     });
@@ -387,7 +395,7 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
   // photos in bursts that will render, and then to in-scope photos within
   // those bursts — otherwise matching the filename of a hidden photo would
   // surface the encounter and show unrelated visible cards.
-  var filenamePids;
+  /** @type {number[]} */ var filenamePids;
   if (bursts.length > 0) {
     filenamePids = [];
     visibleBursts.forEach(function(burst) {
@@ -415,30 +423,32 @@ function encounterMatchesSearch(enc, photoMap, inScope) {
   });
 }
 
+/** @param {ReviewPhoto} photo */
 function hasQualityScore(photo) {
   return photo && photo.quality_composite != null && isFinite(Number(photo.quality_composite));
 }
 
 function hasQualityResults() {
-  if (!pipelineResults || pipelineResults.review_mode === 'species') return false;
-  return (pipelineResults.photos || []).some(hasQualityScore);
+  if (!pipelineResults || currentReviewResults().review_mode === 'species') return false;
+  return (currentReviewResults().photos || []).some(hasQualityScore);
 }
 
 function updatePipelineReviewSidebarVisibility() {
-  var ss = document.getElementById('sidebarScoring');
+  var ss = /** @type {HTMLElement} */ (document.getElementById('sidebarScoring'));
   if (ss) ss.style.display = hasQualityResults() ? '' : 'none';
-  var sg = document.getElementById('sidebarGrouping');
+  var sg = /** @type {HTMLElement} */ (document.getElementById('sidebarGrouping'));
   // Species-only review has no burst/quality/keep/reject output, and
   // /api/pipeline/regroup-live always runs the full pipeline — nudging a
   // grouping slider here would clobber the all-REVIEW cache with quality
   // triage results, reintroducing the culling pipeline that identify mode
   // is meant to skip. Hide the grouping sidebar in that mode; users who
   // want to change grouping can switch to advanced mode and rerun.
-  if (sg) sg.style.display = (pipelineResults && pipelineResults.review_mode === 'species') ? 'none' : '';
+  if (sg) sg.style.display = (pipelineResults && currentReviewResults().review_mode === 'species') ? 'none' : '';
 }
 
+/** @param {number} idx */
 function toggleEncounter(idx) {
-  var body = document.getElementById('encBody' + idx);
+  var body = /** @type {HTMLElement} */ (document.getElementById('encBody' + idx));
   if (!body) return;
   // Collapsing changes the retained node directly. A later results reload
   // resets collapse state, so it must not reuse the pre-toggle markup.
@@ -446,9 +456,9 @@ function toggleEncounter(idx) {
   if (rendered) rendered.html = null;
   var collapsed = body.style.display !== 'none';
   body.style.display = collapsed ? 'none' : '';
-  var chev = document.getElementById('encChev' + idx);
+  var chev = /** @type {HTMLElement} */ (document.getElementById('encChev' + idx));
   if (chev) chev.classList.toggle('collapsed', collapsed);
-  var enc = pipelineResults && pipelineResults.encounters && pipelineResults.encounters[idx];
+  var enc = pipelineResults && currentReviewResults().encounters && currentReviewResults().encounters[idx];
   var key = encounterKey(enc);
   if (key != null) {
     if (collapsed) collapsedEncounters.add(key);
@@ -456,6 +466,7 @@ function toggleEncounter(idx) {
   }
 }
 
+/** @param {string} f */
 function setFilter(f) {
   activeFilter = f;
   applyPipelineReviewToolbarState();
@@ -463,6 +474,7 @@ function setFilter(f) {
   renderResults();
 }
 
+/** @param {ReviewEncounter} enc @param {ReviewBurst} burst */
 function isBurstConfirmed(enc, burst) {
   var ovr = burst && burst.species_override;
   if (ovr) return !!ovr.confirmed;
@@ -474,6 +486,7 @@ function isBurstConfirmed(enc, burst) {
 // When on, photos belonging to confirmed bursts (or a confirmed no-burst
 // encounter) are excluded so encounter-level actions only touch what's on
 // screen.
+/** @param {ReviewEncounter} enc */
 function visibleEncounterPhotoIds(enc) {
   var ids = ((enc && enc.photo_ids) || []).filter(photoInReviewScope);
   if (!hideConfirmed) return ids.slice();
@@ -503,6 +516,7 @@ function toggleHideWithoutSuggestions() {
   renderResults();
 }
 
+/** @param {boolean} show */
 function togglePhotoLabels(show) {
   showPhotoLabels = !!show;
   applyPipelineReviewToolbarState();
@@ -510,18 +524,20 @@ function togglePhotoLabels(show) {
   renderResults();
 }
 
-var _confTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var _confTimer = null;
 
+/** @param {string | number} val @param {boolean} [persist] */
 function updateThumbSize(val, persist) {
-  document.getElementById('encountersContainer').style.setProperty('--photo-card-size', val + 'px');
+  /** @type {HTMLElement} */ (document.getElementById('encountersContainer')).style.setProperty('--photo-card-size', val + 'px');
   if (persist !== false) persistPipelineReviewViewState();
 }
 
+/** @param {string} val */
 function setMinConfidence(val) {
   minConfidence = parseInt(val, 10);
-  document.getElementById('confSliderVal').textContent = minConfidence + '%';
+  /** @type {HTMLElement} */ (document.getElementById('confSliderVal')).textContent = minConfidence + '%';
   if (speciesFilter) renderResults();
-  clearTimeout(_confTimer);
+  clearTimeout(_confTimer || undefined);
   _confTimer = setTimeout(function() {
     fetch('/api/workspaces/active/config')
       .then(function(r) { return r.json(); })

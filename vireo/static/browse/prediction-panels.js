@@ -19,15 +19,15 @@
 // has since been removed would keep being routed to Review forever, naming a
 // conflict that no longer exists. That is the same staleness the effective
 // check exists to kill, pointing the other way.
-function predictionIsAmbiguous(p) {
+function predictionIsAmbiguous(/** @type {BrowsePrediction} */ p) {
   var eff = p.effective_category;
   if (p.alternatives && p.alternatives.length) return true;
   if (eff) return eff === 'conflict' || eff === 'refinement' || eff === 'broader';
   return p.category === 'disagreement' || p.category === 'refinement';
 }
 
-function predictionAmbiguityReason(p) {
-  var reasons = [];
+function predictionAmbiguityReason(/** @type {BrowsePrediction | undefined} */ p) {
+  if (!p) return ''; var reasons = [];
   var altCount = (p.alternatives || []).length;
   if (altCount) {
     reasons.push(altCount + (altCount === 1 ? ' alternative' : ' alternatives'));
@@ -77,7 +77,7 @@ function predictionAmbiguityReason(p) {
 // "every species below is not a match" would be asserting a verdict for a
 // model nobody judged. The per-row warning still fires and names the model
 // that actually failed.
-function buildMatchBanner(matchState) {
+function buildMatchBanner(/** @type {BrowseMatchState | null} */ matchState) {
   if (!matchState || matchState.state !== 'unlisted') return '';
   var lines = (matchState.assessments || [])
     .filter(function(a) { return a && a.state === 'unlisted' && a.explanation; })
@@ -103,8 +103,8 @@ function buildMatchBanner(matchState) {
 // `unlisted` runs are indexed: `uncalibrated` and `unavailable` mean no
 // verdict was reached, and a row must never be marked failing on the strength
 // of a measurement nobody judged.
-function buildUnlistedRunIndex(matchState) {
-  var index = {};
+function buildUnlistedRunIndex(/** @type {BrowseMatchState | null} */ matchState) {
+  var index = /** @type {Record<string, BrowseMatchRun>} */ ({});
   ((matchState && matchState.unlisted_runs) || []).forEach(function(run) {
     if (!run || run.state !== 'unlisted' || run.detection_id == null) return;
     index[run.detection_id + '|' + (run.classifier_model || '')] = run;
@@ -117,7 +117,7 @@ function buildUnlistedRunIndex(matchState) {
 // account for, because the alternative — a bare "no good match" over a row
 // pooling five detections of which one failed — would replace one misleading
 // number with another.
-function unlistedGroupReason(group) {
+function unlistedGroupReason(/** @type {BrowsePredictionGroup} */ group) {
   var models = group.unlisted.map(function(run) {
     return run.classifier_model || run.model || 'this model';
   });
@@ -140,7 +140,7 @@ function unlistedGroupReason(group) {
     'available label, not a match.';
 }
 
-function predictionEmptyMessage(state, hiddenCount) {
+function predictionEmptyMessage(/** @type {BrowsePredictionPhotoState | null} */ state, /** @type {number} */ hiddenCount) {
   if (!state) return 'No predictions for this photo.';
   if (!state.detector_ran) return 'Not yet classified — no detector has run on this photo.';
   if (state.classifier_ran) {
@@ -160,7 +160,7 @@ function predictionEmptyMessage(state, hiddenCount) {
   return 'Not yet classified — detections found, but no classifier has run yet.';
 }
 
-function formatPredictionConfidence(conf) {
+function formatPredictionConfidence(/** @type {number | null | undefined} */ conf) {
   if (conf == null) return 'confidence unknown';
   return Math.round(conf * 100) + '%';
 }
@@ -179,14 +179,14 @@ function formatPredictionConfidence(conf) {
 // top-level rows anyway — /api/predictions nests them under their parent.
 var PREDICTION_DECIDED_STATUSES = ['accepted', 'rejected', 'reviewed'];
 
-function predictionIsDecided(p) {
+function predictionIsDecided(/** @type {BrowsePrediction} */ p) {
   return PREDICTION_DECIDED_STATUSES.indexOf(p && p.status) >= 0;
 }
 
 // Why a decided row carries no buttons. `reviewed` in particular is not
 // self-explanatory in Browse — it is written from ID Conflicts — so the tag
 // says what it means rather than leaving a bare word where two buttons were.
-function predictionStatusExplanation(status) {
+function predictionStatusExplanation(/** @type {string} */ status) {
   // "was confirmed", not "the keyword was added": accepting a prediction for
   // a photo that already carries the species writes no tag at all
   // (``accept_prediction`` returns ``changed_tag=false`` for it), and this
@@ -209,7 +209,7 @@ function predictionStatusExplanation(status) {
 // keywords table keeps as distinct species — the resulting Accept submits
 // both ids and /api/predictions/batch-accept rejects the batch because they
 // resolve to different keyword rows, leaving the row unactionable.
-function asciiCaseFoldKey(name) {
+function asciiCaseFoldKey(/** @type {string} */ name) {
   var s = String(name == null ? '' : name);
   var out = '';
   for (var i = 0; i < s.length; i++) {
@@ -220,8 +220,8 @@ function asciiCaseFoldKey(name) {
   return out;
 }
 
-async function loadDetailPredictions(photoId) {
-  return Vireo.browse.panelLoaders.detailPredictions.load(photoId);
+async function loadDetailPredictions(/** @type {number} */ photoId) {
+  return /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelLoaders.detailPredictions.load(photoId);
 }
 
 function toggleDetailPredictions() {
@@ -236,9 +236,9 @@ function toggleDetailPredictions() {
 // index into `detailPredictionGroups` and a photo id. See the comment on
 // `detailPredictionGroups` for what interpolating a species name into an
 // inline handler attribute did to Say's Phoebe.
-function handleDetailPredictionClick(ev) {
-  var btn = ev.target && ev.target.closest
-    ? ev.target.closest('[data-prediction-action]') : null;
+function handleDetailPredictionClick(/** @type {MouseEvent} */ ev) {
+  var btn = ev.target instanceof Element
+    ? /** @type {HTMLElement | null} */ (ev.target.closest('[data-prediction-action]')) : null;
   if (!btn) return;
   var action = btn.getAttribute('data-prediction-action');
   if (action === 'toggle') { toggleDetailPredictions(); return; }
@@ -252,7 +252,7 @@ function handleDetailPredictionClick(ev) {
   var group = detailPredictionGroups[
     Number(btn.getAttribute('data-prediction-group'))
   ];
-  if (!group) return;
+  if (!group || detailPredictionGroupsPhotoId == null) return;
   if (action === 'accept') {
     acceptDetailPredictions(
       group.ids, detailPredictionGroupsPhotoId, group.species,
@@ -264,8 +264,8 @@ function handleDetailPredictionClick(ev) {
 
 var detailPredictionsClickBound = false;
 
-function renderDetailPredictions(data, photoId) {
-  var list = document.getElementById('detailPredictions');
+function renderDetailPredictions(/** @type {DetailPredictionsResponse} */ data, /** @type {number} */ photoId) {
+  var list = /** @type {HTMLElement} */ (document.getElementById('detailPredictions'));
   if (!list) return;
   // The container is static in the template and only its children are
   // replaced, so one delegated listener outlives every repaint.
@@ -279,12 +279,12 @@ function renderDetailPredictions(data, photoId) {
   detailPredictionGroups = [];
   detailPredictionGroupsPhotoId = photoId;
   _detailPredictionData = { data: data, photoId: photoId };
-  var state = (data.photo_states || {})[String(photoId)] || null;
+  var payload = /** @type {BrowseDetailPredictionPayload} */ (data); var state = (payload.photo_states || {})[String(photoId)] || null;
   // Whether anything in the label list actually matched. This qualifies every
   // row below: a confidence is a rank within the list, so on its own it cannot
   // distinguish the right bird from the closest of a list that never contained
   // it. Rendered first, because reading the rows without it is the mistake.
-  var matchState = (data.match_states || {})[String(photoId)] || null;
+  var matchState = (payload.match_states || {})[String(photoId)] || null;
   var matchBanner = buildMatchBanner(matchState);
   // Per-row failures, for the rows the banner does not speak for. When the
   // banner rendered, every judged run on the photo failed and it has already
@@ -292,9 +292,9 @@ function renderDetailPredictions(data, photoId) {
   // not, some run still may have failed — a second model, or a second
   // detection holding a different animal — and those rows are exactly the
   // ones that would otherwise show a 99% with no warning at all.
-  var unlistedRuns = matchBanner ? {} : buildUnlistedRunIndex(matchState);
+  var unlistedRuns = matchBanner ? /** @type {Record<string, BrowseMatchRun>} */ ({}) : buildUnlistedRunIndex(matchState);
   var threshold = state && state.threshold ? state.threshold : 0;
-  var rows = (data.predictions || []).filter(function(p) {
+  var rows = (payload.predictions || []).filter(function(p) {
     return p.photo_id === photoId;
   });
   // Below-threshold rows are summarised rather than dropped: the user set the
@@ -323,8 +323,8 @@ function renderDetailPredictions(data, photoId) {
   // frames disagree it's the individual-vote consensus. Grouping by the raw
   // per-frame `p.species` here would let a minority Sparrow frame surface
   // its own row with an Accept button that tags Robin.
-  var groups = [];
-  var groupByKey = {};
+  var groups = /** @type {BrowsePredictionGroup[]} */ ([]);
+  var groupByKey = /** @type {Record<string, BrowsePredictionGroup>} */ ({});
   visible.forEach(function(p) {
     // ``reviewed`` is a decision too — the user explicitly said "looked and
     // chose not to act" in Review. Grouping it as pending here would render
@@ -354,7 +354,7 @@ function renderDetailPredictions(data, photoId) {
     if (p.detection_id != null) g.detections[p.detection_id] = true;
     var failedRun = unlistedRuns[p.detection_id + '|' + (p.model || '')];
     if (failedRun) {
-      g.unlistedDetections[p.detection_id] = true;
+      g.unlistedDetections[String(p.detection_id)] = true;
       if (g.unlisted.indexOf(failedRun) === -1) g.unlisted.push(failedRun);
     }
     // Credit ``p.confidence`` to the bucket only when the row's own raw
@@ -452,7 +452,7 @@ function renderDetailPredictions(data, photoId) {
         '<div class="prediction-species">' + escapeHtml(g.species) + '</div>' +
         '<div class="prediction-meta">' + escapeHtml(meta) + '</div>' +
         (ambiguous ? '<div class="prediction-why">' +
-          escapeHtml(predictionAmbiguityReason(g.ambiguous[0])) + '</div>' : '') +
+          escapeHtml(predictionAmbiguityReason(g.ambiguous[0] || g.ambiguous.find(Boolean))) + '</div>' : '') +
         (g.unlisted.length ? '<div class="prediction-why">' +
           escapeHtml(unlistedGroupReason(g)) + '</div>' : '') +
       '</div>' +
@@ -462,7 +462,7 @@ function renderDetailPredictions(data, photoId) {
   // Name what is collapsed and how weak it is, so the shortened list can never
   // be mistaken for the whole answer.
   if (collapsed > 0) {
-    var weakest = groups[shown.length].confidence;
+    var weakest = groups[shown.length]?.confidence;
     // "N weaker species (X% and below)" is only truthful when the first
     // collapsed bucket carries evidence of its own species. Legacy burst
     // groups whose only rows are minority-frame borrowers land here with
@@ -485,7 +485,7 @@ function renderDetailPredictions(data, photoId) {
   list.innerHTML = matchBanner + html;
 }
 
-function openPredictionInReview(photoId) {
+function openPredictionInReview(/** @type {number} */ photoId) {
   // Hand off an EXPLICIT empty filter expression, not just ?photo_id=.
   // VireoFilter.init() falls through to restorePersisted() whenever the URL
   // carries no `filters` param, so a filter the user left active on Review
@@ -525,12 +525,12 @@ function openPredictionInReview(photoId) {
 // `opts.skipDetail` is for callers about to run a full `loadDetail`, which
 // re-fetches the photo AND its predictions: without it one accept would issue
 // two identical prediction requests.
-function refreshPredictionPanels(opts) {
+function refreshPredictionPanels(/** @type {BrowsePredictionRefreshOptions} */ opts = {}) {
   opts = opts || {};
   // Drop the cache key first: `loadSelectionPredictions` early-returns when
   // the key matches, and the selection itself has not changed here — only the
   // state its rows are computed from.
-  Vireo.browse.panelRequests.predictions.invalidate();
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.predictions.invalidate();
   var selection = getActiveSelection();
   if (selection.length > 1) loadSelectionPredictions(selection);
   // Only one of the two panels is on screen at a time: a multi-selection
@@ -567,9 +567,9 @@ function refreshBrowseSidebarPanels() {
   // unchanged selection key — which is exactly this case, since the selection
   // did not move, only the state behind it.
   if (selection.length > 1) {
-    Vireo.browse.panelRequests.keywords.invalidate();
+    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
     loadSelectionKeywordSuggestions(selection);
-  } else if (reloadingDetail) {
+  } else if (reloadingDetail && window._detailPhotoId != null) {
     loadDetail(window._detailPhotoId);
   }
 }
@@ -636,14 +636,14 @@ window.afterHistoryChange = async function() {
 // Accepting writes a keyword, so every surface that counts keywords has to be
 // told — the same fan-out applySelectionKeyword performs. refreshPendingSyncBanner
 // matters especially: an accept queues a pending XMP change.
-async function _afterPredictionMutation(photoIds, opts) {
+async function _afterPredictionMutation(/** @type {number[]} */ photoIds, /** @type {BrowsePredictionMutationOptions | undefined} */ opts) {
   opts = opts || {};
   var reloadingDetail = !!(
     opts.reloadDetail
     && opts.photoId != null
     && window._detailPhotoId === opts.photoId
   );
-  Vireo.browse.panelRequests.keywords.invalidate();
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
   // Refreshes the grid's keyword state AND, through it, both prediction
   // panels: the accept changed the photos' species keywords, so the surviving
   // rows' ambiguity and keyworded counts have both moved. `skipDetail` keeps
@@ -652,7 +652,7 @@ async function _afterPredictionMutation(photoIds, opts) {
   await _refreshBrowseKeywordState(photoIds, { skipDetail: reloadingDetail });
   var selection = getActiveSelection();
   if (selection.length > 1) loadSelectionKeywordSuggestions(selection);
-  if (reloadingDetail) loadDetail(opts.photoId);
+  if (reloadingDetail && opts.photoId != null) loadDetail(opts.photoId);
   loadKeywords();
   scheduleCollectionCountsRefresh();
   refreshActiveCollectionAfterMembershipChange([MUTATION_KEYWORD, MUTATION_PREDICTION]);
@@ -671,7 +671,7 @@ async function _afterPredictionMutation(photoIds, opts) {
 // The refreshed panel shows the survivors, but the gap between "Accept on 35"
 // and 33 accepts has to be named, not left for the user to notice — the same
 // rule that made the button disclose its count in the first place.
-function _reportSkippedAccepts(data) {
+function _reportSkippedAccepts(/** @type {BrowsePredictionMutation | null} */ data) {
   if (!data) return;
   var parts = [];
   if (data.already_decided) {
@@ -711,7 +711,7 @@ function _reportSkippedAccepts(data) {
     parts.join(', '), 'warning');
 }
 
-async function acceptDetailPredictions(predictionIds, photoId, expectedSpecies) {
+async function acceptDetailPredictions(/** @type {number[]} */ predictionIds, /** @type {number} */ photoId, /** @type {string | undefined} */ expectedSpecies) {
   if (!predictionIds || !predictionIds.length) return;
   var data;
   try {
@@ -737,7 +737,7 @@ async function acceptDetailPredictions(predictionIds, photoId, expectedSpecies) 
 // The reject side of _reportSkippedAccepts. batch-reject skips the same
 // already-decided and superseded rows, and a stale panel's Reject dropping
 // rows without saying so is the same silent gap on the other button.
-function _reportSkippedRejects(data) {
+function _reportSkippedRejects(/** @type {BrowsePredictionMutation | null} */ data) {
   if (!data) return;
   var parts = [];
   if (data.already_decided) {
@@ -762,7 +762,7 @@ function _reportSkippedRejects(data) {
     'Nothing rejected: ') + parts.join(', '), 'warning');
 }
 
-async function rejectDetailPredictions(predictionIds, photoId) {
+async function rejectDetailPredictions(/** @type {number[]} */ predictionIds, /** @type {number} */ photoId) {
   if (!predictionIds || !predictionIds.length) return;
   var data;
   try {
@@ -800,7 +800,7 @@ async function rejectDetailPredictions(predictionIds, photoId) {
    Skipped when the card field is off (nothing displays the number) and when
    the active sort ranks on confidence (the caller reloads the whole grid,
    which replaces these cards outright). */
-async function refreshPredictionConfidenceBadges(photoIds) {
+async function refreshPredictionConfidenceBadges(/** @type {number[]} */ photoIds) {
   if (cardFields.indexOf('prediction_confidence') === -1) return;
   if (sortSelectRanksOnPredictionConfidence()) return;
   var ids = Array.from(new Set(photoIds || [])).filter(function(id) {
@@ -813,8 +813,8 @@ async function refreshPredictionConfidenceBadges(photoIds) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: ids}),
     }, {toast: false});
-    var touched = [];
-    (data.photos || []).forEach(function(updated) {
+    var touched = /** @type {number[]} */ ([]);
+    (data.photos || []).forEach(function(/** @type {BrowsePhoto} */ updated) {
       var local = findBrowsePhoto(updated.id);
       if (!local || local.prediction_confidence_is_stack_lead) return;
       local.prediction_confidence = updated.prediction_confidence === undefined
@@ -828,23 +828,23 @@ async function refreshPredictionConfidenceBadges(photoIds) {
   }
 }
 
-async function loadSelectionPredictions(ids) {
-  return Vireo.browse.panelLoaders.predictions.load(ids);
+async function loadSelectionPredictions(/** @type {number[]} */ ids) {
+  return /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelLoaders.predictions.load(ids);
 }
 
 function toggleSelectionPredictions() {
-  var data = Vireo.browse.selectionPanel.predictions.toggle();
+  var data = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.toggle();
   if (data) {
     renderSelectionPredictions(data.predictions, data.selectedCount, data.meta);
   }
 }
 
-function renderSelectionPredictions(predictions, selectedCount, meta) {
-  var list = document.getElementById('selectionPredictions');
+function renderSelectionPredictions(/** @type {SelectionPredictionSuggestion[]} */ predictions, /** @type {number} */ selectedCount, /** @type {SelectionPredictionMeta} */ meta) {
+  var list = /** @type {HTMLElement} */ (document.getElementById('selectionPredictions'));
   if (!list) return;
   meta = meta || {};
-  Vireo.browse.selectionPanel.predictions.reset();
-  Vireo.browse.selectionPanel.predictions.remember(predictions, selectedCount, meta);
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.reset();
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.remember(predictions, selectedCount, meta);
   // The floor is the user's own setting, so hidden rows get counted out loud
   // rather than vanishing into an empty-looking panel.
   var hidden = meta.below_threshold_count || 0;
@@ -868,14 +868,14 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
 
   // Sorted strongest-first by the endpoint, so the collapse keeps the species
   // most worth acting on and names the rest.
-  var shown = Vireo.browse.selectionPanel.predictions.isExpanded()
+  var shown = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.isExpanded()
     ? predictions
     : predictions.slice(0, PREDICTION_COLLAPSE_AT);
-  Vireo.browse.selectionPanel.predictions.replaceRows(shown);
+  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.replaceRows(shown);
   var collapsed = predictions.length - shown.length;
 
   var html = '';
-  shown.forEach(function(p, idx) {
+  shown.forEach(function(p, /** @type {number} */ idx) {
     var acceptable = p.acceptable_prediction_ids || [];
     var ambiguous = p.ambiguous_prediction_ids || [];
     var ambiguousPhotos = p.ambiguous_photo_ids || [];
@@ -979,7 +979,7 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
   if (collapsed > 0) {
     html += '<button class="prediction-toggle" data-selection-action="prediction-toggle">Show ' +
       collapsed + ' more predicted species</button>';
-  } else if (Vireo.browse.selectionPanel.predictions.isExpanded() && predictions.length > PREDICTION_COLLAPSE_AT) {
+  } else if (/** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.isExpanded() && predictions.length > PREDICTION_COLLAPSE_AT) {
     html += '<button class="prediction-toggle" data-selection-action="prediction-toggle">Show fewer</button>';
   }
   list.innerHTML = html + hiddenNote;
@@ -988,19 +988,19 @@ function renderSelectionPredictions(predictions, selectedCount, meta) {
 // "Show N photos" — open just the photos a prediction row counts, so the
 // user can judge the detection before accepting anything. Deliberately
 // read-only: nothing here changes the selection, the grid, or any keyword.
-async function showSelectionPredictionPhotos(idx, button) {
-  var row = Vireo.browse.selectionPanel.predictions.getRow(idx);
+async function showSelectionPredictionPhotos(/** @type {number} */ idx, /** @type {HTMLButtonElement | undefined} */ button = undefined) {
+  var row = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.getRow(idx);
   var ids = row ? row.photoIds : [];
   if (!ids.length) return;
   // Both the selection and the latest Show click must still own this result.
-  var panelIsCurrent = Vireo.browse.panelRequests.predictions.observe();
-  var request = Vireo.browse.panelRequests.predictionPhotos.begin();
+  var panelIsCurrent = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.predictions.observe();
+  const request = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.predictionPhotos.begin(); if (!request) return;
   var label = button ? button.textContent : '';
   if (button) {
     button.disabled = true;
     button.textContent = 'Loading…';
   }
-  var fetched = [];
+  var fetched = /** @type {BrowsePhoto[]} */ ([]);
   try {
     // /api/photos/by-ids caps each POST at 500 ids, and a selection can
     // carry up to 1,000 photos, so chunk rather than silently truncating.
@@ -1033,11 +1033,11 @@ async function showSelectionPredictionPhotos(idx, button) {
     showToast('Showing ' + fetched.length + ' of ' + ids.length +
       ' photos — the rest are no longer in this workspace.', 'warning');
   }
-  openLightbox(fetched[0].id, fetched[0].filename || '', fetched);
+  var first = fetched[0]; if (first) openLightbox(first.id, first.filename || '', fetched);
 }
 
-async function acceptSelectionPrediction(idx, onAll, button) {
-  var row = Vireo.browse.selectionPanel.predictions.getRow(idx);
+async function acceptSelectionPrediction(/** @type {number} */ idx, /** @type {boolean} */ onAll = false, /** @type {HTMLButtonElement | undefined} */ button = undefined) {
+  var row = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.getRow(idx);
   if (!row) return;
   var ids = row.acceptableIds;
   if (!onAll && !ids.length) return;

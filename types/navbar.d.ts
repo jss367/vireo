@@ -2,9 +2,9 @@
 // shared navbar loads before any page script. Declared here for the strict
 // `checkJs` files that call them; the implementations stay classic scripts.
 
-interface SafeEventSourceCallbacks {
-  onProgress?: (data: any) => void;
-  onComplete?: (data: any) => void;
+interface SafeEventSourceCallbacks<Progress = unknown, Complete = unknown> {
+  onProgress?: (data: Progress) => void;
+  onComplete?: (data: Complete) => void;
   onError?: () => void;
   // Suppress the generic "Connection lost" toast because onError shows a
   // more specific one.
@@ -12,4 +12,4 @@ interface SafeEventSourceCallbacks {
 }
 
 declare function showToast(msg: string, type?: string): void;
-declare function safeEventSource(url: string, callbacks?: SafeEventSourceCallbacks): EventSource;
+declare function safeEventSource<Progress = unknown, Complete = unknown>(url: string, callbacks?: SafeEventSourceCallbacks<Progress, Complete>): EventSource;

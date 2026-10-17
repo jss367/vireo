@@ -2,12 +2,12 @@
 // clause, adding them to request bodies, and the filter-change handler.
 // Classic page script; load boot.js after all definitions.
 
-function cloneMissFilterPayload(payload) {
+/** @param {MissFilters} payload */ function cloneMissFilterPayload(payload) {
   return JSON.parse(JSON.stringify(payload || { rules: [], visual: null }));
 }
 
 function missFilterPayload() {
-  var rules = [];
+  /** @type {MissFilters['rules']} */ var rules = [];
   var visual = null;
   if (window.VireoFilter && VireoFilter.getRules) {
     rules = VireoFilter.getRules();
@@ -16,27 +16,27 @@ function missFilterPayload() {
   return { rules: rules || [], visual: visual || null };
 }
 
-function addFilterPayloadToBody(body, payload) {
+/** @param {MissBody} body @param {MissFilters} payload */ function addFilterPayloadToBody(body, payload) {
   body.rules = payload.rules || [];
   if (payload.visual) body.visual = payload.visual;
   return body;
 }
 
-function addAppliedMissFiltersToBody(body) {
+/** @param {MissBody} body */ function addAppliedMissFiltersToBody(body) {
   return addFilterPayloadToBody(body, appliedMissFilters);
 }
 
-function sameMissFilterPayload(a, b) {
+/** @param {MissFilters} a @param {MissFilters} b */ function sameMissFilterPayload(a, b) {
   return JSON.stringify(a || {}) === JSON.stringify(b || {});
 }
 
-function missRulesContainField(node, field) {
+/** @param {unknown} node @param {string} field @returns {boolean} */ function missRulesContainField(node, field) {
   if (Array.isArray(node)) {
     return node.some(function(child) { return missRulesContainField(child, field); });
   }
   if (!node || typeof node !== 'object') return false;
-  if (node.field === field) return true;
-  return Array.isArray(node.rules) && node.rules.some(function(child) {
+  if ('field' in node && node.field === field) return true;
+  return 'rules' in node && Array.isArray(node.rules) && node.rules.some(function(child) {
     return missRulesContainField(child, field);
   });
 }

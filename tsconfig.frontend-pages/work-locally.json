@@ -1,0 +1,7 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/work-locally.d.ts",
+    "../vireo/static/vireo-work-locally.js"
+  ]
+}

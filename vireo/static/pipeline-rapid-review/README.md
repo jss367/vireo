@@ -83,3 +83,15 @@ changing this code:
 - The keydown handler swallows every key while the queue prompt is open and
   ignores `INPUT`, `SELECT`, `TEXTAREA` and contenteditable targets (the
   `#queueFilter` select needs its arrows and Enter).
+
+The page has its own strict program in
+`tsconfig.frontend-pages/pipeline-rapid-review.json`, with API/state shapes in
+`types/pages/pipeline-rapid-review.d.ts`. It checks every implementation script,
+including boot, and compile-only negative contracts. It inherits every strict
+option, including unchecked indexed access, without implementation suppressions.
+
+Annotations on indexed reads describe the existing dense-array loop bounds,
+nonempty history checks, and seeded-session invariants. The DOM assertions refer
+to elements required by this page's template; pointer listeners are bound to the
+photo stage. Numeric textContent writes use the DOM setter's existing string
+coercion. These annotations do not change executable JavaScript.

@@ -14,13 +14,13 @@ function clearLegacyScopeError() {
   renderMissScopeBanner();
 }
 
-function normalizedRuleRoot(raw) {
-  if (Array.isArray(raw)) return { mode: 'all', rules: raw };
-  if (raw && Array.isArray(raw.rules)) return raw;
+/** @param {unknown} raw @returns {MissRuleRoot} */ function normalizedRuleRoot(raw) {
+  if (Array.isArray(raw)) return { mode: 'all', rules: raw.filter(isMissRule) };
+  if (raw && typeof raw === 'object' && 'rules' in raw && Array.isArray(raw.rules)) return {mode: 'mode' in raw && typeof raw.mode === 'string' ? raw.mode : 'all', rules: raw.rules.filter(isMissRule)};
   return { mode: 'all', rules: [] };
 }
 
-function appendRuleRoot(target, source) {
+/** @param {MissRuleRoot} target @param {unknown} source */ function appendRuleRoot(target, source) {
   var root = normalizedRuleRoot(source);
   if (!root.rules.length) return;
   if ((root.mode || 'all') === 'all') {
@@ -30,7 +30,7 @@ function appendRuleRoot(target, source) {
   }
 }
 
-function noteLegacyScopeError(message) {
+/** @param {string} message */ function noteLegacyScopeError(message) {
   // Append when multiple deep-link params fail (e.g. a link with both a
   // missing collection and a missing folder) so the banner surfaces both.
   legacyScopeError = legacyScopeError
@@ -47,7 +47,7 @@ function noteLegacyScopeError(message) {
 }
 
 function renderMissScopeBanner() {
-  var b = document.getElementById('scopeBanner');
+  var b = /** @type {HTMLElement} */ (document.getElementById('scopeBanner'));
   if (!b) return;
   var since = getSinceParam();
   var message = legacyScopeError || (since
@@ -64,7 +64,7 @@ function renderMissScopeBanner() {
   b.hidden = !message;
 }
 
-function parseLegacyScopeParam(params, key) {
+/** @param {URLSearchParams} params @param {string} key */ function parseLegacyScopeParam(params, key) {
   if (!params.has(key)) return { present: false, valid: true, value: null };
   var raw = params.get(key);
   var normalized = String(raw == null ? '' : raw).trim();
@@ -84,9 +84,9 @@ async function applyLegacyMissScopes() {
   var folderParam = parseLegacyScopeParam(current, 'folder_id');
   if (!collectionParam.present && !folderParam.present) return;
   var collectionId = collectionParam.present && collectionParam.valid
-    ? collectionParam.value : NaN;
+    ? collectionParam.value ?? NaN : NaN;
   var folderId = folderParam.present && folderParam.valid
-    ? folderParam.value : NaN;
+    ? folderParam.value ?? NaN : NaN;
 
   var legacyFilterKeys = [
     'rating_min', 'flag', 'color_label', 'date_from', 'date_to', 'keyword',
@@ -95,7 +95,7 @@ async function applyLegacyMissScopes() {
   var keepCompiledUrlRules = legacyFilterKeys.some(function(key) {
     return current.has(key);
   });
-  var combined = { mode: 'all', rules: [] };
+  /** @type {MissRuleRoot} */ var combined = { mode: 'all', rules: [] };
   if (keepCompiledUrlRules) appendRuleRoot(combined, VireoFilter.getUserRules());
   // A plain folder/collection deep link overrides restored page state. Keep a
   // visual clause only when it came from this URL's handoff payload; a visual
@@ -123,7 +123,7 @@ async function applyLegacyMissScopes() {
   // every miss in the workspace).
   var collectionsFetchFailed = false;
   var foldersFetchFailed = false;
-  var requests = [];
+  /** @type {Promise<{id:number;name?:string;path?:string;count_error?:string;rules?:string;visual_json?:string}[]>[]} */ var requests = [];
   requests.push(
     isNaN(collectionId)
       ? Promise.resolve([])
@@ -191,4 +191,13 @@ async function applyLegacyMissScopes() {
     }
   }
   VireoFilter.loadExpression(combined, visual, { reason: 'legacyScopeLoaded' });
+}
+
+/** @param {unknown} value @returns {value is MissRule} */
+function isMissRule(value) {
+  if (!value || typeof value !== 'object') return false;
+  if ('field' in value && typeof value.field !== 'string') return false;
+  if ('op' in value && typeof value.op !== 'string') return false;
+  if ('mode' in value && typeof value.mode !== 'string') return false;
+  return !('rules' in value) || (Array.isArray(value.rules) && value.rules.every(isMissRule));
 }

@@ -1,12 +1,13 @@
 // Import mode, file types, tags, validation, and the Start button gate.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {string} name */
 function normalizedImportTag(name) {
   return String(name || '').trim().replace(/\s+/g, ' ');
 }
 
 function renderImportTags() {
-  const list = document.getElementById('importTagList');
+  const list = /** @type {HTMLElement} */ (document.getElementById('importTagList'));
   list.innerHTML = '';
   importTags.forEach((name, index) => {
     const chip = document.createElement('span');
@@ -26,6 +27,7 @@ function renderImportTags() {
   });
 }
 
+/** @param {string} name */
 function addImportTag(name) {
   const clean = normalizedImportTag(name);
   if (!clean) return false;
@@ -37,10 +39,11 @@ function addImportTag(name) {
 }
 
 function addImportTagFromInput() {
-  const input = document.getElementById('importTagInput');
+  const input = /** @type {HTMLInputElement} */ (document.getElementById('importTagInput'));
   if (addImportTag(input.value)) input.value = '';
 }
 
+/** @param {KeyboardEvent} event */
 function handleImportTagKeydown(event) {
   if (event.key !== 'Enter' && event.key !== ',') return;
   event.preventDefault();
@@ -48,7 +51,7 @@ function handleImportTagKeydown(event) {
 }
 
 function selectedImportMode() {
-  const checked = document.querySelector('input[name="importMode"]:checked');
+  const checked = /** @type {HTMLInputElement | null} */ (document.querySelector('input[name="importMode"]:checked'));
   return checked ? checked.value : 'in_place';
 }
 
@@ -96,15 +99,15 @@ function selectionUnavailableText() {
 
 function updateImportMode() {
   if (newImagesSnapshotId !== null) {
-    document.getElementById('modeInPlace').checked = true;
+    /** @type {HTMLInputElement} */ (document.getElementById('modeInPlace')).checked = true;
   }
   activeImportMode = selectedImportMode();
   const copyMode = activeImportMode === 'copy';
-  document.getElementById('destCard').style.display = copyMode ? '' : 'none';
-  document.getElementById('fileTypesWrap').style.display = copyMode ? '' : 'none';
-  document.getElementById('btnPreview').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('destCard')).style.display = copyMode ? '' : 'none';
+  /** @type {HTMLElement} */ (document.getElementById('fileTypesWrap')).style.display = copyMode ? '' : 'none';
+  /** @type {HTMLButtonElement} */ (document.getElementById('btnPreview')).textContent =
     copyMode ? 'Check for duplicates' : 'Preview import';
-  document.getElementById('previewSummary').textContent = '';
+  /** @type {HTMLElement} */ (document.getElementById('previewSummary')).textContent = '';
   hideDestStructure();
   clearImportPreviewGrid();
   // A mode switch throws the rendered preview away, so the lifecycle has to
@@ -131,22 +134,22 @@ function updateImportMode() {
 }
 
 function selectedFileTypes() {
-  const preset = document.getElementById('fileTypePreset').value;
+  const preset = /** @type {HTMLSelectElement} */ (document.getElementById('fileTypePreset')).value;
   if (preset !== 'custom') return preset;
-  return Array.from(document.querySelectorAll('.file-ext:checked'))
+  return Array.from(/** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.file-ext:checked')))
     .map(el => el.value);
 }
 
 function updateFileTypeControls() {
-  const preset = document.getElementById('fileTypePreset');
-  const custom = document.getElementById('customFileTypes');
+  const preset = /** @type {HTMLSelectElement} */ (document.getElementById('fileTypePreset'));
+  const custom = /** @type {HTMLElement} */ (document.getElementById('customFileTypes'));
   if (!preset || !custom) return;
   custom.style.display = preset.value === 'custom' ? '' : 'none';
 }
 
 function updateWorkspaceMode() {
-  const newMode = !!document.getElementById('workspaceNew')?.checked;
-  const row = document.getElementById('newWorkspaceRow');
+  const newMode = !!/** @type {HTMLInputElement} */ (document.getElementById('workspaceNew'))?.checked;
+  const row = /** @type {HTMLElement} */ (document.getElementById('newWorkspaceRow'));
   if (row) row.style.display = newMode ? '' : 'none';
   // Flipping between "current workspace" and "new workspace" changes
   // which default (workspace-scoped vs global) the server will resolve
@@ -162,27 +165,27 @@ function importFormProblem() {
   if (!sources.length && newImagesSnapshotId === null) {
     return {
       message: 'Add at least one source folder.',
-      target: document.getElementById('sourceCard'),
+      target: /** @type {HTMLElement} */ (document.getElementById('sourceCard')),
     };
   }
   const allowMissingExiftool =
-    !!document.getElementById('chkAllowMissingExiftool')?.checked;
+    !!/** @type {HTMLInputElement} */ (document.getElementById('chkAllowMissingExiftool'))?.checked;
   if (
     importExiftoolRequired && importExiftoolReady === false
     && !allowMissingExiftool
   ) {
     return {
       message: 'Repair ExifTool before importing, or use Advanced → Import without metadata.',
-      target: document.getElementById('exiftoolCard'),
+      target: /** @type {HTMLElement} */ (document.getElementById('exiftoolCard')),
     };
   }
-  if (document.getElementById('workspaceNew')?.checked) {
+  if (/** @type {HTMLInputElement} */ (document.getElementById('workspaceNew'))?.checked) {
     const name =
-      (document.getElementById('newWorkspaceName')?.value || '').trim();
+      (/** @type {HTMLInputElement} */ (document.getElementById('newWorkspaceName'))?.value || '').trim();
     if (!name) {
       return {
         message: 'Enter a name for the new workspace.',
-        target: document.getElementById('newWorkspaceName'),
+        target: /** @type {HTMLInputElement} */ (document.getElementById('newWorkspaceName')),
       };
     }
   }
@@ -193,30 +196,30 @@ function importFormProblem() {
   if (Array.isArray(fileTypes) && !fileTypes.length) {
     return {
       message: 'Choose at least one file extension.',
-      target: document.getElementById('fileTypePreset'),
+      target: /** @type {HTMLSelectElement} */ (document.getElementById('fileTypePreset')),
     };
   }
   const remoteId = importRemoteTargetId();
   if (remoteId) {
     const target = importRemoteTarget();
     const subResult = normalizeRemoteSubpath(
-      document.getElementById('remoteSubpath').value);
+      /** @type {HTMLInputElement} */ (document.getElementById('remoteSubpath')).value);
     if (!target) {
       return {
         message: 'Choose a configured NAS target.',
-        target: document.getElementById('destMode'),
+        target: /** @type {HTMLSelectElement} */ (document.getElementById('destMode')),
       };
     }
     if (!importRsyncAvailable) {
       return {
         message: 'Direct NAS transfer needs GNU rsync. ' + rsyncInstallHint(),
-        target: document.getElementById('destMode'),
+        target: /** @type {HTMLSelectElement} */ (document.getElementById('destMode')),
       };
     }
     if (!target.mount_path || !importIsAbsolutePath(target.mount_path)) {
       return {
         message: 'This NAS target needs an absolute mounted path in Settings before Vireo can catalog imported files.',
-        target: document.getElementById('destMode'),
+        target: /** @type {HTMLSelectElement} */ (document.getElementById('destMode')),
       };
     }
     if (subResult.error || !subResult.value) {
@@ -225,28 +228,29 @@ function importFormProblem() {
           ? subResult.error + ' Enter a folder such as Raw Files/USA.'
           : 'Enter the folder inside ' + target.remote_path +
             ', for example Raw Files/USA.',
-        target: document.getElementById('remoteSubpath'),
+        target: /** @type {HTMLInputElement} */ (document.getElementById('remoteSubpath')),
       };
     }
   } else {
     const destination =
-      (document.getElementById('destInput').value || '').trim();
+      (/** @type {HTMLInputElement} */ (document.getElementById('destInput')).value || '').trim();
     if (!destination) {
       return {
         message: 'Choose a destination folder.',
-        target: document.getElementById('destInput'),
+        target: /** @type {HTMLInputElement} */ (document.getElementById('destInput')),
       };
     }
   }
   return null;
 }
 
+/** @param {string} msg @param {HTMLElement | null | undefined} [target] */
 function showError(msg, target) {
-  const el = document.getElementById('importError');
+  const el = /** @type {HTMLElement} */ (document.getElementById('importError'));
   el.textContent = msg;
   el.style.display = msg ? 'block' : 'none';
   if (msg && target) {
-    const focusTarget = target.focus ? target : null;
+    const focusTarget = target;
     target.scrollIntoView({ behavior: preferredScrollBehavior(), block: 'center' });
     if (focusTarget) focusTarget.focus({ preventScroll: true });
   }
@@ -267,7 +271,7 @@ function showError(msg, target) {
 //                          walk starts, and on a 5,000-file card that walk
 //                          is long enough to click through.
 function updateStartGate() {
-  const btn = document.getElementById('btnStart');
+  const btn = /** @type {HTMLButtonElement} */ (document.getElementById('btnStart'));
   if (!btn) return;
   // Same predicate as the boxes themselves — see importSelectionEnabled().
   // The label counts the selection, so it must not outlive the controls
@@ -326,7 +330,7 @@ function updateStartGate() {
         ? 'Start import (' + checked.toLocaleString() + ' file'
           + (checked === 1 ? '' : 's') + ')'
         : 'Start import');
-  const summary = document.getElementById('importActionSummary');
+  const summary = /** @type {HTMLElement} */ (document.getElementById('importActionSummary'));
   if (summary) {
     // Use the same current selection and lifecycle gate as the action.
     // A stale or unfinished preview must not promise a copy count.

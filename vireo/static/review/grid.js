@@ -41,7 +41,7 @@ function getVisibleItems() {
   });
 
   // Deduplicate groups — show only the first photo per group
-  var seenGroups = {};
+  /** @type {Record<string,boolean>} */ var seenGroups = {};
   return filtered.filter(function(p) {
     if (!p.group_id) return true;
     if (seenGroups[p.group_id]) return false;
@@ -52,8 +52,8 @@ function getVisibleItems() {
 
 function renderGrid() {
   var items = getVisibleItems();
-  var grid = document.getElementById('grid');
-  var empty = document.getElementById('empty');
+  var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
+  var empty = /** @type {HTMLElement} */ (document.getElementById('empty'));
 
   if (items.length === 0) {
     grid.innerHTML = '';
@@ -73,37 +73,38 @@ function renderGrid() {
 
 /* Delegate grid clicks for lightbox and group review (XSS-safe) */
 function bindReviewGridClicks() {
-  document.getElementById('grid').addEventListener('click', function(e) {
-    var img = e.target.closest('img[data-photo-id]');
+  /** @type {HTMLElement} */ (document.getElementById('grid')).addEventListener('click', function(e) {
+    if (!(e.target instanceof Element)) return;
+    var img = e.target.closest(/** @type {'img'} */ ('img[data-photo-id]'));
     if (img) {
-      var seen = {};
+      /** @type {Record<number,boolean>} */ var seen = {};
       var photoList = [];
-      var thumbs = document.getElementById('grid').querySelectorAll('img[data-photo-id]');
+      var thumbs = /** @type {HTMLElement} */ (document.getElementById('grid')).querySelectorAll(/** @type {'img'} */ ('img[data-photo-id]'));
       for (var i = 0; i < thumbs.length; i++) {
-        var pid = parseInt(thumbs[i].dataset.photoId, 10);
+        var thumb = thumbs[i]; if (!thumb) continue; var pid = parseInt(thumb.dataset.photoId || '', 10);
         if (seen[pid]) continue;
         seen[pid] = true;
-        photoList.push({ id: pid, filename: thumbs[i].dataset.filename || '' });
+        photoList.push({ id: pid, filename: thumb.dataset.filename || '' });
       }
-      openLightbox(parseInt(img.dataset.photoId, 10), img.dataset.filename || '', photoList);
+      openLightbox(parseInt(img.dataset.photoId || '', 10), img.dataset.filename || '', photoList);
       return;
     }
-    var groupBtn = e.target.closest('button[data-group-id]');
+    var groupBtn = e.target.closest(/** @type {'button'} */ ('button[data-group-id]'));
     if (groupBtn) {
-      openGroupReview(groupBtn.dataset.groupId, groupBtn.dataset.model || '');
+      openGroupReview(groupBtn.dataset.groupId || '', groupBtn.dataset.model || '');
     }
   });
 }
 
-function getConsensusSpecies(pred) {
+/** @param {ReviewPrediction} pred */ function getConsensusSpecies(pred) {
   // For grouped predictions, derive the consensus winner from the individual votes
   if (pred.individual) {
     try {
-      var votes = typeof pred.individual === 'string' ? JSON.parse(pred.individual) : pred.individual;
+      var votes = reviewVoteCounts(pred.individual);
       var best = null;
       var bestCount = 0;
       for (var sp in votes) {
-        if (votes[sp] > bestCount) { bestCount = votes[sp]; best = sp; }
+        if ((votes[sp] || 0) > bestCount) { bestCount = votes[sp] || 0; best = sp; }
       }
       if (best) return best;
     } catch(e) {}
@@ -111,7 +112,7 @@ function getConsensusSpecies(pred) {
   return pred.species;
 }
 
-function renderPredictionCard(pred) {
+/** @param {ReviewPrediction} pred */ function renderPredictionCard(pred) {
   if (
     typeof window.vireoRememberPhotoEditRecipe === 'function' &&
     Object.prototype.hasOwnProperty.call(pred, 'edit_recipe')
@@ -153,9 +154,9 @@ function renderPredictionCard(pred) {
   var voteHtml = '';
   if (pred.individual) {
     try {
-      var votes = typeof pred.individual === 'string' ? JSON.parse(pred.individual) : pred.individual;
-      var parts = [];
-      var keys = Object.keys(votes).sort(function(a, b) { return votes[b] - votes[a]; });
+      var votes = reviewVoteCounts(pred.individual);
+      /** @type {string[]} */ var parts = [];
+      var keys = Object.keys(votes).sort(function(a, b) { return (votes[b] || 0) - (votes[a] || 0); });
       keys.forEach(function(k) {
         parts.push('<span>' + escapeHtml(k) + ': ' + votes[k] + '</span>');
       });
@@ -229,7 +230,7 @@ function renderPredictionCard(pred) {
   }
 
   // Build image with optional bounding box overlay
-  var hasBox = pred.box_x != null && pred.box_y != null && pred.box_w != null && pred.box_h != null;
+  var box = reviewPredictionBox(pred); var hasBox = box !== null;
   var hideDetectionOverlay = (
     typeof window.vireoPhotoHasOrientationEdit === 'function' &&
     window.vireoPhotoHasOrientationEdit(pred.photo_id)
@@ -242,12 +243,12 @@ function renderPredictionCard(pred) {
     : '';
 
   var imgHtml;
-  if (hasBox) {
+  if (box) {
     var color = getSpeciesColor(displaySpecies);
-    var bLeft = (pred.box_x * 100).toFixed(2) + '%';
-    var bTop = (pred.box_y * 100).toFixed(2) + '%';
-    var bWidth = (pred.box_w * 100).toFixed(2) + '%';
-    var bHeight = (pred.box_h * 100).toFixed(2) + '%';
+    var bLeft = (box.x * 100).toFixed(2) + '%';
+    var bTop = (box.y * 100).toFixed(2) + '%';
+    var bWidth = (box.w * 100).toFixed(2) + '%';
+    var bHeight = (box.h * 100).toFixed(2) + '%';
     imgHtml = '<div class="card-img-wrap">' + imgTag +
       representativeBadge +
       '<div class="detection-box" data-photo-id="' + pred.photo_id + '" style="' + ((reviewDetectionBoxesVisible && !hideDetectionOverlay) ? '' : 'display:none;') + 'left:' + bLeft + ';top:' + bTop +
@@ -276,7 +277,7 @@ function renderPredictionCard(pred) {
   '</div>';
 }
 
-function groupMembersHtml(pred) {
+/** @param {ReviewPrediction} pred */ function groupMembersHtml(pred) {
   if (!pred.group_id) return '';
 
   var members = predictions.filter(function(p) {
@@ -287,4 +288,17 @@ function groupMembersHtml(pred) {
   return '<button data-group-id="' + escapeAttr(pred.group_id) + '" data-model="' + escapeAttr(pred.model || '') + '" ' +
     'style="background:var(--accent,#24E5CA);color:var(--accent-text,#0A1F2E);border:none;border-radius:6px;padding:8px 12px;font-size:13px;font-weight:600;cursor:pointer;margin-top:8px;width:100%;display:flex;align-items:center;justify-content:center;gap:6px;">' +
     '<span style="font-size:16px;">&#9638;</span> Review Burst Group (' + members.length + ' photos)</button>';
+}
+
+/** @param {ReviewPrediction['individual']} raw @returns {Record<string,number>} */
+function reviewVoteCounts(raw) {
+  /** @type {unknown} */ var parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  return Object.fromEntries(Object.entries(parsed).filter(function(entry) { return typeof entry[1] === 'number'; }));
+}
+
+/** @param {ReviewPrediction} prediction */
+function reviewPredictionBox(prediction) {
+  if (prediction.box_x == null || prediction.box_y == null || prediction.box_w == null || prediction.box_h == null) return null;
+  return {x:prediction.box_x,y:prediction.box_y,w:prediction.box_w,h:prediction.box_h};
 }

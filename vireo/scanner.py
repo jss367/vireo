@@ -969,6 +969,53 @@ def _defer_primary_display_cache_invalidation(
     post_commit_fs_actions.append(_invalidate_primary_variants)
 
 
+def _carry_prediction_reviews_to_survivors(db, old_id, new_id):
+    """Move review state off predictions that collided during a re-key."""
+    # If a companion prediction collided with an existing primary
+    # prediction, its row stayed on the old detection id. Preserve any
+    # workspace review state by moving it onto the surviving prediction
+    # before the old detection delete cascades the duplicate away.
+    db.conn.execute(
+        """INSERT INTO prediction_review
+                 (prediction_id, workspace_id, status, reviewed_at,
+                  individual, group_id, vote_count, total_votes)
+               SELECT survivor.id, pr.workspace_id, pr.status,
+                      pr.reviewed_at, pr.individual, pr.group_id,
+                      pr.vote_count, pr.total_votes
+                 FROM predictions duplicate
+                 JOIN predictions survivor
+                   ON survivor.detection_id = ?
+                  AND survivor.classifier_model = duplicate.classifier_model
+                  AND survivor.labels_fingerprint = duplicate.labels_fingerprint
+                  AND survivor.species IS duplicate.species
+                 JOIN prediction_review pr
+                   ON pr.prediction_id = duplicate.id
+                WHERE duplicate.detection_id = ?
+               ON CONFLICT(prediction_id, workspace_id)
+               DO UPDATE SET status = excluded.status,
+                             reviewed_at = excluded.reviewed_at,
+                             individual = COALESCE(
+                                 excluded.individual,
+                                 prediction_review.individual
+                             ),
+                             group_id = COALESCE(
+                                 excluded.group_id,
+                                 prediction_review.group_id
+                             ),
+                             vote_count = COALESCE(
+                                 excluded.vote_count,
+                                 prediction_review.vote_count
+                             ),
+                             total_votes = COALESCE(
+                                 excluded.total_votes,
+                                 prediction_review.total_votes
+                             )
+                WHERE prediction_review.status = 'pending'
+                  AND excluded.status <> 'pending'""",
+        (new_id, old_id),
+    )
+
+
 def _rekey_companion_detections_onto_primary(db, primary, companion):
     """Transfer detections (and their cascaded predictions) from companion to primary.
 
@@ -1024,49 +1071,7 @@ def _rekey_companion_detections_onto_primary(db, primary, companion):
             "UPDATE OR IGNORE predictions SET detection_id = ? WHERE detection_id = ?",
             (new_id, det["id"]),
         )
-        # If a companion prediction collided with an existing primary
-        # prediction, its row stayed on the old detection id. Preserve any
-        # workspace review state by moving it onto the surviving prediction
-        # before the old detection delete cascades the duplicate away.
-        db.conn.execute(
-            """INSERT INTO prediction_review
-                     (prediction_id, workspace_id, status, reviewed_at,
-                      individual, group_id, vote_count, total_votes)
-                   SELECT survivor.id, pr.workspace_id, pr.status,
-                          pr.reviewed_at, pr.individual, pr.group_id,
-                          pr.vote_count, pr.total_votes
-                     FROM predictions duplicate
-                     JOIN predictions survivor
-                       ON survivor.detection_id = ?
-                      AND survivor.classifier_model = duplicate.classifier_model
-                      AND survivor.labels_fingerprint = duplicate.labels_fingerprint
-                      AND survivor.species IS duplicate.species
-                     JOIN prediction_review pr
-                       ON pr.prediction_id = duplicate.id
-                    WHERE duplicate.detection_id = ?
-                   ON CONFLICT(prediction_id, workspace_id)
-                   DO UPDATE SET status = excluded.status,
-                                 reviewed_at = excluded.reviewed_at,
-                                 individual = COALESCE(
-                                     excluded.individual,
-                                     prediction_review.individual
-                                 ),
-                                 group_id = COALESCE(
-                                     excluded.group_id,
-                                     prediction_review.group_id
-                                 ),
-                                 vote_count = COALESCE(
-                                     excluded.vote_count,
-                                     prediction_review.vote_count
-                                 ),
-                                 total_votes = COALESCE(
-                                     excluded.total_votes,
-                                     prediction_review.total_votes
-                                 )
-                    WHERE prediction_review.status = 'pending'
-                      AND excluded.status <> 'pending'""",
-            (new_id, det["id"]),
-        )
+        _carry_prediction_reviews_to_survivors(db, det["id"], new_id)
         # Redirect classifier_runs too — they're the cache key the
         # non-reclassify gate consults. Without this, paired photos with
         # cached predictions would look unclassified to
@@ -1459,6 +1464,50 @@ def _invalidate_raw_display_cache(vireo_dir, photo_id):
             )
 
 
+def _invalidate_cached_thumbnails(db, vireo_dir, photo_id, thumb_cache_dir):
+    """Delete the photo's thumbnails and clear ``thumb_path`` to match."""
+    thumb_dir = thumb_cache_dir or os.path.join(vireo_dir, "thumbnails")
+    thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
+    thumb_removed = False
+    if os.path.exists(thumb_path):
+        try:
+            os.remove(thumb_path)
+            thumb_removed = True
+        except OSError:
+            log.debug("Could not delete stale thumbnail %s", thumb_path, exc_info=True)
+    else:
+        # File already gone but the column may still point at it (e.g.
+        # external cache wipe). Keep the column in sync so the pipeline
+        # planner's "thumb_path IS NULL" gate matches disk reality.
+        thumb_removed = True
+    # Explicit RAW/JPEG pair views use source-specific thumbnail names. They
+    # derive from the same source bytes and must be invalidated alongside the
+    # legacy thumbnail, especially when a hash change preserves file mtime.
+    for source in ("raw", "jpeg"):
+        variant_path = os.path.join(thumb_dir, f"{photo_id}_{source}.jpg")
+        if not os.path.exists(variant_path):
+            continue
+        try:
+            os.remove(variant_path)
+        except OSError:
+            log.debug(
+                "Could not delete stale paired thumbnail %s",
+                variant_path,
+                exc_info=True,
+            )
+    if thumb_removed:
+        # Mirror the working_copy_path / preview_cache cleanup in
+        # ``_invalidate_derived_caches``: any
+        # path that drops the cached thumbnail file must also clear
+        # photos.thumb_path so count_photos_missing_thumb (used by the
+        # Thumbnails & Previews plan card) doesn't see a phantom "done"
+        # state for a row whose JPEG no longer exists on disk.
+        db.conn.execute(
+            "UPDATE photos SET thumb_path = NULL WHERE id = ?",
+            (photo_id,),
+        )
+
+
 def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
     """Delete cached thumbnail / working copy / display / preview for a photo.
 
@@ -1492,45 +1541,7 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
     if not vireo_dir:
         return
 
-    thumb_dir = thumb_cache_dir or os.path.join(vireo_dir, "thumbnails")
-    thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
-    thumb_removed = False
-    if os.path.exists(thumb_path):
-        try:
-            os.remove(thumb_path)
-            thumb_removed = True
-        except OSError:
-            log.debug("Could not delete stale thumbnail %s", thumb_path, exc_info=True)
-    else:
-        # File already gone but the column may still point at it (e.g.
-        # external cache wipe). Keep the column in sync so the pipeline
-        # planner's "thumb_path IS NULL" gate matches disk reality.
-        thumb_removed = True
-    # Explicit RAW/JPEG pair views use source-specific thumbnail names. They
-    # derive from the same source bytes and must be invalidated alongside the
-    # legacy thumbnail, especially when a hash change preserves file mtime.
-    for source in ("raw", "jpeg"):
-        variant_path = os.path.join(thumb_dir, f"{photo_id}_{source}.jpg")
-        if not os.path.exists(variant_path):
-            continue
-        try:
-            os.remove(variant_path)
-        except OSError:
-            log.debug(
-                "Could not delete stale paired thumbnail %s",
-                variant_path,
-                exc_info=True,
-            )
-    if thumb_removed:
-        # Mirror the working_copy_path / preview_cache cleanup below: any
-        # path that drops the cached thumbnail file must also clear
-        # photos.thumb_path so count_photos_missing_thumb (used by the
-        # Thumbnails & Previews plan card) doesn't see a phantom "done"
-        # state for a row whose JPEG no longer exists on disk.
-        db.conn.execute(
-            "UPDATE photos SET thumb_path = NULL WHERE id = ?",
-            (photo_id,),
-        )
+    _invalidate_cached_thumbnails(db, vireo_dir, photo_id, thumb_cache_dir)
 
     wc_file = os.path.join(vireo_dir, "working", f"{photo_id}.jpg")
     if os.path.exists(wc_file):
@@ -2467,25 +2478,7 @@ class _WorkingCopyBatch:
         # after the size check) would leave the row marked failed even
         # though the archive copy has the correct bytes.
         if not ok:
-            retry_source = None
-            if source == src.primary_path and src.primary_override_used:
-                retry_source = src.catalog_primary
-            elif source == src.companion_path and src.companion_override_used:
-                retry_source = src.catalog_companion
-            if retry_source and os.path.isfile(retry_source):
-                log.info(
-                    "Card-side working-copy extraction failed for photo "
-                    "%s (%s); retrying from archive %s",
-                    row["id"], source, retry_source,
-                )
-                source = retry_source
-                if retry_source == src.catalog_primary:
-                    src.primary_path = src.catalog_primary
-                    src.primary_override_used = False
-                else:
-                    src.companion_path = src.catalog_companion
-                    src.companion_override_used = False
-                ok = extract(source)
+            source, ok = self._retry_from_archive(row, src, source, extract)
 
         raw_failed_then_companion = False
         if (
@@ -2535,6 +2528,33 @@ class _WorkingCopyBatch:
             raw_failed_then_companion=raw_failed_then_companion,
             published_identities=published_identities,
         )
+
+    def _retry_from_archive(self, row, src, source, extract):
+        """Retry a failed card-side read from the archive; ``(source, ok)``.
+
+        Points ``src`` at the archive copy it switches to. Without an
+        archive copy to retry from, returns ``source`` unchanged and False.
+        """
+        retry_source = None
+        if source == src.primary_path and src.primary_override_used:
+            retry_source = src.catalog_primary
+        elif source == src.companion_path and src.companion_override_used:
+            retry_source = src.catalog_companion
+        if retry_source and os.path.isfile(retry_source):
+            log.info(
+                "Card-side working-copy extraction failed for photo "
+                "%s (%s); retrying from archive %s",
+                row["id"], source, retry_source,
+            )
+            source = retry_source
+            if retry_source == src.catalog_primary:
+                src.primary_path = src.catalog_primary
+                src.primary_override_used = False
+            else:
+                src.companion_path = src.catalog_companion
+                src.companion_override_used = False
+            return source, extract(source)
+        return source, False
 
     def _raw_result_is_full_size(self, row, wc_abs, companion_path):
         """Whether a RAW extraction is worth keeping over the companion.
@@ -2764,16 +2784,9 @@ class _WorkingCopyBatch:
         INSIDE the extract's guard (via the ``on_publish`` callback) so the
         replacement's bytes survive whether it has committed yet or not.
         """
-        published_identity = (
-            published_identities[-1] if published_identities else None
+        file_still_ours = self._still_holds_published_bytes(
+            wc_abs, published_identities,
         )
-        file_still_ours = False
-        if published_identity is not None:
-            try:
-                current_identity = self.file_identity(os.stat(wc_abs))
-            except OSError:
-                current_identity = None
-            file_still_ours = current_identity == published_identity
         row_owned_by_replacement = self.db.conn.execute(
             "SELECT 1 FROM photos WHERE working_copy_path=?"
             " LIMIT 1",
@@ -2839,6 +2852,23 @@ class _WorkingCopyBatch:
                 "Rollback after an orphaned working-copy publish "
                 "failed", exc_info=True,
             )
+
+    def _still_holds_published_bytes(self, wc_abs, published_identities):
+        """Whether ``wc_abs`` still holds the bytes this batch last published.
+
+        False without a fingerprint captured under extract's guard, or when
+        the file cannot be stat'd.
+        """
+        published_identity = (
+            published_identities[-1] if published_identities else None
+        )
+        if published_identity is None:
+            return False
+        try:
+            current_identity = self.file_identity(os.stat(wc_abs))
+        except OSError:
+            current_identity = None
+        return current_identity == published_identity
 
     def _mark_extraction_failed(self, row, extraction):
         """Record the failure so the row is not retried every pass.
@@ -3048,13 +3078,18 @@ class _WorkingCopyBatch:
             )
             self.stop_after_current = True
 
+        self._stop_if_sweep_stalls(enforcement, retained_before_enforce)
+
+    def _stop_if_sweep_stalls(self, enforcement, retained_before_enforce):
+        """Stop the library-wide sweep once enforcement stops adding coverage."""
         # The same rotation, one step earlier: enforcement can stay under
         # the ceiling by reclaiming working copies this batch did not write
         # — the ones a previous run or an on-demand render already
         # published. Those deletions never shrink ``retained_new_files``,
-        # so the check above cannot see them, and the batch would happily
-        # trade existing coverage for new coverage file by file. That is
-        # not progress: total coverage is flat, and because eviction sheds
+        # so ``_enforce_mid_batch``'s rotation checks cannot see them, and
+        # the batch would happily trade existing coverage for new coverage
+        # file by file. That is not progress: total coverage is flat, and
+        # because eviction sheds
         # the oldest stamps first it is spending the user's most recently
         # used copies to backfill photos they have not asked for. Defer the
         # rest.
@@ -3167,10 +3202,17 @@ class _WorkingCopyBatch:
         )
         commit_with_retry(self.db.conn)
 
+        return self._undo_deferral_if_quota_raised(remaining)
+
+    def _undo_deferral_if_quota_raised(self, remaining):
+        """Clear this pass's deferred markers if the ceiling rose meanwhile.
+
+        ``True`` when it did and the batch keeps going.
+        """
         # Close the remaining save/side-effect race: if the config
-        # increased after the check above but before this commit, the
-        # settings handler may already have performed its one-time marker
-        # clear. Re-read after committing and undo only this pass's
+        # increased after ``_resume_after_stop``'s check but before its
+        # commit, the settings handler may already have performed its
+        # one-time marker clear. Re-read after committing and undo only this pass's
         # deferred markers when the new capacity can hold more of the
         # batch. If the save happens after this read, its own side effect
         # clears them instead.
@@ -3181,9 +3223,9 @@ class _WorkingCopyBatch:
             and sum(self.retained_new_files.values()) < refreshed_quota_bytes
         ):
             return False
-        # Same complete identity guard as the deferred write above: a
-        # companion re-pair or folder relocation between the deferred write
-        # and this undo must not cause the undo to match — the marker on
+        # Same complete identity guard as ``_resume_after_stop``'s deferred
+        # write: a companion re-pair or folder relocation between the
+        # deferred write and this undo must not cause the undo to match — the marker on
         # the row's *previous* source identity is what we wrote, and the
         # row now has different extraction inputs whose backfill the marker
         # never suppressed.
@@ -3824,6 +3866,52 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     counts = {} if counts is None else counts
     counts.update(_EMPTY_SCAN_COUNTS)
     status_supports_phase = _status_callback_supports_phase(status_callback)
+    resolved = _resolve_scan_root(
+        root, db, restrict_dirs, restrict_files, skip_paths, discovered_files,
+    )
+    if resolved is None:
+        return counts
+    root_path, restrict_dirs, restrict_files, skip_paths, frozen_files = resolved
+    from file_identity import catalog_folder_aliases, catalog_folder_path
+
+    _ScanRun(
+        root, root_path, db, counts, frozen_files,
+        catalog_folder_path=catalog_folder_path,
+        catalog_folder_aliases=catalog_folder_aliases,
+        progress_callback=progress_callback,
+        incremental=incremental,
+        extract_full_metadata=extract_full_metadata,
+        photo_callback=photo_callback,
+        skip_paths=skip_paths,
+        status_callback=status_callback,
+        status_supports_phase=status_supports_phase,
+        recursive=recursive,
+        restrict_dirs=restrict_dirs,
+        restrict_files=restrict_files,
+        vireo_dir=vireo_dir,
+        thumb_cache_dir=thumb_cache_dir,
+        permission_error_callback=permission_error_callback,
+        cancel_check=cancel_check,
+        pause_check=pause_check,
+        cancel_only_check=cancel_only_check,
+        skip_working_copies=skip_working_copies,
+        repair_missing_metadata=repair_missing_metadata,
+        register_restrict_dirs_as_roots=register_restrict_dirs_as_roots,
+        allow_photo_inserts=allow_photo_inserts,
+        photo_merged_callback=photo_merged_callback,
+        reported_photo_identities=reported_photo_identities,
+    ).run()
+    return counts
+
+
+def _resolve_scan_root(root, db, restrict_dirs, restrict_files, skip_paths,
+                       discovered_files):
+    """The cataloged root and the caller's inputs rebased under it.
+
+    Returns ``(root_path, restrict_dirs, restrict_files, skip_paths,
+    frozen_files)``, or ``None`` when the root must not be scanned (an
+    other-app data bundle, or a missing root without a frozen manifest).
+    """
     root_path = Path(root)
     # Don't open the root at all if the root is, or sits inside, an
     # other-app data bundle. prune_scan_dirs below only filters
@@ -3836,20 +3924,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # follows symlinks and stat's the target, so for a directly selected
     # bundle (or a symlink to one), the existence test alone is enough
     # to trip the TCC prompt — mirroring the restrict_dirs branch below.
-    # Both bail-outs below return the same counts shape as a completed
-    # scan (all zeros) rather than None, so callers can total up
-    # ``indexed`` across roots without special-casing the roots that
-    # never ran. See the summary block in ``_ScanRun._log_summary``.
+    # Both bail-outs below return None, and ``scan()`` returns the same
+    # counts shape as a completed scan (all zeros) rather than None, so
+    # callers can total up ``indexed`` across roots without special-casing
+    # the roots that never ran. See the summary block in
+    # ``_ScanRun._log_summary``.
     if is_excluded_scan_path(root_path):
         log.info(
             "Skipping other-app data bundle as scan root: %s", root_path,
         )
-        return counts
-    from file_identity import (
-        catalog_folder_aliases,
-        catalog_folder_path,
-        catalog_scan_root,
-    )
+        return None
+    from file_identity import catalog_scan_root
 
     original_root = os.path.abspath(root_path)
     root_path = Path(catalog_scan_root(db, original_root))
@@ -3883,36 +3968,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 str(root_path),
             )
         log.warning("Root path does not exist or is not a directory: %s", root)
-        return counts
-
-    _ScanRun(
-        root, root_path, db, counts, frozen_files,
-        catalog_folder_path=catalog_folder_path,
-        catalog_folder_aliases=catalog_folder_aliases,
-        progress_callback=progress_callback,
-        incremental=incremental,
-        extract_full_metadata=extract_full_metadata,
-        photo_callback=photo_callback,
-        skip_paths=skip_paths,
-        status_callback=status_callback,
-        status_supports_phase=status_supports_phase,
-        recursive=recursive,
-        restrict_dirs=restrict_dirs,
-        restrict_files=restrict_files,
-        vireo_dir=vireo_dir,
-        thumb_cache_dir=thumb_cache_dir,
-        permission_error_callback=permission_error_callback,
-        cancel_check=cancel_check,
-        pause_check=pause_check,
-        cancel_only_check=cancel_only_check,
-        skip_working_copies=skip_working_copies,
-        repair_missing_metadata=repair_missing_metadata,
-        register_restrict_dirs_as_roots=register_restrict_dirs_as_roots,
-        allow_photo_inserts=allow_photo_inserts,
-        photo_merged_callback=photo_merged_callback,
-        reported_photo_identities=reported_photo_identities,
-    ).run()
-    return counts
+        return None
+    return root_path, restrict_dirs, restrict_files, skip_paths, frozen_files
 
 
 def _rebase_scan_inputs(original_root, root_path, restrict_dirs,
@@ -5354,29 +5411,8 @@ class _ScanRun:
                 # columns and this guarded UPDATE. Without this re-check the
                 # pairing would commit on a stale compatibility decision and
                 # permanently attach unrelated files.
-                current = db.conn.execute(
-                    "SELECT timestamp, camera_make, camera_model FROM photos"
-                    " WHERE id = ?",
-                    (owner_id,),
-                ).fetchone()
-                if current is not None:
-                    jpeg_summary = (
-                        exif_summary_columns(item.meta.file_meta)
-                        if item.meta.file_meta else {}
-                    )
-                    if not _companions_compatible(
-                        {
-                            "timestamp": current["timestamp"],
-                            "camera_make": current["camera_make"],
-                            "camera_model": current["camera_model"],
-                        },
-                        {
-                            "timestamp": item.meta.timestamp,
-                            "camera_make": jpeg_summary.get("camera_make"),
-                            "camera_model": jpeg_summary.get("camera_model"),
-                        },
-                    ):
-                        raise _CompanionAttachRefused
+                if not self._owner_still_compatible(owner_id, item):
+                    raise _CompanionAttachRefused
                 db.conn.execute(
                     "INSERT OR REPLACE INTO companion_identities"
                     " (photo_id, filename, file_size, timestamp, file_hash,"
@@ -5400,6 +5436,45 @@ class _ScanRun:
             # cannot hold commits; the refusals precede every other write.
             db.conn.rollback()
             return False
+        self._publish_attached_companion(image_path, owner, ownership)
+        if self.progress_callback:
+            self.progress_callback(self.processed_count, self.total)
+        return True
+
+    def _owner_still_compatible(self, owner_id, item):
+        """Whether the owner row, as it stands now, still pairs with ``item``.
+
+        Only a row that is present and incompatible refuses the attach; the
+        guarded UPDATE ahead of this already required the row under the
+        writer lock.
+        """
+        current = self.db.conn.execute(
+            "SELECT timestamp, camera_make, camera_model FROM photos"
+            " WHERE id = ?",
+            (owner_id,),
+        ).fetchone()
+        if current is None:
+            return True
+        jpeg_summary = (
+            exif_summary_columns(item.meta.file_meta)
+            if item.meta.file_meta else {}
+        )
+        return _companions_compatible(
+            {
+                "timestamp": current["timestamp"],
+                "camera_make": current["camera_make"],
+                "camera_model": current["camera_model"],
+            },
+            {
+                "timestamp": item.meta.timestamp,
+                "camera_make": jpeg_summary.get("camera_make"),
+                "camera_model": jpeg_summary.get("camera_model"),
+            },
+        )
+
+    def _publish_attached_companion(self, image_path, owner, ownership):
+        """Drop the RAW's display caches and report the committed attach."""
+        owner_id = owner["id"]
         # Report AFTER ``_commits_held`` releases: the thumbnail worker runs
         # on a separate connection and only sees committed data. If the
         # callback fired inside the guard, a queue entry whose canonical
@@ -5425,7 +5500,7 @@ class _ScanRun:
             _run_post_commit_fs_actions(actions)
         if self.photo_callback:
             # Revalidate ownership before publishing ``owner_id``. The
-            # attach commit was released above so the post-commit FS
+            # attach commit was released by the caller so the post-commit FS
             # actions could see it; in that window another connection can
             # delete the RAW and SQLite can reuse its rowid for an
             # unrelated photo. Without this check, an incremental scan
@@ -5446,7 +5521,7 @@ class _ScanRun:
             # the writer lock, then publishes through a nonblocking callback.
             # Ownership is revalidated AFTER that wait, keeping rowid reuse
             # protection without preventing the consumer's thumbnail commits.
-            with publication as publish, db._commits_held():
+            with publication as publish, self.db._commits_held():
                 owner_still_valid = self._lock_companion_owner(
                     owner_id, ownership,
                 )
@@ -5465,9 +5540,6 @@ class _ScanRun:
             self._reported_identities[owner_id] = (
                 owner["folder_id"], owner["filename"],
             )
-        if self.progress_callback:
-            self.progress_callback(self.processed_count, self.total)
-        return True
 
     def _keep_known_companion(
         self, image_path, folder_id, file_size, file_mtime, file_hash, meta,
@@ -5828,63 +5900,10 @@ class _ScanRun:
         file_hash = item.file_hash
         file_size = item.file_size
         row_already_existed = item.row_already_existed
-        prev_file_hash = item.prev_file_hash
-        updates = []
-        update_params = []
-        if meta.timestamp is not None:
-            updates.append("timestamp=?")
-            update_params.append(meta.timestamp)
-        if meta.width is not None:
-            updates.append("width=?")
-            update_params.append(meta.width)
-        if meta.height is not None:
-            updates.append("height=?")
-            update_params.append(meta.height)
-        if meta.latitude is not None:
-            updates.extend(["latitude=?", "longitude=?"])
-            update_params.extend([meta.latitude, meta.longitude])
-        if item.phash is not None:
-            updates.append("phash=?")
-            update_params.append(item.phash)
-        if meta.burst_id is not None:
-            updates.append("burst_id=?")
-            update_params.append(meta.burst_id)
-        if file_hash is not None:
-            updates.append("file_hash=?")
-            update_params.append(file_hash)
-            if row_already_existed and prev_file_hash != file_hash:
-                # The stored baseline is being replaced, so any prior
-                # integrity verdict applied to bytes that no longer
-                # exist. Clear the verification markers rather than
-                # carry them forward — the audit summary must only
-                # claim "checked" for baselines verify_hashes (or an
-                # explicit user accept) actually vouched for. A rescan
-                # that recomputes the same hash leaves coverage intact.
-                updates.append("hash_checked_at=NULL")
-                updates.append("hash_status=NULL")
-        elif file_size == 0:
-            updates.append("file_hash=NULL")
-            if row_already_existed and prev_file_hash is not None:
-                updates.append("hash_checked_at=NULL")
-                updates.append("hash_status=NULL")
-            # Historical rows where the empty SHA leaked in are repaired
-            # here by clearing file_hash above. We deliberately leave the
-            # ``flag`` column untouched: a 'rejected' value could come
-            # from the user (Browse / culling) just as easily as from
-            # past duplicate auto-resolution, and we have no marker that
-            # distinguishes them. Silently un-rejecting a user's
-            # placeholder would be worse than leaving it as-is; the
-            # duplicates page already flags empty-byte groups for
-            # manual review.
-        pending_companion = (
-            self._pending_companion_fills.pop(photo_id, None)
-            if row_already_existed else None
+        updates, update_params = self._identity_column_updates(item)
+        pending_companion_fill = self._take_pending_companion_fill(
+            photo_id, row_already_existed,
         )
-        pending_companion_fill = None
-        if pending_companion is not None:
-            ownership, columns = pending_companion
-            if self._lock_companion_owner(photo_id, ownership):
-                pending_companion_fill = columns
         if file_meta:
             # Promoted EXIF summary columns (universal filter fields).
             # Written whenever ExifTool ran, independent of whether the
@@ -5966,6 +5985,75 @@ class _ScanRun:
                     (photo_id,),
                 )
             commit_with_retry(self.db.conn)
+
+    def _identity_column_updates(self, item):
+        """SET clauses for the file's metadata and content-hash columns."""
+        meta = item.meta
+        file_hash = item.file_hash
+        file_size = item.file_size
+        row_already_existed = item.row_already_existed
+        prev_file_hash = item.prev_file_hash
+        updates = []
+        update_params = []
+        if meta.timestamp is not None:
+            updates.append("timestamp=?")
+            update_params.append(meta.timestamp)
+        if meta.width is not None:
+            updates.append("width=?")
+            update_params.append(meta.width)
+        if meta.height is not None:
+            updates.append("height=?")
+            update_params.append(meta.height)
+        if meta.latitude is not None:
+            updates.extend(["latitude=?", "longitude=?"])
+            update_params.extend([meta.latitude, meta.longitude])
+        if item.phash is not None:
+            updates.append("phash=?")
+            update_params.append(item.phash)
+        if meta.burst_id is not None:
+            updates.append("burst_id=?")
+            update_params.append(meta.burst_id)
+        if file_hash is not None:
+            updates.append("file_hash=?")
+            update_params.append(file_hash)
+            if row_already_existed and prev_file_hash != file_hash:
+                # The stored baseline is being replaced, so any prior
+                # integrity verdict applied to bytes that no longer
+                # exist. Clear the verification markers rather than
+                # carry them forward — the audit summary must only
+                # claim "checked" for baselines verify_hashes (or an
+                # explicit user accept) actually vouched for. A rescan
+                # that recomputes the same hash leaves coverage intact.
+                updates.append("hash_checked_at=NULL")
+                updates.append("hash_status=NULL")
+        elif file_size == 0:
+            updates.append("file_hash=NULL")
+            if row_already_existed and prev_file_hash is not None:
+                updates.append("hash_checked_at=NULL")
+                updates.append("hash_status=NULL")
+            # Historical rows where the empty SHA leaked in are repaired
+            # here by clearing file_hash above. We deliberately leave the
+            # ``flag`` column untouched: a 'rejected' value could come
+            # from the user (Browse / culling) just as easily as from
+            # past duplicate auto-resolution, and we have no marker that
+            # distinguishes them. Silently un-rejecting a user's
+            # placeholder would be worse than leaving it as-is; the
+            # duplicates page already flags empty-byte groups for
+            # manual review.
+        return updates, update_params
+
+    def _take_pending_companion_fill(self, photo_id, row_already_existed):
+        """The companion fill queued for this owner, if it still owns it."""
+        pending_companion = (
+            self._pending_companion_fills.pop(photo_id, None)
+            if row_already_existed else None
+        )
+        if pending_companion is None:
+            return None
+        ownership, columns = pending_companion
+        if self._lock_companion_owner(photo_id, ownership):
+            return columns
+        return None
 
     def _heal_changed_content(self, photo_id, item):
         """Content-change self-heal.

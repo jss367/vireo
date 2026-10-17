@@ -16,7 +16,7 @@ window.vireoSyncNumberedNavigation = function() {
   const paths = window.vireoNumberedNavigationPages().map(page => page ? page.href : '');
   // Serialize native updates so a slower earlier render cannot restore old bindings.
   nativeNavigationSync = nativeNavigationSync.then(() =>
-    window.__TAURI_INTERNALS__.invoke('sync_navigation_shortcuts', {paths})
+    window.__TAURI_INTERNALS__?.invoke('sync_navigation_shortcuts', {paths}).then(() => {})
   ).catch(error => console.warn('[nav] Could not sync native shortcuts', error));
   return nativeNavigationSync;
 };
@@ -35,15 +35,15 @@ window.openCommandPalette = function() {
   // state so the user keeps interacting with the dialog; dismissing the
   // dialog clears the inert state and the palette opens normally afterward.
   if (window.VireoDialog && window.VireoDialog.hasActive && window.VireoDialog.hasActive()) return;
-  const overlay = document.getElementById('commandPalette');
+  const overlay = /** @type {HTMLElement} */ (document.getElementById('commandPalette'));
   if (!overlay) return;
   overlay.removeAttribute('hidden');
-  const input = document.getElementById('cmdPaletteInput');
+  const input = /** @type {HTMLInputElement} */ (document.getElementById('cmdPaletteInput'));
   if (input) { input.value = ''; input.focus(); }
   if (window._cmdPaletteRender) window._cmdPaletteRender('');
 };
 window.closeCommandPalette = function() {
-  const overlay = document.getElementById('commandPalette');
+  const overlay = /** @type {HTMLElement} */ (document.getElementById('commandPalette'));
   if (overlay) overlay.setAttribute('hidden', '');
 };
 document.addEventListener('keydown', function(e) {
@@ -52,7 +52,7 @@ document.addEventListener('keydown', function(e) {
   // Keep the desktop's existing secondary navigation shortcuts available
   // when a menu item uses its single accelerator slot for a number.
   if (window.__TAURI_INTERNALS__ && mod && e.shiftKey && !e.altKey) {
-    const paths = {j: '/jobs', d: '/dashboard', w: '/workspace', l: '/logs'};
+    /** @type {Record<string,string>} */ const paths = {j: '/jobs', d: '/dashboard', w: '/workspace', l: '/logs'};
     const path = paths[e.key.toLowerCase()];
     if (path) {
       e.preventDefault();
@@ -66,7 +66,7 @@ document.addEventListener('keydown', function(e) {
     return;
   }
   if (e.key === 'Escape') {
-    const overlay = document.getElementById('commandPalette');
+    const overlay = /** @type {HTMLElement} */ (document.getElementById('commandPalette'));
     if (overlay && !overlay.hasAttribute('hidden')) {
       window.closeCommandPalette();
       return;
@@ -100,8 +100,8 @@ document.addEventListener('keydown', function(e) {
       const tabAnchor = document.querySelector('.nav-tab[data-nav-id="' + cur + '"]');
       if (tabAnchor) {
         e.preventDefault();
-        const closeBtn = tabAnchor.querySelector('.nav-tab-close');
-        if (closeBtn) closeBtn.click();
+        const closeBtn = /** @type {HTMLAnchorElement | null} */ (tabAnchor.querySelector('.nav-tab-close'));
+        if (closeBtn instanceof HTMLElement) closeBtn.click();
       }
     }
   }

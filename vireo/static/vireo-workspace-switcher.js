@@ -3,36 +3,39 @@
  */
 (function(root) {
   'use strict';
+  /** @param {unknown} str */
+  function wsEscapeHtml(str) {
+    if (str == null) return '';
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(String(str)));
+    return div.innerHTML;
+  }
+
+  /** @param {WorkspaceSwitcherOptions} options */
   function create(options) {
     var window = options.window || root;
     var document = window.document;
     /* ---------- Workspace switcher ---------- */
     var _wsDropdownOpen = false;
+    /** @type {number | null} */
     var _wsActiveId = null;
     var _wsMenuLoadGeneration = 0;
-    var outsideClickTimer = null;
+    var outsideClickTimer = /** @type {number | null} */ (null);
 
     function close() {
       _wsDropdownOpen = false;
       ++_wsMenuLoadGeneration;
-      var menu = document.getElementById('wsMenu');
+      var menu = /** @type {HTMLElement} */ (document.getElementById('wsMenu'));
       if (menu) menu.classList.remove('open');
       if (outsideClickTimer !== null) window.clearTimeout(outsideClickTimer);
       outsideClickTimer = null;
       document.removeEventListener('click', closeWsDropdownOutside);
     }
 
-    function wsEscapeHtml(str) {
-      if (str == null) return '';
-      var div = document.createElement('div');
-      div.appendChild(document.createTextNode(String(str)));
-      return div.innerHTML;
-    }
-
     async function loadCurrentName() {
       try {
-        var ws = await options.fetch('/api/workspaces/active?include_folders=0', {}, { toast: false });
-        var el = document.getElementById('wsCurrentName');
+        var ws = await /** @type {Promise<WorkspaceSummary>} */ (options.fetch('/api/workspaces/active?include_folders=0', {}, { toast: false }));
+        var el = /** @type {HTMLElement} */ (document.getElementById('wsCurrentName'));
         if (el && ws && ws.name) el.textContent = ws.name;
       } catch(e) {}
     }
@@ -43,7 +46,7 @@
         return;
       }
       _wsDropdownOpen = true;
-      var menu = document.getElementById('wsMenu');
+      var menu = /** @type {HTMLElement} */ (document.getElementById('wsMenu'));
       var loading = loadWorkspaceMenu();
       menu.classList.add('open');
       outsideClickTimer = window.setTimeout(function() {
@@ -53,13 +56,15 @@
       return loading;
     }
 
+    /** @param {MouseEvent} e */
     function closeWsDropdownOutside(e) {
-      var dd = document.getElementById('wsDropdown');
-      if (!dd.contains(e.target)) {
+      var dd = /** @type {HTMLElement} */ (document.getElementById('wsDropdown'));
+      if (!(e.target instanceof Node) || !dd.contains(e.target)) {
         close();
       }
     }
 
+    /** @param {WorkspaceSummary} ws @param {number | null} activeId */
     function renderWsItem(ws, activeId) {
       var isActive = ws.id === activeId;
       var isPinned = !!ws.pinned_at;
@@ -79,12 +84,12 @@
       div.onclick = function(e) {
         // Pin button clicks are handled separately and must not switch workspaces.
         // e.target can be a text node in some browsers; walk up to the nearest Element first.
-        var t = e.target;
-        if (t && t.nodeType !== 1) t = t.parentElement;
-        if (t && t.closest && t.closest('.ws-pin-btn')) return;
+        var t = e.target instanceof Node ? e.target : null;
+        if (t && !(t instanceof Element)) t = t.parentElement;
+        if (t instanceof Element && t.closest('.ws-pin-btn')) return;
         switchWorkspace(ws.id, ws.name);
       };
-      var pinBtn = div.querySelector('.ws-pin-btn');
+      var pinBtn = /** @type {HTMLButtonElement} */ (div.querySelector('.ws-pin-btn'));
       pinBtn.onclick = function(e) {
         e.stopPropagation();
         toggleWorkspacePin(ws.id, !isPinned);
@@ -92,11 +97,13 @@
       return div;
     }
 
+    /** @param {WorkspaceSummary[]} workspaces @param {number | null} activeId */
     function renderWorkspaceMenu(workspaces, activeId) {
-      var list = document.getElementById('wsMenuList');
+      var list = /** @type {HTMLElement} */ (document.getElementById('wsMenuList'));
       list.innerHTML = '';
       var pinned = workspaces.filter(function(w) { return !!w.pinned_at; });
       var unpinned = workspaces.filter(function(w) { return !w.pinned_at; });
+      /** @param {string} text */
       function addHeader(text) {
         var h = document.createElement('div');
         h.className = 'ws-menu-header';
@@ -123,14 +130,14 @@
 
       // Skip folder photo counts for navigation. Load identity in parallel so
       // the workspace names remain usable even if this request is delayed.
-      var activePromise = options.fetch('/api/workspaces/active?include_folders=0', {}, { toast: false })
+      var activePromise = (/** @type {Promise<WorkspaceSummary>} */ (options.fetch('/api/workspaces/active?include_folders=0', {}, { toast: false })))
         .catch(function(e) {
           console.error('Failed to load active workspace', e);
           return null;
         });
 
       try {
-        var workspaces = await options.fetch('/api/workspaces', {}, { toast: false });
+        var workspaces = await /** @type {Promise<WorkspaceSummary[]>} */ (options.fetch('/api/workspaces', {}, { toast: false }));
         if (generation !== _wsMenuLoadGeneration) return;
         renderWorkspaceMenu(workspaces, _wsActiveId);
 
@@ -145,6 +152,7 @@
       }
     }
 
+    /** @param {number} wsId @param {boolean} pinned */
     async function toggleWorkspacePin(wsId, pinned) {
       try {
         await options.fetch('/api/workspaces/' + wsId + '/pin', {
@@ -159,14 +167,15 @@
       }
     }
 
+    /** @param {number} wsId @param {string} wsName */
     async function switchWorkspace(wsId, wsName) {
       try {
-        var data = await options.fetch('/api/workspaces/' + wsId + '/activate', {
+        var data = await /** @type {Promise<{restore_path?: string}>} */ (options.fetch('/api/workspaces/' + wsId + '/activate', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ current_path: window.location.pathname })
-        });
-        document.getElementById('wsCurrentName').textContent = wsName;
+        }));
+        /** @type {HTMLElement} */ (document.getElementById('wsCurrentName')).textContent = wsName;
         close();
         // Flag that a workspace switch just happened (for drift check)
         window.sessionStorage.setItem('vireo_ws_switched', '1');
@@ -179,30 +188,30 @@
     /* ---------- Create Workspace modal ---------- */
     function showCreateWorkspaceModal() {
       close();
-      document.getElementById('newWsName').value = '';
-      document.getElementById('newWsError').style.display = 'none';
-      document.getElementById('createWsModal').classList.add('open');
-      document.getElementById('newWsName').focus();
+      /** @type {HTMLInputElement} */ (document.getElementById('newWsName')).value = '';
+      /** @type {HTMLElement} */ (document.getElementById('newWsError')).style.display = 'none';
+      /** @type {HTMLElement} */ (document.getElementById('createWsModal')).classList.add('open');
+      /** @type {HTMLInputElement} */ (document.getElementById('newWsName')).focus();
     }
 
     function hideCreateWsModal() {
-      document.getElementById('createWsModal').classList.remove('open');
+      /** @type {HTMLElement} */ (document.getElementById('createWsModal')).classList.remove('open');
     }
 
     async function createWorkspace() {
-      var name = document.getElementById('newWsName').value.trim();
+      var name = /** @type {HTMLInputElement} */ (document.getElementById('newWsName')).value.trim();
       if (!name) {
-        document.getElementById('newWsError').textContent = 'Name is required';
-        document.getElementById('newWsError').style.display = 'block';
+        /** @type {HTMLElement} */ (document.getElementById('newWsError')).textContent = 'Name is required';
+        /** @type {HTMLElement} */ (document.getElementById('newWsError')).style.display = 'block';
         return;
       }
 
       try {
-        var data = await options.fetch('/api/workspaces', {
+        var data = await /** @type {Promise<{id: number}>} */ (options.fetch('/api/workspaces', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ name: name })
-        }, { toast: false });
+        }, { toast: false }));
         hideCreateWsModal();
         // Activate the new workspace, then go straight to pipeline
         await options.fetch('/api/workspaces/' + data.id + '/activate', {
@@ -214,8 +223,8 @@
         options.clearWorkspaceCursors();
         options.navigate('/pipeline');
       } catch(e) {
-        document.getElementById('newWsError').textContent = e.message || 'Failed to create';
-        document.getElementById('newWsError').style.display = 'block';
+        /** @type {HTMLElement} */ (document.getElementById('newWsError')).textContent = (e instanceof Error ? e.message : '') || 'Failed to create';
+        /** @type {HTMLElement} */ (document.getElementById('newWsError')).style.display = 'block';
       }
     }
 

@@ -1,4 +1,5 @@
 /* Workspace deletion uses an in-page dialog in browsers and the desktop shell. */
+/** @param {number} wsId @param {string} name */
 async function deleteWorkspaceConfirm(wsId, name) {
   if (document.getElementById('workspaceDeleteDialog')) return;
   var dialog = document.createElement('dialog');
@@ -24,10 +25,11 @@ async function deleteWorkspaceConfirm(wsId, name) {
   document.body.appendChild(dialog);
   var previousFocus = document.activeElement;
   var accepted = await new Promise(function(resolve) {
+    /** @param {boolean} value */
     function finish(value) {
       dialog.close();
       dialog.remove();
-      if (previousFocus) previousFocus.focus();
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
       resolve(value);
     }
     cancel.onclick = function() { finish(false); };
@@ -38,7 +40,7 @@ async function deleteWorkspaceConfirm(wsId, name) {
   });
   if (!accepted) return;
   try {
-    var result = await safeFetch('/api/workspaces/' + wsId, {method: 'DELETE'});
+    var result = await /** @type {Promise<{cleanup_errors?: string[]}>} */ (safeFetch('/api/workspaces/' + wsId, {method: 'DELETE'}));
     if ((result.cleanup_errors || []).length) {
       showToast('Workspace deleted. Some saved result files could not be removed; Storage maintenance will retry. See Logs for paths.', 'warning');
     }

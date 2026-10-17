@@ -4,6 +4,7 @@ function rsyncInstallHint() {
     'Install GNU rsync and configure its executable under Settings → Paths.';
 }
 
+/** @param {Element} container @param {string[]} [commands] */
 function appendRsyncInstallCommands(container, commands) {
   (commands || []).forEach(function(command) {
     var row = document.createElement('div');
@@ -17,7 +18,7 @@ function appendRsyncInstallCommands(container, commands) {
     copy.setAttribute('aria-label', 'Copy ' + command);
     copy.onclick = async function() {
       try {
-        if (typeof isTauri === 'function' && isTauri()) {
+        if (typeof isTauri === 'function' && isTauri() && window.__TAURI_INTERNALS__) {
           await window.__TAURI_INTERNALS__.invoke('plugin:clipboard-manager|write_text', {text: command});
         } else {
           await navigator.clipboard.writeText(command);

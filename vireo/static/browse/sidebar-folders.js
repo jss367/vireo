@@ -21,7 +21,7 @@ function reconcileFolderLoadRenders() {
         // the destructive Remove action always targets the workspace the
         // user actually sees.
         if (state.workspaceId != null) browseWorkspaceId = state.workspaceId;
-        renderFolderTree(state.data);
+        state.data && renderFolderTree(state.data);
       }
       Object.keys(folderLoadStates).forEach(function(key) {
         if (Number(key) <= folderLoadGen) delete folderLoadStates[key];
@@ -32,7 +32,7 @@ function reconcileFolderLoadRenders() {
   }
 }
 
-async function loadFolders(opts) {
+async function loadFolders(/** @type {{shouldRender?: () => boolean}} */ opts = {}) {
   var myGen = ++folderLoadGen;
   folderLoadStates[myGen] = {
     status: 'pending',
@@ -76,13 +76,13 @@ async function loadFolders(opts) {
   }
 }
 
-function renderFolderTree(folders) {
+function renderFolderTree(/** @type {BrowseFolder[]} */ folders) {
   var rows = folders.slice();
-  var byParent = {};
+  var byParent = /** @type {Record<string, BrowseFolder[]>} */ ({});
   rows.forEach(function(f) {
     var pid = f.parent_id || 'root';
     if (!byParent[pid]) byParent[pid] = [];
-    byParent[pid].push(f);
+    byParent[pid]?.push(f);
   });
 
   // Ask folderLocalStatuses for any phantom top-level rows it had to
@@ -101,8 +101,8 @@ function renderFolderTree(folders) {
 
   // Single post-order pass: each subtree's rollup is computed once and cached.
   // (Per-node recomputation during render would be O(n^2) on deep trees.)
-  var rolledUp = {};
-  function computeRollup(f) {
+  var rolledUp = /** @type {Record<string, number>} */ ({});
+  function computeRollup(/** @type {BrowseFolder} */ f) {
     var total = f.photo_count || 0;
     (byParent[f.id] || []).forEach(function(c) { total += computeRollup(c); });
     rolledUp[f.id] = total;
@@ -112,11 +112,11 @@ function renderFolderTree(folders) {
   var localStatuses = statusResult.statuses;
   var archiveStatuses = pendingArchiveFolderStatuses();
 
-  function buildTree(parentId, depth) {
+  function buildTree(/** @type {number | string} */ parentId, /** @type {number} */ depth) {
     var children = byParent[parentId] || [];
     var html = '';
     children.forEach(function(f) {
-      var hasChildren = byParent[f.id] && byParent[f.id].length > 0;
+      var hasChildren = byParent[f.id] && (byParent[f.id]?.length || 0) > 0;
       var indent = '';
       for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
       var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
@@ -130,7 +130,7 @@ function renderFolderTree(folders) {
         // "12" for a date-templated import. The full path on hover is the
         // cheapest way to say which directory the row actually is.
         '<span class="folder-name"' + (f.path ? ' title="' + escapeAttr(f.path) + '"' : '') + '>' +
-          escapeHtml(f.name) + '</span>' +
+          escapeHtml(f.name || '') + '</span>' +
         '<span class="folder-local-status-slot">' + folderLocalStatusMarkup(localStatuses[f.id]) + '</span>' +
         '<span class="folder-archive-status-slot">' + folderLocalStatusMarkup(archiveStatuses[f.id]) + '</span>' +
         partialBadge +
@@ -143,19 +143,21 @@ function renderFolderTree(folders) {
     return html;
   }
 
-  document.getElementById('folderTree').innerHTML = buildTree('root', 0);
+  /** @type {HTMLElement} */ (document.getElementById('folderTree')).innerHTML = buildTree('root', 0);
 }
 
-function folderLocalStatuses(folders, byParent, options) {
+/** @overload @param {BrowseFolder[]} folders @param {Record<string, BrowseFolder[]>} byParent @param {{wantsSynthetic: true}} options @returns {BrowseFolderStatusResult} */
+/** @overload @param {BrowseFolder[]} folders @param {Record<string, BrowseFolder[]>} byParent @param {{wantsSynthetic?: false}} [options] @returns {Record<string, BrowseFolderStatus>} */
+function folderLocalStatuses(/** @type {BrowseFolder[]} */ folders, /** @type {Record<string, BrowseFolder[]>} */ byParent, /** @type {{wantsSynthetic?: boolean} | undefined} */ options) {
   var wantsSynthetic = !!(options && options.wantsSynthetic);
   var localData = window.vireoLocalFolderData;
   if (!localData || localData.legacy_workspace_session) {
     return wantsSynthetic ? {statuses: {}, synthetic: []} : {};
   }
 
-  var rowsById = {};
-  folders.forEach(function(folder) { rowsById[Number(folder.id)] = folder; });
-  var direct = {};
+  var rowsById = /** @type {Record<string, BrowseFolder>} */ ({});
+  folders.forEach(function(/** @type {BrowseFolder} */ folder) { rowsById[Number(folder.id)] = folder; });
+  var direct = /** @type {Record<string, BrowseFolderStatus>} */ ({});
   // Job payloads report their target as the local root_folder_id, but a
   // visible workspace folder may be covered by a shared ancestor whose
   // root_folder_id isn't itself in this workspace's tree. Map each covering
@@ -164,19 +166,19 @@ function folderLocalStatuses(folders, byParent, options) {
   // so job status can inherit whether the visible id is the covering root
   // itself (direct — spread through the subtree) or a fallback anchor
   // standing in for a hidden session (do not spread).
-  var visibleIdsByRoot = {};
-  var syntheticRoots = [];
-  var syntheticIds = {};
+  var visibleIdsByRoot = /** @type {Record<string, {visibleId: number, fallback: boolean}[]>} */ ({});
+  var syntheticRoots = /** @type {BrowseFolder[]} */ ([]);
+  var syntheticIds = /** @type {Record<string, boolean>} */ ({});
 
-  function recordMapping(rootId, visibleId, isFallback) {
+  function recordMapping(/** @type {number} */ rootId, /** @type {number} */ visibleId, /** @type {boolean} */ isFallback) {
     if (!rootId) return;
     if (!visibleIdsByRoot[rootId]) visibleIdsByRoot[rootId] = [];
     for (var i = 0; i < visibleIdsByRoot[rootId].length; i++) {
-      if (visibleIdsByRoot[rootId][i].visibleId === visibleId) {
+      if (visibleIdsByRoot[rootId][i]?.visibleId === visibleId) {
         // A direct match on this visible id trumps a fallback mapping: a
         // job on the covering root then propagates to the folder's own
         // subtree instead of stopping at the fallback anchor.
-        if (!isFallback) visibleIdsByRoot[rootId][i].fallback = false;
+        if (!isFallback) Object.assign(visibleIdsByRoot[rootId][i] || {}, {fallback: false});
         return;
       }
     }
@@ -227,7 +229,7 @@ function folderLocalStatuses(folders, byParent, options) {
           // photos, which mis-cues users toward discarding it (Codex review
           // r3792132683).
           var syntheticCount = Number(item.workspace_photo_count || 0);
-          var syntheticRow = {
+          var syntheticRow = {path: '',
             id: requestedId,
             parent_id: null,
             name: syntheticName,
@@ -269,20 +271,20 @@ function folderLocalStatuses(folders, byParent, options) {
   });
 
   (localData.jobs || []).forEach(function(job) {
-    var jobStatus = {
+    const jobStatus = /** @type {Record<string, [string, string]>} */ ({
       'work-locally-folder-stage': ['COPYING', 'Copying locally'],
       'work-locally-folder-sync': ['SYNCING', 'Syncing local changes to source storage'],
       'work-locally-folder-discard': ['REMOVING', 'Removing the local copy']
-    }[job.type];
+    })[job.type];
     if (!jobStatus) return;
     (job.folder_ids || []).forEach(function(rawId) {
       var id = Number(rawId);
-      var targets = [];
+      var targets = /** @type {{visibleId: number, fallback: boolean}[]} */ ([]);
       if (rowsById[id]) targets.push({visibleId: id, fallback: false});
       (visibleIdsByRoot[id] || []).forEach(function(mapping) {
         for (var ti = 0; ti < targets.length; ti++) {
-          if (targets[ti].visibleId === mapping.visibleId) {
-            if (!mapping.fallback) targets[ti].fallback = false;
+          if (targets[ti]?.visibleId === mapping.visibleId) {
+            if (!mapping.fallback) Object.assign(targets[ti] || {}, {fallback: false});
             return;
           }
         }
@@ -299,9 +301,9 @@ function folderLocalStatuses(folders, byParent, options) {
     });
   });
 
-  var result = {};
-  function markDescendants(folderId, status) {
-    result[folderId] = status;
+  var result = /** @type {Record<string, BrowseFolderStatus>} */ ({});
+  function markDescendants(/** @type {number} */ folderId, /** @type {BrowseFolderStatus | undefined} */ status) {
+    if (!status) return; result[folderId] = status;
     // Fallback anchors represent a hidden subtree that could not be
     // shown. Propagating the anchor's status through unrelated visible
     // siblings would mislabel healthy remote folders as LOCAL ISSUE /
@@ -318,7 +320,7 @@ function folderLocalStatuses(folders, byParent, options) {
   Object.keys(direct).forEach(function(rawId) {
     var current = rowsById[Number(rawId)];
     var parentId = current ? current.parent_id : null;
-    var seen = {};
+    var seen = /** @type {Record<string, boolean>} */ ({});
     while (parentId != null && !seen[parentId]) {
       seen[parentId] = true;
       if (!direct[parentId]) {
@@ -346,7 +348,7 @@ function pendingArchiveFolderStatuses() {
   // lives on the destination storage.
   var items = window.vireoPendingArchives;
   if (!Array.isArray(items)) return {};
-  var statuses = {};
+  var statuses = /** @type {Record<string, BrowseFolderStatus>} */ ({});
   items.forEach(function(item) {
     if (!item || !Array.isArray(item.folder_ids)) return;
     var sending = item.state === 'sending';
@@ -370,8 +372,8 @@ function pendingArchiveFolderStatuses() {
 
 function refreshPendingArchiveStatusIndicators() {
   var statuses = pendingArchiveFolderStatuses();
-  document.querySelectorAll('#folderTree .tree-item[data-folder-id]').forEach(function(row) {
-    var slot = row.querySelector('.folder-archive-status-slot');
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item[data-folder-id]')).forEach(function(row) {
+    var slot = /** @type {HTMLElement | null} */ (row.querySelector('.folder-archive-status-slot'));
     if (slot) slot.innerHTML = folderLocalStatusMarkup(statuses[Number(row.dataset.folderId)]);
   });
 }
@@ -380,7 +382,7 @@ window.addEventListener('vireo:pending-archives-changed', function() {
   refreshPendingArchiveStatusIndicators();
 });
 
-function folderLocalStatusMarkup(status) {
+function folderLocalStatusMarkup(/** @type {BrowseFolderStatus | undefined} */ status) {
   if (!status) return '';
   return '<span class="folder-local-status ' + status.kind + '" role="img"' +
     ' aria-label="' + escapeAttr(status.description) + '"' +
@@ -399,20 +401,20 @@ function refreshFolderLocalStatusIndicators() {
   var realFolders = browseFolderRows.filter(function(f) {
     return !f.__synthetic_missing_local;
   });
-  var byParent = {};
+  var byParent = /** @type {Record<string, BrowseFolder[]>} */ ({});
   realFolders.forEach(function(folder) {
     var parentId = folder.parent_id || 'root';
     if (!byParent[parentId]) byParent[parentId] = [];
-    byParent[parentId].push(folder);
+    byParent[parentId]?.push(folder);
   });
   var statusResult = folderLocalStatuses(
     realFolders, byParent, {wantsSynthetic: true}
   );
-  var neededPhantomIds = {};
+  var neededPhantomIds = /** @type {Record<string, boolean>} */ ({});
   (statusResult.synthetic || []).forEach(function(row) {
     neededPhantomIds[Number(row.id)] = true;
   });
-  var existingPhantomIds = {};
+  var existingPhantomIds = /** @type {Record<string, boolean>} */ ({});
   browseFolderRows.forEach(function(f) {
     if (f.__synthetic_missing_local) existingPhantomIds[Number(f.id)] = true;
   });
@@ -441,8 +443,8 @@ function refreshFolderLocalStatusIndicators() {
     return;
   }
   var statuses = statusResult.statuses;
-  document.querySelectorAll('#folderTree .tree-item[data-folder-id]').forEach(function(row) {
-    var slot = row.querySelector('.folder-local-status-slot');
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item[data-folder-id]')).forEach(function(row) {
+    var slot = /** @type {HTMLElement | null} */ (row.querySelector('.folder-local-status-slot'));
     if (slot) slot.innerHTML = folderLocalStatusMarkup(statuses[Number(row.dataset.folderId)]);
   });
 }
@@ -451,16 +453,16 @@ window.addEventListener('vireo:local-folder-status-changed', function() {
   refreshFolderLocalStatusIndicators();
 });
 
-function toggleTree(e, el) {
+function toggleTree(/** @type {Event} */ e, /** @type {HTMLElement} */ el) {
   e.stopPropagation();
-  var next = el.closest('.tree-item').nextElementSibling;
+  var next = /** @type {HTMLElement | null} */ (el.closest('.tree-item'))?.nextElementSibling;
   if (next && next.classList.contains('tree-children')) {
     next.classList.toggle('open');
     el.innerHTML = next.classList.contains('open') ? '&#9660;' : '&#9654;';
   }
 }
 
-function filterByFolder(folderId) {
+function filterByFolder(/** @type {number} */ folderId) {
   browseScopeGen++;
   if (activeFolderId === folderId) {
     activeFolderId = null;
@@ -494,8 +496,8 @@ function filterByFolder(folderId) {
   // bypasses VireoFilter, so clear it explicitly here.
   openedCollectionId = null;
   clearOfflineCollectionState();
-  document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
-    el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item')).forEach(function(el) {
+    el.classList.toggle('active', parseInt(el.dataset.folderId || '') === activeFolderId);
   });
   if (hadSidebarKeyword && window.VireoFilter && VireoFilter.isReady()) {
     if (VireoFilter.removeField('keyword', { reason: 'scopeChanged' })) return;

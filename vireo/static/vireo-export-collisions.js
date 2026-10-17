@@ -29,26 +29,33 @@
 var VireoExportCollisions = (function() {
   var DEBOUNCE_MS = 350;
   var VISIBLE_RENAMES = 5;
+  /** @type {number | null} */
   var timer = null;
   var checkGeneration = 0;
+  /** @type {string | null} */
   var shownSignature = null;
   // The request the notice describes (or is being checked for). Controls
   // that do not change names (quality, metadata) leave it unchanged, so
   // editing them neither re-checks nor flickers the notice.
+  /** @type {string | null} */
   var checkedKey = null;
   // The photos + destination the location line describes; null while it
   // is pending, failed, or blank.
+  /** @type {string | null} */
   var locationShownKey = null;
 
+  /** @param {string} id */
   function $(id) { return document.getElementById(id); }
   function overlay() { return $('exportOverlay'); }
   function notice() { return $('exportCollisionNotice'); }
   function locationLine() { return $('exportLocation'); }
 
+  /** @param {ExportPreflightRequest | null} body */
   function locationKey(body) {
     return body ? JSON.stringify([body.photo_ids, body.destination]) : null;
   }
 
+  /** @param {string} text */
   function setLocation(text) {
     var el = locationLine();
     if (!el) return;
@@ -56,6 +63,7 @@ var VireoExportCollisions = (function() {
     el.hidden = !text;
   }
 
+  /** @param {ExportPreflightResult | null} preflight @param {string | null} key */
   function renderLocation(preflight, key) {
     var folders = (preflight && preflight.destination_folders) || [];
     var count = (preflight && preflight.destination_folder_count) || 0;
@@ -73,6 +81,7 @@ var VireoExportCollisions = (function() {
     setLocation(text);
   }
 
+  /** @param {ExportPreflightResult} preflight */
   function signature(preflight) {
     return JSON.stringify([preflight.rename_count, preflight.renames || []]);
   }
@@ -86,6 +95,7 @@ var VireoExportCollisions = (function() {
   }
 
   // Wrap between the two names, not inside one, in the narrow summary column.
+  /** @param {string} name */
   function filenameSpan(name) {
     var span = document.createElement('span');
     span.className = 'export-collision-name';
@@ -93,6 +103,7 @@ var VireoExportCollisions = (function() {
     return span;
   }
 
+  /** @param {ExportPreflightResult} preflight */
   function render(preflight) {
     var el = notice();
     if (!el) return;
@@ -135,8 +146,10 @@ var VireoExportCollisions = (function() {
       : null;
   }
 
+  /** @param {ExportPreflightRequest} body @param {number} generation */
   async function check(body, generation) {
     timer = null;
+    /** @type {ExportPreflightResult} */
     var preflight;
     try {
       preflight = await safeFetch('/api/jobs/export/preflight', {
@@ -150,7 +163,7 @@ var VireoExportCollisions = (function() {
       // failure), but say why there is no location rather than leave it on
       // "checking".
       if (generation !== checkGeneration || !isOpen()) return;
-      setLocation('Location unavailable: ' + error.message);
+      setLocation('Location unavailable: ' + (error instanceof Error ? error.message : String(error)));
       return;
     }
     if (generation !== checkGeneration || !isOpen()) return;
@@ -172,7 +185,7 @@ var VireoExportCollisions = (function() {
   // result lands.
   function schedule() {
     if (!isOpen()) return;
-    var body = currentRequest();
+    const body = currentRequest();
     var key = body ? JSON.stringify(body) : null;
     if (key === checkedKey) return;
     checkedKey = key;
@@ -217,6 +230,7 @@ var VireoExportCollisions = (function() {
   }
 
   // Called with the submit-time preflight.
+  /** @param {ExportPreflightResult} preflight */
   function acknowledged(preflight) {
     cancelPending();
     renderLocation(preflight, locationKey(currentRequest()));
@@ -232,11 +246,12 @@ var VireoExportCollisions = (function() {
   }
 
   function init() {
-    if (!overlay()) return;
+    const container = overlay();
+    if (!container) return;
     ['input', 'change'].forEach(function(type) {
-      overlay().addEventListener(type, function(event) {
+      container.addEventListener(type, function(event) {
         var target = event.target;
-        if (!target || !target.matches || !target.matches('input, select, textarea')) return;
+        if (!(target instanceof Element) || !target.matches('input, select, textarea')) return;
         schedule();
       });
     });

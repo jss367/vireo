@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": ["../types/pages/export-presets.d.ts", "../vireo/static/vireo-export-presets.js"]
+}

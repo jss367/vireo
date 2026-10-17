@@ -3,6 +3,7 @@
 // decisions prompt, and changing the queue.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {RapidSession[]} sessions @param {string} key */
 function findSessionIndexByKeyIn(sessions, key) {
   for (var i = 0; i < sessions.length; i++) {
     if (sessionKey(sessions[i]) === key) return i;
@@ -10,6 +11,7 @@ function findSessionIndexByKeyIn(sessions, key) {
   return -1;
 }
 
+/** @param {string} key */
 function findSessionIndexByKey(key) {
   return findSessionIndexByKeyIn(rapid.sessions, key);
 }
@@ -25,25 +27,27 @@ function requestedSessionKey() {
   return encIdx + ':' + burstIdx;
 }
 
+/** @param {number} rawIndex */
 function findNextFilteredIndexAfterRaw(rawIndex) {
   for (var i = 0; i < rapid.sessions.length; i++) {
-    if (rapid.sessions[i].rawIndex > rawIndex) return i;
+    if (/** @type {RapidSession} */ (rapid.sessions[i]).rawIndex > rawIndex) return i;
   }
   return -1;
 }
 
+/** @param {number} rawIndex */
 function findNearestFilteredIndex(rawIndex) {
   var next = findNextFilteredIndexAfterRaw(rawIndex);
   if (next >= 0) return next;
   for (var i = rapid.sessions.length - 1; i >= 0; i--) {
-    if (rapid.sessions[i].rawIndex < rawIndex) return i;
+    if (/** @type {RapidSession} */ (rapid.sessions[i]).rawIndex < rawIndex) return i;
   }
   return -1;
 }
 
 function hasStagedChanges() {
   var session = rapid.sessions[rapid.sessionIndex];
-  var input = document.getElementById('speciesInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('speciesInput'));
   var currentSpecies = input ? (input.value || '').trim() : '';
   return rapid.history.length > 0 || (!!session && currentSpecies !== (session.species || ''));
 }
@@ -55,15 +59,15 @@ function findInitialSession() {
     if (requestedIdx >= 0) return requestedIdx;
   }
   for (var j = 0; j < rapid.sessions.length; j++) {
-    if (rapid.sessions[j].ids.length > 1) return j;
+    if (/** @type {RapidSession} */ (rapid.sessions[j]).ids.length > 1) return j;
   }
   return rapid.sessions.length ? 0 : -1;
 }
 
 function renderQueueControls() {
-  var select = document.getElementById('queueFilter');
-  var include = document.getElementById('includeRejectedToggle');
-  var multi = document.getElementById('multiOnlyToggle');
+  var select = /** @type {HTMLSelectElement} */ (document.getElementById('queueFilter'));
+  var include = /** @type {HTMLInputElement} */ (document.getElementById('includeRejectedToggle'));
+  var multi = /** @type {HTMLInputElement} */ (document.getElementById('multiOnlyToggle'));
   if (select) select.value = rapid.queue.filter;
   if (include) include.checked = rapid.queue.includeRejected;
   if (multi) multi.checked = rapid.queue.multiOnly;
@@ -74,12 +78,13 @@ function renderQueueControls() {
   if (rapid.sessionIndex >= 0 && count) {
     text += ' - ' + (rapid.sessionIndex + 1) + ' of ' + count;
   }
-  document.getElementById('queueCount').textContent = text;
+  /** @type {HTMLElement} */ (document.getElementById('queueCount')).textContent = text;
 }
 
+/** @returns {Promise<string|null>} */
 function promptStagedQueueChange() {
-  var prompt = document.getElementById('queuePrompt');
-  var applyBtn = prompt.querySelector('[data-queue-choice="apply"]');
+  var prompt = /** @type {HTMLElement} */ (document.getElementById('queuePrompt'));
+  var applyBtn = /** @type {HTMLButtonElement|null} */ (prompt.querySelector('[data-queue-choice="apply"]'));
   if (applyBtn) {
     var diff = rapidComputeApplyDiff();
     applyBtn.textContent = rapidApplyButtonText('Apply', diff);
@@ -92,21 +97,22 @@ function promptStagedQueueChange() {
 }
 
 function isQueuePromptOpen() {
-  var prompt = document.getElementById('queuePrompt');
+  var prompt = /** @type {HTMLElement} */ (document.getElementById('queuePrompt'));
   return !!(prompt && !prompt.hidden);
 }
 
 function bindQueuePromptChoices() {
-  document.getElementById('queuePrompt').addEventListener('click', function(e) {
-    var btn = e.target.closest('[data-queue-choice]');
+  /** @type {HTMLElement} */ (document.getElementById('queuePrompt')).addEventListener('click', function(e) {
+    var btn = /** @type {HTMLElement} */ (e.target).closest('[data-queue-choice]');
     if (!btn || !rapid.queuePromptResolve) return;
     var resolve = rapid.queuePromptResolve;
     rapid.queuePromptResolve = null;
-    document.getElementById('queuePrompt').hidden = true;
+    /** @type {HTMLElement} */ (document.getElementById('queuePrompt')).hidden = true;
     resolve(btn.getAttribute('data-queue-choice'));
   });
 }
 
+/** @param {Partial<RapidQueue>} patch */
 async function changeQueue(patch) {
   if (rapid.applying) {
     renderQueueControls();
@@ -136,6 +142,7 @@ async function changeQueue(patch) {
   else showEmptyQueue();
 }
 
+/** @param {number} index */
 function requestOpenSession(index) {
   openSession(index);
 }

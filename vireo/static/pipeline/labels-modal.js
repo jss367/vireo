@@ -1,15 +1,15 @@
 // The species-label download modal: place search, filters, and fetch.
 // Classic page script; load boot.js after all definitions.
 
-var pipelineSelectedPlaceId = null;
+/** @type {number | null} */ var pipelineSelectedPlaceId = null;
 var pipelineSelectedPlaceName = '';
-var pipelineLabelsSearchTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var pipelineLabelsSearchTimer = null;
 var pipelineLabelsSearchRequestId = 0;
 var pipelineLabelsFormLoaded = false;
-var pipelineLabelsEscHandler = null;
+/** @type {((event: KeyboardEvent) => void) | null} */ var pipelineLabelsEscHandler = null;
 
 function openPipelineLabelsModal() {
-  var modal = document.getElementById('pipelineLabelsModal');
+  var modal = /** @type {HTMLElement} */ (document.getElementById('pipelineLabelsModal'));
   if (!modal) return;
   modal.classList.add('open');
   resetPipelineLabelsStatus();
@@ -23,13 +23,13 @@ function openPipelineLabelsModal() {
   };
   document.addEventListener('keydown', pipelineLabelsEscHandler);
   setTimeout(function() {
-    var input = document.getElementById('pipelinePlaceSearch');
+    var input = /** @type {HTMLInputElement} */ (document.getElementById('pipelinePlaceSearch'));
     if (input) input.focus();
   }, 0);
 }
 
 function closePipelineLabelsModal() {
-  var modal = document.getElementById('pipelineLabelsModal');
+  var modal = /** @type {HTMLElement} */ (document.getElementById('pipelineLabelsModal'));
   if (modal) modal.classList.remove('open');
   if (pipelineLabelsEscHandler) {
     document.removeEventListener('keydown', pipelineLabelsEscHandler);
@@ -38,10 +38,10 @@ function closePipelineLabelsModal() {
 }
 
 function resetPipelineLabelsStatus() {
-  var status = document.getElementById('pipelineFetchLabelsStatus');
-  var progress = document.getElementById('pipelineFetchLabelsProgress');
-  var fill = document.getElementById('pipelineFetchLabelsFill');
-  var btn = document.getElementById('pipelineFetchLabelsBtn');
+  var status = /** @type {HTMLElement} */ (document.getElementById('pipelineFetchLabelsStatus'));
+  var progress = /** @type {HTMLElement} */ (document.getElementById('pipelineFetchLabelsProgress'));
+  var fill = /** @type {HTMLElement} */ (document.getElementById('pipelineFetchLabelsFill'));
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineFetchLabelsBtn'));
   if (status) {
     status.textContent = '';
     status.style.color = 'var(--text-dim)';
@@ -52,7 +52,7 @@ function resetPipelineLabelsStatus() {
 }
 
 async function loadPipelineTaxonGroups() {
-  var box = document.getElementById('pipelineTaxonCheckboxes');
+  var box = /** @type {HTMLElement} */ (document.getElementById('pipelineTaxonCheckboxes'));
   if (!box) return;
   box.textContent = 'Loading...';
   try {
@@ -77,7 +77,7 @@ async function loadPipelineTaxonGroups() {
 }
 
 async function loadPipelineObservationFilters() {
-  var box = document.getElementById('pipelineObservationFilterRadios');
+  var box = /** @type {HTMLElement} */ (document.getElementById('pipelineObservationFilterRadios'));
   if (!box) return;
   box.textContent = 'Loading...';
   try {
@@ -109,8 +109,8 @@ function searchPipelinePlacesDebounced() {
   if (pipelineSelectedPlaceId) {
     pipelineSelectedPlaceId = null;
     pipelineSelectedPlaceName = '';
-    var btn = document.getElementById('pipelineFetchLabelsBtn');
-    var input = document.getElementById('pipelinePlaceSearch');
+    var btn = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineFetchLabelsBtn'));
+    var input = /** @type {HTMLInputElement} */ (document.getElementById('pipelinePlaceSearch'));
     if (btn) btn.disabled = true;
     if (input) input.style.borderColor = 'var(--border-secondary)';
   }
@@ -120,8 +120,8 @@ function searchPipelinePlacesDebounced() {
 }
 
 async function searchPipelinePlaces() {
-  var input = document.getElementById('pipelinePlaceSearch');
-  var dropdown = document.getElementById('pipelinePlaceDropdown');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('pipelinePlaceSearch'));
+  var dropdown = /** @type {HTMLElement} */ (document.getElementById('pipelinePlaceDropdown'));
   if (!input || !dropdown) return;
   var q = input.value.trim();
   if (q.length < 2) {
@@ -130,7 +130,7 @@ async function searchPipelinePlaces() {
   }
   var requestId = ++pipelineLabelsSearchRequestId;
   try {
-    var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
+    /** @type {{id: number; display_name?: string; name?: string}[]} */ var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
     if (
       requestId !== pipelineLabelsSearchRequestId ||
       input.value.trim() !== q
@@ -166,12 +166,13 @@ async function searchPipelinePlaces() {
   }
 }
 
+/** @param {number} id @param {string} name */
 function selectPipelinePlace(id, name) {
-  pipelineSelectedPlaceId = parseInt(id, 10);
+  pipelineSelectedPlaceId = Number(id);
   pipelineSelectedPlaceName = name;
-  var dropdown = document.getElementById('pipelinePlaceDropdown');
-  var input = document.getElementById('pipelinePlaceSearch');
-  var btn = document.getElementById('pipelineFetchLabelsBtn');
+  var dropdown = /** @type {HTMLElement} */ (document.getElementById('pipelinePlaceDropdown'));
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('pipelinePlaceSearch'));
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineFetchLabelsBtn'));
   if (dropdown) dropdown.textContent = '';
   if (input) {
     input.value = name;
@@ -181,6 +182,7 @@ function selectPipelinePlace(id, name) {
   resetPipelineLabelsStatus();
 }
 
+/** @param {PipelinePrecompute} precompute */
 async function startPipelineLabelEmbeddingPrecompute(precompute) {
   if (!precompute || !precompute.model_id || !precompute.labels_file) return;
   var modelName = precompute.model_name || 'active model';
@@ -215,12 +217,12 @@ async function startPipelineLabelEmbeddingPrecompute(precompute) {
 
 async function fetchPipelineLabels() {
   if (!pipelineSelectedPlaceId) return;
-  var groups = [];
-  document.querySelectorAll('.pipeline-taxon-cb:checked').forEach(function(cb) {
+  /** @type {string[]} */ var groups = [];
+  /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.pipeline-taxon-cb:checked')).forEach(function(cb) {
     groups.push(cb.value);
   });
   if (groups.length === 0) {
-    var noGroupsStatus = document.getElementById('pipelineFetchLabelsStatus');
+    var noGroupsStatus = /** @type {HTMLElement} */ (document.getElementById('pipelineFetchLabelsStatus'));
     if (noGroupsStatus) {
       noGroupsStatus.textContent = 'Select at least one taxon group.';
       noGroupsStatus.style.color = 'var(--danger)';
@@ -228,10 +230,10 @@ async function fetchPipelineLabels() {
     return;
   }
 
-  var btn = document.getElementById('pipelineFetchLabelsBtn');
-  var status = document.getElementById('pipelineFetchLabelsStatus');
-  var progress = document.getElementById('pipelineFetchLabelsProgress');
-  var fill = document.getElementById('pipelineFetchLabelsFill');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineFetchLabelsBtn'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('pipelineFetchLabelsStatus'));
+  var progress = /** @type {HTMLElement} */ (document.getElementById('pipelineFetchLabelsProgress'));
+  var fill = /** @type {HTMLElement} */ (document.getElementById('pipelineFetchLabelsFill'));
   if (btn) btn.disabled = true;
   if (status) {
     status.textContent = 'Starting download...';
@@ -248,7 +250,7 @@ async function fetchPipelineLabels() {
         place_id: pipelineSelectedPlaceId,
         place_name: pipelineSelectedPlaceName,
         taxon_groups: groups,
-        observation_filter: (document.querySelector('input[name="pipeline-obs-filter"]:checked') || {}).value || 'research',
+        observation_filter: (/** @type {HTMLInputElement | null} */ (document.querySelector('input[name="pipeline-obs-filter"]:checked')) || {}).value || 'research',
       }),
     }, { toast: false });
     if (status) status.textContent = 'Fetching species...';
@@ -279,7 +281,7 @@ async function fetchPipelineLabels() {
           }, { toast: false }).catch(function(e) {
             saveSelectionFailed = true;
             if (status) {
-              status.textContent = 'Downloaded, but could not save the active label selection: ' + (e.message || e);
+              status.textContent = 'Downloaded, but could not save the active label selection: ' + (e instanceof Error ? e.message : e);
               status.style.color = 'var(--warning)';
             }
           }).then(function() {
@@ -309,18 +311,19 @@ async function fetchPipelineLabels() {
     });
   } catch(e) {
     if (status) {
-      status.textContent = 'Error: ' + (e.message || e);
+      status.textContent = 'Error: ' + (e instanceof Error ? e.message : e);
       status.style.color = 'var(--danger)';
     }
     if (btn) btn.disabled = !pipelineSelectedPlaceId;
   }
 }
 
+/** @param {{selectFiles?: string[]}} [options] */
 async function loadLabels(options) {
   try {
     options = options || {};
     var data = await safeFetch('/api/labels', {}, { toast: false });
-    var div = document.getElementById('labelsPicker');
+    var div = /** @type {HTMLElement} */ (document.getElementById('labelsPicker'));
     var active = data.active || [];
     var activePaths = new Set(
       options.selectFiles || active.map(function(a) { return a.labels_file; })

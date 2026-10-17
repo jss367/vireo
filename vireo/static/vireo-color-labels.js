@@ -4,20 +4,27 @@
 
   const COLORS = ['red', 'yellow', 'green', 'blue', 'purple'];
   const MAX_LENGTH = 120;
+  /** @type {Record<string, unknown>} */
   let descriptions = {};
   let loaded = false;
+  /** @type {Promise<Record<string, unknown>> | null} */
   let loadPromise = null;
+  /** @type {string | null} */
   let editingColor = null;
+  /** @type {number | null} */
   let escToken = null;
 
+  /** @param {string} color */
   function colorName(color) {
     return color.charAt(0).toUpperCase() + color.slice(1);
   }
 
+  /** @param {string} color */
   function isValid(color) {
     return COLORS.includes(color);
   }
 
+  /** @param {string} url @param {RequestInit} [options] @returns {Promise<Record<string, unknown>>} */
   function request(url, options) {
     if (window.Vireo && window.Vireo.api) {
       return window.Vireo.api.json(url, options, { toast: false });
@@ -44,10 +51,13 @@
     return loadPromise;
   }
 
+  /** @param {string} color @returns {string} */
   function description(color) {
-    return typeof descriptions[color] === 'string' ? descriptions[color] : '';
+    const value = descriptions[color];
+    return typeof value === 'string' ? value : '';
   }
 
+  /** @param {string} color @param {string} [baseTitle] */
   function title(color, baseTitle) {
     const base = baseTitle || (colorName(color) + ' label');
     const text = description(color);
@@ -56,9 +66,10 @@
       : base + ' · Right-click to add a description';
   }
 
+  /** @param {HTMLElement} element */
   function refreshControl(element) {
     const color = element.dataset.color;
-    if (!COLORS.includes(color)) return;
+    if (!color || !COLORS.includes(color)) return;
     if (!element.dataset.colorLabelBaseTitle) {
       element.dataset.colorLabelBaseTitle = element.title || (colorName(color) + ' label');
     }
@@ -74,30 +85,34 @@
     );
   }
 
+  /** @param {ParentNode} [root] */
   function refreshControls(root) {
     const scope = root || document;
-    scope.querySelectorAll('[data-color-label-control][data-color]').forEach(refreshControl);
+    scope.querySelectorAll('[data-color-label-control][data-color]').forEach(function(element) {
+      if (element instanceof HTMLElement) refreshControl(element);
+    });
   }
 
+  /** @param {string} color */
   async function openEditor(color) {
-    if (!COLORS.includes(color)) return;
+    if (!color || !COLORS.includes(color)) return;
     if (typeof window.closeContextMenu === 'function') window.closeContextMenu();
     try {
       await ensureLoaded();
     } catch (error) {
       if (typeof window.showToast === 'function') {
-        window.showToast(error.message || 'Could not load color label descriptions', 'error');
+        window.showToast((error instanceof Error ? error.message : '') || 'Could not load color label descriptions', 'error');
       }
       return;
     }
 
     editingColor = color;
-    const modal = document.getElementById('colorLabelDescriptionModal');
-    const input = document.getElementById('colorLabelDescriptionInput');
-    const error = document.getElementById('colorLabelDescriptionError');
-    document.getElementById('colorLabelDescriptionHeading').textContent =
+    const modal = /** @type {HTMLElement} */ (document.getElementById('colorLabelDescriptionModal'));
+    const input = /** @type {HTMLInputElement} */ (document.getElementById('colorLabelDescriptionInput'));
+    const error = /** @type {HTMLElement} */ (document.getElementById('colorLabelDescriptionError'));
+    /** @type {HTMLElement} */ (document.getElementById('colorLabelDescriptionHeading')).textContent =
       colorName(color) + ' label description';
-    document.getElementById('colorLabelDescriptionSwatch').dataset.color = color;
+    /** @type {HTMLElement} */ (document.getElementById('colorLabelDescriptionSwatch')).dataset.color = color;
     input.value = description(color);
     error.style.display = 'none';
     error.textContent = '';
@@ -111,7 +126,7 @@
   }
 
   function closeEditor() {
-    const modal = document.getElementById('colorLabelDescriptionModal');
+    const modal = /** @type {HTMLElement} */ (document.getElementById('colorLabelDescriptionModal'));
     if (modal) modal.classList.remove('open');
     if (escToken !== null && window.Keymap) window.Keymap.popEsc(escToken);
     escToken = null;
@@ -119,17 +134,17 @@
   }
 
   function updateCount() {
-    const input = document.getElementById('colorLabelDescriptionInput');
-    const counter = document.getElementById('colorLabelDescriptionCount');
+    const input = /** @type {HTMLInputElement} */ (document.getElementById('colorLabelDescriptionInput'));
+    const counter = /** @type {HTMLElement} */ (document.getElementById('colorLabelDescriptionCount'));
     if (input && counter) counter.textContent = input.value.length + ' / ' + MAX_LENGTH;
   }
 
   async function saveEditor() {
     if (!editingColor) return;
     const color = editingColor;
-    const input = document.getElementById('colorLabelDescriptionInput');
-    const button = document.getElementById('colorLabelDescriptionSave');
-    const error = document.getElementById('colorLabelDescriptionError');
+    const input = /** @type {HTMLInputElement} */ (document.getElementById('colorLabelDescriptionInput'));
+    const button = /** @type {HTMLButtonElement} */ (document.getElementById('colorLabelDescriptionSave'));
+    const error = /** @type {HTMLElement} */ (document.getElementById('colorLabelDescriptionError'));
     button.disabled = true;
     error.style.display = 'none';
     try {
@@ -151,7 +166,7 @@
         );
       }
     } catch (requestError) {
-      error.textContent = requestError.message || 'Could not save the description';
+      error.textContent = (requestError instanceof Error ? requestError.message : '') || 'Could not save the description';
       error.style.display = 'block';
     } finally {
       button.disabled = false;
@@ -170,15 +185,15 @@
   };
 
   document.addEventListener('contextmenu', function (event) {
-    const control = event.target.closest('[data-color-label-control][data-color]');
-    if (!control || !COLORS.includes(control.dataset.color)) return;
+    const control = event.target instanceof Element ? event.target.closest('[data-color-label-control][data-color]') : null;
+    if (!(control instanceof HTMLElement) || !control.dataset.color || !COLORS.includes(control.dataset.color)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     openEditor(control.dataset.color);
   }, true);
 
   document.addEventListener('DOMContentLoaded', function () {
-    const input = document.getElementById('colorLabelDescriptionInput');
+    const input = /** @type {HTMLInputElement} */ (document.getElementById('colorLabelDescriptionInput'));
     if (input) {
       input.addEventListener('input', updateCount);
       input.addEventListener('keydown', function (event) {

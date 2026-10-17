@@ -19,7 +19,7 @@ function parseSource() {
   return null;
 }
 
-function collectionOptionLabel(collection) {
+/** @param {LocationCollection} collection */ function collectionOptionLabel(collection) {
   var count = collection.available_photo_count != null
     ? collection.available_photo_count
     : collection.photo_count;
@@ -30,11 +30,11 @@ function collectionOptionLabel(collection) {
 }
 
 async function loadCollectionChoices() {
-  var select = document.getElementById('locationReviewCollection');
+  var select = /** @type {HTMLSelectElement} */ (document.getElementById('locationReviewCollection'));
   try {
     state.collections = await safeFetch('/api/collections', {}, {toast: false});
   } catch (e) {
-    select.options[0].textContent = 'Collections unavailable';
+    var option = select.options[0]; if (option) option.textContent = 'Collections unavailable';
     throw e;
   }
 
@@ -69,33 +69,33 @@ async function loadCollectionChoices() {
   }
 }
 
-function changeReviewSource(source) {
+/** @param {LocationSource|null} source */ function changeReviewSource(source) {
   if (state.isAssigning || hasPartialAssignmentProgress()) return;
   if (!source) {
-    document.getElementById('locationReviewMode').value = state.mode;
-    document.getElementById('locationReviewGap').value = String(state.gapMinutes);
+    /** @type {HTMLSelectElement} */ (document.getElementById('locationReviewMode')).value = state.mode;
+    /** @type {HTMLSelectElement} */ (document.getElementById('locationReviewGap')).value = String(state.gapMinutes);
     showToast('Choose a collection or All available photos before changing review options.', 'error');
     return;
   }
   var params = new URLSearchParams();
-  if (source && source.collection_id != null) params.set('collection_id', source.collection_id);
+  if (source && source.collection_id != null) params.set('collection_id', String(source.collection_id));
   else if (source && source.photo_ids) params.set('source', 'selection');
   else params.set('scope', 'all');
-  if (document.getElementById('locationReviewMode').value === 'time') {
+  if (/** @type {HTMLSelectElement} */ (document.getElementById('locationReviewMode')).value === 'time') {
     params.set('mode', 'time');
-    params.set('gap_minutes', document.getElementById('locationReviewGap').value);
+    params.set('gap_minutes', /** @type {HTMLSelectElement} */ (document.getElementById('locationReviewGap')).value);
   }
-  if (document.getElementById('locationReviewMode').value === 'discrepancies') {
-    var distance = document.getElementById('locationReviewDistance');
+  if (/** @type {HTMLSelectElement} */ (document.getElementById('locationReviewMode')).value === 'discrepancies') {
+    var distance = /** @type {HTMLInputElement} */ (document.getElementById('locationReviewDistance'));
     if (!distance.reportValidity()) return;
     params.set('mode', 'discrepancies');
     params.set('minimum_distance_m', distance.value);
-    params.set('include_reviewed', document.getElementById('locationReviewIncludeKept').checked);
+    params.set('include_reviewed', String(/** @type {HTMLInputElement} */ (document.getElementById('locationReviewIncludeKept')).checked));
   }
   window.location.href = '/locations/review?' + params.toString();
 }
 
-function dropPhotoFromSelectionSource(photoId) {
+/** @param {number} photoId */ function dropPhotoFromSelectionSource(photoId) {
   if (!state.source || !Array.isArray(state.source.photo_ids)) return;
   if (state.source.photo_ids.indexOf(photoId) === -1) return;
   state.source.photo_ids = state.source.photo_ids.filter(function(id) {

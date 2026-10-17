@@ -3,7 +3,7 @@
 // Classic page script; load boot.js after all definitions.
 
 function render() {
-  var root = document.getElementById('missesRoot');
+  var root = /** @type {HTMLElement} */ (document.getElementById('missesRoot'));
   var total = missesData.no_subject.length + missesData.clipped.length + missesData.oof.length;
   if (total === 0) {
     root.innerHTML =
@@ -36,11 +36,11 @@ function render() {
   updateSelectionBar();
 }
 
-function renderSection(cat, photos) {
+/** @param {MissCategory} cat @param {MissPhoto[]} photos */ function renderSection(cat, photos) {
   var count = photos.length;
   var label = CATEGORY_LABELS[cat];
   var sectionId = 'missesSection-' + cat;
-  var bodyHtml;
+  var bodyHtml = '';
   if (count === 0) {
     bodyHtml = '<div class="misses-empty">No photos in this category.</div>';
   } else {
@@ -73,7 +73,7 @@ function renderSection(cat, photos) {
   );
 }
 
-function renderCard(cat, p, idx) {
+/** @param {MissCategory} cat @param {MissPhoto} p @param {number} idx */ function renderCard(cat, p, idx) {
   var bbox = parseDetectionBox(p.detection_box);
   var bboxHtml = '';
   if (!bbox && cat === 'no_subject') {
@@ -136,8 +136,8 @@ function renderCard(cat, p, idx) {
 }
 
 /* ---------- Section collapse ---------- */
-function toggleSection(cat, e) {
-  if (e && e.target && e.target.closest('button')) return;
+/** @param {MissCategory} cat @param {MouseEvent=} e */ function toggleSection(cat, e) {
+  if (e && e.target instanceof Element && e.target.closest('button')) return;
   var sec = document.getElementById('missesSection-' + cat);
   if (sec) sec.classList.toggle('collapsed');
 }

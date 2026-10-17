@@ -1,19 +1,19 @@
 // The remembered crop ratio, its revisions, and cross-tab sync via localStorage.
 // Classic page script; load boot.js after all definitions.
 
-var cropRatioPreference = {enabled: false, aspect: null};
-var cropRatioSave = Promise.resolve();
+/** @type {EditorCropRatio} */ var cropRatioPreference = {enabled: false, aspect: null};
+/** @type {Promise<unknown>} */ var cropRatioSave = Promise.resolve();
 
 var COMMITTED_CROP_RATIO_KEY = 'vireo_committed_crop_ratio';
 var MAX_CROP_RATIO_REVISION = Number.MAX_SAFE_INTEGER;
 
-function isValidCropRatioPreference(value) {
-  return value && typeof value.enabled === 'boolean' &&
-    Number.isSafeInteger(value.revision) && value.revision > 0 &&
-    (value.aspect === null || (Number.isFinite(value.aspect) && value.aspect > 0));
+/** @param {unknown} value @returns {value is EditorPendingCropRatio} */ function isValidCropRatioPreference(value) {
+  return !!value && typeof value === 'object' && 'enabled' in value && typeof value.enabled === 'boolean' &&
+    'revision' in value && typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision > 0 &&
+    'aspect' in value && (value.aspect === null || (typeof value.aspect === 'number' && Number.isFinite(value.aspect) && value.aspect > 0));
 }
 
-function cropRatioRevisionAtCeiling(revision) {
+/** @param {number|undefined} revision */ function cropRatioRevisionAtCeiling(revision) {
   // The server accepts a lower rollover write once the stored counter reaches
   // the safe-integer ceiling; the client's monotonic guards must match, or a
   // stale cached snapshot outranks the freshly saved rollover value and
@@ -22,13 +22,13 @@ function cropRatioRevisionAtCeiling(revision) {
 }
 
 function pendingCropRatioRecords() {
-  var records = [];
+  /** @type {{key:string;preference:EditorPendingCropRatio}[]} */ var records = [];
   try {
     Object.keys(localStorage).filter(function(key) {
       return key.indexOf('vireo_pending_crop_ratio:') === 0;
     }).forEach(function(key) {
       try {
-        var pending = JSON.parse(VireoViewPreferences.read(key));
+        var pending = JSON.parse(VireoViewPreferences.read(key) || 'null');
         if (isValidCropRatioPreference(pending)) {
           records.push({key: key, preference: pending});
         }
@@ -47,13 +47,13 @@ function readCommittedCropRatioPreference() {
   } catch (_) { return null; }
 }
 
-function writeCommittedCropRatioPreference(preference) {
+/** @param {EditorCropRatio} preference */ function writeCommittedCropRatioPreference(preference) {
   if (!isValidCropRatioPreference(preference)) return;
   var existing = readCommittedCropRatioPreference();
   // Once the cached revision reaches the ceiling, any subsequent write is a
   // rollover the server has already accepted; the previous snapshot is stale
   // regardless of its numeric revision, so replace it.
-  if (existing && existing.revision >= preference.revision &&
+  if (existing && existing.revision >= (preference.revision || 0) &&
       !cropRatioRevisionAtCeiling(existing.revision)) return;
   try {
     VireoViewPreferences.write(COMMITTED_CROP_RATIO_KEY, JSON.stringify({
@@ -85,10 +85,10 @@ function adoptCommittedCropRatioPreference() {
 function pendingCropRatioPreference() {
   return pendingCropRatioRecords().reduce(function(latest, record) {
     return !latest || record.preference.revision > latest.revision ? record.preference : latest;
-  }, null);
+  }, /** @type {EditorPendingCropRatio|null} */ (null));
 }
 
-function acknowledgeCropRatioPreference(revision) {
+/** @param {number} revision */ function acknowledgeCropRatioPreference(revision) {
   // Each write owns an immutable key. Another tab can add a newer record
   // between this read and removal without having its pending value erased.
   pendingCropRatioRecords().forEach(function(record) {
@@ -98,15 +98,15 @@ function acknowledgeCropRatioPreference(revision) {
   });
 }
 
-function saveCropRatioPreference(preference) {
+/** @param {EditorCropRatio} preference */ function saveCropRatioPreference(preference) {
   // Issue every write before teardown can discard JavaScript callbacks.
   // The server compares revisions so a slow older request cannot win.
-  var request = safeFetch('/api/editor/crop-ratio', {
+  /** @type {Promise<EditorPendingCropRatio>} */ var response = safeFetch('/api/editor/crop-ratio', {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(preference),
     keepalive: true,
-  }, {toast: false}).then(function(saved) {
+  }, {toast: false}); var request = response.then(function(saved) {
     // Another tab may have won with a newer (or tied) revision. Adopt the
     // persisted preference for future photos without recropping this one.
     if (saved.revision >= (cropRatioPreference.revision || 0)) {
@@ -123,7 +123,7 @@ function saveCropRatioPreference(preference) {
   cropRatioSave = Promise.all([cropRatioSave, request]);
 }
 
-function nextCropRatioRevision(previous) {
+/** @param {number|undefined} previous */ function nextCropRatioRevision(previous) {
   // A previous revision at Number.MAX_SAFE_INTEGER has no safe successor.
   // Fall back to Date.now() so future writes stay within safe-integer
   // range; the server accepts this rollover instead of rejecting it as
@@ -142,7 +142,7 @@ function nextCropRatioRevision(previous) {
   return Number.isSafeInteger(next) ? next : candidate;
 }
 
-function rememberCropRatio(force) {
+/** @param {boolean=} force */ function rememberCropRatio(force) {
   if (!cropRatioPreference.enabled && !force) return;
   cropRatioPreference.aspect = cropRatioPreference.enabled ? editorState.cropAspect : null;
   cropRatioPreference.revision = nextCropRatioRevision(cropRatioPreference.revision);
@@ -155,7 +155,7 @@ function rememberCropRatio(force) {
   saveCropRatioPreference(cropRatioPreference);
 }
 
-function setRememberCropRatio(enabled) {
+/** @param {boolean} enabled */ function setRememberCropRatio(enabled) {
   cropRatioPreference.enabled = enabled;
   rememberCropRatio(true);
 }

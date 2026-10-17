@@ -1,7 +1,7 @@
 // Import Retry and Resume: in-flight retries, takeovers, and the retry body.
 // Classic page script; load boot.js after all definitions.
 
-function canRestartInPlace(job) {
+/** @param {JobsRow} job */ function canRestartInPlace(job) {
   if (!job || job.type !== 'import-in-place' ||
       ['failed', 'cancelled'].indexOf(job.status) < 0) return false;
   var cfg = jobConfig(job);
@@ -9,7 +9,7 @@ function canRestartInPlace(job) {
     (Array.isArray(cfg.sources) && cfg.sources.length > 0);
 }
 
-function inPlaceRestartJobId(job) {
+/** @param {JobsRow} job */ function inPlaceRestartJobId(job) {
   var local = inPlaceRestarts[job.id];
   if (local && local.jobId) return local.jobId;
   var child = activeJobs.concat(historyJobs).find(function(candidate) {
@@ -30,7 +30,7 @@ function inPlaceRestartJobId(job) {
 // folders). Matches either field so a retry-of-retry — whose direct
 // ``parent_import_job_id`` points at the first retry, not the
 // original failed import — still blocks the original's Retry button.
-function hasActiveRetryFor(parentId) {
+/** @param {string} parentId */ function hasActiveRetryFor(parentId) {
   if (!parentId) return false;
   if (pendingImportRetries[parentId]) return true;
   return activeJobs.some(function(candidate) {
@@ -50,7 +50,7 @@ function hasActiveRetryFor(parentId) {
 // (``photo_ids``, even if empty): a resume must carry those into the
 // after-import processing, and an older interrupted row without the
 // list would silently leave them unprocessed.
-function isResumableImport(job, rows) {
+/** @param {JobsRow} job @param {JobsRow[]} rows */ function isResumableImport(job, rows) {
   var result = job && job.result;
   if (!(job && job.type === 'import' && job.status === 'failed' &&
       result && result.interrupted && Array.isArray(result.photo_ids))) {
@@ -75,11 +75,11 @@ function isResumableImport(job, rows) {
   return true;
 }
 
-function hasFailedImportFiles(result) {
+/** @param {JobsResult | null | undefined} result */ function hasFailedImportFiles(result) {
   return !!result && typeof result.failed === 'number' && result.failed > 0;
 }
 
-function importChainProcessJobIds(config, result, rows, jobId, inferLegacy) {
+/** @param {JobsConfig} config @param {JobsResult} result @param {JobsRow[]} rows @param {string} jobId @param {boolean=} inferLegacy */ function importChainProcessJobIds(config, result, rows, jobId, inferLegacy) {
   var byId = new Map((rows || []).filter(function(row) {
     return row.type === 'import';
   }).map(function(row) { return [row.id, row]; }));
@@ -94,7 +94,7 @@ function importChainProcessJobIds(config, result, rows, jobId, inferLegacy) {
       byId.forEach(function(row, id) {
         if (id === jobId || found.has(id) || (cutoff && (row.started_at || '') > cutoff)) return;
         var cfg = jobConfig(row);
-        if (found.has(cfg.parent_import_job_id) || cfg.root_import_job_id === scopeRoot) {
+        if (found.has(cfg.parent_import_job_id || '') || cfg.root_import_job_id === scopeRoot) {
           found.add(id);
           changed = true;
         }
@@ -115,13 +115,13 @@ function importChainProcessJobIds(config, result, rows, jobId, inferLegacy) {
     var parentId = config.parent_import_job_id;
     if (!parentId || seen.has(parentId) || !byId.has(parentId)) return [];
     seen.add(parentId);
-    var row = byId.get(parentId);
+    var row = byId.get(parentId); if (!row) return [];
     config = jobConfig(row);
     result = row.result || {};
   }
 }
 
-function importChainProcessJobGroups(config, result, rows, jobId) {
+/** @param {JobsConfig} config @param {JobsResult} result @param {JobsRow[]} rows @param {string} jobId */ function importChainProcessJobGroups(config, result, rows, jobId) {
   var recorded = importChainProcessJobIds(config, result, rows, jobId, false);
   if (!recorded.length) {
     var candidates = importChainProcessJobIds(config, result, rows, jobId);
@@ -146,19 +146,19 @@ function importChainProcessJobGroups(config, result, rows, jobId) {
     var parentId = config.parent_import_job_id;
     if (!parentId || seen.has(parentId) || !byId.has(parentId)) return recorded.map(function(id) { return [id]; });
     seen.add(parentId);
-    var row = byId.get(parentId);
+    var row = byId.get(parentId); if (!row) return [];
     config = jobConfig(row);
     result = row.result || {};
   }
 }
 
-function importChainInvalidated(config, result, rows, jobId, neverStarted) {
+/** @param {JobsConfig} config @param {JobsResult} result @param {JobsRow[]} rows @param {string} jobId @param {Set<string>} neverStarted */ function importChainInvalidated(config, result, rows, jobId, neverStarted) {
   return importChainProcessJobGroups(config, result, rows, jobId).some(function(group) {
     return group.every(function(id) { return neverStarted.has(id); });
   });
 }
 
-function pipelineNeverStarted(row) {
+/** @param {JobsRow} row */ function pipelineNeverStarted(row) {
   return row.type === 'pipeline' && ((row.result && row.result.never_started) ||
     (row.status === 'cancelled' && row.result == null && row.duration === null));
 }
@@ -176,7 +176,7 @@ function pipelineNeverStarted(row) {
 // descendant to continue from, null while the parent itself is still
 // the place to continue; ``kind`` is "done" (nothing left), "resume"
 // (it was interrupted) or "retry" (it failed files after its tag pass).
-function importResumeTakeover(parent, rows) {
+/** @param {JobsRow | undefined} parent @param {JobsRow[]} rows */ function importResumeTakeover(parent, rows) {
   var parentResult = parent && parent.result;
   var parentInterrupted = !!(parentResult && parentResult.interrupted);
   if (!(parent && parent.type === 'import' && parentResult &&
@@ -188,8 +188,8 @@ function importResumeTakeover(parent, rows) {
   var neverStartedProcesses = new Set((rows || []).filter(function(row) {
     return pipelineNeverStarted(row);
   }).map(function(row) { return row.id; }));
-  var children = {};
-  var candidates = [];
+  /** @type {Record<string,JobsImportEntry[]>} */ var children = {};
+  /** @type {JobsImportEntry[]} */ var candidates = [];
   (rows || []).forEach(function(row) {
     if (!row || row.type !== 'import' || row.id === parent.id) return;
     if (['completed', 'failed', 'cancelled'].indexOf(row.status) < 0) return;
@@ -203,7 +203,7 @@ function importResumeTakeover(parent, rows) {
     var parentKey = String(cfg.parent_import_job_id);
     (children[parentKey] = children[parentKey] || []).push(entry);
   });
-  var found = {};
+  /** @type {Record<string,JobsImportEntry>} */ var found = {};
   var frontier = [parent.id];
   candidates.forEach(function(e) {
     if (e.root === parent.id && !found[e.id]) {
@@ -219,8 +219,8 @@ function importResumeTakeover(parent, rows) {
       }
     });
   }
-  var descendants = Object.keys(found).map(function(id) { return found[id]; })
-    .filter(function(e) { return !e.result.never_started; });
+  var descendants = Object.values(found)
+    .filter(function(e) { return e !== undefined && !e.result.never_started; });
   descendants.forEach(function(e) {
     var r = e.result;
     var tags, chainStep;
@@ -244,14 +244,14 @@ function importResumeTakeover(parent, rows) {
     // After a failed import the chain step marks but skips processing.
     e.chainProcessJobIds = importChainProcessJobIds(e.config, r, rows, e.id);
     e.chained = (!!e.config.chain_already_ran ||
-      (chainStep && r.ok !== false && !neverStartedProcesses.has(r.process_job_id))) &&
+      (chainStep && r.ok !== false && !neverStartedProcesses.has(r.process_job_id || ''))) &&
       !importChainInvalidated(e.config, r, rows, e.id, neverStartedProcesses);
     e.resumable = e.status === 'failed' && !!r.interrupted &&
       Array.isArray(r.photo_ids) && !(tags && e.chained);
     e.hasFailedFiles = hasFailedImportFiles(r);
   });
   // What a Resume replays: the parent's marks plus what descendants paid.
-  function tagScope(cfg, result) {
+  /** @param {JobsConfig} cfg @param {JobsResult} result */ function tagScope(cfg, result) {
     var scope = new Set(), identities = new Map();
     var fingerprints = Object.assign({}, cfg.carry_photo_fingerprints || {},
       result.photo_fingerprints || {}, result.carried_photo_fingerprints || {});
@@ -277,13 +277,13 @@ function importResumeTakeover(parent, rows) {
     });
     return {scope: scope, identities: identities};
   }
-  function paidCarriedScope(cfg, identities) {
+  /** @param {JobsConfig} cfg @param {Map<number,string>} identities */ function paidCarriedScope(cfg, identities) {
     var paid = new Set(), carried = new Set(cfg.carry_photo_ids || []);
     (cfg.untagged_photo_ids || []).forEach(function(pid) { carried.delete(pid); });
     (cfg.paid_tag_photo_ids || []).forEach(function(pid) { carried.add(pid); });
     carried.forEach(function(pid) {
       if (!identities.has(pid)) return;
-      var token = identities.get(pid);
+      var token = identities.get(pid); if (token === undefined) return;
       paid.add(token);
       var identity = JSON.parse(token)[2], index = identity.lastIndexOf('|h=');
       if (index >= 0 && identity.substring(index + 3))
@@ -300,7 +300,7 @@ function importResumeTakeover(parent, rows) {
   var inheritedScopes = new Map([[parent.id, parentScope.scope]]);
   descendants.slice().sort(function(a, b) { return a.startedAt.localeCompare(b.startedAt); }).forEach(function(e) {
     var own = tagScope(e.config, e.result);
-    (inheritedScopes.get(e.parent) || inheritedScopes.get(e.root) || new Set()).forEach(function(token) { own.scope.add(token); });
+    (inheritedScopes.get(e.parent || '') || inheritedScopes.get(e.root || '') || new Set()).forEach(function(token) { own.scope.add(token); });
     inheritedScopes.set(e.id, own.scope);
     own.identities.forEach(function(token, pid) { tagIdentities.set(pid, token); });
     own.scope.forEach(function(token) {
@@ -338,7 +338,7 @@ function importResumeTakeover(parent, rows) {
   var nextSteps = descendants.filter(function(e) {
     return e.resumable || (e.hasFailedFiles && e.tagsApplied);
   });
-  function newest(entries) {
+  /** @param {JobsImportEntry[]} entries */ function newest(entries) {
     return entries.reduce(function(best, e) {
       return e.startedAt > best.startedAt ? e : best;
     });
@@ -357,7 +357,7 @@ function importResumeTakeover(parent, rows) {
           parentInterrupted: parentInterrupted};
 }
 
-function importTakeoverNote(takeover) {
+/** @param {JobsTakeover} takeover */ function importTakeoverNote(takeover) {
   var when = takeover.byStartedAt ? new Date(takeover.byStartedAt) : null;
   var which = when && !isNaN(when.getTime())
     ? 'the import started ' + when.toLocaleString()
@@ -375,12 +375,12 @@ function importTakeoverNote(takeover) {
   return lead + ', which had files fail. Retry them from that import instead; it carries these photos.';
 }
 
-function importResumeHint(job) {
-  var landed = job.result.photo_ids.length;
+/** @param {JobsRow} job */ function importResumeHint(job) {
+  var landed = job.result?.photo_ids?.length || 0;
   // Files are recorded as landed before they're cataloged, so the
   // checkpointed photo ids can lag them. Count photos only when the ids
   // cover every landed file (a RAW+JPEG pair is two files, one photo).
-  var landedFiles = Object.keys(job.result.landed_files || {}).length;
+  var landedFiles = Object.keys(job.result?.landed_files || {}).length;
   if (!landed && !landedFiles) {
     return 'Same source and destination. Nothing was imported before it stopped.';
   }
@@ -394,7 +394,7 @@ function importResumeHint(job) {
   return hint + '.';
 }
 
-function importRetryBody(job) {
+/** @param {JobsRow | undefined} job */ function importRetryBody(job) {
   var cfg = jobConfig(job);
   if (!job || job.type !== 'import' || cfg.mode === 'in_place' ||
       !Array.isArray(cfg.sources) || !cfg.sources.length) return null;
@@ -414,7 +414,7 @@ function importRetryBody(job) {
     ? cfg.folder_template : '%Y/%Y-%m-%d';
   var parentSkipDuplicates = cfg.skip_duplicates != null
     ? !!cfg.skip_duplicates : true;
-  var body = {
+  /** @type {JobsConfig} */ var body = {
     sources: cfg.sources.slice(),
     destination: cfg.destination,
     recursive: cfg.recursive !== false,
@@ -438,13 +438,13 @@ function importRetryBody(job) {
     ? cfg.carry_photo_ids : [];
   // Everything the parent carried (its own carry list plus photos a
   // resume recovered from an interrupted run) stays in scope too.
-  var parentImported = [];
-  ['photo_ids', 'carried_photo_ids', 'recovered_photo_ids'].forEach(function(key) {
+  /** @type {number[]} */ var parentImported = [];
+  [/** @type {const} */ ('photo_ids'), /** @type {const} */ ('carried_photo_ids'), /** @type {const} */ ('recovered_photo_ids')].forEach(function(key) {
     var ids = job.result && job.result[key];
     if (Array.isArray(ids)) parentImported = parentImported.concat(ids);
   });
-  var carry = [];
-  var carrySeen = {};
+  /** @type {number[]} */ var carry = [];
+  /** @type {Record<number,boolean>} */ var carrySeen = {};
   parentCarry.concat(parentImported).forEach(function(pid) {
     if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return;
     if (carrySeen[pid]) return;

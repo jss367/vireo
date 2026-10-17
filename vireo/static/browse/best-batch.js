@@ -9,17 +9,17 @@ function bestBatchSeedId() {
 }
 
 function hideBestBatch() {
-  var modal = document.getElementById('bestBatchModal');
+  var modal = /** @type {HTMLElement} */ (document.getElementById('bestBatchModal'));
   if (modal) modal.classList.remove('open');
 }
 
-function bestBatchRoleLabel(role) {
+function bestBatchRoleLabel(/** @type {string} */ role) {
   if (role === 'best') return 'Best';
   if (role === 'alternate') return 'Alt';
   return 'Reject';
 }
 
-function bestBatchScoreText(card) {
+function bestBatchScoreText(/** @type {BrowseBestBatchCard} */ card) {
   var parts = [];
   if (card.quality_pct != null) parts.push('Q ' + card.quality_pct);
   if (card.focus != null) parts.push('F ' + Math.round(card.focus * 100));
@@ -27,9 +27,9 @@ function bestBatchScoreText(card) {
   return parts.join(' · ') || 'No score';
 }
 
-function renderBestBatch(data) {
+function renderBestBatch(/** @type {BrowseBestBatch} */ data) {
   bestBatchData = data;
-  var content = document.getElementById('bestBatchContent');
+  var content = /** @type {HTMLElement} */ (document.getElementById('bestBatchContent'));
   if (!content) return;
   var best = (data.cards || []).find(function(c) { return c.id === data.best_photo_id; }) || (data.cards || [])[0];
   if (!best) {
@@ -50,7 +50,7 @@ function renderBestBatch(data) {
     return '<div class="best-batch-card ' + escapeAttr(card.role || '') + '" data-photo-id="' + card.id + '">' +
       '<img src="' + escapeAttr(thumbUrl) + '" alt="' + escapeAttr(card.filename || '') + '" loading="lazy">' +
       '<div class="best-batch-card-body">' +
-        '<div class="best-batch-role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + bestBatchRoleLabel(card.role) + '</div>' +
+        '<div class="best-batch-role ' + escapeAttr(card.role || '') + '">#' + card.rank + ' ' + bestBatchRoleLabel(card.role || '') + '</div>' +
         '<div class="best-batch-card-name" title="' + escapeAttr(card.filename || '') + '">' + escapeHtml(card.filename || '') + '</div>' +
         '<div class="best-batch-card-line">' + escapeHtml(bestBatchScoreText(card)) + '</div>' +
         '<div class="best-batch-card-line">' + reasons + '</div>' +
@@ -78,7 +78,7 @@ function renderBestBatch(data) {
     '<div class="best-batch-list">' + cards + '</div>';
 }
 
-function openBestBatchForIds(ids, seedId) {
+function openBestBatchForIds(/** @type {number[]} */ ids, /** @type {number | null | undefined} */ seedId = undefined) {
   ids = Array.isArray(ids) ? ids.filter(function(id) { return id != null; }) : [];
   seedId = seedId || (ids.length ? ids[0] : bestBatchSeedId());
   if (!seedId) {
@@ -146,7 +146,7 @@ async function applyBestBatchPickAndReject() {
   var touchedIds = [bestId].concat(rejectIds);
   touchedIds.forEach(function(id) {
     var p = findBrowsePhoto(id);
-    var flag = id === bestId ? 'flagged' : 'rejected';
+    /** @type {'flagged' | 'rejected'} */ var flag = id === bestId ? 'flagged' : 'rejected';
     if (p) p.flag = flag;
     _clearRepresentativeStateIfIneligible(id, flag);
   });

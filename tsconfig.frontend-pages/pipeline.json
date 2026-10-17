@@ -1,0 +1,22 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/pipeline.d.ts",
+    "../vireo/static/pipeline/boot.js",
+    "../vireo/static/pipeline/completion.js",
+    "../vireo/static/pipeline/extract-config.js",
+    "../vireo/static/pipeline/labels-modal.js",
+    "../vireo/static/pipeline/models.js",
+    "../vireo/static/pipeline/page-init.js",
+    "../vireo/static/pipeline/plan.js",
+    "../vireo/static/pipeline/preview.js",
+    "../vireo/static/pipeline/processes.js",
+    "../vireo/static/pipeline/progress.js",
+    "../vireo/static/pipeline/readiness.js",
+    "../vireo/static/pipeline/run.js",
+    "../vireo/static/pipeline/slots.js",
+    "../vireo/static/pipeline/sources.js",
+    "../vireo/static/pipeline/start-gate.js",
+    "../vireo/static/pipeline/steps.js"
+  ]
+}

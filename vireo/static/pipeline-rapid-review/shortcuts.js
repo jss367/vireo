@@ -3,6 +3,7 @@
 // Classic page script; load boot.js after all definitions.
 
 var RAPID_SCOPE = 'pipeline_rapid_review';
+/** @type {Record<string,string>} */
 var RAPID_SC_DEFAULTS = {
   pick: 'p',
   reject: 'x',
@@ -16,6 +17,7 @@ var RAPID_SC_DEFAULTS = {
 var rapidShortcuts = Object.assign({}, RAPID_SC_DEFAULTS);
 var rapidShortcutsRegistered = false;
 
+/** @param {KeyboardEvent} e @param {string} action */
 function rapidShortcutMatches(e, action) {
   var shortcut = rapidShortcuts[action];
   if (!shortcut) return false;
@@ -26,6 +28,7 @@ function rapidShortcutMatches(e, action) {
   return false;
 }
 
+/** @param {string} action */
 function handleRapidShortcutAction(action) {
   if (typeof isQueuePromptOpen === 'function' && isQueuePromptOpen()) return true;
   if (action === 'pick') decideCurrent('pick');
@@ -44,7 +47,7 @@ function registerRapidShortcuts() {
   Object.keys(RAPID_SC_DEFAULTS).forEach(function(action) {
     var key = rapidShortcuts[action];
     if (!key) return;
-    window.Keymap.register(RAPID_SCOPE, {
+    /** @type {NonNullable<RapidKeymap["register"]>} */ (window.Keymap.register)(RAPID_SCOPE, {
       key: key,
       name: action,
       description: action,
@@ -63,7 +66,7 @@ async function loadRapidShortcuts() {
     window._vireoShortcuts = window._vireoShortcuts || {};
     if (cfg.keyboard_shortcuts) {
       Object.keys(cfg.keyboard_shortcuts).forEach(function(ctx) {
-        if (!window._vireoShortcuts[ctx]) window._vireoShortcuts[ctx] = cfg.keyboard_shortcuts[ctx];
+        if (!/** @type {Record<string,Record<string,string>>} */ (window._vireoShortcuts)[ctx]) /** @type {Record<string,Record<string,string>>} */ (window._vireoShortcuts)[ctx] = /** @type {Record<string,string>} */ (/** @type {Record<string,Record<string,string>>} */ (cfg.keyboard_shortcuts)[ctx]);
       });
     }
     window._vireoShortcuts[RAPID_SCOPE] = rapidShortcuts;
@@ -83,7 +86,7 @@ function bindRapidKeyboard() {
     }
     // Skip every form field, not just INPUT: with the #queueFilter <select>
     // focused, arrows/Enter must change the filter, not decide the photo.
-    var t = e.target;
+    var t = /** @type {HTMLElement|null} */ (e.target);
     if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' ||
               t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (rapidShortcutMatches(e, 'reject')) {
