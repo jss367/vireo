@@ -797,7 +797,21 @@ class CollectionRepository:
             )
             scoped_params = self._top_prediction_confidence_params()
         run_ctes, run_params = self._burst_run_ctes(settings)
-        ctes = f"""
+        ctes = self._browse_stack_ctes(
+            pcols, offline_expr, scoped_extra, folder_join, join_clause, where,
+            run_ctes,
+        )
+        # ``scoped``'s select list precedes its FROM/JOIN/WHERE, and the
+        # keyword-set CTEs ahead of it are parameterless, so the optional
+        # confidence parameter binds before the scope's.
+        return ctes, [*scoped_params, *params, *run_params]
+
+    def _browse_stack_ctes(
+        self, pcols, offline_expr, scoped_extra, folder_join, join_clause, where,
+        run_ctes,
+    ):
+        """The ``scoped`` ... ``keyed`` CTE text of a stacked Browse query."""
+        return f"""
             WITH {self._STACK_KEYWORD_SET_CTES}
             , scoped AS (
                 SELECT DISTINCT {pcols},
@@ -849,10 +863,6 @@ class CollectionRepository:
                        ON burst_sizes._burst_key = burst_keys._burst_key
             )
         """
-        # ``scoped``'s select list precedes its FROM/JOIN/WHERE, and the
-        # keyword-set CTEs ahead of it are parameterless, so the optional
-        # confidence parameter binds before the scope's.
-        return ctes, [*scoped_params, *params, *run_params]
 
     def _stack_sort_spec(self, sort):
         return self._STACK_SORT_SPECS.get(sort, self._STACK_SORT_SPECS["date"])
@@ -1128,6 +1138,32 @@ class CollectionRepository:
         finally:
             self.conn.execute("DROP TABLE IF EXISTS temp._burst_scope")
 
+    @staticmethod
+    def _group_ordered_ids(
+        ordered_ids, rows_by_id, standalone, duplicate_counts, burst_key_by_id,
+    ):
+        """``(groups, group_order)``: each id's stack key, first appearance first."""
+        groups = {}
+        group_order = []
+        for pid in ordered_ids:
+            row = rows_by_id.get(pid)
+            if not row:
+                continue
+            file_hash = row["file_hash"]
+            if pid in standalone:
+                key = (None, pid)
+            elif file_hash and duplicate_counts.get(file_hash, 0) >= 2:
+                key = ("duplicate", file_hash)
+            elif pid in burst_key_by_id:
+                key = ("burst", burst_key_by_id[pid])
+            else:
+                key = (None, pid)
+            if key not in groups:
+                groups[key] = []
+                group_order.append(key)
+            groups[key].append(pid)
+        return groups, group_order
+
     def collapse_browse_stack_photo_ids(self, photo_ids, standalone_ids=None,
                                         stack_config=None):
         """Collapse an already ordered ID result, preserving group order.
@@ -1189,25 +1225,9 @@ class CollectionRepository:
             burst_candidates, stack_config=stack_config,
         )
 
-        groups = {}
-        group_order = []
-        for pid in ordered_ids:
-            row = rows_by_id.get(pid)
-            if not row:
-                continue
-            file_hash = row["file_hash"]
-            if pid in standalone:
-                key = (None, pid)
-            elif file_hash and duplicate_counts.get(file_hash, 0) >= 2:
-                key = ("duplicate", file_hash)
-            elif pid in burst_key_by_id:
-                key = ("burst", burst_key_by_id[pid])
-            else:
-                key = (None, pid)
-            if key not in groups:
-                groups[key] = []
-                group_order.append(key)
-            groups[key].append(pid)
+        groups, group_order = self._group_ordered_ids(
+            ordered_ids, rows_by_id, standalone, duplicate_counts, burst_key_by_id,
+        )
 
         def cover_score(pid):
             row = rows_by_id[pid]
@@ -1392,6 +1412,52 @@ class CollectionRepository:
                 folder_join, join_clause, where, params, q=q, limit=limit
             )
         limit = max(1, min(int(limit or 20), 50))
+        conditions, extra_joins, extra_params, display_expr, group_expr = (
+            self._suggest_field_sql(field)
+        )
+        # IS NOT NULL and the typeahead LIKE compare against ``group_expr``
+        # so a facet grouped case-insensitively (camera fields, extension)
+        # also matches case-insensitively — otherwise ``camera_model``
+        # would list a single ``Sony A1`` bucket but drop it as soon as the
+        # user typed ``sony``.
+        conditions.append(f"{group_expr} IS NOT NULL")
+        if q:
+            conditions.append(f"{group_expr} LIKE ? ESCAPE '\\'")
+            q_norm = (
+                str(q).lower()
+                if group_expr.startswith("LOWER(") or field == "extension"
+                else str(q)
+            )
+            extra_params.append(f"%{self._escape_like(q_norm)}%")
+        joined = " AND ".join(conditions)
+        # ``where`` from ``_build_query_from_rules`` is ``WHERE (A) OR (B)``
+        # for a top-level ``any`` group. Appending ``AND {joined}`` without
+        # wrapping would bind to the last OR branch (AND binds tighter than
+        # OR in SQL) and let first-branch rows leak through even when the
+        # facet field is NULL or the typeahead doesn't match — so the count
+        # no longer answers "how many results would selecting this suggestion
+        # return".
+        if where:
+            where_full = f"WHERE ({where[len('WHERE '):]}) AND {joined}"
+        else:
+            where_full = f"WHERE {joined}"
+        query = f"""
+            SELECT {display_expr} AS value, COUNT(DISTINCT p.id) AS count
+            FROM photos p
+            {folder_join}
+            {join_clause}
+            {extra_joins}
+            {where_full}
+            GROUP BY {group_expr}
+            ORDER BY count DESC, value ASC
+            LIMIT ?
+        """
+        rows = self.conn.execute(query, [*params, *extra_params, limit]).fetchall()
+        return [{"value": row["value"], "count": row["count"]} for row in rows]
+
+    def _suggest_field_sql(self, field):
+        """``(conditions, extra_joins, extra_params, display_expr, group_expr)``
+        for one suggest-capable field; raises ValueError for any other."""
         conditions = []
         extra_joins = ""
         extra_params = []
@@ -1471,45 +1537,7 @@ class CollectionRepository:
                 group_expr = display_expr
         else:
             raise ValueError(f"field {field!r} does not support value suggestions")
-        # IS NOT NULL and the typeahead LIKE compare against ``group_expr``
-        # so a facet grouped case-insensitively (camera fields, extension)
-        # also matches case-insensitively — otherwise ``camera_model``
-        # would list a single ``Sony A1`` bucket but drop it as soon as the
-        # user typed ``sony``.
-        conditions.append(f"{group_expr} IS NOT NULL")
-        if q:
-            conditions.append(f"{group_expr} LIKE ? ESCAPE '\\'")
-            q_norm = (
-                str(q).lower()
-                if group_expr.startswith("LOWER(") or field == "extension"
-                else str(q)
-            )
-            extra_params.append(f"%{self._escape_like(q_norm)}%")
-        joined = " AND ".join(conditions)
-        # ``where`` from ``_build_query_from_rules`` is ``WHERE (A) OR (B)``
-        # for a top-level ``any`` group. Appending ``AND {joined}`` without
-        # wrapping would bind to the last OR branch (AND binds tighter than
-        # OR in SQL) and let first-branch rows leak through even when the
-        # facet field is NULL or the typeahead doesn't match — so the count
-        # no longer answers "how many results would selecting this suggestion
-        # return".
-        if where:
-            where_full = f"WHERE ({where[len('WHERE '):]}) AND {joined}"
-        else:
-            where_full = f"WHERE {joined}"
-        query = f"""
-            SELECT {display_expr} AS value, COUNT(DISTINCT p.id) AS count
-            FROM photos p
-            {folder_join}
-            {join_clause}
-            {extra_joins}
-            {where_full}
-            GROUP BY {group_expr}
-            ORDER BY count DESC, value ASC
-            LIMIT ?
-        """
-        rows = self.conn.execute(query, [*params, *extra_params, limit]).fetchall()
-        return [{"value": row["value"], "count": row["count"]} for row in rows]
+        return conditions, extra_joins, extra_params, display_expr, group_expr
 
     def _folder_filter_values(self, folder_join, join_clause, where, params, q, limit):
         """Folder suggestions with subtree-aware counts.

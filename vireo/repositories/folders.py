@@ -497,6 +497,44 @@ class FolderRepository:
             params,
         ).fetchall()
 
+    def _cascade_missing_children(self, old_path, new_path):
+        """Move each missing child of ``old_path`` that exists under ``new_path``.
+
+        Returns ``[{"id", "old_path", "new_path"}]`` for the children moved.
+        """
+        cascaded = []
+        skipped_prefixes = []
+        children = self.conn.execute(
+            """SELECT id, path FROM folders
+               WHERE status = 'missing'
+                 AND substr(REPLACE(path, '\\', '/'), 1, ?) = ?
+               ORDER BY length(REPLACE(path, '\\', '/')),
+                        REPLACE(path, '\\', '/')""",
+            (len(self.subtree_prefix(old_path)), self.subtree_prefix(old_path)),
+        ).fetchall()
+        for child in children:
+            # Skip descendants of conflicted folders
+            child_match_path = self.path_for_subtree_match(child["path"])
+            if any(child_match_path.startswith(p + "/") for p in skipped_prefixes):
+                continue
+            relative = self.subtree_relative(child["path"], old_path)
+            candidate = self.join_subtree_path(new_path, relative)
+            if os.path.exists(candidate):
+                # Skip if another folder already has this path
+                child_conflict = self.conn.execute(
+                    "SELECT id FROM folders WHERE path = ? AND id != ?",
+                    (candidate, child["id"]),
+                ).fetchone()
+                if child_conflict:
+                    skipped_prefixes.append(child_match_path)
+                    continue
+                self.conn.execute(
+                    "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
+                    (candidate, child["id"]),
+                )
+                cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
+        return cascaded
+
     def relocate(self, folder_id, new_path, *, merge_into_existing, relink_parents_by_path):
         """Move a folder row to new_path, cascading missing children; commit.
 
@@ -540,37 +578,7 @@ class FolderRepository:
         )
 
         # Check missing children for cascade
-        cascaded = []
-        skipped_prefixes = []
-        children = self.conn.execute(
-            """SELECT id, path FROM folders
-               WHERE status = 'missing'
-                 AND substr(REPLACE(path, '\\', '/'), 1, ?) = ?
-               ORDER BY length(REPLACE(path, '\\', '/')),
-                        REPLACE(path, '\\', '/')""",
-            (len(self.subtree_prefix(old_path)), self.subtree_prefix(old_path)),
-        ).fetchall()
-        for child in children:
-            # Skip descendants of conflicted folders
-            child_match_path = self.path_for_subtree_match(child["path"])
-            if any(child_match_path.startswith(p + "/") for p in skipped_prefixes):
-                continue
-            relative = self.subtree_relative(child["path"], old_path)
-            candidate = self.join_subtree_path(new_path, relative)
-            if os.path.exists(candidate):
-                # Skip if another folder already has this path
-                child_conflict = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ? AND id != ?",
-                    (candidate, child["id"]),
-                ).fetchone()
-                if child_conflict:
-                    skipped_prefixes.append(child_match_path)
-                    continue
-                self.conn.execute(
-                    "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
-                    (candidate, child["id"]),
-                )
-                cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
+        cascaded = self._cascade_missing_children(old_path, new_path)
 
         # Cascade the rebase into ``photos.last_move_source_folder_path``.
         # ``move_folder_path`` already does this for the whole-folder move
@@ -599,29 +607,16 @@ class FolderRepository:
         self.conn.commit()
         return cascaded
 
-    def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
-                            commit=True, transfer_gps_review,
-                            transfer_embedded_offered,
-                            relink_parents_by_path,
-                            KEYWORD_SOURCE_CONFLICT_SQL):
-        """Fold a missing folder into the existing folder at new_path.
+    def _fold_source_photos(
+        self, source_folder_id, target_folder_id, new_path, transfer_gps_review,
+        transfer_embedded_offered, KEYWORD_SOURCE_CONFLICT_SQL,
+    ):
+        """Move or drop each photo of the merged folder.
 
-        ``transfer_gps_review`` is ``Database._transfer_gps_review_for_merge``,
-        ``transfer_embedded_offered`` is
-        ``Database.transfer_embedded_keyword_offered_for_merge``, and
-        ``relink_parents_by_path`` is ``Database._relink_parents_by_path``;
-        all three run inside this transaction. Commits only when ``commit``.
-
-        ``KEYWORD_SOURCE_CONFLICT_SQL`` is the ``db`` module constant of the
-        same name, the shared ON CONFLICT clause the ``photo_keywords`` carry
-        below uses so a losing row's keyword that lands on an existing
-        survivor association keeps the stronger of the two provenance stamps.
+        A photo the target already holds is folded into that row (GPS
+        review, keyword associations, embedded-offered keys) and dropped.
+        Returns ``(drop_ids, collection_remap)``.
         """
-        old_row = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (source_folder_id,)
-        ).fetchone()
-        old_path = old_row["path"] if old_row else ""
-
         # Get photos from the missing folder
         source_photos = self.conn.execute(
             "SELECT id, filename FROM photos WHERE folder_id = ?",
@@ -677,7 +672,10 @@ class FolderRepository:
                 # File doesn't exist on disk at target — drop phantom record
                 drop_ids.append(photo["id"])
                 collection_remap[photo["id"]] = None
+        return drop_ids, collection_remap
 
+    def _drop_merged_photos(self, drop_ids, collection_remap):
+        """Delete the merged folder's duplicate and phantom photo rows."""
         # Delete duplicate photos and their associated data
         if drop_ids:
             remap_photo_visibility(self.conn, collection_remap)
@@ -692,12 +690,8 @@ class FolderRepository:
             with photo_row_deletion(self.conn) as photo_rows:
                 photo_rows.delete(collection_remap)
 
-        # Reparent child folders from source to target
-        self.conn.execute(
-            "UPDATE folders SET parent_id = ? WHERE parent_id = ?",
-            (target_folder_id, source_folder_id),
-        )
-
+    def _transfer_workspace_links(self, source_folder_id, target_folder_id):
+        """Give the target every workspace link the source folder had."""
         # Transfer workspace visibility from source to target while preserving
         # whether the source link was a user-facing root or a materialized
         # descendant.
@@ -718,6 +712,44 @@ class FolderRepository:
                        WHERE workspace_id = ? AND folder_id = ?""",
                     (link["workspace_id"], target_folder_id),
                 )
+
+    def merge_into_existing(self, source_folder_id, target_folder_id, new_path, *,
+                            commit=True, transfer_gps_review,
+                            transfer_embedded_offered,
+                            relink_parents_by_path,
+                            KEYWORD_SOURCE_CONFLICT_SQL):
+        """Fold a missing folder into the existing folder at new_path.
+
+        ``transfer_gps_review`` is ``Database._transfer_gps_review_for_merge``,
+        ``transfer_embedded_offered`` is
+        ``Database.transfer_embedded_keyword_offered_for_merge``, and
+        ``relink_parents_by_path`` is ``Database._relink_parents_by_path``;
+        all three run inside this transaction. Commits only when ``commit``.
+
+        ``KEYWORD_SOURCE_CONFLICT_SQL`` is the ``db`` module constant of the
+        same name, the shared ON CONFLICT clause the ``photo_keywords`` carry
+        below uses so a losing row's keyword that lands on an existing
+        survivor association keeps the stronger of the two provenance stamps.
+        """
+        old_row = self.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (source_folder_id,)
+        ).fetchone()
+        old_path = old_row["path"] if old_row else ""
+
+        drop_ids, collection_remap = self._fold_source_photos(
+            source_folder_id, target_folder_id, new_path, transfer_gps_review,
+            transfer_embedded_offered, KEYWORD_SOURCE_CONFLICT_SQL,
+        )
+
+        self._drop_merged_photos(drop_ids, collection_remap)
+
+        # Reparent child folders from source to target
+        self.conn.execute(
+            "UPDATE folders SET parent_id = ? WHERE parent_id = ?",
+            (target_folder_id, source_folder_id),
+        )
+
+        self._transfer_workspace_links(source_folder_id, target_folder_id)
 
         # Remove source folder
         self.conn.execute(
@@ -753,35 +785,7 @@ class FolderRepository:
         )
 
         # Cascade to missing children (same logic as relocate_folder)
-        cascaded = []
-        skipped_prefixes = []
-        children = self.conn.execute(
-            """SELECT id, path FROM folders
-               WHERE status = 'missing'
-                 AND substr(REPLACE(path, '\\', '/'), 1, ?) = ?
-               ORDER BY length(REPLACE(path, '\\', '/')),
-                        REPLACE(path, '\\', '/')""",
-            (len(self.subtree_prefix(old_path)), self.subtree_prefix(old_path)),
-        ).fetchall()
-        for child in children:
-            child_match_path = self.path_for_subtree_match(child["path"])
-            if any(child_match_path.startswith(p + "/") for p in skipped_prefixes):
-                continue
-            relative = self.subtree_relative(child["path"], old_path)
-            candidate = self.join_subtree_path(new_path, relative)
-            if os.path.exists(candidate):
-                child_conflict = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ? AND id != ?",
-                    (candidate, child["id"]),
-                ).fetchone()
-                if child_conflict:
-                    skipped_prefixes.append(child_match_path)
-                    continue
-                self.conn.execute(
-                    "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
-                    (candidate, child["id"]),
-                )
-                cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
+        cascaded = self._cascade_missing_children(old_path, new_path)
 
         # The surviving missing-child rows above have moved from each old
         # path to its candidate under the existing target root. Keep any
@@ -820,33 +824,8 @@ class FolderRepository:
             )
         return linked
 
-    def delete(self, folder_id, active_ws, *, subtree_ids_by_path,
-               linked_in_other_workspace, delete_photos, remember_removals):
-        """Delete a folder subtree and its photos in one transaction.
-
-        Folders another workspace links to are kept and only unlinked from
-        ``active_ws``. The callbacks are the ``Database`` methods
-        ``_folder_subtree_ids_by_path``, ``_folders_linked_in_other_workspace``,
-        ``delete_photos`` and ``_remember_workspace_folder_removals``.
-        Returns ``(deleted_photo_ids, files)``.
-        """
-        # Everything under the target, by path, including legacy
-        # NULL-parent_id descendants a parent_id walk would miss.
-        candidates = set(subtree_ids_by_path(folder_id))
-
-        # Candidates that another workspace has a link for are never
-        # deleted, and each protected folder keeps its whole subtree. Any
-        # foreign link counts — root or scanner-materialized — since either
-        # means the folder is still visible in that workspace. When the
-        # target itself is protected, the kept set covers every candidate
-        # and this degenerates to unlink-only: nothing is deleted, no
-        # reparenting happens, and only the active workspace's links go.
-        protected = linked_in_other_workspace(candidates, active_ws)
-        kept_subtree_ids = set()
-        for fid in protected:
-            kept_subtree_ids.update(subtree_ids_by_path(fid))
-        delete_ids = candidates - kept_subtree_ids
-
+    def _kept_subtree_heads(self, kept_subtree_ids, delete_ids):
+        """Kept folders whose parent row is about to be deleted."""
         # Kept folders whose parent row is being deleted must be reparented
         # to NULL before the folder DELETE — folders.parent_id has no ON
         # DELETE action. (Kept folders whose parent also survives keep
@@ -862,7 +841,10 @@ class FolderRepository:
                 ).fetchall()
                 if row["parent_id"] in delete_ids
             )
+        return kept_head_ids
 
+    def _folder_delete_order(self, delete_ids):
+        """``(ids deepest first, stored paths)`` of the folders to delete."""
         # Delete children before parents, else the multi-statement delete
         # trips the parent_id FK at the end of an earlier chunk's statement.
         # Order by path depth descending — a parent's normalized path always
@@ -891,9 +873,12 @@ class FolderRepository:
         ordered_delete_ids = sorted(
             delete_ids, key=lambda fid: depth_by_id.get(fid, 0), reverse=True
         )
+        return ordered_delete_ids, deleted_folder_paths
 
+    def _photo_ids_in_folders(self, folder_ids):
+        """Ids of the photos in ``folder_ids``, chunk by chunk in order."""
         photo_ids = []
-        for chunk in self._chunks(ordered_delete_ids):
+        for chunk in self._chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
             photo_ids.extend(
                 row["id"]
@@ -902,6 +887,62 @@ class FolderRepository:
                     chunk,
                 ).fetchall()
             )
+        return photo_ids
+
+    def _unlink_kept_subtrees(self, active_ws, kept_subtree_ids, remember_removals):
+        """Drop the active workspace's links to the kept subtrees."""
+        # Kept subtrees disappear from this workspace's view: drop the
+        # active workspace's links, leaving the other workspaces' links
+        # (and the folder rows and photos) untouched.
+        if active_ws is not None:
+            remember_removals(active_ws, kept_subtree_ids, recursive=True)
+            for chunk in self._chunks(kept_subtree_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+                    f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))",
+                    [active_ws] + chunk,
+                )
+                self.conn.execute(
+                    f"DELETE FROM workspace_folders WHERE workspace_id = ? "
+                    f"AND folder_id IN ({placeholders})",
+                    [active_ws] + chunk,
+                )
+
+    def delete(self, folder_id, active_ws, *, subtree_ids_by_path,
+               linked_in_other_workspace, delete_photos, remember_removals):
+        """Delete a folder subtree and its photos in one transaction.
+
+        Folders another workspace links to are kept and only unlinked from
+        ``active_ws``. The callbacks are the ``Database`` methods
+        ``_folder_subtree_ids_by_path``, ``_folders_linked_in_other_workspace``,
+        ``delete_photos`` and ``_remember_workspace_folder_removals``.
+        Returns ``(deleted_photo_ids, files)``.
+        """
+        # Everything under the target, by path, including legacy
+        # NULL-parent_id descendants a parent_id walk would miss.
+        candidates = set(subtree_ids_by_path(folder_id))
+
+        # Candidates that another workspace has a link for are never
+        # deleted, and each protected folder keeps its whole subtree. Any
+        # foreign link counts — root or scanner-materialized — since either
+        # means the folder is still visible in that workspace. When the
+        # target itself is protected, the kept set covers every candidate
+        # and this degenerates to unlink-only: nothing is deleted, no
+        # reparenting happens, and only the active workspace's links go.
+        protected = linked_in_other_workspace(candidates, active_ws)
+        kept_subtree_ids = set()
+        for fid in protected:
+            kept_subtree_ids.update(subtree_ids_by_path(fid))
+        delete_ids = candidates - kept_subtree_ids
+
+        kept_head_ids = self._kept_subtree_heads(kept_subtree_ids, delete_ids)
+
+        ordered_delete_ids, deleted_folder_paths = self._folder_delete_order(
+            delete_ids,
+        )
+
+        photo_ids = self._photo_ids_in_folders(ordered_delete_ids)
 
         # One outer transaction so a failure partway can't commit the photo
         # deletes while leaving the folder rows behind. ``commit=False`` also
@@ -924,23 +965,7 @@ class FolderRepository:
                     f"WHERE id IN ({placeholders})",
                     chunk,
                 )
-            # Kept subtrees disappear from this workspace's view: drop the
-            # active workspace's links, leaving the other workspaces' links
-            # (and the folder rows and photos) untouched.
-            if active_ws is not None:
-                remember_removals(active_ws, kept_subtree_ids, recursive=True)
-                for chunk in self._chunks(kept_subtree_ids):
-                    placeholders = ",".join("?" for _ in chunk)
-                    self.conn.execute(
-                        f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
-                        f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))",
-                        [active_ws] + chunk,
-                    )
-                    self.conn.execute(
-                        f"DELETE FROM workspace_folders WHERE workspace_id = ? "
-                        f"AND folder_id IN ({placeholders})",
-                        [active_ws] + chunk,
-                    )
+            self._unlink_kept_subtrees(active_ws, kept_subtree_ids, remember_removals)
             for chunk in self._chunks(ordered_delete_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 self.conn.execute(

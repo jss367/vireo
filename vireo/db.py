@@ -218,7 +218,7 @@ class MissingPhotosCancelled(RuntimeError):
 def _present_names_via_listing(folder_path, listing_pass, check_cancelled):
     """NFC names present in ``folder_path``, read through ``listing_pass``.
 
-    Mirrors the direct ``os.scandir`` read in ``get_missing_photos``: a
+    Mirrors the direct ``os.scandir`` read (``_present_names_via_scandir``): a
     symlink whose target is gone does not count as present. A remembered
     listing cannot vouch for a target, so symlinks are checked live whether
     the listing was reused or just read. Raises ``OSError`` like the direct
@@ -235,6 +235,118 @@ def _present_names_via_listing(folder_path, listing_pass, check_cancelled):
             continue
         names.add(_nfc(name))
     return names
+
+
+def _present_names_via_scandir(folder_path, check_cancelled):
+    """NFC names present in ``folder_path``, read with ``os.scandir``.
+
+    A symlink whose target is gone does not count as present. Raises
+    ``OSError`` when the folder cannot be read.
+    """
+    names_set: set[str] = set()
+    with os.scandir(folder_path) as it:
+        for entry in it:
+            check_cancelled()
+            # Broken symlinks: scandir returns the basename
+            # even when the target is gone, but the prior
+            # os.path.exists check returned False. Filter
+            # them so missing originals tracked via
+            # symlinks still surface. is_symlink() uses
+            # cached lstat from scandir, so non-symlinks
+            # don't pay an extra stat.
+            if entry.is_symlink() and not os.path.exists(entry.path):
+                continue
+            names_set.add(_nfc(entry.name))
+    return names_set
+
+
+def _scan_missing_photos(rows, progress_callback, listing_pass, check_cancelled):
+    """The rows of ``get_missing_photos`` whose file is gone from disk."""
+    # One readdir per folder instead of one stat per photo. On a 50k-photo
+    # library across a network volume the per-photo `os.path.exists` was
+    # costing minutes; a single scandir + set-membership check is orders
+    # of magnitude faster and the dominant call site for this endpoint.
+    # Misses fall back to a single os.path.exists to honor FS-specific
+    # case rules without unconditionally case-folding (which would
+    # silently collapse distinct files on case-sensitive volumes).
+    folder_online: dict[int, bool] = {}
+    folder_names: dict[int, set[str] | None] = {}
+    missing = []
+    photos_considered = 0
+    folders_checked = 0
+    reported_folders = set()
+    progress_callback_enabled = True
+
+    def report_progress(current_folder):
+        nonlocal progress_callback_enabled
+        if progress_callback is None or not progress_callback_enabled:
+            return
+        try:
+            progress_callback({
+                "folders_checked": folders_checked,
+                "photos_considered": photos_considered,
+                "missing_found": len(missing),
+                "total_photos": len(rows),
+                "current_folder": current_folder,
+            })
+        except Exception:
+            progress_callback_enabled = False
+            log.exception("Missing photos progress callback failed")
+
+    def report_photo_progress(current_folder):
+        if photos_considered % _MISSING_PHOTOS_PROGRESS_INTERVAL == 0:
+            report_progress(current_folder)
+
+    for row in rows:
+        check_cancelled()
+        fid = row["folder_id"]
+        if fid not in folder_online:
+            folder_online[fid] = os.path.isdir(row["folder_path"])
+        if not folder_online[fid]:
+            # Whole folder is offline — surfaced by missing-folders flow.
+            if fid not in reported_folders:
+                reported_folders.add(fid)
+                folders_checked += 1
+                report_progress(row["folder_path"])
+            continue
+        if fid not in folder_names:
+            try:
+                if listing_pass is not None:
+                    folder_names[fid] = _present_names_via_listing(
+                        row["folder_path"], listing_pass, check_cancelled,
+                    )
+                else:
+                    folder_names[fid] = _present_names_via_scandir(
+                        row["folder_path"], check_cancelled,
+                    )
+            except OSError:
+                # Folder vanished between isdir and scandir, or unreadable;
+                # treat the same as "folder offline" so we don't bulk-flag
+                # every photo as a ghost.
+                folder_names[fid] = None
+            if fid not in reported_folders:
+                reported_folders.add(fid)
+                folders_checked += 1
+                report_progress(row["folder_path"])
+        names = folder_names[fid]
+        photos_considered += 1
+        if names is None:
+            report_photo_progress(row["folder_path"])
+            continue
+        if _nfc(row["filename"]) in names:
+            report_photo_progress(row["folder_path"])
+            continue
+        # NFC miss: defer to the kernel for case rules. On case-insensitive
+        # volumes (APFS default, NTFS) os.path.exists resolves a
+        # case-mismatched name; on case-sensitive volumes (most Linux
+        # filesystems) it correctly reports the file as absent.
+        check_cancelled()
+        if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
+            missing.append(row)
+        report_photo_progress(row["folder_path"])
+    check_cancelled()
+    report_progress("")
+    return missing
 
 
 def _nfc(name: str) -> str:
@@ -793,6 +905,257 @@ _PREDICTION_CONFIDENCE_SORTS = {
     "prediction_confidence": "DESC",
     "prediction_confidence_asc": "ASC",
 }
+
+
+def _contains_prediction_field(node, prediction_fields):
+    """Whether a rule node is, or (transitively) holds, a prediction leaf."""
+    if not isinstance(node, dict):
+        return False
+    if "rules" in node and "field" not in node:
+        return any(
+            _contains_prediction_field(c, prediction_fields)
+            for c in node.get("rules") or []
+        )
+    return node.get("field") in prediction_fields
+
+
+def _relax_negated_walk(node, negated, prediction_fields, broad):
+    """``_relax_negated_prediction_leaves``'s recursive pass over one node."""
+    if isinstance(node, dict) and "rules" in node and "field" not in node:
+        mode = node.get("mode", "all")
+        child_negated = negated or (mode == "none")
+        new_children = []
+        had_broad = False
+        for child in node.get("rules") or []:
+            is_group = (
+                isinstance(child, dict)
+                and "rules" in child
+                and "field" not in child
+            )
+            # Under negation, a subgroup that mixes metadata with
+            # prediction leaves would be compiled by the outer
+            # ``NOT EXISTS(...)`` in a way that lets its metadata
+            # siblings prune photos before the row filter sees them
+            # (see ``Database._relax_negated_prediction_leaves``). Drop the whole subgroup so
+            # SQL broadens; the row filter re-evaluates the
+            # ORIGINAL tree per row.
+            if (
+                child_negated
+                and is_group
+                and _contains_prediction_field(child, prediction_fields)
+            ):
+                had_broad = True
+                continue
+            stripped = _relax_negated_walk(
+                child, child_negated, prediction_fields, broad,
+            )
+            if stripped is None:
+                # Bare row-level leaf dropped under negation:
+                # SQL for that leaf broadens to TRUE.
+                had_broad = True
+                continue
+            if stripped is broad:
+                had_broad = True
+                continue
+            new_children.append(stripped)
+        # ``any`` with any broad child is TRUE at the photo
+        # level — the whole OR broadens. ``all``/``none`` drop
+        # broad children silently (they don't restrict) unless
+        # every child broadened, in which case the group itself
+        # is broad and must propagate.
+        if mode == "any" and had_broad:
+            return broad
+        if had_broad and not new_children:
+            return broad
+        new_node = dict(node)
+        new_node["rules"] = new_children
+        return new_node
+    if negated and isinstance(node, dict) and \
+            node.get("field") in prediction_fields:
+        return None
+    return node
+
+
+def _rule_truthy(value):
+    """Whether a rule value reads as boolean true."""
+    return value is True or value == 1 or value == "1" or value == "true"
+
+
+def _rule_num_match(row_val, op, want):
+    """A numeric rule leaf evaluated against one row value."""
+    if row_val is None:
+        return False
+    try:
+        a = float(row_val)
+    except (TypeError, ValueError):
+        return False
+    if op == "between":
+        if not isinstance(want, list) or len(want) != 2:
+            return False
+        try:
+            lo, hi = float(want[0]), float(want[1])
+        except (TypeError, ValueError):
+            return False
+        return lo <= a <= hi
+    try:
+        b = float(want)
+    except (TypeError, ValueError):
+        return False
+    if op == ">=":
+        return a >= b
+    if op == "<=":
+        return a <= b
+    if op == ">":
+        return a > b
+    if op == "<":
+        return a < b
+    if op in ("equals", "is"):
+        return a == b
+    if op == "is not":
+        return a != b
+    return False
+
+
+def _rule_text_match(row_val, op, want):
+    """A case-insensitive text rule leaf evaluated against one row value."""
+    a = "" if row_val is None else str(row_val)
+    b = "" if want is None else str(want)
+    if op == "contains":
+        return b.lower() in a.lower()
+    if op == "not_contains":
+        return b.lower() not in a.lower()
+    if op == "starts_with":
+        return a.lower().startswith(b.lower())
+    if op == "ends_with":
+        return a.lower().endswith(b.lower())
+    if op in ("equals", "is"):
+        return a.lower() == b.lower()
+    if op == "is not":
+        return a.lower() != b.lower()
+    return False
+
+
+def _rule_enum_match(row_val, op, want):
+    """An enum rule leaf evaluated against one row value."""
+    a = "" if row_val is None else str(row_val)
+    if op in ("in", "not_in"):
+        values = [str(v) for v in (want or [])]
+        inside = a in values
+        return inside if op == "in" else not inside
+    if op in ("equals", "is"):
+        return a == str(want)
+    if op == "is not":
+        return a != str(want)
+    return False
+
+
+def _prediction_leaf_row_match(rule, row, leaf_photo_sets):
+    """One rule leaf evaluated against one prediction row.
+
+    ``leaf_photo_sets`` maps ``id(leaf)`` to the photo ids a metadata leaf
+    inside an ``any``/``none`` group matches (``None``: match every row).
+    """
+    field = rule.get("field")
+    op = rule.get("op", "")
+    value = rule.get("value")
+    if field == "prediction_confidence":
+        return _rule_num_match(row["confidence"], op, value)
+    if field == "prediction_status":
+        return _rule_enum_match(row["status"], op, value)
+    if field == "classifier_model":
+        return _rule_text_match(row["classifier_model"], op, value)
+    if field in (
+        "taxonomy_kingdom",
+        "taxonomy_phylum",
+        "taxonomy_class",
+        "taxonomy_order",
+        "taxonomy_family",
+        "taxonomy_genus",
+    ):
+        col = row[field] if field in row.keys() else None  # noqa: SIM118 -- sqlite3.Row supports `in` on keys() but not on the row itself
+        if op == "contains":
+            return _rule_text_match(col, "contains", value)
+        return _rule_text_match(col, op, value)
+    if field == "needs_review":
+        is_pending = str(row["status"] or "pending") == "pending"
+        return is_pending if _rule_truthy(value) else not is_pending
+    # Non-prediction leaf. In a pure ``all`` position the SQL
+    # subquery already proved this photo satisfies it, so shortcut
+    # to True. Inside a mixed ``any``/``none`` group we can't
+    # shortcut (SQL only proved *some* sibling matched at the
+    # photo level, not this leaf), so answer from the pre-resolved
+    # per-leaf photo-id set.
+    pset = leaf_photo_sets.get(id(rule))
+    if pset is None:
+        return True
+    return row["photo_id"] in pset
+
+
+def _check_keyword_type_kwarg(kwargs):
+    """Reject an ``update_keyword`` ``type`` that is not a keyword type."""
+    if 'type' in kwargs:
+        kt = kwargs['type']
+        # Guard the membership test against non-hashable JSON values —
+        # api_update_keyword passes the request body through, and
+        # `x in frozenset` raises TypeError on unhashable input. Treat
+        # any non-string as invalid (raise ValueError so the route's
+        # existing catch yields the documented 400).
+        if not isinstance(kt, str) or kt not in KEYWORD_TYPES:
+            raise ValueError(f"Invalid keyword type: {kt!r}")
+
+
+def _keyword_update_effective_type(updates, cur_type, taxon_id):
+    """``(effective_type, type_changed)`` for an ``update_keyword`` call.
+
+    Reconciles ``updates['is_species']`` on an explicit type change.
+    """
+    # Peer lookup must use the EFFECTIVE type, not the pre-update
+    # row type: an explicit retype kwarg or the general→taxonomy
+    # auto-promotion below can move this row into a slot where a
+    # peer already lives.
+    effective_type = updates.get('type', cur_type)
+    if 'type' not in updates and cur_type == 'general' and taxon_id:
+        effective_type = 'taxonomy'
+    type_changed = effective_type != cur_type
+    # The type dropdown sends only {type: ...}. Keep the legacy
+    # is_species flag coherent on an actual type transition:
+    # otherwise demoting a taxonomy homonym to a deliberate type
+    # such as 'location' leaves is_species=1, and downstream
+    # queries that accept ``type='taxonomy' OR is_species=1`` still
+    # treat it as a species. Do not touch no-op type submissions:
+    # legacy general rows can legitimately retain is_species=1
+    # until taxonomy marking normalizes them.
+    if 'type' in updates and type_changed:
+        updates['is_species'] = int(effective_type == 'taxonomy')
+    return effective_type, type_changed
+
+
+def _apply_rename_retype(updates, cur_type, taxon_id):
+    """Auto-retype a renamed keyword, the same way add_keyword types an insert."""
+    if cur_type == 'general':
+        # Only promote to taxonomy if a match exists;
+        # otherwise leave type/taxon_id alone.
+        if taxon_id:
+            updates.setdefault('type', 'taxonomy')
+            # Gate taxon_id on the EFFECTIVE type so an
+            # explicit non-taxonomy type kwarg (e.g.
+            # type='location') doesn't end up with a
+            # taxonomy link. Mirror add_keyword's invariant
+            # for the auto-promoted case: type='taxonomy'
+            # backed by a matched taxon implies is_species=1.
+            if updates.get('type') == 'taxonomy':
+                updates.setdefault('taxon_id', taxon_id)
+                updates['is_species'] = 1
+    elif (cur_type == 'taxonomy' and taxon_id
+          and updates.get('type', 'taxonomy') == 'taxonomy'):
+        # Already taxonomy: refresh taxon_id only if the new
+        # name matches a (possibly different) taxon AND the
+        # effective type stays 'taxonomy' (caller may demote
+        # to 'location' etc.). If no match, leave the
+        # existing link in place.
+        updates.setdefault('taxon_id', taxon_id)
+    # Other manual types ('location', 'people', etc.) are
+    # preserved — user intent wins.
 
 
 class Database:
@@ -2066,6 +2429,36 @@ class Database:
         value = self.get_meta("folder_health_version")
         return int(value or 0)
 
+    def _missing_photos_subtree_clause(self, folder_id, params):
+        """The SQL restricting ``get_missing_photos`` to ``folder_id``'s subtree.
+
+        Appends its parameters to ``params``. Returns ``""`` for the whole
+        workspace and ``None`` when the folder has no subtree to scan.
+        """
+        subtree_clause = ""
+        if folder_id is not None:
+            # Restrict to the folder subtree. Path-prefix expansion (the same
+            # helper used by add_workspace_folder etc.) covers legacy rows
+            # whose parent_id is NULL — a plain recursive walk over parent_id
+            # would silently drop those subfolders.
+            subtree_ids = self._folder_subtree_ids_by_path(folder_id)
+            if not subtree_ids:
+                return None
+            if len(subtree_ids) <= _SQLITE_PARAM_CHUNK_SIZE:
+                placeholders = ",".join("?" for _ in subtree_ids)
+                subtree_clause = f" AND f.id IN ({placeholders})"
+                params.extend(subtree_ids)
+            else:
+                # A workspace root with thousands of descendant folders would
+                # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
+                # in a single IN(...) clause. Stage the ids in a
+                # connection-local temp table and join through that instead.
+                self.stats.stage_scope_ids("missing_subtree_ids", subtree_ids)
+                subtree_clause = (
+                    " AND f.id IN (SELECT id FROM missing_subtree_ids)"
+                )
+        return subtree_clause
+
     def get_missing_photos(
         self,
         folder_id=None,
@@ -2120,130 +2513,17 @@ class Database:
 
         check_cancelled()
         params = [self._ws_id()]
-        subtree_clause = ""
-        if folder_id is not None:
-            # Restrict to the folder subtree. Path-prefix expansion (the same
-            # helper used by add_workspace_folder etc.) covers legacy rows
-            # whose parent_id is NULL — a plain recursive walk over parent_id
-            # would silently drop those subfolders.
-            subtree_ids = self._folder_subtree_ids_by_path(folder_id)
-            if not subtree_ids:
-                return []
-            if len(subtree_ids) <= _SQLITE_PARAM_CHUNK_SIZE:
-                placeholders = ",".join("?" for _ in subtree_ids)
-                subtree_clause = f" AND f.id IN ({placeholders})"
-                params.extend(subtree_ids)
-            else:
-                # A workspace root with thousands of descendant folders would
-                # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
-                # in a single IN(...) clause. Stage the ids in a
-                # connection-local temp table and join through that instead.
-                self.stats.stage_scope_ids("missing_subtree_ids", subtree_ids)
-                subtree_clause = (
-                    " AND f.id IN (SELECT id FROM missing_subtree_ids)"
-                )
+        subtree_clause = self._missing_photos_subtree_clause(folder_id, params)
+        if subtree_clause is None:
+            return []
         check_cancelled()
         rows = self._folder_repository(scoped=False).photos_in_present_folders(
             subtree_clause, params,
         )
         check_cancelled()
-        # One readdir per folder instead of one stat per photo. On a 50k-photo
-        # library across a network volume the per-photo `os.path.exists` was
-        # costing minutes; a single scandir + set-membership check is orders
-        # of magnitude faster and the dominant call site for this endpoint.
-        # Misses fall back to a single os.path.exists to honor FS-specific
-        # case rules without unconditionally case-folding (which would
-        # silently collapse distinct files on case-sensitive volumes).
-        folder_online: dict[int, bool] = {}
-        folder_names: dict[int, set[str] | None] = {}
-        missing = []
-        photos_considered = 0
-        folders_checked = 0
-        reported_folders = set()
-        progress_callback_enabled = True
-
-        def report_progress(current_folder):
-            nonlocal progress_callback_enabled
-            if progress_callback is None or not progress_callback_enabled:
-                return
-            try:
-                progress_callback({
-                    "folders_checked": folders_checked,
-                    "photos_considered": photos_considered,
-                    "missing_found": len(missing),
-                    "total_photos": len(rows),
-                    "current_folder": current_folder,
-                })
-            except Exception:
-                progress_callback_enabled = False
-                log.exception("Missing photos progress callback failed")
-
-        def report_photo_progress(current_folder):
-            if photos_considered % _MISSING_PHOTOS_PROGRESS_INTERVAL == 0:
-                report_progress(current_folder)
-
-        for row in rows:
-            check_cancelled()
-            fid = row["folder_id"]
-            if fid not in folder_online:
-                folder_online[fid] = os.path.isdir(row["folder_path"])
-            if not folder_online[fid]:
-                # Whole folder is offline — surfaced by missing-folders flow.
-                if fid not in reported_folders:
-                    reported_folders.add(fid)
-                    folders_checked += 1
-                    report_progress(row["folder_path"])
-                continue
-            if fid not in folder_names:
-                try:
-                    if listing_pass is not None:
-                        folder_names[fid] = _present_names_via_listing(
-                            row["folder_path"], listing_pass, check_cancelled,
-                        )
-                    else:
-                        names_set: set[str] = set()
-                        with os.scandir(row["folder_path"]) as it:
-                            for entry in it:
-                                check_cancelled()
-                                # Broken symlinks: scandir returns the basename
-                                # even when the target is gone, but the prior
-                                # os.path.exists check returned False. Filter
-                                # them so missing originals tracked via
-                                # symlinks still surface. is_symlink() uses
-                                # cached lstat from scandir, so non-symlinks
-                                # don't pay an extra stat.
-                                if entry.is_symlink() and not os.path.exists(entry.path):
-                                    continue
-                                names_set.add(_nfc(entry.name))
-                        folder_names[fid] = names_set
-                except OSError:
-                    # Folder vanished between isdir and scandir, or unreadable;
-                    # treat the same as "folder offline" so we don't bulk-flag
-                    # every photo as a ghost.
-                    folder_names[fid] = None
-                if fid not in reported_folders:
-                    reported_folders.add(fid)
-                    folders_checked += 1
-                    report_progress(row["folder_path"])
-            names = folder_names[fid]
-            photos_considered += 1
-            if names is None:
-                report_photo_progress(row["folder_path"])
-                continue
-            if _nfc(row["filename"]) in names:
-                report_photo_progress(row["folder_path"])
-                continue
-            # NFC miss: defer to the kernel for case rules. On case-insensitive
-            # volumes (APFS default, NTFS) os.path.exists resolves a
-            # case-mismatched name; on case-sensitive volumes (most Linux
-            # filesystems) it correctly reports the file as absent.
-            check_cancelled()
-            if not os.path.exists(os.path.join(row["folder_path"], row["filename"])):
-                missing.append(row)
-            report_photo_progress(row["folder_path"])
-        check_cancelled()
-        report_progress("")
-        return missing
+        return _scan_missing_photos(
+            rows, progress_callback, listing_pass, check_cancelled,
+        )
 
     def nearest_ancestor_folder_id(self, path, exclude_id=None):
         """Return the id of the folder whose stored path is the longest proper
@@ -6741,6 +7021,27 @@ class Database:
         """
         return self._folder_repository().with_quality_data()
 
+    def _refuse_cross_type_rename(self, new_name, parent_id, keyword_id):
+        """Raise ValueError when a different-type keyword holds the target slot."""
+        # No same-type peer, but a DIFFERENT-type peer at the
+        # same (name, parent_id) would hit the table-level
+        # UNIQUE(name, parent_id) constraint at UPDATE time for
+        # a non-NULL parent and surface as an uncaught
+        # IntegrityError/500. Detect it here and raise
+        # ValueError so api_update_keyword returns a documented
+        # 400. For NULL parents a cross-type peer is allowed to
+        # coexist (mirrors add_keyword).
+        if parent_id is not None:
+            cross = self._keyword_repository().cross_type_peer(
+                new_name, parent_id, keyword_id,
+            )
+            if cross is not None:
+                raise ValueError(
+                    f"cannot rename to {new_name!r}: a "
+                    f"{cross['type']!r} keyword with that name "
+                    f"already exists under this parent"
+                )
+
     def update_keyword(self, keyword_id, **kwargs):
         """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name.
 
@@ -6754,15 +7055,7 @@ class Database:
         kwargs always win over auto-detection, and an explicit type change
         reconciles the legacy ``is_species`` flag with the requested type.
         """
-        if 'type' in kwargs:
-            kt = kwargs['type']
-            # Guard the membership test against non-hashable JSON values —
-            # api_update_keyword passes the request body through, and
-            # `x in frozenset` raises TypeError on unhashable input. Treat
-            # any non-string as invalid (raise ValueError so the route's
-            # existing catch yields the documented 400).
-            if not isinstance(kt, str) or kt not in KEYWORD_TYPES:
-                raise ValueError(f"Invalid keyword type: {kt!r}")
+        _check_keyword_type_kwarg(kwargs)
         allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -6805,24 +7098,11 @@ class Database:
                     )
                     if name_changed else None
                 )
-                # Peer lookup must use the EFFECTIVE type, not the pre-update
-                # row type: an explicit retype kwarg or the general→taxonomy
-                # auto-promotion below can move this row into a slot where a
-                # peer already lives.
-                effective_type = updates.get('type', cur_type)
-                if 'type' not in updates and cur_type == 'general' and taxon_id:
-                    effective_type = 'taxonomy'
-                type_changed = effective_type != cur_type
-                # The type dropdown sends only {type: ...}. Keep the legacy
-                # is_species flag coherent on an actual type transition:
-                # otherwise demoting a taxonomy homonym to a deliberate type
-                # such as 'location' leaves is_species=1, and downstream
-                # queries that accept ``type='taxonomy' OR is_species=1`` still
-                # treat it as a species. Do not touch no-op type submissions:
-                # legacy general rows can legitimately retain is_species=1
-                # until taxonomy marking normalizes them.
-                if 'type' in updates and type_changed:
-                    updates['is_species'] = int(effective_type == 'taxonomy')
+                # Peer lookup must use the EFFECTIVE type (see
+                # ``_keyword_update_effective_type``).
+                effective_type, type_changed = _keyword_update_effective_type(
+                    updates, cur_type, taxon_id,
+                )
                 if name_changed or type_changed:
                     # Merge into a same-slot same-type peer instead of
                     # writing a duplicate. Without this, top-level renames
@@ -6849,24 +7129,7 @@ class Database:
                         )
                         self._keyword_repository().commit()
                         return peer["id"]
-                    # No same-type peer, but a DIFFERENT-type peer at the
-                    # same (name, parent_id) would hit the table-level
-                    # UNIQUE(name, parent_id) constraint at UPDATE time for
-                    # a non-NULL parent and surface as an uncaught
-                    # IntegrityError/500. Detect it here and raise
-                    # ValueError so api_update_keyword returns a documented
-                    # 400. For NULL parents a cross-type peer is allowed to
-                    # coexist (mirrors add_keyword).
-                    if parent_id is not None:
-                        cross = self._keyword_repository().cross_type_peer(
-                            new_name, parent_id, keyword_id,
-                        )
-                        if cross is not None:
-                            raise ValueError(
-                                f"cannot rename to {new_name!r}: a "
-                                f"{cross['type']!r} keyword with that name "
-                                f"already exists under this parent"
-                            )
+                    self._refuse_cross_type_rename(new_name, parent_id, keyword_id)
 
                 # Auto-retype on rename: same logic as add_keyword. Only
                 # fires on an actual name change so idempotent PUT-style
@@ -6874,30 +7137,7 @@ class Database:
                 # unexpectedly reclassify a 'general' keyword once the taxa
                 # table is populated.
                 if name_changed:
-                    if cur_type == 'general':
-                        # Only promote to taxonomy if a match exists;
-                        # otherwise leave type/taxon_id alone.
-                        if taxon_id:
-                            updates.setdefault('type', 'taxonomy')
-                            # Gate taxon_id on the EFFECTIVE type so an
-                            # explicit non-taxonomy type kwarg (e.g.
-                            # type='location') doesn't end up with a
-                            # taxonomy link. Mirror add_keyword's invariant
-                            # for the auto-promoted case: type='taxonomy'
-                            # backed by a matched taxon implies is_species=1.
-                            if updates.get('type') == 'taxonomy':
-                                updates.setdefault('taxon_id', taxon_id)
-                                updates['is_species'] = 1
-                    elif (cur_type == 'taxonomy' and taxon_id
-                          and updates.get('type', 'taxonomy') == 'taxonomy'):
-                        # Already taxonomy: refresh taxon_id only if the new
-                        # name matches a (possibly different) taxon AND the
-                        # effective type stays 'taxonomy' (caller may demote
-                        # to 'location' etc.). If no match, leave the
-                        # existing link in place.
-                        updates.setdefault('taxon_id', taxon_id)
-                    # Other manual types ('location', 'people', etc.) are
-                    # preserved — user intent wins.
+                    _apply_rename_retype(updates, cur_type, taxon_id)
 
         self._keyword_repository().apply_update(keyword_id, updates)
         return keyword_id
@@ -7192,75 +7432,16 @@ class Database:
         """
         broad = self._RELAX_BROAD
 
-        def _contains_prediction_field(node):
-            if not isinstance(node, dict):
-                return False
-            if "rules" in node and "field" not in node:
-                return any(
-                    _contains_prediction_field(c)
-                    for c in node.get("rules") or []
-                )
-            return node.get("field") in self._PREDICTION_ROW_FIELDS
-
-        def _walk(node, negated):
-            if isinstance(node, dict) and "rules" in node and "field" not in node:
-                mode = node.get("mode", "all")
-                child_negated = negated or (mode == "none")
-                new_children = []
-                had_broad = False
-                for child in node.get("rules") or []:
-                    is_group = (
-                        isinstance(child, dict)
-                        and "rules" in child
-                        and "field" not in child
-                    )
-                    # Under negation, a subgroup that mixes metadata with
-                    # prediction leaves would be compiled by the outer
-                    # ``NOT EXISTS(...)`` in a way that lets its metadata
-                    # siblings prune photos before the row filter sees
-                    # them (see docstring). Drop the whole subgroup so
-                    # SQL broadens; the row filter re-evaluates the
-                    # ORIGINAL tree per row.
-                    if (
-                        child_negated
-                        and is_group
-                        and _contains_prediction_field(child)
-                    ):
-                        had_broad = True
-                        continue
-                    stripped = _walk(child, child_negated)
-                    if stripped is None:
-                        # Bare row-level leaf dropped under negation:
-                        # SQL for that leaf broadens to TRUE.
-                        had_broad = True
-                        continue
-                    if stripped is broad:
-                        had_broad = True
-                        continue
-                    new_children.append(stripped)
-                # ``any`` with any broad child is TRUE at the photo
-                # level — the whole OR broadens. ``all``/``none`` drop
-                # broad children silently (they don't restrict) unless
-                # every child broadened, in which case the group itself
-                # is broad and must propagate.
-                if mode == "any" and had_broad:
-                    return broad
-                if had_broad and not new_children:
-                    return broad
-                new_node = dict(node)
-                new_node["rules"] = new_children
-                return new_node
-            if negated and isinstance(node, dict) and \
-                    node.get("field") in self._PREDICTION_ROW_FIELDS:
-                return None
-            return node
+        fields = self._PREDICTION_ROW_FIELDS
 
         if isinstance(rules, list):
-            wrapped = _walk({"mode": "all", "rules": rules}, False)
+            wrapped = _relax_negated_walk(
+                {"mode": "all", "rules": rules}, False, fields, broad,
+            )
             if wrapped is broad or wrapped is None:
                 return []
             return wrapped.get("rules", [])
-        walked = _walk(rules, False)
+        walked = _relax_negated_walk(rules, False, fields, broad)
         if walked is broad or walked is None:
             return {"mode": "all", "rules": []}
         return walked
@@ -7319,7 +7500,7 @@ class Database:
         # to the photo-id set they actually match. Anywhere else the outer
         # SQL subquery already proved the leaf holds for the photo, so we
         # keep the True-shortcut. ``id(node)`` is stable across this call —
-        # the dict identity is what we look up in ``_leaf_row_match``.
+        # the dict identity is what we look up in ``_prediction_leaf_row_match``.
         leaf_photo_sets = {}
 
         def _collect_alt_metadata_leaves(node, inside_alt=False):
@@ -7345,107 +7526,6 @@ class Database:
 
         _collect_alt_metadata_leaves(root)
 
-        def _truthy(value):
-            return value is True or value == 1 or value == "1" or value == "true"
-
-        def _num_match(row_val, op, want):
-            if row_val is None:
-                return False
-            try:
-                a = float(row_val)
-            except (TypeError, ValueError):
-                return False
-            if op == "between":
-                if not isinstance(want, list) or len(want) != 2:
-                    return False
-                try:
-                    lo, hi = float(want[0]), float(want[1])
-                except (TypeError, ValueError):
-                    return False
-                return lo <= a <= hi
-            try:
-                b = float(want)
-            except (TypeError, ValueError):
-                return False
-            if op == ">=":
-                return a >= b
-            if op == "<=":
-                return a <= b
-            if op == ">":
-                return a > b
-            if op == "<":
-                return a < b
-            if op in ("equals", "is"):
-                return a == b
-            if op == "is not":
-                return a != b
-            return False
-
-        def _text_match(row_val, op, want):
-            a = "" if row_val is None else str(row_val)
-            b = "" if want is None else str(want)
-            if op == "contains":
-                return b.lower() in a.lower()
-            if op == "not_contains":
-                return b.lower() not in a.lower()
-            if op == "starts_with":
-                return a.lower().startswith(b.lower())
-            if op == "ends_with":
-                return a.lower().endswith(b.lower())
-            if op in ("equals", "is"):
-                return a.lower() == b.lower()
-            if op == "is not":
-                return a.lower() != b.lower()
-            return False
-
-        def _enum_match(row_val, op, want):
-            a = "" if row_val is None else str(row_val)
-            if op in ("in", "not_in"):
-                values = [str(v) for v in (want or [])]
-                inside = a in values
-                return inside if op == "in" else not inside
-            if op in ("equals", "is"):
-                return a == str(want)
-            if op == "is not":
-                return a != str(want)
-            return False
-
-        def _leaf_row_match(rule, row):
-            field = rule.get("field")
-            op = rule.get("op", "")
-            value = rule.get("value")
-            if field == "prediction_confidence":
-                return _num_match(row["confidence"], op, value)
-            if field == "prediction_status":
-                return _enum_match(row["status"], op, value)
-            if field == "classifier_model":
-                return _text_match(row["classifier_model"], op, value)
-            if field in (
-                "taxonomy_kingdom",
-                "taxonomy_phylum",
-                "taxonomy_class",
-                "taxonomy_order",
-                "taxonomy_family",
-                "taxonomy_genus",
-            ):
-                col = row[field] if field in row.keys() else None  # noqa: SIM118 -- sqlite3.Row supports `in` on keys() but not on the row itself
-                if op == "contains":
-                    return _text_match(col, "contains", value)
-                return _text_match(col, op, value)
-            if field == "needs_review":
-                is_pending = str(row["status"] or "pending") == "pending"
-                return is_pending if _truthy(value) else not is_pending
-            # Non-prediction leaf. In a pure ``all`` position the SQL
-            # subquery already proved this photo satisfies it, so shortcut
-            # to True. Inside a mixed ``any``/``none`` group we can't
-            # shortcut (SQL only proved *some* sibling matched at the
-            # photo level, not this leaf), so answer from the pre-resolved
-            # per-leaf photo-id set.
-            pset = leaf_photo_sets.get(id(rule))
-            if pset is None:
-                return True
-            return row["photo_id"] in pset
-
         def _eval(node, row):
             if "rules" in node and "field" not in node:
                 mode = node.get("mode", "all")
@@ -7458,7 +7538,7 @@ class Database:
                 if mode == "none":
                     return not any(_eval(c, row) for c in children)
                 return all(_eval(c, row) for c in children)
-            return _leaf_row_match(node, row)
+            return _prediction_leaf_row_match(node, row, leaf_photo_sets)
 
         return [r for r in rows if _eval(root, r)]
 
