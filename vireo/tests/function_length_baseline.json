@@ -160,7 +160,6 @@
   "web/models.py:create_models_blueprint.api_classify_readiness": 160,
   "web/models.py:create_models_blueprint.api_job_download_darktable": 274,
   "web/moves.py:create_moves_blueprint.api_move_folder_preflight": 192,
-  "web/photo_edit_recipes.py:create_photo_edit_recipes_blueprint.api_apply_photo_edit_recipe_bulk": 140,
   "web/photos.py:_OpenExternal.handoff_path": 133,
   "web/photos.py:create_photos_blueprint.api_photo_detail": 103,
   "web/photos.py:create_photos_blueprint.api_photo_region_sharpness": 131,
