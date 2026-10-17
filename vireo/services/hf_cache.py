@@ -623,7 +623,8 @@ def _purge_keys(keys, cache_dir, models_dir):
     """
     result = _delete_selected(
         cache_dir, models_dir,
-        lambda found: [found[k] for k in keys if k in found and not found[k]["installed"]],
+        lambda found: [found[k] for k in dict.fromkeys(keys)
+                       if k in found and not found[k]["installed"]],
     )
     return result["freed"]
 

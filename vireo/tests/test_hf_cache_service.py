@@ -251,6 +251,32 @@ def test_purge_model_uses_the_known_models_subfolder(hub):
     assert hf_cache.purge_model("custom-abc") == 0
 
 
+def test_purge_model_does_not_double_delete_when_source_equals_model_str(hub, monkeypatch):
+    """bioclip-2 declares the same hf-hub repo for ``model_str`` and ``source``.
+
+    Without deduplication the comprehension that picks groups to delete yields
+    the same group twice; the second pass hits ENOENT and ``_delete_groups_locked``
+    records spurious failures and warning logs. Deduplicate like ``remove()`` does.
+    """
+    from services import hf_cache
+
+    hub.add("image_encoder.onnx", b"b" * 400, repo="models--imageomics--bioclip-2")
+
+    seen_groups = []
+    real = hf_cache._delete_groups_locked
+
+    def spy(groups):
+        seen_groups.append(list(groups))
+        return real(groups)
+
+    monkeypatch.setattr(hf_cache, "_delete_groups_locked", spy)
+
+    assert hf_cache.purge_model("bioclip-2") == 400
+    assert len(seen_groups) == 1
+    keys = [g["key"] for g in seen_groups[0]]
+    assert keys == ["imageomics/bioclip-2"], keys
+
+
 def test_remove_model_in_settings_takes_the_cache_copy_along(hub, tmp_path):
     """Settings → Models → Remove must not leave the download in the cache."""
     import models
