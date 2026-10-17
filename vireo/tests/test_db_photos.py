@@ -738,6 +738,12 @@ def test_get_browse_summary(db, lib, isolated_config):
             {"folder_id": lib["root"], "name": "lib", "count": 2},
             {"folder_id": lib["child"], "name": "c", "count": 1},
         ],
+        # Every visible photo has an animal box above the floor; no quality,
+        # eye or misses pass has run.
+        "analysis": {
+            "with_detection": 3, "with_quality": 0, "with_eye": 0,
+            "with_misses": 0,
+        },
     }
     by_folder = db.get_browse_summary(folder_id=lib["child"])
     assert by_folder["filtered_total"] == 1

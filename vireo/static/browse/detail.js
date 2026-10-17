@@ -435,6 +435,37 @@ async function loadSummary() {
   }
 }
 
+// One line saying how much of the summarized scope each analysis has
+// actually reached, so "no misses flagged" never reads like "misses never
+// computed". A zero count on a non-empty scope says "never computed"; a
+// partial count says "K of N"; a complete misses pass says "checked on N".
+// Empty when the scope has no photos or the server sent no coverage.
+function analysisCoverageText(/** @type {BrowseSummary} */ summary) {
+  var total = Number(summary && summary.filtered_total) || 0;
+  var analysis = summary && summary.analysis;
+  if (total <= 0 || !analysis) return '';
+  var totalText = total.toLocaleString();
+  function count(/** @type {number | undefined} */ value) {
+    return Math.min(Math.max(Number(value) || 0, 0), total);
+  }
+  function dataSegment(/** @type {string} */ noun, /** @type {string} */ preposition, /** @type {number | undefined} */ value) {
+    var n = count(value);
+    if (n === 0) return noun + ' never computed';
+    return noun + ' ' + preposition + ' ' + n.toLocaleString() + ' of ' + totalText;
+  }
+  var misses = count(analysis.with_misses);
+  var missesSegment = misses === 0 ? 'misses never computed'
+    : misses === total ? 'misses checked on ' + totalText
+    : 'misses checked on ' + misses.toLocaleString() + ' of ' + totalText;
+  var text = [
+    dataSegment('detections', 'on', analysis.with_detection),
+    dataSegment('quality data', 'for', analysis.with_quality),
+    dataSegment('eye focus', 'for', analysis.with_eye),
+    missesSegment,
+  ].join(' · ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function renderSummary(/** @type {BrowseSummary} */ data) {
   var isFiltered = data.filtered_total !== data.total;
 
@@ -444,6 +475,7 @@ function renderSummary(/** @type {BrowseSummary} */ data) {
 
   /** @type {HTMLElement} */ (document.getElementById('summaryClassified')).textContent = data.classified.toLocaleString() + ' classified';
   /** @type {HTMLElement} */ (document.getElementById('summaryUnclassified')).textContent = data.unclassified.toLocaleString() + ' unclassified';
+  /** @type {HTMLElement} */ (document.getElementById('summaryAnalysis')).textContent = analysisCoverageText(data);
 
   // Top species
   var speciesSection = /** @type {HTMLElement} */ (document.getElementById('summarySpeciesSection'));
