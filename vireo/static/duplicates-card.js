@@ -3,6 +3,7 @@
 // trashOneLoserFile), which duplicates.html defines after loading this; they
 // are only read when a card renders.
 
+/** @param {DuplicatePhoto} photo @param {boolean} isWinner @param {string} [reason] @param {boolean} [isResolvedLoser] @param {boolean} [winnerMissingProtect] @param {boolean} [winnerOfflineProtect] */
 function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect, winnerOfflineProtect) {
   var cls = isWinner ? 'winner' : 'loser';
   // A copy on an offline volume is unknown, not missing — don't apply
@@ -62,6 +63,7 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   return html;
 }
 
+/** @param {number} photoId */
 async function revealDuplicatePhoto(photoId) {
   try {
     var data = await safeFetch('/api/files/reveal', {
@@ -70,15 +72,16 @@ async function revealDuplicatePhoto(photoId) {
       body: JSON.stringify({ photo_id: photoId, scope: 'duplicates' }),
     }, { toast: false });
     showRevealFeedback(data);
-  } catch (err) {
+  } catch (caught) { const err = duplicateRequestError(caught);
     showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
   }
 }
 
 // Delegate so restored results, fresh scans, and filter re-renders all work.
 document.addEventListener('contextmenu', function(e) {
-  var card = e.target.closest('.dup-card[data-photo-id]');
-  var results = document.getElementById('results');
+  if (!(e.target instanceof Element)) return;
+  var card = e.target.closest(/** @type {'div'} */ ('.dup-card[data-photo-id]'));
+  var results = /** @type {HTMLElement} */ (document.getElementById('results'));
   if (!card || !results || !results.contains(card)) return;
   var photoId = Number(card.dataset.photoId);
   if (!Number.isInteger(photoId) || photoId <= 0) return;

@@ -1,19 +1,22 @@
 // Duplicates page: feedback for revealing a bucket's folders.
-var _pendingBucketReveals = new Set();
+/** @type {Set<string>} */ var _pendingBucketReveals = new Set();
 
+/** @param {number} bi @param {Element|null} [button] @returns {string[]} */
 function bucketRevealFolders(bi, button) {
   var card = button && button.closest('.bucket-card');
   if (card && card.hasAttribute('data-reveal-paths')) {
-    return JSON.parse(card.getAttribute('data-reveal-paths'));
+    var paths = JSON.parse(card.getAttribute('data-reveal-paths') || '[]'); return duplicateStringList(paths) ? paths : [];
   }
   var bucket = visibleBucket((_lastScanResult && _lastScanResult.buckets || [])[bi]);
   return (bucket && bucket.folders || []).slice();
 }
 
+/** @param {number} bi @param {Element|null} [button] */
 function bucketRevealKey(bi, button) {
   return JSON.stringify(bucketRevealFolders(bi, button).sort());
 }
 
+/** @param {number} bi @param {Element|null} [card] @param {string[]} [folders] */
 function bucketRevealButton(bi, card, folders) {
   var key = folders ? JSON.stringify(folders.slice().sort()) : bucketRevealKey(bi, card);
   var pending = _pendingBucketReveals.has(key);
@@ -27,8 +30,9 @@ function bucketRevealButton(bi, card, folders) {
     escapeHtml(label) + '</button>';
 }
 
+/** @param {string} [completedKey] */
 function refreshBucketRevealButtons(completedKey) {
-  document.querySelectorAll('[data-reveal-bucket]').forEach(function(button) {
+  document.querySelectorAll(/** @type {'button'} */ ('[data-reveal-bucket]')).forEach(function(button) {
     var key = bucketRevealKey(Number(button.dataset.revealBucket), button);
     if (completedKey !== undefined && key !== completedKey) return;
     var pending = _pendingBucketReveals.has(key);
@@ -39,6 +43,7 @@ function refreshBucketRevealButtons(completedKey) {
       : window.VIREO_REVEAL_LABEL;
   });
 }
+/** @param {number} bi @param {HTMLButtonElement|null} [button] */
 async function revealBucketFolders(bi, button) {
   var folders = bucketRevealFolders(bi, button);
   if (!folders.length) return;
@@ -51,7 +56,7 @@ async function revealBucketFolders(bi, button) {
     button.textContent = 'Opening ' + manager + '\u2026';
   }
   try {
-    var data = await safeFetch('/api/folders/reveal', {
+    /** @type {{revealed?:string[];failed?:Array<{path:string;reason:string}>;skipped?:Array<{path:string;reason:string}>}} */ var data = await safeFetch('/api/folders/reveal', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ paths: folders }),
@@ -69,7 +74,7 @@ async function revealBucketFolders(bi, button) {
     } else {
       showToast(message, 'success');
     }
-  } catch (e) {
+  } catch (caught) { const e = duplicateRequestError(caught);
     showToast('Reveal failed: ' + (e.message || 'error'), 'error');
   } finally {
     _pendingBucketReveals.delete(key);

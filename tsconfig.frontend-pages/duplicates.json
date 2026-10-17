@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/duplicates.d.ts",
+    "../vireo/static/duplicates-card.js",
+    "../vireo/static/duplicates-cleanup.js",
+    "../vireo/static/duplicates-patterns.js",
+    "../vireo/static/duplicates-restore.js",
+    "../vireo/static/duplicates-reveal.js"
+  ]
+}
