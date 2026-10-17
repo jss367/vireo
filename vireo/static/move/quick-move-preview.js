@@ -7,11 +7,9 @@ function setQuickMoveSummary(folder, finalPath) {
   if (!folder || !finalPath) {
     summary.replaceChildren();
     summary.style.display = 'none';
-    return '';
+    return;
   }
   var count = folder.photo_count || 0;
-  var text = 'Confirm moving ' + count.toLocaleString() + ' photo' +
-    (count !== 1 ? 's' : '') + ' from ' + folder.path + ' to ' + finalPath + '?';
 
   summary.replaceChildren();
   var eyebrow = document.createElement('div');
@@ -51,7 +49,6 @@ function setQuickMoveSummary(folder, finalPath) {
   summary.appendChild(route);
   summary.appendChild(meta);
   summary.style.display = 'block';
-  return text;
 }
 
 /** @param {MoveFolder | undefined} folder @param {MovePreflight | null} data */

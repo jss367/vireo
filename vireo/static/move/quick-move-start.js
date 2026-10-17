@@ -112,12 +112,7 @@ async function startQuickMove() {
     });
     return;
   }
-  var moveSummary = folder
-    ? setQuickMoveSummary(folder, finalPath)
-    : 'Confirm moving photos from ' + sourcePath + ' to ' + finalPath + '?';
-  var verifyText = remoteId
-    ? '\n\nTransferred over SSH and verified by checksum before originals are removed.'
-    : '\n\nFiles will be copied and verified before originals are removed.';
+  if (folder) setQuickMoveSummary(folder, finalPath);
   if (pf.exists) {
     var p = pf.preview || {};
     var copyN = p.will_copy;
@@ -142,13 +137,14 @@ async function startQuickMove() {
       }
     );
   } else {
-    showConfirm(
-      'Move Folder',
-      moveSummary + verifyText,
-      function() {
-        executeQuickMove(Object.assign({folder_id: fid, merge: false}, destBody));
-      }
-    );
+    showMoveConfirm({
+      sourcePath: sourcePath,
+      destinationPath: finalPath,
+      photoCount: folder ? (folder.photo_count || 0) : null,
+      remote: !!remoteId,
+    }, function() {
+      executeQuickMove(Object.assign({folder_id: fid, merge: false}, destBody));
+    });
   }
 }
 
