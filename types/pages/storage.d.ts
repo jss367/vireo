@@ -1,5 +1,5 @@
 interface StorageOverviewCategory {name:string;size:number;type?:string|null;release?:boolean;settings?:boolean;hfCache?:boolean;note?:string|null;count?:number;kind:string;kindLabel:string}
-interface HfCacheEntry {removable?:boolean;retained_size?:number;name:string;key:string;size:number;file_count:number;installed:boolean;install_path?:string}
+interface HfCacheEntry {retained_reason?:string|null;removable?:boolean;retained_size?:number;name:string;key:string;size:number;file_count:number;installed:boolean;install_path?:string}
 interface HfCacheInventory {retained_size?:number;entries:HfCacheEntry[];unused_size:number;installed_size?:number;failed?:Array<{path:string;error:string}>;freed?:number}
 declare function loadStoragePanel():Promise<void>;
 interface RetainedStoragePolicy {retained_cache_max_mb:number;retained_cache_max_age_days:number;grouping_history_max_mb:number}

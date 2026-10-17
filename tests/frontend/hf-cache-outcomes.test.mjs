@@ -58,8 +58,8 @@ test('retained-only entries show retained bytes and cannot bind a remove action'
   assert.equal(button.disabled, true);
   assert.match(button.title, /copies are retained/);
   const bytes = row.children[0].children[1].children[0];
-  assert.match(bytes.textContent, /0 B.*99 B retained copies/);
-  assert.equal(c.hfCacheCardNote({size: 99, unused_size: 0, retained_size: 99}), '99 B retained snapshot copies');
+  assert.match(bytes.textContent, /0 B.*99 B retained/);
+  assert.equal(c.hfCacheCardNote({size: 99, unused_size: 0, retained_size: 99}), '99 B retained cache payloads');
   assert.equal(c.hfCacheCardNote({size: 1, unused_size: 0, installed_size: 0}), 'No removable payloads');
 });
 
@@ -78,4 +78,16 @@ test('bulk removal counts removable entries and does nothing for retained-only b
   await c.removeUnusedHfCache();
   assert.equal(posts.length, 1);
   assert.equal(confirms.length, 1);
+});
+
+test('unmanaged inventory rows retain their ownership explanation even with an external install', () => {
+  const {c} = page();
+  for (const installed of [false, true]) {
+    const row = c._hfCacheRow({name: 'External cache', key: 'outside/client', size: 0,
+      retained_size: 23, removable: false, installed, file_count: 1,
+      retained_reason: 'Unmanaged registration: Vireo does not own this cache cleanup.'});
+    assert.equal(row.children[1].disabled, true);
+    assert.match(row.children[1].title, /Unmanaged registration/);
+    assert.match(row.children[0].children[1].children[0].textContent, /0 B.*23 B retained/);
+  }
 });

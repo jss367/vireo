@@ -27,14 +27,14 @@ An entry is ``installed`` when a model directory exists for it, even an
 empty one: every download creates the directory before fetching, so the
 directory is the user's intent and the cache entry is what will fill it.
 
-Collection scope is the explicit list from ``KNOWN_MODELS`` and the
+Cleanup scope is the explicit list from ``KNOWN_MODELS`` and the
 managed registered models (plus the legacy BioCLIP checkpoints), never an
 organization-wide prefix: a shared cache may hold repositories owned by
-other Hub clients, and inventorying one of those as a Vireo entry would let
-``Remove unused`` evict it. A purge of a dynamically downloaded model
+other Hub clients, so registration alone cannot authorize cleanup. A purge of a dynamically downloaded model
 (``download_hf_model``, id absent from ``KNOWN_MODELS``) passes the entry's
 ``hf-hub:`` identifier captured before unregistration so that one repository
-rejoins the collection scope for the purge.
+rejoins the collection scope for the purge. Read-only inventory also reports
+unmanaged registered repositories, with their payloads marked non-removable.
 
 Cleanup is descriptor-only and fails closed on unsupported platforms. A pinned
 cache tree spans collection, selection and payload deletion. All Vireo cache
@@ -97,7 +97,7 @@ def _cache_dir(cache_dir):
     return huggingface_cache_dir()
 
 
-def _repo_dirs(cache_dir, extra_repos=()):
+def _repo_dirs(cache_dir, extra_repos=(), *, managed_only=True):
     """Vireo-relevant ``models--*`` directories under the hub cache (no symlinks).
 
     The whitelist is the explicit list built from ``KNOWN_MODELS`` and the
@@ -113,7 +113,7 @@ def _repo_dirs(cache_dir, extra_repos=()):
 
     if not _fs().path.isdir(cache_dir):
         return []
-    wanted = huggingface_repositories(managed_only=True) | {
+    wanted = huggingface_repositories(managed_only=managed_only) | {
         "models--" + repo.replace("/", "--") for repo in extra_repos
     }
     out = []
@@ -257,7 +257,9 @@ def _unreferenced_blobs(repo_dir, referenced):
 
 
 def _reclaimable_blobs(group):
-    """Only actual hub blobs have download locks cleanup can establish."""
+    """Only eligible hub blobs have download locks cleanup can establish."""
+    if not group.get("cleanup_eligible", True):
+        return {}
     blobs_dir = _fs().path.realpath(os.path.join(group["repo_dir"], "blobs"))
     return {path: size for path, size in group["blobs"].items()
             if os.path.dirname(path) == blobs_dir}
@@ -278,7 +280,7 @@ def _size_groups(found):
         group["removable"] = bool(reclaimable)
 
 
-def _collect(cache_dir, models_dir, extra_repos=()):
+def _collect(cache_dir, models_dir, extra_repos=(), *, reporting=False):
     """Every group across every Vireo repo, keyed, with install status."""
     from services.storage_paths import directory_bytes
 
@@ -286,7 +288,9 @@ def _collect(cache_dir, models_dir, extra_repos=()):
     onnx_name = _onnx_repo_dir_name()
     total = 0
     found = {}
-    for dir_name, repo_dir in _repo_dirs(cache_dir, extra_repos):
+    eligible = {name for name, _path in _repo_dirs(cache_dir, extra_repos)} if reporting else None
+    for dir_name, repo_dir in _repo_dirs(cache_dir, extra_repos, managed_only=not reporting):
+        cleanup_eligible = eligible is None or dir_name in eligible
         total += directory_bytes(repo_dir) if _ACTIVE_TREE.get() is None else 0
         repo = _repo_id(dir_name)
         onnx = dir_name == onnx_name
@@ -301,7 +305,7 @@ def _collect(cache_dir, models_dir, extra_repos=()):
                 key, name, candidates = repo, repo, by_repo.get(repo, [])
             install = next((d for d in candidates if _is_install_dir(d)), None)
             found[key] = {
-                "key": key, "name": name, "repo_dir": repo_dir,
+                "key": key, "name": name, "repo_dir": repo_dir, "cleanup_eligible": cleanup_eligible,
                 "files": data["files"], "blobs": data["blobs"],
                 "installed": install is not None, "install_path": install,
             }
@@ -310,7 +314,7 @@ def _collect(cache_dir, models_dir, extra_repos=()):
             key = repo + UNREFERENCED_SUFFIX
             found[key] = {
                 "key": key, "name": f"{repo}: files no download refers to",
-                "repo_dir": repo_dir, "files": list(dangling), "blobs": dangling,
+                "repo_dir": repo_dir, "files": list(dangling), "blobs": dangling, "cleanup_eligible": cleanup_eligible,
                 "installed": False, "install_path": None, "dangling": True,
             }
     _size_groups(found)
@@ -323,6 +327,8 @@ def _public(group):
         "shared_size": group["shared_size"], "installed": group["installed"],
         "install_path": group["install_path"], "file_count": len(group["files"]),
         "retained_size": group["retained_size"], "removable": group["removable"],
+        "retained_reason": ("Reported for an unmanaged registration; Vireo does not own this repository's cache cleanup."
+                            if not group.get("cleanup_eligible", True) else None),
     }
 
 
@@ -332,10 +338,12 @@ def inventory(cache_dir=None, models_dir=None):
     ``size`` is the bytes the Vireo repos occupy on disk; ``entries`` splits
     them by model with ``installed`` saying whether an install folder exists
     for it. ``unused_size`` is what ``remove_unused`` would reclaim: every
-    blob the unused entries reference that no installed entry also does.
+    eligible blob the unused entries reference that no installed entry also
+    does. Unmanaged registrations remain visible with non-removable retained
+    bytes; installed bytes take priority over retained bytes in the totals.
     """
     cache_dir = _cache_dir(cache_dir)
-    total, found = _collect(cache_dir, _models_dir(models_dir))
+    total, found = _collect(cache_dir, _models_dir(models_dir), reporting=True)
     installed_blobs: dict[str, int] = {}
     unused_blobs: dict[str, int] = {}
     retained_blobs: dict[str, int] = {}

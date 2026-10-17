@@ -14,7 +14,7 @@ function hfCacheCardNote(hf) {
   if (hf.unused_size) {
     return storageFormatBytes(hf.unused_size) + ' backs no installed model';
   }
-  if (hf.retained_size) return storageFormatBytes(hf.retained_size) + ' retained snapshot copies';
+  if (hf.retained_size) return storageFormatBytes(hf.retained_size) + ' retained cache payloads';
   return hf.installed_size ? 'All entries back installed models' : 'No removable payloads';
 }
 
@@ -69,10 +69,10 @@ function _hfCacheRow(entry) {
   var files = document.createElement('span');
   files.textContent = (entry.file_count === 1 ? '1 file' : entry.file_count + ' files') +
     ' · ' + storageFormatBytes(entry.size);
-  if (entry.retained_size) files.textContent += ' · ' + storageFormatBytes(entry.retained_size) + ' retained copies';
+  if (entry.retained_size) files.textContent += ' · ' + storageFormatBytes(entry.retained_size) + ' retained';
   meta.appendChild(files);
   var tag = document.createElement('span');
-  tag.className = 'stat-kind ' + (entry.installed ? 'keep' : 'safe');
+  tag.className = 'stat-kind ' + (entry.installed || entry.removable === false ? 'keep' : 'safe');
   tag.textContent = entry.installed ? 'Backs installed model' : 'No installed model uses this';
   if (entry.installed && entry.install_path) tag.title = entry.install_path;
   meta.appendChild(tag);
@@ -81,7 +81,10 @@ function _hfCacheRow(entry) {
   var btn = document.createElement('button');
   btn.className = 'btn-danger';
   btn.textContent = 'Remove';
-  if (entry.installed) {
+  if (entry.retained_reason) {
+    btn.disabled = true;
+    btn.title = entry.retained_reason;
+  } else if (entry.installed) {
     btn.disabled = true;
     btn.title = 'Remove the model in Settings → Models; its cache entry goes with it. ' +
       'The installed copy may share disk blocks with this entry, so removing it alone frees little.';
