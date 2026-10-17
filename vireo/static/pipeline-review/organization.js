@@ -4,37 +4,39 @@
 // Each organization dialog owns its own captured selection so opening one
 // cannot silently overwrite the photos the other is about to submit, and
 // closing one cannot clear the selection the other is still using.
-var pipelineReviewCollectionPhotoIds = [];
-var pipelineReviewKeywordPhotoIds = [];
-var pipelineReviewCollections = [];
-var pipelineReviewSelectedCollectionId = null;
-var pipelineReviewCollectionSubmitPromise = null;
-var pipelineReviewCreatedCollection = null;
+/** @type {number[]} */ var pipelineReviewCollectionPhotoIds = [];
+/** @type {number[]} */ var pipelineReviewKeywordPhotoIds = [];
+/** @type {ReviewCollection[]} */ var pipelineReviewCollections = [];
+/** @type {number | null} */ var pipelineReviewSelectedCollectionId = null;
+/** @type {Promise<unknown> | null} */ var pipelineReviewCollectionSubmitPromise = null;
+/** @type {{id: number; name: string} | null} */ var pipelineReviewCreatedCollection = null;
 var pipelineReviewCollectionLoadSeq = 0;
-var pipelineReviewKeywordSubmitPromise = null;
-var pipelineReviewActiveOrganizationModal = null;
+/** @type {Promise<unknown> | null} */ var pipelineReviewKeywordSubmitPromise = null;
+/** @type {string | null} */ var pipelineReviewActiveOrganizationModal = null;
 
 function pipelineReviewAnyOrganizationModalOpen() {
-  var collection = document.getElementById('pipelineCollectionModal');
-  var keyword = document.getElementById('pipelineKeywordModal');
+  var collection = /** @type {HTMLElement} */ (document.getElementById('pipelineCollectionModal'));
+  var keyword = /** @type {HTMLElement} */ (document.getElementById('pipelineKeywordModal'));
   return !!((collection && collection.classList.contains('open')) ||
     (keyword && keyword.classList.contains('open')));
 }
 
+/** @param {string} kind */
 function pipelineReviewActivateOrganizationModal(kind) {
-  var collection = document.getElementById('pipelineCollectionModal');
-  var keyword = document.getElementById('pipelineKeywordModal');
+  var collection = /** @type {HTMLElement} */ (document.getElementById('pipelineCollectionModal'));
+  var keyword = /** @type {HTMLElement} */ (document.getElementById('pipelineKeywordModal'));
   pipelineReviewActiveOrganizationModal = kind;
   if (collection) collection.style.zIndex = kind === 'collection' ? '551' : '550';
   if (keyword) keyword.style.zIndex = kind === 'keyword' ? '551' : '550';
 }
 
+/** @param {string} kind */
 function pipelineReviewDeactivateOrganizationModal(kind) {
   if (pipelineReviewActiveOrganizationModal !== kind) return;
   var other = kind === 'collection' ? 'keyword' : 'collection';
-  var otherEl = document.getElementById(
+  var otherEl = /** @type {HTMLElement} */ (document.getElementById(
     other === 'collection' ? 'pipelineCollectionModal' : 'pipelineKeywordModal'
-  );
+  ));
   if (otherEl && otherEl.classList.contains('open')) {
     pipelineReviewActivateOrganizationModal(other);
   } else {
@@ -42,15 +44,17 @@ function pipelineReviewDeactivateOrganizationModal(kind) {
   }
 }
 
+/** @param {number[]} photoIds */
 function pipelineReviewUniquePhotoIds(photoIds) {
-  var seen = {};
-  return (photoIds || []).map(function(id) { return parseInt(id, 10); }).filter(function(id) {
+  /** @type {Record<number,boolean>} */ var seen = {};
+  return (photoIds || []).map(function(id) { return parseInt(String(id), 10); }).filter(function(id) {
     if (!id || seen[id]) return false;
     seen[id] = true;
     return true;
   });
 }
 
+/** @param {ReviewCollection} collection */
 function pipelineCollectionAcceptsManualPhotos(collection) {
   if (typeof collection.can_add_photos === 'boolean') return collection.can_add_photos;
   try {
@@ -61,6 +65,7 @@ function pipelineCollectionAcceptsManualPhotos(collection) {
   } catch(e) { return false; }
 }
 
+/** @param {number[]} photoIds */
 async function addToCollection(photoIds) {
   if (pipelineReviewCollectionSubmitPromise) return false;
   if (isScopedReviewView()) {
@@ -101,7 +106,7 @@ async function addToCollection(photoIds) {
   pipelineReviewSelectedCollectionId = null;
   pipelineReviewCreatedCollection = null;
   pipelineReviewCollections = (collections || []).filter(pipelineCollectionAcceptsManualPhotos);
-  document.getElementById('pipelineCollectionTitle').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('pipelineCollectionTitle')).textContent =
     'Add ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's') + ' to Collection';
   var listHtml = pipelineReviewCollections.map(function(collection) {
     return '<button type="button" class="pipeline-collection-choice" data-id="' + collection.id +
@@ -111,26 +116,28 @@ async function addToCollection(photoIds) {
   if (!listHtml) {
     listHtml = '<div style="padding:6px 10px;color:var(--text-dim);font-size:12px;">No manual collections yet. Enter a name below to create one.</div>';
   }
-  document.getElementById('pipelineCollectionList').innerHTML = listHtml;
-  document.getElementById('pipelineCollectionNewName').value = '';
-  document.getElementById('pipelineCollectionModal').classList.add('open');
+  /** @type {HTMLElement} */ (document.getElementById('pipelineCollectionList')).innerHTML = listHtml;
+  /** @type {HTMLInputElement} */ (document.getElementById('pipelineCollectionNewName')).value = '';
+  /** @type {HTMLElement} */ (document.getElementById('pipelineCollectionModal')).classList.add('open');
   pipelineReviewActivateOrganizationModal('collection');
-  setTimeout(function() { document.getElementById('pipelineCollectionNewName').focus(); }, 50);
+  setTimeout(function() { /** @type {HTMLInputElement} */ (document.getElementById('pipelineCollectionNewName')).focus(); }, 50);
   return true;
 }
 
+/** @param {number} collectionId */
 function pickPipelineCollection(collectionId) {
   pipelineReviewSelectedCollectionId = collectionId;
   pipelineReviewCreatedCollection = null;
-  document.getElementById('pipelineCollectionNewName').value = '';
-  document.querySelectorAll('.pipeline-collection-choice').forEach(function(el) {
-    el.style.background = parseInt(el.dataset.id, 10) === collectionId ? 'var(--bg-tertiary)' : 'transparent';
+  /** @type {HTMLInputElement} */ (document.getElementById('pipelineCollectionNewName')).value = '';
+  /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.pipeline-collection-choice')).forEach(function(el) {
+    el.style.background = Number(el.dataset.id) === collectionId ? 'var(--bg-tertiary)' : 'transparent';
   });
 }
 
+/** @param {boolean} [force] */
 function hidePipelineCollectionModal(force) {
   if (pipelineReviewCollectionSubmitPromise && force !== true) return false;
-  document.getElementById('pipelineCollectionModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('pipelineCollectionModal')).classList.remove('open');
   pipelineReviewDeactivateOrganizationModal('collection');
   pipelineReviewCollectionPhotoIds = [];
   pipelineReviewSelectedCollectionId = null;
@@ -143,12 +150,13 @@ function hidePipelineCollectionModal(force) {
   return true;
 }
 
+/** @param {boolean} submitting */
 function setPipelineCollectionSubmitting(submitting) {
-  var btn = document.getElementById('pipelineCollectionSubmitBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineCollectionSubmitBtn'));
   if (btn) btn.disabled = submitting;
-  var cancel = document.getElementById('pipelineCollectionCancelBtn');
+  var cancel = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineCollectionCancelBtn'));
   if (cancel) cancel.disabled = submitting;
-  var input = document.getElementById('pipelineCollectionNewName');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('pipelineCollectionNewName'));
   if (input) input.disabled = submitting;
 }
 
@@ -161,7 +169,7 @@ function confirmPipelineCollection() {
   // Re-check the scope at submit: a membership refresh can drop a photo
   // while the dialog is open.
   var ids = photoIdsInReviewScope(pipelineReviewCollectionPhotoIds);
-  var newName = document.getElementById('pipelineCollectionNewName').value.trim();
+  var newName = /** @type {HTMLInputElement} */ (document.getElementById('pipelineCollectionNewName')).value.trim();
   var collectionId = pipelineReviewSelectedCollectionId;
   var collectionName = '';
   if (!ids.length || (!newName && collectionId == null)) return Promise.resolve(false);
@@ -173,16 +181,16 @@ function confirmPipelineCollection() {
         collectionId = pipelineReviewCreatedCollection.id;
       } else {
         try {
-          var created = await safeFetch('/api/collections', {
+          var created = await /** @type {Promise<ReviewCollection>} */ (safeFetch('/api/collections', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
               name: newName,
               rules: [{field: 'photo_ids', value: []}],
             }),
-          });
+          }));
           collectionId = created.id;
-          pipelineReviewCreatedCollection = {id: collectionId, name: newName};
+          pipelineReviewCreatedCollection = {id: collectionId || 0, name: newName};
         } catch(e) { return false; }
       }
       collectionName = newName;
@@ -218,6 +226,7 @@ function confirmPipelineCollection() {
   return pipelineReviewCollectionSubmitPromise;
 }
 
+/** @param {number[]} photoIds */
 function batchAddKeyword(photoIds) {
   if (pipelineReviewKeywordSubmitPromise) return false;
   if (isScopedReviewView()) {
@@ -232,17 +241,18 @@ function batchAddKeyword(photoIds) {
   }
   pipelineReviewKeywordPhotoIds = ids;
   window._vireoNativeMenuPhotoIdsOverride = null;
-  document.getElementById('pipelineKeywordTitle').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('pipelineKeywordTitle')).textContent =
     'Add Keyword to ' + ids.length + ' Photo' + (ids.length === 1 ? '' : 's');
-  document.getElementById('pipelineKeywordInput').value = '';
-  document.getElementById('pipelineKeywordModal').classList.add('open');
+  /** @type {HTMLInputElement} */ (document.getElementById('pipelineKeywordInput')).value = '';
+  /** @type {HTMLElement} */ (document.getElementById('pipelineKeywordModal')).classList.add('open');
   pipelineReviewActivateOrganizationModal('keyword');
-  setTimeout(function() { document.getElementById('pipelineKeywordInput').focus(); }, 50);
+  setTimeout(function() { /** @type {HTMLInputElement} */ (document.getElementById('pipelineKeywordInput')).focus(); }, 50);
 }
 
+/** @param {boolean} [force] */
 function hidePipelineKeywordModal(force) {
   if (pipelineReviewKeywordSubmitPromise && force !== true) return false;
-  document.getElementById('pipelineKeywordModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('pipelineKeywordModal')).classList.remove('open');
   pipelineReviewDeactivateOrganizationModal('keyword');
   pipelineReviewKeywordPhotoIds = [];
   // Preserve the native selection override while the collection dialog is
@@ -253,12 +263,13 @@ function hidePipelineKeywordModal(force) {
   return true;
 }
 
+/** @param {boolean} submitting */
 function setPipelineKeywordSubmitting(submitting) {
-  var submit = document.getElementById('pipelineKeywordSubmitBtn');
+  var submit = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineKeywordSubmitBtn'));
   if (submit) submit.disabled = submitting;
-  var cancel = document.getElementById('pipelineKeywordCancelBtn');
+  var cancel = /** @type {HTMLButtonElement} */ (document.getElementById('pipelineKeywordCancelBtn'));
   if (cancel) cancel.disabled = submitting;
-  var input = document.getElementById('pipelineKeywordInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('pipelineKeywordInput'));
   if (input) input.disabled = submitting;
 }
 
@@ -269,7 +280,7 @@ function confirmPipelineKeyword() {
     return Promise.resolve(false);
   }
   var ids = photoIdsInReviewScope(pipelineReviewKeywordPhotoIds);
-  var name = document.getElementById('pipelineKeywordInput').value.trim();
+  var name = /** @type {HTMLInputElement} */ (document.getElementById('pipelineKeywordInput')).value.trim();
   if (!ids.length || !name) return Promise.resolve(false);
   setPipelineKeywordSubmitting(true);
   pipelineReviewKeywordSubmitPromise = safeFetch('/api/batch/keyword', {
@@ -299,23 +310,23 @@ function bindPipelineReviewOrganizationKeyboard() {
     document.addEventListener('keydown', function(e) {
       if (e.key !== 'Escape') return;
       if (pipelineReviewActiveOrganizationModal === 'keyword' &&
-          document.getElementById('pipelineKeywordModal').classList.contains('open')) {
+          /** @type {HTMLElement} */ (document.getElementById('pipelineKeywordModal')).classList.contains('open')) {
         hidePipelineKeywordModal();
         e.preventDefault();
         return;
       }
       if (pipelineReviewActiveOrganizationModal === 'collection' &&
-          document.getElementById('pipelineCollectionModal').classList.contains('open')) {
+          /** @type {HTMLElement} */ (document.getElementById('pipelineCollectionModal')).classList.contains('open')) {
         hidePipelineCollectionModal();
         e.preventDefault();
         return;
       }
-      if (document.getElementById('pipelineCollectionModal').classList.contains('open')) {
+      if (/** @type {HTMLElement} */ (document.getElementById('pipelineCollectionModal')).classList.contains('open')) {
         hidePipelineCollectionModal();
         e.preventDefault();
         return;
       }
-      if (document.getElementById('pipelineKeywordModal').classList.contains('open')) {
+      if (/** @type {HTMLElement} */ (document.getElementById('pipelineKeywordModal')).classList.contains('open')) {
         hidePipelineKeywordModal();
         e.preventDefault();
       }

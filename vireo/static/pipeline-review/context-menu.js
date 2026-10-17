@@ -1,7 +1,7 @@
 // Photo context menu construction and event routing.
 // Classic page script; shared globals are initialized before boot.js runs.
 
-var pipelineReviewContextPhotoIds = [];
+/** @type {number[]} */ var pipelineReviewContextPhotoIds = [];
 
 // A right-click sets pipelineReviewContextPhotoIds, and the shared native
 // Photo menu resolves it through getActiveSelection() for keyboard-driven
@@ -38,6 +38,7 @@ function filterPipelineReviewContextSelectionToScope() {
   }
 }
 
+/** @param {number[]} photoIds @param {number} clickedPhotoId @param {boolean} inGroupReview */
 function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) {
   // Scope guard: the menu's actions close over these ids, so drop any the
   // Folder/Collection scope hides (Group Review members stay allowed).
@@ -55,14 +56,14 @@ function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) 
   var navigationHint = tauriNavigationBlocked
     ? 'Apply or close Group Review before leaving this page'
     : singleHint;
-  var rateChip = function(n) {
+  var rateChip = function(/** @type {number} */ n) {
     return {
       label: n === 0 ? '\u2606' : String(n),
       title: n === 0 ? 'No rating' : 'Rate ' + n,
       onClick: function() { setPipelineReviewRating(photoIds, n); },
     };
   };
-  var flagChip = function(flag, icon, title) {
+  var flagChip = function(/** @type {string} */ flag, /** @type {string} */ icon, /** @type {string} */ title) {
     return {
       label: icon,
       title: title,
@@ -78,7 +79,7 @@ function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) 
     };
   };
 
-  var items = [];
+  /** @type {ReviewMenuItem[]} */ var items = [];
   if (inGroupReview) {
     items = items.concat([
       {label: '\u2B06  Move to Picks', onClick: function() { grmMovePick(photoIds); }},
@@ -104,10 +105,10 @@ function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) 
   items.push({label: 'Open in Lightbox', disabled: !one, disabledHint: singleHint,
     onClick: function() { openPipelineLightbox(clickedPhotoId); }});
   items.push({label: 'Open in Browse', disabled: !one || tauriNavigationBlocked, disabledHint: navigationHint,
-    onClick: function() { window.openInBrowse(clickedPhotoId); }});
+    onClick: function() { window.openInBrowse?.(clickedPhotoId); }});
   if (typeof window.findSimilar === 'function') {
     items.push({label: 'Find Similar', disabled: !one, disabledHint: singleHint,
-      onClick: function() { window.findSimilar(clickedPhotoId); }});
+      onClick: function() { window.findSimilar?.(clickedPhotoId); }});
   }
   items.push({label: window.VIREO_REVEAL_LABEL, disabled: !one, disabledHint: singleHint,
     onClick: function() { revealPhoto(clickedPhotoId); }});
@@ -130,7 +131,7 @@ function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) 
   if (typeof window.developPhotos === 'function') {
     items.push({label: 'Develop in darktable', disabled: !!scopedWriteHint,
       disabledHint: scopedWriteHint,
-      onClick: function() { window.developPhotos(photoIds); }});
+      onClick: function() { window.developPhotos?.(photoIds); }});
   }
   if (inGroupReview && grmState && grmState.allowRemove !== false) {
     items.push({separator: true});
@@ -139,10 +140,11 @@ function buildPipelinePhotoContextMenu(photoIds, clickedPhotoId, inGroupReview) 
   return items;
 }
 
+/** @param {MouseEvent} e */
 function pipelineContextPhotoIdFromEvent(e) {
-  var card = e.target.closest('.photo-card[data-photo-id], .grm-card[data-photo-id]');
+  var card = /** @type {HTMLElement} */ (e.target).closest('.photo-card[data-photo-id], .grm-card[data-photo-id]');
   if (card) {
-    var cardPid = parseInt(card.dataset.photoId, 10);
+    var cardPid = parseInt(card.getAttribute('data-photo-id') || '', 10);
     if (cardPid) {
       return {
         photoId: cardPid,
@@ -154,8 +156,8 @@ function pipelineContextPhotoIdFromEvent(e) {
   // The burst-review loupe is an image too, but it is not nested in a
   // data-photo-id card. Resolve it through the modal's current selection so
   // the same context menu actions work on the large preview.
-  var loupe = e.target.closest('#grmLoupeImg, #grmLoupePhoto');
-  var overlay = document.getElementById('grmOverlay');
+  var loupe = /** @type {HTMLElement} */ (e.target).closest('#grmLoupeImg, #grmLoupePhoto');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   if (
     loupe &&
     overlay &&
@@ -165,7 +167,7 @@ function pipelineContextPhotoIdFromEvent(e) {
     grmState.selected
   ) {
     return {
-      photoId: parseInt(grmState.selected, 10),
+      photoId: Number(grmState.selected),
       card: null,
     };
   }
@@ -186,7 +188,7 @@ function bindPipelineReviewContextMenu() {
       var card = target.card;
       e.preventDefault();
       var inGroupReview = !!(card && card.classList.contains('grm-card')) ||
-        !!e.target.closest('#grmLoupeImg, #grmLoupePhoto');
+        !!/** @type {HTMLElement} */ (e.target).closest('#grmLoupeImg, #grmLoupePhoto');
       if (inGroupReview && typeof grmState !== 'undefined' && grmState) {
         var prevSelected = grmState.selected;
         grmState.selected = pid;
@@ -207,7 +209,7 @@ function bindPipelineReviewContextMenu() {
       if (typeof openContextMenu === 'function') {
         openContextMenu(e, buildPipelinePhotoContextMenu(ids, pid, inGroupReview));
       } else {
-        window.openInBrowse(pid);
+        window.openInBrowse?.(pid);
       }
     });
 }

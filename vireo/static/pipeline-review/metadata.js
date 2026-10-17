@@ -4,6 +4,7 @@
 // Render a single species-prediction block (title + rows). Each row in `rows`
 // is {species, models: [{model, confidence}]}. Returns '' when there are no
 // rows so we never emit an empty header.
+/** @param {string} title @param {ReviewSpeciesRow[]} rows */
 function renderSpeciesBlock(title, rows) {
   if (!rows || rows.length === 0) return '';
   var html = '<div class="inspect-species-predictions">';
@@ -36,31 +37,34 @@ function renderSpeciesBlock(title, rows) {
 // Group a single photo's raw species_top5 ([species, confidence, model] rows)
 // into the same {species, models} shape the aggregate uses, dropping models
 // below `threshold` and sorting by confidence descending.
+/** @param {ReviewPrediction[]} top5 @param {number} [threshold] */
 function buildSpeciesRows(top5, threshold) {
   top5 = top5 || [];
   if (top5.length === 0) return [];
-  var bySpecies = {};
-  var order = [];
+  /** @type {Record<string,ReviewSpeciesModel[]>} */ var bySpecies = {};
+  /** @type {string[]} */ var order = [];
   top5.forEach(function(entry) {
     var sp = entry[0];
     var conf = entry[1];
     var model = entry[2] || 'unknown';
-    if (conf < threshold) return;
+    if (conf < requireReviewValue(threshold)) return;
     if (!bySpecies[sp]) { bySpecies[sp] = []; order.push(sp); }
-    bySpecies[sp].push({ model: model, confidence: conf });
+    requireReviewValue(bySpecies[sp]).push({ model: model, confidence: conf });
   });
   var rows = order.map(function(sp) {
-    var models = bySpecies[sp].slice().sort(function(a, b) { return b.confidence - a.confidence; });
+    var models = requireReviewValue(bySpecies[sp]).slice().sort(function(a, b) { return b.confidence - a.confidence; });
     return { species: sp, models: models };
   });
-  rows.sort(function(a, b) { return b.models[0].confidence - a.models[0].confidence; });
+  rows.sort(function(a, b) { return requireReviewValue(requireReviewValue(b.models)[0]).confidence - requireReviewValue(requireReviewValue(a.models)[0]).confidence; });
   return rows;
 }
 
+/** @param {ReviewPhoto} photo @param {number} [threshold] */
 function buildPerPhotoSpeciesRows(photo, threshold) {
   return buildSpeciesRows((photo && photo.species_top5) || [], threshold);
 }
 
+/** @param {ReviewPhoto} photo @param {number} [threshold] */
 function buildMultiSubjectReviewHtml(photo, threshold) {
   var subjects = grmPhotoSubjects(photo);
   if (subjects.length < 2) return '';
@@ -72,7 +76,7 @@ function buildMultiSubjectReviewHtml(photo, threshold) {
   html += '<div class="grm-subject-review-hint">Choose a subject to see the prediction tied to that part of the photo.</div>';
   html += '<div class="grm-subject-switcher">';
   subjects.forEach(function(subject, index) {
-    var isSelected = String(subject.detection_id) === String(selected.detection_id);
+    var isSelected = String(subject.detection_id) === String(requireReviewValue(requireReviewValue(selected).detection_id));
     html += '<button type="button" class="grm-subject-chip' + (isSelected ? ' selected' : '') +
       '" data-testid="subject-chip" onclick="grmSelectSubject(' + photo.id + ', ' +
       Number(subject.detection_id) + ')">' + escapeHtml(grmSubjectLabel(subject, index)) + '</button>';
@@ -82,8 +86,8 @@ function buildMultiSubjectReviewHtml(photo, threshold) {
   var box = selected.box || {};
   var conf = selected.detection_confidence;
   var boxText = [box.x, box.y, box.w, box.h].every(function(value) { return value != null; })
-    ? ' · box x ' + Math.round(box.x * 100) + '–' + Math.round((box.x + box.w) * 100) +
-      '%, y ' + Math.round(box.y * 100) + '–' + Math.round((box.y + box.h) * 100) + '%'
+    ? ' · box x ' + Math.round(Number(box.x) * 100) + '–' + Math.round((Number(box.x) + Number(box.w)) * 100) +
+      '%, y ' + Math.round(Number(box.y) * 100) + '–' + Math.round((Number(box.y) + Number(box.h)) * 100) + '%'
     : '';
   html += '<div class="grm-subject-review-meta">Detector confidence ' +
     (conf == null ? 'unknown' : Math.round(conf * 100) + '%') + boxText + '</div>';
@@ -99,6 +103,7 @@ function buildMultiSubjectReviewHtml(photo, threshold) {
 }
 
 // Drop aggregate rows (and their models) below `threshold`.
+/** @param {ReviewSpeciesRow[]} rows @param {number} [threshold] */
 function filterAggSpeciesRows(rows, threshold) {
   if (!threshold) return rows || [];
   return (rows || []).map(function(sp) {
@@ -112,31 +117,32 @@ function filterAggSpeciesRows(rows, threshold) {
 // sorted by total count desc, models sorted by name). Used to rebuild a burst's
 // predictions after a local detach so the cached/displayed "Burst consensus"
 // reflects only the photos still in that burst — not the ones split off.
+/** @param {ReviewPhoto[]} photos */
 function buildBurstConsensus(photos) {
-  var modelData = {};   // species -> model -> {confs:[], count:0}
-  var order = [];       // species insertion order (stable tiebreak, matches server)
+  /** @type {Record<string,Record<string,{confs: number[]; count: number}>>} */ var modelData = {};   // species -> model -> {confs:[], count:0}
+  /** @type {string[]} */ var order = [];       // species insertion order (stable tiebreak, matches server)
   (photos || []).forEach(function(p) {
     ((p && p.species_top5) || []).forEach(function(entry) {
       var sp = entry[0];
       var conf = entry[1];
       var model = entry[2] || 'unknown';
       if (!modelData[sp]) { modelData[sp] = {}; order.push(sp); }
-      if (!modelData[sp][model]) modelData[sp][model] = { confs: [], count: 0 };
-      modelData[sp][model].confs.push(conf);
-      modelData[sp][model].count += 1;
+      if (!requireReviewValue(modelData[sp])[model]) requireReviewValue(modelData[sp])[model] = { confs: [], count: 0 };
+      requireReviewValue(requireReviewValue(modelData[sp])[model]).confs.push(conf);
+      requireReviewValue(requireReviewValue(modelData[sp])[model]).count += 1;
     });
   });
-  var round4 = function(x) { return Math.round(x * 1e4) / 1e4; };
+  var round4 = function(/** @type {number} */ x) { return Math.round(x * 1e4) / 1e4; };
   var rows = order.map(function(sp) {
-    var models = [];
+    /** @type {ReviewSpeciesModel[]} */ var models = [];
     var totalCount = 0, totalConfSum = 0, totalConfCount = 0;
-    Object.keys(modelData[sp]).sort().forEach(function(model) {
-      var data = modelData[sp][model];
-      var sum = data.confs.reduce(function(a, b) { return a + b; }, 0);
-      models.push({ model: model, confidence: round4(sum / data.confs.length), photo_count: data.count });
-      totalCount += data.count;
+    Object.keys(modelData[sp] || {}).sort().forEach(function(model) {
+      var data = requireReviewValue(modelData[sp])[model];
+      var sum = requireReviewValue(data).confs.reduce(function(a, b) { return a + b; }, 0);
+      models.push({ model: model, confidence: round4(sum / requireReviewValue(data).confs.length), photo_count: requireReviewValue(data).count });
+      totalCount += requireReviewValue(data).count;
       totalConfSum += sum;
-      totalConfCount += data.confs.length;
+      totalConfCount += requireReviewValue(data).confs.length;
     });
     return {
       species: sp,
@@ -160,21 +166,22 @@ function buildBurstConsensus(photos) {
 // different species when a lower-confidence label repeats across
 // detections/models while a higher-confidence one appears once — e.g.
 // [A .90, B .44, B .44] where the server picks A but a count sort picks B.
+/** @param {ReviewPhoto[]} photos */
 function candidateSpeciesOverrideFromPhotos(photos) {
-  var weights = {};
-  var order = [];
+  /** @type {Record<string,number>} */ var weights = {};
+  /** @type {string[]} */ var order = [];
   (photos || []).forEach(function(p) {
     ((p && p.species_top5) || []).forEach(function(entry) {
       var sp = entry[0];
       var conf = entry[1] || 0;
       if (!(sp in weights)) { weights[sp] = 0; order.push(sp); }
-      weights[sp] += conf;
+      weights[sp] = (weights[sp] || 0) + conf;
     });
   });
   if (order.length === 0) return null;
-  var best = order[0];
+  var best = order[0] || '';
   for (var i = 1; i < order.length; i++) {
-    if (weights[order[i]] > weights[best]) best = order[i];
+    if ((weights[order[i] || ''] || 0) > (weights[best] || 0)) best = order[i] || '';
   }
   return { species: best, confirmed: false };
 }
@@ -189,6 +196,7 @@ function candidateSpeciesOverrideFromPhotos(photos) {
 // (`consensusRows`) and title so the block matches what's on screen — burst for
 // the GRM, encounter for the flat-cache fallback. `threshold` (0..1) filters by
 // confidence; pass 0 for none.
+/** @param {ReviewPhoto} photo @param {ReviewSpeciesRow[]} consensusRows @param {string} consensusTitleText @param {number} [threshold] */
 function buildSpeciesPredictionsHtml(photo, consensusRows, consensusTitleText, threshold) {
   threshold = threshold || 0;
   var html = '';
@@ -204,8 +212,9 @@ function buildSpeciesPredictionsHtml(photo, consensusRows, consensusTitleText, t
   return html;
 }
 
+/** @param {ReviewPhoto} photo */
 function buildPipelineMetadataHtml(photo) {
-  var enc = pipelineResults.encounters[grmState.encIdx];
+  var enc = currentReviewResults().encounters[grmState.encIdx ?? -1];
   var label = (photo.label || '').toLowerCase();
   var q = hasQualityScore(photo) ? Number(photo.quality_composite) : null;
 
@@ -226,10 +235,10 @@ function buildPipelineMetadataHtml(photo) {
     html += '</div>';
   }
 
-  var conflictEnc = pipelineResults && pipelineResults.encounters &&
-    pipelineResults.encounters[grmState.encIdx];
+  var conflictEnc = pipelineResults && currentReviewResults().encounters &&
+    currentReviewResults().encounters[grmState.encIdx ?? -1];
   var conflictBurst = conflictEnc && conflictEnc.bursts &&
-    conflictEnc.bursts[grmState.burstIdx];
+    conflictEnc.bursts[grmState.burstIdx ?? -1];
   var conflictExpected = speciesCandidateForReviewUnit(conflictEnc, conflictBurst);
   // Same expected identity the card behind this modal used: without the
   // review unit's own candidate key, an encounter holding two identified taxa
@@ -274,7 +283,7 @@ function buildPipelineMetadataHtml(photo) {
   html += buildSpeciesPredictionsHtml(photo, consRows, 'Burst consensus', 0);
 
   // Score waterfall
-  var scores = [
+  /** @type {{name: string; key: 'focus_score' | 'exposure_score' | 'composition_score' | 'area_score' | 'noise_score'; weight: number; cls: string}[]} */ var scores = [
     {name: 'Focus', key: 'focus_score', weight: 0.45, cls: 'focus'},
     {name: 'Exposure', key: 'exposure_score', weight: 0.20, cls: 'exposure'},
     {name: 'Composition', key: 'composition_score', weight: 0.15, cls: 'composition'},
