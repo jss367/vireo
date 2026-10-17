@@ -118,6 +118,47 @@ class _MaskFileStage(Protocol):
     def finish(self) -> None: ...
 
 
+def _primary_detection_entry(p, primary):
+    """The worklist entry for a photo's selected primary detection."""
+    return {
+        "photo": p,
+        "detection_id": primary["id"],
+        "det_box": {
+            "x": primary["box_x"],
+            "y": primary["box_y"],
+            "w": primary["box_w"],
+            "h": primary["box_h"],
+        },
+        "detector_model": primary["detector_model"],
+        # Stored prompt provenance: full-precision bbox
+        # tuple. detections.box_* are normalized REAL
+        # values in [0, 1], so int()-truncating would
+        # collapse every prompt to (0, 0, 0, 0) and the
+        # cache/staleness check would never invalidate
+        # on bbox change. SQLite's column type affinity
+        # accepts REAL into the INTEGER-declared
+        # columns and stores them verbatim.
+        "prompt": (
+            primary["box_x"],
+            primary["box_y"],
+            primary["box_w"],
+            primary["box_h"],
+        ),
+    }
+
+
+def _mask_subject_size(mask):
+    # Mask-derived subject_size: fraction of frame
+    # covered by the boolean mask. Replaces the
+    # detection-bbox approximation classify uses.
+    total_pixels = float(mask.size)
+    if total_pixels > 0:
+        return float(
+            np.count_nonzero(mask) / total_pixels
+        )
+    return None
+
+
 @dataclass
 class _MaskPhoto:
     """One worklist photo: its source paths and in-flight mask generation."""
@@ -352,33 +393,8 @@ class _MaskPass:
                 kept.append(p)
         self.photos = kept
         dropped_ids = {p["id"] for p in dropped}
-        # The unreadable count exists to explain `no_subject_mask`
-        # rejections in Process Review. A dropped photo that
-        # already carries an active mask for the configured
-        # variant won't be rejected for that, so counting it
-        # overstates the damage from an outage that never harmed
-        # it (Codex #1392 P2).
-        # Photos that will be rejected as `no_subject_mask`
-        # because of this outage — i.e. the dropped ones that
-        # don't already have a mask. The already-masked ones need
-        # no source read and are at no risk, so they drive neither
-        # the count nor the failure latch below: latching on them
-        # would fail the stage and demand a reconnect that would
-        # change nothing (Codex #1392 P2).
         already_masked_ids, at_risk_dropped_ids = (
-            self.preflight_mask_outcomes(
-                self.thread_db, dropped, self.sam2_variant, self.dinov2_variant,
-                self.detector_confidence,
-                raw_subject_analysis=self.run.params.raw_subject_analysis,
-                contextual_weak_ids=self.contextual_weak_ids,
-                weak_detection_confidence=(
-                    self.weak_detection_confidence
-                    if self.weak_rescue_enabled
-                    and self.weak_detection_confidence
-                    < self.detector_confidence
-                    else None
-                ),
-            )
+            self._dropped_mask_outcomes(dropped)
         )
         self.em_preflight_unreadable = len(at_risk_dropped_ids)
         self.em_preflight_masked = len(already_masked_ids)
@@ -412,6 +428,35 @@ class _MaskPass:
             "Extract-masks: dropped %d photo(s) from %d "
             "offline folder(s); source not reachable.",
             len(dropped_ids), len(still_offline_folder_ids),
+        )
+
+    def _dropped_mask_outcomes(self, dropped):
+        """Split offline-dropped photos into already-masked and at-risk ids."""
+        # The unreadable count exists to explain `no_subject_mask`
+        # rejections in Process Review. A dropped photo that
+        # already carries an active mask for the configured
+        # variant won't be rejected for that, so counting it
+        # overstates the damage from an outage that never harmed
+        # it (Codex #1392 P2).
+        # Photos that will be rejected as `no_subject_mask`
+        # because of this outage — i.e. the dropped ones that
+        # don't already have a mask. The already-masked ones need
+        # no source read and are at no risk, so they drive neither
+        # the count nor the failure latch below: latching on them
+        # would fail the stage and demand a reconnect that would
+        # change nothing (Codex #1392 P2).
+        return self.preflight_mask_outcomes(
+            self.thread_db, dropped, self.sam2_variant, self.dinov2_variant,
+            self.detector_confidence,
+            raw_subject_analysis=self.run.params.raw_subject_analysis,
+            contextual_weak_ids=self.contextual_weak_ids,
+            weak_detection_confidence=(
+                self.weak_detection_confidence
+                if self.weak_rescue_enabled
+                and self.weak_detection_confidence
+                < self.detector_confidence
+                else None
+            ),
         )
 
     def map_primary_detections(self):
@@ -451,63 +496,11 @@ class _MaskPass:
         self.photos_with_detections = 0
         self.photos_subthreshold_only = 0
         for p in self.photos:
-            # Pass the captured detector_confidence explicitly so the
-            # floor matches effective_cfg (and the standalone
-            # /api/jobs/extract-masks path), not whatever cfg.load()
-            # would re-read from disk inside get_detections. With the
-            # legacy `mask_path IS NULL` prefilter gone, sub-threshold-
-            # only photos would otherwise enter SAM extraction on
-            # variant cache misses.
-            #
-            # Contextual weak-rescue photos get the lower floor plus
-            # the same MDv6/animal constraints that classify_stage and
-            # load_photo_features apply, so mask extraction picks up
-            # the same bracketed frame those two stages already opted
-            # in to.
-            if p["id"] in self.contextual_weak_ids:
-                dets = [
-                    d for d in thread_db.get_detections(
-                        p["id"],
-                        min_conf=self.weak_detection_confidence,
-                        detector_model="megadetector-v6",
-                    )
-                    if d["category"] == "animal"
-                ]
-            else:
-                dets = [
-                    d for d in thread_db.get_detections(
-                        p["id"], min_conf=self.detector_confidence,
-                    )
-                    if d["detector_model"] != "full-image"
-                ]
+            dets = self._qualifying_detections(p)
             if dets:
                 self.photos_with_detections += 1
                 primary = dets[0]  # selected primary first
-                photo_det_map[p["id"]] = {
-                    "photo": p,
-                    "detection_id": primary["id"],
-                    "det_box": {
-                        "x": primary["box_x"],
-                        "y": primary["box_y"],
-                        "w": primary["box_w"],
-                        "h": primary["box_h"],
-                    },
-                    "detector_model": primary["detector_model"],
-                    # Stored prompt provenance: full-precision bbox
-                    # tuple. detections.box_* are normalized REAL
-                    # values in [0, 1], so int()-truncating would
-                    # collapse every prompt to (0, 0, 0, 0) and the
-                    # cache/staleness check would never invalidate
-                    # on bbox change. SQLite's column type affinity
-                    # accepts REAL into the INTEGER-declared
-                    # columns and stores them verbatim.
-                    "prompt": (
-                        primary["box_x"],
-                        primary["box_y"],
-                        primary["box_w"],
-                        primary["box_h"],
-                    ),
-                }
+                photo_det_map[p["id"]] = _primary_detection_entry(p, primary)
             else:
                 # No qualifying detection — but check whether sub-
                 # threshold rows exist so the silent-completion guard
@@ -529,6 +522,38 @@ class _MaskPass:
 
         self.photos_to_process = [
             photo_det_map[pid] for pid in photo_det_map
+        ]
+
+    def _qualifying_detections(self, p):
+        """The detections that may drive this photo's mask, primary first."""
+        thread_db = self.thread_db
+        # Pass the captured detector_confidence explicitly so the
+        # floor matches effective_cfg (and the standalone
+        # /api/jobs/extract-masks path), not whatever cfg.load()
+        # would re-read from disk inside get_detections. With the
+        # legacy `mask_path IS NULL` prefilter gone, sub-threshold-
+        # only photos would otherwise enter SAM extraction on
+        # variant cache misses.
+        #
+        # Contextual weak-rescue photos get the lower floor plus
+        # the same MDv6/animal constraints that classify_stage and
+        # load_photo_features apply, so mask extraction picks up
+        # the same bracketed frame those two stages already opted
+        # in to.
+        if p["id"] in self.contextual_weak_ids:
+            return [
+                d for d in thread_db.get_detections(
+                    p["id"],
+                    min_conf=self.weak_detection_confidence,
+                    detector_model="megadetector-v6",
+                )
+                if d["category"] == "animal"
+            ]
+        return [
+            d for d in thread_db.get_detections(
+                p["id"], min_conf=self.detector_confidence,
+            )
+            if d["detector_model"] != "full-image"
         ]
 
     def open_worklist(self):
@@ -717,8 +742,7 @@ class _MaskPass:
         )
         self._weights_ensured = True
 
-    def extract_all(self):
-        run = self.run
+    def _defer_weight_download(self):
         # Auto-download SAM2 + DINOv2 weights on first pipeline run.
         # Mirrors the MegaDetector auto-download pattern (commit 90cd0f9):
         # without this, first-time users hit 1 FileNotFoundError per
@@ -740,6 +764,38 @@ class _MaskPass:
         self.ensure_sam2_weights = ensure_sam2_weights
         self._weights_ensured = False
 
+    def _mask_photo(self, entry):
+        photo = entry["photo"]
+        det_box = entry["det_box"]
+        photo_id = photo["id"]
+        folder_path = self.folders.get(photo["folder_id"], "")
+        return _MaskPhoto(
+            entry=entry,
+            photo=photo,
+            det_box=det_box,
+            photo_id=photo_id,
+            folder_path=folder_path,
+            image_path=os.path.join(folder_path, photo["filename"]),
+        )
+
+    def _report_photo_progress(self, i):
+        run = self.run
+        self.processed = i + 1
+        run.stages["extract_masks"]["count"] = self.processed
+        run.stages["extract_masks"]["total"] = self.total
+        run.runner.update_step(run.job["id"], "extract_masks",
+                           progress={"current": self.processed, "total": self.total},
+                           error_count=self.em_failed + self.em_unreadable)
+        run.emit_progress(
+            run.runner, run.job["id"], run.stages, "extract_masks",
+            "Extracting features (SAM2 + DINOv2)",
+            rate=round(self.processed / max(time.time() - self.start_time, 0.01) * 60, 1),
+        )
+
+    def extract_all(self):
+        run = self.run
+        self._defer_weight_download()
+
         self.processed = 0
         # ``while`` (not ``for``) so a pause that arrives mid-photo
         # can unwind the per-photo mask lock and retry the SAME
@@ -752,18 +808,7 @@ class _MaskPass:
             if run.control.should_abort(run.abort):
                 break
 
-            photo = entry["photo"]
-            det_box = entry["det_box"]
-            photo_id = photo["id"]
-            folder_path = self.folders.get(photo["folder_id"], "")
-            item = _MaskPhoto(
-                entry=entry,
-                photo=photo,
-                det_box=det_box,
-                photo_id=photo_id,
-                folder_path=folder_path,
-                image_path=os.path.join(folder_path, photo["filename"]),
-            )
+            item = self._mask_photo(entry)
 
             try:
                 # Per-photo serialisation. Two pipelines whose
@@ -837,17 +882,7 @@ class _MaskPass:
                     if item.mask_file_stage is not None:
                         item.mask_file_stage.restore()
 
-            self.processed = i + 1
-            run.stages["extract_masks"]["count"] = self.processed
-            run.stages["extract_masks"]["total"] = self.total
-            run.runner.update_step(run.job["id"], "extract_masks",
-                               progress={"current": self.processed, "total": self.total},
-                               error_count=self.em_failed + self.em_unreadable)
-            run.emit_progress(
-                run.runner, run.job["id"], run.stages, "extract_masks",
-                "Extracting features (SAM2 + DINOv2)",
-                rate=round(self.processed / max(time.time() - self.start_time, 0.01) * 60, 1),
-            )
+            self._report_photo_progress(i)
             i += 1
 
     def _extract_photo(self, i, item):
@@ -1087,33 +1122,9 @@ class _MaskPass:
             "subject_tenengrad", None,
         )
         mask_bg_tenengrad = features.pop("bg_tenengrad", None)
-        # Mask-derived subject_size: fraction of frame
-        # covered by the boolean mask. Replaces the
-        # detection-bbox approximation classify uses.
-        total_pixels = float(mask.size)
-        if total_pixels > 0:
-            mask_subject_size = float(
-                np.count_nonzero(mask) / total_pixels
-            )
-        else:
-            mask_subject_size = None
+        mask_subject_size = _mask_subject_size(mask)
 
-        # GPU serialisation lives inside dino_embed.embed /
-        # embed_batch (around the session.run call). The wider
-        # wrap previously here held the semaphore through
-        # per-image resize/normalize preprocessing.
-        subject_crop = self.crop_subject(proxy, mask, margin=0.15)
-        if subject_crop is not None:
-            embs = self.embed_batch(
-                [subject_crop, proxy], variant=self.dinov2_variant,
-            )
-            subj_emb_blob = self.embedding_to_blob(embs[0])
-            global_emb_blob = self.embedding_to_blob(embs[1])
-        else:
-            subj_emb_blob = None
-            global_emb_blob = self.embedding_to_blob(
-                self.embed(proxy, variant=self.dinov2_variant),
-            )
+        subj_emb_blob, global_emb_blob = self._dino_embeddings(proxy, mask)
 
         item.mask_file_stage = self.staged_mask_file.create(
             mask,
@@ -1183,6 +1194,26 @@ class _MaskPass:
         commit_with_retry(thread_db.conn)
         item.mask_file_stage.finish()
         item.mask_file_stage = None
+
+    def _dino_embeddings(self, proxy, mask):
+        """Return the (subject, global) DINOv2 embedding blobs for a mask."""
+        # GPU serialisation lives inside dino_embed.embed /
+        # embed_batch (around the session.run call). The wider
+        # wrap previously here held the semaphore through
+        # per-image resize/normalize preprocessing.
+        subject_crop = self.crop_subject(proxy, mask, margin=0.15)
+        if subject_crop is not None:
+            embs = self.embed_batch(
+                [subject_crop, proxy], variant=self.dinov2_variant,
+            )
+            subj_emb_blob = self.embedding_to_blob(embs[0])
+            global_emb_blob = self.embedding_to_blob(embs[1])
+        else:
+            subj_emb_blob = None
+            global_emb_blob = self.embedding_to_blob(
+                self.embed(proxy, variant=self.dinov2_variant),
+            )
+        return subj_emb_blob, global_emb_blob
 
     # -- rollup ------------------------------------------------------
 

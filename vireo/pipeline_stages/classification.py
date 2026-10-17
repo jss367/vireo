@@ -549,6 +549,15 @@ class _ClassifyPass:
             return
 
         preds = self._store_results(spec)
+        spec_failed = self._tally_stored_spec(spec, preds)
+
+        if run.params.reclassify and self.models_succeeded == 1:
+            self._purge_stale_detections()
+
+        self._finish_spec_step(spec, preds, spec_failed)
+
+    def _tally_stored_spec(self, spec, preds):
+        """Add a finished spec to the stage totals; ``True`` if its row failed."""
         self.total_predictions_stored += preds
         self.total_full_image_fallbacks += spec.full_image_fallbacks
         self.total_failed += spec.failed
@@ -567,14 +576,10 @@ class _ClassifyPass:
         # ``classify:<model>`` step, so the fix has to land here.
         spec_failed = bool(self.offline_reason or spec.source_skipped_photo_ids)
         if spec_failed:
-            self.failed_step_ids.add(step_id)
+            self.failed_step_ids.add(spec.step_id)
         else:
-            self.completed_step_ids.add(step_id)
-
-        if run.params.reclassify and self.models_succeeded == 1:
-            self._purge_stale_detections()
-
-        self._finish_spec_step(spec, preds, spec_failed)
+            self.completed_step_ids.add(spec.step_id)
+        return spec_failed
 
     def _activate_model(self, spec_idx, active_spec, step_id):
         """Load this spec's classifier; ``None`` when the spec is skipped."""
@@ -862,6 +867,49 @@ class _ClassifyPass:
         attempt. ``None`` means the photo is skipped without inference.
         """
         photo_id = photo["id"]
+        photo_dets = self._qualifying_animal_boxes(photo_id)
+        if photo_dets:
+            return photo_dets, False
+
+        # No animal box is usable at either the ordinary threshold or
+        # the contextual weak-rescue floor. Treat this the same as a true
+        # no-detection photo and give the classifier a full-image
+        # attempt. Raw detector output is retained for diagnostics/cache
+        # reuse, but a 1% noise box must not suppress classification of
+        # an otherwise visible subject.
+        #
+        # Exception: MegaDetector emitted a confident non-animal
+        # (person/vehicle) box at or above ``detector_confidence``.
+        # Sending the entire human/vehicle frame to the wildlife
+        # classifier would persist a spurious species prediction. Skip
+        # the fallback in that case and leave the photo without a
+        # classifier run, matching the old raw-detection guard's intent
+        # while still rescuing sub-threshold animal photos.
+        if self._has_confident_non_animal(photo_id):
+            # This is the only no-target path that skips inference.
+            # Track it so the ETA does not project confident person/
+            # vehicle tails as pending model work.
+            spec.photos_unclassifiable.add(photo_id)
+            return None
+
+        full_det_id = self._full_image_detection_id(photo_id)
+        spec.full_image_fallbacks += 1
+        self.fresh_full_image_ids_by_photo.setdefault(
+            photo_id, set(),
+        ).add(full_det_id)
+        return [{
+            "id": full_det_id,
+            "box_x": 0,
+            "box_y": 0,
+            "box_w": 1,
+            "box_h": 1,
+            "confidence": 0,
+            "category": "animal",
+            "detector_model": "full-image",
+        }], True
+
+    def _qualifying_animal_boxes(self, photo_id):
+        """The real animal boxes eligible for classification, if any."""
         is_contextual_weak = photo_id in self.contextual_weak_ids
         detection_floor = (
             self.weak_detection_confidence
@@ -926,45 +974,7 @@ class _ClassifyPass:
                     d.get("id", 0),
                 ),
             )[:1]
-        if photo_dets:
-            return photo_dets, False
-
-        # No animal box is usable at either the ordinary threshold or
-        # the contextual weak-rescue floor. Treat this the same as a true
-        # no-detection photo and give the classifier a full-image
-        # attempt. Raw detector output is retained for diagnostics/cache
-        # reuse, but a 1% noise box must not suppress classification of
-        # an otherwise visible subject.
-        #
-        # Exception: MegaDetector emitted a confident non-animal
-        # (person/vehicle) box at or above ``detector_confidence``.
-        # Sending the entire human/vehicle frame to the wildlife
-        # classifier would persist a spurious species prediction. Skip
-        # the fallback in that case and leave the photo without a
-        # classifier run, matching the old raw-detection guard's intent
-        # while still rescuing sub-threshold animal photos.
-        if self._has_confident_non_animal(photo_id):
-            # This is the only no-target path that skips inference.
-            # Track it so the ETA does not project confident person/
-            # vehicle tails as pending model work.
-            spec.photos_unclassifiable.add(photo_id)
-            return None
-
-        full_det_id = self._full_image_detection_id(photo_id)
-        spec.full_image_fallbacks += 1
-        self.fresh_full_image_ids_by_photo.setdefault(
-            photo_id, set(),
-        ).add(full_det_id)
-        return [{
-            "id": full_det_id,
-            "box_x": 0,
-            "box_y": 0,
-            "box_w": 1,
-            "box_h": 1,
-            "confidence": 0,
-            "category": "animal",
-            "detector_model": "full-image",
-        }], True
+        return photo_dets
 
     def _has_confident_non_animal(self, photo_id):
         if photo_id in self.cached_detections:
@@ -1040,38 +1050,7 @@ class _ClassifyPass:
         detection would silently drop out of the grouping pipeline.
         """
         thread_db = self.thread_db
-        expected_classifier_runtime = None
-        labels_full, model_identity, tax_identity = self._portable_identity()
-        if labels_full and model_identity:
-            from computation_cache import classifier_runtime_for_detection
-
-            expected_classifier_runtime = classifier_runtime_for_detection(
-                thread_db,
-                detection["id"],
-                model_identity,
-                labels_full,
-                taxonomy_identity=tax_identity,
-            )
-        # Fetch both accepted and gate-rejected keys in one query.
-        # ``rejected_keys`` is the "existed but the runtime_fingerprint
-        # rule rejected it" set — the preflight ``count_classifier_runs``
-        # ignores that rule, so without recording these as overcounts
-        # below, a photo whose only key is gate-rejected sits in
-        # ``cached_est`` forever and ETA prematurely reads "finishing…"
-        # on runs where the detector fingerprint has rolled since the
-        # prior classifier pass (Codex #1468 P2).
-        if expected_classifier_runtime is not None:
-            run_keys, rejected_keys = thread_db.model_runs.get_classifier_run_key_gate(
-                detection["id"],
-                expected_classifier_runtime,
-            )
-        else:
-            # No expected runtime fingerprint means portable identity
-            # isn't wired up (legacy path); fall back to the unfiltered
-            # gate. Nothing to reconcile because the preflight and the
-            # gate then agree on which rows count.
-            run_keys = thread_db.model_runs.get_classifier_run_keys(detection["id"])
-            rejected_keys = set()
+        run_keys, rejected_keys = self._classifier_run_key_gate(detection)
 
         run_key = (spec.model_name, spec.fp)
         if run_key in run_keys:
@@ -1134,6 +1113,43 @@ class _ClassifyPass:
             if photo["id"] in spec.preflight_cached_ids:
                 spec.photos_cache_overcounted.add(photo["id"])
         return False
+
+    def _classifier_run_key_gate(self, detection):
+        """``(run_keys, rejected_keys)`` recorded for this detection."""
+        thread_db = self.thread_db
+        expected_classifier_runtime = None
+        labels_full, model_identity, tax_identity = self._portable_identity()
+        if labels_full and model_identity:
+            from computation_cache import classifier_runtime_for_detection
+
+            expected_classifier_runtime = classifier_runtime_for_detection(
+                thread_db,
+                detection["id"],
+                model_identity,
+                labels_full,
+                taxonomy_identity=tax_identity,
+            )
+        # Fetch both accepted and gate-rejected keys in one query.
+        # ``rejected_keys`` is the "existed but the runtime_fingerprint
+        # rule rejected it" set — the preflight ``count_classifier_runs``
+        # ignores that rule, so without recording these as overcounts
+        # below, a photo whose only key is gate-rejected sits in
+        # ``cached_est`` forever and ETA prematurely reads "finishing…"
+        # on runs where the detector fingerprint has rolled since the
+        # prior classifier pass (Codex #1468 P2).
+        if expected_classifier_runtime is not None:
+            run_keys, rejected_keys = thread_db.model_runs.get_classifier_run_key_gate(
+                detection["id"],
+                expected_classifier_runtime,
+            )
+        else:
+            # No expected runtime fingerprint means portable identity
+            # isn't wired up (legacy path); fall back to the unfiltered
+            # gate. Nothing to reconcile because the preflight and the
+            # gate then agree on which rows count.
+            run_keys = thread_db.model_runs.get_classifier_run_keys(detection["id"])
+            rejected_keys = set()
+        return run_keys, rejected_keys
 
     def _count_cache_hit(self, spec, photo):
         spec.skipped_existing += 1
@@ -1810,40 +1826,7 @@ class _ClassifyPass:
         self.source_offline_state["skipped_photo_ids"] = (
             set(self.source_skipped_photo_ids)
         )
-        if self.offline_reason:
-            # Must carry the "[classify] Fatal:" prefix: the end-of-run
-            # rollup picks the job's headline error by that marker and
-            # would otherwise fall back to errors[0] — likely an
-            # unrelated per-photo warning logged much earlier.
-            run.errors.append(
-                f"[classify] Fatal: source "
-                f"{self.offline_reason}. Reconnect it and run "
-                f"Process again to classify the rest — photos already "
-                f"classified will be skipped."
-            )
-            # extract_masks_stage / eye_keypoints_stage only gate on
-            # abort.is_set(); with the source dead there is nothing
-            # for them to read either, so without this they walk every
-            # detected photo and reproduce the exact "N failed"
-            # pattern this PR fixes — just one stage later, before
-            # the failed-stage rollup at the end of the pipeline gets
-            # a chance to short-circuit them.
-            run.abort.set()
-        elif n_source_skipped_photos > 0:
-            # Folder-scoped outage: some photos were unreachable but
-            # the source as a whole is not necessarily gone (other
-            # folders in the collection may still be healthy). Do NOT
-            # abort — later stages can still make progress on the
-            # reachable photos — but the classify pass did not open
-            # every photo it was asked to, so surface a fatal-prefixed
-            # error so the end-of-run rollup names the outage instead
-            # of letting the run finish silent-green.
-            run.errors.append(
-                f"[classify] Fatal: {n_source_skipped_photos} of "
-                f"{total} photos unreachable (source offline). "
-                f"Reconnect the missing folder(s) and run Process "
-                f"again to classify the rest."
-            )
+        self._report_source_outage(n_source_skipped_photos)
         # A run that gave up on a dead source, or that skipped photos
         # because their folder was unreachable, did NOT classify the
         # whole collection, so it must not land on the job tree as a
@@ -1878,6 +1861,44 @@ class _ClassifyPass:
             "models_skipped": len(self.skipped_model_names),
             "skipped_model_names": self.skipped_model_names,
         }
+
+    def _report_source_outage(self, n_source_skipped_photos):
+        """Name a dead source or unreachable folders as a classify failure."""
+        run = self.run
+        if self.offline_reason:
+            # Must carry the "[classify] Fatal:" prefix: the end-of-run
+            # rollup picks the job's headline error by that marker and
+            # would otherwise fall back to errors[0] — likely an
+            # unrelated per-photo warning logged much earlier.
+            run.errors.append(
+                f"[classify] Fatal: source "
+                f"{self.offline_reason}. Reconnect it and run "
+                f"Process again to classify the rest — photos already "
+                f"classified will be skipped."
+            )
+            # extract_masks_stage / eye_keypoints_stage only gate on
+            # abort.is_set(); with the source dead there is nothing
+            # for them to read either, so without this they walk every
+            # detected photo and reproduce the exact "N failed"
+            # pattern this PR fixes — just one stage later, before
+            # the failed-stage rollup at the end of the pipeline gets
+            # a chance to short-circuit them.
+            run.abort.set()
+        elif n_source_skipped_photos > 0:
+            # Folder-scoped outage: some photos were unreachable but
+            # the source as a whole is not necessarily gone (other
+            # folders in the collection may still be healthy). Do NOT
+            # abort — later stages can still make progress on the
+            # reachable photos — but the classify pass did not open
+            # every photo it was asked to, so surface a fatal-prefixed
+            # error so the end-of-run rollup names the outage instead
+            # of letting the run finish silent-green.
+            run.errors.append(
+                f"[classify] Fatal: {n_source_skipped_photos} of "
+                f"{self.total} photos unreachable (source offline). "
+                f"Reconnect the missing folder(s) and run Process "
+                f"again to classify the rest."
+            )
 
     def fail(self, e):
         run = self.run

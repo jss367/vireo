@@ -63,13 +63,11 @@ def load_model_bundle(
                 or run.control.cancellation_requested()
             )
 
-        if load.model_type == "timm":
-            if cancel_check():
-                raise ClassificationCancelled("classification cancelled")
-            from timm_classifier import TimmClassifier
-            return TimmClassifier(load.model_str, taxonomy=tax)
         if cancel_check():
             raise ClassificationCancelled("classification cancelled")
+        if load.model_type == "timm":
+            from timm_classifier import TimmClassifier
+            return TimmClassifier(load.model_str, taxonomy=tax)
         from classifier import Classifier
         if not load.use_tol:
             from classify_job import _reuse_saved_label_embeddings
@@ -83,52 +81,43 @@ def load_model_bundle(
             pause_check=load.pause_check,
         )
 
-    # The shared cache key includes an ordered, canonical label identity
-    # when use_tol=False because Classifier captures embeddings in that
-    # exact column order. Two pipelines with different labels or order
-    # must not share a session. Tree-of-Life mode reads precomputed
-    # embeddings and is label-independent, so its key is constant.
-    #
-    # The weights fingerprint catches in-place model replacement
-    # (Repair, custom re-register). Without it, a pipeline started
-    # before the old session's idle timer fires would reuse the
-    # stale ONNX session on the new bytes.
-    tax_fp = load.cache_taxonomy_fingerprint()
-    files = active_model.get("files")
+    cache_key = load.classifier_cache_key()
 
     # _construct_classifier may trigger the ONNX self-heal path
     # (create_session_with_self_heal) which deletes corrupt weights
     # and redownloads them inside the factory. The shared acquisition
     # helper rekeys the entry to the post-load file fingerprint.
-    cache_handle = None
+    def _acquire():
+        return acquire_cached_classifier(
+            factory=_construct_classifier,
+            cancel_check=lambda: (
+                run.control.should_abort(run.abort)
+                or run.control.cancellation_requested()
+            ),
+            **cache_key,
+        )
+
+    clf, cache_handle = _enter_cached_classifier(
+        load, _acquire, _looks_like_missing_external_data, ClassifierLoadPaused,
+    )
+    return load.bundle(clf, cache_handle)
+
+
+def _enter_cached_classifier(
+    load, acquire, looks_like_missing_external_data, paused_class,
+):
+    """Acquire and enter the shared classifier, retrying after a pause.
+
+    Returns ``(clf, cache_handle)``. A load failure that looks like
+    missing ONNX external data becomes the incomplete-model error.
+    """
     try:
         while True:
             try:
-                cache_handle = acquire_cached_classifier(
-                    model_type=load.model_type,
-                    model_str=load.model_str,
-                    weights_path=load.weights_path,
-                    labels=None if load.use_tol else load.labels,
-                    factory=_construct_classifier,
-                    files=files,
-                    # Fold in optional-artifact presence: without
-                    # this a Repair that downloads timm's
-                    # label_descriptions.json (or bioclip-2.5's ToL
-                    # files) would not invalidate the entry already
-                    # loaded from the pre-repair install, and
-                    # subsequent pipeline runs would keep using a
-                    # stale classifier constructed without those
-                    # artifacts.
-                    optional_files=active_model.get("optional_files"),
-                    taxonomy_fingerprint=tax_fp,
-                    cancel_check=lambda: (
-                        run.control.should_abort(run.abort)
-                        or run.control.cancellation_requested()
-                    ),
-                )
+                cache_handle = acquire()
                 clf = cache_handle.__enter__()
-                break
-            except ClassifierLoadPaused:
+                return clf, cache_handle
+            except paused_class:
                 # The factory stepped out of the shared load lock
                 # with its label embeddings checkpointed. Park this
                 # participant at the pipeline's pause gate (no lock
@@ -139,27 +128,9 @@ def load_model_bundle(
                 load.park_paused_load()
                 continue
     except Exception as load_err:
-        if _looks_like_missing_external_data(load_err):
+        if looks_like_missing_external_data(load_err):
             load.raise_incomplete_model(load_err)
         raise
-
-    portable_model_identity = load.portable_model_identity(clf)
-    label_source = load.describe_label_source(clf)
-
-    return {
-        "clf": clf,
-        "_cache_handle": cache_handle,
-        "model_type": load.model_type,
-        "model_name": load.model_name,
-        "model_str": load.model_str,
-        "labels": load.labels,
-        "label_source": label_source,
-        "labels_fingerprint": load.fp,
-        "labels_fingerprint_full": load.fp_full,
-        "classifier_model_identity": portable_model_identity,
-        "use_tol": load.use_tol,
-        "active_model": active_model,
-    }
 
 
 class ClassifierLoadPaused(RuntimeError):
@@ -354,7 +325,7 @@ class _BundleLoad:
         classifier checkpoint the label embeddings finished so
         far and raise ``ClassifierLoadPaused`` instead of
         parking under ``load_lock``; the acquire loop in
-        ``load_model_bundle`` parks this participant at its normal
+        ``_enter_cached_classifier`` parks this participant at its normal
         checkpoint with every lock released and constructs again on
         Resume. Threads without a registered pause participant cannot
         park, so they never abort for pause and instead honor
@@ -364,6 +335,38 @@ class _BundleLoad:
             return False
         probe = getattr(self.run.runner, "pause_requested", None)
         return bool(probe is not None and probe(self.run.job["id"]))
+
+    def classifier_cache_key(self):
+        """The keyword arguments that key this model in the classifier cache."""
+        # The shared cache key includes an ordered, canonical label identity
+        # when use_tol=False because Classifier captures embeddings in that
+        # exact column order. Two pipelines with different labels or order
+        # must not share a session. Tree-of-Life mode reads precomputed
+        # embeddings and is label-independent, so its key is constant.
+        #
+        # The weights fingerprint catches in-place model replacement
+        # (Repair, custom re-register). Without it, a pipeline started
+        # before the old session's idle timer fires would reuse the
+        # stale ONNX session on the new bytes.
+        tax_fp = self.cache_taxonomy_fingerprint()
+        files = self.active_model.get("files")
+        return {
+            "model_type": self.model_type,
+            "model_str": self.model_str,
+            "weights_path": self.weights_path,
+            "labels": None if self.use_tol else self.labels,
+            "files": files,
+            # Fold in optional-artifact presence: without
+            # this a Repair that downloads timm's
+            # label_descriptions.json (or bioclip-2.5's ToL
+            # files) would not invalidate the entry already
+            # loaded from the pre-repair install, and
+            # subsequent pipeline runs would keep using a
+            # stale classifier constructed without those
+            # artifacts.
+            "optional_files": self.active_model.get("optional_files"),
+            "taxonomy_fingerprint": tax_fp,
+        }
 
     def cache_taxonomy_fingerprint(self):
         """The timm key also varies by taxonomy fingerprint: TimmClassifier
@@ -471,6 +474,26 @@ class _BundleLoad:
 
     # -- bundle metadata ---------------------------------------------
 
+    def bundle(self, clf, cache_handle):
+        """The ready-to-use classifier bundle the classify stage consumes."""
+        portable_model_identity = self.portable_model_identity(clf)
+        label_source = self.describe_label_source(clf)
+
+        return {
+            "clf": clf,
+            "_cache_handle": cache_handle,
+            "model_type": self.model_type,
+            "model_name": self.model_name,
+            "model_str": self.model_str,
+            "labels": self.labels,
+            "label_source": label_source,
+            "labels_fingerprint": self.fp,
+            "labels_fingerprint_full": self.fp_full,
+            "classifier_model_identity": portable_model_identity,
+            "use_tol": self.use_tol,
+            "active_model": self.active_model,
+        }
+
     def portable_model_identity(self, clf):
         try:
             from computation_cache import (
@@ -551,21 +574,10 @@ def model_loader_stage(
         thread_db = run.database_factory(run.db_path)
         thread_db.set_active_workspace(run.workspace_id)
 
-        if run.collection_id:
-            candidate_photos = _filter_excluded(
-                thread_db.get_collection_photos(run.collection_id, per_page=999999)
-            )
-            photo_ids = [p["id"] for p in candidate_photos]
-            candidate_ids = thread_db.filter_out_wildlife_excluded(photo_ids)
-            if candidate_photos and not candidate_ids:
-                run.stages["model_loader"]["status"] = "skipped"
-                run.runner.update_step(
-                    run.job["id"], "model_loader", status="completed",
-                    summary="Skipped (all photos marked not wildlife)",
-                )
-                run.update_stages(run.runner, run.job["id"], run.stages)
-                models_ready.set()
-                return
+        if run.collection_id and _skip_when_no_wildlife(
+            run, thread_db, run.collection_id, _filter_excluded, models_ready,
+        ):
+            return
 
         # Specs were pre-resolved at job start so step_defs could carry
         # the model's display name on each `classify:<id>` row. If that
@@ -577,45 +589,7 @@ def model_loader_stage(
         first_name = resolved_specs[0]["name"]
         run.runner.update_step(run.job["id"], "model_loader", current_file=first_name)
 
-        # Download taxonomy if missing/unusable and requested. Mirrors the
-        # availability check used by /api/pipeline/page-init: a 0-byte stub
-        # from an interrupted download "exists" but is not a usable
-        # taxonomy, and the user opted into a download to recover from
-        # exactly that state.
-        from models import get_taxonomy_info
-        from taxonomy import TAXONOMY_JSON_PATH, find_taxonomy_json
-        taxonomy_path = find_taxonomy_json()
-        if run.params.download_taxonomy and not get_taxonomy_info().get("available"):
-            try:
-                from taxonomy import download_taxonomy
-                run.emit_progress(
-                    run.runner, run.job["id"], run.stages, "model_loader", "Downloading taxonomy...",
-                )
-                # Always write new downloads to the persistent path.
-                taxonomy_path = TAXONOMY_JSON_PATH
-                download_taxonomy(taxonomy_path, progress_callback=lambda msg:
-                    run.emit_progress(
-                        run.runner, run.job["id"], run.stages, "model_loader", msg,
-                    )
-                )
-            except Exception as e:
-                log.warning("Taxonomy download failed, continuing without: %s", e)
-
-        # Taxonomy is shared across every classifier in the run.
-        # Use load_local_taxonomy() so a corrupt persistent file
-        # falls back to the legacy package-dir copy.
-        from taxonomy import load_local_taxonomy
-        tax = load_local_taxonomy()
-        loaded_models["tax"] = tax
-        # Portable identity for the taxonomy backing this pipeline.
-        # Threaded through publish and cache-match paths so that
-        # classifier runs made against one taxonomy revision are
-        # not conflated with runs from a different revision on
-        # another installation. See computation_cache.taxonomy_identity.
-        from computation_cache import (
-            taxonomy_identity as _taxonomy_identity_fn,
-        )
-        loaded_models["taxonomy_identity"] = _taxonomy_identity_fn(tax)
+        tax = _load_run_taxonomy(run, loaded_models)
         loaded_models["resolved_specs"] = resolved_specs
 
         # Load the first classifier so classify_stage can start as soon
@@ -629,14 +603,7 @@ def model_loader_stage(
             bundle = _load_model_bundle(resolved_specs[0], tax, thread_db)
             loaded_models.update(bundle)
         except Exception as preload_err:
-            is_classification_cancelled = (
-                preload_err.__class__.__name__ == "ClassificationCancelled"
-            )
-            if (
-                run.control.cancellation_requested()
-                or is_classification_cancelled
-                or str(preload_err) == "classification cancelled"
-            ):
+            if _is_classification_cancellation(run, preload_err):
                 raise
             if len(resolved_specs) > 1:
                 # Other models remain — don't abort the whole pipeline.
@@ -651,21 +618,9 @@ def model_loader_stage(
 
         loaded_models["pending_specs"] = resolved_specs[1:]
 
-        run.stages["model_loader"]["status"] = "completed"
-        summary = ", ".join(s["name"] for s in resolved_specs)
-        if "preload_error" in loaded_models:
-            summary += f" ({first_name} failed to preload)"
-        run.runner.update_step(run.job["id"], "model_loader", status="completed",
-                           summary=summary)
+        _mark_models_loaded(run, loaded_models, resolved_specs, first_name)
     except Exception as e:
-        is_classification_cancelled = (
-            e.__class__.__name__ == "ClassificationCancelled"
-        )
-        if (
-            run.control.cancellation_requested()
-            or is_classification_cancelled
-            or str(e) == "classification cancelled"
-        ):
+        if _is_classification_cancellation(run, e):
             run.abort.set()
             run.stages["model_loader"]["status"] = "skipped"
             run.runner.update_step(
@@ -690,3 +645,89 @@ def model_loader_stage(
     finally:
         models_ready.set()
         run.update_stages(run.runner, run.job["id"], run.stages)
+
+
+def _is_classification_cancellation(run: PipelineRun, err: BaseException) -> bool:
+    """Whether a model-load failure is a cancellation rather than an error."""
+    is_classification_cancelled = (
+        err.__class__.__name__ == "ClassificationCancelled"
+    )
+    return bool(
+        run.control.cancellation_requested()
+        or is_classification_cancelled
+        or str(err) == "classification cancelled"
+    )
+
+
+def _load_run_taxonomy(run: PipelineRun, loaded_models: dict):
+    """Download the taxonomy if requested, then load it for every classifier."""
+    # Download taxonomy if missing/unusable and requested. Mirrors the
+    # availability check used by /api/pipeline/page-init: a 0-byte stub
+    # from an interrupted download "exists" but is not a usable
+    # taxonomy, and the user opted into a download to recover from
+    # exactly that state.
+    from models import get_taxonomy_info
+    from taxonomy import TAXONOMY_JSON_PATH, find_taxonomy_json
+    taxonomy_path = find_taxonomy_json()
+    if run.params.download_taxonomy and not get_taxonomy_info().get("available"):
+        try:
+            from taxonomy import download_taxonomy
+            run.emit_progress(
+                run.runner, run.job["id"], run.stages, "model_loader", "Downloading taxonomy...",
+            )
+            # Always write new downloads to the persistent path.
+            taxonomy_path = TAXONOMY_JSON_PATH
+            download_taxonomy(taxonomy_path, progress_callback=lambda msg:
+                run.emit_progress(
+                    run.runner, run.job["id"], run.stages, "model_loader", msg,
+                )
+            )
+        except Exception as e:
+            log.warning("Taxonomy download failed, continuing without: %s", e)
+
+    # Taxonomy is shared across every classifier in the run.
+    # Use load_local_taxonomy() so a corrupt persistent file
+    # falls back to the legacy package-dir copy.
+    from taxonomy import load_local_taxonomy
+    tax = load_local_taxonomy()
+    loaded_models["tax"] = tax
+    # Portable identity for the taxonomy backing this pipeline.
+    # Threaded through publish and cache-match paths so that
+    # classifier runs made against one taxonomy revision are
+    # not conflated with runs from a different revision on
+    # another installation. See computation_cache.taxonomy_identity.
+    from computation_cache import (
+        taxonomy_identity as _taxonomy_identity_fn,
+    )
+    loaded_models["taxonomy_identity"] = _taxonomy_identity_fn(tax)
+    return tax
+
+
+def _skip_when_no_wildlife(
+    run: PipelineRun, thread_db, collection_id: int, _filter_excluded, models_ready,
+) -> bool:
+    """Skip the stage when every collection photo is marked not wildlife."""
+    candidate_photos = _filter_excluded(
+        thread_db.get_collection_photos(collection_id, per_page=999999)
+    )
+    photo_ids = [p["id"] for p in candidate_photos]
+    candidate_ids = thread_db.filter_out_wildlife_excluded(photo_ids)
+    if candidate_photos and not candidate_ids:
+        run.stages["model_loader"]["status"] = "skipped"
+        run.runner.update_step(
+            run.job["id"], "model_loader", status="completed",
+            summary="Skipped (all photos marked not wildlife)",
+        )
+        run.update_stages(run.runner, run.job["id"], run.stages)
+        models_ready.set()
+        return True
+    return False
+
+
+def _mark_models_loaded(run: PipelineRun, loaded_models, resolved_specs, first_name):
+    run.stages["model_loader"]["status"] = "completed"
+    summary = ", ".join(s["name"] for s in resolved_specs)
+    if "preload_error" in loaded_models:
+        summary += f" ({first_name} failed to preload)"
+    run.runner.update_step(run.job["id"], "model_loader", status="completed",
+                       summary=summary)

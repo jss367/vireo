@@ -217,40 +217,12 @@ def _preprocess(image_array):
     return arr, (scale, pad_x, pad_y, w, h)
 
 
-def _postprocess(outputs, preprocess_info, confidence_threshold):
-    """Post-process ONNX model outputs to detection list.
+def _decode_proposals(output):
+    """Split a raw YOLO output tensor into ``(boxes, confidences, class_ids)``.
 
-    Supports two YOLO output layouts (after squeezing the batch dim and
-    transposing to (N, C) where N = number of anchor proposals):
-
-    - C == 4 + num_classes (YOLOv8/v9 — no objectness):
-        [cx, cy, w, h, cls0, cls1, ...]
-        For MegaDetector V6 (YOLOv9c, 3 classes) this is C == 7.
-    - C == 5 + num_classes (legacy YOLOv5/v7 with objectness):
-        [x1, y1, x2, y2, obj_conf, cls0, cls1, ...]
-        With 3 classes that's C == 8.
-
-    The two layouts are distinguished by an exact column count keyed off
-    ``CLASS_NAMES``. Earlier code keyed on ``num_cols >= 7``, which sent
-    the YOLOv9 7-column output down the with-objectness path and silently
-    corrupted both the confidence (animal × max(person, vehicle) ≈ 0)
-    and the category labels (off-by-one) on every MegaDetector V6
-    detection.
-
-    Args:
-        outputs: list of numpy arrays from ONNX session.run()
-        preprocess_info: tuple from _preprocess (scale, pad_x, pad_y,
-            orig_w, orig_h)
-        confidence_threshold: minimum confidence for a detection
-
-    Returns:
-        list of detection dicts with keys: box, confidence, category
+    Boxes are ``x1, y1, x2, y2`` in padded 640x640 coordinates. Returns
+    ``None`` (after logging) when the column count matches neither layout.
     """
-    from onnx_runtime import nms
-
-    scale, pad_x, pad_y, orig_w, orig_h = preprocess_info
-    output = outputs[0]  # primary output tensor
-
     # Handle different output shapes
     if output.ndim == 3:
         output = output[0]  # remove batch dim -> (N, C) or (C, N)
@@ -289,22 +261,14 @@ def _postprocess(outputs, preprocess_info, confidence_threshold):
             "for %d classes)",
             output.shape, 4 + num_classes, 5 + num_classes, num_classes,
         )
-        return []
+        return None
 
-    # Filter by confidence
-    mask = confidences >= confidence_threshold
-    boxes_raw = boxes_raw[mask]
-    confidences = confidences[mask]
-    class_ids = class_ids[mask]
+    return boxes_raw, confidences, class_ids
 
-    if len(boxes_raw) == 0:
-        return []
 
-    # NMS
-    keep = nms(boxes_raw, confidences, iou_threshold=0.45)
-    boxes_raw = boxes_raw[keep]
-    confidences = confidences[keep]
-    class_ids = class_ids[keep]
+def _to_normalized_detections(boxes_raw, confidences, class_ids, preprocess_info):
+    """Map kept boxes back to normalized 0-1 image coordinates."""
+    scale, pad_x, pad_y, orig_w, orig_h = preprocess_info
 
     # Convert from padded 640x640 coords back to normalized 0-1
     detections = []
@@ -340,6 +304,63 @@ def _postprocess(outputs, preprocess_info, confidence_threshold):
         )
 
     return detections
+
+
+def _postprocess(outputs, preprocess_info, confidence_threshold):
+    """Post-process ONNX model outputs to detection list.
+
+    Supports two YOLO output layouts (after squeezing the batch dim and
+    transposing to (N, C) where N = number of anchor proposals):
+
+    - C == 4 + num_classes (YOLOv8/v9 — no objectness):
+        [cx, cy, w, h, cls0, cls1, ...]
+        For MegaDetector V6 (YOLOv9c, 3 classes) this is C == 7.
+    - C == 5 + num_classes (legacy YOLOv5/v7 with objectness):
+        [x1, y1, x2, y2, obj_conf, cls0, cls1, ...]
+        With 3 classes that's C == 8.
+
+    The two layouts are distinguished by an exact column count keyed off
+    ``CLASS_NAMES``. Earlier code keyed on ``num_cols >= 7``, which sent
+    the YOLOv9 7-column output down the with-objectness path and silently
+    corrupted both the confidence (animal × max(person, vehicle) ≈ 0)
+    and the category labels (off-by-one) on every MegaDetector V6
+    detection.
+
+    Args:
+        outputs: list of numpy arrays from ONNX session.run()
+        preprocess_info: tuple from _preprocess (scale, pad_x, pad_y,
+            orig_w, orig_h)
+        confidence_threshold: minimum confidence for a detection
+
+    Returns:
+        list of detection dicts with keys: box, confidence, category
+    """
+    from onnx_runtime import nms
+
+    output = outputs[0]  # primary output tensor
+    decoded = _decode_proposals(output)
+    if decoded is None:
+        return []
+    boxes_raw, confidences, class_ids = decoded
+
+    # Filter by confidence
+    mask = confidences >= confidence_threshold
+    boxes_raw = boxes_raw[mask]
+    confidences = confidences[mask]
+    class_ids = class_ids[mask]
+
+    if len(boxes_raw) == 0:
+        return []
+
+    # NMS
+    keep = nms(boxes_raw, confidences, iou_threshold=0.45)
+    boxes_raw = boxes_raw[keep]
+    confidences = confidences[keep]
+    class_ids = class_ids[keep]
+
+    return _to_normalized_detections(
+        boxes_raw, confidences, class_ids, preprocess_info,
+    )
 
 
 def _tile_starts(length, crop_length):

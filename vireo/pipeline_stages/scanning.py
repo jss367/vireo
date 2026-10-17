@@ -191,6 +191,47 @@ class _ScannedPhotoCallback:
                                    current_file=os.path.basename(canonical))
 
 
+def _incomplete_archive_message(archive_report, incomplete):
+    """Why the run refuses empty or partial files at incoming archive paths."""
+    # Only surface incomplete-file paths in
+    # this branch: the message tells the user
+    # to remove empty/partial debris, so
+    # mixing full-content conflict paths into
+    # the example list would point them at
+    # files that are neither empty nor
+    # truncated.
+    incomplete_examples = ", ".join(
+        incomplete[:3],
+    )
+    incomplete_more = (
+        f" and {len(incomplete) - 3} more"
+        if len(incomplete) > 3 else ""
+    )
+    bits = []
+    if archive_report["empty"]:
+        bits.append(
+            f"{len(archive_report['empty'])} empty"
+        )
+    if archive_report["partial"]:
+        bits.append(
+            f"{len(archive_report['partial'])} "
+            "partial"
+        )
+    return (
+        "Archive destination contains "
+        f"{' and '.join(bits)} unindexed file"
+        f"{'s' if len(incomplete) != 1 else ''} "
+        "at incoming import paths: "
+        f"{incomplete_examples}"
+        f"{incomplete_more}. This looks like "
+        "an interrupted previous archive "
+        "copy. Remove or replace those "
+        "incomplete files, then retry; Vireo "
+        "will not suffix around likely "
+        "corrupt archive files."
+    )
+
+
 class _ScanPass:
     """State shared by every phase of one scanner stage run."""
 
@@ -1179,42 +1220,8 @@ class _ScanPass:
             + archive_report["partial"]
         )
         if incomplete:
-            # Only surface incomplete-file paths in
-            # this branch: the message tells the user
-            # to remove empty/partial debris, so
-            # mixing full-content conflict paths into
-            # the example list would point them at
-            # files that are neither empty nor
-            # truncated.
-            incomplete_examples = ", ".join(
-                incomplete[:3],
-            )
-            incomplete_more = (
-                f" and {len(incomplete) - 3} more"
-                if len(incomplete) > 3 else ""
-            )
-            bits = []
-            if archive_report["empty"]:
-                bits.append(
-                    f"{len(archive_report['empty'])} empty"
-                )
-            if archive_report["partial"]:
-                bits.append(
-                    f"{len(archive_report['partial'])} "
-                    "partial"
-                )
             self._bail_storage(
-                "Archive destination contains "
-                f"{' and '.join(bits)} unindexed file"
-                f"{'s' if len(incomplete) != 1 else ''} "
-                "at incoming import paths: "
-                f"{incomplete_examples}"
-                f"{incomplete_more}. This looks like "
-                "an interrupted previous archive "
-                "copy. Remove or replace those "
-                "incomplete files, then retry; Vireo "
-                "will not suffix around likely "
-                "corrupt archive files."
+                _incomplete_archive_message(archive_report, incomplete),
             )
             return False
         examples = ", ".join(archive_conflicts[:3])

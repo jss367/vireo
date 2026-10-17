@@ -22,6 +22,82 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _find_images(folder_path, recursive):
+    """Sorted supported, non-hidden image files under ``folder_path``."""
+    if recursive:
+        return sorted(
+            f
+            for f in folder_path.rglob("*")
+            if f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(".")
+        )
+    return sorted(
+        f
+        for f in folder_path.iterdir()
+        if f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(".")
+    )
+
+
+def _label_image(clf, image_path, threshold, write, stats):
+    """Classify one image and write or report its sidecar, updating ``stats``.
+
+    Returns False when the image was failed or skipped, True when it got
+    predictions (whether or not its sidecar write succeeded).
+    """
+    # Load and resize image
+    img = load_image(str(image_path))
+    if img is None:
+        stats["images_failed"] += 1
+        return False
+
+    # Re-save as temp JPEG since image was loaded/resized by load_image
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp_path = tmp.name
+        img.save(tmp_path, quality=85)
+
+    try:
+        predictions = clf.classify(tmp_path, threshold=threshold)
+    except Exception:
+        log.warning("Classification failed for %s", image_path, exc_info=True)
+        stats["images_failed"] += 1
+        return False
+    finally:
+        os.unlink(tmp_path)
+
+    stats["images_processed"] += 1
+
+    if not predictions:
+        stats["images_skipped"] += 1
+        log.debug("No predictions above threshold for %s", image_path)
+        return False
+
+    top = predictions[0]
+    flat_keywords = set()
+    for pred in predictions:
+        flat_keywords.add(pred["auto_tag"])
+        flat_keywords.add(pred["confidence_tag"])
+
+    xmp_path = image_path.with_suffix(".xmp")
+
+    if write:
+        try:
+            write_sidecar(
+                str(xmp_path),
+                flat_keywords=flat_keywords,
+                hierarchical_keywords=set(),
+            )
+            stats["sidecars_written"] += 1
+        except Exception:
+            log.warning("Failed to write sidecar for %s", image_path, exc_info=True)
+    else:
+        log.info(
+            "[DRY RUN] %s -> %s (%.2f)",
+            image_path.name,
+            top["species"],
+            top["score"],
+        )
+    return True
+
+
 def run(
     folder,
     labels=None,
@@ -60,18 +136,7 @@ def run(
     clf = classifier_handle.__enter__()
     try:
         folder_path = Path(folder)
-        if recursive:
-            image_files = sorted(
-                f
-                for f in folder_path.rglob("*")
-                if f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(".")
-            )
-        else:
-            image_files = sorted(
-                f
-                for f in folder_path.iterdir()
-                if f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(".")
-            )
+        image_files = _find_images(folder_path, recursive)
 
         stats = {
             "images_found": len(image_files),
@@ -84,58 +149,8 @@ def run(
         log.info("Found %d images in %s", len(image_files), folder)
 
         for i, image_path in enumerate(image_files):
-            # Load and resize image
-            img = load_image(str(image_path))
-            if img is None:
-                stats["images_failed"] += 1
+            if not _label_image(clf, image_path, threshold, write, stats):
                 continue
-
-            # Re-save as temp JPEG since image was loaded/resized by load_image
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                tmp_path = tmp.name
-                img.save(tmp_path, quality=85)
-
-            try:
-                predictions = clf.classify(tmp_path, threshold=threshold)
-            except Exception:
-                log.warning("Classification failed for %s", image_path, exc_info=True)
-                stats["images_failed"] += 1
-                continue
-            finally:
-                os.unlink(tmp_path)
-
-            stats["images_processed"] += 1
-
-            if not predictions:
-                stats["images_skipped"] += 1
-                log.debug("No predictions above threshold for %s", image_path)
-                continue
-
-            top = predictions[0]
-            flat_keywords = set()
-            for pred in predictions:
-                flat_keywords.add(pred["auto_tag"])
-                flat_keywords.add(pred["confidence_tag"])
-
-            xmp_path = image_path.with_suffix(".xmp")
-
-            if write:
-                try:
-                    write_sidecar(
-                        str(xmp_path),
-                        flat_keywords=flat_keywords,
-                        hierarchical_keywords=set(),
-                    )
-                    stats["sidecars_written"] += 1
-                except Exception:
-                    log.warning("Failed to write sidecar for %s", image_path, exc_info=True)
-            else:
-                log.info(
-                    "[DRY RUN] %s -> %s (%.2f)",
-                    image_path.name,
-                    top["species"],
-                    top["score"],
-                )
 
             if (i + 1) % 100 == 0:
                 log.info("Progress: %d/%d images processed", i + 1, len(image_files))

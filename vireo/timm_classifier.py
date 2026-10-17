@@ -252,6 +252,22 @@ def _spawn_label_desc_heal(model_dir, model_str):
     return thread
 
 
+def _common_names_from_descriptions(descs):
+    """Build the lowercase scientific -> common name mapping.
+
+    Format: {"Sturnus vulgaris": "European Starling, Bird"}
+    """
+    common_names = {}
+    for sci_name, desc in (descs or {}).items():
+        # desc format: "Common Name, Category" -- take part before last comma
+        parts = desc.rsplit(", ", 1)
+        common = parts[0] if len(parts) > 1 else desc
+        # If common name equals scientific name, it has no common name
+        if common.lower() != sci_name.lower():
+            common_names[sci_name.lower()] = common
+    return common_names
+
+
 class TimmClassifier:
     """Wraps an ONNX model for species classification.
 
@@ -308,39 +324,7 @@ class TimmClassifier:
             label_desc_path,
         )
 
-        # Record what this instance actually consumed for
-        # ``label_descriptions.json`` so ``acquire_cached_classifier``
-        # keys the entry by that state, not by whatever the disk shows
-        # after construction. The heal spawned below can publish the
-        # file mid-construction (network probes can take a full HF
-        # timeout, but they can also finish before the ONNX session
-        # opens); without this snapshot the post-load fingerprint would
-        # match the healed disk state, rekey this pre-heal instance
-        # under the healed fingerprint, and every later classify job
-        # would reuse the stale classifier — its ``_common_names``
-        # stays empty until eviction, so raw scientific names would
-        # leak indefinitely under regular use.
-        # The signature comes from the descriptor that produced ``descs``
-        # (``read_label_descriptions``), not from a stat taken afterwards:
-        # a Repair or heal that republishes the file between the read and
-        # a path stat would otherwise stamp this instance with the
-        # replacement's identity — the same "keyed by artifacts it never
-        # read" hazard, just a narrower window.
-        label_desc_state = label_desc_signature if descs is not None else None
-        self.optional_files_snapshot = {
-            "label_descriptions.json": label_desc_state,
-        }
-
-        # Portable content identity of the same consumed mapping.
-        # ``optional_files_snapshot`` is a local (size, mtime_ns) stat
-        # tuple — fine for keying this process's classifier cache, but
-        # meaningless on another machine. Runs published to the portable
-        # computation cache are stamped with *this* value instead (see
-        # ``computation_cache.with_consumed_label_descriptions``), so a
-        # run recorded before the background heal supplies the file is
-        # never mistaken for a post-heal run whose species names differ.
-        from computation_cache import label_descriptions_identity
-        self.label_descriptions_identity = label_descriptions_identity(descs)
+        self._record_consumed_label_descriptions(descs, label_desc_signature)
 
         # Remember the model coordinates so cache reuse (see
         # ``notify_reuse`` below) can re-arm the background heal without
@@ -377,16 +361,7 @@ class TimmClassifier:
         self._mean = preproc["mean"]
         self._std = preproc["std"]
 
-        # Build scientific -> common name mapping from label_descriptions
-        # Format: {"Sturnus vulgaris": "European Starling, Bird"}
-        self._common_names = {}
-        for sci_name, desc in (descs or {}).items():
-            # desc format: "Common Name, Category" -- take part before last comma
-            parts = desc.rsplit(", ", 1)
-            common = parts[0] if len(parts) > 1 else desc
-            # If common name equals scientific name, it has no common name
-            if common.lower() != sci_name.lower():
-                self._common_names[sci_name.lower()] = common
+        self._common_names = _common_names_from_descriptions(descs)
 
         # Also use taxonomy.json for any names not in label_descriptions
         self._taxonomy = taxonomy
@@ -396,6 +371,42 @@ class TimmClassifier:
             len(self._class_names),
             len(self._common_names),
         )
+
+    def _record_consumed_label_descriptions(self, descs, label_desc_signature):
+        """Stamp this instance with the ``label_descriptions.json`` it read."""
+        # Record what this instance actually consumed for
+        # ``label_descriptions.json`` so ``acquire_cached_classifier``
+        # keys the entry by that state, not by whatever the disk shows
+        # after construction. The heal ``__init__`` spawns next can publish the
+        # file mid-construction (network probes can take a full HF
+        # timeout, but they can also finish before the ONNX session
+        # opens); without this snapshot the post-load fingerprint would
+        # match the healed disk state, rekey this pre-heal instance
+        # under the healed fingerprint, and every later classify job
+        # would reuse the stale classifier — its ``_common_names``
+        # stays empty until eviction, so raw scientific names would
+        # leak indefinitely under regular use.
+        # The signature comes from the descriptor that produced ``descs``
+        # (``read_label_descriptions``), not from a stat taken afterwards:
+        # a Repair or heal that republishes the file between the read and
+        # a path stat would otherwise stamp this instance with the
+        # replacement's identity — the same "keyed by artifacts it never
+        # read" hazard, just a narrower window.
+        label_desc_state = label_desc_signature if descs is not None else None
+        self.optional_files_snapshot = {
+            "label_descriptions.json": label_desc_state,
+        }
+
+        # Portable content identity of the same consumed mapping.
+        # ``optional_files_snapshot`` is a local (size, mtime_ns) stat
+        # tuple — fine for keying this process's classifier cache, but
+        # meaningless on another machine. Runs published to the portable
+        # computation cache are stamped with *this* value instead (see
+        # ``computation_cache.with_consumed_label_descriptions``), so a
+        # run recorded before the background heal supplies the file is
+        # never mistaken for a post-heal run whose species names differ.
+        from computation_cache import label_descriptions_identity
+        self.label_descriptions_identity = label_descriptions_identity(descs)
 
     @property
     def label_space_size(self):

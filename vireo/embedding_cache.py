@@ -477,61 +477,109 @@ class EmbeddingCache:
                 producer = False
 
         if not producer:
-            log.info("EmbeddingCache: joining producer key=%s", initial_digest[:12])
-            while not flight.event.wait(0.1):
-                if cancel_check and cancel_check():
-                    raise EmbeddingWaitCancelled("classification cancelled")
+            return self._wait_for_producer(
+                flight,
+                identity,
+                compute,
+                identity_after,
+                cancel_check,
+                embedding_dim,
+                label_count,
+                initial_digest,
+            )
+
+        return self._produce(
+            flight,
+            flight_key,
+            identity,
+            compute,
+            identity_after,
+            cancel_check,
+            embedding_dim,
+            label_count,
+            initial_digest,
+        )
+
+    def _wait_for_producer(
+        self,
+        flight,
+        identity,
+        compute,
+        identity_after,
+        cancel_check,
+        embedding_dim,
+        label_count,
+        initial_digest,
+    ):
+        """Wait for the in-flight producer and load what it published."""
+        log.info("EmbeddingCache: joining producer key=%s", initial_digest[:12])
+        while not flight.event.wait(0.1):
             if cancel_check and cancel_check():
                 raise EmbeddingWaitCancelled("classification cancelled")
-            if flight.error is not None:
-                if flight.error.__class__.__name__ in _PRODUCER_STEPPED_DOWN:
-                    # Cancellation (or a pause-abort, which checkpoints its
-                    # progress first) belongs to the producer, not the key.
-                    # A healthy waiter retries and one of the waiters becomes
-                    # the replacement producer, resuming from the checkpoint.
-                    # ``embedding_dim`` must ride
-                    # the retry so the replacement computation is checked
-                    # against this caller's image encoder; dropping it would
-                    # bypass the new dimension validation on this branch and
-                    # let a mismatched payload publish and later crash at
-                    # ``img_features @ txt_embeddings``.
-                    return self.get_or_compute(
-                        identity,
-                        compute,
-                        identity_after=identity_after,
-                        cancel_check=cancel_check,
-                        embedding_dim=embedding_dim,
-                    )
-                raise EmbeddingComputationError(
-                    "label embedding producer failed"
-                ) from flight.error
-            published_digest = flight.published_digest or initial_digest
-            # Durable publication is the hand-off contract.  Do not reuse the
-            # producer's mutable ndarray in memory.
-            #
-            # A shared producer (e.g. an equal-key precompute job) may
-            # self-heal the whole model snapshot mid-flight to a revision
-            # whose text encoder emits a different feature width.  The
-            # producer publishes under the healed identity, so
-            # ``published_digest != initial_digest`` is the durable signal
-            # that this waiter's pre-flight image encoder is now stale.
-            # In that case, validating the healed payload against this
-            # waiter's stale ``embedding_dim`` would (a) raise before we can
-            # return the healed identity, so the caller never reaches its
-            # ``identity_before != identity_after`` image-side rebuild, and
-            # (b) trip ``_load``'s inode-matched unlink on the freshly
-            # published valid payload.  Skip the waiter-specific dimension
-            # check on the hand-off; the caller detects the identity change
-            # and rebuilds its image side against the healed snapshot.
-            waiter_dim = (
-                None if published_digest != initial_digest else embedding_dim
-            )
-            value = self._load(
-                published_digest, label_count, embedding_dim=waiter_dim,
-            )
-            actual_identity = identity_after() if identity_after else identity
-            return value, actual_identity
+        if cancel_check and cancel_check():
+            raise EmbeddingWaitCancelled("classification cancelled")
+        if flight.error is not None:
+            if flight.error.__class__.__name__ in _PRODUCER_STEPPED_DOWN:
+                # Cancellation (or a pause-abort, which checkpoints its
+                # progress first) belongs to the producer, not the key.
+                # A healthy waiter retries and one of the waiters becomes
+                # the replacement producer, resuming from the checkpoint.
+                # ``embedding_dim`` must ride
+                # the retry so the replacement computation is checked
+                # against this caller's image encoder; dropping it would
+                # bypass the new dimension validation on this branch and
+                # let a mismatched payload publish and later crash at
+                # ``img_features @ txt_embeddings``.
+                return self.get_or_compute(
+                    identity,
+                    compute,
+                    identity_after=identity_after,
+                    cancel_check=cancel_check,
+                    embedding_dim=embedding_dim,
+                )
+            raise EmbeddingComputationError(
+                "label embedding producer failed"
+            ) from flight.error
+        published_digest = flight.published_digest or initial_digest
+        # Durable publication is the hand-off contract.  Do not reuse the
+        # producer's mutable ndarray in memory.
+        #
+        # A shared producer (e.g. an equal-key precompute job) may
+        # self-heal the whole model snapshot mid-flight to a revision
+        # whose text encoder emits a different feature width.  The
+        # producer publishes under the healed identity, so
+        # ``published_digest != initial_digest`` is the durable signal
+        # that this waiter's pre-flight image encoder is now stale.
+        # In that case, validating the healed payload against this
+        # waiter's stale ``embedding_dim`` would (a) raise before we can
+        # return the healed identity, so the caller never reaches its
+        # ``identity_before != identity_after`` image-side rebuild, and
+        # (b) trip ``_load``'s inode-matched unlink on the freshly
+        # published valid payload.  Skip the waiter-specific dimension
+        # check on the hand-off; the caller detects the identity change
+        # and rebuilds its image side against the healed snapshot.
+        waiter_dim = (
+            None if published_digest != initial_digest else embedding_dim
+        )
+        value = self._load(
+            published_digest, label_count, embedding_dim=waiter_dim,
+        )
+        actual_identity = identity_after() if identity_after else identity
+        return value, actual_identity
 
+    def _produce(
+        self,
+        flight,
+        flight_key,
+        identity,
+        compute,
+        identity_after,
+        cancel_check,
+        embedding_dim,
+        label_count,
+        initial_digest,
+    ):
+        """Compute and publish the payload as the flight's owner."""
         try:
             if cancel_check and cancel_check():
                 raise EmbeddingWaitCancelled("classification cancelled")
