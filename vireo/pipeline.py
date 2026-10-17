@@ -1365,6 +1365,195 @@ def _build_species_predictions(photos):
     return result
 
 
+def _prior_empty_burst_photo_ids(prior_results):
+    """Return the photo ids the prior cache recorded in explicit-empty bursts.
+
+    A regrouped burst whose photos are all untagged in the DB AND
+    every one of them was in an explicit-empty burst before keeps the
+    sentinel; anything else is an ordinary unconfirmed burst.
+    """
+    prior_empty_photo_ids = set()
+    if isinstance(prior_results, dict):
+        for prior_enc in prior_results.get("encounters", []) or []:
+            for prior_burst in prior_enc.get("bursts") or []:
+                ovr = prior_burst.get("species_override")
+                if (
+                    isinstance(ovr, dict)
+                    and isinstance(ovr.get("species_list"), list)
+                    and not ovr["species_list"]
+                    and not ovr.get("confirmed")
+                ):
+                    prior_empty_photo_ids.update(
+                        prior_burst.get("photo_ids") or []
+                    )
+    return prior_empty_photo_ids
+
+
+def _clean_serialized_photo(p):
+    """Strip non-serializable fields from a photo dict."""
+    cleaned = {}
+    for k, v in p.items():
+        if isinstance(v, np.ndarray):
+            continue  # skip embedding arrays
+        if isinstance(v, np.floating | np.integer):
+            cleaned[k] = float(v)
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
+def _most_frequent_confirmed_species(photo_species):
+    """Return the most frequent non-empty species in ``photo_species``.
+
+    Ties are broken by first appearance in photo order, so the pick is
+    deterministic. Returns None when no entry is set.
+    """
+    counts = defaultdict(int)
+    first_index = {}
+    for idx, s in enumerate(photo_species):
+        if s:
+            counts[s] += 1
+            first_index.setdefault(s, idx)
+    if not counts:
+        return None
+    return max(
+        counts,
+        key=lambda s: (counts[s], -first_index[s]),
+    )
+
+
+def _encounter_confirmed_species(photos_list):
+    """Return ``(confirmed_species, confirmed_species_list, species_confirmed)``
+    for a serialized encounter built from ``photos_list``.
+    """
+    # An encounter is confirmed only when every photo shares the same
+    # confirmed_species. Threshold-slider regrouping can merge a confirmed
+    # encounter with an unconfirmed (or differently-confirmed) neighbor;
+    # in that case the merged encounter must stay visible for review
+    # rather than inheriting the confirmed flag from an arbitrary photo.
+    # confirmed_species is still surfaced as the dominant prior species so
+    # the /api/encounters/species endpoint can find the keyword to untag
+    # when the user re-confirms.
+    photo_species = [p.get("confirmed_species") for p in photos_list]
+    if _photos_uniformly_confirmed(photos_list):
+        # Every photo is tagged and they share at least one species:
+        # confirmed as the shared set (one or several), with the first
+        # entry as the legacy single-valued primary.
+        enc_confirmed_list = _shared_confirmed_species(photos_list)
+        enc_confirmed = enc_confirmed_list[0]
+        species_confirmed_flag = True
+    else:
+        # Mixed/partial encounter. Prefer the species every tagged photo
+        # shares (a frame tagged [Wigeon, Teal] beside one tagged [Teal]
+        # is a Teal encounter with an extra subject on one frame, not a
+        # Wigeon one): that is the honest baseline for the confirm
+        # endpoint's previous_species and for rapid review's apply diff,
+        # and it keeps a flag-only apply from re-tagging the second
+        # frame with a species it never had. Only when the tagged photos
+        # share nothing does the most-frequent primary decide.
+        enc_confirmed = None
+        enc_confirmed_list = _shared_confirmed_species(photos_list)
+        if enc_confirmed_list:
+            enc_confirmed = enc_confirmed_list[0]
+        confirmed_set = {s for s in photo_species if s}
+        # Tie-break the fallback by first appearance in photo order. Set
+        # iteration order is not stable across processes, so iterating
+        # confirmed_set directly would feed /api/encounters/species an
+        # arbitrary previous_species and untag an unpredictable keyword
+        # on re-confirm.
+        if enc_confirmed is None and confirmed_set:
+            enc_confirmed = _most_frequent_confirmed_species(photo_species)
+            enc_confirmed_list = [enc_confirmed]
+        species_confirmed_flag = False
+    return enc_confirmed, enc_confirmed_list, species_confirmed_flag
+
+
+def _burst_species_override(burst, burst_ids, prior_empty_photo_ids):
+    """Derive a serialized burst's ``species_override`` from its photos."""
+    from pipeline_results import (
+        build_species_override,
+        empty_species_override,
+        photo_confirmed_species_list,
+    )
+
+    if _photos_uniformly_confirmed(burst):
+        return build_species_override(
+            _shared_confirmed_species(burst),
+        )
+    elif burst and all(
+        photo_confirmed_species_list(p) for p in burst
+    ):
+        # Every frame tagged, nothing shared: the burst's own
+        # set is empty. The sentinel keeps it from inheriting
+        # the encounter's baseline (see the refresh helper).
+        return empty_species_override()
+    elif (
+        prior_empty_photo_ids
+        and burst_ids
+        and all(
+            not photo_confirmed_species_list(p) for p in burst
+        )
+        and all(pid in prior_empty_photo_ids for pid in burst_ids)
+    ):
+        # All photos are untagged AND every one of them was in
+        # an explicit-empty burst before this regroup — keep the
+        # sentinel so the burst does not inherit the encounter's
+        # species and get its removed tag re-applied on the next
+        # rapid/classic review apply.
+        return empty_species_override()
+    return None
+
+
+def _serialize_encounter(enc, prior_empty_photo_ids):
+    """Serialize one encounter (and its bursts) for :func:`serialize_results`."""
+    photos_list = enc.get("photos", [])
+    enc_confirmed, enc_confirmed_list, species_confirmed_flag = (
+        _encounter_confirmed_species(photos_list)
+    )
+
+    species_votes = _build_species_predictions(photos_list)
+
+    s_enc = {
+        "species": enc.get("species"),
+        "confirmed_species": enc_confirmed,
+        "confirmed_species_list": enc_confirmed_list,
+        "species_predictions": species_votes,
+        "species_confirmed": species_confirmed_flag,
+        "photo_count": enc.get("photo_count"),
+        "burst_count": enc.get("burst_count"),
+        "time_range": enc.get("time_range"),
+        "photo_ids": [p["id"] for p in photos_list],
+        # Count photos with no EXIF timestamp (scan I/O errors / unreadable
+        # files). The review page badges encounters where this is non-zero
+        # so the user knows the group was assembled by file order, not time.
+        "missing_timestamp_count": sum(
+            1 for p in photos_list if not p.get("timestamp")
+        ),
+    }
+    # Surface per-cut-point trace when run_full_pipeline was invoked with
+    # emit_trace=True (e.g. from /api/pipeline/regroup-live so the
+    # pipeline-review sidebar can show how each encounter was formed).
+    if "trace" in enc:
+        s_enc["trace"] = enc["trace"]
+    if "bursts" in enc:
+        s_enc["bursts"] = []
+        for burst in enc["bursts"]:
+            burst_ids = [p["id"] for p in burst]
+            # Derive species_override from per-photo confirmations so that
+            # burst-confirmed indicators survive a regroup. Previously this
+            # was always None, wiping per-burst confirmation state every
+            # time a slider moved even though the underlying tags persist.
+            burst_override = _burst_species_override(
+                burst, burst_ids, prior_empty_photo_ids,
+            )
+            s_enc["bursts"].append({
+                "photo_ids": burst_ids,
+                "species_predictions": _build_species_predictions(burst),
+                "species_override": burst_override,
+            })
+    return s_enc
+
+
 def serialize_results(results, prior_results=None):
     """Serialize pipeline results to a JSON-safe dict.
 
@@ -1385,165 +1574,19 @@ def serialize_results(results, prior_results=None):
     Returns:
         JSON-serializable dict
     """
-    from pipeline_results import (
-        build_species_override,
-        empty_species_override,
-        photo_confirmed_species_list,
-    )
-
     # Photo ids the prior cache recorded as belonging to an explicit-empty
-    # burst. A regrouped burst whose photos are all untagged in the DB AND
-    # every one of them was in an explicit-empty burst before keeps the
-    # sentinel; anything else is an ordinary unconfirmed burst.
-    prior_empty_photo_ids = set()
-    if isinstance(prior_results, dict):
-        for prior_enc in prior_results.get("encounters", []) or []:
-            for prior_burst in prior_enc.get("bursts") or []:
-                ovr = prior_burst.get("species_override")
-                if (
-                    isinstance(ovr, dict)
-                    and isinstance(ovr.get("species_list"), list)
-                    and not ovr["species_list"]
-                    and not ovr.get("confirmed")
-                ):
-                    prior_empty_photo_ids.update(
-                        prior_burst.get("photo_ids") or []
-                    )
-
-    def _clean_photo(p):
-        """Strip non-serializable fields from a photo dict."""
-        cleaned = {}
-        for k, v in p.items():
-            if isinstance(v, np.ndarray):
-                continue  # skip embedding arrays
-            if isinstance(v, np.floating | np.integer):
-                cleaned[k] = float(v)
-            else:
-                cleaned[k] = v
-        return cleaned
+    # burst; a regrouped burst made only of them keeps the sentinel.
+    prior_empty_photo_ids = _prior_empty_burst_photo_ids(prior_results)
 
     serialized_encounters = []
     for enc in results["encounters"]:
-        photos_list = enc.get("photos", [])
-
-        # An encounter is confirmed only when every photo shares the same
-        # confirmed_species. Threshold-slider regrouping can merge a confirmed
-        # encounter with an unconfirmed (or differently-confirmed) neighbor;
-        # in that case the merged encounter must stay visible for review
-        # rather than inheriting the confirmed flag from an arbitrary photo.
-        # confirmed_species is still surfaced as the dominant prior species so
-        # the /api/encounters/species endpoint can find the keyword to untag
-        # when the user re-confirms.
-        photo_species = [p.get("confirmed_species") for p in photos_list]
-        if _photos_uniformly_confirmed(photos_list):
-            # Every photo is tagged and they share at least one species:
-            # confirmed as the shared set (one or several), with the first
-            # entry as the legacy single-valued primary.
-            enc_confirmed_list = _shared_confirmed_species(photos_list)
-            enc_confirmed = enc_confirmed_list[0]
-            species_confirmed_flag = True
-        else:
-            # Mixed/partial encounter. Prefer the species every tagged photo
-            # shares (a frame tagged [Wigeon, Teal] beside one tagged [Teal]
-            # is a Teal encounter with an extra subject on one frame, not a
-            # Wigeon one): that is the honest baseline for the confirm
-            # endpoint's previous_species and for rapid review's apply diff,
-            # and it keeps a flag-only apply from re-tagging the second
-            # frame with a species it never had. Only when the tagged photos
-            # share nothing does the most-frequent primary decide.
-            enc_confirmed = None
-            enc_confirmed_list = _shared_confirmed_species(photos_list)
-            if enc_confirmed_list:
-                enc_confirmed = enc_confirmed_list[0]
-            confirmed_set = {s for s in photo_species if s}
-            # Tie-break the fallback by first appearance in photo order. Set
-            # iteration order is not stable across processes, so iterating
-            # confirmed_set directly would feed /api/encounters/species an
-            # arbitrary previous_species and untag an unpredictable keyword
-            # on re-confirm.
-            if enc_confirmed is None and confirmed_set:
-                counts = defaultdict(int)
-                first_index = {}
-                for idx, s in enumerate(photo_species):
-                    if s:
-                        counts[s] += 1
-                        first_index.setdefault(s, idx)
-                enc_confirmed = max(
-                    counts,
-                    key=lambda s: (counts[s], -first_index[s]),
-                )
-                enc_confirmed_list = [enc_confirmed]
-            species_confirmed_flag = False
-
-        species_votes = _build_species_predictions(photos_list)
-
-        s_enc = {
-            "species": enc.get("species"),
-            "confirmed_species": enc_confirmed,
-            "confirmed_species_list": enc_confirmed_list,
-            "species_predictions": species_votes,
-            "species_confirmed": species_confirmed_flag,
-            "photo_count": enc.get("photo_count"),
-            "burst_count": enc.get("burst_count"),
-            "time_range": enc.get("time_range"),
-            "photo_ids": [p["id"] for p in photos_list],
-            # Count photos with no EXIF timestamp (scan I/O errors / unreadable
-            # files). The review page badges encounters where this is non-zero
-            # so the user knows the group was assembled by file order, not time.
-            "missing_timestamp_count": sum(
-                1 for p in photos_list if not p.get("timestamp")
-            ),
-        }
-        # Surface per-cut-point trace when run_full_pipeline was invoked with
-        # emit_trace=True (e.g. from /api/pipeline/regroup-live so the
-        # pipeline-review sidebar can show how each encounter was formed).
-        if "trace" in enc:
-            s_enc["trace"] = enc["trace"]
-        if "bursts" in enc:
-            s_enc["bursts"] = []
-            for burst in enc["bursts"]:
-                burst_ids = [p["id"] for p in burst]
-                # Derive species_override from per-photo confirmations so that
-                # burst-confirmed indicators survive a regroup. Previously this
-                # was always None, wiping per-burst confirmation state every
-                # time a slider moved even though the underlying tags persist.
-                if _photos_uniformly_confirmed(burst):
-                    burst_override = build_species_override(
-                        _shared_confirmed_species(burst),
-                    )
-                elif burst and all(
-                    photo_confirmed_species_list(p) for p in burst
-                ):
-                    # Every frame tagged, nothing shared: the burst's own
-                    # set is empty. The sentinel keeps it from inheriting
-                    # the encounter's baseline (see the refresh helper).
-                    burst_override = empty_species_override()
-                elif (
-                    prior_empty_photo_ids
-                    and burst_ids
-                    and all(
-                        not photo_confirmed_species_list(p) for p in burst
-                    )
-                    and all(pid in prior_empty_photo_ids for pid in burst_ids)
-                ):
-                    # All photos are untagged AND every one of them was in
-                    # an explicit-empty burst before this regroup — keep the
-                    # sentinel so the burst does not inherit the encounter's
-                    # species and get its removed tag re-applied on the next
-                    # rapid/classic review apply.
-                    burst_override = empty_species_override()
-                else:
-                    burst_override = None
-                s_enc["bursts"].append({
-                    "photo_ids": burst_ids,
-                    "species_predictions": _build_species_predictions(burst),
-                    "species_override": burst_override,
-                })
-        serialized_encounters.append(s_enc)
+        serialized_encounters.append(
+            _serialize_encounter(enc, prior_empty_photo_ids)
+        )
 
     out = {
         "encounters": serialized_encounters,
-        "photos": [_clean_photo(p) for p in results["photos"]],
+        "photos": [_clean_serialized_photo(p) for p in results["photos"]],
         "summary": results["summary"],
     }
     if results.get("review_mode"):
@@ -1859,6 +1902,35 @@ def load_results_raw(cache_dir, workspace_id):
     return _load_results_json(path)
 
 
+def _refresh_encounter_confirmed_species(enc, enc_photos):
+    """Recompute a cached encounter's confirmed-species fields in place
+    from its photos' fresh ``confirmed_species`` / ``confirmed_species_list``.
+    """
+    if _photos_uniformly_confirmed(enc_photos):
+        enc_confirmed_list = _shared_confirmed_species(enc_photos)
+        enc["confirmed_species"] = enc_confirmed_list[0] if enc_confirmed_list else None
+        enc["confirmed_species_list"] = enc_confirmed_list
+        enc["species_confirmed"] = bool(enc_confirmed_list)
+    else:
+        enc_confirmed_list = _shared_confirmed_species(enc_photos)
+        if enc_confirmed_list:
+            enc["confirmed_species"] = enc_confirmed_list[0]
+            enc["confirmed_species_list"] = enc_confirmed_list
+        else:
+            # Fall back to the most-frequent primary, tie-broken by first
+            # appearance so the pick is deterministic (matches
+            # serialize_results).
+            photo_species = [p.get("confirmed_species") for p in enc_photos]
+            top = _most_frequent_confirmed_species(photo_species)
+            if top is not None:
+                enc["confirmed_species"] = top
+                enc["confirmed_species_list"] = [top]
+            else:
+                enc["confirmed_species"] = None
+                enc["confirmed_species_list"] = []
+        enc["species_confirmed"] = False
+
+
 def refresh_cache_species_for_photos(
     cache_dir, workspace_id, species_by_photo, photos_only=False,
 ):
@@ -1925,38 +1997,7 @@ def refresh_cache_species_for_photos(
             if not b_photos:
                 continue
             burst["species_override"] = derive_burst_override(b_photos)
-        if _photos_uniformly_confirmed(enc_photos):
-            enc_confirmed_list = _shared_confirmed_species(enc_photos)
-            enc["confirmed_species"] = enc_confirmed_list[0] if enc_confirmed_list else None
-            enc["confirmed_species_list"] = enc_confirmed_list
-            enc["species_confirmed"] = bool(enc_confirmed_list)
-        else:
-            enc_confirmed_list = _shared_confirmed_species(enc_photos)
-            if enc_confirmed_list:
-                enc["confirmed_species"] = enc_confirmed_list[0]
-                enc["confirmed_species_list"] = enc_confirmed_list
-            else:
-                # Fall back to the most-frequent primary, tie-broken by first
-                # appearance so the pick is deterministic (matches
-                # serialize_results).
-                photo_species = [p.get("confirmed_species") for p in enc_photos]
-                counts = defaultdict(int)
-                first_index = {}
-                for idx, s in enumerate(photo_species):
-                    if s:
-                        counts[s] += 1
-                        first_index.setdefault(s, idx)
-                if counts:
-                    top = max(
-                        counts,
-                        key=lambda s: (counts[s], -first_index[s]),
-                    )
-                    enc["confirmed_species"] = top
-                    enc["confirmed_species_list"] = [top]
-                else:
-                    enc["confirmed_species"] = None
-                    enc["confirmed_species_list"] = []
-            enc["species_confirmed"] = False
+        _refresh_encounter_confirmed_species(enc, enc_photos)
 
     refresh_serialized_summary(data)
     _atomic_json_dump(data, path)
@@ -2103,6 +2144,38 @@ def _count_eye_keypoint_attempts(db):
     return row["n"] or 0
 
 
+def _eye_keypoint_readiness_counts(db, total):
+    """Return ``(eye_detect_enabled, eye_target, eye_attempts)`` for
+    :func:`compute_review_readiness`.
+    """
+    import config as cfg
+
+    # Use the *attemptable* count, not the loose mask+detection+prediction
+    # eligible count: photos the stage skips at a pre-model gate
+    # (out-of-scope taxonomy, classifier confidence below
+    # eye_classifier_conf_gate) intentionally don't get an
+    # eye_kp_fingerprint stamped, so they would otherwise sit in the gap
+    # between target and attempts forever and trip the "computed without
+    # eye keypoints" banner after every run. Mirrors the variant-aware
+    # treatment of usable_embeddings in compute_review_readiness.
+    # eye_classifier_conf_gate lives under the nested "pipeline" sub-dict
+    # of the config (see config.DEFAULTS and the settings API round-trip
+    # test), so reading it off the top level always returns the default
+    # 0.5 even when the user has explicitly raised or lowered it in
+    # settings — a silent bug that would re-introduce the same banner
+    # lying this PR set out to fix. Mirrors how pipeline_job.py:3064-3066
+    # reads the same key off the pipeline sub-dict before invoking the
+    # eye stage.
+    pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
+    eye_conf_gate = pipeline_cfg.get("eye_classifier_conf_gate", 0.5)
+    eye_detect_enabled = bool(pipeline_cfg.get("eye_detect_enabled", False))
+    eye_target = (
+        db.count_eye_keypoint_attemptable(eye_conf_gate) if total else 0
+    )
+    eye_attempts = _count_eye_keypoint_attempts(db) if eye_target else 0
+    return eye_detect_enabled, eye_target, eye_attempts
+
+
 def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
     """Classify whether the pipeline review page can render meaningful results.
 
@@ -2138,8 +2211,6 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
             "enhancing_missing": list[str],  # stages that would improve quality
         }
     """
-    import config as cfg
-
     cov = db.get_coverage_stats()
     total = cov["total"]
     targets = _count_stage_targets(db) if total else {
@@ -2155,29 +2226,9 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
     usable_embeddings = _count_usable_embeddings(
         db, dinov2_variant, detected_only=embedding_detected_only,
     )
-    # Use the *attemptable* count, not the loose mask+detection+prediction
-    # eligible count: photos the stage skips at a pre-model gate
-    # (out-of-scope taxonomy, classifier confidence below
-    # eye_classifier_conf_gate) intentionally don't get an
-    # eye_kp_fingerprint stamped, so they would otherwise sit in the gap
-    # between target and attempts forever and trip the "computed without
-    # eye keypoints" banner after every run. Mirrors the variant-aware
-    # treatment of usable_embeddings above.
-    # eye_classifier_conf_gate lives under the nested "pipeline" sub-dict
-    # of the config (see config.DEFAULTS and the settings API round-trip
-    # test), so reading it off the top level always returns the default
-    # 0.5 even when the user has explicitly raised or lowered it in
-    # settings — a silent bug that would re-introduce the same banner
-    # lying this PR set out to fix. Mirrors how pipeline_job.py:3064-3066
-    # reads the same key off the pipeline sub-dict before invoking the
-    # eye stage.
-    pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
-    eye_conf_gate = pipeline_cfg.get("eye_classifier_conf_gate", 0.5)
-    eye_detect_enabled = bool(pipeline_cfg.get("eye_detect_enabled", False))
-    eye_target = (
-        db.count_eye_keypoint_attemptable(eye_conf_gate) if total else 0
+    eye_detect_enabled, eye_target, eye_attempts = (
+        _eye_keypoint_readiness_counts(db, total)
     )
-    eye_attempts = _count_eye_keypoint_attempts(db) if eye_target else 0
     out = {
         "state": "empty",
         "total_photos": total,
@@ -2197,6 +2248,26 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
     if total == 0:
         return out
 
+    _classify_review_readiness(
+        out, cov,
+        feature_target=feature_target,
+        mask_threshold=mask_threshold,
+        usable_embeddings=usable_embeddings,
+        eye_detect_enabled=eye_detect_enabled,
+        eye_attempts=eye_attempts,
+        eye_target=eye_target,
+    )
+    return out
+
+
+def _classify_review_readiness(
+    out, cov, *, feature_target, mask_threshold, usable_embeddings,
+    eye_detect_enabled, eye_attempts, eye_target,
+):
+    """Fill ``out``'s ``state``, ``missing_required`` and
+    ``enhancing_missing`` for a non-empty workspace (see
+    :func:`compute_review_readiness`).
+    """
     # Required: enough photos have masks (otherwise pipeline rejects all).
     # Use ceiling so the gate honors the documented minimum fraction — e.g.
     # 1 mask out of 5 (20%) must classify as insufficient against a 25%
@@ -2226,8 +2297,6 @@ def compute_review_readiness(db, mask_threshold=0.25, dinov2_variant=None):
         out["enhancing_missing"].append("eye_keypoints")
     if cov["classified"] < feature_target:
         out["enhancing_missing"].append("species_predictions")
-
-    return out
 
 
 def rebuild_species_predictions(results, photo_ids):
@@ -2375,6 +2444,118 @@ def _load_mask_array(mask_path):
     return np.array(mask_img) > 127
 
 
+def _mark_eye_attempted_without_eye(db, photo_id):
+    """Stamp the eye-keypoint fingerprint with no trusted eye recorded."""
+    # Stamp the current eye-keypoint fingerprint only after the model
+    # has actually run and produced no trustworthy eye. Pre-model gates
+    # (Gate 1: classifier confidence, taxonomy routing, missing weights,
+    # missing image, etc.) depend on runtime settings or external state
+    # the user can change, so stamping there would permanently filter
+    # the photo out of future runs even after the user lowers the gate
+    # or adds the missing model — a functional regression. Those photos
+    # remain on the to-do list and are cheaply re-skipped on each run.
+    db.masks_features.update_pipeline_features(
+        photo_id,
+        eye_x=None,
+        eye_y=None,
+        eye_conf=None,
+        eye_tenengrad=None,
+        eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
+    )
+
+
+def _current_primary_mask_for_eye(db, row, iw, ih):
+    """Return the photo's current subject mask at (ih, iw), or None.
+
+    Must be called while holding ``acquire_photo_mask(row["id"])``. Returns
+    None when ``row``'s detection is no longer the effective primary or the
+    photo has no active mask.
+    """
+    # Resolve the effective primary the same way
+    # ``list_photos_for_eye_keypoint_stage`` and both mask-extraction
+    # paths do: the top-ordered non-full-image detection above the
+    # workspace's current detector_confidence floor.
+    # ``photo_subject_state.detection_id`` can lag when the floor
+    # changes (workspace override, or a peer workspace sharing this
+    # photo runs with a different floor), so joining against the
+    # cached state would compare ``row`` against a stale subject and
+    # skip persisting eye_kp_fingerprint — the photo would then repeat
+    # the expensive keypoint inference on every run until another
+    # operation refreshed the state.
+    import config as cfg
+    from subjects import primary_order_sql
+    min_conf = db.get_effective_config(cfg.load()).get(
+        "detector_confidence", 0.2
+    )
+    selected = db.conn.execute(
+        f"""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h
+              FROM detections d
+             WHERE d.photo_id = ?
+               AND d.detector_confidence >= ?
+               AND d.detector_model != 'full-image'
+             ORDER BY {primary_order_sql("d")}
+             LIMIT 1""",
+        (row["id"], min_conf),
+    ).fetchone()
+    # ``selected is None`` when a concurrent reclassify removed every
+    # detection, or a workspace raised its confidence floor above all of
+    # them, between the worklist build and this lock. Persisting an
+    # eye_kp_fingerprint against ``row`` in that state would strand the
+    # photo with results attributed to a subject that is no longer the
+    # effective primary (Codex P2 r4056478554).
+    if selected is None or selected["id"] != row["detection_id"]:
+        return None
+    current_mask = db.conn.execute(
+        "SELECT mask_path FROM photos WHERE id = ?", (row["id"],),
+    ).fetchone()
+    if current_mask is None or not current_mask["mask_path"]:
+        return None
+    mask = _load_mask_array(current_mask["mask_path"])
+
+    # Resize mask to image dims if needed (masks are typically saved at
+    # proxy resolution and must be compared to full-image keypoint coords).
+    if mask.shape != (ih, iw):
+        from PIL import Image as _PIL
+        mask_img = _PIL.fromarray(mask.astype(np.uint8) * 255).resize(
+            (iw, ih), _PIL.NEAREST
+        )
+        mask = np.array(mask_img) > 127
+    return mask
+
+
+def _eye_candidates_in_mask(kps, mask, T):
+    """Return the eye keypoints that pass the confidence and mask gates."""
+    eye_candidates = []
+    for k_point in kps:
+        if k_point["name"] not in ("left_eye", "right_eye"):
+            continue
+        if k_point["conf"] < T:
+            continue
+        mx, my = int(k_point["x"]), int(k_point["y"])
+        if not (0 <= mx < mask.shape[1] and 0 <= my < mask.shape[0]):
+            continue
+        if not mask[my, mx]:
+            continue
+        eye_candidates.append(k_point)
+    return eye_candidates
+
+
+def _best_eye_by_tenengrad(image, eye_candidates, bbox, k_window):
+    """Return ``(best_eye, best_score)`` by windowed tenengrad."""
+    from quality import compute_eye_tenengrad
+
+    best = None
+    best_score = -1.0
+    for eye in eye_candidates:
+        score = compute_eye_tenengrad(
+            image, (eye["x"], eye["y"]), bbox, k=k_window
+        )
+        if score > best_score:
+            best_score = score
+            best = eye
+    return best, best_score
+
+
 def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     """Run the four-gate policy on a single photo row.
 
@@ -2387,25 +2568,6 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     import keypoints as kp
     from image_loader import load_image
     from pipeline_locks import acquire_photo_mask
-    from quality import compute_eye_tenengrad
-
-    def mark_attempted_without_eye():
-        # Stamp the current eye-keypoint fingerprint only after the model
-        # has actually run and produced no trustworthy eye. Pre-model gates
-        # (Gate 1: classifier confidence, taxonomy routing, missing weights,
-        # missing image, etc.) depend on runtime settings or external state
-        # the user can change, so stamping there would permanently filter
-        # the photo out of future runs even after the user lowers the gate
-        # or adds the missing model — a functional regression. Those photos
-        # remain on the to-do list and are cheaply re-skipped on each run.
-        db.masks_features.update_pipeline_features(
-            row["id"],
-            eye_x=None,
-            eye_y=None,
-            eye_conf=None,
-            eye_tenengrad=None,
-            eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
-        )
 
     # Gate 1: classifier confidence + species in scope.
     if (row.get("species_conf") or 0.0) < C:
@@ -2454,84 +2616,21 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     # carry its predecessor path. Re-read and fully load the current active
     # mask under the same photo lock writers hold through predecessor cleanup.
     with acquire_photo_mask(row["id"]):
-        # Resolve the effective primary the same way
-        # ``list_photos_for_eye_keypoint_stage`` and both mask-extraction
-        # paths do: the top-ordered non-full-image detection above the
-        # workspace's current detector_confidence floor.
-        # ``photo_subject_state.detection_id`` can lag when the floor
-        # changes (workspace override, or a peer workspace sharing this
-        # photo runs with a different floor), so joining against the
-        # cached state would compare ``row`` against a stale subject and
-        # skip persisting eye_kp_fingerprint — the photo would then repeat
-        # the expensive keypoint inference on every run until another
-        # operation refreshed the state.
-        import config as cfg
-        from subjects import primary_order_sql
-        min_conf = db.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
-        selected = db.conn.execute(
-            f"""SELECT d.id, d.box_x, d.box_y, d.box_w, d.box_h
-                  FROM detections d
-                 WHERE d.photo_id = ?
-                   AND d.detector_confidence >= ?
-                   AND d.detector_model != 'full-image'
-                 ORDER BY {primary_order_sql("d")}
-                 LIMIT 1""",
-            (row["id"], min_conf),
-        ).fetchone()
-        # ``selected is None`` when a concurrent reclassify removed every
-        # detection, or a workspace raised its confidence floor above all of
-        # them, between the worklist build and this lock. Persisting an
-        # eye_kp_fingerprint against ``row`` in that state would strand the
-        # photo with results attributed to a subject that is no longer the
-        # effective primary (Codex P2 r4056478554).
-        if selected is None or selected["id"] != row["detection_id"]:
+        mask = _current_primary_mask_for_eye(db, row, iw, ih)
+        if mask is None:
             return
-        current_mask = db.conn.execute(
-            "SELECT mask_path FROM photos WHERE id = ?", (row["id"],),
-        ).fetchone()
-        if current_mask is None or not current_mask["mask_path"]:
-            return
-        mask = _load_mask_array(current_mask["mask_path"])
-
-        # Resize mask to image dims if needed (masks are typically saved at
-        # proxy resolution and must be compared to full-image keypoint coords).
-        if mask.shape != (ih, iw):
-            from PIL import Image as _PIL
-            mask_img = _PIL.fromarray(mask.astype(np.uint8) * 255).resize(
-                (iw, ih), _PIL.NEAREST
-            )
-            mask = np.array(mask_img) > 127
 
         # Gate 3 + 4: eye keypoint conf >= T AND inside the subject mask.
-        eye_candidates = []
-        for k_point in kps:
-            if k_point["name"] not in ("left_eye", "right_eye"):
-                continue
-            if k_point["conf"] < T:
-                continue
-            mx, my = int(k_point["x"]), int(k_point["y"])
-            if not (0 <= mx < mask.shape[1] and 0 <= my < mask.shape[0]):
-                continue
-            if not mask[my, mx]:
-                continue
-            eye_candidates.append(k_point)
+        eye_candidates = _eye_candidates_in_mask(kps, mask, T)
 
         if not eye_candidates:
-            mark_attempted_without_eye()
+            _mark_eye_attempted_without_eye(db, row["id"])
             return
 
         # Pick the eye with the highest windowed tenengrad — "best" eye wins.
-        best = None
-        best_score = -1.0
-        for eye in eye_candidates:
-            score = compute_eye_tenengrad(
-                image, (eye["x"], eye["y"]), bbox, k=k_window
-            )
-            if score > best_score:
-                best_score = score
-                best = eye
+        best, best_score = _best_eye_by_tenengrad(
+            image, eye_candidates, bbox, k_window,
+        )
 
         # Persist eye coords normalized to 0-1 against the loaded (oriented)
         # image dims. Two reasons: (a) EXIF-rotated JPEGs would otherwise
@@ -2548,6 +2647,27 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
             eye_tenengrad=best_score,
             eye_kp_fingerprint=EYE_KP_FINGERPRINT_VERSION,
         )
+
+
+def _eye_keypoint_stage_photos(db, collection_id, exclude_photo_ids):
+    """Return the eye-keypoint stage worklist scoped to ``collection_id``
+    and minus ``exclude_photo_ids`` (empty when nothing is in scope).
+    """
+    exclude_set = set(exclude_photo_ids) if exclude_photo_ids else None
+
+    photo_ids = None
+    if collection_id is not None:
+        photo_ids = _resolve_collection_photo_ids(db, collection_id)
+        if not photo_ids:
+            return []
+    if exclude_set and photo_ids is not None:
+        photo_ids = {pid for pid in photo_ids if pid not in exclude_set}
+        if not photo_ids:
+            return []
+    photos = db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids)
+    if exclude_set and photo_ids is None:
+        photos = [p for p in photos if p["id"] not in exclude_set]
+    return photos
 
 
 def detect_eye_keypoints_stage(
@@ -2593,20 +2713,7 @@ def detect_eye_keypoints_stage(
     T = config.get("eye_detection_conf_gate", 0.5)
     k_window = config.get("eye_window_k", 0.08)
 
-    exclude_set = set(exclude_photo_ids) if exclude_photo_ids else None
-
-    photo_ids = None
-    if collection_id is not None:
-        photo_ids = _resolve_collection_photo_ids(db, collection_id)
-        if not photo_ids:
-            return
-    if exclude_set and photo_ids is not None:
-        photo_ids = {pid for pid in photo_ids if pid not in exclude_set}
-        if not photo_ids:
-            return
-    photos = db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids)
-    if exclude_set and photo_ids is None:
-        photos = [p for p in photos if p["id"] not in exclude_set]
+    photos = _eye_keypoint_stage_photos(db, collection_id, exclude_photo_ids)
     if not photos:
         return
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}

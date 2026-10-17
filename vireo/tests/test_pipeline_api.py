@@ -3058,7 +3058,7 @@ def test_pipeline_rejects_source_snapshot_id(setup, tmp_path):
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     db.add_folder(str(folder))
     snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
-    db.conn.close()
+    db.close()
 
     with app.test_client() as c:
         resp = c.post("/api/jobs/pipeline", json={
@@ -3091,7 +3091,7 @@ def test_pipeline_endpoint_forwards_missing_originals_invalidator(
 
     db = Database(db_path)
     collection_id = db.add_collection("Existing photos", json.dumps([]))
-    db.conn.close()
+    db.close()
 
     import pipeline_job
     original = pipeline_job.run_pipeline_job
@@ -3142,7 +3142,7 @@ def test_pipeline_rejects_snapshot_combined_with_stale_sources(setup, tmp_path):
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     db.add_folder(str(folder))
     snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
-    db.conn.close()
+    db.close()
 
     with app.test_client() as c:
         resp = c.post("/api/jobs/pipeline", json={
@@ -3173,7 +3173,7 @@ def test_pipeline_rejects_destination_with_snapshot(setup, tmp_path):
     Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
     db.add_folder(str(folder))
     snap_id = db.workspaces.create_new_images_snapshot([str(img_path)])
-    db.conn.close()
+    db.close()
 
     dest = tmp_path / "dest"
     dest.mkdir()

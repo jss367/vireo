@@ -946,7 +946,7 @@ def test_review_keeps_homonymous_predictions_and_confirmed_tags_distinct(db, tmp
         db.tag_photo(pid, kid)
     data = payload()
     assert data["encounters"][0]["species_confirmed"] == same_taxon
-    rapid = (Path(__file__).parents[1] / "templates/pipeline_rapid_review.html").read_text(encoding="utf-8")
+    rapid = (Path(__file__).parents[1] / "static/pipeline-rapid-review/queue-filters.js").read_text(encoding="utf-8")
     function = rapid[rapid.index("function hasMixedSpecies"):rapid.index("function needsSpecies")]
     script = ("var data = " + json.dumps(data) + "; var rapid = {results:data};\n"
               "function queueIncludedPhotos() { return data.photos; }\n"

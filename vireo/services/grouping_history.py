@@ -303,6 +303,82 @@ def _find_encounter_by_photo_ids(encounters, photo_ids):
     return None
 
 
+def _restore_burst_confirmation(enc, change, burst_photo_ids, *, undo):
+    """Swap a burst's ``species_override`` for a species-confirm undo/redo.
+
+    Mutates the matching burst of ``enc`` in place; raises
+    :class:`GroupingHistoryStale` when the burst or its label has changed.
+    """
+    target_burst = None
+    for b in enc.get("bursts") or []:
+        if isinstance(b, dict) and list(b.get("photo_ids") or []) == burst_photo_ids:
+            target_burst = b
+            break
+    if target_burst is None:
+        raise GroupingHistoryStale(
+            "The burst has changed since this edit. "
+            "This confirmation cannot be restored."
+        )
+    confirmed = change.get("new_burst_override")
+    if confirmed is None:
+        # Entries recorded before species sets: a single confirmed
+        # species.
+        confirmed = {"species": change["species"], "confirmed": True}
+    previous = change.get("previous_burst_override")
+    expected = confirmed if undo else previous
+    if target_burst.get("species_override") != expected:
+        raise GroupingHistoryStale(
+            "The burst label has changed since this edit. "
+            "This confirmation cannot be restored."
+        )
+    replacement = previous if undo else confirmed
+    if replacement is None:
+        target_burst.pop("species_override", None)
+    else:
+        target_burst["species_override"] = copy.deepcopy(replacement)
+
+
+def _restore_encounter_confirmation(enc, change, *, undo):
+    """Swap an encounter's confirmed-species fields for a species-confirm undo/redo.
+
+    Mutates ``enc`` in place; raises :class:`GroupingHistoryStale` when the
+    encounter label has changed since the edit.
+    """
+    previous = change.get("previous_encounter_state") or {}
+    confirmed = change.get("new_encounter_state") or {
+        "confirmed_species": change["species"], "species_confirmed": True,
+    }
+    # Entries recorded with species sets also carry the list; older
+    # ones compare the two legacy fields only.
+    with_list = "confirmed_species_list" in confirmed
+    current_state = {
+        "confirmed_species": enc.get("confirmed_species"),
+        "species_confirmed": bool(enc.get("species_confirmed")),
+    }
+    if with_list:
+        current_state["confirmed_species_list"] = list(
+            enc.get("confirmed_species_list")
+            or ([enc["confirmed_species"]]
+                if enc.get("confirmed_species") else [])
+        )
+    expected = confirmed if undo else previous
+    if current_state != expected:
+        raise GroupingHistoryStale(
+            "The encounter label has changed since this edit. "
+            "This confirmation cannot be restored."
+        )
+    replacement = previous if undo else confirmed
+    if replacement.get("confirmed_species") is None:
+        enc.pop("confirmed_species", None)
+    else:
+        enc["confirmed_species"] = replacement["confirmed_species"]
+    enc["species_confirmed"] = bool(replacement.get("species_confirmed"))
+    if with_list:
+        enc["confirmed_species_list"] = list(
+            replacement.get("confirmed_species_list") or []
+        )
+
+
 @contextmanager
 def restore_species_confirm_cache_edit(db, entry, *, undo):
     """Undo (or redo) a cache-only ``/api/encounters/species`` confirmation.
@@ -347,67 +423,9 @@ def restore_species_confirm_cache_edit(db, entry, *, undo):
             )
         burst_photo_ids = change.get("burst_photo_ids")
         if burst_photo_ids is not None:
-            target_burst = None
-            for b in enc.get("bursts") or []:
-                if isinstance(b, dict) and list(b.get("photo_ids") or []) == burst_photo_ids:
-                    target_burst = b
-                    break
-            if target_burst is None:
-                raise GroupingHistoryStale(
-                    "The burst has changed since this edit. "
-                    "This confirmation cannot be restored."
-                )
-            confirmed = change.get("new_burst_override")
-            if confirmed is None:
-                # Entries recorded before species sets: a single confirmed
-                # species.
-                confirmed = {"species": change["species"], "confirmed": True}
-            previous = change.get("previous_burst_override")
-            expected = confirmed if undo else previous
-            if target_burst.get("species_override") != expected:
-                raise GroupingHistoryStale(
-                    "The burst label has changed since this edit. "
-                    "This confirmation cannot be restored."
-                )
-            replacement = previous if undo else confirmed
-            if replacement is None:
-                target_burst.pop("species_override", None)
-            else:
-                target_burst["species_override"] = copy.deepcopy(replacement)
+            _restore_burst_confirmation(enc, change, burst_photo_ids, undo=undo)
         else:
-            previous = change.get("previous_encounter_state") or {}
-            confirmed = change.get("new_encounter_state") or {
-                "confirmed_species": change["species"], "species_confirmed": True,
-            }
-            # Entries recorded with species sets also carry the list; older
-            # ones compare the two legacy fields only.
-            with_list = "confirmed_species_list" in confirmed
-            current_state = {
-                "confirmed_species": enc.get("confirmed_species"),
-                "species_confirmed": bool(enc.get("species_confirmed")),
-            }
-            if with_list:
-                current_state["confirmed_species_list"] = list(
-                    enc.get("confirmed_species_list")
-                    or ([enc["confirmed_species"]]
-                        if enc.get("confirmed_species") else [])
-                )
-            expected = confirmed if undo else previous
-            if current_state != expected:
-                raise GroupingHistoryStale(
-                    "The encounter label has changed since this edit. "
-                    "This confirmation cannot be restored."
-                )
-            replacement = previous if undo else confirmed
-            if replacement.get("confirmed_species") is None:
-                enc.pop("confirmed_species", None)
-            else:
-                enc["confirmed_species"] = replacement["confirmed_species"]
-            enc["species_confirmed"] = bool(replacement.get("species_confirmed"))
-            if with_list:
-                enc["confirmed_species_list"] = list(
-                    replacement.get("confirmed_species_list") or []
-                )
+            _restore_encounter_confirmation(enc, change, undo=undo)
         save_results_raw(restored, cache_dir, db.require_workspace_id())
         try:
             yield
