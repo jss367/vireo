@@ -1102,6 +1102,7 @@ def test_get_snapshot_returns_summary(app_and_db):
         data = resp.get_json()
         assert data["file_count"] == 1
         assert data["folder_paths"] == [str(folder)]
+        assert data["folder_counts"] == {str(folder): 1}
         assert data["files_sample"][0].endswith("IMG_001.JPG")
 
 
@@ -1197,6 +1198,35 @@ def test_new_images_preview_unknown_snapshot_returns_404(app_and_db):
             json={"snapshot_id": 99999},
         )
         assert resp.status_code == 404
+
+
+def test_new_images_preview_leaves_out_excluded_folders(app_and_db):
+    """The preview shows exactly what Start would import: files directly in
+    a left-out folder are gone, its captured subfolders are not."""
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "photos"
+    child = root / "2020-10-08"
+    _touch_image(str(root / "parent.jpg"))
+    _touch_image(str(child / "child.jpg"))
+    db.add_folder(str(root))
+    snap_id = db.workspaces.create_new_images_snapshot([
+        str(root / "parent.jpg"), str(child / "child.jpg"),
+    ])
+
+    with app.test_client() as client:
+        resp = client.post("/api/import/new-images-preview", json={
+            "snapshot_id": snap_id, "exclude_folders": [str(root)],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()
+        assert data["total_count"] == 1
+        assert [f["filename"] for f in data["files"]] == ["child.jpg"]
+
+        for bad in ([str(tmp_path / "elsewhere")], [str(root), str(child)]):
+            resp = client.post("/api/import/new-images-preview", json={
+                "snapshot_id": snap_id, "exclude_folders": bad,
+            })
+            assert resp.status_code == 400, bad
 
 
 def test_new_images_preview_scopes_roots_to_active_workspace(app_and_db):
