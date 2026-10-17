@@ -1339,7 +1339,7 @@ def test_pipeline_passes_recursive_false_to_scan(tmp_path, monkeypatch):
 
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    assert scan_kwargs.get("recursive") is False
+    assert scan_kwargs["options"].recursive is False
 
 
 def test_pipeline_passes_vireo_dir_to_scan(tmp_path, monkeypatch):
@@ -1382,7 +1382,7 @@ def test_pipeline_passes_vireo_dir_to_scan(tmp_path, monkeypatch):
 
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    assert scan_kwargs.get("vireo_dir") == os.path.dirname(db_path), (
+    assert scan_kwargs["options"].vireo_dir == os.path.dirname(db_path), (
         "Pipeline must pass vireo_dir (the DB's parent dir) to scan() so "
         "derived-cache invalidation is reachable on pipeline rescans."
     )
@@ -1432,7 +1432,7 @@ def test_pipeline_forwards_thumb_cache_dir_to_scan(tmp_path, monkeypatch):
         thumb_cache_dir=custom_thumb_dir,
     )
 
-    assert scan_kwargs.get("thumb_cache_dir") == custom_thumb_dir, (
+    assert scan_kwargs["options"].thumb_cache_dir == custom_thumb_dir, (
         "Pipeline must thread the configured thumb_cache_dir to scan() "
         "so invalidation targets the real cache on custom --thumb-dir "
         "layouts."
@@ -1487,9 +1487,9 @@ def test_pipeline_vireo_dir_aligns_with_thumb_cache_dir_parent(tmp_path, monkeyp
     )
 
     expected_vireo_dir = os.path.dirname(str(custom_thumb_dir))
-    assert scan_kwargs.get("vireo_dir") == expected_vireo_dir, (
+    assert scan_kwargs["options"].vireo_dir == expected_vireo_dir, (
         f"Pipeline should derive vireo_dir from thumb_cache_dir's parent "
-        f"({expected_vireo_dir}); got {scan_kwargs.get('vireo_dir')!r}. "
+        f"({expected_vireo_dir}); got {scan_kwargs['options'].vireo_dir!r}. "
         "Otherwise scan's previews/working paths diverge from the "
         "Flask serve paths."
     )
@@ -2071,7 +2071,7 @@ def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path):
     def tracking_scan(root, *args, **kwargs):
         scan_calls.append({
             "root": str(root),
-            "restrict_dirs": kwargs.get("restrict_dirs"),
+            "restrict_dirs": kwargs["options"].restrict_dirs,
         })
         return original_scan(root, *args, **kwargs)
 
@@ -2203,7 +2203,7 @@ def test_pipeline_copy_mode_scans_subfolders(tmp_path):
     original_scan = scanner_mod.scan
 
     def tracking_scan(root, *args, **kwargs):
-        scan_calls.append({"root": str(root), "restrict_dirs": kwargs.get("restrict_dirs")})
+        scan_calls.append({"root": str(root), "restrict_dirs": kwargs["options"].restrict_dirs})
         return original_scan(root, *args, **kwargs)
 
     with patch.object(scanner_mod, "scan", tracking_scan):
@@ -12737,10 +12737,11 @@ def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
     def fake_scan(
         root,
         scan_db,
-        progress_callback=None,
-        photo_callback=None,
+        hooks=None,
         **_kwargs,
     ):
+        progress_callback = hooks.progress if hooks is not None else None
+        photo_callback = hooks.photo if hooks is not None else None
         folder_id = scan_db.add_folder(str(root), name="photos")
         photo_id = scan_db.add_photo(
             folder_id=folder_id,
@@ -12822,10 +12823,11 @@ def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
     def fake_scan(
         root,
         scan_db,
-        progress_callback=None,
-        photo_callback=None,
+        hooks=None,
         **_kwargs,
     ):
+        progress_callback = hooks.progress if hooks is not None else None
+        photo_callback = hooks.photo if hooks is not None else None
         folder_id = scan_db.add_folder(str(root), name="photos")
         photo_id = scan_db.add_photo(
             folder_id=folder_id,

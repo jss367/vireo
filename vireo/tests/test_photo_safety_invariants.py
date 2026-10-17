@@ -83,6 +83,7 @@ from hypothesis.stateful import (  # noqa: E402
     rule,
 )
 from PIL import ExifTags, Image  # noqa: E402
+from scanner import ScanHooks, ScanOptions  # noqa: E402
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg")
 # RAW+JPEG shooting puts IMG.cr3 beside IMG.jpg; a scan pairs them into one
@@ -632,13 +633,17 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         import scanner
 
         own_root = os.path.dirname(self.own_folder)
-        scanner.scan(own_root, self.db, incremental=incremental,
-                     thumb_cache_dir=self.thumbs,
-                     photo_merged_callback=self._merged_into_raw)
+        scanner.scan(
+            own_root, self.db,
+            options=ScanOptions(incremental=incremental, thumb_cache_dir=self.thumbs),
+            hooks=ScanHooks(photo_merged=self._merged_into_raw),
+        )
         self._check_scan_catalogs_folder(own_root)
         rows_before = self._catalog_rows()
-        counts = scanner.scan(own_root, self.db, incremental=incremental,
-                              thumb_cache_dir=self.thumbs)
+        counts = scanner.scan(
+            own_root, self.db,
+            options=ScanOptions(incremental=incremental, thumb_cache_dir=self.thumbs),
+        )
         assert not counts["merged_companions"], (
             f"rescanning an unchanged folder merged {counts['merged_companions']} "
             "companion JPEG(s) into their RAW again"
@@ -667,9 +672,11 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
                 on_photo(new_id, path)
 
         own_root = os.path.dirname(self.own_folder)
-        scanner.scan(own_root, self.db, incremental=incremental,
-                     thumb_cache_dir=self.thumbs, photo_callback=on_photo,
-                     photo_merged_callback=on_merged)
+        scanner.scan(
+            own_root, self.db,
+            options=ScanOptions(incremental=incremental, thumb_cache_dir=self.thumbs),
+            hooks=ScanHooks(photo=on_photo, photo_merged=on_merged),
+        )
         self._check_scan_catalogs_folder(own_root)
         if reported:
             self.db.add_collection(

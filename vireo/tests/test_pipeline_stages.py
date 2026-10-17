@@ -14,6 +14,7 @@ import pytest
 from db import Database
 from PIL import Image
 from pipeline_stages import media
+from scanner import ScanHooks
 from test_pipeline_job import FakeRunner, _make_job
 
 
@@ -386,15 +387,15 @@ def test_scan_resets_dedup_set_between_invocations():
     )
 
     def do_scan_a(root, db, **kwargs):
-        kwargs["photo_callback"](42, "/A/IMG_001.jpg")
+        kwargs["hooks"].photo(42, "/A/IMG_001.jpg")
     def do_scan_b(root, db, **kwargs):
         # SQLite reuses id 42 for a new photo in the next source.
-        kwargs["photo_callback"](42, "/B/IMG_002.jpg")
+        kwargs["hooks"].photo(42, "/B/IMG_002.jpg")
 
     scan.do_scan = do_scan_a
-    scan._scan("/A", photo_callback=scan._on_scanned_photo)
+    scan._scan("/A", hooks=ScanHooks(photo=scan._on_scanned_photo))
     scan.do_scan = do_scan_b
-    scan._scan("/B", photo_callback=scan._on_scanned_photo)
+    scan._scan("/B", hooks=ScanHooks(photo=scan._on_scanned_photo))
 
     assert collected == [42, 42]
     assert enqueued == [

@@ -8,6 +8,7 @@ from db import Database
 from jobs import JobRunner
 from PIL import Image
 from repositories.processes import ProcessesRepository
+from scanner import ScanOptions
 from services.imports import ImportFailure, ImportService
 from wait import wait_for_job_via_runner
 
@@ -29,7 +30,7 @@ def test_restart_in_place_reuses_catalog_and_restores_settings(import_service, t
     source = tmp_path / "photos"
     source.mkdir()
     Image.new("RGB", (32, 32), "red").save(source / "saved.jpg")
-    scanner.scan(str(source), db, incremental=True)
+    scanner.scan(str(source), db, options=ScanOptions(incremental=True))
     saved_id = db.conn.execute("SELECT id FROM photos WHERE filename='saved.jpg'").fetchone()[0]
     Image.new("RGB", (32, 32), "blue").save(source / "remaining.jpg")
     nested = source / "excluded"
@@ -76,7 +77,7 @@ def test_restart_snapshot_finishes_processing_for_already_cataloged_files(import
     Image.new("RGB", (32, 32), "red").save(selected)
     db.add_folder(str(source), name="photos")
     snapshot_id = db.workspaces.create_new_images_snapshot([str(selected)])
-    scanner.scan(str(source), db, incremental=True)
+    scanner.scan(str(source), db, options=ScanOptions(incremental=True))
     Image.new("RGB", (32, 32), "blue").save(source / "unselected.jpg")
     process_id = db.processes.create("After import")
     frozen_process = db.resolve_process(process_id)

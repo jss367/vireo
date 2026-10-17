@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from pipeline_stages.context import PipelineRun
@@ -576,8 +576,17 @@ class _ScanPass:
             f"grant Vireo access."
         )
 
-    def _scan(self, root, **kwargs):
-        """Run scanner.scan with the callbacks and settings every scan shares."""
+    def _scan(self, root, *, options=None, hooks=None):
+        """Run scanner.scan with the callbacks and settings every scan shares.
+
+        ``options`` and ``hooks`` carry what differs per call; this fills in
+        the shared fields (incremental, metadata extraction, the data
+        directories, progress and status) and the cancel/pause probes.
+        """
+        from scanner import ScanControl, ScanHooks, ScanOptions
+
+        options = ScanOptions() if options is None else options
+        hooks = ScanHooks() if hooks is None else hooks
         # Scope the callback-id dedup set to one scanner invocation. SQLite
         # reuses the ids of deleted rows, and the pairing pass at the end of
         # a scan can delete a JPEG photo's row after its _on_scanned_photo
@@ -590,21 +599,28 @@ class _ScanPass:
         # pair/companion dedup inside one pass intact.
         self._reported_photo_ids.clear()
         if (self.prepare_scan_item is not None
-                and kwargs.get("photo_callback") == self._on_scanned_photo):
-            kwargs["photo_callback"] = _ScannedPhotoCallback(self)
+                and hooks.photo == self._on_scanned_photo):
+            hooks = replace(hooks, photo=_ScannedPhotoCallback(self))
         self.do_scan(
             root, self.thread_db,
-            progress_callback=self._on_scan_progress,
-            incremental=True,
-            extract_full_metadata=self.pipeline_cfg.get("extract_full_metadata", True),
-            status_callback=self._on_scan_status,
-            vireo_dir=self.effective_vireo_dir,
-            thumb_cache_dir=self.effective_thumb_cache_dir,
-            cancel_check=self.cancel_requested,
-            pause_check=self._scan_pause_requested,
-            cancel_only_check=self.run.control.cancellation_requested,
+            options=replace(
+                options,
+                incremental=True,
+                extract_full_metadata=self.pipeline_cfg.get("extract_full_metadata", True),
+                vireo_dir=self.effective_vireo_dir,
+                thumb_cache_dir=self.effective_thumb_cache_dir,
+            ),
+            hooks=replace(
+                hooks,
+                progress=self._on_scan_progress,
+                status=self._on_scan_status,
+            ),
+            control=ScanControl(
+                cancel_check=self.cancel_requested,
+                pause_check=self._scan_pause_requested,
+                cancel_only_check=self.run.control.cancellation_requested,
+            ),
             reported_photo_identities=self._reported_photo_identities,
-            **kwargs,
         )
 
     def _start_scan_step(self):
@@ -707,6 +723,8 @@ class _ScanPass:
 
     def _repair_folders(self, broken):
         """Rescan each broken folder; return how many were unreachable."""
+        from scanner import ScanHooks, ScanOptions
+
         run = self.run
         unreachable = 0
         for folder_path, file_paths in broken:
@@ -732,11 +750,13 @@ class _ScanPass:
                 # ingested as a side effect of the repair.
                 self._scan(
                     folder_path,
-                    photo_callback=self._on_repaired_photo,
-                    restrict_dirs=[folder_path],
-                    restrict_files=set(file_paths),
-                    register_restrict_dirs_as_roots=False,
-                    allow_photo_inserts=False,
+                    options=ScanOptions(
+                        restrict_dirs=[folder_path],
+                        restrict_files=set(file_paths),
+                        register_restrict_dirs_as_roots=False,
+                        allow_photo_inserts=False,
+                    ),
+                    hooks=ScanHooks(photo=self._on_repaired_photo),
                 )
             except (OSError, RuntimeError) as e:
                 if isinstance(e, self.scan_cancelled) and self.cancel_requested():
@@ -1538,19 +1558,25 @@ class _ScanPass:
         return sorted(restrict_set) if restrict_set else None
 
     def _scan_destination(self, totals):
+        from scanner import ScanHooks, ScanOptions
+
         restrict = self._destination_restrict_dirs(totals)
         self._start_scan_step()
         self.scanned_roots.append(self.run.params.destination)
         self._scan(
             self.run.params.destination,
-            photo_callback=self._on_scanned_photo,
-            photo_merged_callback=self._on_merged_photo,
-            restrict_dirs=restrict,
-            permission_error_callback=self._on_permission_denied,
+            options=ScanOptions(restrict_dirs=restrict),
+            hooks=ScanHooks(
+                photo=self._on_scanned_photo,
+                photo_merged=self._on_merged_photo,
+                permission_error=self._on_permission_denied,
+            ),
         )
 
     def _scan_in_place(self, sources):
         """Scan-in-place: scan each source folder independently."""
+        from scanner import ScanHooks, ScanOptions
+
         run = self.run
         self._start_scan_step()
         # Snapshot-scoped: hand the scanner the exact file set
@@ -1586,13 +1612,17 @@ class _ScanPass:
             try:
                 self._scan(
                     src_folder,
-                    photo_callback=self._on_scanned_photo,
-                    photo_merged_callback=self._on_merged_photo,
-                    skip_paths=run.params.exclude_paths,
-                    recursive=run.params.recursive,
-                    restrict_dirs=snapshot_restrict_dirs,
-                    restrict_files=snapshot_restrict_files,
-                    permission_error_callback=self._on_permission_denied,
+                    options=ScanOptions(
+                        skip_paths=run.params.exclude_paths,
+                        recursive=run.params.recursive,
+                        restrict_dirs=snapshot_restrict_dirs,
+                        restrict_files=snapshot_restrict_files,
+                    ),
+                    hooks=ScanHooks(
+                        photo=self._on_scanned_photo,
+                        photo_merged=self._on_merged_photo,
+                        permission_error=self._on_permission_denied,
+                    ),
                 )
             finally:
                 self.scan_progress.advance()

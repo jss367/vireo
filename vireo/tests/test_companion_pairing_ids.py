@@ -15,6 +15,7 @@ import sqlite3
 
 import pytest
 from PIL import Image
+from scanner import ScanHooks, ScanOptions
 from testing.waits import synchronization_timeout
 
 
@@ -116,16 +117,18 @@ def test_later_scan_root_cannot_substitute_an_unrelated_reused_id(tmp_path):
     stage._on_scan_status = lambda *a, **k: None
     try:
         stage._scan(
-            str(first), discovered_files=[original], skip_working_copies=True,
-            photo_callback=stage._on_scanned_photo, photo_merged_callback=stage._on_merged_photo,
+            str(first),
+            options=ScanOptions(discovered_files=[original], skip_working_copies=True),
+            hooks=ScanHooks(photo=stage._on_scanned_photo, photo_merged=stage._on_merged_photo),
         )
         assert collected == [old_id]
         writer.delete_photos([old_id])
         assert writer.add_photo(unrelated_id, "OTHER.jpg", ".jpg", 256, None) == old_id
         raw_id = writer.add_photo(unrelated_id, "OTHER.cr3", ".cr3", 256, None)
         stage._scan(
-            str(second), discovered_files=[other], skip_working_copies=True,
-            photo_callback=stage._on_scanned_photo, photo_merged_callback=stage._on_merged_photo,
+            str(second),
+            options=ScanOptions(discovered_files=[other], skip_working_copies=True),
+            hooks=ScanHooks(photo=stage._on_scanned_photo, photo_merged=stage._on_merged_photo),
         )
         second_id = db.conn.execute("SELECT id FROM photos WHERE filename = 'SECOND.jpg'").fetchone()[0]
         assert raw_id not in collected
@@ -495,7 +498,7 @@ def test_first_scan_never_reports_or_inserts_a_companion_row(
             "SELECT COUNT(*) FROM photos WHERE extension = '.jpg'"
         ).fetchone()[0])
 
-    counts = scan(str(card), db, photo_callback=on_photo)
+    counts = scan(str(card), db, hooks=ScanHooks(photo=on_photo))
 
     ids = _photo_ids_by_filename(db)
     assert set(ids) == {f"IMG_001{raw_ext}", f"IMG_002{raw_ext}"}
@@ -685,7 +688,7 @@ def test_new_photo_rechecks_collections_between_scan_inserts(tmp_path):
             )
 
     try:
-        scan(str(card), db, photo_callback=after_each_insert)
+        scan(str(card), db, hooks=ScanHooks(photo=after_each_insert))
         ids = _photo_ids_by_filename(db)
         second_id = ids["second.jpg"]
         assert state["collection_id"] is not None
@@ -809,7 +812,7 @@ def test_attach_companion_commits_before_firing_callback(tmp_path):
             ).fetchone()
             seen_companion_path.append(row["companion_path"] if row else None)
 
-    scan(str(card), db, photo_callback=on_photo)
+    scan(str(card), db, hooks=ScanHooks(photo=on_photo))
 
     assert seen_companion_path == ["IMG_001.jpg"], seen_companion_path
 
@@ -855,9 +858,8 @@ def test_attach_companion_invalidates_display_cache_before_firing_callback(
     with pytest.raises(RuntimeError, match="callback failure"):
         scan(
             str(card), db,
-            photo_callback=on_photo,
-            vireo_dir=str(vireo_dir),
-            thumb_cache_dir=str(thumbs),
+            options=ScanOptions(vireo_dir=str(vireo_dir), thumb_cache_dir=str(thumbs)),
+            hooks=ScanHooks(photo=on_photo),
         )
 
     assert stale_display_paths, "RAW photo_callback never fired"
@@ -1005,7 +1007,7 @@ def test_attach_companion_refuses_when_owner_metadata_changed_before_commit(
     def on_photo(photo_id, path):
         callbacks.append((photo_id, path))
 
-    scanner_mod.scan(str(card), db, photo_callback=on_photo)
+    scanner_mod.scan(str(card), db, hooks=ScanHooks(photo=on_photo))
 
     # The attach must refuse because the RAW's metadata diverged from
     # the JPEG's under the writer lock. The JPEG then falls through to
@@ -1103,9 +1105,8 @@ def test_attach_companion_skips_publishing_when_owner_vanished_before_callback(
 
     scanner_mod.scan(
         str(card), db,
-        photo_callback=on_photo,
-        vireo_dir=str(vireo_dir),
-        thumb_cache_dir=str(thumbs),
+        options=ScanOptions(vireo_dir=str(vireo_dir), thumb_cache_dir=str(thumbs)),
+        hooks=ScanHooks(photo=on_photo),
     )
 
     # The JPEG's attach fired after the RAW was deleted and its id reused
@@ -1133,8 +1134,12 @@ def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
     try:
         # Catalog only the RAW, then scan only its newly discovered JPEG.
         scanner_mod.scan(
-            str(card), db, discovered_files=[raw], incremental=False,
-            skip_working_copies=True,
+            str(card), db,
+            options=ScanOptions(
+                discovered_files=[raw],
+                incremental=False,
+                skip_working_copies=True,
+            ),
         )
         raw_id = _photo_ids_by_filename(db)[raw.name]
         other = tmp_path / "other"
@@ -1165,8 +1170,13 @@ def test_attach_companion_keeps_owner_locked_during_publication(tmp_path):
             published.append((photo_id, path))
 
         scanner_mod.scan(
-            str(card), db, discovered_files=[jpeg], incremental=False,
-            skip_working_copies=True, photo_callback=publish,
+            str(card), db,
+            options=ScanOptions(
+                discovered_files=[jpeg],
+                incremental=False,
+                skip_working_copies=True,
+            ),
+            hooks=ScanHooks(photo=publish),
         )
         assert published == [(raw_id, str(jpeg))]
         assert blocked == [True]
@@ -1197,8 +1207,10 @@ def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind
     raw, jpeg = card / "IMG_001.cr3", card / "IMG_001.jpg"
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
-    scanner_mod.scan(str(card), db, discovered_files=[raw], incremental=False,
-                     skip_working_copies=True)
+    scanner_mod.scan(
+        str(card), db,
+        options=ScanOptions(discovered_files=[raw], incremental=False, skip_working_copies=True),
+    )
     raw_id = _photo_ids_by_filename(db)[raw.name]
     db.close()
     waiting, resume = threading.Event(), threading.Event()
@@ -1233,9 +1245,13 @@ def test_attach_companion_pipeline_wait_does_not_hold_writer(tmp_path, wait_kind
                 runner=SimpleNamespace(update_step=lambda *a, **kw: None),
             )
             scanner_mod.scan(
-                str(card), thread_db, discovered_files=[jpeg],
-                incremental=False, skip_working_copies=True,
-                photo_callback=_ScannedPhotoCallback(receiver),
+                str(card), thread_db,
+                options=ScanOptions(
+                    discovered_files=[jpeg],
+                    incremental=False,
+                    skip_working_copies=True,
+                ),
+                hooks=ScanHooks(photo=_ScannedPhotoCallback(receiver)),
             )
         except BaseException as error:
             errors.append(error)
@@ -1356,7 +1372,7 @@ def test_scan_refreshes_collection_membership_between_insert_commits(tmp_path, s
         )
 
     try:
-        scan(str(card), db, photo_callback=save_stale_selection)
+        scan(str(card), db, hooks=ScanHooks(photo=save_stale_selection))
         assert state["next"] in _photo_ids_by_filename(db).values()
         assert _collection_photo_ids(db, state["collection"]) == [state["first"]]
     finally:

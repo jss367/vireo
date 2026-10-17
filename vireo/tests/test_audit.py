@@ -6,6 +6,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
+from scanner import ScanOptions
 
 
 def test_check_drift_detects_xmp_change(tmp_path):
@@ -820,7 +821,7 @@ def test_build_summary_states(tmp_path):
 
     # A new photo lands after the verify run: clean but stale
     Image.new('RGB', (60, 60)).save(os.path.join(root, 'new.jpg'))
-    scan(root, db, incremental=True)
+    scan(root, db, options=ScanOptions(incremental=True))
     db.audit.record_run('untracked', 0)
     s = build_summary(db)
     assert s['status'] == 'stale'
