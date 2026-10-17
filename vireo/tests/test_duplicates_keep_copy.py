@@ -169,3 +169,56 @@ def test_keep_refuses_photo_without_duplicates(tmp_path):
 
     assert db.keep_duplicate_copy(pid) == {"error": "not a duplicate"}
     assert db.keep_duplicate_copy(pid + 999) == {"error": "not found"}
+
+
+def test_keep_plans_under_the_writer_lock(tmp_path, monkeypatch):
+    """Two keeps in one group must not both plan against the same old
+    keeper, so the plan is read inside the transaction that applies it."""
+    db, kept, rejected = _resolved_pair(tmp_path)
+    real_plan = dup_repo.DuplicatesRepository.keep_copy_plan
+    seen = []
+
+    def plan_in_txn(repo, photo_id):
+        seen.append(db.in_transaction)
+        return real_plan(repo, photo_id)
+
+    monkeypatch.setattr(dup_repo.DuplicatesRepository, "keep_copy_plan", plan_in_txn)
+
+    db.keep_duplicate_copy(rejected)
+
+    assert seen == [True]
+    assert not db.in_transaction
+
+
+def test_second_keep_in_a_group_rejects_the_first_choice(tmp_path):
+    """Keeping B then C (both once rejected) leaves only C kept."""
+    db, kept, rejected = _resolved_pair(tmp_path)
+    folder = tmp_path / "c"
+    folder.mkdir()
+    (folder / "owl.jpg").write_bytes(b"x")
+    fid = db.add_folder(str(folder))
+    third = db.add_photo(
+        folder_id=fid, filename="owl.jpg", extension=".jpg",
+        file_size=1, file_mtime=100.0, file_hash="HKEEP",
+    )
+    assert _flags(db, [third])[third] == "rejected"
+
+    db.keep_duplicate_copy(rejected)
+    result = db.keep_duplicate_copy(third)
+
+    assert result["loser_ids"] == [rejected]
+    assert _flags(db, [kept, rejected, third]) == {
+        kept: "rejected", rejected: "rejected", third: "none",
+    }
+
+
+def test_keep_rolls_back_when_the_photo_vanishes_under_the_lock(tmp_path, monkeypatch):
+    db, kept, rejected = _resolved_pair(tmp_path)
+    monkeypatch.setattr(
+        dup_repo.DuplicatesRepository, "keep_copy_plan",
+        lambda repo, photo_id: (None, "not found"),
+    )
+
+    assert db.keep_duplicate_copy(rejected) == {"error": "not found"}
+    assert not db.in_transaction
+    assert _flags(db, [kept, rejected]) == {kept: "none", rejected: "rejected"}

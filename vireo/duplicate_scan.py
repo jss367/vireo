@@ -74,7 +74,7 @@ def revalidate_scan_result(db, result):
     })
     rows = _fetch_photo_rows(
         db, photo_ids,
-        columns="p.id, p.filename, p.file_hash, p.flag, f.path AS folder_path",
+        columns="p.id, p.filename, p.file_hash, p.flag, p.rating, f.path AS folder_path",
     )
     live = {
         r["id"]: (
@@ -84,6 +84,7 @@ def revalidate_scan_result(db, result):
         for r in rows
     }
     rejected_ids = {r["id"] for r in rows if r["flag"] == "rejected"}
+    ratings = {r["id"]: r["rating"] for r in rows}
 
     def current(entry, file_hash):
         return live.get(entry.get("id")) == (entry.get("path"), file_hash)
@@ -100,7 +101,7 @@ def revalidate_scan_result(db, result):
             continue
         p = dict(p, losers=losers)
         if p.get("status") == "resolved":
-            p = _reorient_resolved_proposal(p, rejected_ids)
+            p = _reorient_resolved_proposal(p, rejected_ids, ratings)
         kept.append(p)
 
     new_group_count, changed_group_count = _changes_since_scan(
@@ -126,25 +127,36 @@ def revalidate_scan_result(db, result):
     )
 
 
-def _reorient_resolved_proposal(proposal, rejected_ids):
+def _reorient_resolved_proposal(proposal, rejected_ids, ratings):
     """Show a resolved group with the copy the catalog keeps now as KEEP.
 
     "Keep this copy instead" (or a flag edit) can swap which copy of a
     resolved group is kept after the scan stored it. When exactly one shown
     copy is still kept and it isn't the stored winner, that copy becomes the
     winner and the rest are rejected losers; the copy it replaced says so.
-    Otherwise the proposal is returned unchanged.
+    The switch merged the old keeper's rating onto the new one, so every
+    copy shows its rating from ``ratings`` (id to the catalog's rating now)
+    rather than the scan's. Otherwise the proposal is returned unchanged.
     """
     winner = proposal["winner"]
     members = [winner] + proposal["losers"]
     kept = [m for m in members if m.get("id") not in rejected_ids]
     if len(kept) != 1 or kept[0] is winner:
         return proposal
-    new_winner = {
+
+    def live(entry, **changes):
+        entry = dict(entry, **changes)
+        if entry.get("id") in ratings:
+            entry["rating"] = ratings[entry["id"]]
+        return entry
+
+    new_winner = live({
         k: v for k, v in kept[0].items() if k not in ("rejected", "reason")
-    }
-    replaced = dict(winner, rejected=True, reason=KEPT_ANOTHER_COPY_REASON)
-    losers = [replaced] + [m for m in proposal["losers"] if m is not kept[0]]
+    })
+    replaced = live(winner, rejected=True, reason=KEPT_ANOTHER_COPY_REASON)
+    losers = [replaced] + [
+        live(m) for m in proposal["losers"] if m is not kept[0]
+    ]
     return dict(proposal, winner=new_winner, losers=losers)
 
 

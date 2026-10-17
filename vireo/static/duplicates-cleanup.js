@@ -70,7 +70,7 @@ function releasePausedDuplicateTrashBatch(photoIds, owner) {
 
 /** @param {number} photoId */
 async function trashOneLoserFile(photoId) {
-  if (duplicateFileTrashIsPending(photoId)) return;
+  if (duplicateFileTrashIsPending(photoId) || duplicateKeepBlocksTrash()) return;
   var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
   if (!card || !card.querySelector(/** @type {'button'} */ ('.trash-btn'))) return;
   var state = {pending: true, terminal: false, message: 'Moving to Trash...'};
@@ -120,6 +120,14 @@ async function trashOneLoserFile(photoId) {
 var KEPT_ANOTHER_COPY_REASON = 'kept another copy instead';
 /** @type {Set<number>} */ var _duplicateKeepPending = new Set();
 
+// A switch in flight decides which copy is the extra one, so no cleanup may
+// start until it lands (the server also serializes the two).
+function duplicateKeepBlocksTrash() {
+  if (!_duplicateKeepPending.size) return false;
+  showToast('Wait for the switch to finish before moving files to Trash.', 'info');
+  return true;
+}
+
 // Re-point a resolved group at the copy the server now keeps: every other
 // copy shown is rejected, the ones it just rejected saying why.
 /** @param {DuplicateProposal} proposal @param {DuplicateKeepResponse} data */
@@ -156,6 +164,11 @@ async function keepDuplicateCopy(photoId) {
   var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
   var button = card && card.querySelector(/** @type {'button'} */ ('.keep-btn'));
   if (button) { button.disabled = true; button.textContent = 'Switching...'; }
+  // The group re-renders when the switch lands, restoring these.
+  var pendingGroup = card && card.closest(/** @type {'div'} */ ('.dup-group'));
+  if (pendingGroup) {
+    pendingGroup.querySelectorAll(/** @type {'button'} */ ('.trash-btn, .keep-btn')).forEach(function(b) { b.disabled = true; });
+  }
   try {
     /** @type {DuplicateKeepResponse} */ var data = await safeFetch('/api/duplicates/keep', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -220,7 +233,7 @@ function refreshDuplicateTrashControls() {
 }
 
 async function trashAllLoserFiles() {
-  if (_duplicateTrashActive) return;
+  if (_duplicateTrashActive || duplicateKeepBlocksTrash()) return;
   // ``groupMatchesFilter`` restricts to groups the filter actually
   // surfaced. Without it, an active filter shrinks the rendered
   // resolved section and the button label (both driven by the

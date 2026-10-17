@@ -3444,18 +3444,35 @@ class Database:
         of the same file is rejected, and their rating and keywords merge
         onto the chosen copy, all in one transaction. Copies already rejected
         stay rejected. Refuses a copy that is missing on disk or on an
-        offline volume (see ``DuplicatesRepository.keep_copy_plan``).
+        offline volume (see ``DuplicatesRepository.keep_copy_refusal``).
+
+        The plan is read under SQLite's writer lock and applied in the same
+        transaction, so two concurrent keeps in one group can't each reject
+        the old keeper and leave both chosen copies kept; the later one sees
+        the earlier one's keeper and rejects it. The disk checks run before
+        the lock, since a stat on a network volume can be slow.
 
         Returns ``{"file_hash", "winner_id", "loser_ids", "rating", "flag"}``
         or ``{"error": reason}``.
         """
         repo = self._duplicates_repository()
-        plan, reason = repo.keep_copy_plan(photo_id)
+        reason = repo.keep_copy_refusal(photo_id)
         if reason is not None:
             return {"error": reason}
-        self._apply_winner_loser_merge(
-            photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"],
-        )
+        self.begin_immediate()
+        try:
+            plan, reason = repo.keep_copy_plan(photo_id)
+            if reason is not None:
+                self.rollback()
+                return {"error": reason}
+            # Commits the transaction opened above.
+            self._apply_winner_loser_merge(
+                photo_id, plan["loser_ids"], winner_flag=plan["winner_flag"],
+            )
+        except BaseException:
+            if self.in_transaction:
+                self.rollback()
+            raise
         return {
             "file_hash": plan["file_hash"],
             "winner_id": photo_id,

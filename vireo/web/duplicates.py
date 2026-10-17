@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 
 from duplicate_scan import attach_workspace_names, catalog_cleanup_result, revalidate_scan_result
 from flask import Blueprint, jsonify, request
@@ -21,6 +22,9 @@ from photo_payload import attach_nested_edit_recipes
 from sql_chunks import chunked
 
 log = logging.getLogger(__name__)
+
+# How long "keep this copy instead" waits for a loser cleanup to finish.
+KEEP_CLEANUP_WAIT_SECS = 5.0
 
 
 def create_duplicates_blueprint(
@@ -44,6 +48,10 @@ def create_duplicates_blueprint(
     drops the missing-originals cache after the catalog changes.
     """
     blueprint = Blueprint("duplicates", __name__)
+    # Held by "keep this copy instead" and by loser cleanup from classification
+    # through the row delete, so a copy cleanup already chose to trash can't
+    # be promoted to the kept one before its file and row are gone.
+    loser_cleanup_lock = threading.Lock()
 
     @blueprint.route("/api/duplicates/apply", methods=["POST"])
     def api_duplicates_apply():
@@ -112,7 +120,17 @@ def create_duplicates_blueprint(
         photo_id = body.get("photo_id") if isinstance(body, dict) else None
         if not isinstance(photo_id, int) or isinstance(photo_id, bool):
             return json_error("photo_id required")
-        result = get_db().keep_duplicate_copy(photo_id)
+        # A cleanup batch normally finishes within this wait; a slow network
+        # Trash call can outlast it, and the user retries once it's done.
+        if not loser_cleanup_lock.acquire(timeout=KEEP_CLEANUP_WAIT_SECS):
+            return json_error(
+                "cleanup in progress", 409,
+                message="Files are being moved to Trash. Try again when that finishes.",
+            )
+        try:
+            result = get_db().keep_duplicate_copy(photo_id)
+        finally:
+            loser_cleanup_lock.release()
         reason = result.get("error")
         if reason is not None:
             status, message = keep_refusals[reason]
@@ -321,7 +339,11 @@ def create_duplicates_blueprint(
         if err is not None:
             return err
 
-        db = get_db()
+        with loser_cleanup_lock:
+            return _trash_loser_files(get_db(), photo_ids)
+
+    def _trash_loser_files(db, photo_ids):
+        """Body of ``delete-loser-files``, run under ``loser_cleanup_lock``."""
         trash_candidates, trashed_pids, skipped, network_roots = (
             _classify_loser_candidates(db, photo_ids)
         )

@@ -1350,3 +1350,73 @@ def test_keep_endpoint_validates_input(app_and_db):
         assert resp.status_code == 400
     resp = client.post("/api/duplicates/keep", json={"photo_id": 999999})
     assert resp.status_code == 404
+
+
+def test_keep_endpoint_waits_out_a_cleanup_in_progress(app_and_db, tmp_path, monkeypatch):
+    """A copy cleanup has already chosen to trash can't be promoted to the
+    kept one while that cleanup is still moving it to Trash."""
+    import threading
+
+    import app as app_module
+    import web.duplicates as duplicates_web
+    from testing.waits import synchronization_timeout
+
+    app, db = app_and_db
+    kept, rejected, _kept_path, rejected_path = _seed_pair_with_real_files(
+        db, tmp_path, "HKEEPRACE",
+    )
+    trashing = threading.Event()
+    release = threading.Event()
+
+    def slow_trash(paths, progress_callback=None, already_missing_out=None,
+                   network_roots=None):
+        trashing.set()
+        assert release.wait(synchronization_timeout())
+        for path in paths:
+            os.remove(path)
+        return len(paths), set(paths), []
+
+    monkeypatch.setattr(app_module, "_trash_paths", slow_trash)
+    monkeypatch.setattr(duplicates_web, "KEEP_CLEANUP_WAIT_SECS", 0.05)
+    cleanup = {}
+
+    def run_cleanup():
+        cleanup["resp"] = app.test_client().post(
+            "/api/duplicates/delete-loser-files", json={"photo_ids": [rejected]},
+        )
+
+    worker = threading.Thread(target=run_cleanup)
+    worker.start()
+    try:
+        assert trashing.wait(synchronization_timeout())
+        resp = app.test_client().post("/api/duplicates/keep", json={"photo_id": rejected})
+        assert resp.status_code == 409
+        assert resp.get_json()["error"] == "cleanup in progress"
+    finally:
+        release.set()
+        worker.join(synchronization_timeout())
+    assert cleanup["resp"].get_json()["trashed"] == 1
+    # The trashed copy is gone, and the other copy is still the kept one.
+    assert db.get_photo(rejected) is None
+    assert not os.path.exists(rejected_path)
+    flag = db.conn.execute("SELECT flag FROM photos WHERE id=?", (kept,)).fetchone()["flag"]
+    assert flag != "rejected"
+
+
+def test_last_scan_shows_live_rating_after_a_switch(app_and_db, tmp_path):
+    """Keeping the other copy merges the old keeper's rating onto it; a
+    restored scan shows that rating, not the one the scan stored."""
+    app, db = app_and_db
+    kept, rejected, _kp, _rp = _seed_pair_with_real_files(db, tmp_path, "HKEEPRATING")
+    db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (kept,))
+    db.conn.commit()
+    client = app.test_client()
+    _scan_and_restore(client)
+
+    assert client.post("/api/duplicates/keep", json={"photo_id": rejected}).status_code == 200
+
+    result = client.get("/api/duplicates/last-scan").get_json()["result"]
+    (proposal,) = result["proposals"]
+    assert proposal["winner"]["id"] == rejected
+    assert proposal["winner"]["rating"] == 4
+    assert result["changed_group_count"] == 0

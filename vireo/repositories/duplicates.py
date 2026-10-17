@@ -427,24 +427,54 @@ class DuplicatesRepository:
         loser_ids = [r["id"] for r in rows if r["id"] != winner_id]
         return winner_id, loser_ids, None
 
+    def keep_copy_refusal(self, photo_id):
+        """Why ``photo_id`` can't become the kept copy of its group, or ``None``.
+
+        Reasons: ``"not found"``, ``"not a duplicate"``, ``"volume offline"``
+        or ``"missing on disk"``. Promoting a copy whose file is gone (or
+        unknowable) would reject the copy that still exists. Does the disk
+        checks, so callers run it before taking the writer lock; the folder
+        and filename it checks don't change when flags do. Writes nothing.
+        """
+        row = self.conn.execute(
+            """SELECT p.file_hash, p.filename, f.path AS folder_path
+               FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
+               WHERE p.id = ?""",
+            (photo_id,),
+        ).fetchone()
+        if row is None:
+            return "not found"
+        if not row["file_hash"] or self.conn.execute(
+            "SELECT 1 FROM photos WHERE file_hash = ? AND id != ? LIMIT 1",
+            (row["file_hash"], photo_id),
+        ).fetchone() is None:
+            return "not a duplicate"
+        if row["folder_path"] is None:
+            return "missing on disk"
+        path = os.path.join(row["folder_path"], row["filename"] or "")
+        # Reachability first: a stat on a stale network mount can block.
+        if _volume_offline(path):
+            return "volume offline"
+        if not os.path.exists(path):
+            return "missing on disk"
+        return None
+
     def keep_copy_plan(self, photo_id):
         """Plan making ``photo_id`` the one kept copy of its ``file_hash``.
 
         Unlike the resolver plans this may promote a rejected copy: it backs
         the user's explicit "keep this copy instead" choice. Every other
         non-rejected copy of the hash becomes a loser; copies already
-        rejected stay as they are. Returns ``(plan, None)`` with ``plan`` a
-        dict of ``file_hash``, ``loser_ids`` and ``winner_flag`` (the flag
-        the kept copy ends with), or ``(None, reason)`` where ``reason`` is
-        ``"not found"``, ``"not a duplicate"``, ``"volume offline"`` or
-        ``"missing on disk"``. Promoting a copy whose file is gone (or
-        unknowable) would reject the copy that still exists. Writes nothing.
+        rejected stay as they are. Reads only flags, so it is cheap to run
+        inside the writer-locked transaction that applies it (two concurrent
+        keeps in one group must not both plan against the same old keeper).
+        Returns ``(plan, None)`` with ``plan`` a dict of ``file_hash``,
+        ``loser_ids`` and ``winner_flag`` (the flag the kept copy ends with),
+        or ``(None, reason)`` with ``"not found"`` or ``"not a duplicate"``.
+        Writes nothing.
         """
         row = self.conn.execute(
-            """SELECT p.file_hash, p.filename, p.flag, f.path AS folder_path
-               FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
-               WHERE p.id = ?""",
-            (photo_id,),
+            "SELECT file_hash, flag FROM photos WHERE id = ?", (photo_id,),
         ).fetchone()
         if row is None:
             return None, "not found"
@@ -456,14 +486,6 @@ class DuplicatesRepository:
         ).fetchall()
         if not siblings:
             return None, "not a duplicate"
-        if row["folder_path"] is None:
-            return None, "missing on disk"
-        path = os.path.join(row["folder_path"], row["filename"] or "")
-        # Reachability first: a stat on a stale network mount can block.
-        if _volume_offline(path):
-            return None, "volume offline"
-        if not os.path.exists(path):
-            return None, "missing on disk"
         losers = [s for s in siblings if s["flag"] != "rejected"]
         # The copies are the same file, so a pick on the copy being replaced
         # belongs to the one that stays; a rejected copy comes back unflagged.
