@@ -5,12 +5,12 @@
 // Expose selectedIds for tests to inspect Finder-style coercion.
 window.__kwSelectedIds = selectedIds;
 
-function buildKeywordContextMenu(kwIds) {
+/** @param {number[]} kwIds */ function buildKeywordContextMenu(kwIds) {
   const one = kwIds.length === 1;
   const hint = one ? undefined : 'Select a single keyword';
   const singleKw = one ? allKeywords.find(k => k.id === kwIds[0]) : null;
 
-  const typeChip = function(t) {
+  /** @param {string} t */ const typeChip = function(t) {
     return {
       label: t,
       title: 'Set type to ' + t,
@@ -46,12 +46,12 @@ function buildKeywordContextMenu(kwIds) {
 
 function bindKeywordContextMenu() {
   document.addEventListener('contextmenu', function(e) {
-    const row = e.target.closest('tr[data-id]');
+    if (!(e.target instanceof Element)) return; const row = e.target.closest(/** @type {'tr'} */ ('tr[data-id]'));
     if (!row) return;
     // Ignore right-clicks that land inside the context menu itself.
     if (e.target.closest('.vireo-ctx-menu')) return;
     e.preventDefault();
-    const kwId = parseInt(row.dataset.id, 10);
+    const kwId = parseInt(row.dataset.id || '', 10);
     if (!kwId) return;
     const group = !showRecords && identityGroups.find(k => k.id === kwId);
     if (group && group.members.length > 1) {
@@ -61,7 +61,7 @@ function bindKeywordContextMenu() {
             '&keyword_label=' + encodeURIComponent(group.name);
         }},
         {label: 'Edit individual records', onClick: function() {
-          document.getElementById('kwShowRecords').checked = true;
+          /** @type {HTMLInputElement} */ (document.getElementById('kwShowRecords')).checked = true;
           showRecords = true;
           selectedIds.clear();
           render();

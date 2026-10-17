@@ -3,13 +3,13 @@
 
 function render() {
   const filtered = sortList(getFiltered());
-  const tbody = document.getElementById('kwBody');
-  const empty = document.getElementById('kwEmpty');
-  const stats = document.getElementById('kwStats');
+  const tbody = /** @type {HTMLElement} */ (document.getElementById('kwBody'));
+  const empty = /** @type {HTMLElement} */ (document.getElementById('kwEmpty'));
+  const stats = /** @type {HTMLElement} */ (document.getElementById('kwStats'));
 
   stats.textContent = filtered.length + ' of ' + (showRecords ? allKeywords.length : identityGroups.length) + ' keywords';
-  const unlinkedEl = document.getElementById('kwUnlinkedCount');
-  if (unlinkedEl) unlinkedEl.textContent = unlinkedLocationCount();
+  const unlinkedEl = /** @type {HTMLElement} */ (document.getElementById('kwUnlinkedCount'));
+  if (unlinkedEl) unlinkedEl.textContent = String(unlinkedLocationCount());
 
   if (!filtered.length) {
     tbody.innerHTML = '';

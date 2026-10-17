@@ -14,7 +14,7 @@ async function loadKeywords() {
     allKeywords.forEach(k => { parentMap[k.id] = k.name; });
     render();
   } catch(e) {
-    document.getElementById('kwEmpty').style.display = 'block';
-    document.getElementById('kwEmpty').textContent = 'Failed to load keywords.';
+    /** @type {HTMLElement} */ (document.getElementById('kwEmpty')).style.display = 'block';
+    /** @type {HTMLElement} */ (document.getElementById('kwEmpty')).textContent = 'Failed to load keywords.';
   }
 }
