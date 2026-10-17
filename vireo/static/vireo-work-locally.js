@@ -1,17 +1,17 @@
 (function initFolderScopedWorkLocally() {
   'use strict';
 
-  var data = null;
-  var activeJob = null;
+  /** @type {WorkLocalData|null} */ var data = null;
+  /** @type {WorkLocalWatch|null} */ var activeJob = null;
   var actionInFlight = false;
   var loadGeneration = 0;
-  var pendingStageItems = [];
+  /** @type {WorkLocalFolder[]} */ var pendingStageItems = [];
   var stagePreflightGeneration = 0;
-  var stagePreflightTimer = null;
-  var stagePreflightSignature = null;
-  var stagePreflightAbort = null;
-  var stagePreflightId = null;
-  var stagePreflightWorkspaceId = null;
+  /** @type {ReturnType<typeof setTimeout>|null} */ var stagePreflightTimer = null;
+  /** @type {string|null} */ var stagePreflightSignature = null;
+  /** @type {AbortController|null} */ var stagePreflightAbort = null;
+  /** @type {string|null} */ var stagePreflightId = null;
+  /** @type {number|null} */ var stagePreflightWorkspaceId = null;
   var stagePreflightStorageKey = preflightClientStorageKey();
   var stagePreflightClientState = loadPreflightClientState();
   var stagePreflightClientId = stagePreflightClientState.id;
@@ -27,14 +27,14 @@
     return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
   }
 
-  function loadPreflightClientState() {
+  /** @returns {WorkLocalClientState} */ function loadPreflightClientState() {
     try {
-      var stored = JSON.parse(window.sessionStorage.getItem(stagePreflightStorageKey));
+      /** @type {unknown} */ var stored = JSON.parse(window.sessionStorage.getItem(stagePreflightStorageKey) || 'null');
       if (
-        stored && typeof stored.id === 'string' && stored.id &&
-        Number.isSafeInteger(stored.seq) && stored.seq >= 0
+        stored && typeof stored === 'object' && 'id' in stored && typeof stored.id === 'string' && stored.id &&
+        'seq' in stored && typeof stored.seq === 'number' && Number.isSafeInteger(stored.seq) && stored.seq >= 0
       ) {
-        return stored;
+        return {id: stored.id, seq: stored.seq};
       }
     } catch (_error) {
       // Storage can be disabled by browser privacy settings. The in-memory
@@ -46,18 +46,18 @@
   }
 
   function preflightClientStorageKey() {
-    var stateKey = 'vireoWorkLocallyPreflightEntryId';
+    const stateKey = 'vireoWorkLocallyPreflightEntryId';
     var keyPrefix = 'vireoWorkLocallyPreflightClient:';
     try {
-      var historyState = window.history.state;
-      var entryId = isRestoredNavigation() && historyState &&
+      /** @type {unknown} */ var historyState = window.history.state;
+      var entryId = isRestoredNavigation() && historyState && typeof historyState === 'object' && stateKey in historyState &&
         typeof historyState[stateKey] === 'string'
         ? historyState[stateKey]
         : null;
       if (!entryId) {
         entryId = newPreflightId();
-        var nextState = historyState && typeof historyState === 'object'
-          ? Object.assign({}, historyState)
+        /** @type {Record<string,unknown>} */ var nextState = historyState && typeof historyState === 'object'
+          ? Object.assign({}, /** @type {Record<string,unknown>} */ (historyState))
           : {};
         nextState[stateKey] = entryId;
         window.history.replaceState(nextState, document.title);
@@ -74,7 +74,7 @@
       if (window.performance && typeof window.performance.getEntriesByType === 'function') {
         var navigations = window.performance.getEntriesByType('navigation');
         if (navigations.length) {
-          return ['reload', 'back_forward'].indexOf(navigations[0].type) >= 0;
+          return ['reload', 'back_forward'].indexOf((navigations[0] && 'type' in navigations[0] && typeof navigations[0].type === 'string' ? navigations[0].type : '')) >= 0;
         }
       }
       // Navigation Timing Level 1 fallback for older WebKit versions.
@@ -87,7 +87,7 @@
     }
   }
 
-  function persistPreflightClientState(state) {
+  /** @param {WorkLocalClientState} state */ function persistPreflightClientState(state) {
     try {
       window.sessionStorage.setItem(stagePreflightStorageKey, JSON.stringify(state));
     } catch (_error) {
@@ -102,7 +102,7 @@
     return stagePreflightSeq;
   }
 
-  function cancelStagePreflight(notifyServer) {
+  /** @param {boolean} notifyServer */ function cancelStagePreflight(notifyServer) {
     var preflightId = stagePreflightId;
     var workspaceId = stagePreflightWorkspaceId;
     if (stagePreflightAbort) stagePreflightAbort.abort();
@@ -125,11 +125,11 @@
     }).catch(function() {});
   }
 
-  var blockingJobTimer = null;
+  /** @type {ReturnType<typeof setTimeout>|null} */ var blockingJobTimer = null;
   var blockingJobRefreshDue = false;
   var stageBlockedByJob = false;
 
-  function blockingJobMessage(job) {
+  /** @param {WorkLocalBlocker|null} [job] */ function blockingJobMessage(job) {
     job = job || (data && data.blocking_job);
     if (!job) return '';
     var label = typeof window.formatJobType === 'function'
@@ -141,22 +141,22 @@
     return label + ' is ' + status + '. Work Locally will be available when it finishes or is cancelled.';
   }
 
-  function blockingJobForFolder(folderId) {
+  /** @param {number} folderId */ function blockingJobForFolder(folderId) {
     var jobs = (data && data.folder_blocking_jobs) || {};
     return jobs[String(Number(folderId))] || null;
   }
 
-  function blockingJobForSelection(folderIds) {
+  /** @param {number[]|null} folderIds */ function blockingJobForSelection(folderIds) {
     if (!data) return null;
     if (!folderIds || !folderIds.length) return data.blocking_job || null;
     for (var index = 0; index < folderIds.length; index += 1) {
-      var job = blockingJobForFolder(folderIds[index]);
+      var folderId = folderIds[index]; if (folderId === undefined) continue; var job = blockingJobForFolder(folderId);
       if (job) return job;
     }
     return null;
   }
 
-  function blockerSignature(payload) {
+  /** @param {WorkLocalBlockerData|null} payload */ function blockerSignature(payload) {
     if (!payload) return '';
     // ``residency_fingerprint`` is a short server-side digest of the
     // ``local_folders`` rows visible to this workspace (state, activated_at,
@@ -180,7 +180,7 @@
     // changes so the panel re-renders enabled/disabled controls.
     if (!data) return;
     try {
-      var payload = await Vireo.api.json(
+      /** @type {WorkLocalBlockerData} */ var payload = await Vireo.api.json(
         '/api/workspaces/active/local-folders/blocker', {}, {toast: false}
       );
       var previous = blockerSignature(data);
@@ -223,7 +223,7 @@
     refreshBlockingJob();
   });
 
-  function selectedItems(folderIds, localOnly) {
+  /** @param {number[]|null} folderIds @param {boolean} localOnly */ function selectedItems(folderIds, localOnly) {
     var wanted = folderIds && folderIds.length
       ? new Set(folderIds.map(Number))
       : null;
@@ -233,13 +233,13 @@
     });
   }
 
-  function statusFor(folderId) {
+  /** @param {number} folderId */ function statusFor(folderId) {
     return ((data && data.folders) || []).find(function(item) {
       return Number(item.requested_folder_id) === Number(folderId);
     }) || null;
   }
 
-  function jobFor(folderId) {
+  /** @param {number} folderId */ function jobFor(folderId) {
     var item = statusFor(folderId);
     var rootId = Number(item && item.root_folder_id != null
       ? item.root_folder_id
@@ -253,31 +253,31 @@
     });
   }
 
-  function folderName(path) {
+  /** @param {string} path */ function folderName(path) {
     var parts = String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/);
     return parts[parts.length - 1] || 'Folder';
   }
 
-  function joinPath(parent, name) {
+  /** @param {string} parent @param {string} name */ function joinPath(parent, name) {
     var base = String(parent || '').replace(/[\\/]+$/, '');
     if (!base) return name;
     return base + (base.indexOf('\\') >= 0 ? '\\' : '/') + name;
   }
 
-  function updateStageDestinationPreview(input) {
+  /** @param {HTMLInputElement} input */ function updateStageDestinationPreview(input) {
     var preview = document.querySelector(
       '[data-local-destination-preview="' + input.dataset.localDestinationBase + '"]'
     );
     if (!preview) return;
-    preview.textContent = joinPath(input.value.trim(), input.dataset.localFolderName);
+    preview.textContent = joinPath(input.value.trim(), input.dataset.localFolderName || '');
   }
 
   function stageRequestBody() {
-    var destinationBases = {};
+    /** @type {Record<string,string>} */ var destinationBases = {};
     var complete = pendingStageItems.length > 0;
     pendingStageItems.forEach(function(item) {
       var id = Number(item.requested_folder_id);
-      var input = document.querySelector('[data-local-destination-base="' + id + '"]');
+      var input = document.querySelector(/** @type {'input'} */ ('[data-local-destination-base="' + id + '"]'));
       var destination = input ? input.value.trim() : '';
       if (!destination) complete = false;
       destinationBases[String(id)] = destination;
@@ -293,14 +293,14 @@
   }
 
   function updateStageDialogBlocker() {
-    var modal = document.getElementById('stageLocalFoldersModal');
+    var modal = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersModal'));
     if (!modal || !modal.classList.contains('open') || !pendingStageItems.length) return;
     var folderIds = pendingStageItems.map(function(item) {
       return item.requested_folder_id;
     });
     var blocker = blockingJobForSelection(folderIds);
-    var button = document.getElementById('confirmStageLocalFolders');
-    var error = document.getElementById('stageLocalFoldersError');
+    var button = /** @type {HTMLButtonElement|null} */ (document.getElementById('confirmStageLocalFolders'));
+    var error = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersError'));
     if (blocker) {
       stageBlockedByJob = true;
       stagePreflightGeneration += 1;
@@ -318,16 +318,16 @@
     scheduleStagePreflight(0);
   }
 
-  function renderStagePreflight(preflight) {
-    var capacity = document.getElementById('stageLocalFoldersCapacity');
-    var button = document.getElementById('confirmStageLocalFolders');
-    var byFolder = {};
+  /** @param {WorkLocalPreflight} preflight */ function renderStagePreflight(preflight) {
+    var capacity = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersCapacity'));
+    var button = /** @type {HTMLButtonElement|null} */ (document.getElementById('confirmStageLocalFolders'));
+    /** @type {Record<string,WorkLocalPreflightFolder>} */ var byFolder = {};
     (preflight.folders || []).forEach(function(folder) {
       byFolder[String(folder.folder_id)] = folder;
     });
     pendingStageItems.forEach(function(item) {
       var id = String(item.requested_folder_id);
-      var line = document.querySelector('[data-local-capacity-folder="' + id + '"]');
+      var line = document.querySelector(/** @type {'div'} */ ('[data-local-capacity-folder="' + id + '"]'));
       var folder = byFolder[id];
       if (!line || !folder) return;
       line.style.color = 'var(--text-secondary)';
@@ -353,7 +353,7 @@
         var volumeCount = (preflight.volumes || []).length;
         var summary = formatBytes(preflight.total_bytes || 0) + ' total to copy' +
           (volumeCount === 1
-            ? ' · ' + formatBytes(preflight.volumes[0].after_copy_bytes || 0) + ' will remain free'
+            ? ' · ' + formatBytes(preflight.volumes?.[0]?.after_copy_bytes || 0) + ' will remain free'
             : ' across ' + volumeCount + ' destination disks');
         var closeToReserve = (preflight.volumes || []).filter(function(volume) {
           var reserve = Number(volume.reserve_bytes || 0);
@@ -365,7 +365,7 @@
           return reserve > 0 && afterCopy - reserve <= reserve;
         });
         if (volumeCount === 1 && closeToReserve.length === 1) {
-          var volume = closeToReserve[0];
+          var volume = closeToReserve[0]; if (!volume) return;
           var headroom = Math.max(
             0,
             Number(volume.after_copy_bytes || 0) - Number(volume.reserve_bytes || 0)
@@ -379,7 +379,7 @@
         } else if (closeToReserve.length) {
           summary += '. ' + closeToReserve.length + ' destination disk' +
             (closeToReserve.length === 1
-              ? ' is close to its ' + formatBytes(closeToReserve[0].reserve_bytes || 0) +
+              ? ' is close to its ' + formatBytes(closeToReserve[0]?.reserve_bytes || 0) +
                 ' safety reserve'
               : 's are close to their safety reserves (' + closeToReserve.map(function(volume) {
                 return formatBytes(volume.reserve_bytes || 0);
@@ -393,8 +393,8 @@
 
   async function runStagePreflight() {
     var request = stageRequestBody();
-    var capacity = document.getElementById('stageLocalFoldersCapacity');
-    var button = document.getElementById('confirmStageLocalFolders');
+    var capacity = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersCapacity'));
+    var button = /** @type {HTMLButtonElement|null} */ (document.getElementById('confirmStageLocalFolders'));
     var generation = ++stagePreflightGeneration;
     stagePreflightSignature = null;
     if (button) button.disabled = true;
@@ -418,7 +418,7 @@
       capacity.innerHTML = '<span class="btn-spinner" style="display:inline-block;margin-right:6px;"></span>Calculating folder sizes and available space...';
     }
     try {
-      var result = await Vireo.api.json('/api/workspaces/active/local-folders/preflight', {
+      /** @type {WorkLocalPreflight} */ var result = await Vireo.api.json('/api/workspaces/active/local-folders/preflight', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(Object.assign({}, request.body, {
@@ -435,7 +435,7 @@
       if (controller.signal.aborted || generation !== stagePreflightGeneration || !pendingStageItems.length) return;
       if (capacity) {
         capacity.style.color = 'var(--danger)';
-        capacity.textContent = requestError.message || 'Could not check folder sizes and free space.';
+        capacity.textContent = workLocalErrorMessage(requestError) || 'Could not check folder sizes and free space.';
       }
     } finally {
       if (stagePreflightAbort === controller) stagePreflightAbort = null;
@@ -446,19 +446,19 @@
     }
   }
 
-  function scheduleStagePreflight(delay) {
+  /** @param {number} [delay] */ function scheduleStagePreflight(delay) {
     if (stagePreflightTimer) clearTimeout(stagePreflightTimer);
     cancelStagePreflight(true);
     stagePreflightGeneration += 1;
     stagePreflightSignature = null;
-    var button = document.getElementById('confirmStageLocalFolders');
+    var button = /** @type {HTMLButtonElement|null} */ (document.getElementById('confirmStageLocalFolders'));
     if (button) button.disabled = true;
     stagePreflightTimer = setTimeout(runStagePreflight, delay == null ? 500 : delay);
   }
 
   function closeStageDialog() {
     if (actionInFlight) return;
-    var modal = document.getElementById('stageLocalFoldersModal');
+    var modal = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersModal'));
     if (modal) modal.classList.remove('open');
     stagePreflightGeneration += 1;
     stagePreflightSignature = null;
@@ -469,7 +469,7 @@
     pendingStageItems = [];
   }
 
-  async function openStageDialog(folderIds) {
+  /** @param {number[]|null} folderIds */ async function openStageDialog(folderIds) {
     if (actionInFlight || activeJob) return;
     await load();
     if (actionInFlight || activeJob) return;
@@ -483,13 +483,13 @@
     });
     if (!items.length) return;
     pendingStageItems = items;
-    var container = document.getElementById('stageLocalFoldersModalItems');
-    var error = document.getElementById('stageLocalFoldersError');
-    var modal = document.getElementById('stageLocalFoldersModal');
+    var container = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersModalItems'));
+    var error = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersError'));
+    var modal = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersModal'));
     if (!container || !modal) return;
     stageBlockedByJob = false;
     if (error) error.textContent = '';
-    var workspaceNamesById = {};
+    /** @type {Record<string,string>} */ var workspaceNamesById = {};
     ((data && data.linked_workspaces) || []).forEach(function(workspace) {
       workspaceNamesById[String(workspace.id)] = workspace.name;
     });
@@ -503,7 +503,7 @@
       var shared = (item.workspace_ids || []).length;
       var sharedNames = (item.workspace_ids || []).map(function(workspaceId) {
         return workspaceNamesById[String(workspaceId)];
-      }).filter(Boolean).map(escapeHtml);
+      }).filter(/** @returns {name is string} */ function(name) { return typeof name === 'string' && Boolean(name); }).map(escapeHtml);
       var sharingMessage = 'This copy will be shared by ' + shared + ' linked workspaces' +
         (sharedNames.length === shared ? ': ' + sharedNames.join(', ') : '') + '.';
       return '<div class="setting-row" style="display:block;padding:12px 0;">' +
@@ -542,8 +542,8 @@
       '<div style="font-size:11px;color:var(--text-dim);margin-top:6px;">Progress is also available in Jobs.</div></div>';
   }
 
-  function renderLegacy(legacy) {
-    var container = document.getElementById('localWorkspaceContent');
+  /** @param {WorkLocalLegacy} [legacy] */ function renderLegacy(legacy) {
+    var container = /** @type {HTMLElement|null} */ (document.getElementById('localWorkspaceContent'));
     if (!container) return;
     if (activeJob) {
       container.innerHTML = progressMarkup();
@@ -582,7 +582,7 @@
   }
 
   function render() {
-    var container = document.getElementById('localWorkspaceContent');
+    var container = /** @type {HTMLElement|null} */ (document.getElementById('localWorkspaceContent'));
     if (!container) return;
     if (activeJob) {
       container.innerHTML = progressMarkup();
@@ -605,7 +605,7 @@
     var total = Number(data.folder_count || 0);
     var localItems = selectedItems(null, true);
     var changes = localItems.reduce(function(sum, item) {
-      var current = item.changes || {};
+      /** @type {Partial<WorkLocalChanges>} */ var current = item.changes || {};
       sum.created += Number(current.created || 0);
       sum.modified += Number(current.modified || 0);
       sum.deleted += Number(current.deleted || 0);
@@ -655,7 +655,7 @@
     } catch (_error) {}
   }
 
-  function trackStartedJob(result, type) {
+  /** @param {WorkLocalStarted} result @param {string} type */ function trackStartedJob(result, type) {
     if (!data || data.legacy_workspace_session || !result || !result.job_id) return;
     var jobs = (data.jobs || []).filter(function(job) {
       return job.id !== result.job_id;
@@ -673,7 +673,7 @@
     if (typeof loadWsFolders === 'function') loadWsFolders();
   }
 
-  function publishJobProgress(jobId, progress) {
+  /** @param {string} jobId @param {WorkLocalProgress} progress */ function publishJobProgress(jobId, progress) {
     try {
       window.dispatchEvent(new CustomEvent('vireo:local-folder-job-progress', {
         detail: {jobId: jobId, progress: progress}
@@ -681,8 +681,8 @@
     } catch (_error) {}
   }
 
-  function rememberCompletedSteps(watch, steps) {
-    var completed = [];
+  /** @param {WorkLocalWatch} watch @param {WorkLocalStep[]} [steps] */ function rememberCompletedSteps(watch, steps) {
+    /** @type {WorkLocalProgress[]} */ var completed = [];
     (steps || []).forEach(function(step) {
       if (!step || step.status !== 'completed') return;
       var match = /^folder-(\d+)$/.exec(String(step.id || ''));
@@ -703,7 +703,7 @@
     return completed;
   }
 
-  function applyJobProgress(watch, progress) {
+  /** @param {WorkLocalWatch} watch @param {WorkLocalProgress} progress */ function applyJobProgress(watch, progress) {
     if (!progress || activeJob !== watch) return;
     watch.progress = progress;
     var completed = rememberCompletedSteps(watch, progress.steps);
@@ -718,10 +718,10 @@
     publishJobProgress(watch.id, progress);
   }
 
-  function watchJob(jobId) {
+  /** @param {string} jobId */ function watchJob(jobId) {
     if (activeJob && activeJob.id === jobId) return;
     if (activeJob && activeJob.source) activeJob.source.close();
-    var watch = {
+    /** @type {WorkLocalWatch} */ var watch = {
       id: jobId,
       progress: null,
       progressByRoot: {},
@@ -741,7 +741,7 @@
         activeJob = null;
         if (event.status === 'completed') showToast('Local folder update complete', 'success');
         else if (event.status !== 'cancelled') {
-          var detail = event.errors && event.errors.length ? event.errors[event.errors.length - 1] : 'The job did not complete';
+          var detail = event.errors?.[event.errors.length - 1] || 'The job did not complete';
           showToast(detail, 'error');
         }
         await load();
@@ -760,7 +760,7 @@
     watch.source.addEventListener('open', function() {
       Vireo.api.json(
         '/api/jobs/' + encodeURIComponent(jobId), {}, {toast: false}
-      ).then(function(snapshot) {
+      ).then(/** @param {{progress?:WorkLocalProgress;steps?:WorkLocalStep[]}} snapshot */ function(snapshot) {
         if (activeJob !== watch || watch.eventCount || !snapshot) return;
         var progress = Object.assign({}, snapshot.progress || {}, {
           steps: snapshot.steps || []
@@ -775,7 +775,7 @@
   async function load() {
     var generation = ++loadGeneration;
     try {
-      var nextData = await Vireo.api.json(
+      /** @type {WorkLocalData} */ var nextData = await Vireo.api.json(
         '/api/workspaces/active/local-folders', {}, {toast: false}
       );
       if (nextData.legacy_workspace_session) {
@@ -790,9 +790,9 @@
       if (generation !== loadGeneration) return null;
       data = nextData;
       if (data.legacy_workspace_session) {
-        if (data.legacy.job) watchJob(data.legacy.job.id);
+        if (data.legacy?.job) watchJob(data.legacy.job.id);
       } else if (data.jobs && data.jobs.length) {
-        watchJob(data.jobs[0].id);
+        var firstJob = data.jobs[0]; if (firstJob) watchJob(firstJob.id);
       }
       if (!data.legacy_workspace_session) {
         var runningFolders = new Set();
@@ -816,16 +816,16 @@
       return data;
     } catch (error) {
       if (generation !== loadGeneration) return null;
-      var container = document.getElementById('localWorkspaceContent');
-      if (container) container.innerHTML = '<span style="color:var(--danger);font-size:13px;">' + escapeHtml(error.message || 'Failed to read local folder status') + '</span>';
+      var container = /** @type {HTMLElement|null} */ (document.getElementById('localWorkspaceContent'));
+      if (container) container.innerHTML = '<span style="color:var(--danger);font-size:13px;">' + escapeHtml(workLocalErrorMessage(error) || 'Failed to read local folder status') + '</span>';
       return null;
     }
   }
 
   async function submitStageDialog() {
     if (actionInFlight || activeJob || !pendingStageItems.length) return;
-    var error = document.getElementById('stageLocalFoldersError');
-    var button = document.getElementById('confirmStageLocalFolders');
+    var error = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersError'));
+    var button = /** @type {HTMLButtonElement|null} */ (document.getElementById('confirmStageLocalFolders'));
     var request = stageRequestBody();
     var blocker = blockingJobForSelection(request.body.folder_ids);
     if (blocker) {
@@ -843,25 +843,25 @@
     if (button) button.disabled = true;
     if (error) error.textContent = '';
     try {
-      var result = await Vireo.api.json('/api/workspaces/active/local-folders/stage', {
+      /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-folders/stage', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(request.body)
       }, {toast: false});
-      var modal = document.getElementById('stageLocalFoldersModal');
+      var modal = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersModal'));
       if (modal) modal.classList.remove('open');
       pendingStageItems = [];
       watchJob(result.job_id);
       trackStartedJob(result, 'work-locally-folder-stage');
     } catch (requestError) {
-      if (error) error.textContent = requestError.message || 'Could not start the local copy.';
+      if (error) error.textContent = workLocalErrorMessage(requestError) || 'Could not start the local copy.';
     } finally {
       actionInFlight = false;
       if (pendingStageItems.length) scheduleStagePreflight(0);
     }
   }
 
-  async function sync(folderIds) {
+  /** @param {number[]|null} folderIds */ async function sync(folderIds) {
     if (actionInFlight || activeJob) return;
     await load();
     if (activeJob) return;
@@ -879,10 +879,10 @@
       showToast('An incomplete local copy cannot be synced; clean it up or discard it first.', 'error');
       return;
     }
-    var sessions = {};
+    /** @type {Record<string,WorkLocalFolder>} */ var sessions = {};
     items.forEach(function(item) { sessions[item.root_folder_id] = item; });
-    var unique = Object.keys(sessions).map(function(key) { return sessions[key]; });
-    var counts = {};
+    var unique = Object.values(sessions);
+    /** @type {Record<string,number>} */ var counts = {};
     var deleted = 0;
     var affected = new Set();
     unique.forEach(function(item) {
@@ -897,7 +897,7 @@
     if (!confirm(message)) return;
     actionInFlight = true;
     try {
-      var result = await Vireo.api.json('/api/workspaces/active/local-folders/sync', {
+      /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-folders/sync', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -915,7 +915,7 @@
     }
   }
 
-  async function discard(folderIds) {
+  /** @param {number[]|null} folderIds */ async function discard(folderIds) {
     if (actionInFlight || activeJob) return;
     await load();
     if (activeJob) return;
@@ -935,7 +935,7 @@
     if (!confirm(message)) return;
     actionInFlight = true;
     try {
-      var result = await Vireo.api.json('/api/workspaces/active/local-folders/discard', {
+      /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-folders/discard', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -954,15 +954,14 @@
   }
 
   function openManager() {
-    var modal = document.getElementById('localFoldersModal');
-    var container = document.getElementById('localFoldersModalItems');
+    var modal = /** @type {HTMLElement|null} */ (document.getElementById('localFoldersModal'));
+    var container = /** @type {HTMLElement|null} */ (document.getElementById('localFoldersModalItems'));
     if (!modal || !container) return;
-    var sessions = {};
+    /** @type {Record<string,WorkLocalFolder>} */ var sessions = {};
     selectedItems(null, true).forEach(function(item) {
       if (!sessions[item.root_folder_id]) sessions[item.root_folder_id] = item;
     });
-    container.innerHTML = Object.keys(sessions).map(function(key) {
-      var item = sessions[key];
+    container.innerHTML = Object.values(sessions).map(function(item) {
       var changes = item.changes || {created: 0, modified: 0, deleted: 0};
       var shared = (item.workspace_ids || []).length;
       return '<label class="setting-row" style="display:flex;align-items:flex-start;gap:9px;cursor:pointer;">' +
@@ -979,17 +978,17 @@
   }
 
   function closeManager() {
-    var modal = document.getElementById('localFoldersModal');
+    var modal = /** @type {HTMLElement|null} */ (document.getElementById('localFoldersModal'));
     if (modal) modal.classList.remove('open');
   }
 
   function managerSelection() {
-    return Array.from(document.querySelectorAll('[data-local-folder-selection]:checked')).map(function(input) {
+    return Array.from(document.querySelectorAll(/** @type {'input'} */ ('[data-local-folder-selection]:checked'))).map(function(input) {
       return Number(input.value);
     });
   }
 
-  async function legacyAction(action) {
+  /** @param {string} action */ async function legacyAction(action) {
     if (!data || !data.legacy || actionInFlight || activeJob) return;
     await load();
     if (!data || !data.legacy || actionInFlight || activeJob) return;
@@ -1014,7 +1013,7 @@
     }
     actionInFlight = true;
     try {
-      var result = await Vireo.api.json('/api/workspaces/active/local-workspace/' + endpoint, {
+      /** @type {WorkLocalStarted} */ var result = await Vireo.api.json('/api/workspaces/active/local-workspace/' + endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
       });
       watchJob(result.job_id);
@@ -1025,10 +1024,10 @@
     }
   }
 
-  var panel = document.getElementById('localWorkspaceContent');
+  var panel = /** @type {HTMLElement|null} */ (document.getElementById('localWorkspaceContent'));
   if (panel) {
     panel.addEventListener('click', function(event) {
-      var button = event.target.closest('[data-local-folders-action], [data-legacy-action]');
+      if (!(event.target instanceof Element)) return; var button = event.target.closest(/** @type {'button'} */ ('[data-local-folders-action], [data-legacy-action]'));
       if (!button || button.disabled) return;
       var action = button.dataset.localFoldersAction;
       if (action === 'stage-all') openStageDialog(null);
@@ -1037,25 +1036,25 @@
     });
   }
 
-  var closeManagerButton = document.getElementById('closeLocalFoldersModal');
+  var closeManagerButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('closeLocalFoldersModal'));
   if (closeManagerButton) closeManagerButton.addEventListener('click', closeManager);
-  var cancelStageButton = document.getElementById('cancelStageLocalFolders');
+  var cancelStageButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('cancelStageLocalFolders'));
   if (cancelStageButton) cancelStageButton.addEventListener('click', closeStageDialog);
-  var confirmStageButton = document.getElementById('confirmStageLocalFolders');
+  var confirmStageButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('confirmStageLocalFolders'));
   if (confirmStageButton) confirmStageButton.addEventListener('click', submitStageDialog);
-  var stageItems = document.getElementById('stageLocalFoldersModalItems');
+  var stageItems = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersModalItems'));
   if (stageItems) {
     stageItems.addEventListener('input', function(event) {
-      if (event.target.matches('[data-local-destination-base]')) {
+      if (event.target instanceof HTMLInputElement && event.target.matches('[data-local-destination-base]')) {
         updateStageDestinationPreview(event.target);
         scheduleStagePreflight();
       }
     });
     stageItems.addEventListener('click', async function(event) {
-      var button = event.target.closest('[data-browse-local-destination]');
+      if (!(event.target instanceof Element)) return; var button = event.target.closest(/** @type {'button'} */ ('[data-browse-local-destination]'));
       if (!button) return;
       var id = button.dataset.browseLocalDestination;
-      var input = document.querySelector('[data-local-destination-base="' + id + '"]');
+      var input = document.querySelector(/** @type {'input'} */ ('[data-local-destination-base="' + id + '"]'));
       if (!input || typeof pickDirectory !== 'function') return;
       var chosen = await pickDirectory('Choose a location for ' + input.dataset.folderName, {
         defaultPath: input.value.trim()
@@ -1066,7 +1065,7 @@
       scheduleStagePreflight(0);
     });
   }
-  var syncSelectedButton = document.getElementById('syncSelectedLocalFolders');
+  var syncSelectedButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('syncSelectedLocalFolders'));
   if (syncSelectedButton) {
     syncSelectedButton.addEventListener('click', function() {
       var selected = managerSelection();
@@ -1075,7 +1074,7 @@
       sync(selected);
     });
   }
-  var discardSelectedButton = document.getElementById('discardSelectedLocalFolders');
+  var discardSelectedButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('discardSelectedLocalFolders'));
   if (discardSelectedButton) {
     discardSelectedButton.addEventListener('click', function() {
       var selected = managerSelection();
@@ -1089,7 +1088,7 @@
     cancelStagePreflight(true);
   });
   window.addEventListener('pageshow', function(event) {
-    var modal = document.getElementById('stageLocalFoldersModal');
+    var modal = /** @type {HTMLElement|null} */ (document.getElementById('stageLocalFoldersModal'));
     if (
       event.persisted &&
       modal && modal.classList.contains('open') &&
@@ -1101,7 +1100,7 @@
     }
   });
 
-  async function stageFromAnywhere(folderId) {
+  /** @param {number} folderId */ async function stageFromAnywhere(folderId) {
     if (!data) await load();
     if (activeJob || (data && data.legacy_workspace_session)) {
       window.location.href = '/workspace#work-locally';
@@ -1124,9 +1123,15 @@
     blockingJobFor: blockingJobForFolder,
     blockingMessage: blockingJobMessage,
     stage: stageFromAnywhere,
-    sync: function(folderId) { return sync([Number(folderId)]); },
-    discard: function(folderId) { return discard([Number(folderId)]); }
+    sync: /** @param {number} folderId */ function(folderId) { return sync([Number(folderId)]); },
+    discard: /** @param {number} folderId */ function(folderId) { return discard([Number(folderId)]); }
   };
 
   load();
 })();
+
+/** @param {unknown} error @returns {string} */
+function workLocalErrorMessage(error) {
+  return error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+    ? error.message : '';
+}

@@ -1,0 +1,11 @@
+interface StorageOverviewCategory {name:string;size:number;type?:string;release?:boolean;settings?:boolean;count?:number;kind:string;kindLabel:string}
+interface RetainedStoragePolicy {retained_cache_max_mb:number;retained_cache_max_age_days:number;grouping_history_max_mb:number}
+interface RetainedStorageResponse {maintenance?:{status:string;finished_at?:string;started_at:string;summary?:string};caches:Array<{name:string;size:number;count:number;errors:string[];path:string;type:string;clearable:boolean;files:Array<{name:string;size:number}>;truncated?:boolean}>;grouping_history:{bytes:number;count:number;redo_bytes:number;entries:Array<{workspace:string;description:string;bytes:number;undone:boolean}>;truncated?:boolean};policy:RetainedStoragePolicy}
+declare var _storageSummary:Record<string,{count:number;size:number}>;
+declare var VireoReleaseOriginals:{storageButton():string};
+declare function storageFormatBytes(bytes:number):string;
+declare function storageEscapeHtml(value:string):string;
+declare function openStorageFolder(type:string):void;
+declare function refreshStoragePage():Promise<void>;
+declare function safeFetch<T>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>;
+declare function showToast(message:string,kind:string):void;

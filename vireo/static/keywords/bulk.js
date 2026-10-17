@@ -3,8 +3,8 @@
 
 // -- Bulk apply type --
 function bindKeywordBulkApply() {
-  document.getElementById('kwBulkApply').addEventListener('click', async function() {
-    const newType = document.getElementById('kwBulkType').value;
+  /** @type {HTMLButtonElement} */ (document.getElementById('kwBulkApply')).addEventListener('click', async function() {
+    const newType = /** @type {HTMLSelectElement} */ (document.getElementById('kwBulkType')).value;
     if (!newType) return;
     const ids = Array.from(selectedIds);
     if (!ids.length) return;
@@ -18,7 +18,7 @@ function bindKeywordBulkApply() {
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({type: newType})
         });
-        const data = await resp.json().catch(() => ({}));
+        /** @type {KeywordMutation} */ const data = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
         if (data && data.merged) {
           // Row was merged into a normalized-equal peer -- can't update in
@@ -30,11 +30,11 @@ function bindKeywordBulkApply() {
       } catch(e) {
         console.error('Failed to update', id, e);
         failed++;
-        if (!firstError) firstError = e.message || 'request failed';
+        if (!firstError) firstError = keywordErrorMessage(e) || 'request failed';
       }
     }
     selectedIds.clear();
-    document.getElementById('kwBulkType').value = '';
+    /** @type {HTMLSelectElement} */ (document.getElementById('kwBulkType')).value = '';
     await loadKeywords();
     if (failed) {
       showToast('Could not change the type of ' + failed + ' of ' + ids.length +
@@ -55,7 +55,7 @@ async function deleteSelectedKeywords() {
     try {
       const resp = await fetch('/api/keywords/' + id, { method: 'DELETE' });
       if (!resp.ok) {
-        const data = await resp.json().catch(() => ({}));
+        /** @type {KeywordMutation} */ const data = await resp.json().catch(() => ({}));
         throw new Error(data.error || ('HTTP ' + resp.status));
       }
       allKeywords = allKeywords.filter(k => k.id !== id);
@@ -63,7 +63,7 @@ async function deleteSelectedKeywords() {
     } catch(e) {
       console.error('Failed to delete', id, e);
       failed++;
-      if (!firstError) firstError = e.message || 'request failed';
+      if (!firstError) firstError = keywordErrorMessage(e) || 'request failed';
     }
   }
   selectedIds.clear();

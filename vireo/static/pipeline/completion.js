@@ -6,6 +6,7 @@
 // pipeline stage and /api/jobs/extract-masks actually emit — this card used
 // to read `masks_created`/`scored_count`, names no backend has ever sent, so
 // its summary rendered empty on every run.
+/** @param {PipelineStageResult | null | undefined} ext */
 function _extractMasksSummary(ext) {
   if (!ext) return '';
   var parts = [];
@@ -31,6 +32,7 @@ function _extractMasksSummary(ext) {
 // means the backend emptied the worklist because something went wrong. None
 // of those are "Done!". Shared by the pipeline-run card and the standalone
 // Extract step so the two can't drift.
+/** @param {PipelineStageResult | null | undefined} ext */
 function _extractMasksClean(ext) {
   if (!ext) return true;
   return !ext.unreadable && !ext.failed && !ext.reason;
@@ -47,6 +49,7 @@ function _extractMasksClean(ext) {
 // before the worker returned a structured result — otherwise those two paths
 // fall through to the generic "Some photos have no mask", hiding the real
 // cause (Codex #1392 P2).
+/** @param {string} jobStatus @param {PipelineStageResult | null | undefined} result @param {string[] | undefined} topErrors */
 function _extractStepOutcome(jobStatus, result, topErrors) {
   var clean = jobStatus === 'completed' && _extractMasksClean(result);
   var nested = (result && result.errors) || [];
@@ -68,14 +71,16 @@ function _extractStepOutcome(jobStatus, result, topErrors) {
   };
 }
 
+/** @param {PipelineResult} result */
 function _pipelineFailureErrors(result) {
   var notes = new Set(result.notes || []);
   return (result.errors || []).filter(function(error) { return !notes.has(error); });
 }
 
+/** @param {PipelineCompletion} result */
 function _onPipelineComplete(result) {
   if (result.status === 'cancelled') {
-    var actionStatus = document.getElementById('pipelineActionStatus');
+    var actionStatus = /** @type {HTMLElement} */ (document.getElementById('pipelineActionStatus'));
     if (actionStatus) {
       actionStatus.textContent = 'Pipeline cancelled.';
       actionStatus.className = 'status-msg';
@@ -100,10 +105,10 @@ function _onPipelineComplete(result) {
   var stageResults = r.stages || {};
 
   // Source card — always mark complete
-  var numSource = document.getElementById('numSource');
+  var numSource = /** @type {HTMLElement} */ (document.getElementById('numSource'));
   numSource.className = 'stage-num complete';
   if (_sourceMode === 'collection') {
-    document.getElementById('txtSource').textContent = 'Collection selected';
+    /** @type {HTMLElement} */ (document.getElementById('txtSource')).textContent = 'Collection selected';
   } else {
     updateSourceSummary();
   }
@@ -112,13 +117,13 @@ function _onPipelineComplete(result) {
   // its last state so the user can see how far ingest got, and don't
   // show a misleading "Done!" label for an incomplete import.
   if (succeeded) {
-    var fillSource = document.getElementById('fillSource');
+    var fillSource = /** @type {HTMLElement} */ (document.getElementById('fillSource'));
     if (fillSource && fillSource.style.width && fillSource.style.width !== '0%') {
       fillSource.style.width = '100%';
       if (stageResults.ingest && typeof stageResults.ingest.copied === 'number') {
         _showSourceEjectSafe(stageResults.ingest);
       } else {
-        var statusSourceEl = document.getElementById('statusSource');
+        var statusSourceEl = /** @type {HTMLElement} */ (document.getElementById('statusSource'));
         if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
       }
     }
@@ -126,39 +131,39 @@ function _onPipelineComplete(result) {
 
   // Scan card
   if (stageResults.scan) {
-    document.getElementById('numScan').className = 'stage-num complete';
+    /** @type {HTMLElement} */ (document.getElementById('numScan')).className = 'stage-num complete';
     var scanInfo = stageResults.scan;
     var scanSummary = [];
     if (scanInfo.photos_indexed) scanSummary.push(scanInfo.photos_indexed + ' indexed');
     if (scanInfo.copied) scanSummary.push(scanInfo.copied + ' imported');
-    document.getElementById('summaryScan').textContent = scanSummary.join(', ') || 'Done';
-    var statusScan = document.getElementById('statusScan');
-    var fillScan = document.getElementById('fillScan');
+    /** @type {HTMLElement} */ (document.getElementById('summaryScan')).textContent = scanSummary.join(', ') || 'Done';
+    var statusScan = /** @type {HTMLElement} */ (document.getElementById('statusScan'));
+    var fillScan = /** @type {HTMLElement} */ (document.getElementById('fillScan'));
     if (fillScan) fillScan.style.width = '100%';
     if (statusScan) { statusScan.textContent = 'Done!'; statusScan.className = 'status-msg ok'; }
   }
 
   // Previews card
   if (stageResults.thumbnails || stageResults.previews) {
-    document.getElementById('numPreviews').className = 'stage-num complete';
+    /** @type {HTMLElement} */ (document.getElementById('numPreviews')).className = 'stage-num complete';
     var prevSummary = [];
     if (stageResults.thumbnails && stageResults.thumbnails.generated) prevSummary.push(stageResults.thumbnails.generated + ' thumbs');
     if (stageResults.previews && stageResults.previews.generated) prevSummary.push(stageResults.previews.generated + ' previews');
-    document.getElementById('summaryPreviews').textContent = prevSummary.join(', ') || 'Done';
-    var statusPrev = document.getElementById('statusPreviews');
-    var fillPrev = document.getElementById('fillPreviews');
+    /** @type {HTMLElement} */ (document.getElementById('summaryPreviews')).textContent = prevSummary.join(', ') || 'Done';
+    var statusPrev = /** @type {HTMLElement} */ (document.getElementById('statusPreviews'));
+    var fillPrev = /** @type {HTMLElement} */ (document.getElementById('fillPreviews'));
     if (fillPrev) fillPrev.style.width = '100%';
     if (statusPrev) { statusPrev.textContent = 'Done!'; statusPrev.className = 'status-msg ok'; }
   }
 
   // Classify card
   if (stageResults.classify) {
-    document.getElementById('numClassify').className = 'stage-num complete';
+    /** @type {HTMLElement} */ (document.getElementById('numClassify')).className = 'stage-num complete';
     var cls = stageResults.classify;
     var predCount = cls.predictions_stored || cls.total || 0;
-    document.getElementById('txtDetections').textContent = predCount + ' detections';
-    var statusCls = document.getElementById('statusClassify');
-    var fillCls = document.getElementById('fillClassify');
+    /** @type {HTMLElement} */ (document.getElementById('txtDetections')).textContent = predCount + ' detections';
+    var statusCls = /** @type {HTMLElement} */ (document.getElementById('statusClassify'));
+    var fillCls = /** @type {HTMLElement} */ (document.getElementById('fillClassify'));
     if (fillCls) fillCls.style.width = '100%';
     if (statusCls) { statusCls.textContent = 'Done!'; statusCls.className = 'status-msg ok'; }
   }
@@ -166,17 +171,17 @@ function _onPipelineComplete(result) {
   // Extract card
   if (stageResults.extract_masks) {
     var ext = stageResults.extract_masks;
-    document.getElementById('txtMasks').textContent = _extractMasksSummary(ext);
+    /** @type {HTMLElement} */ (document.getElementById('txtMasks')).textContent = _extractMasksSummary(ext);
     // A photo the stage couldn't read or that errored ends the run with no
     // mask, and scoring hard-rejects every unmasked photo as
     // `no_subject_mask`. Marking the card complete/"Done!" in that state
     // sends the user to Process Review with no idea why two-thirds of their
     // encounters are rejects.
     var extClean = _extractMasksClean(ext);
-    document.getElementById('numExtract').className =
+    /** @type {HTMLElement} */ (document.getElementById('numExtract')).className =
       extClean ? 'stage-num complete' : 'stage-num';
-    var statusExt = document.getElementById('statusExtract');
-    var fillExt = document.getElementById('fillExtract');
+    var statusExt = /** @type {HTMLElement} */ (document.getElementById('statusExtract'));
+    var fillExt = /** @type {HTMLElement} */ (document.getElementById('fillExtract'));
     if (fillExt) fillExt.style.width = '100%';
     if (statusExt) {
       if (extClean) {
@@ -194,11 +199,11 @@ function _onPipelineComplete(result) {
 
   // Eye Keypoints card
   if (stageResults.eye_keypoints) {
-    document.getElementById('numEyeKeypoints').className = 'stage-num complete';
+    /** @type {HTMLElement} */ (document.getElementById('numEyeKeypoints')).className = 'stage-num complete';
     var ekp = stageResults.eye_keypoints;
     var ekpTotal = ekp.total || 0;
     var ekpProcessed = ekp.processed || 0;
-    var ekpTxt = document.getElementById('txtEyeKeypoints');
+    var ekpTxt = /** @type {HTMLElement} */ (document.getElementById('txtEyeKeypoints'));
     if (ekpTxt) {
       // When the backend preflight skips the stage (disabled config or no
       // keypoint weights installed), surface the explicit reason so users
@@ -215,8 +220,8 @@ function _onPipelineComplete(result) {
           : 'No eligible photos';
       }
     }
-    var statusEkp = document.getElementById('statusEyeKeypoints');
-    var fillEkp = document.getElementById('fillEyeKeypoints');
+    var statusEkp = /** @type {HTMLElement} */ (document.getElementById('statusEyeKeypoints'));
+    var fillEkp = /** @type {HTMLElement} */ (document.getElementById('fillEyeKeypoints'));
     if (fillEkp) fillEkp.style.width = '100%';
     if (statusEkp) { statusEkp.textContent = 'Done!'; statusEkp.className = 'status-msg ok'; }
   }
@@ -230,7 +235,7 @@ function _onPipelineComplete(result) {
   for (var noteStage in messages.notes) {
     var noteCard = _stageToCard[noteStage] || _failureOnlyStageToCard[noteStage];
     if (!noteCard) continue;
-    var noteStatusEl = document.getElementById('status' + noteCard);
+    var noteStatusEl = /** @type {HTMLElement} */ (document.getElementById('status' + noteCard));
     if (noteStatusEl) {
       noteStatusEl.textContent = 'Skipped: ' + _humanizePipelineError(messages.notes[noteStage]);
       noteStatusEl.className = 'status-msg note';
@@ -260,7 +265,7 @@ function _onPipelineComplete(result) {
       // that finishes before the browser subscribes reaches only this path.
       var cardSuffix = _stageToCard[stage] || _failureOnlyStageToCard[stage];
       if (cardSuffix) {
-        var statusEl = document.getElementById('status' + cardSuffix);
+        var statusEl = /** @type {HTMLElement} */ (document.getElementById('status' + cardSuffix));
         if (statusEl) {
           statusEl.textContent = 'Failed: ' + errorStages[stage];
           statusEl.className = 'status-msg error';
@@ -268,7 +273,7 @@ function _onPipelineComplete(result) {
         delete _runningStages[cardSuffix];
         _stageOutcomes[cardSuffix] = 'failed';
         _setPill(cardSuffix, 'failed');
-        var numEl = document.getElementById('num' + cardSuffix);
+        var numEl = /** @type {HTMLElement} */ (document.getElementById('num' + cardSuffix));
         if (numEl) numEl.className = 'stage-num';
         if (!firstFailedCard) firstFailedCard = cardSuffix;
       }
@@ -297,23 +302,24 @@ function _onPipelineComplete(result) {
   }
 }
 
+/** @param {number | null} jobId @param {() => void} resolve */
 function _waitForPipelineTerminal(jobId, resolve) {
-  var actionStatus = document.getElementById('pipelineActionStatus');
+  var actionStatus = /** @type {HTMLElement} */ (document.getElementById('pipelineActionStatus'));
   if (actionStatus) {
     actionStatus.textContent = 'Connection lost while cancelling. Checking job status...';
   }
   var attempts = 0;
   var statusFailures = 0;
   var maxStatusFailures = 300;
-  var terminalStatuses = {completed: true, failed: true, cancelled: true};
+  /** @type {Record<string, boolean>} */ var terminalStatuses = {completed: true, failed: true, cancelled: true};
   var timer = setInterval(function() {
     attempts += 1;
-    fetch('/api/jobs/' + encodeURIComponent(jobId))
+    fetch('/api/jobs/' + encodeURIComponent(jobId || ''))
       .then(function(resp) {
         if (!resp.ok) throw new Error('job status unavailable');
         return resp.json();
       })
-      .then(function(job) {
+      .then(function(/** @type {PipelineCompletion} */ job) {
         statusFailures = 0;
         if (!terminalStatuses[job.status]) {
           if (attempts === 120 && actionStatus) {

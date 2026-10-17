@@ -11,6 +11,7 @@ var DuplicateCategories = (function() {
     {id: 'other', label: 'Other patterns'},
   ];
 
+  /** @param {DuplicateMember} photo */
   function fileParts(photo) {
     var path = (photo.path || '').replace(/\\/g, '/');
     var split = path.lastIndexOf('/');
@@ -26,10 +27,12 @@ var DuplicateCategories = (function() {
 
   // Only recognize trailing copy-style numbers, never embedded camera
   // sequence numbers (IMG_1234) or arbitrary differences in the filename.
+  /** @param {string} stem */
   function stripNumber(stem) {
     return stem.replace(/(?:-[1-9]\d*| \([1-9]\d*\))$/, '');
   }
 
+  /** @param {DuplicateCategoryGroup} group */
   function classify(group) {
     if (group.empty_file_group) return 'empty-files';
     var members = [group.winner].concat(group.other_kept || [], group.losers || [])
@@ -37,7 +40,8 @@ var DuplicateCategories = (function() {
     if (members.length < 2 || members.some(function(p) { return !p.name || !p.folder; })) {
       return 'other';
     }
-    var first = members[0];
+    const first = members[0];
+    if (!first) return 'other';
     var sameFolder = members.every(function(p) { return p.folder === first.folder; });
     if (members.every(function(p) { return p.name === first.name; })) {
       return sameFolder ? 'same-path' : 'same-name-across-folders';
@@ -61,23 +65,26 @@ var DuplicateCategories = (function() {
     return sameFolder ? 'renamed-same-folder' : 'renamed-across-folders';
   }
 
+  /** @param {string} id */
   function label(id) {
     var definition = definitions.find(function(d) { return d.id === id; });
     return definition ? definition.label : 'Other patterns';
   }
 
+  /** @param {DuplicateCategoryGroup[]} groups */
   function summarize(groups) {
+    /** @type {Record<string, DuplicateCategorySummary>} */
     var counts = {};
     groups.forEach(function(group) {
       var id = classify(group);
-      if (!counts[id]) counts[id] = {id: id, label: label(id), groups: 0, extras: 0, bytes: 0};
-      counts[id].groups++;
+      var count = counts[id] || (counts[id] = {id: id, label: label(id), groups: 0, extras: 0, bytes: 0});
+      count.groups++;
       (group.losers || []).forEach(function(p) {
-        counts[id].extras++;
-        counts[id].bytes += p.file_size || 0;
+        count.extras++;
+        count.bytes += p.file_size || 0;
       });
     });
-    return definitions.map(function(d) { return counts[d.id]; }).filter(Boolean);
+    return definitions.map(function(d) { return counts[d.id]; }).filter(function(row) { return row !== undefined; });
   }
 
   return {classify: classify, label: label, summarize: summarize};

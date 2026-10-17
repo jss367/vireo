@@ -1,0 +1,30 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/photo-editor.d.ts",
+    "../vireo/static/photo-editor/adjustments.js",
+    "../vireo/static/photo-editor/auto-tone.js",
+    "../vireo/static/photo-editor/boot.js",
+    "../vireo/static/photo-editor/checkpoints.js",
+    "../vireo/static/photo-editor/context-menu.js",
+    "../vireo/static/photo-editor/crop-drag.js",
+    "../vireo/static/photo-editor/crop-geometry.js",
+    "../vireo/static/photo-editor/crop-ratio.js",
+    "../vireo/static/photo-editor/crop.js",
+    "../vireo/static/photo-editor/export.js",
+    "../vireo/static/photo-editor/keyboard.js",
+    "../vireo/static/photo-editor/loading.js",
+    "../vireo/static/photo-editor/local-adjustments.js",
+    "../vireo/static/photo-editor/mask-brush.js",
+    "../vireo/static/photo-editor/navigation.js",
+    "../vireo/static/photo-editor/presets.js",
+    "../vireo/static/photo-editor/preview.js",
+    "../vireo/static/photo-editor/recipe.js",
+    "../vireo/static/photo-editor/save.js",
+    "../vireo/static/photo-editor/search.js",
+    "../vireo/static/photo-editor/state.js",
+    "../vireo/static/photo-editor/zoom.js",
+    "../vireo/static/photo_editor_color.js",
+    "../vireo/static/photo_editor_history.js"
+  ]
+}

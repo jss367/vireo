@@ -3,9 +3,9 @@
 
 // ---------------- Explorer: data load + honesty states (Task 10) ----------------
 
-var explorerData = null;      // last payload from /api/life-list/explorer
-var explorerPath = [];        // [{id,name,rank}] drill path from class root down
-var explorerRankView = null;  // {rank,data,search,missingOnly,showAll} when the flat rank view is open, else null
+/** @type {LifeExplorer|null} */ var explorerData = null;      // last payload from /api/life-list/explorer
+/** @type {LifeCrumb[]} */ var explorerPath = [];        // [{id,name,rank}] drill path from class root down
+/** @type {LifeRankView|null} */ var explorerRankView = null;  // {rank,data,search,missingOnly,showAll} when the flat rank view is open, else null
 // Token for the requests that fill #explorerBody (the genus species leaf and the
 // flat rank view). Each one claims it; every navigation that replaces the body
 // bumps it, so a late response for a view the user already left is dropped.
@@ -13,8 +13,8 @@ var explorerViewReqId = 0;
 
 // Load the explorer tree for a class (rootId = class taxon id, or omit for
 // the default Aves root). Stores the payload and re-renders.
-async function loadExplorer(rootId) {
-  var panel = document.getElementById('tab-explorer');
+/** @param {string|number=} rootId */ async function loadExplorer(rootId) {
+  var panel = /** @type {HTMLElement} */ (document.getElementById('tab-explorer'));
   explorerViewReqId++;   // invalidate any in-flight /rank or /species fetch from the old class
   panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Loading…</div></div>';
   try {
@@ -30,11 +30,11 @@ async function loadExplorer(rootId) {
 
 // Trigger the taxonomy download job, then poll it and reload the explorer on
 // completion. Mirrors settings.html's downloadTaxonomy() pattern.
-async function explorerDownloadTaxonomy(btn) {
+/** @param {HTMLButtonElement} btn */ async function explorerDownloadTaxonomy(btn) {
   btn.disabled = true;
   btn.textContent = 'Downloading… (see Jobs panel)';
   try {
-    var data = await safeFetch('/api/jobs/download-taxonomy', { method: 'POST' }, { toast: false });
+    /** @type {{job_id?:string}} */ var data = await safeFetch('/api/jobs/download-taxonomy', { method: 'POST' }, { toast: false });
     if (typeof safeEventSource === 'function' && data && data.job_id) {
       safeEventSource('/api/jobs/' + data.job_id + '/stream', {
         onComplete: function() { loadExplorer(); }
@@ -47,7 +47,7 @@ async function explorerDownloadTaxonomy(btn) {
 }
 
 function renderExplorer() {
-  var panel = document.getElementById('tab-explorer');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('tab-explorer'));
   var d = explorerData || {};
 
   // Honesty state 1: reference taxonomy not downloaded — no fake 0/0.
@@ -71,10 +71,10 @@ function renderExplorer() {
   html += '<label for="explorerClass">Class</label>';
   html += '<select id="explorerClass" onchange="loadExplorer(this.value)">';
   var classes = (d.classes || []).slice();
-  var root = d.root || {};
+  /** @type {Partial<LifeTaxon>} */ var root = d.root || {};
   var seenRoot = classes.some(function(c) { return c.id === root.id; });
   if (root.id != null && !seenRoot) {
-    classes.unshift({ id: root.id, name: root.name, common_name: root.common_name });
+    classes.unshift({ id: root.id, name: root.name || '', common_name: root.common_name });
   }
   classes.forEach(function(c) {
     var label = c.common_name || c.name;
@@ -107,7 +107,7 @@ function renderExplorer() {
   panel.innerHTML = html;
 
   wireSummaryBar();
-  wireBreadcrumb(document.getElementById('explorerBody'));
+  wireBreadcrumb(/** @type {HTMLElement} */ (document.getElementById('explorerBody')));
   renderExplorerBody();
 }
 
@@ -117,10 +117,11 @@ function renderExplorer() {
 // Mirrors wireBreadcrumb's delegation pattern. Reads data-rank off the clicked
 // chip and opens the flat rank breakdown for that rank.
 function wireSummaryBar() {
-  var panel = document.getElementById('tab-explorer');
+  var panel = /** @type {HTMLElement} */ (document.getElementById('tab-explorer'));
   if (!panel || panel._llSummaryWired) return;
   panel._llSummaryWired = true;
   panel.addEventListener('click', function(event) {
+    if (!(event.target instanceof Element)) return;
     var chip = event.target.closest('.ll-sumchip');
     if (!chip || !panel.contains(chip)) return;
     var rank = chip.getAttribute('data-rank');
@@ -131,12 +132,13 @@ function wireSummaryBar() {
 // Single delegated click listener for breadcrumb crumbs. Attached once to the
 // persistent #explorerBody container, so re-rendering its innerHTML (cards,
 // species leaf, loading states) never accumulates duplicate handlers.
-function wireBreadcrumb(container) {
+/** @param {HTMLElement|null} container */ function wireBreadcrumb(container) {
   if (!container) return;
   container.addEventListener('click', function(event) {
+    if (!(event.target instanceof Element)) return;
     var crumb = event.target.closest('.ll-crumb');
     if (!crumb || !container.contains(crumb)) return;
-    var depth = parseInt(crumb.getAttribute('data-depth'), 10);
+    var depth = parseInt(crumb.getAttribute('data-depth') || '', 10);
     if (isNaN(depth) || depth === explorerPath.length) return;   // current crumb: no-op
     explorerPath = explorerPath.slice(0, depth);
     explorerViewReqId++;   // supersede any in-flight /species or /rank fetch
@@ -144,7 +146,7 @@ function wireBreadcrumb(container) {
   });
 }
 
-function uncountedBrowseHref(entry) {
+/** @param {LifeUncounted} entry */ function uncountedBrowseHref(entry) {
   // The compact token is expanded by Browse into the same server-side
   // ancestor-suppression predicate that produced ``photo_count``. Embedding
   // every matching photo ID here would exceed browser/server URL limits for
@@ -155,7 +157,7 @@ function uncountedBrowseHref(entry) {
   return '/browse?filters=' + encodeURIComponent(JSON.stringify(filters));
 }
 
-function renderUncountedGroup(entries, count, message) {
+/** @param {LifeUncounted[]|undefined} entries @param {number} count @param {string} message */ function renderUncountedGroup(entries, count, message) {
   if (!count) return '';
   var shown = entries || [];
   var truncated = count > shown.length;
@@ -181,10 +183,10 @@ function renderUncountedGroup(entries, count, message) {
 
 // Reasoned, class-aware disclosure for accepted identification labels that
 // cannot contribute to exact species completeness.
-function renderUnmatched(d) {
+/** @param {LifeExplorer} d */ function renderUnmatched(d) {
   var u = d.uncounted_identifications;
   if (!u) return '';
-  var root = d.root || {};
+  /** @type {Partial<LifeTaxon>} */ var root = d.root || {};
   var className = root.common_name || root.name || 'this class';
   var scopedCount = u.scoped_count || 0;
   var workspaceCount = u.workspace_count || 0;

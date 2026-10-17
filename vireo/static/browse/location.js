@@ -3,7 +3,7 @@
    browse/*.js files in dependency order. */
 
 /* ---------- Location section ---------- */
-let googleMapsLoadPromise = null;
+let googleMapsLoadPromise = /** @type {Promise<BrowseGoogle> | null} */ (null);
 function loadGoogleMapsJs() {
   if (googleMapsLoadPromise) return googleMapsLoadPromise;
   const apiKey = window.GOOGLE_MAPS_API_KEY || '';
@@ -29,20 +29,20 @@ function loadGoogleMapsJs() {
 // Per-input autocomplete state. Keyed by `input` element so we can detect
 // whether a `place_changed` event recently fired (and thus the Enter
 // handler should defer to it).
-var _locationAutocomplete = null;
+var _locationAutocomplete = /** @type {BrowseGoogleAutocomplete | null} */ (null);
 var _locationLastPickedAt = 0;
 var _locationAutocompleteBound = false;
 // Pending free-text submit triggered by Enter. Held for ~300ms so a
 // keyboard-selected autocomplete suggestion (where place_changed fires
 // AFTER the keydown event) gets a chance to cancel the text path.
-var _locationPendingTextSubmit = null;
+var _locationPendingTextSubmit = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
 var _locationKeywordState = {
-  matches: [],
+  matches: /** @type {BrowseKeywordOption[]} */ ([]),
   activeIndex: -1,
 };
 
-function _showLocationError(msg) {
-  var el = document.getElementById('locationError');
+function _showLocationError(/** @type {string} */ msg) {
+  var el = /** @type {HTMLElement} */ (document.getElementById('locationError'));
   if (!el) return;
   el.textContent = msg;
   el.hidden = false;
@@ -52,12 +52,12 @@ function _showLocationError(msg) {
 }
 
 function _hideLocationError() {
-  var el = document.getElementById('locationError');
+  var el = /** @type {HTMLElement} */ (document.getElementById('locationError'));
   if (el) el.hidden = true;
 }
 
 function hideLocationKeywordSuggestions() {
-  var dropdown = document.getElementById('locationKeywordSuggestions');
+  var dropdown = /** @type {HTMLElement} */ (document.getElementById('locationKeywordSuggestions'));
   if (dropdown) {
     dropdown.classList.remove('open');
     dropdown.innerHTML = '';
@@ -67,8 +67,8 @@ function hideLocationKeywordSuggestions() {
 }
 
 function renderLocationKeywordSuggestions() {
-  var input = document.getElementById('locationInput');
-  var dropdown = document.getElementById('locationKeywordSuggestions');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('locationInput'));
+  var dropdown = /** @type {HTMLElement} */ (document.getElementById('locationKeywordSuggestions'));
   if (!input || !dropdown) return;
   var query = input.value.trim().toLowerCase();
   if (!query || !keywordAutocompleteCache || !keywordAutocompleteCache.length) {
@@ -109,7 +109,7 @@ function renderLocationKeywordSuggestions() {
 }
 
 function updateLocationKeywordSuggestions() {
-  var input = document.getElementById('locationInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('locationInput'));
   if (!input || !input.value.trim()) {
     hideLocationKeywordSuggestions();
     return;
@@ -117,10 +117,10 @@ function updateLocationKeywordSuggestions() {
   loadKeywordAutocompleteOptions().then(renderLocationKeywordSuggestions);
 }
 
-function chooseLocationKeywordSuggestion(index) {
+function chooseLocationKeywordSuggestion(/** @type {number} */ index) {
   var keyword = _locationKeywordState.matches[index];
   if (!keyword) return;
-  var input = document.getElementById('locationInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('locationInput'));
   if (input) input.value = keyword.name;
   hideLocationKeywordSuggestions();
   if (_locationPendingTextSubmit) {
@@ -155,7 +155,7 @@ function _locationTargetKey() {
   return selectionIdsKey(_locationApplyPhotoIds()) + '|' + (window._detailPhotoId || '');
 }
 
-async function _postLocationBatched(endpoint, baseBody, ids) {
+async function _postLocationBatched(/** @type {string} */ endpoint, /** @type {BrowseLocationBody} */ baseBody, /** @type {number[]} */ ids) {
   var last = null;
   for (var offset = 0; offset < ids.length; offset += LOCATION_BATCH_LIMIT) {
     var body = Object.assign({}, baseBody, {
@@ -170,7 +170,7 @@ async function _postLocationBatched(endpoint, baseBody, ids) {
   return last;
 }
 
-async function _afterLocationMutation(photoIds, detailPhotoId) {
+async function _afterLocationMutation(/** @type {number[]} */ photoIds, /** @type {number | null} */ detailPhotoId) {
   // Bump the location-mutation epoch so any in-flight reverse-geocode from an
   // earlier maybeShowExifSuggestion(A) bails out of its post-await paint. Every
   // save/clear/accept path funnels through here, so this is the single choke
@@ -208,7 +208,7 @@ async function _afterLocationMutation(photoIds, detailPhotoId) {
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({photo_ids: idsToRefresh.slice(offset, offset + 500)})
         }, {toast: false});
-        (statusData.photos || []).forEach(function(updated) {
+        (statusData.photos || []).forEach(function(/** @type {BrowsePhoto} */ updated) {
           var local = findBrowsePhoto(updated.id);
           if (local) local.location_status = updated.location_status || 'none';
         });
@@ -240,7 +240,7 @@ async function bindLocationAutocomplete() {
   try { await _cfgPromise; } catch(e) {}
   if (!window.GOOGLE_MAPS_API_KEY) return;  // no key -> free-text only
   _locationAutocompleteBound = true;
-  var input = document.getElementById('locationInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('locationInput'));
   if (!input) return;
   loadGoogleMapsJs().then(function(google) {
     if (!google || !google.maps || !google.maps.places) return;
@@ -256,7 +256,7 @@ async function bindLocationAutocomplete() {
       ],
     });
     _locationAutocomplete.addListener('place_changed', function() {
-      var place = _locationAutocomplete.getPlace();
+      var place = _locationAutocomplete?.getPlace();
       if (!place || !place.place_id) return;
       _locationLastPickedAt = Date.now();
       // Cancel any pending free-text submit from the Enter that triggered
@@ -274,7 +274,7 @@ async function bindLocationAutocomplete() {
   });
 }
 
-function normalizeGooglePlaceForSubmit(place) {
+function normalizeGooglePlaceForSubmit(/** @type {BrowseGooglePlace | null} */ place) {
   if (!place || !place.place_id) return null;
   var loc = place.geometry && place.geometry.location;
   var lat = null;
@@ -300,7 +300,7 @@ function normalizeGooglePlaceForSubmit(place) {
   };
 }
 
-async function _submitLocationPlace(placeId, placeDetails) {
+async function _submitLocationPlace(/** @type {string | number} */ placeId, /** @type {BrowseGooglePlaceSubmit | null} */ placeDetails) {
   _hideLocationError();
   // Derive the target photos from the batch-aware selection so a fresh
   // multi-select (Cmd/Ctrl-click without ever opening a single-photo detail)
@@ -311,7 +311,7 @@ async function _submitLocationPlace(placeId, placeDetails) {
   var useBatch = ids.length > 1;
   var detailPhotoId = window._detailPhotoId || null;
   var targetKey = _locationTargetKey();
-  var body = { place_id: placeId };
+  var body = /** @type {BrowseLocationBody} */ ({ place_id: placeId });
   if (placeDetails) body.place = placeDetails;
   try {
     var resp = useBatch
@@ -326,11 +326,11 @@ async function _submitLocationPlace(placeId, placeDetails) {
     }
     await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
-    _showLocationError(e && e.message ? e.message : 'Could not save location.');
+    _showLocationError(e instanceof Error ? e.message : 'Could not save location.');
   }
 }
 
-async function _submitLocationKeyword(keyword) {
+async function _submitLocationKeyword(/** @type {BrowseKeywordOption} */ keyword) {
   if (!keyword || !keyword.id) return;
   _hideLocationError();
   var ids = _locationApplyPhotoIds();
@@ -352,11 +352,11 @@ async function _submitLocationKeyword(keyword) {
     }
     await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
-    _showLocationError(e && e.message ? e.message : 'Could not save location.');
+    _showLocationError(e instanceof Error ? e.message : 'Could not save location.');
   }
 }
 
-async function _submitLocationText(name) {
+async function _submitLocationText(/** @type {string} */ name) {
   _hideLocationError();
   var ids = _locationApplyPhotoIds();
   if (!ids.length) return;
@@ -376,7 +376,7 @@ async function _submitLocationText(name) {
       await _afterLocationMutation(ids, detailPhotoId);
     }
   } catch(e) {
-    _showLocationError(e && e.message ? e.message : 'Could not save location.');
+    _showLocationError(e instanceof Error ? e.message : 'Could not save location.');
   }
 }
 
@@ -389,7 +389,7 @@ async function clearPhotoLocation() {
     renderLocationEmpty();
     await _afterLocationMutation([photoId], photoId);
   } catch(e) {
-    _showLocationError(e && e.message ? e.message : 'Could not clear location.');
+    _showLocationError(e instanceof Error ? e.message : 'Could not clear location.');
   }
 }
 
@@ -398,28 +398,28 @@ async function clearPhotoLocation() {
 // they can't silently diverge — e.g. if a future scrub also needs to clear a
 // stored placeId. Codex nitpick on PR #1097.
 function clearExifSuggestion() {
-  var sugg = document.getElementById('locationExifSuggestion');
+  var sugg = /** @type {HTMLElement} */ (document.getElementById('locationExifSuggestion'));
   if (!sugg) return;
   sugg.hidden = true;
   sugg.innerHTML = '';
   if (sugg.dataset) delete sugg.dataset.photoId;
 }
 
-function formatCoordinatePair(latitude, longitude) {
+function formatCoordinatePair(/** @type {number | null | undefined} */ latitude, /** @type {number | null | undefined} */ longitude) {
   if (latitude == null || longitude == null) return '';
   return Number(latitude).toFixed(5) + ', ' + Number(longitude).toFixed(5);
 }
 
-function renderCoordinateStatus(photo) {
-  var el = document.getElementById('locationCoordinateStatus');
+function renderCoordinateStatus(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
+  var el = /** @type {HTMLElement} */ (document.getElementById('locationCoordinateStatus'));
   if (!el) return;
   var status = photo && photo.location_status ? photo.location_status : 'none';
   var text;
   if (status === 'exif') {
-    text = '📍 EXIF GPS — ' + formatCoordinatePair(photo.latitude, photo.longitude) +
+    text = '📍 EXIF GPS — ' + formatCoordinatePair(photo?.latitude, photo?.longitude) +
       '. Embedded in the original photo and used on the map.';
   } else if (status === 'assigned') {
-    var loc = photo.location || {};
+    var loc = photo?.location || {};
     var coords = formatCoordinatePair(loc.latitude, loc.longitude);
     text = '● Assigned map location' + (coords ? ' — ' + coords : '') +
       '. The original photo does not contain a complete EXIF GPS pair.';
@@ -430,9 +430,9 @@ function renderCoordinateStatus(photo) {
   el.textContent = text;
 }
 
-function renderLocationFilled(loc) {
-  var filled = document.getElementById('locationFilled');
-  var empty = document.getElementById('locationEmpty');
+function renderLocationFilled(/** @type {BrowseLocation | null} */ loc) {
+  var filled = /** @type {HTMLElement} */ (document.getElementById('locationFilled'));
+  var empty = /** @type {HTMLElement} */ (document.getElementById('locationEmpty'));
   if (!filled || !empty) return;
   if (!loc) { renderLocationEmpty(); return; }
   var parents = (loc.parent_chain || [])
@@ -452,7 +452,7 @@ function renderLocationFilled(loc) {
   filled.hidden = false;
   empty.hidden = true;
   // Reset the input value for next time.
-  var input = document.getElementById('locationInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('locationInput'));
   if (input) input.value = '';
   // Once a saved location is on screen any pending EXIF suggestion is moot,
   // and leaving it (hidden) in #locationEmpty makes it stale state: open A
@@ -462,15 +462,15 @@ function renderLocationFilled(loc) {
   clearExifSuggestion();
 }
 
-function renderLocationEmpty(opts) {
+function renderLocationEmpty(/** @type {{preserveExifSuggestion?: boolean, selectionIds?: number[]}} */ opts = {}) {
   opts = opts || {};
-  var filled = document.getElementById('locationFilled');
-  var empty = document.getElementById('locationEmpty');
+  var filled = /** @type {HTMLElement} */ (document.getElementById('locationFilled'));
+  var empty = /** @type {HTMLElement} */ (document.getElementById('locationEmpty'));
   if (!filled || !empty) return;
   filled.innerHTML = '';
   filled.hidden = true;
   empty.hidden = false;
-  var input = document.getElementById('locationInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('locationInput'));
   if (input) input.value = '';
   hideLocationKeywordSuggestions();
   // Reset any prior EXIF suggestion. The caller (renderDetail) re-runs
@@ -481,7 +481,7 @@ function renderLocationEmpty(opts) {
   // produced it is still in the selection. Otherwise Accept would apply
   // that anchor's GPS-derived location to unrelated photos (Codex P1 on
   // PR #1097: open A → Cmd-click B → Cmd-click A to drop → Cmd-click C).
-  var sugg = document.getElementById('locationExifSuggestion');
+  var sugg = /** @type {HTMLElement} */ (document.getElementById('locationExifSuggestion'));
   if (!sugg) return;
   var keepSugg = false;
   if (opts.preserveExifSuggestion) {
@@ -498,9 +498,9 @@ function renderLocationEmpty(opts) {
    reverse-geocode suggestion and offer it as an inline Accept line. Bails
    silently when there's no key or no coords; the proxy returns null when
    Google has no match for the cell. */
-async function maybeShowExifSuggestion(photo) {
+async function maybeShowExifSuggestion(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
   clearExifSuggestion();
-  var sugg = document.getElementById('locationExifSuggestion');
+  var sugg = /** @type {HTMLElement} */ (document.getElementById('locationExifSuggestion'));
   if (!sugg) return;
 
   if (!photo) return;
@@ -521,7 +521,7 @@ async function maybeShowExifSuggestion(photo) {
   var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
   if (!apiKey) return;
   try {
-    var params = new URLSearchParams({lat: photo.latitude, lng: photo.longitude});
+    var params = new URLSearchParams({lat: String(photo.latitude), lng: String(photo.longitude)});
     var r = await fetch('/api/places/reverse-geocode?' + params.toString());
     if (!r.ok) return;
     var data = await r.json();
@@ -561,7 +561,7 @@ async function maybeShowExifSuggestion(photo) {
     // painted it wanted the suggestion gone. The epoch check above already
     // covers the batch race; this catches any future save site that renders
     // filled without funneling through _afterLocationMutation.
-    var filled = document.getElementById('locationFilled');
+    var filled = /** @type {HTMLElement} */ (document.getElementById('locationFilled'));
     if (filled && !filled.hidden) return;
 
     sugg.innerHTML = '';
@@ -584,7 +584,7 @@ async function maybeShowExifSuggestion(photo) {
   }
 }
 
-async function acceptExifSuggestion(placeId) {
+async function acceptExifSuggestion(/** @type {string | number} */ placeId) {
   var photoId = window._detailPhotoId;
   if (!photoId || !placeId) return;
   _hideLocationError();
@@ -607,7 +607,7 @@ async function acceptExifSuggestion(placeId) {
     }
     await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
-    _showLocationError(e && e.message ? e.message : 'Could not save location.');
+    _showLocationError(e instanceof Error ? e.message : 'Could not save location.');
   }
 }
 
@@ -621,8 +621,8 @@ function _onLocationInputInput() {
   updateLocationKeywordSuggestions();
 }
 
-function _onLocationInputKeydown(e) {
-  var dropdown = document.getElementById('locationKeywordSuggestions');
+function _onLocationInputKeydown(/** @type {KeyboardEvent} */ e) {
+  var dropdown = /** @type {HTMLElement} */ (document.getElementById('locationKeywordSuggestions'));
   var localOpen = dropdown && dropdown.classList.contains('open') && _locationKeywordState.matches.length > 0;
   var googlePlacesMayHandleKeyboard = !!(window.GOOGLE_MAPS_API_KEY || '').trim();
   if (localOpen && !googlePlacesMayHandleKeyboard && e.key === 'ArrowDown') {
@@ -654,7 +654,7 @@ function _onLocationInputKeydown(e) {
   // If a place was JUST picked (e.g. mouse click within ~500ms ago),
   // skip outright.
   if (Date.now() - _locationLastPickedAt < 500) return;
-  var input = e.target;
+  var input = e.target; if (!(input instanceof HTMLInputElement)) return;
   var val = (input.value || '').trim();
   if (!val) return;
   // Defer the free-text submit. If a Google suggestion was highlighted
@@ -675,7 +675,7 @@ function _onLocationInputKeydown(e) {
 // in the DOM unconditionally (server renders the section), so we don't need
 // to re-bind on every photo load.
 document.addEventListener('DOMContentLoaded', function() {
-  var input = document.getElementById('locationInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('locationInput'));
   if (input) {
     input.addEventListener('focus', _onLocationInputFocus);
     input.addEventListener('input', _onLocationInputInput);
@@ -684,13 +684,13 @@ document.addEventListener('DOMContentLoaded', function() {
       setTimeout(hideLocationKeywordSuggestions, 120);
     });
   }
-  var locationDropdown = document.getElementById('locationKeywordSuggestions');
+  var locationDropdown = /** @type {HTMLElement} */ (document.getElementById('locationKeywordSuggestions'));
   if (locationDropdown) {
     locationDropdown.addEventListener('mousedown', function(e) {
-      var option = e.target.closest('.keyword-suggestion-option');
+      var option = /** @type {HTMLElement | null} */ (e.target instanceof Element ? e.target.closest('.keyword-suggestion-option') : null);
       if (!option) return;
       e.preventDefault();
-      chooseLocationKeywordSuggestion(parseInt(option.dataset.index, 10));
+      chooseLocationKeywordSuggestion(parseInt(option.dataset.index || '', 10));
     });
   }
   bindKeywordAutocomplete('addKeywordInput', 'addKeywordSuggestions', addKeyword);

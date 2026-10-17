@@ -1,0 +1,22 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/pipeline-rapid-review.d.ts",
+    "../tests/frontend/rapid-review-type-contracts.ts",
+    "../vireo/static/pipeline-rapid-review/apply-diff.js",
+    "../vireo/static/pipeline-rapid-review/apply.js",
+    "../vireo/static/pipeline-rapid-review/boot.js",
+    "../vireo/static/pipeline-rapid-review/decisions.js",
+    "../vireo/static/pipeline-rapid-review/loading.js",
+    "../vireo/static/pipeline-rapid-review/photo-urls.js",
+    "../vireo/static/pipeline-rapid-review/queue-filters.js",
+    "../vireo/static/pipeline-rapid-review/queue.js",
+    "../vireo/static/pipeline-rapid-review/render.js",
+    "../vireo/static/pipeline-rapid-review/sessions.js",
+    "../vireo/static/pipeline-rapid-review/shortcuts.js",
+    "../vireo/static/pipeline-rapid-review/species-keywords.js",
+    "../vireo/static/pipeline-rapid-review/species-list.js",
+    "../vireo/static/pipeline-rapid-review/state.js",
+    "../vireo/static/pipeline-rapid-review/zoom.js"
+  ]
+}

@@ -4,8 +4,8 @@
 // ---------------- Explorer tab ----------------
 var explorerLoaded = false;   // lazy-load guard: fetch explorer once on first open
 
-function llSwitchTab(name) {
-  document.querySelectorAll('.ll-tab').forEach(function(t) {
+/** @param {string} name */ function llSwitchTab(name) {
+  document.querySelectorAll(/** @type {'div'} */ ('.ll-tab')).forEach(function(t) {
     t.classList.toggle('active', t.dataset.tab === name);
   });
   document.querySelectorAll('.ll-tabpanel').forEach(function(p) {

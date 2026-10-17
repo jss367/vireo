@@ -21,7 +21,7 @@ function visiblePendingCards() {
 // ``allPredictions``, but a sibling outside the current collection filter is
 // only in the unfiltered copy — walk both so neither is left claiming a row is
 // pending after the server accepted it.
-function _markPredictionsAccepted(predIds) {
+/** @param {number[]} predIds */ function _markPredictionsAccepted(predIds) {
   if (!predIds || !predIds.length) return;
   var wanted = new Set(predIds);
   [allPredictions, predictions].forEach(function(list) {
@@ -31,7 +31,7 @@ function _markPredictionsAccepted(predIds) {
   });
 }
 
-async function acceptPrediction(predId) {
+/** @param {number} predId */ async function acceptPrediction(predId) {
   if (_predictionsReloading) return;
   var epoch = _loadPredictionsEpoch;
   var applied;
@@ -49,10 +49,10 @@ async function acceptPrediction(predId) {
   renderAll();
 }
 
-async function rejectPrediction(predId) {
+/** @param {number} predId */ async function rejectPrediction(predId) {
   if (_predictionsReloading) return;
   var epoch = _loadPredictionsEpoch;
-  var resp;
+  /** @type {{rejected_prediction_ids?:number[]}} */ var resp;
   try {
     resp = await safeFetch('/api/predictions/' + predId + '/reject', { method: 'POST' });
   } catch(e) { return; }
@@ -70,7 +70,7 @@ async function rejectPrediction(predId) {
   renderAll();
 }
 
-async function acceptAlternative(altId, parentPredId) {
+/** @param {number} altId @param {number} parentPredId */ async function acceptAlternative(altId, parentPredId) {
   if (_predictionsReloading) return;
   var epoch = _loadPredictionsEpoch;
   try {
@@ -104,11 +104,11 @@ async function acceptAllPending() {
   for (var i = 0; i < pending.length; i++) {
     if (_predictionEpochStale(epoch)) break;
     // Accepted, not skipped: an earlier request in this very run wrote it.
-    if (decided.alreadyDecided(pending[i].id)) continue;
+    var item = pending[i]; if (!item) continue; if (decided.alreadyDecided(item.id)) continue;
     try {
-      var applied = await safeFetch('/api/predictions/' + pending[i].id + '/accept', { method: 'POST' });
+      var applied = await safeFetch('/api/predictions/' + item.id + '/accept', { method: 'POST' });
       _markPredictionsAccepted(
-        [pending[i].id].concat(decided.record(applied)));
+        [item.id].concat(decided.record(applied)));
     } catch(e) { break; }
   }
   if (_predictionEpochStale(epoch)) return;

@@ -3,7 +3,7 @@
 // Classic page script; load boot.js after all definitions.
 
 /* ---------- Focus tracking + keyboard shortcuts ---------- */
-function setFocused(cat, idx) {
+/** @param {MissCategory | null} cat @param {number} idx */ function setFocused(cat, idx) {
   focusedCategory = cat;
   focusedIndex = idx;
   document.querySelectorAll('.miss-card.focused').forEach(function(el) {
@@ -18,12 +18,12 @@ function setFocused(cat, idx) {
   }
 }
 
-function moveFocus(delta) {
+/** @param {number} delta */ function moveFocus(delta) {
   // Pick the first non-empty category if nothing focused yet.
   if (focusedCategory == null) {
     for (var i = 0; i < CATEGORY_ORDER.length; i++) {
-      if (missesData[CATEGORY_ORDER[i]].length > 0) {
-        setFocused(CATEGORY_ORDER[i], 0);
+      if (missesData[CATEGORY_ORDER[i] || 'no_subject'].length > 0) {
+        setFocused(CATEGORY_ORDER[i] || null, 0);
         return;
       }
     }
@@ -38,6 +38,7 @@ function moveFocus(delta) {
 
 function bindMissKeyboard() {
   document.addEventListener('keydown', function(e) {
+    if (!(e.target instanceof Element)) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
     if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .help-overlay.active')) return;
 
@@ -106,7 +107,7 @@ function bindMissKeyboard() {
  * focused card to the selection. The previously-focused card is also added so
  * that the first Shift+J after a plain j-walk seeds the range with two cards
  * instead of one (matches what users expect from text-editor selection). */
-function extendSelectionByFocus(delta) {
+/** @param {number} delta */ function extendSelectionByFocus(delta) {
   if (focusedCategory == null) {
     moveFocus(delta);
     return;

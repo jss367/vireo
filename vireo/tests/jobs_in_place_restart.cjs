@@ -8,8 +8,12 @@ let fetchCount = 0;
 let resolveRequest;
 let request;
 const toasts = [];
+class Element {
+  constructor(properties) { Object.assign(this, properties); }
+}
 const ctx = vm.createContext({
   console,
+  Element,
   document: {
     getElementById() { return {addEventListener(_type, handler) { clickHandler = handler; }}; },
     createElement() {
@@ -63,7 +67,7 @@ const button = {
   disabled: false, textContent: 'Restart import',
   getAttribute() { return parent.id; },
 };
-const event = {target: {closest(selector) { return selector === '[data-restart-in-place]' ? button : null; }}};
+const event = {target: new Element({closest(selector) { return selector === '[data-restart-in-place]' ? button : null; }})};
 
 async function flush() { for (let i = 0; i < 10; i++) await Promise.resolve(); }
 async function main() {

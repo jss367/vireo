@@ -12,7 +12,7 @@ function reconcileKeywordLoadRenders() {
   while (gen > keywordRenderDecisionGen) {
     var state = keywordLoadStates[gen];
     if (!state || state.status === 'pending') return;
-    if (state.status === 'success') {
+    if (state.status === 'success' && state.data) {
       var shouldRender = !state.shouldRender || state.shouldRender();
       keywordRenderDecisionGen = gen;
       if (shouldRender) renderKeywordTree(state.data);
@@ -25,7 +25,7 @@ function reconcileKeywordLoadRenders() {
   }
 }
 
-async function loadKeywords(opts) {
+async function loadKeywords(/** @type {{shouldRender?: () => boolean} | undefined} */ opts = undefined) {
   var myGen = ++keywordLoadGen;
   keywordLoadStates[myGen] = {
     status: 'pending',
@@ -49,21 +49,21 @@ async function loadKeywords(opts) {
   }
 }
 
-function renderKeywordTree(keywords) {
+function renderKeywordTree(/** @type {BrowseKeyword[]} */ keywords) {
   _rememberKeywordNames(keywords);
-  var byParent = {};
+  /** @type {Record<string, BrowseKeyword[]>} */ var byParent = {};
   keywords.forEach(function(k) {
     var pid = k.parent_id || 'root';
     if (!byParent[pid]) byParent[pid] = [];
-    byParent[pid].push(k);
+    (byParent[pid] || (byParent[pid] = [])).push(k);
   });
 
-  var treeTypeIcons = {general:'',taxonomy:'🌿',individual:'👤',location:'📍',genre:'🎭'};
-  function buildTree(parentId, depth) {
+  /** @type {Record<string, string>} */ var treeTypeIcons = {general:'',taxonomy:'🌿',individual:'👤',location:'📍',genre:'🎭'};
+  function buildTree(/** @type {number | string} */ parentId, /** @type {number} */ depth) {
     var children = byParent[parentId] || [];
     var html = '';
     children.forEach(function(k) {
-      var hasChildren = byParent[k.id] && byParent[k.id].length > 0;
+      var hasChildren = byParent[k.id] && (byParent[k.id]?.length || 0) > 0;
       var indent = '';
       for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
       var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
@@ -81,16 +81,16 @@ function renderKeywordTree(keywords) {
     return html;
   }
 
-  var tree = document.getElementById('keywordTree');
+  var tree = /** @type {HTMLElement} */ (document.getElementById('keywordTree'));
   tree.innerHTML = buildTree('root', 0) || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No keywords</div>';
   // Delegate keyword clicks (XSS-safe: avoids inline onclick with user data)
   tree.onclick = function(e) {
-    var item = e.target.closest('.tree-item[data-keyword]');
-    if (item) filterByKeyword(item.dataset.keyword);
+    var item = e.target instanceof Element ? /** @type {HTMLElement | null} */ (/** @type {HTMLElement | null} */ (e.target.closest('.tree-item[data-keyword]'))) : null;
+    if (item) filterByKeyword(item.dataset.keyword || '');
   };
 }
 
-async function filterByKeyword(name) {
+async function filterByKeyword(/** @type {string} */ name) {
   // Bump the scope generation BEFORE the readiness guard so an in-flight
   // queued filterByCollection (awaiting browseFilterInitPromise) sees the
   // newer intent and bails out on resume. Without this, the collection
@@ -130,7 +130,7 @@ async function filterByKeyword(name) {
   // The rule toggles: adding an identical keyword rule removes it. The
   // filter bar's onChange handles the reload.
   VireoFilter.addRule('keyword', 'is', name);
-  document.querySelectorAll('#keywordTree .tree-item').forEach(function(el) {
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#keywordTree .tree-item')).forEach(function(el) {
     el.classList.toggle('active', el.dataset.keyword === activeKeyword);
   });
 }

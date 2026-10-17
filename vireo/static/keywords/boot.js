@@ -15,7 +15,7 @@ bindKeywordTypeBadges();
 document.addEventListener('click', closeDropdown);
 bindKeywordRename();
 bindKeywordBulkApply();
-document.getElementById('kwBulkDelete').addEventListener('click', deleteSelectedKeywords);
+/** @type {HTMLButtonElement} */ (document.getElementById('kwBulkDelete')).addEventListener('click', deleteSelectedKeywords);
 bindKeywordContextMenu();
 bindLinkPlaceControls();
 

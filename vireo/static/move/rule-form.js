@@ -1,9 +1,10 @@
 // The rule editor form: criteria, preview, and save.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {MoveRule | undefined} [rule] */
 function showRuleForm(rule) {
   editingRuleId = rule ? rule.id : null;
-  var criteria = {};
+  /** @type {MoveCriteria} */ var criteria = {};
   if (rule) {
     try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : (rule.criteria || {}); } catch(e) {}
   }
@@ -89,35 +90,35 @@ function showRuleForm(rule) {
 
   html += '</div>';
 
-  document.getElementById('ruleFormContainer').innerHTML = html;
-  document.getElementById('ruleFormContainer').style.display = 'block';
+  /** @type {HTMLElement} */ (document.getElementById('ruleFormContainer')).innerHTML = html;
+  /** @type {HTMLElement} */ (document.getElementById('ruleFormContainer')).style.display = 'block';
 }
 
 function hideRuleForm() {
-  document.getElementById('ruleFormContainer').style.display = 'none';
-  document.getElementById('ruleFormContainer').innerHTML = '';
+  /** @type {HTMLElement} */ (document.getElementById('ruleFormContainer')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('ruleFormContainer')).innerHTML = '';
   editingRuleId = null;
 }
 
 function gatherCriteria() {
-  var criteria = {};
-  var rating = document.getElementById('ruleCriteriaRating').value;
+  /** @type {MoveCriteria} */ var criteria = {};
+  var rating = /** @type {HTMLSelectElement} */ (document.getElementById('ruleCriteriaRating')).value;
   if (rating) criteria.rating_min = parseInt(rating);
-  var flag = document.getElementById('ruleCriteriaFlag').value;
+  var flag = /** @type {HTMLSelectElement} */ (document.getElementById('ruleCriteriaFlag')).value;
   if (flag) criteria.flag = flag;
-  var species = document.getElementById('ruleCriteriaSpecies').value.trim();
+  var species = /** @type {HTMLInputElement} */ (document.getElementById('ruleCriteriaSpecies')).value.trim();
   if (species) {
     criteria.species = species.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
   }
-  if (document.getElementById('ruleCriteriaHasPred').checked) {
+  if (/** @type {HTMLInputElement} */ (document.getElementById('ruleCriteriaHasPred')).checked) {
     criteria.has_predictions = true;
   }
-  var folderSelect = document.getElementById('ruleCriteriaFolders');
+  var folderSelect = /** @type {HTMLSelectElement} */ (document.getElementById('ruleCriteriaFolders'));
   if (folderSelect) {
     var selectedFolders = Array.from(folderSelect.selectedOptions).map(function(o) { return parseInt(o.value); });
     if (selectedFolders.length) criteria.folder_ids = selectedFolders;
   }
-  var importedBefore = document.getElementById('ruleCriteriaImportedBefore');
+  var importedBefore = /** @type {HTMLInputElement} */ (document.getElementById('ruleCriteriaImportedBefore'));
   if (importedBefore && importedBefore.value) {
     criteria.imported_before = importedBefore.value;
   }
@@ -125,8 +126,8 @@ function gatherCriteria() {
 }
 
 async function previewRule() {
-  var criteria = gatherCriteria();
-  var resultDiv = document.getElementById('rulePreviewResult');
+  /** @type {MoveCriteria} */ var criteria = gatherCriteria();
+  var resultDiv = /** @type {HTMLElement} */ (document.getElementById('rulePreviewResult'));
   resultDiv.innerHTML = '<div class="loading">Checking matches...</div>';
 
   try {
@@ -143,13 +144,13 @@ async function previewRule() {
 }
 
 async function saveRule() {
-  var name = document.getElementById('ruleNameInput').value.trim();
-  var dest = document.getElementById('ruleDestInput').value.trim();
+  var name = /** @type {HTMLInputElement} */ (document.getElementById('ruleNameInput')).value.trim();
+  var dest = /** @type {HTMLInputElement} */ (document.getElementById('ruleDestInput')).value.trim();
   if (!name || !dest) {
     showToast('Name and destination are required', 'error');
     return;
   }
-  var criteria = gatherCriteria();
+  /** @type {MoveCriteria} */ var criteria = gatherCriteria();
 
   try {
     if (editingRuleId) {

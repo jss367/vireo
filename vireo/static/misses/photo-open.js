@@ -3,18 +3,18 @@
 // Classic page script; load boot.js after all definitions.
 
 /* ---------- Open lightbox ---------- */
-function openMiss(cat, idx, e) {
-  if (e && e.target && e.target.closest('button')) return;
-  var photos = missesData[cat];
+/** @param {MissCategory | null} cat @param {number} idx @param {MouseEvent=} e */ function openMiss(cat, idx, e) {
+  if (e && e.target instanceof Element && e.target.closest('button')) return;
+  if (cat === null) return; const category = cat; var photos = missesData[category];
   if (!photos || !photos[idx]) return;
   var p = photos[idx];
   setFocused(cat, idx);
   missLightboxCategoryById = {};
   var photoList = photos.map(function(q) {
-    missLightboxCategoryById[q.id] = cat;
-    return { id: q.id, filename: q.filename, missCategory: cat };
+    missLightboxCategoryById[q.id] = category;
+    return { id: q.id, filename: q.filename, missCategory: category };
   });
-  missLightboxCurrent = { photoId: p.id, category: cat };
+  missLightboxCurrent = { photoId: p.id, category: category };
 
   if (typeof openLightbox !== 'function') return;
   // The wrap onclick handler in _navbar.html guards on !window._lightboxZoomHandled,
@@ -28,7 +28,7 @@ function bindMissLightboxTracking() {
   document.addEventListener('lightbox:photochanged', function(e) {
     var photoId = e && e.detail ? e.detail.photoId : null;
     var cat = photoId != null ? missLightboxCategoryById[photoId] : null;
-    missLightboxCurrent = cat ? { photoId: photoId, category: cat } : null;
+    missLightboxCurrent = cat && photoId != null ? { photoId: photoId, category: cat } : null;
   });
 
   document.addEventListener('lightbox:closed', function() {
@@ -47,8 +47,8 @@ function getActiveSelection() {
   return focused ? [focused.id] : [];
 }
 
-function openPhotoInBrowse(photoId) {
-  photoId = parseInt(photoId, 10);
+/** @param {number} photoId */ function openPhotoInBrowse(photoId) {
+  photoId = parseInt(String(photoId), 10);
   if (isNaN(photoId)) return;
   window.location.href = '/browse?photo_id=' + encodeURIComponent(photoId);
 }
@@ -56,7 +56,7 @@ function openPhotoInBrowse(photoId) {
 function openSelectionInBrowse() {
   var ids = getActiveSelection();
   if (ids.length !== 1) return;
-  openPhotoInBrowse(ids[0]);
+  if (ids[0] !== undefined) openPhotoInBrowse(ids[0]);
 }
 
 function openFocusedMissInBrowse() {
@@ -65,7 +65,7 @@ function openFocusedMissInBrowse() {
   openPhotoInBrowse(focused.id);
 }
 
-function openBrowseShortcutPhoto(fullscreen) {
+/** @param {boolean} fullscreen */ function openBrowseShortcutPhoto(fullscreen) {
   var focused = getFocusedMiss();
   if (!focused) return false;
   openMiss(focusedCategory, focusedIndex);

@@ -63,3 +63,13 @@ session checks protect asynchronous seeding and apply. Flag writes in `flags.js`
 coordinate direct and group edits. Keep these guards intact when changing
 callers. The shared lightbox implementation remains in `vireo/static/lightbox/`;
 this directory only supplies Pipeline Review's integration hooks.
+
+## Strict page checks
+
+`tsconfig.frontend-pages/pipeline-review.json` checks every implementation in this
+directory together as classic scripts. Endpoint and shared-helper contracts live
+in `types/pages/pipeline-review.d.ts`; the page continues to load the same files
+in the template's explicit order. Required snapshot and indexed-member reads use
+`currentReviewResults()` / `requireReviewValue()` from `state.js`, including reads
+inside deferred callbacks. Tests that extract a single page function must load
+these two small invariant helpers as well.

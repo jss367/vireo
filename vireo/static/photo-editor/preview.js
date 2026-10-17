@@ -2,7 +2,7 @@
 // Classic page script; load boot.js after all definitions.
 
 function clearHistogramFeedback() {
-  var canvas = document.getElementById('histogramCanvas');
+  var canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('histogramCanvas'));
   var ctx = canvas ? canvas.getContext('2d') : null;
   if (ctx) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -10,16 +10,16 @@ function clearHistogramFeedback() {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
   ['shadow', 'highlight'].forEach(function(kind) {
-    var value = document.getElementById(kind + 'ClipValue');
-    var chip = document.getElementById(kind + 'ClipChip');
+    var value = /** @type {HTMLElement} */ (document.getElementById(kind + 'ClipValue'));
+    var chip = /** @type {HTMLElement} */ (document.getElementById(kind + 'ClipChip'));
     if (value) value.textContent = '--';
     if (chip) chip.classList.remove('warning');
   });
 }
 
 function updateHistogramFeedback() {
-  var img = document.getElementById('editorImg');
-  var canvas = document.getElementById('histogramCanvas');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
+  var canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('histogramCanvas'));
   if (!img || !canvas || !img.complete || !img.naturalWidth || !img.naturalHeight) {
     clearHistogramFeedback();
     return;
@@ -59,16 +59,16 @@ function updateHistogramFeedback() {
     return;
   }
 
-  var bins = new Array(64).fill(0);
+  /** @type {number[]} */ var bins = new Array(64).fill(0);
   var clippedLow = 0;
   var clippedHigh = 0;
   var total = Math.max(1, sample.width * sample.height);
   for (var i = 0; i < data.length; i += 4) {
-    var r = data[i];
-    var g = data[i + 1];
-    var b = data[i + 2];
+    var r = data[i] || 0;
+    var g = data[i + 1] || 0;
+    var b = data[i + 2] || 0;
     var luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    bins[Math.min(63, Math.floor(luma / 4))] += 1;
+    var bin = Math.min(63, Math.floor(luma / 4)); bins[bin] = (bins[bin] || 0) + 1;
     if (luma <= 3) clippedLow += 1;
     if (r >= 253 || g >= 253 || b >= 253) clippedHigh += 1;
   }
@@ -92,7 +92,7 @@ function updateHistogramFeedback() {
   var maxBin = Math.max.apply(Math, bins);
   var barW = canvas.width / bins.length;
   for (var bi = 0; bi < bins.length; bi++) {
-    var h = maxBin ? Math.round((bins[bi] / maxBin) * (canvas.height - 8)) : 0;
+    var h = maxBin ? Math.round(((bins[bi] || 0) / maxBin) * (canvas.height - 8)) : 0;
     ctx.fillStyle = bi < 2 || bi > 61 ? warning : accent;
     ctx.globalAlpha = bi < 2 || bi > 61 ? 0.82 : 0.62;
     ctx.fillRect(Math.floor(bi * barW), canvas.height - h, Math.ceil(barW), h);
@@ -103,10 +103,10 @@ function updateHistogramFeedback() {
   ctx.fillText('0', 6, canvas.height - 6);
   ctx.fillText('255', canvas.width - 24, canvas.height - 6);
 
-  function setClip(kind, count) {
+  /** @param {string} kind @param {number} count */ function setClip(kind, count) {
     var pct = count * 100 / total;
-    var value = document.getElementById(kind + 'ClipValue');
-    var chip = document.getElementById(kind + 'ClipChip');
+    var value = /** @type {HTMLElement} */ (document.getElementById(kind + 'ClipValue'));
+    var chip = /** @type {HTMLElement} */ (document.getElementById(kind + 'ClipChip'));
     if (value) value.textContent = '~' + pct.toFixed(pct < 1 ? 2 : 1) + '% clipped';
     if (chip) chip.classList.toggle('warning', pct >= 1);
   }
@@ -114,7 +114,7 @@ function updateHistogramFeedback() {
   setClip('highlight', clippedHigh);
 }
 
-function editorRenderSizeForPercent(percent) {
+/** @param {number} percent */ function editorRenderSizeForPercent(percent) {
   var dims = editorNativeRecipeDimensions(
     editorZoomRecipe() || {}, editorPreviewAppliesCrop()
   );
@@ -143,7 +143,7 @@ function previewRenderSize() {
   return editorRenderSizeForPercent(percent);
 }
 
-function previewStatusText(img) {
+/** @param {HTMLImageElement} img */ function previewStatusText(img) {
   // At and above 100% the render size is the whole point of the view — state
   // the delivered dimensions rather than implying "100%" on its own.
   var suffix = editorState.zoomMode !== 'fit' && editorState.zoomPercent >= 99.5 &&
@@ -157,7 +157,7 @@ function previewStatusText(img) {
 
 // Keep one render in flight and one replaceable request. Dragging never builds
 // an unbounded server queue, and obsolete pixels never replace the visible photo.
-var editorPreviewQueue = {active: null, pending: null};
+/** @type {{active:EditorPreviewRequest|null;pending:EditorPreviewRequest|null}} */ var editorPreviewQueue = {active: null, pending: null};
 // A fresh random id per page keeps two tabs on the same photo independent.
 var editorPreviewSession = Array.from(crypto.getRandomValues(new Uint8Array(16)), function(value) {
   return value.toString(16).padStart(2, '0');
@@ -171,13 +171,13 @@ function cancelServerPreview() {
   }, {toast: false}).catch(function() { /* the next render also fences older work */ });
 }
 
-function detachEditorPreview(notifyServer) {
+/** @param {boolean} notifyServer */ function detachEditorPreview(notifyServer) {
   var active = editorPreviewQueue.active;
   if (!active) return;
   editorPreviewQueue.active = null;
   clearTimeout(active.timeout);
-  active.image.onload = active.image.onerror = null;
-  active.image.removeAttribute('src');
+  if (active.image) active.image.onload = active.image.onerror = null;
+  active.image?.removeAttribute('src');
   if (notifyServer) cancelServerPreview();
 }
 
@@ -188,7 +188,7 @@ var EDITOR_REFINE_DELAY = 300;
 var EDITOR_PREVIEW_TIMEOUT = 60000;
 
 function hidePreviewRetry() {
-  document.getElementById('previewRetryBtn').hidden = true;
+  /** @type {HTMLButtonElement} */ (document.getElementById('previewRetryBtn')).hidden = true;
 }
 
 function retryEditorPreview() {
@@ -197,10 +197,10 @@ function retryEditorPreview() {
   updatePreview();
 }
 
-function cancelEditorPreview(options) {
+/** @param {{abortActive?:boolean}=} options */ function cancelEditorPreview(options) {
   editorState.previewSeq++;
-  clearTimeout(editorState.previewTimer);
-  clearTimeout(editorState.previewRefineTimer);
+  clearTimeout(editorState.previewTimer ?? undefined);
+  clearTimeout(editorState.previewRefineTimer ?? undefined);
   editorState.previewTimer = null;
   editorState.previewRefineTimer = null;
   editorPreviewQueue.pending = null;
@@ -208,9 +208,9 @@ function cancelEditorPreview(options) {
   if (options && options.abortActive) detachEditorPreview(true);
 }
 
-function presentEditorPreview(request, image) {
+/** @param {EditorPreviewRequest} request @param {HTMLImageElement} image */ function presentEditorPreview(request, image) {
   hidePreviewRetry();
-  var old = document.getElementById('editorImg');
+  var old = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
   if (old !== image) {
     // Move the decoded element into the document: assigning its URL to the old
     // element could fetch/render the same uncached recipe a second time.
@@ -222,7 +222,7 @@ function presentEditorPreview(request, image) {
   image.dataset.previewUrl = request.url;
   var status = previewStatusText(image);
   if (request.interactive) status = 'Quick preview — detail will refine when editing pauses';
-  document.getElementById('previewStatus').textContent = status;
+  /** @type {HTMLElement} */ (document.getElementById('previewStatus')).textContent = status;
   applyEditorZoom();
   updateEditorZoomControl();
   renderCropBox();
@@ -248,7 +248,7 @@ function pumpEditorPreview() {
   request.image = image;
   editorPreviewQueue.active = request;
   hidePreviewRetry();
-  function finish(ok, timedOut) {
+  /** @param {boolean} ok @param {boolean=} timedOut */ function finish(ok, timedOut) {
     clearTimeout(request.timeout);
     image.onload = image.onerror = null;
     // An obsolete event must not clear the next photo's active request.
@@ -258,15 +258,15 @@ function pumpEditorPreview() {
     if (request.seq === editorState.previewSeq && !editorState.loading) {
       if (ok) presentEditorPreview(request, image);
       else {
-        document.getElementById('previewStatus').textContent =
+        /** @type {HTMLElement} */ (document.getElementById('previewStatus')).textContent =
           timedOut ? 'Preview timed out. Retry or keep editing.' :
             'Could not render preview. Retry or keep editing.';
-        document.getElementById('previewRetryBtn').hidden = false;
+        /** @type {HTMLButtonElement} */ (document.getElementById('previewRetryBtn')).hidden = false;
         clearHistogramFeedback();
       }
     }
     if (!ok && editorPreviewQueue.pending) {
-      document.getElementById('previewStatus').textContent = editorPreviewQueue.pending.interactive
+      /** @type {HTMLElement} */ (document.getElementById('previewStatus')).textContent = editorPreviewQueue.pending.interactive
         ? 'Rendering quick preview…' : 'Refining preview…';
     }
     pumpEditorPreview();
@@ -281,7 +281,7 @@ function pumpEditorPreview() {
     '&preview_seq=' + request.serverSequence;
 }
 
-function updatePreview(options) {
+/** @param {{scheduled?:boolean;interactive?:boolean;started?:number|null}=} options */ function updatePreview(options) {
   if (!editorState.photoId || editorState.loading) return;
   options = options || {};
   if (!options.scheduled) cancelEditorPreview();
@@ -301,7 +301,7 @@ function updatePreview(options) {
     interactive: size < targetSize,
     started: options.started || performance.now(),
   };
-  var img = document.getElementById('editorImg');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
   if ((img.dataset.previewUrl || img.getAttribute('src')) === url && img.complete && img.naturalWidth) {
     // Reusing the displayed result also supersedes any slower in-flight tier.
     // Keep the timers: reusing a quick preview must still allow refinement.
@@ -311,7 +311,7 @@ function updatePreview(options) {
     presentEditorPreview(request, img);
     return;
   }
-  document.getElementById('previewStatus').textContent = request.interactive
+  /** @type {HTMLElement} */ (document.getElementById('previewStatus')).textContent = request.interactive
     ? 'Rendering quick preview…' : 'Refining preview…';
   // Identical active requests can serve a newer revision without re-rendering.
   if (editorPreviewQueue.active && editorPreviewQueue.active.url === url) {
@@ -340,7 +340,7 @@ function schedulePreview() {
       updatePreview({interactive: true, scheduled: true, started: editorState.previewInputAt});
     }, EDITOR_PREVIEW_INTERVAL);
   }
-  clearTimeout(editorState.previewRefineTimer);
+  clearTimeout(editorState.previewRefineTimer ?? undefined);
   editorState.previewRefineTimer = setTimeout(function() {
     editorState.previewRefineTimer = null;
     updatePreview({scheduled: true, started: editorState.previewInputAt});

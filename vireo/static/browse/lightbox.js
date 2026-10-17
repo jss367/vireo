@@ -3,10 +3,10 @@
    browse/*.js files in dependency order. */
 
 /* ---------- Grid dblclick delegation (XSS-safe) ---------- */
-document.getElementById('grid').addEventListener('dblclick', function(e) {
-  var card = e.target.closest('.grid-card');
+/** @type {HTMLElement} */ (document.getElementById('grid')).addEventListener('dblclick', function(e) { if (!(e.target instanceof Element)) return;
+  var card = /** @type {HTMLElement | null} */ (e.target.closest('.grid-card'));
   if (!card || card.classList.contains('offline')) return;
-  var id = parseInt(card.dataset.id, 10);
+  var id = parseInt(card.dataset.id || '', 10);
   var filename = card.dataset.filename || '';
   // Provenance for the close handler. A double-click on a stack card runs its
   // own two clicks through selectPhoto first, so the stack is selected by the
@@ -27,9 +27,9 @@ document.getElementById('grid').addEventListener('dblclick', function(e) {
   // the batch rather than creating it. Consult the pre-first-click snapshot:
   // only mark the gesture when the clicks actually moved the selection onto
   // this stack. Codex P2 on PR #1672.
-  var gestureIds = e.target.closest('.browse-stack-badge')
+  var gestureIds = /** @type {HTMLElement | null} */ (e.target.closest('.browse-stack-badge'))
     ? null : browseStackMemberIds(id);
-  var preState = browseSelectionBeforeStackDblClickStart;
+  const preState = browseSelectionBeforeStackDblClickStart;
   browseSelectionBeforeStackDblClickStart = null;
   var preStateWasThisStack = !!(
     preState && gestureIds
@@ -49,14 +49,14 @@ document.getElementById('grid').addEventListener('dblclick', function(e) {
   openLightbox(id, filename, availableBrowsePhotos());
 });
 
-var browseAvailableLightboxPhotos = [];
+/** @type {BrowsePhoto[]} */ var browseAvailableLightboxPhotos = [];
 
-function browsePhotoIsAvailable(photo) {
+function browsePhotoIsAvailable(/** @type {BrowsePhoto} */ photo) {
   return !photo.folder_status ||
     photo.folder_status === 'ok' || photo.folder_status === 'partial';
 }
 
-function replaceBrowseAvailableLightboxPhotos(available) {
+function replaceBrowseAvailableLightboxPhotos(/** @type {BrowsePhoto[]} */ available) {
   browseAvailableLightboxPhotos.length = 0;
   available.forEach(function(photo) {
     browseAvailableLightboxPhotos.push(photo);
@@ -100,11 +100,11 @@ function getBrowseShortcutPhoto() {
   if (selectedPhotos.size > 0) {
     var selectedIds = Array.from(selectedPhotos);
     for (var selectedOffset = 0; selectedOffset < selectedIds.length; selectedOffset++) {
-      var selectedMember = findBrowsePhoto(selectedIds[selectedOffset]);
-      if (selectedMember) {
+      var selectedId = selectedIds[selectedOffset]; if (selectedId == null) continue; var selectedMember = findBrowsePhoto(selectedId);
+      if (selectedMember) { const memberId = selectedMember.id;
         var memberNavigation = browsePhotoNavigationList(selectedMember.id);
         if (browseNavigationListIsTopLevel(memberNavigation) && !photos.some(function(photo) {
-          return photo.id === selectedMember.id;
+          return photo.id === memberId;
         })) {
           var memberCoverId = browseStackCoverIdForPhoto(selectedMember.id);
           var memberCover = photos.find(function(photo) { return photo.id === memberCoverId; });
@@ -128,15 +128,15 @@ function getBrowseShortcutPhoto() {
         photo.folder_status === 'ok' || photo.folder_status === 'partial';
     });
   }
-  if (idx < 0 || !photos[idx]) return null;
+  var photo = photos[idx]; if (idx < 0 || !photo) return null;
   return {
-    photo: photos[idx],
+    photo: photo,
     index: idx,
     navigationPhotos: availableBrowsePhotos(),
   };
 }
 
-function openBrowseShortcutPhoto(fullscreen) {
+function openBrowseShortcutPhoto(/** @type {boolean} */ fullscreen) {
   var item = getBrowseShortcutPhoto();
   if (!item) return false;
   openLightbox(item.photo.id, item.photo.filename || '', item.navigationPhotos);
@@ -146,7 +146,7 @@ function openBrowseShortcutPhoto(fullscreen) {
   return true;
 }
 
-function browseKeyMatchesConfiguredShortcut(e) {
+function browseKeyMatchesConfiguredShortcut(/** @type {KeyboardEvent} */ e) {
   if (!_shortcuts) return false;
   for (var action in _shortcuts) {
     if (Object.prototype.hasOwnProperty.call(_shortcuts, action) && matchesShortcut(e, _shortcuts[action])) {
@@ -162,7 +162,7 @@ function browseKeyMatchesConfiguredShortcut(e) {
    the active list synchronized, so prefetched pages reach the lightbox without
    reopening it. If the user reaches an edge before the request finishes, retry
    at the same boundary and advance as soon as the page is available. */
-var browseLightboxBoundaryRetry = null;
+/** @type {number | null} */ var browseLightboxBoundaryRetry = null;
 var browseLightboxSession = 0;
 // Set by the grid double-click handler when the gesture's own clicks selected
 // the stack it opened: {ids, epoch}. It is spent by the close of the lightbox
@@ -171,11 +171,11 @@ var browseLightboxSession = 0;
 // made in, so any selection action in between — a click, a Select all, a
 // Clear — also retires it, without every one of those paths having to know
 // this marker exists.
-var browseLightboxStackGesture = null;
+/** @type {BrowseStackGesture | null} */ var browseLightboxStackGesture = null;
 // The gesture a delete-button close just retired, held only until the delete
 // that caused it either completes (and hands it back) or is cancelled (and
 // never claims it). See the ``lightbox:photodeleted`` listener.
-var browseLightboxStackGestureSpent = null;
+/** @type {BrowseStackGesture | null} */ var browseLightboxStackGestureSpent = null;
 
 // What each photo viewed in this lightbox session stands for, for the covers
 // among them: {photoId: memberIds}. Recorded while the photo is on screen,
@@ -184,7 +184,7 @@ var browseLightboxStackGestureSpent = null;
 // slot so the reopen that follows a delete cannot overwrite the entry the
 // delete still needs. Read by the ``lightbox:photodeleted`` listener, and
 // dropped when the lightbox is really closed. Codex P2 on PR #1672.
-var browseLightboxRepresentedByPhoto = {};
+/** @type {Record<string, number[]>} */ var browseLightboxRepresentedByPhoto = {};
 
 // The selection as it stood before the first click of the most recent click
 // sequence. Captured in ``selectPhoto`` and consulted by the grid double-click
@@ -196,7 +196,7 @@ var browseLightboxRepresentedByPhoto = {};
 // this snapshot the dblclick handler would mark that pre-existing batch as
 // gesture-generated and the close handler would then replace it with the
 // finished-on photo. Codex P2 on PR #1672.
-var browseSelectionBeforeStackDblClickStart = null;
+/** @type {Set<number> | null} */ var browseSelectionBeforeStackDblClickStart = null;
 
 function browseLightboxOwnsLoadedWindow() {
   return (
@@ -216,16 +216,16 @@ function refreshBrowseLightboxCounter() {
   var index = lightboxPhotos.findIndex(function(photo) {
     return photo.id === visibleId;
   });
-  var counter = document.getElementById('lightboxCounter');
+  var counter = /** @type {HTMLElement} */ (document.getElementById('lightboxCounter'));
   if (index < 0 || !counter || lightboxPhotos.length < 2) return;
-  var filename = lightboxPhotos[index].filename || '';
+  var filename = lightboxPhotos[index]?.filename || '';
   counter.textContent = (index + 1) + ' / ' + lightboxPhotos.length
     + (filename ? ' \u00b7 ' + filename : '');
   counter.title = filename;
   counter.style.display = '';
 }
 
-function continueBrowseLightboxAcrossBoundary(delta, currentId, session) {
+function continueBrowseLightboxAcrossBoundary(/** @type {number} */ delta, /** @type {number} */ currentId, /** @type {number} */ session) {
   if (session !== browseLightboxSession) return;
   if (!browseLightboxOwnsLoadedWindow() || window.vireoLightboxSession.requestedPhotoId() !== currentId) return;
   var lightboxPhotos = window._lightboxPhotoList;
@@ -243,9 +243,9 @@ function continueBrowseLightboxAcrossBoundary(delta, currentId, session) {
   var canLoad = delta > 0 ? !allLoaded : earliestPage > 1;
   if (!canLoad) return;
   if (loading) {
-    clearTimeout(browseLightboxBoundaryRetry);
+    if (browseLightboxBoundaryRetry != null) clearTimeout(browseLightboxBoundaryRetry);
     browseLightboxBoundaryRetry = setTimeout(function() {
-      continueBrowseLightboxAcrossBoundary(delta, currentId, session);
+      continueBrowseLightboxAcrossBoundary(delta, /** @type {number} */ currentId, /** @type {number} */ session);
     }, 50);
     return;
   }
@@ -291,7 +291,7 @@ document.addEventListener('lightbox:navigationboundary', function(event) {
 
 document.addEventListener('lightbox:closed', function() {
   browseLightboxSession++;
-  clearTimeout(browseLightboxBoundaryRetry);
+  if (browseLightboxBoundaryRetry != null) clearTimeout(browseLightboxBoundaryRetry);
   browseLightboxBoundaryRetry = null;
 });
 
@@ -304,7 +304,7 @@ document.addEventListener('lightbox:closed', function() {
 // but only if this delete is the one it was set aside for. Deleting some other
 // photo later (after a cancel, say) must not inherit it.
 document.addEventListener('lightbox:photodeleted', function(event) {
-  var deletedId = event && event.detail ? event.detail.photoId : null;
+  const deletedId = event && event.detail ? event.detail.photoId : null;
   var spent = browseLightboxStackGestureSpent;
   browseLightboxStackGestureSpent = null;
   if (deletedId == null) return;
@@ -364,11 +364,11 @@ document.addEventListener('lightbox:photodeleted', function(event) {
   // members) so what the card stands for matches what still exists, then
   // repaint the affected badge so its count matches the pruned list.
   // Codex P2 on PR #1672.
-  var badgesToRefresh = [];
+  /** @type {number[]} */ var badgesToRefresh = [];
   photos.forEach(function(photo) {
     var stack = photo.browse_stack;
     var stackIds = stack && stack.photo_ids;
-    if (!Array.isArray(stackIds)) return;
+    if (!stack || !Array.isArray(stackIds)) return;
     var idx = stackIds.indexOf(deletedId);
     if (idx === -1) return;
     stackIds.splice(idx, 1);
@@ -396,11 +396,11 @@ document.addEventListener('lightbox:photodeleted', function(event) {
       delete browseStackMembers[cacheKey];
       expandedBrowseStacks.delete(photo.id);
       browseStackCoverRecheck.delete(photo.id);
-      var tray = document.querySelector(
-        '.browse-stack-tray[data-stack-cover-id="' + photo.id + '"]');
+      var tray = /** @type {HTMLElement | null} */ (document.querySelector(
+        '.browse-stack-tray[data-stack-cover-id="' + photo.id + '"]'));
       if (tray) tray.remove();
-      var card = document.querySelector(
-        '.grid-card[data-id="' + photo.id + '"]');
+      var card = /** @type {HTMLElement | null} */ (document.querySelector(
+        '.grid-card[data-id="' + photo.id + '"]'));
       if (card) {
         card.classList.remove('has-browse-stack');
         card.classList.remove('stack-partial');
@@ -510,7 +510,7 @@ function browseReconcileEmptyLightboxClose() {
       // uncached collapsed stack is still represented by its cover card.
       // Codex P2 on PR #1672.
       var stackIds = (photo.browse_stack && photo.browse_stack.photo_ids) || [];
-      if (stackIds.indexOf(selectedPhotoId) !== -1) return true;
+      if (stackIds.indexOf(selectedPhotoId == null ? -1 : selectedPhotoId) !== -1) return true;
       var members = browseStackMembers[String(photo.id)] || [];
       return members.some(function(member) { return member.id === selectedPhotoId; });
     });
@@ -542,7 +542,7 @@ document.addEventListener('lightbox:closed', function(event) {
   // happens — which reopens the lightbox on the next photo, so there is a
   // real close still to come. Codex P2 on PR #1672.
   var stackGesture = browseLightboxStackGesture;
-  var deleteDialogOpen = !!document.querySelector('#deleteModal.open');
+  var deleteDialogOpen = !!/** @type {HTMLElement | null} */ (document.querySelector('#deleteModal.open'));
   browseLightboxStackGestureSpent = deleteDialogOpen ? stackGesture : null;
   browseLightboxStackGesture = null;
   // The delete dialog is open over this close and the lightbox will reopen on
@@ -565,7 +565,7 @@ document.addEventListener('lightbox:closed', function(event) {
     // selected with nothing on screen representing them, and the next batch
     // shortcut would act on photos the user cannot see.
     // Codex P2 on PR #1672.
-    var gestureIds = stackGesture && stackGesture.epoch === anchorRestoreEpoch
+    const gestureIds = stackGesture && stackGesture.epoch === anchorRestoreEpoch
       ? new Set(stackGesture.ids) : null;
     if (!gestureIds || !Array.from(selectedPhotos).every(function(id) {
       return gestureIds.has(id);

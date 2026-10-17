@@ -2,41 +2,43 @@
 // Classic page script; load boot.js after all definitions.
 
 /* ---------- Folder Browser ---------- */
+/** @param {string} targetInputId */
 function openBrowser(targetInputId) {
   browserTargetInput = targetInputId;
-  var currentVal = document.getElementById(targetInputId).value.trim();
+  var currentVal = /** @type {HTMLInputElement} */ (document.getElementById(targetInputId)).value.trim();
   browserPath = currentVal || '';
-  document.getElementById('moveBrowserModal').classList.add('open');
-  document.getElementById('newFolderName').value = '';
+  /** @type {HTMLElement} */ (document.getElementById('moveBrowserModal')).classList.add('open');
+  /** @type {HTMLInputElement} */ (document.getElementById('newFolderName')).value = '';
   updateBrowserSource();
   browseTo(browserPath || null);
 }
 
 function updateBrowserSource() {
-  var source = document.getElementById('moveBrowserSource');
+  var source = /** @type {HTMLElement} */ (document.getElementById('moveBrowserSource'));
   var folder = null;
   if (browserTargetInput === 'quickDestInput') {
-    var fid = parseInt(document.getElementById('quickFolderSelect').value);
+    var fid = parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('quickFolderSelect')).value);
     folder = allFolders.find(function(f) { return f.id === fid; });
   }
   if (!folder) {
     source.style.display = 'none';
-    document.getElementById('moveBrowserSourcePath').textContent = '';
-    document.getElementById('moveBrowserSourceCount').textContent = '';
+    /** @type {HTMLElement} */ (document.getElementById('moveBrowserSourcePath')).textContent = '';
+    /** @type {HTMLElement} */ (document.getElementById('moveBrowserSourceCount')).textContent = '';
     return;
   }
   var count = folder.photo_count || 0;
-  document.getElementById('moveBrowserSourcePath').textContent = folder.path;
-  document.getElementById('moveBrowserSourceCount').textContent = ' (' +
+  /** @type {HTMLElement} */ (document.getElementById('moveBrowserSourcePath')).textContent = folder.path;
+  /** @type {HTMLElement} */ (document.getElementById('moveBrowserSourceCount')).textContent = ' (' +
     count.toLocaleString() + ' photo' + (count !== 1 ? 's' : '') + ')';
   source.style.display = 'block';
 }
 
 function closeBrowser() {
-  document.getElementById('moveBrowserModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('moveBrowserModal')).classList.remove('open');
   browserTargetInput = null;
 }
 
+/** @param {string | null} path */
 async function browseTo(path) {
   // Stamp each browse so a slow initial fetch can't clobber a later
   // shortcut click. Without this, opening the modal with a prefilled
@@ -80,7 +82,7 @@ async function browseTo(path) {
     url = '/api/browse?path=' + encodeURIComponent(path);
   }
   try {
-    var data = await safeFetch(url);
+    /** @type {MoveBrowserData} */ var data = await safeFetch(url);
     if (seq !== browseSeq) return;
     browserPath = data.path;
     if (!path) browserHomePath = data.path;
@@ -90,10 +92,11 @@ async function browseTo(path) {
   }
 }
 
+/** @param {MoveBrowserData} data @param {{syntheticRoot?: boolean} | undefined} [opts] */
 function renderBrowserList(data, opts) {
-  document.getElementById('moveBrowserBreadcrumb').textContent = data.path || 'Volumes';
+  /** @type {HTMLElement} */ (document.getElementById('moveBrowserBreadcrumb')).textContent = data.path || 'Volumes';
 
-  var list = document.getElementById('moveBrowserList');
+  var list = /** @type {HTMLElement} */ (document.getElementById('moveBrowserList'));
   var html = '';
   var isSyntheticRoot = opts && opts.syntheticRoot;
   var parent = '';
@@ -123,7 +126,7 @@ function renderBrowserList(data, opts) {
 function selectBrowserFolder() {
   if (!browserTargetInput || !browserPath) return;
   var selectedPath = browserPath;
-  document.getElementById(browserTargetInput).value = selectedPath;
+  /** @type {HTMLInputElement} */ (document.getElementById(browserTargetInput)).value = selectedPath;
   closeBrowser();
   rememberRecentDestination(selectedPath);
   // Trigger any button state updates
@@ -132,7 +135,7 @@ function selectBrowserFolder() {
 }
 
 async function createNewFolder() {
-  var name = document.getElementById('newFolderName').value.trim();
+  var name = /** @type {HTMLInputElement} */ (document.getElementById('newFolderName')).value.trim();
   if (!name || !browserPath) return;
 
   var newPath = browserPath + (browserPath.endsWith('/') ? '' : '/') + name;
@@ -144,7 +147,7 @@ async function createNewFolder() {
     });
     // Refresh the browser to show the new folder
     browseTo(browserPath);
-    document.getElementById('newFolderName').value = '';
+    /** @type {HTMLInputElement} */ (document.getElementById('newFolderName')).value = '';
   } catch (e) {
     // safeFetch handles error toast
   }

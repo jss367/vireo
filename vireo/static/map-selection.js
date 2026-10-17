@@ -10,9 +10,13 @@ var mapSelectionIds = (function() {
     return null;
   }
   try {
+    /** @type {unknown} */
     var stored = JSON.parse(sessionStorage.getItem('vireoMapSelection') || 'null');
-    if (stored && Array.isArray(stored.photo_ids) && stored.photo_ids.length) {
-      return stored.photo_ids;
+    if (stored && typeof stored === 'object' && 'photo_ids' in stored && Array.isArray(stored.photo_ids)) {
+      var ids = stored.photo_ids.filter(function(id) {
+        return typeof id === 'number' && Number.isSafeInteger(id) && id > 0;
+      });
+      if (ids.length) return /** @type {number[]} */ (ids);
     }
   } catch (e) {}
   // Opened in a new tab, or the tab's session storage was cleared: there is
@@ -29,10 +33,11 @@ function mapSelectionScopeLabel() {
 }
 
 // The selection travels in a POST body: a large one would not fit in a URL.
+/** @param {unknown} rules @param {unknown} visual @returns {Promise<MapGeoResponse>} */
 function fetchMapSelection(rules, visual) {
-  return safeFetch('/api/photos/geo', {
+  return /** @type {Promise<MapGeoResponse>} */ (safeFetch('/api/photos/geo', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_ids: mapSelectionIds, rules: rules, visual: visual}),
-  });
+  }));
 }

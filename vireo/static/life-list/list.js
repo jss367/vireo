@@ -1,17 +1,17 @@
 // Life List page state, view preferences, escaping, and loading /api/life-list.
 // Classic page script; load boot.js after all definitions.
 
-var currentData = null;
+/** @type {LifeData|null} */ var currentData = null;
 var lifeListLoadSeq = 0;
 
 function restoreLifeListViewPreferences() {
-  VireoViewPreferences.restoreAll(document.getElementById('controlsBar'));
+  VireoViewPreferences.restoreAll(/** @type {HTMLElement} */ (document.getElementById('controlsBar')));
 }
 
 // All dynamic values rendered into card HTML pass through the shared
 // escapeAttr (vireo-utils.js) — same escaping convention as highlights.html.
 
-function formatDate(iso) {
+/** @param {string | undefined} iso */ function formatDate(iso) {
   if (!iso) return null;
   var d = new Date(iso);
   if (isNaN(d.getTime())) return null;
@@ -19,10 +19,10 @@ function formatDate(iso) {
 }
 
 async function loadLifeList() {
-  var meta = document.getElementById('meta');
+  var meta = /** @type {HTMLElement} */ (document.getElementById('meta'));
   var loadSeq = ++lifeListLoadSeq;
   meta.textContent = 'Loading life list…';
-  var data;
+  /** @type {LifeData} */ var data;
   try {
     data = await safeFetch('/api/life-list');
   } catch (e) {

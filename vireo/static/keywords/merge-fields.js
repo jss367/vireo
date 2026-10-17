@@ -6,7 +6,7 @@
 /* Build the per-attribute controls for one "record to keep". Rebuilt only
    when that dropdown changes -- re-rendering on every preview would fight
    the user's typing in the name and coordinate inputs. */
-function renderMergeFields(data) {
+/** @param {KeywordMergePreview} data */ function renderMergeFields(data) {
   const options = data.options;
   const resolved = data.resolved;
   const needed = new Set(data.requires_choice);
@@ -110,13 +110,13 @@ function renderMergeFields(data) {
    every target change and dialog reopen, so one chip click would fire a
    growing number of preview requests against stale option data. */
 function wireMergeFields() {
-  const nameInput = document.getElementById('kwMergeName');
+  const nameInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeName'));
   nameInput.addEventListener('input', function() {
     mergeOverrides.name = nameInput.value;
     scheduleMergePreview(false);
   });
-  const latInput = document.getElementById('kwMergeLat');
-  const lngInput = document.getElementById('kwMergeLng');
+  const latInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLat'));
+  const lngInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLng'));
   function readCoords() {
     if (latInput.value.trim() === '' && lngInput.value.trim() === '') {
       mergeOverrides.coordinates = null;
@@ -131,14 +131,14 @@ function wireMergeFields() {
   latInput.addEventListener('input', readCoords);
   lngInput.addEventListener('input', readCoords);
 
-  const parentSelect = document.getElementById('kwMergeParent');
+  const parentSelect = /** @type {HTMLSelectElement} */ (document.getElementById('kwMergeParent'));
   if (parentSelect) {
     parentSelect.addEventListener('change', function() {
       mergeOverrides.parent_id = parentSelect.value === '' ? null : Number(parentSelect.value);
       scheduleMergePreview(true);
     });
   }
-  const typeSelect = document.getElementById('kwMergeType');
+  const typeSelect = /** @type {HTMLSelectElement} */ (document.getElementById('kwMergeType'));
   if (typeSelect) {
     typeSelect.addEventListener('change', function() {
       mergeOverrides.type = typeSelect.value;
@@ -149,11 +149,11 @@ function wireMergeFields() {
 
 function bindMergeFieldDelegates() {
   mergeFields.addEventListener('click', function(event) {
-    const chip = event.target.closest('.kw-merge-chip');
+    if (!(event.target instanceof Element)) return; const chip = event.target.closest(/** @type {'button'} */ ('.kw-merge-chip'));
     if (!chip) return;
-    const nameInput = document.getElementById('kwMergeName');
-    const latInput = document.getElementById('kwMergeLat');
-    const lngInput = document.getElementById('kwMergeLng');
+    const nameInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeName'));
+    const latInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLat'));
+    const lngInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLng'));
     if (chip.dataset.name !== undefined) {
       nameInput.value = chip.dataset.name;
       mergeOverrides.name = chip.dataset.name;
@@ -161,8 +161,8 @@ function bindMergeFieldDelegates() {
       latInput.value = ''; lngInput.value = '';
       mergeOverrides.coordinates = null;
     } else {
-      latInput.value = chip.dataset.lat;
-      lngInput.value = chip.dataset.lng;
+      latInput.value = chip.dataset.lat || '';
+      lngInput.value = chip.dataset.lng || '';
       mergeOverrides.coordinates = {
         latitude: Number(chip.dataset.lat), longitude: Number(chip.dataset.lng)
       };
@@ -171,7 +171,7 @@ function bindMergeFieldDelegates() {
   });
 
   mergeFields.addEventListener('change', function(event) {
-    const input = event.target;
+    const input = event.target; if (!(input instanceof HTMLInputElement)) return;
     if (!mergeFieldOptions) return;
     if (input.name === 'kwMergePlace') {
       mergeOverrides.place_id = input.value === '' ? null : input.value;
@@ -183,11 +183,12 @@ function bindMergeFieldDelegates() {
       // instead, so the fields always show what the merge will actually do.
       scheduleMergePreview(true);
     } else if (input.name === 'kwMergeSpecies') {
+      const species = mergeFieldOptions.species[Number(input.value)]; if (input.value !== '' && !species) return;
       mergeOverrides.species = input.value === ''
         ? null
         : {
-            taxon_id: mergeFieldOptions.species[Number(input.value)].taxon_id,
-            source_taxon_id: mergeFieldOptions.species[Number(input.value)].source_taxon_id
+            taxon_id: species ? species.taxon_id : null,
+            source_taxon_id: species ? species.source_taxon_id : null
           };
       scheduleMergePreview(true);
     }
@@ -197,11 +198,11 @@ function bindMergeFieldDelegates() {
 /* Show the coordinates the merge will really use. Skipped once the user
    types their own, because from then on the boxes ARE the override and
    overwriting them would fight the typing. */
-function syncCoordinateInputs(data) {
+/** @param {KeywordMergePreview} data */ function syncCoordinateInputs(data) {
   if (mergeOverrides.coordinates !== undefined) return;
-  const latInput = document.getElementById('kwMergeLat');
-  const lngInput = document.getElementById('kwMergeLng');
+  const latInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLat'));
+  const lngInput = /** @type {HTMLInputElement} */ (document.getElementById('kwMergeLng'));
   if (!latInput || !lngInput) return;
-  latInput.value = data.resolved.latitude == null ? '' : data.resolved.latitude;
-  lngInput.value = data.resolved.longitude == null ? '' : data.resolved.longitude;
+  latInput.value = data.resolved.latitude == null ? '' : String(data.resolved.latitude);
+  lngInput.value = data.resolved.longitude == null ? '' : String(data.resolved.longitude);
 }

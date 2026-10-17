@@ -6,7 +6,7 @@
 bindJobListClicks();
 bindSourceCleanupConfirm();
 bindDetailPaneActions();
-document.getElementById('retryJobsPolling').addEventListener('click', retryJobsPolling);
+jobsElement('retryJobsPolling', HTMLButtonElement).addEventListener('click', retryJobsPolling);
 
 // Initial load
 fetchJobs();

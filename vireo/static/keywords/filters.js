@@ -3,14 +3,14 @@
 
 // -- Search & filter --
 function bindKeywordRecordToggles() {
-  document.getElementById('kwShowRecords').addEventListener('change', function() {
+  /** @type {HTMLInputElement} */ (document.getElementById('kwShowRecords')).addEventListener('change', function() {
     showRecords = this.checked;
     selectedIds.clear();
     render();
   });
-  document.getElementById('kwBody').addEventListener('click', function(event) {
-    if (!event.target.closest('[data-edit-records]')) return;
-    document.getElementById('kwShowRecords').checked = true;
+  /** @type {HTMLElement} */ (document.getElementById('kwBody')).addEventListener('click', function(event) {
+    if (!(event.target instanceof Element) || !event.target.closest('[data-edit-records]')) return;
+    /** @type {HTMLInputElement} */ (document.getElementById('kwShowRecords')).checked = true;
     showRecords = true;
     selectedIds.clear();
     render();
@@ -18,18 +18,18 @@ function bindKeywordRecordToggles() {
 }
 
 function bindKeywordSearch() {
-  document.getElementById('kwSearch').addEventListener('input', function() {
+  /** @type {HTMLInputElement} */ (document.getElementById('kwSearch')).addEventListener('input', function() {
     searchTerm = this.value.trim();
     render();
   });
 }
 
 function bindKeywordFilterButtons() {
-  document.querySelectorAll('.kw-filter-btn').forEach(btn => {
+  document.querySelectorAll(/** @type {'button'} */ ('.kw-filter-btn')).forEach(btn => {
     btn.addEventListener('click', function() {
-      document.querySelectorAll('.kw-filter-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll(/** @type {'button'} */ ('.kw-filter-btn')).forEach(b => b.classList.remove('active'));
       this.classList.add('active');
-      filterType = this.dataset.type;
+      filterType = this.dataset.type || 'all';
       render();
     });
   });
@@ -37,9 +37,9 @@ function bindKeywordFilterButtons() {
 
 // -- Sorting --
 function bindKeywordSorting() {
-  document.querySelectorAll('.kw-table th[data-col]').forEach(th => {
+  document.querySelectorAll(/** @type {'th'} */ ('.kw-table th[data-col]')).forEach(th => {
     th.addEventListener('click', function() {
-      const col = this.dataset.col;
+      const col = this.dataset.col || 'name';
       if (sortCol === col) { sortDir *= -1; } else { sortCol = col; sortDir = 1; }
       // Update header styles
       document.querySelectorAll('.kw-table th').forEach(h => {

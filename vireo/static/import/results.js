@@ -1,27 +1,28 @@
 // Import result presentation and the card-cleanup handoff.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {ImportResult} res @param {string} status */
 function renderResult(res, status) {
-  document.getElementById('resultCard').style.display = '';
-  const retryRow = document.getElementById('retryImportRow');
-  const retryButton = document.getElementById('btnRetryImport');
-  const directRetryButton = document.getElementById('btnRetryImportDirectToNas');
+  /** @type {HTMLElement} */ (document.getElementById('resultCard')).style.display = '';
+  const retryRow = /** @type {HTMLElement} */ (document.getElementById('retryImportRow'));
+  const retryButton = /** @type {HTMLButtonElement} */ (document.getElementById('btnRetryImport'));
+  const directRetryButton = /** @type {HTMLButtonElement} */ (document.getElementById('btnRetryImportDirectToNas'));
   directRetryButton.textContent = 'Retry directly to NAS';
   directRetryButton.style.display = 'none';
-  document.getElementById('retryImportDirectHint').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('retryImportDirectHint')).style.display = 'none';
   ++importRecoveryGeneration;
   directRetryButton.disabled = false;
-  const retryHint = document.getElementById('retryImportHint');
+  const retryHint = /** @type {HTMLElement} */ (document.getElementById('retryImportHint'));
   retryRow.style.display = 'none';
   retryHint.textContent = '';
   retryButton.disabled = false;
   // Card-cleanup entry point. Reset it here so an in-place run after a
   // copy run doesn't inherit the previous run's button and source path.
-  const freeUpCardBtn = document.getElementById('btnFreeUpCardSpace');
+  const freeUpCardBtn = /** @type {HTMLButtonElement} */ (document.getElementById('btnFreeUpCardSpace'));
   freeUpCardBtn.style.display = 'none';
   cardCleanupImportSources = [];
-  const pill = document.getElementById('safeToFormatPill');
-  const unsafe = document.getElementById('unsafeList');
+  const pill = /** @type {HTMLElement} */ (document.getElementById('safeToFormatPill'));
+  const unsafe = /** @type {HTMLElement} */ (document.getElementById('unsafeList'));
   unsafe.innerHTML = '';
   if (res.mode === 'in_place') {
     pill.className = res.ok === false ? 'pill pill-bad' : 'pill pill-ok';
@@ -36,11 +37,11 @@ function renderResult(res, status) {
       unsafe.appendChild(li);
     });
     if (res.source_snapshot_id != null) {
-      [
-        ['Missing', res.missing, res.missing_paths],
-        ['Unreadable', res.unreadable, res.unreadable_paths],
-        ['Not indexed', res.unindexed, res.unindexed_paths],
-      ].forEach(([label, count, paths]) => {
+      /** @type {[string, number | undefined, string[]][]} */ ([
+        ['Missing', res.missing, res.missing_paths || []],
+        ['Unreadable', res.unreadable, res.unreadable_paths || []],
+        ['Not indexed', res.unindexed, res.unindexed_paths || []],
+      ]).forEach(([label, count, paths]) => {
         (paths || []).forEach(path => {
           const li = document.createElement('li');
           li.textContent = label + ': ' + path;
@@ -70,14 +71,14 @@ function renderResult(res, status) {
       if (res.unreadable) parts.push(res.unreadable + ' unreadable');
       if (res.unindexed) parts.push(res.unindexed + ' not indexed');
       if (status && status !== 'completed') parts.push('job ' + status);
-      document.getElementById('resultSummary').textContent = parts.join(' · ');
+      /** @type {HTMLElement} */ (document.getElementById('resultSummary')).textContent = parts.join(' · ');
     } else {
-      document.getElementById('resultSummary').textContent =
+      /** @type {HTMLElement} */ (document.getElementById('resultSummary')).textContent =
         (res.indexed || res.discovered || 0) + ' indexed' +
         (res.failed ? ' · ' + res.failed + ' failed' : '') +
         (status && status !== 'completed' ? ' · job ' + status : '');
     }
-    document.getElementById('resultFolders').innerHTML = '';
+    /** @type {HTMLElement} */ (document.getElementById('resultFolders')).innerHTML = '';
     renderChainInfo(res);
     renderTaggingInfo(res);
     renderModelWarning(res);
@@ -144,12 +145,12 @@ function renderResult(res, status) {
     freeUpCardBtn.style.display = '';
   }
   const importNotStarted = status === 'failed' && importFailedBeforeStart(res);
-  document.getElementById('resultSummary').textContent = importNotStarted
+  /** @type {HTMLElement} */ (document.getElementById('resultSummary')).textContent = importNotStarted
     ? 'Import stopped before copying began.'
     : res.discovered + ' discovered · ' + res.copied + ' copied · ' +
       res.skipped_duplicate + ' duplicates skipped · ' + res.failed + ' failed' +
       (status && status !== 'completed' ? ' · job ' + status : '');
-  renderFolderTable(document.getElementById('resultFolders'), res.folders || {});
+  renderFolderTable(/** @type {HTMLElement} */ (document.getElementById('resultFolders')), res.folders || {});
 
   const failedCount = Number(res.failed || 0);
   if ((failedCount > 0 || importNotStarted) && retryBodyFromFinishedJob(lastFinishedImportJob)) {
@@ -168,8 +169,9 @@ function renderResult(res, status) {
   renderModelWarning(res);
 }
 
+/** @param {ImportResult} res */
 function renderTaggingInfo(res) {
-  const el = document.getElementById('taggingInfo');
+  const el = /** @type {HTMLElement} */ (document.getElementById('taggingInfo'));
   const tagging = res.tagging;
   if (!tagging) {
     el.textContent = '';
@@ -193,14 +195,15 @@ function renderTaggingInfo(res) {
     }
   }
   if ((tagging.errors || []).length) {
-    parts.push(tagging.errors.join(' '));
+    parts.push((tagging.errors || []).join(' '));
   }
   if (tagging.skipped) parts.push('Tagging skipped: ' + tagging.skipped);
   el.textContent = parts.join(' · ');
 }
 
+/** @param {ImportResult} res */
 function renderChainInfo(res) {
-  const chain = document.getElementById('chainInfo');
+  const chain = /** @type {HTMLElement} */ (document.getElementById('chainInfo'));
   const parts = [];
   if (res.process_job_id) {
     parts.push('Processing started as its own job: ' + res.process_job_id);
@@ -251,8 +254,9 @@ function renderChainInfo(res) {
   chain.textContent = parts.join(' ');
 }
 
+/** @param {ImportResult} res */
 function renderModelWarning(res) {
-  const warn = document.getElementById('modelWarning');
+  const warn = /** @type {HTMLElement} */ (document.getElementById('modelWarning'));
   if (res.model_warning) {
     warn.textContent = res.model_warning;
     warn.style.display = '';
@@ -268,7 +272,7 @@ function renderModelWarning(res) {
 function openCardCleanupPage() {
   const params = new URLSearchParams();
   if (cardCleanupImportSources.length) {
-    params.set('source', cardCleanupImportSources[0]);
+    params.set('source', cardCleanupImportSources[0] || '');
     cardCleanupImportSources.slice(1).forEach((s) => params.append('others', s));
   }
   const qs = params.toString();

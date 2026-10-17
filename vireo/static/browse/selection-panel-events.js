@@ -8,12 +8,12 @@
   if (!selectionPanel) return;
 
   selectionPanel.bindActions = function() {
-    const panel = document.getElementById('selectionPanel');
+    const panel = /** @type {HTMLElement} */ (document.getElementById('selectionPanel'));
     if (!panel || bound.has(panel)) return;
     bound.add(panel);
     panel.addEventListener('click', function(event) {
       if (!(event.target instanceof Element)) return;
-      var button = event.target.closest('button[data-selection-action]');
+      var button = /** @type {HTMLElement | null} */ (event.target.closest('button[data-selection-action]'));
       if (!(button instanceof HTMLButtonElement) || !panel.contains(button) || button.disabled) return;
       var action = button.getAttribute('data-selection-action');
       if (action === 'edit') {

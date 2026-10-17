@@ -15,7 +15,7 @@
 (function () {
   'use strict';
 
-  const OP_LABELS = {
+  const OP_LABELS = /** @type {Record<string, string>} */ ({
     'contains': 'contains',
     'not_contains': "doesn't contain",
     'is': 'is',
@@ -32,7 +32,7 @@
     'under': 'is under',
     'not_under': 'is not under',
     'recent': 'is in the last',
-  };
+  });
   const RECENT_UNITS = [
     ['days', 'day', 'days'],
     ['weeks', 'week', 'weeks'],
@@ -43,12 +43,12 @@
   // quick filter for. A configured shortcut's own label wins (see
   // ``shortcutLabelFor``); this is the fallback for a rule built in the
   // popover, or after its shortcut was removed from Settings.
-  const MISSING_TAG_LABELS = {
+  const MISSING_TAG_LABELS = /** @type {Record<string, string>} */ ({
     has_species: 'Missing species',
     has_location_keyword: 'Missing location tag',
-  };
+  });
 
-  const state = {
+  const state = /** @type {FilterState} */ ({
     page: 'browse',
     root: { mode: 'all', rules: [] },
     muted: false,
@@ -56,7 +56,7 @@
     visualInfo: null,   // last server-reported visual status/coverage
     scopeLabel: '',
     scopeLocked: true,
-    fields: null,          // registry from /api/filters/fields (key -> spec)
+    fields: null, onCollectionSaved: null,          // registry from /api/filters/fields (key -> spec)
     fieldOrder: [],
     excludedValues: {},    // page-specific enum values hidden from filter controls
     onChange: null,
@@ -68,18 +68,18 @@
     advanced: false,
     ready: false,
     shortcuts: [],       // configured quick filters, rendered as the button row
-  };
+  });
 
-  let rootEl = null;
-  let snapshots = [];
-  let persistTimer = null;
-  let suggestTimer = null;
-  let quickSearchTimer = null;
-  let toastTimer = null;
+  let rootEl = /** @type {HTMLElement | null} */ (null);
+  let snapshots = /** @type {FilterSnapshot[]} */ ([]);
+  let persistTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+  let suggestTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+  let quickSearchTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+  let toastTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
   let wouldMatchEpoch = 0;
   let localEdits = false;
-  let extensionOptions = null;
-  let extensionRequest = null;
+  let extensionOptions = /** @type {string[] | null} */ (null);
+  let extensionRequest = /** @type {Promise<string[]> | null} */ (null);
   // What quick-search terms match: 'all' (every metadata value) or
   // 'keyword' (keyword names only). The toggle is remembered across pages;
   // an applied search records its own scope in ``_qs_scope``, and the
@@ -91,11 +91,13 @@
   let searchScope = readSearchScope();
   let scopeExplicit = false;
 
-  const $ = (sel) => rootEl.querySelector(sel);
-  const $$ = (sel) => Array.from(rootEl.querySelectorAll(sel));
+  const $ = (/** @type {string} */ sel) => /** @type {HTMLElement} */ (/** @type {HTMLElement} */ (rootEl?.querySelector(sel)));
+  const $$ = (/** @type {string} */ sel) => Array.from(/** @type {NodeListOf<HTMLElement>} */ (/** @type {NodeListOf<HTMLElement>} */ (rootEl?.querySelectorAll(sel))));
+  /** @template T @param {T} v @returns {T} */
   const clone = (v) => JSON.parse(JSON.stringify(v));
 
-  function fetchJson(url, options) {
+  /** @returns {Promise<unknown>} */
+  function fetchJson(/** @type {string} */ url, /** @type {RequestInit | undefined} */ options = undefined) {
     return fetch(url, options).then((r) => {
       if (!r.ok) return r.json().catch(() => ({})).then((body) => {
         throw new Error(body.error || body.message || `HTTP ${r.status}`);
@@ -106,11 +108,11 @@
 
   function loadRegistry() {
     if (state.fields) return Promise.resolve(state.fields);
-    return fetchJson('/api/filters/fields').then((data) => {
-      state.fields = {};
+    return /** @type {Promise<{fields: FilterRegisteredField[]}>} */ (fetchJson('/api/filters/fields')).then((data) => {
+      const fields = /** @type {Record<string, FilterField>} */ ({}); state.fields = fields;
       state.fieldOrder = [];
       data.fields.forEach((f) => {
-        state.fields[f.key] = f;
+        fields[f.key] = f;
         state.fieldOrder.push(f.key);
       });
       return state.fields;
@@ -119,11 +121,13 @@
 
   // ---- rule model -------------------------------------------------------
 
-  function isGroup(node) {
-    return node && typeof node === 'object' && Array.isArray(node.rules) && !('field' in node);
+  /** @returns {node is FilterGroup} */
+  function isGroup(/** @type {FilterRule | null | undefined} */ node) {
+    return !!node && typeof node === 'object' && Array.isArray(node.rules) && !('field' in node);
   }
 
-  function allLeaves(node, out) {
+  /** @returns {FilterLeaf[]} */
+  function allLeaves(/** @type {FilterRule | null | undefined} */ node, /** @type {FilterLeaf[] | undefined} */ out = undefined) {
     const target = out || [];
     if (!node) return target;
     if (isGroup(node)) node.rules.forEach((child) => allLeaves(child, target));
@@ -131,7 +135,7 @@
     return target;
   }
 
-  function defaultOp(spec) {
+  function defaultOp(/** @type {FilterField | undefined} */ spec) {
     if (!spec) return 'is';
     if (spec.default_op) return spec.default_op;
     if (spec.type === 'text') return 'contains';
@@ -139,19 +143,19 @@
     if (spec.type === 'enum') return 'in';
     if (spec.type === 'rating') return '>=';
     if (spec.type === 'folder') return 'under';
-    return spec.ops[0];
+    return spec.ops[0] || 'is';
   }
 
-  function fieldSpec(field) {
-    const spec = state.fields[field];
+  function fieldSpec(/** @type {string} */ field) {
+    const spec = state.fields?.[field];
     const excluded = state.excludedValues[field] || [];
     if (!spec || !spec.values || !excluded.length) return spec;
     return { ...spec, values: spec.values.filter((value) => !excluded.includes(value)) };
   }
 
-  function fieldValueAvailable(field, value) {
+  function fieldValueAvailable(/** @type {string} */ field, /** @type {FilterScalar} */ value) {
     const spec = fieldSpec(field);
-    return !spec || !spec.values || spec.values.includes(value);
+    return !spec || !spec.values || spec.values?.includes(/** @type {FilterScalar} */ (value));
   }
 
   // Strip excluded enum values out of a rule tree so a cross-page handoff
@@ -167,16 +171,17 @@
   // value is already false by the page scope, so they are harmless. An
   // ``in`` rule left with no values, or a group left with no rules, is
   // pruned so we never send an empty ``in [] → false`` clause.
-  function sanitizeExcludedValues(node) {
+  /** @returns {FilterRule | null} */
+  function sanitizeExcludedValues(/** @type {FilterRule | null} */ node) {
     if (!node) return null;
     if (isGroup(node)) {
-      const rules = node.rules.map(sanitizeExcludedValues).filter((n) => n);
+      const rules = node.rules.map(sanitizeExcludedValues).filter((n) => n !== null);
       if (!rules.length) return null;
       return { ...node, rules };
     }
     const excluded = state.excludedValues[node.field];
     if (!excluded || !excluded.length) return node;
-    if (node.op === 'is') return excluded.includes(node.value) ? null : node;
+    if (node.op === 'is') return excluded.includes(/** @type {FilterScalar} */ (node.value)) ? null : node;
     if (node.op === 'in' && Array.isArray(node.value)) {
       const values = node.value.filter((v) => !excluded.includes(v));
       if (!values.length) return null;
@@ -186,28 +191,31 @@
     return node;
   }
 
-  function sanitizeRoot(root) {
+  /** @returns {FilterGroup} */
+  function sanitizeRoot(/** @type {FilterGroup | null} */ root) {
     if (!root || !Array.isArray(root.rules)) return { mode: 'all', rules: [] };
     const cleaned = sanitizeExcludedValues(root);
-    return cleaned || { mode: root.mode || 'all', rules: [] };
+    return isGroup(cleaned) ? cleaned : { mode: root.mode || 'all', rules: [] };
   }
 
-  function defaultValue(spec, op) {
+  /** @returns {FilterValue} */
+  function defaultValue(/** @type {FilterField} */ spec, /** @type {string} */ op) {
     if (op === 'recent') return { n: 12, unit: 'months' };
     if (op === 'between') {
       if (spec.type === 'date') return ['2025-01-01', new Date().toISOString().slice(0, 10)];
       return [0, 100];
     }
-    if (op === 'in' || op === 'not_in') return spec.values && spec.values.length ? [spec.values[0]] : [];
+    if (op === 'in' || op === 'not_in') return spec.values && spec.values.length ? [(spec.values[0] ?? '')] : [];
     if (spec.type === 'boolean') return 1;
-    if (spec.type === 'enum') return spec.values && spec.values.length ? spec.values[0] : '';
+    if (spec.type === 'enum') return spec.values && spec.values.length ? (spec.values[0] ?? '') : '';
     if (spec.type === 'rating') return 3;
     if (spec.type === 'number') return 0;
     if (spec.type === 'date') return new Date().toISOString().slice(0, 10);
     return '';
   }
 
-  function coerceValue(spec, op, prev) {
+  /** @returns {FilterValue} */
+  function coerceValue(/** @type {FilterField} */ spec, /** @type {string} */ op, /** @type {FilterValue | undefined} */ prev) {
     if (op === 'recent') {
       return prev && typeof prev === 'object' && !Array.isArray(prev) && prev.n ? prev : defaultValue(spec, op);
     }
@@ -217,42 +225,44 @@
     }
     if (op === 'in' || op === 'not_in') {
       if (Array.isArray(prev)) return prev.length ? prev : defaultValue(spec, op);
-      if (prev != null && prev !== '' && (!spec.values || spec.values.includes(prev))) return [prev];
+      if (prev != null && typeof prev !== 'object' && prev !== '' && (!spec.values || spec.values.includes(prev))) return [prev];
       return defaultValue(spec, op);
     }
-    if (Array.isArray(prev)) return prev.length ? prev[0] : defaultValue(spec, op);
+    if (Array.isArray(prev)) return prev.length ? prev[0] ?? null : defaultValue(spec, op);
     if (prev && typeof prev === 'object') return defaultValue(spec, op);
-    if (spec.type === 'enum' && spec.values && !spec.values.includes(prev)) {
-      return spec.values.length ? spec.values[0] : '';
+    if (spec.type === 'enum' && spec.values && !spec.values.includes(/** @type {FilterScalar} */ (prev))) {
+      return spec.values.length ? (spec.values[0] ?? '') : '';
     }
     if (prev == null || prev === '') return defaultValue(spec, op);
     return prev;
   }
 
-  function makeRule(field, op, value) {
-    const spec = fieldSpec(field);
+  /** @returns {FilterLeaf} */
+  function makeRule(/** @type {string} */ field, /** @type {string | undefined} */ op = undefined, /** @type {FilterValue | undefined} */ value = undefined) {
+    const spec = fieldSpec(field) || {label: field, type: 'text', ops: ['contains']};
     const resolvedOp = op || defaultOp(spec);
     return { field, op: resolvedOp, value: value == null ? defaultValue(spec, resolvedOp) : value };
   }
 
-  function getNodeAtPath(path) {
+  function getNodeAtPath(/** @type {string | undefined} */ path) {
     if (path === 'root' || path === '') return state.root;
-    let node = state.root;
+    let node = /** @type {FilterRule | undefined} */ (state.root);
     String(path).split('.').forEach((idx) => {
       node = node && node.rules ? node.rules[Number(idx)] : undefined;
     });
     return node;
   }
 
-  function getParentAtPath(path) {
+  function getParentAtPath(/** @type {string} */ path) {
     const parts = String(path).split('.');
     const index = Number(parts.pop());
-    let parent = state.root;
-    parts.forEach((idx) => { parent = parent.rules[Number(idx)]; });
+    let parent = /** @type {FilterGroup | undefined} */ (state.root);
+    parts.forEach((idx) => { const next = parent?.rules[Number(idx)]; parent = isGroup(next) ? next : undefined; });
     return { parent, index };
   }
 
-  function removeByReference(node, target) {
+  /** @returns {boolean} */
+  function removeByReference(/** @type {FilterRule} */ node, /** @type {FilterRule} */ target) {
     if (!isGroup(node)) return false;
     const idx = node.rules.indexOf(target);
     if (idx >= 0) { node.rules.splice(idx, 1); return true; }
@@ -261,17 +271,18 @@
 
   // Structural equality for rule nodes. Quick filters are stored expressions,
   // so "is this shortcut on?" is "is this exact node in the expression?".
-  function sameNode(a, b) {
+  /** @returns {boolean} */
+  function sameNode(/** @type {unknown} */ a, /** @type {unknown} */ b) {
     if (a === b) return true;
     if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return a === b;
     if (Array.isArray(a) || Array.isArray(b)) {
       return Array.isArray(a) && Array.isArray(b) && a.length === b.length &&
         a.every((item, i) => sameNode(item, b[i]));
     }
-    const keys = Object.keys(a).filter((k) => a[k] !== undefined);
-    const otherKeys = Object.keys(b).filter((k) => b[k] !== undefined);
+    const left = /** @type {Record<string, unknown>} */ (a); const right = /** @type {Record<string, unknown>} */ (b); const keys = Object.keys(left).filter((k) => left[k] !== undefined);
+    const otherKeys = Object.keys(right).filter((k) => right[k] !== undefined);
     if (keys.length !== otherKeys.length) return false;
-    return keys.every((k) => Object.hasOwn(b, k) && sameNode(a[k], b[k]));
+    return keys.every((k) => Object.hasOwn(b, k) && sameNode(left[k], right[k]));
   }
 
   // ---- configured quick filters ----------------------------------------
@@ -281,7 +292,7 @@
   // soon as the list lands — disabled, like the rest of the bar, until the
   // field registry makes them safe to click.
   function loadShortcuts() {
-    return fetchJson('/api/filters/shortcuts').then((data) => {
+    return /** @type {Promise<{shortcuts: FilterShortcut[], groups: FilterShortcutGroup[]}>} */ (fetchJson('/api/filters/shortcuts')).then((data) => {
       state.shortcuts = Array.isArray(data.shortcuts) ? data.shortcuts : [];
       renderShortcutButtons(Array.isArray(data.groups) ? data.groups : []);
     }).catch(() => {
@@ -292,10 +303,10 @@
     });
   }
 
-  function renderShortcutButtons(groups) {
-    const host = $('.vf-shortcuts');
-    const hint = $('.vf-missing-hint');
-    host.querySelectorAll('.vf-shortcut-group').forEach((el) => el.remove());
+  function renderShortcutButtons(/** @type {FilterShortcutGroup[]} */ groups) {
+    const host = /** @type {HTMLElement} */ ($('.vf-shortcuts'));
+    const hint = /** @type {HTMLElement} */ ($('.vf-missing-hint'));
+    /** @type {NodeListOf<HTMLElement>} */ (host.querySelectorAll('.vf-shortcut-group')).forEach((el) => el.remove());
     const frag = document.createDocumentFragment();
     groups.forEach((group) => {
       const box = document.createElement('div');
@@ -322,26 +333,26 @@
     host.insertBefore(frag, hint);
   }
 
-  function shortcutById(id) {
+  function shortcutById(/** @type {string | undefined} */ id) {
     return state.shortcuts.find((s) => s.id === id) || null;
   }
 
   // Ungrouped shortcuts are their own group: they toggle a standalone clause
   // instead of merging with a neighbor.
-  function shortcutGroupKey(shortcut) {
+  function shortcutGroupKey(/** @type {FilterShortcut} */ shortcut) {
     return shortcut.group || `\u0000${shortcut.id}`;
   }
 
   // Fields covered by the missing-tag buttons that share this group — the
   // set that ORs together into "missing either tag".
-  function missingGroupFields(shortcut) {
+  function missingGroupFields(/** @type {FilterShortcut} */ shortcut) {
     const key = shortcutGroupKey(shortcut);
     return state.shortcuts
       .filter((s) => s.kind === 'missing' && shortcutGroupKey(s) === key)
       .map((s) => s.field);
   }
 
-  function shortcutLabelFor(node) {
+  function shortcutLabelFor(/** @type {FilterRule} */ node) {
     const match = state.shortcuts.find((s) => sameNode(s.rules, node));
     if (match) return match.label;
     // Clicking an enum shortcut stores ``field in [value]`` so a second value
@@ -352,7 +363,7 @@
     if (!isGroup(node) && node.op === 'in' && Array.isArray(node.value) &&
         node.value.length === 1) {
       const single = state.shortcuts.find((s) => s.kind === 'enum' &&
-        s.field === node.field && s.value === node.value[0]);
+        s.field === node.field && s.value === (Array.isArray(node.value) ? node.value[0] : undefined));
       if (single) return single.label;
     }
     return null;
@@ -365,21 +376,23 @@
   // query (and into any scope request built from the result) and collapse
   // the grid to nothing — never substitute "true" for the removed leaf,
   // which inverts any/none groups (prototype review finding).
-  function prunedTree(root, drop) {
-    function walk(node) {
+  /** @returns {FilterGroup} */
+  function prunedTree(/** @type {FilterGroup} */ root, /** @type {(node: FilterLeaf) => boolean} */ drop) {
+    /** @returns {FilterRule | null} */
+  function walk(/** @type {FilterRule} */ node) {
       if (!isGroup(node)) return drop(node) ? null : clone(node);
       const kept = node.rules.map(walk).filter((c) => c !== null);
       if (!kept.length) return null;
       return { ...clone({ ...node, rules: [] }), rules: kept };
     }
-    return walk(root) || { mode: 'all', rules: [] };
+    const cleaned = walk(root); return isGroup(cleaned) ? cleaned : { mode: 'all', rules: [] };
   }
 
-  function rulesWithout(target) {
+  function rulesWithout(/** @type {FilterRule} */ target) {
     return prunedTree(state.root, (n) => n === target);
   }
 
-  function rulesWithoutFields(root, fields) {
+  function rulesWithoutFields(/** @type {FilterGroup} */ root, /** @type {string[]} */ fields) {
     return prunedTree(root, (n) => fields.includes(n.field));
   }
 
@@ -392,7 +405,7 @@
   // r4208938067). Wrap non-``all`` subtrees so their mode survives, and
   // drop empty subtrees so an empty ``any`` doesn't short-circuit the
   // scope to false (``prunedTree`` already prunes nested empties).
-  function composeScopeRules(context, others) {
+  function composeScopeRules(/** @type {FilterRule[]} */ context, /** @type {FilterGroup} */ others) {
     const combined = clone(context);
     if (others && others.rules && others.rules.length) {
       if (others.mode === 'all') combined.push(...others.rules);
@@ -403,15 +416,16 @@
 
   // ---- labels -----------------------------------------------------------
 
-  function valueLabel(spec, rule) {
+  /** @returns {string | number | boolean | null} */
+  function valueLabel(/** @type {FilterField} */ spec, /** @type {FilterLeaf} */ rule) {
     const labels = spec.labels || {};
     if (rule.op === 'in' || rule.op === 'not_in') {
       const values = Array.isArray(rule.value) ? rule.value : [rule.value];
-      return values.map((v) => labels[v] || v).join(', ') || '(none)';
+      return values.map((v) => labels[String(v)] || v).join(', ') || '(none)';
     }
     if (rule.op === 'recent') {
-      const spec2 = rule.value || {};
-      const unit = RECENT_UNITS.find(([k]) => k === spec2.unit) || RECENT_UNITS[0];
+      const spec2 = rule.value && typeof rule.value === 'object' && !Array.isArray(rule.value) ? rule.value : {n: 12, unit: 'months'};
+      const unit = RECENT_UNITS.find(([k]) => k === spec2.unit) || ['days', 'day', 'days'];
       return `${spec2.n} ${Number(spec2.n) === 1 ? unit[1] : unit[2]}`;
     }
     if (rule.op === 'between') {
@@ -422,18 +436,18 @@
     if (spec.type === 'rating') {
       return `${rule.value} ${Number(rule.value) === 1 ? 'star' : 'stars'}`;
     }
-    return labels[rule.value] != null ? labels[rule.value] : rule.value;
+    return labels[String(rule.value)] ?? String(rule.value);
   }
 
   // ``literal`` describes the rule itself, ignoring any quick-filter label
   // configured for it — what the Settings list needs while naming a button.
-  function ruleLabel(rule, literal) {
+  function ruleLabel(/** @type {FilterLeaf} */ rule, /** @type {boolean | undefined} */ literal = undefined) {
     // A clause set by a quick filter reads back with that button's words —
     // the chip must name the thing the user clicked, not a paraphrase.
     const fromShortcut = literal ? null : shortcutLabelFor(rule);
     if (fromShortcut) return fromShortcut;
     if (isMissingTagRule(rule) && MISSING_TAG_LABELS[rule.field]) {
-      return MISSING_TAG_LABELS[rule.field];
+      return MISSING_TAG_LABELS[rule.field] || rule.field;
     }
     if (rule.field === 'keyword_identity') return 'Keyword · ' + (rule.label || 'Selected species or place');
     if (['burst_id', 'duplicate_group'].includes(rule.field)) {
@@ -446,21 +460,22 @@
     }
     if (rule.field === 'life_list_uncounted') {
       try {
-        const token = JSON.parse(rule.value);
+        const token = JSON.parse(String(rule.value));
         if (token && typeof token.name === 'string' && token.name) {
           return `Uncounted identification · ${token.name}`;
         }
       } catch (e) { /* Invalid tokens fail closed on the server. */ }
       return 'Uncounted identification';
     }
-    const spec = state.fields[rule.field] || { label: rule.field, type: 'text' };
+    const spec = state.fields?.[rule.field] || { label: rule.field, type: 'text', ops: [] };
     const opLabel = OP_LABELS[rule.op] || rule.op;
     return `${spec.label} ${opLabel} ${valueLabel(spec, rule)}`;
   }
 
   // Sentence form of a whole node: a leaf reads as one clause, a group as
   // its children joined by the logic that combines them.
-  function describeNode(node, literal) {
+  /** @returns {string} */
+  function describeNode(/** @type {FilterRule} */ node, /** @type {boolean | undefined} */ literal = undefined) {
     if (!isGroup(node)) return ruleLabel(node, literal);
     const parts = node.rules.map((child) => describeNode(child, literal));
     if (node.mode === 'none') return `NOT (${parts.join(' OR ')})`;
@@ -480,16 +495,16 @@
     }
   }
 
-  function groupScope(group) {
+  function groupScope(/** @type {FilterRule | undefined} */ group) {
     return group && group._qs_scope === 'keyword' ? 'keyword' : 'all';
   }
 
-  function quickSearchLabel(group) {
+  function quickSearchLabel(/** @type {FilterRule} */ group) {
     return groupScope(group) === 'keyword' ? 'Keywords' : 'Search';
   }
 
   function chipEntries() {
-    const entries = [];
+    const entries = /** @type {FilterChip[]} */ ([]);
     if (state.visual) {
       const status = state.visualInfo && state.visualInfo.status;
       entries.push({
@@ -509,8 +524,8 @@
       } else if (fromShortcut) {
         // A grouped expression set by one button removes as one chip.
         entries.push({ node, label: fromShortcut });
-      } else if (isMissingTagGroup(node)) {
-        entries.push({ node, label: node.rules.map((rule) => ruleLabel(rule)).join(' OR ') });
+      } else if (isMissingTagGroup(node) && isGroup(node)) {
+        entries.push({ node, label: node.rules.map((rule) => describeNode(rule)).join(' OR ') });
       } else {
         entries.push({ node, label: describeNode(node) });
       }
@@ -533,7 +548,7 @@
   // (Codex review r3620791294). Non-'all' roots are wrapped as a nested
   // child so the outer AND with the context is honored without collapsing
   // the inner OR/NOT.
-  function composeWithContext(context, root) {
+  function composeWithContext(/** @type {FilterRule[]} */ context, /** @type {FilterGroup} */ root) {
     const ctx = clone(context);
     const rootMode = (root && root.mode) || 'all';
     const rootRules = (root && Array.isArray(root.rules)) ? root.rules : [];
@@ -565,13 +580,13 @@
     if (snapshots.length > 20) snapshots.shift();
   }
 
-  function mutate(fn, opts) {
+  function mutate(/** @type {() => void} */ fn, /** @type {FilterMutationOptions | undefined} */ opts = undefined) {
     localEdits = true;
     const options = opts || {};
     // A pending debounced edit would replay stale input against the
     // re-rendered tree (e.g. overwrite a just-picked suggestion with the
     // half-typed text). Nothing survives across a mutate.
-    clearTimeout(editDebounce);
+    clearTimeout(editDebounce ?? undefined);
     editDebounce = null;
     if (!options.noSnapshot) snapshot();
     fn();
@@ -610,13 +625,13 @@
     if (state.onChange) state.onChange({ reason: null });
   }
 
-  function toast(text, withUndo) {
-    const el = $('.vf-toast');
+  function toast(/** @type {string} */ text, /** @type {boolean | undefined} */ withUndo = undefined) {
+    const el = /** @type {HTMLElement} */ ($('.vf-toast'));
     if (!el) return;
-    el.querySelector('span').textContent = text;
-    el.querySelector('button').hidden = !withUndo;
+    /** @type {HTMLElement} */ (el.querySelector('span')).textContent = text;
+    /** @type {HTMLButtonElement} */ (el.querySelector('button')).hidden = !withUndo;
     el.hidden = false;
-    clearTimeout(toastTimer);
+    clearTimeout(toastTimer ?? undefined);
     toastTimer = setTimeout(() => { el.hidden = true; }, 4200);
   }
 
@@ -627,11 +642,11 @@
     // "would match" counter must reflect what unpausing would apply, not
     // an AND-flattened version of an any/none root (Codex r3620791294).
     const rules = composeWithContext(context, state.root);
-    fetchJson('/api/photos/query', {
+    /** @type {Promise<{total: number}>} */ (fetchJson('/api/photos/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...(state.getScope ? state.getScope() : {}), rules, per_page: 1, visual: state.visual || undefined }),
-    }).then((data) => {
+    })).then((data) => {
       if (epoch !== wouldMatchEpoch || !state.muted) return;
       state.wouldMatch = data.total;
       renderMuteState();
@@ -642,14 +657,14 @@
 
   function schedulePersist() {
     if (!state.workspaceId) return;
-    clearTimeout(persistTimer);
+    clearTimeout(persistTimer ?? undefined);
     persistTimer = setTimeout(persistNow, 800);
   }
 
   function persistNow() {
     if (!state.workspaceId) return;
     // Read-modify-write ui_state so other keys survive.
-    fetchJson('/api/workspaces/active').then((ws) => {
+    /** @type {Promise<FilterWorkspace>} */ (fetchJson('/api/workspaces/active')).then((ws) => {
       if (ws.id !== state.workspaceId) return;
       const uiState = parseUiState(ws.ui_state);
       if (!uiState.universal_filters) uiState.universal_filters = {};
@@ -666,7 +681,8 @@
     }).catch(() => {});
   }
 
-  function parseUiState(raw) {
+  /** @returns {FilterUiState} */
+  function parseUiState(/** @type {unknown} */ raw) {
     if (raw == null) return {};
     let value = raw;
     try {
@@ -674,11 +690,11 @@
       if (typeof value === 'string') value = JSON.parse(value);
       if (typeof value === 'string') value = JSON.parse(value);
     } catch (e) { return {}; }
-    return value && typeof value === 'object' ? value : {};
+    return value && typeof value === 'object' ? /** @type {FilterUiState} */ (value) : {};
   }
 
   function restorePersisted() {
-    return fetchJson('/api/workspaces/active').then((ws) => {
+    return /** @type {Promise<FilterWorkspace>} */ (fetchJson('/api/workspaces/active')).then((ws) => {
       state.workspaceId = ws.id;
       // Startup can finish after the user has already searched or cleared
       // the bar. Saved filters must never replace that newer intent.
@@ -705,7 +721,7 @@
 
   // ---- deep links -------------------------------------------------------
 
-  function applyLegacyParams(params) {
+  function applyLegacyParams(/** @type {URLSearchParams} */ params) {
     const rules = [];
     if (params.has('keyword_identity')) {
       rules.push({field: 'keyword_identity', op: 'equals', value: params.get('keyword_identity'),
@@ -755,44 +771,45 @@
 
   // ---- quick search -----------------------------------------------------
 
-  function buildQuickSearchGroup(text) {
+  /** @returns {FilterGroup} */
+  function buildQuickSearchGroup(/** @type {string} */ text) {
     const keywordOnly = searchScope === 'keyword';
-    const group = {
+    const group = /** @type {FilterGroup} */ ({
       mode: 'all', _qs: true, _qs_text: text, _qs_version: 2,
       rules: [window.VireoSearch.parse(text, { field: keywordOnly ? 'keyword' : 'metadata' })],
-    };
+    });
     if (keywordOnly) group._qs_scope = 'keyword';
     return group;
   }
 
-  function setSearchError(message) {
-    const input = $('.vf-search input');
-    const error = $('.vf-search-error');
+  function setSearchError(/** @type {string} */ message) {
+    const input = /** @type {HTMLInputElement} */ ($('.vf-search input'));
+    const error = /** @type {HTMLElement} */ ($('.vf-search-error'));
     if (input) input.setAttribute('aria-invalid', message ? 'true' : 'false');
     if (error) {
       error.textContent = message ? `${message} Showing the last applied filters.` : '';
       error.hidden = !message;
     }
-    const clear = $('.vf-clear');
+    const clear = /** @type {HTMLButtonElement} */ ($('.vf-clear'));
     if (clear) clear.hidden = !message && !hasUserFilters();
   }
 
   function cancelQuickSearchTimer() {
     if (quickSearchTimer !== null) {
-      clearTimeout(quickSearchTimer);
+      clearTimeout(quickSearchTimer ?? undefined);
       quickSearchTimer = null;
     }
   }
 
   function clearUnappliedQuickSearchText() {
     localEdits = true;
-    const input = $('.vf-search input');
+    const input = /** @type {HTMLInputElement} */ ($('.vf-search input'));
     if (input) input.value = '';
     setSearchError('');
     hideSearchSuggest();
   }
 
-  function applyQuickSearch(text, opts) {
+  function applyQuickSearch(/** @type {string} */ text, /** @type {FilterMutationOptions | undefined} */ opts = undefined) {
     localEdits = true;
     cancelQuickSearchTimer();
     const value = String(text || '').trim();
@@ -800,7 +817,7 @@
     try {
       group = value ? buildQuickSearchGroup(value) : null;
     } catch (error) {
-      setSearchError(error.message);
+      setSearchError((error instanceof Error ? error.message : String(error)));
       return;
     }
     setSearchError('');
@@ -830,7 +847,7 @@
     });
   }
 
-  function applyVisualSearch(text) {
+  function applyVisualSearch(/** @type {string} */ text) {
     cancelQuickSearchTimer();
     setSearchError('');
     const value = String(text || '').trim();
@@ -851,13 +868,13 @@
   }
 
   function hideSearchSuggest() {
-    const drop = $('.vf-search-suggest');
+    const drop = /** @type {HTMLElement} */ ($('.vf-search-suggest'));
     if (drop) drop.hidden = true;
   }
 
   function showSearchSuggest() {
-    const drop = $('.vf-search-suggest');
-    const input = $('.vf-search input');
+    const drop = /** @type {HTMLElement} */ ($('.vf-search-suggest'));
+    const input = /** @type {HTMLInputElement} */ ($('.vf-search input'));
     const q = input.value.trim();
     if (!drop) return;
     if (!q) { drop.hidden = true; return; }
@@ -872,7 +889,7 @@
   function scheduleQuickSearch() {
     showSearchSuggest();
     cancelQuickSearchTimer();
-    const value = $('.vf-search input').value.trim();
+    const value = /** @type {HTMLInputElement} */ ($('.vf-search input')).value.trim();
     // Clearing should feel instantaneous. Non-empty input gets a very short
     // debounce so a normal burst of typing results in one server query while
     // still filtering without Enter or any other confirmation.
@@ -893,7 +910,7 @@
   }
 
   function syncQuickSearchInput() {
-    const input = $('.vf-search input');
+    const input = /** @type {HTMLInputElement} */ ($('.vf-search input'));
     if (!input) return;
     const group = quickSearchGroup();
     // Scope belongs to the restored group even while the input has focus;
@@ -901,12 +918,12 @@
     // unrelated stored scope. An explicit toggle remains authoritative.
     if (group && !scopeExplicit) searchScope = groupScope(group);
     if (quickSearchTimer !== null || document.activeElement === input || input.getAttribute('aria-invalid') === 'true') return;
-    input.value = group ? group._qs_text : (state.visual ? state.visual.prompt : '');
+    input.value = group ? group._qs_text || '' : (state.visual ? state.visual.prompt : '');
   }
 
   function renderSearchScope() {
-    const btn = $('.vf-search-scope');
-    const input = $('.vf-search input');
+    const btn = /** @type {HTMLElement} */ ($('.vf-search-scope'));
+    const input = /** @type {HTMLInputElement} */ ($('.vf-search input'));
     if (!btn || !input) return;
     const keywordOnly = searchScope === 'keyword';
     btn.classList.toggle('active', keywordOnly);
@@ -928,7 +945,7 @@
     searchScope = searchScope === 'keyword' ? 'all' : 'keyword';
     try { window.localStorage.setItem(SEARCH_SCOPE_KEY, searchScope); } catch (e) { /* private mode */ }
     renderSearchScope();
-    const input = $('.vf-search input');
+    const input = /** @type {HTMLInputElement} */ ($('.vf-search input'));
     // Re-run the typed search in the new scope. A visual clause keeps its
     // prompt; the toggle only decides what the next text search matches.
     // ``applyQuickSearch`` goes through ``mutate`` and sets ``localEdits``
@@ -949,9 +966,9 @@
 
   function renderTotal() {
     const total = state.resultTotal;
-    const el = $('.vf-total strong');
+    const el = /** @type {HTMLElement} */ ($('.vf-total strong'));
     if (el) el.textContent = total == null ? '–' : Number(total).toLocaleString();
-    const matchEl = $('.vf-match-count');
+    const matchEl = /** @type {HTMLElement} */ ($('.vf-match-count'));
     if (matchEl) matchEl.textContent = total == null ? '' : `${Number(total).toLocaleString()} matching ${total === 1 ? 'photo' : 'photos'}`;
   }
 
@@ -964,32 +981,32 @@
     renderQuick();
     renderMuteState();
     const count = chipEntries().length;
-    const badge = $('.vf-filters-btn .vf-count');
-    badge.textContent = count;
+    const badge = /** @type {HTMLButtonElement} */ ($('.vf-filters-btn .vf-count'));
+    badge.textContent = String(count);
     badge.hidden = count === 0;
-    $('.vf-clear').hidden = !hasUserFilters() && $('.vf-search input').getAttribute('aria-invalid') !== 'true';
-    $('.vf-mute').hidden = !hasUserFilters() && !state.muted;
-    const saveBtn = $('.vf-save-collection');
+    /** @type {HTMLButtonElement} */ ($('.vf-clear')).hidden = !hasUserFilters() && /** @type {HTMLInputElement} */ ($('.vf-search input')).getAttribute('aria-invalid') !== 'true';
+    /** @type {HTMLElement} */ ($('.vf-mute')).hidden = !hasUserFilters() && !state.muted;
+    const saveBtn = /** @type {HTMLElement} */ ($('.vf-save-collection'));
     if (saveBtn) saveBtn.hidden = !hasUserFilters();
     renderVisualNote();
     renderHandoff();
     requestAnimationFrame(updateChipOverflow);
   }
 
-  const VISUAL_STATUS_MESSAGES = {
+  const VISUAL_STATUS_MESSAGES = /** @type {Record<string, string>} */ ({
     no_model: 'No active model — visual search unavailable',
     model_no_text_search: 'The active model does not support text search',
     no_embeddings: 'No visual index for these photos',
     encoding_failed: 'Visual search failed',
-  };
+  });
 
   function renderVisualNote() {
-    const note = $('.vf-visual-note');
+    const note = /** @type {HTMLElement} */ ($('.vf-visual-note'));
     if (!note) return;
     const info = state.visualInfo;
     if (!state.visual || state.muted || !info) { note.hidden = true; return; }
     if (info.status !== 'ok') {
-      note.textContent = `✦ ${VISUAL_STATUS_MESSAGES[info.status] || info.status} — metadata filters shown only`;
+      note.textContent = `✦ ${VISUAL_STATUS_MESSAGES[info.status || ''] || info.status} — metadata filters shown only`;
       note.classList.add('error');
       note.hidden = false;
       return;
@@ -1004,13 +1021,13 @@
   }
 
   function renderMuteState() {
-    const btn = $('.vf-mute');
+    const btn = /** @type {HTMLElement} */ ($('.vf-mute'));
     btn.textContent = state.muted ? '▶ Resume' : '⏸ Pause';
     btn.classList.toggle('active', state.muted);
     btn.title = 'Temporarily disable filters without losing them (\\)';
-    $('.vf-chip-row').classList.toggle('muted', state.muted);
-    $('.vf-shortcuts').classList.toggle('muted', state.muted);
-    const note = $('.vf-paused-note');
+    /** @type {HTMLElement} */ ($('.vf-chip-row')).classList.toggle('muted', state.muted);
+    /** @type {HTMLElement} */ ($('.vf-shortcuts')).classList.toggle('muted', state.muted);
+    const note = /** @type {HTMLElement} */ ($('.vf-paused-note'));
     if (state.muted) {
       const n = state.wouldMatch;
       note.textContent = n == null
@@ -1023,8 +1040,8 @@
   }
 
   function renderChips() {
-    const list = $('.vf-chips');
-    $('.vf-scope-chip span').textContent = state.scopeLabel;
+    const list = /** @type {HTMLElement} */ ($('.vf-chips'));
+    /** @type {HTMLElement} */ ($('.vf-scope-chip span')).textContent = state.scopeLabel;
     list.innerHTML = chipEntries().map((entry, idx) =>
       `<button class="vf-chip${entry.visual ? ' visual' : ''}${entry.error ? ' error' : ''}" data-chip="${idx}" type="button" title="Edit filters">
         <span>${escapeHtml(entry.label)}</span>
@@ -1033,10 +1050,10 @@
   }
 
   function updateChipOverflow() {
-    const viewport = $('.vf-chip-viewport');
-    const overflow = $('.vf-overflow');
+    const viewport = /** @type {HTMLElement} */ ($('.vf-chip-viewport'));
+    const overflow = /** @type {HTMLElement} */ ($('.vf-overflow'));
     if (!viewport) return;
-    const chips = $$('.vf-chips .vf-chip');
+    const chips = /** @type {HTMLElement[]} */ ($$('.vf-chips .vf-chip'));
     chips.forEach((c) => { c.style.display = 'inline-flex'; });
     overflow.hidden = true;
     if (!chips.length) return;
@@ -1055,7 +1072,7 @@
     }
   }
 
-  function findRootRule(field) {
+  function findRootRule(/** @type {string} */ field) {
     return state.root.rules.find((n) => !isGroup(n) && n.field === field);
   }
 
@@ -1066,23 +1083,23 @@
   // ``model``, a ``case`` flag) means something narrower than the button
   // does, and these toggles rebuild a leaf from its field and value alone —
   // claiming it would rewrite it without the qualifier.
-  function isPlainLeaf(node) {
-    return Boolean(node) && !isGroup(node) &&
+  function isPlainLeaf(/** @type {FilterRule | null | undefined} */ node) {
+    return !!node && !isGroup(node) &&
       Object.keys(node).every((key) => ['field', 'op', 'value'].includes(key));
   }
 
-  function isMissingTagRule(node) {
-    const spec = node && !isGroup(node) && state.fields ? state.fields[node.field] : null;
-    return Boolean(spec) && isPlainLeaf(node) && spec.type === 'boolean' &&
-      node.op === 'is' && [0, false, '0'].includes(node.value);
+  function isMissingTagRule(/** @type {FilterRule} */ node) {
+    const spec = node && !isGroup(node) && state.fields ? state.fields?.[node.field] : null;
+    return !!spec && isPlainLeaf(node) && spec.type === 'boolean' &&
+      node.op === 'is' && [0, false, '0'].includes(/** @type {FilterScalar} */ (node.value));
   }
 
-  function isMissingTagGroup(node) {
+  function isMissingTagGroup(/** @type {FilterRule} */ node) {
     return isGroup(node) && node.mode === 'any' && node.rules.length > 0 &&
       node.rules.every(isMissingTagRule);
   }
 
-  function quickMissingNode(fields) {
+  function quickMissingNode(/** @type {string[]} */ fields) {
     // Only recognize a clause that narrows the other filters. An arbitrary
     // nested rule or a leaf in an OR/NOT root does not have that meaning.
     if (state.root.mode !== 'all') return null;
@@ -1091,22 +1108,22 @@
     // Settings, and the button that remains has to keep controlling that
     // clause. Requiring every member to be configured would render it
     // inactive and its next click would add a duplicate clause beside it.
-    const overlaps = (node) =>
-      (isGroup(node) ? node.rules : [node]).some((leaf) => fields.includes(leaf.field));
+    const overlaps = (/** @type {FilterRule} */ node) =>
+      (isGroup(node) ? node.rules : [node]).some((leaf) => fields.includes(leaf.field || ''));
     const nodes = state.root.rules.filter((node) =>
       (isMissingTagGroup(node) || isMissingTagRule(node)) && overlaps(node));
     return nodes.length === 1 ? nodes[0] : null;
   }
 
-  function quickMissingFields(fields) {
+  function quickMissingFields(/** @type {string[]} */ fields) {
     const node = quickMissingNode(fields);
-    return node ? (isGroup(node) ? node.rules : [node]).map((rule) => rule.field) : [];
+    return node ? (isGroup(node) ? node.rules : [node]).map((rule) => rule.field || '') : [];
   }
 
   // ``fields`` is the shortcut group's field set: buttons in one group OR
   // together into a single clause ("missing either tag"), while a shortcut
   // that stands alone toggles just its own field.
-  function toggleQuickMissing(field, fields) {
+  function toggleQuickMissing(/** @type {string} */ field, /** @type {string[]} */ fields) {
     if (!fields.includes(field)) return;
     const removing = quickMissingFields(fields).includes(field);
     mutate(() => {
@@ -1124,7 +1141,7 @@
       // independently recognizable and can be toggled back off.
       const independentMissing = !node && state.root.rules.some((rule) =>
         (isGroup(rule) ? isMissingTagGroup(rule) : isMissingTagRule(rule)) &&
-        (isGroup(rule) ? rule.rules : [rule]).some((leaf) => fields.includes(leaf.field)));
+        (isGroup(rule) ? rule.rules : [rule]).some((leaf) => fields.includes(leaf.field || '')));
       if (state.root.mode !== 'all' || independentMissing) {
         state.root = { mode: 'all', rules: state.root.rules.length ? [state.root] : [] };
       }
@@ -1140,8 +1157,8 @@
   // sit ahead of them, and a loaded collection can carry more than one — so
   // the button reconciles against all of them. Reading just the first would
   // report it off while one of the others still applies its value.
-  function enumClauseIndexes(field) {
-    const out = [];
+  function enumClauseIndexes(/** @type {string} */ field) {
+    const out = /** @type {number[]} */ ([]);
     state.root.rules.forEach((node, i) => {
       if (isPlainLeaf(node) && node.field === field &&
           (node.op === 'is' || (node.op === 'in' && Array.isArray(node.value)))) out.push(i);
@@ -1149,11 +1166,11 @@
     return out;
   }
 
-  function enumClauseValues(node) {
-    return node.op === 'in' ? node.value : [node.value];
+  function enumClauseValues(/** @type {FilterRule | null | undefined} */ node) {
+    if (!node) return []; return Array.isArray(node.value) ? node.value : node.value != null && typeof node.value !== 'object' ? [node.value] : [];
   }
 
-  function quickEnumValues(field) {
+  function quickEnumValues(/** @type {string} */ field) {
     // OR/NOT leaves belong to the advanced expression, not an active
     // narrowing shortcut. Clicking a shortcut will AND it with that tree.
     if (state.root.mode !== 'all') return [];
@@ -1164,11 +1181,11 @@
     const clauses = enumClauseIndexes(field)
       .map((i) => enumClauseValues(state.root.rules[i]));
     if (!clauses.length) return [];
-    return clauses[0].filter((value) =>
+    return (clauses[0] || []).filter((value) =>
       clauses.every((values) => values.includes(value)));
   }
 
-  function toggleQuickEnum(field, value) {
+  function toggleQuickEnum(/** @type {string} */ field, /** @type {string} */ value) {
     if (!fieldValueAvailable(field, value)) return;
     const removing = quickEnumValues(field).includes(value);
     mutate(() => {
@@ -1188,7 +1205,7 @@
       if (applied) {
         // Clear the value from every clause naming it. Leaving one behind
         // would keep filtering on it with the button reading off.
-        const kept = [];
+        const kept = /** @type {FilterRule[]} */ ([]);
         state.root.rules.forEach((node, i) => {
           if (!owned.includes(i)) { kept.push(node); return; }
           const values = enumClauseValues(node);
@@ -1215,7 +1232,7 @@
 
   // A shortcut that is neither a missing-tag nor an enum value is a saved
   // expression: toggling it adds or removes that exact clause.
-  function toggleQuickRules(shortcut) {
+  function toggleQuickRules(/** @type {FilterShortcut} */ shortcut) {
     const removing = shortcutActive(shortcut);
     mutate(() => {
       if (state.root.mode === 'all') {
@@ -1237,22 +1254,22 @@
     }, { reason: removing ? 'filterRemoved' : undefined });
   }
 
-  function toggleShortcut(shortcut) {
+  function toggleShortcut(/** @type {FilterShortcut} */ shortcut) {
     if (shortcut.kind === 'missing') {
       toggleQuickMissing(shortcut.field, missingGroupFields(shortcut));
     } else if (shortcut.kind === 'enum') {
-      toggleQuickEnum(shortcut.field, shortcut.value);
+      if (shortcut.value != null) toggleQuickEnum(shortcut.field, shortcut.value);
     } else {
       toggleQuickRules(shortcut);
     }
   }
 
-  function shortcutActive(shortcut) {
+  function shortcutActive(/** @type {FilterShortcut} */ shortcut) {
     if (shortcut.kind === 'missing') {
       return quickMissingFields(missingGroupFields(shortcut)).includes(shortcut.field);
     }
     if (shortcut.kind === 'enum') {
-      return quickEnumValues(shortcut.field).includes(shortcut.value);
+      return quickEnumValues(shortcut.field).includes(shortcut.value || '');
     }
     return state.root.mode === 'all' &&
       state.root.rules.some((node) => sameNode(node, shortcut.rules));
@@ -1263,7 +1280,7 @@
   // review-only prediction fields), or a value the page scope excludes
   // (Misses hides rejected photos, so a "Rejected" shortcut there would only
   // ever return an empty grid).
-  function shortcutAvailable(shortcut) {
+  function shortcutAvailable(/** @type {FilterShortcut} */ shortcut) {
     const leaves = allLeaves(shortcut.rules);
     if (!leaves.length) return false;
     return leaves.every((leaf) => {
@@ -1272,12 +1289,12 @@
       if (!spec) return false;
       if (!spec.values || !['is', 'in'].includes(leaf.op)) return true;
       const values = Array.isArray(leaf.value) ? leaf.value : [leaf.value];
-      return values.every((value) => spec.values.includes(value));
+      return values.every((value) => spec.values?.includes(/** @type {FilterScalar} */ (value)));
     }) && sanitizeExcludedValues(shortcut.rules) !== null;
   }
 
   function renderShortcutHint() {
-    const hint = $('.vf-missing-hint');
+    const hint = /** @type {HTMLElement} */ ($('.vf-missing-hint'));
     // Buttons in one group OR together; say so whenever more than one of
     // them is on, so a widening result set is never a surprise.
     const groups = new Map();
@@ -1297,8 +1314,8 @@
   function renderQuick() {
     // Markup starts disabled; only enable once handlers and restored state
     // are ready, so early clicks cannot be lost or overwritten by init.
-    $$('.vf-shortcuts button').forEach((btn) => { btn.disabled = !state.ready; });
-    $$('.vf-shortcuts [data-shortcut]').forEach((btn) => {
+    /** @type {HTMLButtonElement[]} */ ($$('.vf-shortcuts button')).forEach((btn) => { btn.disabled = !state.ready; });
+    /** @type {HTMLElement[]} */ ($$('.vf-shortcuts [data-shortcut]')).forEach((btn) => {
       const shortcut = shortcutById(btn.dataset.shortcut);
       if (!shortcut) { btn.hidden = true; return; }
       btn.hidden = !shortcutAvailable(shortcut);
@@ -1308,28 +1325,28 @@
     });
     renderShortcutHint();
     const rating = findRootRule('rating');
-    const opSel = $('.vf-quick-rating select');
-    if (rating && ['>=', 'is', '<='].includes(rating.op)) opSel.value = rating.op;
-    $$('.vf-quick-rating .vf-star').forEach((btn) => {
+    const opSel = /** @type {HTMLSelectElement} */ ($('.vf-quick-rating select'));
+    if (rating && ['>=', 'is', '<='].includes(rating.op || '')) opSel.value = rating.op || '';
+    /** @type {HTMLButtonElement[]} */ ($$('.vf-quick-rating .vf-star')).forEach((btn) => {
       btn.classList.toggle('active', Boolean(rating && Number(rating.value) >= Number(btn.dataset.rating)));
     });
     const colors = quickEnumValues('color_label');
-    $$('.vf-quick-colors button').forEach((btn) => btn.classList.toggle('active', colors.includes(btn.dataset.color)));
+    /** @type {HTMLButtonElement[]} */ ($$('.vf-quick-colors button')).forEach((btn) => btn.classList.toggle('active', colors.includes(btn.dataset.color || '')));
   }
 
   function renderRules() {
-    const tree = $('.vf-rule-tree');
-    $('.vf-advanced input').checked = state.advanced;
-    $('.vf-add-group').hidden = !state.advanced;
-    const active = document.activeElement;
+    const tree = /** @type {HTMLElement} */ ($('.vf-rule-tree'));
+    /** @type {HTMLInputElement} */ ($('.vf-advanced input')).checked = state.advanced;
+    /** @type {HTMLElement} */ ($('.vf-add-group')).hidden = !state.advanced;
+    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const restore = active && tree.contains(active) && active.dataset && active.dataset.path != null
       ? {
           action: active.dataset.action,
           path: active.dataset.path,
           value: active.dataset.value,
           folder: active.dataset.folder,
-          start: active.selectionStart,
-          end: active.selectionEnd,
+          start: active instanceof HTMLInputElement ? active.selectionStart : null,
+          end: active instanceof HTMLInputElement ? active.selectionEnd : null,
           suggest: Boolean(active.dataset.suggest),
         }
       : null;
@@ -1337,7 +1354,7 @@
       <span class="vf-visual-label">✦ Visually similar to “${escapeHtml(state.visual.prompt)}”</span>
       <div class="vf-segmented vf-visual-strength">
         ${['broad', 'balanced', 'strict'].map((s) =>
-          `<button type="button" data-action="visual-strength" data-strength="${s}" class="${state.visual.strength === s ? 'active' : ''}">${s}</button>`).join('')}
+          `<button type="button" data-action="visual-strength" data-strength="${s}" class="${state.visual?.strength === s ? 'active' : ''}">${s}</button>`).join('')}
       </div>
       <button class="vf-remove" data-action="visual-remove" type="button" aria-label="Remove visual search">×</button>
     </div>` : '';
@@ -1347,32 +1364,33 @@
     loadExtensionPickers();
     loadValuePickers();
     if (restore) {
-      const controls = Array.from(tree.querySelectorAll('[data-action][data-path]'));
+      const controls = Array.from(/** @type {NodeListOf<HTMLElement>} */ (tree.querySelectorAll('[data-action][data-path]')));
       let el = controls.find((candidate) =>
         candidate.dataset.action === restore.action && candidate.dataset.path === restore.path &&
-        candidate.dataset.value === restore.value && candidate.dataset.folder === restore.folder) || (['extension-remove', 'extension-pick'].includes(restore.action) &&
+        candidate.dataset.value === restore.value && candidate.dataset.folder === restore.folder) || (['extension-remove', 'extension-pick'].includes(restore.action || '') &&
           controls.find((candidate) => candidate.dataset.action === 'extension-pick' &&
             candidate.dataset.path === restore.path &&
-            candidate.dataset.value.toLowerCase() === restore.value.toLowerCase()));
-      if (!el && ['extension-remove', 'extension-pick'].includes(restore.action)) {
-        const picker = $$('.vf-extension-picker').find((candidate) => candidate.dataset.path === restore.path);
+            (candidate.dataset.value || '').toLowerCase() === (restore.value || '').toLowerCase()));
+      if (!el && ['extension-remove', 'extension-pick'].includes(restore.action || '')) {
+        const picker = /** @type {HTMLElement[]} */ ($$('.vf-extension-picker')).find((candidate) => candidate.dataset.path === restore.path);
         if (picker) el = extensionFocusTarget(picker);
       }
-      if (!el && ['choice-pick', 'choice-remove', 'choice-folder-toggle'].includes(restore.action)) {
+      if (!el && ['choice-pick', 'choice-remove', 'choice-folder-toggle'].includes(restore.action || '')) {
         el = controls.find((candidate) => candidate.dataset.path === restore.path &&
           candidate.dataset.action === 'choice-search');
       }
       if (el) {
         el.focus({ preventScroll: true });
-        if (restore.start != null) {
+        if (restore.start != null && el instanceof HTMLInputElement) {
           try { el.setSelectionRange(restore.start, restore.end); } catch (e) { /* selects */ }
         }
-        if (restore.suggest) showValueSuggest(el);
+        if (restore.suggest && el instanceof HTMLInputElement) showValueSuggest(el);
       }
     }
   }
 
-  function renderNode(node, path, depth) {
+  /** @returns {string} */
+  function renderNode(/** @type {FilterRule} */ node, /** @type {string} */ path, /** @type {number} */ depth) {
     if (isGroup(node)) {
       if (node._qs) {
         return `<div class="vf-rule-row vf-qs-row">
@@ -1406,8 +1424,8 @@
     }
     const spec = fieldSpec(node.field) || { label: node.field, type: 'text', ops: ['is'] };
     const fieldOptions = state.fieldOrder.filter((key) =>
-      (fieldAvailable(key) && !state.fields[key].picker_hidden) || key === node.field).map((key) =>
-      `<option value="${key}" ${key === node.field ? 'selected' : ''}>${escapeHtml(state.fields[key].label)}</option>`).join('');
+      (fieldAvailable(key) && !state.fields?.[key]?.picker_hidden) || key === node.field).map((key) =>
+      `<option value="${key}" ${key === node.field ? 'selected' : ''}>${escapeHtml(state.fields?.[key]?.label || key)}</option>`).join('');
     const opOptions = spec.ops.map((op) =>
       `<option value="${escapeHtml(op)}" ${op === node.op ? 'selected' : ''}>${escapeHtml(OP_LABELS[op] || op)}</option>`).join('');
     return `<div class="vf-rule-row">
@@ -1419,20 +1437,20 @@
     </div>`;
   }
 
-  function extensionValues(node) {
-    return (Array.isArray(node.value) ? node.value : [node.value]).filter((v) => v != null && v !== '');
+  function extensionValues(/** @type {FilterRule} */ node) {
+    return (Array.isArray(node.value) ? node.value : [node.value]).filter((v) => v != null && v !== '').map(String);
   }
 
-  function extensionLabel(value) {
+  function extensionLabel(/** @type {string} */ value) {
     return String(value).replace(/^\./, '').toUpperCase();
   }
 
-  function extensionFocusTarget(picker) {
-    return picker.querySelector('[data-action="extension-pick"]') ||
-      picker.querySelector('[data-action="extension-retry"]') || picker;
+  function extensionFocusTarget(/** @type {HTMLElement} */ picker) {
+    return /** @type {HTMLElement} */ (picker.querySelector('[data-action="extension-pick"]')) ||
+      /** @type {HTMLElement} */ (picker.querySelector('[data-action="extension-retry"]')) || picker;
   }
 
-  function renderExtensionPicker(node, path) {
+  function renderExtensionPicker(/** @type {FilterLeaf} */ node, /** @type {string} */ path) {
     const selected = extensionValues(node);
     const multiple = node.op === 'in' || node.op === 'not_in';
     // Preserve saved values, including formats no longer in the workspace.
@@ -1453,27 +1471,27 @@
   }
 
   function loadExtensionPickers() {
-    const pickers = $$('.vf-extension-picker');
+    const pickers = /** @type {HTMLElement[]} */ ($$('.vf-extension-picker'));
     if (!pickers.length || extensionOptions !== null) return;
     // One request per popover session, independent of the active rules so
     // selecting one format cannot hide the other choices. No facet counts.
-    if (!extensionRequest) extensionRequest = fetchJson('/api/photos/extensions');
+    if (!extensionRequest) extensionRequest = /** @type {Promise<string[]>} */ (fetchJson('/api/photos/extensions'));
     const request = extensionRequest;
     request.then((data) => {
       if (extensionRequest !== request) return;
       extensionOptions = (Array.isArray(data) ? data : []).map((value) => String(value)).filter(Boolean);
       pickers.forEach((picker) => {
         if (!document.contains(picker)) return;
-        const node = getNodeAtPath(picker.dataset.path);
+        const node = getNodeAtPath(picker.dataset.path); if (!node || isGroup(node)) return;
         if (!node || node.field !== 'extension') return;
-        const active = picker.contains(document.activeElement) ? document.activeElement : null;
-        const path = picker.dataset.path;
+        const active = document.activeElement instanceof HTMLElement && picker.contains(document.activeElement) ? document.activeElement : null;
+        const path = picker.dataset.path || '';
         picker.outerHTML = renderExtensionPicker(node, path);
         if (active) {
-          const replacement = $$('.vf-extension-picker [data-action]').find((el) =>
+          const replacement = /** @type {HTMLElement[]} */ ($$('.vf-extension-picker [data-action]')).find((el) =>
             el.dataset.path === path && el.dataset.action === active.dataset.action &&
             el.dataset.value === active.dataset.value);
-          const updatedPicker = $$('.vf-extension-picker').find((el) => el.dataset.path === path);
+          const updatedPicker = /** @type {HTMLElement[]} */ ($$('.vf-extension-picker')).find((el) => el.dataset.path === path);
           if (updatedPicker) (replacement || extensionFocusTarget(updatedPicker)).focus({ preventScroll: true });
         }
       });
@@ -1482,18 +1500,18 @@
       pickers.forEach((picker) => {
         if (!document.contains(picker)) return;
         const hadFocus = picker.contains(document.activeElement);
-        const status = picker.querySelector('.vf-extension-status');
+        const status = /** @type {HTMLElement} */ (picker.querySelector('.vf-extension-status'));
         status.innerHTML = 'Could not load formats. <button type="button" data-action="extension-retry">Retry</button>';
-        if (hadFocus) status.querySelector('button').focus({ preventScroll: true });
+        if (hadFocus) /** @type {HTMLButtonElement} */ (status.querySelector('button')).focus({ preventScroll: true });
       });
     });
   }
 
   // Picker searches select stored values; typing here never changes a rule.
   // Per-node state keeps searches and expanded folders across value edits.
-  let valuePickerStates = new WeakMap();
+  let valuePickerStates = new WeakMap(/** @type {[FilterLeaf, FilterPicker][]} */ ([]));
 
-  function valuePickerState(node) {
+  function valuePickerState(/** @type {FilterLeaf} */ node) {
     let picker = valuePickerStates.get(node);
     if (!picker || picker.field !== node.field) {
       picker = { field: node.field, query: '', open: false, values: null, scopedPaths: null, scopeKey: null, error: false, request: 0, pending: false, collapsed: new Set() };
@@ -1509,34 +1527,35 @@
   // pickers: the folder picker fetches a single tree and filters it
   // client-side, so typing in its search box must not invalidate the
   // cache.
-  function pickerScopeKey(node, picker) {
+  function pickerScopeKey(/** @type {FilterLeaf} */ node, /** @type {FilterPicker} */ picker) {
     const context = state.getContextRules ? state.getContextRules() : [];
     const scopedRules = composeScopeRules(context, rulesWithout(node));
     const scope = state.getScope ? state.getScope() : null;
     const visual = (state.visual && !state.muted) ? state.visual : null;
-    const parts = { f: node.field, rules: scopedRules, scope, visual };
+    const parts = { f: node.field, rules: scopedRules, scope, visual, q: /** @type {string | undefined} */ (undefined) };
     if (node.field !== 'folder') parts.q = picker.query.trim();
     return JSON.stringify(parts);
   }
 
-  function usesValuePicker(node) {
+  function usesValuePicker(/** @type {FilterLeaf} */ node) {
     const spec = fieldSpec(node.field);
     return spec && spec.picker && ['is', 'is not', 'in', 'not_in', 'under', 'not_under'].includes(node.op);
   }
 
-  function pickerValueKey(node, value) {
+  function pickerValueKey(/** @type {FilterLeaf} */ node, /** @type {string} */ value) {
     return ['camera_make', 'camera_model', 'lens'].includes(node.field)
       ? String(value).toLowerCase() : String(value);
   }
 
-  function pickerChoice(node, path, value, label) {
+  function pickerChoice(/** @type {FilterLeaf} */ node, /** @type {string} */ path, /** @type {string} */ value, /** @type {string | undefined} */ label = undefined) {
     const multiple = node.op === 'in' || node.op === 'not_in';
     const selected = extensionValues(node).some((v) => pickerValueKey(node, v) === pickerValueKey(node, value));
     return `<label class="vf-choice" title="${escapeHtml(value)}"><input type="${multiple ? 'checkbox' : 'radio'}" name="choice-${path}" data-action="choice-pick" data-path="${path}" data-value="${escapeHtml(value)}" ${selected ? 'checked' : ''}><span>${escapeHtml(label || value)}</span></label>`;
   }
 
-  function renderFolderChoices(node, path, picker) {
-    const folders = picker.values || [];
+  /** @returns {string} */
+  function renderFolderChoices(/** @type {FilterLeaf} */ node, /** @type {string} */ path, /** @type {FilterPicker} */ picker) {
+    const folders = /** @type {FilterFolder[]} */ (picker.values || []);
     // ``scopedPaths`` is the subset of workspace folder paths that have at
     // least one photo matching the current sibling rules, visual clause
     // and page scope (folder/collection) — subtree-aggregated server-side.
@@ -1548,26 +1567,27 @@
     // even when the current scope would otherwise hide it, so they can
     // uncheck it in place instead of hunting for a pill at the top.
     const selectedPaths = new Set(extensionValues(node));
-    const byId = new Map(folders.map((f) => [f.id, f]));
-    const children = new Map();
+    const byId = new Map(/** @type {[number | null, FilterFolder][]} */ (folders.map((f) => [f.id, f])));
+    const children = new Map(/** @type {[number | null, FilterFolder[]][]} */ ([]));
     const visible = new Set();
     const q = picker.query.toLowerCase().trim();
     folders.forEach((f) => {
       const parent = byId.has(f.parent_id) ? f.parent_id : null;
       if (!children.has(parent)) children.set(parent, []);
-      children.get(parent).push(f);
+      children.get(parent)?.push(f);
     });
     folders.forEach((f) => {
       const inScope = !scopedPaths || scopedPaths.has(f.path);
       if (!inScope && !selectedPaths.has(f.path)) return;
       if (!q || f.path.toLowerCase().includes(q)) {
-        let current = f;
+        let current = /** @type {FilterFolder | undefined} */ (f);
         while (current && !visible.has(current.id)) {
           visible.add(current.id);
           current = byId.get(current.parent_id);
         }
       }
     });
+    /** @type {(parent: number | null) => string} */
     const renderBranch = (parent) => (children.get(parent) || [])
       .filter((f) => visible.has(f.id)).sort((a, b) => a.path.localeCompare(b.path)).map((f) => {
         const hasChildren = (children.get(f.id) || []).some((child) => visible.has(child.id));
@@ -1583,26 +1603,26 @@
     return saved.map((v) => pickerChoice(node, path, v)).join('') + `<ul class="vf-folder-choices">${renderBranch(null)}</ul>`;
   }
 
-  function renderPickerChoices(node, path, picker) {
+  function renderPickerChoices(/** @type {FilterLeaf} */ node, /** @type {string} */ path, /** @type {FilterPicker} */ picker) {
     if (node.field === 'folder') return renderFolderChoices(node, path, picker);
     const values = new Map(extensionValues(node).map((v) => [pickerValueKey(node, v), v]));
-    (picker.values || []).forEach((entry) => {
+    (/** @type {FilterFacet[]} */ (picker.values || [])).forEach((entry) => {
       const key = pickerValueKey(node, entry.value);
       if (entry.value != null && entry.value !== '' && !values.has(key)) values.set(key, entry.value);
     });
     return Array.from(values.values()).map((v) => pickerChoice(node, path, v)).join('');
   }
 
-  function pickerStatus(node, picker) {
+  function pickerStatus(/** @type {FilterLeaf} */ node, /** @type {FilterPicker} */ picker) {
     if (picker.pending || picker.values === null && !picker.error) return 'Loading choices…';
     if (picker.error) return 'Could not load choices.';
-    if (!picker.values.length) return picker.query ? 'No matching choices.' : 'No choices in this workspace.';
+    if (!picker.values?.length) return picker.query ? 'No matching choices.' : 'No choices in this workspace.';
     if (node.field === 'folder') {
       const q = picker.query.trim().toLowerCase();
       const scoped = picker.scopedPaths;
       const inScope = scoped
-        ? picker.values.filter((f) => scoped.has(f.path))
-        : picker.values;
+        ? (/** @type {FilterFolder[]} */ (picker.values)).filter((f) => scoped.has(f.path))
+        : /** @type {FilterFolder[]} */ (picker.values);
       if (!inScope.length) return 'No folders in the current scope.';
       if (q && !inScope.some((f) => f.path.toLowerCase().includes(q))) return 'No matching folders.';
       return 'Includes the selected folder and its subfolders.';
@@ -1610,7 +1630,7 @@
     return picker.values.length >= 50 ? 'Showing up to 50 choices. Search to narrow the list.' : '';
   }
 
-  function renderValuePicker(node, spec, path) {
+  function renderValuePicker(/** @type {FilterLeaf} */ node, /** @type {FilterField} */ spec, /** @type {string} */ path) {
     const picker = valuePickerState(node);
     const selected = extensionValues(node);
     return `<div class="vf-value-picker" data-path="${path}">
@@ -1624,24 +1644,24 @@
     </div>`;
   }
 
-  function refreshPickerOptions(node, picker) {
-    $$('.vf-value-picker').forEach((wrap) => {
+  function refreshPickerOptions(/** @type {FilterLeaf} */ node, /** @type {FilterPicker} */ picker) {
+    /** @type {HTMLElement[]} */ ($$('.vf-value-picker')).forEach((wrap) => {
       if (getNodeAtPath(wrap.dataset.path) !== node || !usesValuePicker(node)) return;
-      const options = wrap.querySelector('.vf-choice-options');
-      const active = options.contains(document.activeElement) ? document.activeElement : null;
-      options.innerHTML = renderPickerChoices(node, wrap.dataset.path, picker);
+      const options = /** @type {HTMLElement} */ (wrap.querySelector('.vf-choice-options'));
+      const active = document.activeElement instanceof HTMLElement && options.contains(document.activeElement) ? document.activeElement : null;
+      options.innerHTML = renderPickerChoices(node, wrap.dataset.path || '', picker);
       if (active) {
-        const replacement = Array.from(options.querySelectorAll('[data-action]')).find((el) =>
+        const replacement = Array.from(/** @type {NodeListOf<HTMLElement>} */ (options.querySelectorAll('[data-action]'))).find((el) =>
           el.dataset.action === active.dataset.action && el.dataset.value === active.dataset.value &&
           el.dataset.folder === active.dataset.folder);
-        (replacement || wrap.querySelector('[data-action="choice-search"]')).focus({ preventScroll: true });
+        (replacement || /** @type {HTMLElement} */ (wrap.querySelector('[data-action="choice-search"]'))).focus({ preventScroll: true });
       }
-      wrap.querySelector('.vf-choice-status').textContent = pickerStatus(node, picker);
-      wrap.querySelector('[data-action="choice-retry"]').hidden = !picker.error;
+      /** @type {HTMLElement} */ (wrap.querySelector('.vf-choice-status')).textContent = pickerStatus(node, picker);
+      /** @type {HTMLElement} */ (wrap.querySelector('[data-action="choice-retry"]')).hidden = !picker.error;
     });
   }
 
-  function requestPickerValues(node, picker) {
+  function requestPickerValues(/** @type {FilterLeaf} */ node, /** @type {FilterPicker} */ picker) {
     const seq = ++picker.request;
     picker.pending = true;
     picker.error = false;
@@ -1661,12 +1681,12 @@
       params.set('rules', JSON.stringify(scopedRules));
       if (hasVisual) params.set('visual', JSON.stringify(state.visual));
       if (scope) {
-        if (scope.folder_id != null) params.set('folder_id', scope.folder_id);
-        if (scope.collection_id != null) params.set('collection_id', scope.collection_id);
+        if (scope.folder_id != null) params.set('folder_id', String(scope.folder_id));
+        if (scope.collection_id != null) params.set('collection_id', String(scope.collection_id));
       }
       return params;
     };
-    const finish = (values, scopedPaths) => {
+    const finish = (/** @type {FilterPickerEntry[]} */ values, /** @type {Set<string> | null} */ scopedPaths) => {
       if (picker.request !== seq || valuePickerStates.get(node) !== picker) return;
       picker.values = values;
       picker.scopedPaths = scopedPaths;
@@ -1703,16 +1723,16 @@
       // ancestor hoisting needed. If the facet fails but the tree
       // succeeds, fall back to the unscoped tree (same behavior as
       // before the scope was wired in).
-      const foldersPromise = fetchJson('/api/folders');
+      const foldersPromise = /** @type {Promise<FilterFolder[]>} */ (fetchJson('/api/folders'));
       // The folder facet uses a bump limit server-side so the tree is
       // not silently truncated past the typeahead's 50-cap when the
       // workspace has many scoped folders.
-      let scopedPromise = Promise.resolve(null);
+      let scopedPromise = /** @type {Promise<{values: FilterFacet[]} | null>} */ (Promise.resolve(null));
       if (scopeActive) {
         const params = scopeParams();
         params.set('limit', '10000');
         params.delete('q');  // folder search is client-side
-        scopedPromise = fetchJson(`/api/filters/values?${params}`).catch(() => null);
+        scopedPromise = /** @type {Promise<{values: FilterFacet[]}>} */ (fetchJson(`/api/filters/values?${params}`)).catch(() => null);
       }
       Promise.all([foldersPromise, scopedPromise]).then(([folders, scoped]) => {
         const paths = scoped && scoped.values
@@ -1726,14 +1746,14 @@
     // folder- or collection-scoped Browse view lists values present in
     // the current grid. Without these the global 50-value cap can omit
     // values that are actually in scope (Codex review r4208710522).
-    fetchJson(`/api/filters/values?${scopeParams()}`).then((data) => {
+    /** @type {Promise<{values: FilterFacet[]}>} */ (fetchJson(`/api/filters/values?${scopeParams()}`)).then((data) => {
       finish(data.values, null);
     }).catch(fail);
   }
 
   function loadValuePickers() {
-    $$('.vf-value-picker').forEach((wrap) => {
-      const node = getNodeAtPath(wrap.dataset.path);
+    /** @type {HTMLElement[]} */ ($$('.vf-value-picker')).forEach((wrap) => {
+      const node = getNodeAtPath(wrap.dataset.path); if (!node || isGroup(node)) return;
       const picker = valuePickerState(node);
       if (!picker.open || picker.pending || picker.error) return;
       // Refetch when either the picker has never loaded or when a
@@ -1749,7 +1769,7 @@
     });
   }
 
-  function renderValueInput(node, spec, path) {
+  function renderValueInput(/** @type {FilterLeaf} */ node, /** @type {FilterField} */ spec, /** @type {string} */ path) {
     if (usesValuePicker(node)) return renderValuePicker(node, spec, path);
     if (['burst_id', 'duplicate_group'].includes(node.field)) {
       return `<span class="vf-group-reference" title="${escapeHtml(node.value)}">${escapeHtml(node.value_label || 'Saved group')}<small>Choose groups from a stack’s context menu.</small></span>`;
@@ -1759,7 +1779,7 @@
       const selected = Array.isArray(node.value) ? node.value : [node.value];
       const labels = spec.labels || {};
       return `<div class="vf-enum-multi" role="group">${spec.values.map((v) =>
-        `<button type="button" class="vf-enum-pill ${selected.includes(v) ? 'active' : ''}" data-action="multi" data-path="${path}" data-value="${escapeHtml(v)}" aria-pressed="${selected.includes(v)}">${escapeHtml(labels[v] || v)}</button>`).join('')}</div>`;
+        `<button type="button" class="vf-enum-pill ${selected.includes(v) ? 'active' : ''}" data-action="multi" data-path="${path}" data-value="${escapeHtml(v)}" aria-pressed="${selected.includes(v)}">${escapeHtml(labels[String(v)] || v)}</button>`).join('')}</div>`;
     }
     if ((node.op === 'in' || node.op === 'not_in') && !spec.values) {
       // Other suggest-backed enums retain a free-entry list via typeahead.
@@ -1767,7 +1787,7 @@
       return `<span class="vf-value-wrap"><input data-action="multi-text" data-path="${path}" data-suggest="${spec.suggest ? '1' : ''}" type="text" autocomplete="off" spellcheck="false" value="${escapeHtml(selected.join(', '))}" placeholder="Comma-separated values" aria-label="Filter values"><div class="vf-suggest" hidden></div></span>`;
     }
     if (node.op === 'recent') {
-      const v = node.value || {};
+      const v = node.value && typeof node.value === 'object' && !Array.isArray(node.value) ? node.value : {n: 12, unit: 'months'};
       return `<div class="vf-value-pair"><input data-action="recent-n" data-path="${path}" type="number" min="1" step="1" value="${escapeHtml(v.n)}" aria-label="Number"><select data-action="recent-unit" data-path="${path}" aria-label="Unit">${RECENT_UNITS.map(([k, , plural]) => `<option value="${k}" ${v.unit === k ? 'selected' : ''}>${plural}</option>`).join('')}</select></div>`;
     }
     if (node.op === 'between') {
@@ -1780,7 +1800,7 @@
     }
     if (spec.type === 'enum' && spec.values) {
       const labels = spec.labels || {};
-      return `<select data-action="value-select" data-path="${path}" aria-label="Filter value">${spec.values.map((v) => `<option value="${escapeHtml(v)}" ${v === node.value ? 'selected' : ''}>${escapeHtml(labels[v] || v)}</option>`).join('')}</select>`;
+      return `<select data-action="value-select" data-path="${path}" aria-label="Filter value">${spec.values.map((v) => `<option value="${escapeHtml(v)}" ${v === node.value ? 'selected' : ''}>${escapeHtml(labels[String(v)] || v)}</option>`).join('')}</select>`;
     }
     const inputType = spec.type === 'number' || spec.type === 'rating' ? 'number' : (spec.type === 'date' ? 'date' : 'text');
     const extras = spec.type === 'rating' ? 'min="0" max="5" step="1"' : (inputType === 'number' ? 'step="any"' : '');
@@ -1798,8 +1818,8 @@
   let suggestSeq = 0;
 
   // Typing is debounced so each keystroke doesn't fire its own request.
-  function scheduleValueSuggest(input) {
-    clearTimeout(suggestTimer);
+  function scheduleValueSuggest(/** @type {HTMLInputElement} */ input) {
+    clearTimeout(suggestTimer ?? undefined);
     suggestSeq++;
     suggestTimer = setTimeout(() => {
       suggestTimer = null;
@@ -1807,16 +1827,16 @@
     }, 150);
   }
 
-  function showValueSuggest(input) {
-    clearTimeout(suggestTimer);
+  function showValueSuggest(/** @type {HTMLInputElement} */ input) {
+    clearTimeout(suggestTimer ?? undefined);
     suggestTimer = null;
     const seq = ++suggestSeq;
-    const wrap = input.closest('.vf-value-wrap');
+    const wrap = /** @type {HTMLElement | null} */ (input.closest('.vf-value-wrap'));
     if (!wrap) return;
-    const drop = wrap.querySelector('.vf-suggest');
+    const drop = /** @type {HTMLElement} */ (wrap.querySelector('.vf-suggest'));
     const node = getNodeAtPath(input.dataset.path);
     if (!node || isGroup(node)) { drop.hidden = true; return; }
-    const spec = state.fields[node.field];
+    const spec = state.fields?.[node.field];
     if (!spec || !spec.suggest) { drop.hidden = true; return; }
     const raw = input.dataset.action === 'multi-text'
       ? String(input.value).split(',').pop() : input.value;
@@ -1838,62 +1858,62 @@
     // pick can produce fewer (or zero) grid rows than the badge promised.
     const scope = state.getScope ? state.getScope() : null;
     if (scope) {
-      if (scope.folder_id != null) params.set('folder_id', scope.folder_id);
-      if (scope.collection_id != null) params.set('collection_id', scope.collection_id);
+      if (scope.folder_id != null) params.set('folder_id', String(scope.folder_id));
+      if (scope.collection_id != null) params.set('collection_id', String(scope.collection_id));
     }
-    fetchJson(`/api/filters/values?${params}`).then((data) => {
+    /** @type {Promise<{values: FilterFacet[]}>} */ (fetchJson(`/api/filters/values?${params}`)).then((data) => {
       if (seq !== suggestSeq || !document.contains(input)) return;
       if (!data.values.length) { drop.hidden = true; return; }
       drop.innerHTML = `<div class="vf-suggest-hint">In your photos · counts respect other filters</div>` +
-        data.values.map((entry) =>
+        data.values.map((/** @type {FilterFacet} */ entry) =>
           `<button class="vf-value-option" data-suggest-value="${escapeHtml(entry.value)}" data-path="${input.dataset.path}" type="button"><span>${escapeHtml(entry.value)}</span><em>${entry.count}</em></button>`).join('');
       drop.hidden = false;
     }).catch(() => { if (seq === suggestSeq) drop.hidden = true; });
   }
 
   function hideSuggests() {
-    clearTimeout(suggestTimer);
+    clearTimeout(suggestTimer ?? undefined);
     suggestTimer = null;
     suggestSeq++;
-    $$('.vf-suggest').forEach((d) => { d.hidden = true; });
+    /** @type {HTMLElement[]} */ ($$('.vf-suggest')).forEach((d) => { d.hidden = true; });
   }
 
   // ---- popover ----------------------------------------------------------
 
-  function openPopover(open) {
-    const pop = $('.vf-popover');
-    const shouldOpen = open == null ? pop.hidden : Boolean(open);
+  function openPopover(/** @type {boolean | undefined} */ open = undefined) {
+    const pop = /** @type {HTMLElement} */ ($('.vf-popover'));
+    const shouldOpen = open == null ? !!pop.hidden : Boolean(open);
     const restoreFocus = !shouldOpen && pop.contains(document.activeElement);
     pop.hidden = !shouldOpen;
-    $('.vf-filters-btn').classList.toggle('open', shouldOpen);
-    $('.vf-filters-btn').setAttribute('aria-expanded', String(shouldOpen));
+    /** @type {HTMLButtonElement} */ ($('.vf-filters-btn')).classList.toggle('open', shouldOpen);
+    /** @type {HTMLButtonElement} */ ($('.vf-filters-btn')).setAttribute('aria-expanded', String(shouldOpen));
     if (shouldOpen) {
       extensionOptions = null;
       extensionRequest = null;
       valuePickerStates = new WeakMap();
       renderRules();
     }
-    if (restoreFocus) $('.vf-filters-btn').focus();
+    if (restoreFocus) /** @type {HTMLButtonElement} */ ($('.vf-filters-btn')).focus();
   }
 
-  function fieldAvailable(field) {
+  function fieldAvailable(/** @type {string} */ field) {
     const spec = fieldSpec(field);
     if (!spec) return false;
     if (spec.type === 'enum' && Array.isArray(spec.values) && !spec.values.length) return false;
     return !spec.pages || spec.pages.includes(state.page);
   }
 
-  function renderFieldPicker(query) {
+  function renderFieldPicker(/** @type {string | undefined} */ query = undefined) {
     const needle = String(query || '').trim().toLowerCase();
-    const byCategory = new Map();
+    const byCategory = new Map(/** @type {[string, [string, FilterField][]][]} */ ([]));
     state.fieldOrder.forEach((key) => {
       const spec = fieldSpec(key);
-      if (!fieldAvailable(key) || spec.picker_hidden) return;
+      if (!spec || !fieldAvailable(key) || spec.picker_hidden) return;
       if (needle && !`${spec.label} ${spec.category}`.toLowerCase().includes(needle)) return;
-      if (!byCategory.has(spec.category)) byCategory.set(spec.category, []);
-      byCategory.get(spec.category).push([key, spec]);
+      if (!byCategory.has(spec.category || 'Other')) byCategory.set(spec.category || 'Other', []);
+      byCategory.get(spec.category || 'Other')?.push([key, spec]);
     });
-    $('.vf-field-options').innerHTML = Array.from(byCategory.entries()).map(([category, fields]) =>
+    /** @type {HTMLElement} */ ($('.vf-field-options')).innerHTML = Array.from(byCategory.entries()).map(([category, fields]) =>
       `<div class="vf-field-category">${escapeHtml(category)}</div>` + fields.map(([key, spec]) =>
         `<button class="vf-field-option" data-add-field="${key}" type="button"><span>${escapeHtml(spec.label)}</span><span>${escapeHtml(spec.type)}</span></button>`).join('')).join('')
       || '<div class="vf-empty-rules">No fields found</div>';
@@ -1901,9 +1921,9 @@
 
   // ---- events -----------------------------------------------------------
 
-  let editDebounce = null;
+  let editDebounce = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
 
-  function handleRuleEdit(target, fromTyping) {
+  function handleRuleEdit(/** @type {HTMLInputElement | HTMLSelectElement} */ target, /** @type {boolean | undefined} */ fromTyping = undefined) {
     const action = target.dataset.action;
     const path = target.dataset.path;
     if (!action || path == null) return;
@@ -1915,7 +1935,7 @@
     // deselecting an enum pill. Replacements/additions remain ordinary edits.
     const removing = nextValues && editedNode && Array.isArray(editedNode.value) &&
       nextValues.length < editedNode.value.length &&
-      nextValues.every((value) => editedNode.value.includes(value));
+      nextValues.every((value) => Array.isArray(editedNode.value) && editedNode.value.includes(value));
     mutate(() => {
       const node = getNodeAtPath(path);
       if (!node) return;
@@ -1923,10 +1943,10 @@
         if (action === 'mode') node.mode = target.value;
         return;
       }
-      const spec = fieldSpec(node.field);
+      const spec = fieldSpec(node.field); if (!spec) return;
       if (action === 'field') {
         node.field = target.value;
-        const next = fieldSpec(node.field);
+        const next = fieldSpec(node.field); if (!next) return;
         node.op = defaultOp(next);
         node.value = defaultValue(next, node.op);
         delete node.case;
@@ -1946,13 +1966,13 @@
         pair[action === 'between-lo' ? 0 : 1] = parsed;
         node.value = pair;
       } else if (action === 'recent-n') {
-        node.value = { ...(node.value || {}), n: Math.max(1, Number(target.value) || 1) };
+        node.value = { ...(node.value && typeof node.value === 'object' && !Array.isArray(node.value) ? node.value : {unit: 'months'}), n: Math.max(1, Number(target.value) || 1) };
       } else if (action === 'recent-unit') {
-        node.value = { ...(node.value || {}), unit: target.value };
+        node.value = { ...(node.value && typeof node.value === 'object' && !Array.isArray(node.value) ? node.value : {n: 12}), unit: target.value };
       } else if (action === 'multi-text') {
         node.value = nextValues;
       } else if (action === 'case') {
-        if (target.checked) node.case = true;
+        if (target instanceof HTMLInputElement && target.checked) node.case = true;
         else delete node.case;
       }
     }, {
@@ -1965,7 +1985,7 @@
   }
 
   function installEvents() {
-    const searchInput = $('.vf-search input');
+    const searchInput = /** @type {HTMLInputElement} */ ($('.vf-search input'));
     searchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -1991,11 +2011,11 @@
       else if (!searchInput.value.trim() && state.visual) applyVisualSearch('');
       else syncQuickSearchInput();
     });
-    const searchSuggest = $('.vf-search-suggest');
+    const searchSuggest = /** @type {HTMLElement} */ ($('.vf-search-suggest'));
     if (searchSuggest) {
       // mousedown beats the input's blur, so the pick is never lost.
-      searchSuggest.addEventListener('mousedown', (e) => {
-        const btn = e.target.closest('[data-search-kind]');
+      searchSuggest.addEventListener('mousedown', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+        const btn = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-search-kind]'));
         if (!btn) return;
         e.preventDefault();
         const value = searchInput.value;
@@ -2005,16 +2025,16 @@
       });
     }
 
-    $('.vf-filters-btn').addEventListener('click', () => openPopover());
-    $('.vf-popover-close').addEventListener('click', () => openPopover(false));
-    $('.vf-done').addEventListener('click', () => openPopover(false));
-    $('.vf-overflow').addEventListener('click', () => openPopover(true));
-    $('.vf-mute').addEventListener('click', toggleMute);
-    const handoffBtn = $('.vf-handoff');
+    /** @type {HTMLButtonElement} */ ($('.vf-filters-btn')).addEventListener('click', () => openPopover());
+    /** @type {HTMLElement} */ ($('.vf-popover-close')).addEventListener('click', () => openPopover(false));
+    /** @type {HTMLElement} */ ($('.vf-done')).addEventListener('click', () => openPopover(false));
+    /** @type {HTMLElement} */ ($('.vf-overflow')).addEventListener('click', () => openPopover(true));
+    /** @type {HTMLElement} */ ($('.vf-mute')).addEventListener('click', toggleMute);
+    const handoffBtn = /** @type {HTMLElement} */ ($('.vf-handoff'));
     if (handoffBtn) {
       handoffBtn.addEventListener('click', openHandoffMenu);
-      $('.vf-handoff-menu').addEventListener('click', (e) => {
-        const btn = e.target.closest('[data-handoff-path]');
+      /** @type {HTMLElement} */ ($('.vf-handoff-menu')).addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+        const btn = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-handoff-path]'));
         if (!btn) return;
         // The expression transfers; the destination adds its own locked
         // page scope. URL param wins over the destination's persisted
@@ -2025,7 +2045,7 @@
         window.location.href = `${btn.dataset.handoffPath}?filters=${payload}`;
       });
     }
-    $('.vf-clear').addEventListener('click', () => {
+    /** @type {HTMLButtonElement} */ ($('.vf-clear')).addEventListener('click', () => {
       clearUnappliedQuickSearchText();
       if (!hasUserFilters() && !state.muted) return;
       // Kill any pending live-search debounce so it can't silently reinstate
@@ -2039,7 +2059,7 @@
       }, { reason: 'filtersCleared' });
       toast('Filters cleared', true);
     });
-    $('.vf-clear-rules').addEventListener('click', () => {
+    /** @type {HTMLElement} */ ($('.vf-clear-rules')).addEventListener('click', () => {
       clearUnappliedQuickSearchText();
       cancelQuickSearchTimer();
       // This control stays visible in the popover even when no filters are
@@ -2057,21 +2077,21 @@
       }, { reason: 'filtersCleared' });
       toast('Filters cleared', true);
     });
-    $('.vf-toast button').addEventListener('click', () => { undo(); $('.vf-toast').hidden = true; });
-    const saveCollectionBtn = $('.vf-save-collection');
+    /** @type {HTMLButtonElement} */ ($('.vf-toast button')).addEventListener('click', () => { undo(); /** @type {HTMLElement} */ ($('.vf-toast')).hidden = true; });
+    const saveCollectionBtn = /** @type {HTMLElement} */ ($('.vf-save-collection'));
     if (saveCollectionBtn) {
       saveCollectionBtn.addEventListener('click', openSaveModal);
-      $('.vf-save-cancel').addEventListener('click', closeSaveModal);
-      $('.vf-save-backdrop').addEventListener('click', closeSaveModal);
-      $('.vf-save-confirm').addEventListener('click', confirmSaveCollection);
-      $('.vf-save-name').addEventListener('keydown', (e) => {
+      /** @type {HTMLElement} */ ($('.vf-save-cancel')).addEventListener('click', closeSaveModal);
+      /** @type {HTMLElement} */ ($('.vf-save-backdrop')).addEventListener('click', closeSaveModal);
+      /** @type {HTMLElement} */ ($('.vf-save-confirm')).addEventListener('click', confirmSaveCollection);
+      /** @type {HTMLInputElement} */ ($('.vf-save-name')).addEventListener('keydown', (e) => {
         if (e.key === 'Enter') confirmSaveCollection();
         else if (e.key === 'Escape') closeSaveModal();
       });
     }
 
-    $('.vf-chip-row').addEventListener('click', (e) => {
-      const x = e.target.closest('[data-chip-x]');
+    /** @type {HTMLElement} */ ($('.vf-chip-row')).addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+      const x = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-chip-x]'));
       if (x) {
         e.stopPropagation();
         const entry = chipEntries()[Number(x.dataset.chipX)];
@@ -2088,29 +2108,29 @@
               state.root = {mode: 'all', rules: []};
             } else if (isGroup(entry.node)) {
               state.root.rules = state.root.rules.filter((n) => n !== entry.node);
-            } else removeByReference(state.root, entry.node);
+            } else if (entry.node) removeByReference(state.root, entry.node);
           }, { reason: 'filterRemoved' });
           toast('Filter removed', true);
         }
         return;
       }
-      if (e.target.closest('[data-chip]')) openPopover(true);
+      if (/** @type {HTMLElement | null} */ (eventTarget.closest('[data-chip]'))) openPopover(true);
     });
 
     // Quick filters
-    $('.vf-shortcuts').addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-shortcut]');
+    /** @type {HTMLElement} */ ($('.vf-shortcuts')).addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+      const btn = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-shortcut]'));
       const shortcut = btn ? shortcutById(btn.dataset.shortcut) : null;
       if (shortcut) toggleShortcut(shortcut);
     });
-    $('.vf-quick-rating').addEventListener('click', (e) => {
-      const btn = e.target.closest('.vf-star');
+    /** @type {HTMLElement} */ ($('.vf-quick-rating')).addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+      const btn = /** @type {HTMLButtonElement | null} */ (eventTarget.closest('.vf-star'));
       if (!btn) return;
-      const op = $('.vf-quick-rating select').value;
+      const op = /** @type {HTMLSelectElement} */ ($('.vf-quick-rating select')).value;
       const value = Number(btn.dataset.rating);
       const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === 'rating');
-      const removing = idx >= 0 && state.root.rules[idx].op === op &&
-        Number(state.root.rules[idx].value) === value;
+      const removing = idx >= 0 && state.root.rules[idx]?.op === op &&
+        Number(state.root.rules[idx]?.value) === value;
       mutate(() => {
         if (removing) {
           state.root.rules.splice(idx, 1);
@@ -2118,61 +2138,61 @@
         else state.root.rules.unshift(makeRule('rating', op, value));
       }, { reason: removing ? 'filterRemoved' : undefined });
     });
-    $('.vf-quick-rating select').addEventListener('change', (e) => {
+    /** @type {HTMLSelectElement} */ ($('.vf-quick-rating select')).addEventListener('change', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLSelectElement)) return;
       const rating = findRootRule('rating');
-      if (rating) mutate(() => { rating.op = e.target.value; });
+      if (rating) mutate(() => { rating.op = eventTarget.value; });
     });
-    $('.vf-quick-colors').addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-color]');
-      if (btn) toggleQuickEnum('color_label', btn.dataset.color);
+    /** @type {HTMLElement} */ ($('.vf-quick-colors')).addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+      const btn = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-color]'));
+      if (btn) toggleQuickEnum('color_label', btn.dataset.color || '');
     });
 
-    $('.vf-advanced input').addEventListener('change', (e) => {
+    /** @type {HTMLInputElement} */ ($('.vf-advanced input')).addEventListener('change', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLSelectElement)) return;
       // Only controls whether group tooling is offered — never rewrites
       // the rule tree (hard requirement from the prototype review).
-      state.advanced = e.target.checked;
+      state.advanced = (eventTarget instanceof HTMLInputElement && eventTarget.checked);
       renderRules();
     });
-    $('.vf-add-group').addEventListener('click', () => {
+    /** @type {HTMLElement} */ ($('.vf-add-group')).addEventListener('click', () => {
       mutate(() => state.root.rules.push({ mode: 'any', rules: [makeRule('flag', 'is', 'flagged'), makeRule('rating', 'is', 5)] }));
     });
-    $('.vf-add-filter').addEventListener('click', () => {
-      const picker = $('.vf-field-picker');
+    /** @type {HTMLElement} */ ($('.vf-add-filter')).addEventListener('click', () => {
+      const picker = /** @type {HTMLElement} */ ($('.vf-field-picker'));
       picker.hidden = !picker.hidden;
       if (!picker.hidden) {
         renderFieldPicker('');
-        const search = $('.vf-field-search');
+        const search = /** @type {HTMLInputElement} */ ($('.vf-field-search'));
         search.value = '';
         setTimeout(() => search.focus(), 0);
       }
     });
-    $('.vf-field-search').addEventListener('input', (e) => renderFieldPicker(e.target.value));
-    $('.vf-field-options').addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-add-field]');
+    /** @type {HTMLInputElement} */ ($('.vf-field-search')).addEventListener('input', (e) => { if (e.target instanceof HTMLInputElement) renderFieldPicker(e.target.value); });
+    /** @type {HTMLElement} */ ($('.vf-field-options')).addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+      const btn = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-add-field]'));
       if (!btn) return;
-      mutate(() => state.root.rules.push(makeRule(btn.dataset.addField)));
-      $('.vf-field-picker').hidden = true;
+      mutate(() => state.root.rules.push(makeRule(btn.dataset.addField || '')));
+      /** @type {HTMLElement} */ ($('.vf-field-picker')).hidden = true;
     });
 
-    const tree = $('.vf-rule-tree');
-    tree.addEventListener('toggle', (e) => {
-      if (!e.target.matches('.vf-value-picker details') || !document.contains(e.target)) return;
-      const wrap = e.target.closest('.vf-value-picker');
-      const node = getNodeAtPath(wrap.dataset.path);
-      valuePickerState(node).open = e.target.open;
-      if (e.target.open) loadValuePickers();
+    const tree = /** @type {HTMLElement} */ ($('.vf-rule-tree'));
+    tree.addEventListener('toggle', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLDetailsElement)) return;
+      if (!eventTarget.matches('.vf-value-picker details') || !document.contains(eventTarget)) return;
+      const wrap = /** @type {HTMLElement | null} */ (eventTarget.closest('.vf-value-picker')); if (!wrap) return;
+      const node = getNodeAtPath(wrap.dataset.path); if (!node || isGroup(node)) return;
+      valuePickerState(node).open = eventTarget.open;
+      if (eventTarget.open) loadValuePickers();
     }, true);
-    tree.addEventListener('change', (e) => {
+    tree.addEventListener('change', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLSelectElement)) return;
       // Typed inputs commit through the debounced input path; their blur
       // 'change' would re-render mid-click and destroy a suggest option
       // before its pick lands (blur fires before click).
-      const action = e.target.dataset.action;
+      const action = eventTarget.dataset.action || '';
       if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) return;
       if (action === 'choice-search') return;
       if (action === 'choice-pick') {
-        const node = getNodeAtPath(e.target.dataset.path);
-        const value = e.target.dataset.value;
-        const checked = e.target.checked;
+        const node = getNodeAtPath(eventTarget.dataset.path); if (!node || isGroup(node)) return;
+        const value = eventTarget.dataset.value || '';
+        const checked = (eventTarget instanceof HTMLInputElement && eventTarget.checked);
         mutate(() => {
           if (node.op === 'in' || node.op === 'not_in') {
             const values = extensionValues(node).filter((v) => pickerValueKey(node, v) !== pickerValueKey(node, value));
@@ -2182,10 +2202,10 @@
         return;
       }
       if (action === 'extension-pick') {
-        const node = getNodeAtPath(e.target.dataset.path);
+        const node = getNodeAtPath(eventTarget.dataset.path); if (!node || isGroup(node)) return;
         if (!node || node.field !== 'extension') return;
-        const value = e.target.dataset.value;
-        const checked = e.target.checked;
+        const value = eventTarget.dataset.value || '';
+        const checked = (eventTarget instanceof HTMLInputElement && eventTarget.checked);
         mutate(() => {
           if (node.op === 'in' || node.op === 'not_in') {
             const values = extensionValues(node).filter((v) => String(v).toLowerCase() !== value.toLowerCase());
@@ -2194,14 +2214,14 @@
         }, { reason: checked ? undefined : 'filterRemoved' });
         return;
       }
-      handleRuleEdit(e.target);
+      handleRuleEdit(eventTarget);
     });
-    tree.addEventListener('input', (e) => {
-      const action = e.target.dataset.action;
+    tree.addEventListener('input', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLSelectElement)) return;
+      const action = eventTarget.dataset.action || '';
       if (action === 'choice-search') {
-        const node = getNodeAtPath(e.target.dataset.path);
+        const node = getNodeAtPath(eventTarget.dataset.path); if (!node || isGroup(node)) return;
         const picker = valuePickerState(node);
-        picker.query = e.target.value;
+        picker.query = eventTarget.value;
         clearTimeout(picker.timer);
         picker.request++;
         if (node.field === 'folder' && picker.values !== null) refreshPickerOptions(node, picker);
@@ -2212,39 +2232,39 @@
         return;
       }
       if (['value-input', 'between-lo', 'between-hi', 'recent-n', 'multi-text'].includes(action)) {
-        clearTimeout(editDebounce);
-        const target = e.target;
+        clearTimeout(editDebounce ?? undefined);
+        const target = eventTarget;
         editDebounce = setTimeout(() => {
           editDebounce = null;
           if (document.contains(target)) handleRuleEdit(target, true);
         }, 250);
       }
-      if (e.target.dataset.suggest) scheduleValueSuggest(e.target);
+      if (eventTarget instanceof HTMLInputElement && eventTarget.dataset.suggest) scheduleValueSuggest(eventTarget);
     });
-    tree.addEventListener('focusin', (e) => {
-      if (e.target.dataset && e.target.dataset.suggest) showValueSuggest(e.target);
+    tree.addEventListener('focusin', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLInputElement)) return;
+      if (eventTarget.dataset && eventTarget.dataset.suggest) showValueSuggest(eventTarget);
     });
-    tree.addEventListener('click', (e) => {
-      const suggestion = e.target.closest('[data-suggest-value]');
+    tree.addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+      const suggestion = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-suggest-value]'));
       if (suggestion) {
         mutate(() => {
           const node = getNodeAtPath(suggestion.dataset.path);
           if (!node || isGroup(node)) return;
           if (node.op === 'in' || node.op === 'not_in') {
             const values = Array.isArray(node.value) ? node.value.slice() : [];
-            if (!values.includes(suggestion.dataset.suggestValue)) values.push(suggestion.dataset.suggestValue);
+            if (!values.includes((suggestion.dataset.suggestValue || ''))) values.push((suggestion.dataset.suggestValue || ''));
             node.value = values;
-          } else node.value = suggestion.dataset.suggestValue;
+          } else node.value = (suggestion.dataset.suggestValue || '');
         });
         hideSuggests();
         return;
       }
-      const target = e.target.closest('[data-action]');
+      const target = /** @type {HTMLElement | null} */ (eventTarget.closest('[data-action]'));
       if (!target) return;
       const action = target.dataset.action;
       const path = target.dataset.path;
       if (action === 'visual-strength') {
-        mutate(() => { if (state.visual) state.visual.strength = target.dataset.strength; });
+        mutate(() => { if (state.visual) state.visual.strength = target.dataset.strength || 'balanced'; });
         return;
       }
       if (action === 'visual-remove') {
@@ -2253,12 +2273,12 @@
         return;
       }
       if (action === 'choice-retry') {
-        const node = getNodeAtPath(path);
+        const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
         requestPickerValues(node, valuePickerState(node));
         return;
       }
       if (action === 'choice-folder-toggle') {
-        const node = getNodeAtPath(path);
+        const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
         const picker = valuePickerState(node);
         const folderId = Number(target.dataset.folder);
         if (picker.collapsed.has(folderId)) picker.collapsed.delete(folderId);
@@ -2267,7 +2287,7 @@
         return;
       }
       if (action === 'choice-remove') {
-        const node = getNodeAtPath(path);
+        const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
         mutate(() => {
           if (node.op === 'in' || node.op === 'not_in') node.value = extensionValues(node).filter((v) => v !== target.dataset.value);
           else removeByReference(state.root, node);
@@ -2275,16 +2295,16 @@
         return;
       }
       if (action === 'extension-retry') {
-        const picker = target.closest('.vf-extension-picker');
+        const picker = /** @type {HTMLElement | null} */ (target.closest('.vf-extension-picker')); if (!picker) return;
         const restoreFocus = picker.contains(document.activeElement);
         extensionRequest = null;
-        $$('.vf-extension-status').forEach((status) => { status.textContent = 'Loading formats…'; });
-        if (restoreFocus) picker.querySelector('.vf-extension-status').focus({ preventScroll: true });
+        /** @type {HTMLElement[]} */ ($$('.vf-extension-status')).forEach((status) => { status.textContent = 'Loading formats…'; });
+        if (restoreFocus) /** @type {HTMLElement} */ (picker.querySelector('.vf-extension-status')).focus({ preventScroll: true });
         loadExtensionPickers();
         return;
       }
       if (action === 'extension-remove') {
-        const node = getNodeAtPath(path);
+        const node = getNodeAtPath(path); if (!node || isGroup(node)) return;
         mutate(() => {
           node.value = extensionValues(node).filter((v) => v !== target.dataset.value);
         }, { reason: 'filterRemoved' });
@@ -2293,36 +2313,36 @@
       if (action === 'multi') {
         const node = getNodeAtPath(path);
         if (!node || isGroup(node)) return;
-        const values = Array.isArray(node.value) ? node.value.slice() : [node.value];
-        const removing = values.includes(target.dataset.value);
+        const values = enumClauseValues(node);
+        const removing = values.includes(target.dataset.value || '');
         mutate(() => {
           node.value = removing
             ? values.filter((v) => v !== target.dataset.value)
-            : values.concat([target.dataset.value]);
+            : values.concat([target.dataset.value || '']);
         }, { reason: removing ? 'filterRemoved' : undefined });
         return;
       }
       if (action === 'remove') {
-        clearTimeout(editDebounce);
-        if (getNodeAtPath(path)._qs) {
+        clearTimeout(editDebounce ?? undefined);
+        if (getNodeAtPath(path)?._qs) {
           cancelQuickSearchTimer();
           clearUnappliedQuickSearchText();
         }
         mutate(() => {
-          const ref = getParentAtPath(path);
+          const ref = getParentAtPath(path || ''); if (!ref.parent) return;
           const container = ref.parent === state.root ? state.root.rules : ref.parent.rules;
           container.splice(ref.index, 1);
         }, { reason: 'filterRemoved' });
         toast('Rule removed', true);
       } else if (action === 'add-child') {
-        mutate(() => getNodeAtPath(path).rules.push(makeRule('keyword')));
+        mutate(() => { const group = getNodeAtPath(path); if (isGroup(group)) group.rules.push(makeRule('keyword')); });
       } else if (action === 'add-subgroup') {
-        mutate(() => getNodeAtPath(path).rules.push({ mode: 'all', rules: [makeRule('rating', '>=', 3)] }));
+        mutate(() => { const group = getNodeAtPath(path); if (isGroup(group)) group.rules.push({ mode: 'all', rules: [makeRule('rating', '>=', 3)] }); });
       }
     });
 
-    document.addEventListener('keydown', (e) => {
-      const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
+    document.addEventListener('keydown', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
+      const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(eventTarget.tagName) || eventTarget.isContentEditable;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f' && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         searchInput.focus();
@@ -2331,36 +2351,36 @@
       if (e.key === '\\' && !typing && !e.metaKey && !e.ctrlKey) { e.preventDefault(); toggleMute(); }
       if (e.key === 'Escape') {
         hideSuggests();
-        $('.vf-field-picker').hidden = true;
-        if (!$('.vf-popover').hidden) openPopover(false);
+        /** @type {HTMLElement} */ ($('.vf-field-picker')).hidden = true;
+        if (!/** @type {HTMLElement} */ ($('.vf-popover')).hidden) openPopover(false);
       }
     });
-    document.addEventListener('click', (e) => {
+    document.addEventListener('click', (e) => { const eventTarget = e.target; if (!(eventTarget instanceof HTMLElement)) return;
       // A click that triggered a re-render leaves a detached target by the
       // time this bubbles; treating it as an outside click would close the
       // popover after every suggestion pick.
-      if (!document.contains(e.target)) return;
-      if (!rootEl.contains(e.target)) {
+      if (!document.contains(eventTarget)) return;
+      if (!rootEl?.contains(eventTarget)) {
         hideSuggests();
-        $('.vf-field-picker').hidden = true;
-        const handoffMenu = $('.vf-handoff-menu');
+        /** @type {HTMLElement} */ ($('.vf-field-picker')).hidden = true;
+        const handoffMenu = /** @type {HTMLElement} */ ($('.vf-handoff-menu'));
         if (handoffMenu) handoffMenu.hidden = true;
-        if (!$('.vf-popover').hidden && !e.target.closest('.vf-popover')) openPopover(false);
+        if (!/** @type {HTMLElement} */ ($('.vf-popover')).hidden && !/** @type {HTMLElement | null} */ (eventTarget.closest('.vf-popover'))) openPopover(false);
       } else {
-        if (!e.target.closest('.vf-value-wrap')) hideSuggests();
-        if (!e.target.closest('.vf-add-wrap')) $('.vf-field-picker').hidden = true;
+        if (!/** @type {HTMLElement | null} */ (eventTarget.closest('.vf-value-wrap'))) hideSuggests();
+        if (!/** @type {HTMLElement | null} */ (eventTarget.closest('.vf-add-wrap'))) /** @type {HTMLElement} */ ($('.vf-field-picker')).hidden = true;
         // Same rule as the field picker: clicks inside the filter bar but
         // outside the handoff wrap (search input, other dropdowns) should
         // close the menu — otherwise it stays open while the user moves
         // on to something else.
-        if (!e.target.closest('.vf-handoff-wrap')) {
-          const handoffMenu = $('.vf-handoff-menu');
+        if (!/** @type {HTMLElement | null} */ (eventTarget.closest('.vf-handoff-wrap'))) {
+          const handoffMenu = /** @type {HTMLElement} */ ($('.vf-handoff-menu'));
           if (handoffMenu) handoffMenu.hidden = true;
         }
       }
     });
     window.addEventListener('resize', updateChipOverflow);
-    new ResizeObserver(updateChipOverflow).observe(rootEl);
+    if (rootEl) new ResizeObserver(updateChipOverflow).observe(rootEl);
   }
 
   function expressionSummary() {
@@ -2371,8 +2391,8 @@
   }
 
   function openSaveModal() {
-    const modal = $('.vf-save-modal');
-    const backdrop = $('.vf-save-backdrop');
+    const modal = /** @type {HTMLElement} */ ($('.vf-save-modal'));
+    const backdrop = /** @type {HTMLElement} */ ($('.vf-save-backdrop'));
     // Post-save semantics: the saved Collection reopens unmuted with the
     // visual clause applied — preview THAT count, never the paused view's.
     // Preview the same expression confirmSaveCollection persists
@@ -2386,30 +2406,30 @@
     // flattening of it (Codex review r3620791294). ``userRules()`` is
     // the shared helper for that shape.
     const rules = userRules();
-    const preview = $('.vf-save-preview');
+    const preview = /** @type {HTMLElement} */ ($('.vf-save-preview'));
     preview.textContent = expressionSummary();
-    fetchJson('/api/photos/query', {
+    /** @type {Promise<{total: number}>} */ (fetchJson('/api/photos/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rules, per_page: 1, visual: state.visual || undefined }),
-    }).then((data) => {
+    })).then((data) => {
       preview.textContent = `${Number(data.total).toLocaleString()} matching photo${data.total === 1 ? '' : 's'} — ${expressionSummary()}`;
     }).catch(() => {});
-    $('.vf-save-name').value = '';
+    /** @type {HTMLInputElement} */ ($('.vf-save-name')).value = '';
     modal.hidden = false;
     backdrop.hidden = false;
-    setTimeout(() => $('.vf-save-name').focus(), 0);
+    setTimeout(() => /** @type {HTMLInputElement} */ ($('.vf-save-name')).focus(), 0);
   }
 
   function closeSaveModal() {
-    $('.vf-save-modal').hidden = true;
-    $('.vf-save-backdrop').hidden = true;
+    /** @type {HTMLElement} */ ($('.vf-save-modal')).hidden = true;
+    /** @type {HTMLElement} */ ($('.vf-save-backdrop')).hidden = true;
   }
 
   function confirmSaveCollection() {
-    const name = $('.vf-save-name').value.trim();
-    if (!name) { $('.vf-save-name').focus(); return; }
-    fetchJson('/api/collections', {
+    const name = /** @type {HTMLInputElement} */ ($('.vf-save-name')).value.trim();
+    if (!name) { /** @type {HTMLInputElement} */ ($('.vf-save-name')).focus(); return; }
+    /** @type {Promise<unknown>} */ (fetchJson('/api/collections', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2417,7 +2437,7 @@
         rules: state.root.rules.length ? state.root : [],
         visual: state.visual || null,
       }),
-    }).then(() => {
+    })).then(() => {
       closeSaveModal();
       toast(`Saved “${name}” as a Collection`);
       if (state.onCollectionSaved) state.onCollectionSaved();
@@ -2426,18 +2446,18 @@
     });
   }
 
-  const HANDOFF_PAGES = [
+  const HANDOFF_PAGES = /** @type {[string, string, string, string][]} */ ([
     ['browse', '/browse', 'Browse', 'Workspace · All available photos'],
     ['map', '/map', 'Map', 'Adds: plottable locations scope'],
     ['review', '/review', 'Review', 'Adds: predictions scope'],
     ['duplicates', '/duplicates', 'Duplicates', 'Adds: duplicate groups scope'],
     ['misses', '/misses', 'Misses', 'Adds: detected misses scope'],
-  ];
-  const HANDOFF_EXCLUDED_VALUES = {
+  ]);
+  const HANDOFF_EXCLUDED_VALUES = /** @type {Record<string, Record<string, FilterScalar[]>>} */ ({
     misses: { flag: ['rejected'] },
-  };
+  });
 
-  function handoffPageAvailable(page) {
+  function handoffPageAvailable(/** @type {string} */ page) {
     // Misses has bulk reject/recompute over the whole result set. The
     // handoff payload serializes only ``state.root``/``state.visual`` —
     // it drops any external scope the source page keeps outside the
@@ -2458,7 +2478,7 @@
     return !allLeaves(state.root).some((rule) => {
       const excluded = exclusions[rule.field];
       if (!excluded) return false;
-      if (rule.op === 'is') return excluded.includes(rule.value);
+      if (rule.op === 'is') return excluded.includes(/** @type {FilterScalar} */ (rule.value));
       if (rule.op === 'in' && Array.isArray(rule.value)) {
         return rule.value.every((value) => excluded.includes(value));
       }
@@ -2467,13 +2487,13 @@
   }
 
   function renderHandoff() {
-    const btn = $('.vf-handoff');
+    const btn = /** @type {HTMLElement} */ ($('.vf-handoff'));
     if (!btn) return;
     btn.hidden = !hasUserFilters();
   }
 
   function openHandoffMenu() {
-    const menu = $('.vf-handoff-menu');
+    const menu = /** @type {HTMLElement} */ ($('.vf-handoff-menu'));
     if (!menu.hidden) { menu.hidden = true; return; }
     menu.innerHTML = HANDOFF_PAGES.filter(([key]) =>
       key !== state.page && handoffPageAvailable(key)).map(([key, path, label, detail]) =>
@@ -2500,22 +2520,22 @@
       state.getScope = options.getScope || null;
       state.onCollectionSaved = options.onCollectionSaved || null;
       state.excludedValues = options.excludedValues || {};
-      rootEl = typeof options.root === 'string' ? document.querySelector(options.root) : options.root;
+      rootEl = typeof options.root === 'string' ? /** @type {HTMLElement} */ (document.querySelector(options.root)) : options.root || null;
       if (!rootEl) return Promise.reject(new Error('VireoFilter: missing root element'));
       // The search box is already editable while its event handlers wait
       // for the registry. Remember even a type-then-clear during that gap.
-      const searchInput = $('.vf-search input');
+      const searchInput = /** @type {HTMLInputElement} */ ($('.vf-search input'));
       let earlySearchEdited = false;
       let earlySearchComposing = false;
-      const rememberEarlySearch = (event) => {
+      const rememberEarlySearch = (/** @type {Event & {isComposing?: boolean}} */ event) => {
         localEdits = true;
         earlySearchEdited = true;
-        earlySearchComposing = event.isComposing;
+        earlySearchComposing = !!event.isComposing;
       };
       searchInput.addEventListener('input', rememberEarlySearch);
       // Scope is already visible during registry/shortcut loading. Bind it
       // once now so early choices survive the later workspace restore.
-      const scopeBtn = $('.vf-search-scope');
+      const scopeBtn = /** @type {HTMLElement} */ ($('.vf-search-scope'));
       if (scopeBtn) {
         // Keep focus (and the suggestion list) in the search box.
         scopeBtn.addEventListener('mousedown', (e) => e.preventDefault());
@@ -2539,7 +2559,7 @@
         if (urlParams.has('filters')) {
           const handoffRaw = urlParams.get('filters');
           let payload;
-          try { payload = JSON.parse(handoffRaw); }
+          try { payload = JSON.parse(handoffRaw || ''); }
           catch (e) { payload = null; }
           if (payload && payload.root && Array.isArray(payload.root.rules)) {
             // Strip page-excluded values before adopting the payload so
@@ -2585,7 +2605,7 @@
         };
         if (fromUrl) {
           // Deep-link params win; still resolve the workspace for saves.
-          return fetchJson('/api/workspaces/active')
+          return /** @type {Promise<FilterWorkspace>} */ (fetchJson('/api/workspaces/active'))
             .then((ws) => { state.workspaceId = ws.id; })
             .catch(() => {})
             .then(finish);
@@ -2625,9 +2645,9 @@
       // the anchor is NOT preserved: the selected photo may have just left
       // the collection, and loadUntilPhotoRendered would then page through
       // the whole refreshed set looking for it (Codex review r3622521603).
-      let root = { mode: 'all', rules: [] };
+      let root = /** @type {FilterGroup} */ ({ mode: 'all', rules: [] });
       if (Array.isArray(rules)) root = { mode: 'all', rules: clone(rules) };
-      else if (rules && Array.isArray(rules.rules)) root = clone(rules);
+      else if (isGroup(rules)) root = clone(rules);
       // Legacy default collections use the {"field": "all"} sentinel (no
       // condition) — opening one is simply "show everything", not a chip.
       root.rules = root.rules.filter((r) => !(r && r.field === 'all'));
@@ -2725,10 +2745,11 @@
     // vireo/filter_fields.py, so the two cannot drift.
     dependsOnMutation(mutations) {
       const kinds = Array.isArray(mutations) ? mutations : [mutations];
+      /** @type {(node: FilterRule) => boolean} */
       const affected = (node) => {
         if (isGroup(node)) return (node.rules || []).some(affected);
         if (!node || !node.field) return false;
-        const spec = state.fields && state.fields[node.field];
+        const spec = state.fields && state.fields?.[node.field];
         // A field the registry cannot describe — `keyword_identity`, a rule
         // saved by a newer build — might depend on anything. Re-running the
         // query is the answer that cannot show a stale grid.

@@ -2,7 +2,7 @@
 // request sequence guard, and the navbar's undo/redo hook.
 // Classic page script; load boot.js after all definitions.
 
-function applyMissesPayload(data) {
+/** @param {MissPayload} data */ function applyMissesPayload(data) {
   activeMissFloor = (data.config && data.config.detector_confidence != null)
     ? Number(data.config.detector_confidence)
     : null;
@@ -44,7 +44,7 @@ async function loadMisses() {
     missesData = { no_subject: [], clipped: [], oof: [] };
     appliedMissFilters = cloneMissFilterPayload(missFilterPayload());
     render();
-    var recomputeBtn = document.getElementById('missRecomputeBtn');
+    var recomputeBtn = /** @type {HTMLButtonElement} */ (document.getElementById('missRecomputeBtn'));
     if (recomputeBtn) recomputeBtn.disabled = true;
     return;
   }
@@ -65,7 +65,7 @@ async function loadMisses() {
   });
   if (requestId !== missLoadRequestId) return;
   if (!r.ok) {
-    document.getElementById('missesRoot').innerHTML =
+    /** @type {HTMLElement} */ (document.getElementById('missesRoot')).innerHTML =
       '<div class="misses-empty-page">Failed to load misses.</div>';
     return;
   }

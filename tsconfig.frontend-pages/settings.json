@@ -1,0 +1,21 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/settings.d.ts",
+    "../vireo/static/settings/all-settings.js",
+    "../vireo/static/settings/autosave.js",
+    "../vireo/static/settings/boot.js",
+    "../vireo/static/settings/config.js",
+    "../vireo/static/settings/desktop.js",
+    "../vireo/static/settings/external-editors.js",
+    "../vireo/static/settings/labels.js",
+    "../vireo/static/settings/maintenance.js",
+    "../vireo/static/settings/models.js",
+    "../vireo/static/settings/nas-setup.js",
+    "../vireo/static/settings/page.js",
+    "../vireo/static/settings/quick-filters.js",
+    "../vireo/static/settings/remote-targets.js",
+    "../vireo/static/settings/system-tools.js",
+    "../vireo/static/settings/workspace.js"
+  ]
+}

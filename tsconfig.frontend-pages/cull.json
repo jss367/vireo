@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": ["../types/pages/cull.d.ts", "../vireo/static/cull-favorites.js"]
+}

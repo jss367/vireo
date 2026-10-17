@@ -9,7 +9,7 @@ function refreshPendingSyncBanner() {
 }
 
 /* ---------- Edit Actions ---------- */
-async function setRating(photoId, rating) {
+async function setRating(/** @type {number} */ photoId, /** @type {number} */ rating) {
   try {
     await safeFetch('/api/photos/' + photoId + '/rating', {
       method: 'POST',
@@ -33,10 +33,10 @@ async function setRating(photoId, rating) {
   } catch(e) {}
 }
 
-async function setFlag(flag) {
+async function setFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag) {
   var sel = getActiveSelection();
   if (sel.length > 1) {
-    var st = _batchAllLoaded(sel) ? _batchFlagState(sel) : { unanimous: false };
+    var st = _batchAllLoaded(sel) ? _batchFlagState(sel) : { unanimous: false, value: null };
     var target = (st.unanimous && st.value === flag) ? 'none' : flag;
     // batchSetFlag runs _refreshBatchInspectorIfActive() against the *current*
     // selection when the request resolves, so the sidebar reflects whatever is
@@ -64,8 +64,8 @@ async function setFlag(flag) {
   } catch(e) {}
 }
 
-function updateDetailWildlifeExcluded(photo) {
-  var btn = document.getElementById('detailWildlifeExcluded');
+function updateDetailWildlifeExcluded(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('detailWildlifeExcluded'));
   if (!btn) return;
   var excluded = !!(photo && photo.wildlife_excluded);
   btn.classList.toggle('active', excluded);
@@ -75,7 +75,7 @@ function updateDetailWildlifeExcluded(photo) {
     : 'Exclude this photo from wildlife detection and classification';
 }
 
-async function setWildlifeExcludedFor(photoId, excluded) {
+async function setWildlifeExcludedFor(/** @type {number} */ photoId, /** @type {boolean} */ excluded) {
   await safeFetch('/api/photos/' + photoId + '/wildlife_excluded', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -105,7 +105,7 @@ async function toggleDetailWildlifeExcluded() {
   } catch(e) {}
 }
 
-async function fetchColorLabels(photoIds) {
+async function fetchColorLabels(/** @type {number[]} */ photoIds) {
   if (!photoIds.length) return;
   var gen = colorLabelGen;
   // Chunk the GET URL so oversized stacks (or any large id set) don't
@@ -113,7 +113,7 @@ async function fetchColorLabels(photoIds) {
   // whole page's color labels when a stack expansion hydrates a large
   // member list (Codex P2 on PR #1561). Matches the 500-id cap the
   // /api/photos/by-ids stack-expansion path already uses.
-  var combined = {};
+  /** @type {Record<string, string>} */ var combined = {};
   var chunkFailed = false;
   for (var offset = 0; offset < photoIds.length; offset += 500) {
     var chunk = photoIds.slice(offset, offset + 500);
@@ -134,7 +134,7 @@ async function fetchColorLabels(photoIds) {
   });
   for (var pid in combined) {
     if ((colorLabelEditGen[pid] || 0) > gen) continue;
-    colorLabels[pid] = combined[pid];
+    var color = combined[pid]; if (color != null) colorLabels[pid] = color;
   }
   // Mark every requested id as fetched — an absent id in `combined` means
   // "no color set" now that we've asked, so the batch inspector can trust
@@ -146,10 +146,10 @@ async function fetchColorLabels(photoIds) {
   _refreshBatchInspectorIfActive();
 }
 
-async function setColorLabel(color) {
+async function setColorLabel(/** @type {string | null} */ color) {
   var sel = getActiveSelection();
   if (sel.length > 1) {
-    var st = _batchAllLoaded(sel) ? _batchColorState(sel) : { unanimous: false };
+    var st = _batchAllLoaded(sel) ? _batchColorState(sel) : { unanimous: false, value: null };
     var target = (st.unanimous && st.value === color) ? null : color;
     // See setFlag: batchSetColorLabel already refreshes the inspector for the
     // current selection, so re-rendering with the captured `sel` risks stomping
@@ -182,14 +182,14 @@ async function setColorLabel(color) {
   scheduleCollectionCountsRefresh();
 }
 
-function updateDetailColorsValue(current) {
-  document.querySelectorAll('.detail-color-btn').forEach(function(btn) {
+function updateDetailColorsValue(/** @type {string | null} */ current) {
+  /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.detail-color-btn')).forEach(function(btn) {
     btn.classList.toggle('active', btn.dataset.color === current);
   });
 }
 
 function updateDetailColors() {
-  updateDetailColorsValue(colorLabels[selectedPhotoId] || null);
+  updateDetailColorsValue((selectedPhotoId == null ? null : colorLabels[selectedPhotoId]) || null);
 }
 
 // --- Multi-select (batch) inspector ---------------------------------------
@@ -198,34 +198,36 @@ function updateDetailColors() {
 // value when unanimous, or a "Mixed" marker when the selected photos differ,
 // and edits apply to the whole selection.
 
-function _batchToggleMixed(id, show) {
+function _batchToggleMixed(/** @type {string} */ id, /** @type {boolean} */ show) {
   var el = document.getElementById(id);
   if (el) el.hidden = !show;
 }
 
 // Returns {unanimous, value}. get(id) yields the per-photo value.
+/** @template T @param {number[]} ids @param {(id: number) => T} get @returns {{unanimous: boolean, value: T | null}} */
 function _batchUnanimous(ids, get) {
   if (!ids.length) return { unanimous: false, value: null };
-  var first = get(ids[0]);
+  var firstId = ids[0]; if (firstId == null) return {unanimous: false, value: null};
+  var first = get(firstId);
   for (var i = 1; i < ids.length; i++) {
-    if (get(ids[i]) !== first) return { unanimous: false, value: null };
+    var id = ids[i]; if (id == null || get(id) !== first) return { unanimous: false, value: null };
   }
   return { unanimous: true, value: first };
 }
 
-function _batchRatingState(ids) {
+function _batchRatingState(/** @type {number[]} */ ids) {
   return _batchUnanimous(ids, function(id) {
     var p = findBrowsePhoto(id);
     return p ? (p.rating || 0) : 0;
   });
 }
-function _batchFlagState(ids) {
+function _batchFlagState(/** @type {number[]} */ ids) {
   return _batchUnanimous(ids, function(id) {
     var p = findBrowsePhoto(id);
     return p ? (p.flag || 'none') : 'none';
   });
 }
-function _batchColorState(ids) {
+function _batchColorState(/** @type {number[]} */ ids) {
   return _batchUnanimous(ids, function(id) { return colorLabels[id] || null; });
 }
 
@@ -233,7 +235,7 @@ function _batchColorState(ids) {
 // (and thus its rating/flag/color is known). A selection that reaches beyond the
 // loaded page — e.g. "select all search results" — is shown as Mixed rather than
 // asserting a shared value we can't actually verify.
-function _batchAllLoaded(ids) {
+function _batchAllLoaded(/** @type {number[]} */ ids) {
   return ids.every(function(id) {
     return !!findBrowsePhoto(id);
   });
@@ -243,15 +245,15 @@ function _batchAllLoaded(ids) {
 // having each photo row loaded (via _batchAllLoaded) is not enough to trust the
 // colour column: a selection made before that fetch returns would otherwise
 // render as unanimous no-colour without a Mixed marker.
-function _batchColorLoaded(ids) {
+function _batchColorLoaded(/** @type {number[]} */ ids) {
   return ids.every(function(id) { return colorLabelsFetched.has(id); });
 }
 
-function renderBatchInspector(ids, opts) {
+function renderBatchInspector(/** @type {number[]} */ ids, /** @type {{preserveExifSuggestion?: boolean, preserveLocation?: boolean}} */ opts = {}) {
   opts = opts || {};
   var known = _batchAllLoaded(ids);
 
-  var coordinateEl = document.getElementById('locationCoordinateStatus');
+  var coordinateEl = /** @type {HTMLElement} */ (document.getElementById('locationCoordinateStatus'));
   if (coordinateEl) {
     if (!known) {
       coordinateEl.className = 'coordinate-status none';
@@ -260,7 +262,7 @@ function renderBatchInspector(ids, opts) {
       var counts = {exif: 0, assigned: 0, none: 0};
       ids.forEach(function(id) {
         var p = findBrowsePhoto(id);
-        var status = p && counts[p.location_status] != null ? p.location_status : 'none';
+        var status = p?.location_status || 'none';
         counts[status]++;
       });
       coordinateEl.className = 'coordinate-status';
@@ -273,13 +275,13 @@ function renderBatchInspector(ids, opts) {
   }
 
   var rs = known ? _batchRatingState(ids) : { unanimous: false, value: 0 };
-  var r = rs.unanimous ? rs.value : 0;
+  var r = rs.unanimous ? rs.value || 0 : 0;
   var ratingHtml = '';
   for (var i = 1; i <= 5; i++) {
     ratingHtml += '<span class="' + (i <= r ? 'detail-star active' : 'detail-star') +
       '" onclick="batchRate(' + i + ')">&#9733;</span>';
   }
-  document.getElementById('detailRating').innerHTML = ratingHtml;
+  /** @type {HTMLElement} */ (document.getElementById('detailRating')).innerHTML = ratingHtml;
   // Show Mixed whenever we can't confirm unanimity — including partially-loaded
   // selections where `known` is false. Hiding Mixed there made "0 stars / None /
   // no color" render identically to a truly unanimous no-value selection.
@@ -308,10 +310,10 @@ function renderBatchInspector(ids, opts) {
   }
 }
 
-async function batchRate(rating) {
+async function batchRate(/** @type {number} */ rating) {
   var ids = getActiveSelection();
   if (ids.length < 1) return;
-  var st = _batchAllLoaded(ids) ? _batchRatingState(ids) : { unanimous: false };
+  var st = _batchAllLoaded(ids) ? _batchRatingState(ids) : { unanimous: false, value: null };
   var target = (st.unanimous && st.value === rating) ? 0 : rating;
   // batchSetRating already refreshes the inspector for the current selection.
   // A follow-up render using the captured `ids` would clobber that fresh render
@@ -319,12 +321,12 @@ async function batchRate(rating) {
   await batchSetRating(target);
 }
 
-async function addKeyword(keyword) {
+async function addKeyword(/** @type {BrowseKeywordOption | null} */ keyword = null) {
   var ids = getActiveSelection();
   var useBatch = ids.length > 1;
   var batchSelectionKey = selectionIdsKey(ids);
   if (!selectedPhotoId && !useBatch) return;
-  var input = document.getElementById('addKeywordInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('addKeywordInput'));
   var name = input.value.trim();
   if (!name) return;
   var state = getKeywordAutocompleteState('addKeywordInput');
@@ -333,7 +335,7 @@ async function addKeyword(keyword) {
       ? state.selectedKeyword
       : null
   );
-  var payload = selectedKeyword && selectedKeyword.id
+  /** @type {{keyword_id?: number, name?: string, photo_ids?: number[]}} */ var payload = selectedKeyword && selectedKeyword.id
     ? { keyword_id: selectedKeyword.id }
     : { name: name };
   if (useBatch) payload.photo_ids = ids;
@@ -367,7 +369,7 @@ async function addKeyword(keyword) {
       loadDetail(selectedPhotoId);
     }
     if (useBatch && selectionIdsKey(getActiveSelection()) === batchSelectionKey) {
-      Vireo.browse.panelRequests.keywords.invalidate();
+      /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
       loadSelectionKeywordSuggestions(ids);
     }
     loadKeywords();
@@ -377,7 +379,7 @@ async function addKeyword(keyword) {
   } catch(e) {}
 }
 
-async function removeKeyword(photoId, keywordId) {
+async function removeKeyword(/** @type {number} */ photoId, /** @type {number} */ keywordId) {
   try {
     await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
       method: 'DELETE',
@@ -386,7 +388,7 @@ async function removeKeyword(photoId, keywordId) {
     await _refreshBrowseKeywordState([photoId], { skipDetail: true });
     _clearRepresentativeStateAfterKeywordRemoval(
       [photoId],
-      _keywordNameFromCache(keywordId),
+      _keywordNameFromCache(keywordId) || null,
     );
     // Same guard as setRating: don't blank the panel of a photo opened since.
     if (selectedPhotoId === photoId) loadDetail(photoId);
@@ -398,16 +400,16 @@ async function removeKeyword(photoId, keywordId) {
 }
 
 /* ---------- Keyword Type Dropdown ---------- */
-function toggleTypeDropdown(indicator, kwId) {
+function toggleTypeDropdown(/** @type {HTMLElement} */ indicator, /** @type {number} */ kwId) {
   // Close all other open dropdowns first
-  document.querySelectorAll('.keyword-type-dropdown.open').forEach(function(dd) {
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.keyword-type-dropdown.open')).forEach(function(dd) {
     if (dd.dataset.kwId !== String(kwId)) dd.classList.remove('open');
   });
-  var dropdown = indicator.querySelector('.keyword-type-dropdown');
+  var dropdown = /** @type {HTMLElement | null} */ (indicator.querySelector('.keyword-type-dropdown'));
   if (dropdown) dropdown.classList.toggle('open');
 }
 
-async function setKeywordType(kwId, newType, el) {
+async function setKeywordType(/** @type {number} */ kwId, /** @type {string} */ newType, /** @type {HTMLElement} */ el) {
   try {
     await safeFetch('/api/keywords/' + kwId, {
       method: 'PUT',
@@ -415,7 +417,7 @@ async function setKeywordType(kwId, newType, el) {
       body: JSON.stringify({ type: newType }),
     });
     // Close dropdown
-    var dropdown = el.closest('.keyword-type-dropdown');
+    var dropdown = /** @type {HTMLElement | null} */ (el.closest('.keyword-type-dropdown'));
     if (dropdown) dropdown.classList.remove('open');
     // Refresh detail panel and keyword tree
     // Retyping a keyword to/from `species` changes which predictions count as
@@ -432,8 +434,8 @@ async function setKeywordType(kwId, newType, el) {
 
 // Close keyword type dropdowns when clicking outside
 document.addEventListener('click', function(e) {
-  if (!e.target.closest('.keyword-type-indicator')) {
-    document.querySelectorAll('.keyword-type-dropdown.open').forEach(function(dd) {
+  if (!(e.target instanceof Element) || !/** @type {HTMLElement | null} */ (e.target.closest('.keyword-type-indicator'))) {
+    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.keyword-type-dropdown.open')).forEach(function(dd) {
       dd.classList.remove('open');
     });
   }

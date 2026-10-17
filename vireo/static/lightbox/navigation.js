@@ -1,11 +1,11 @@
 
-function _lbThumbnailUrl(photoId, version) {
+function _lbThumbnailUrl(/** @type {LightboxPhotoId} */ photoId, /** @type {string | undefined} */ version) {
   var url = '/thumbnails/' + photoId + '.jpg';
   if (version) url += '?editv=' + encodeURIComponent(version);
   return vireoCacheBustedPhotoUrl(photoId, url);
 }
 
-function _lbRefreshThumbnailCache(photoId, version) {
+function _lbRefreshThumbnailCache(/** @type {LightboxPhotoId} */ photoId, /** @type {string} */ version) {
   var id = String(photoId);
   var refreshedUrl = _lbThumbnailUrl(id, version);
   document.querySelectorAll('img').forEach(function(img) {
@@ -27,10 +27,10 @@ function _lbRefreshThumbnailCache(photoId, version) {
   } catch (_) {}
 }
 
-function _lbRefreshEditRecipeCache(updates) {
+function _lbRefreshEditRecipeCache(/** @type {Record<string, LightboxRecipe | null | undefined>} */ updates) {
   if (!updates || typeof updates !== 'object') return;
   var version = String(Date.now());
-  var refreshedPhotoIds = [];
+  /** @type {number[]} */ var refreshedPhotoIds = [];
   Object.keys(updates).forEach(function(photoId) {
     var numericId = Number(photoId);
     _lbEditVersionByPhoto[String(photoId)] = version;
@@ -50,8 +50,8 @@ function _lbRefreshEditRecipeCache(updates) {
 
 window.vireoRefreshEditRecipeCache = _lbRefreshEditRecipeCache;
 
-function _lbRenderKeywords(keywords) {
-  var container = document.getElementById('lightboxKeywords');
+function _lbRenderKeywords(/** @type {{name: string}[] | undefined} */ keywords) {
+  const container = document.getElementById('lightboxKeywords');
   if (!container) return;
   container.innerHTML = '';
 
@@ -81,7 +81,7 @@ function _lbRenderKeywords(keywords) {
   });
 }
 
-function openLightbox(photoId, filename, photoList, options) {
+function openLightbox(/** @type {number} */ photoId, /** @type {string | null | undefined} */ filename, /** @type {LightboxPhoto[] | undefined} */ photoList = undefined, /** @type {LightboxOpenOptions | undefined} */ options = undefined) {
   var alreadyOpen = !!window._lbEscToken;
   var transitionAlreadyPending = _lbVisualTransitionPending;
   var reopeningVisiblePhoto = !!(
@@ -168,14 +168,14 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbCurrentWildlifeExcluded = !!(currentFromList && currentFromList.wildlife_excluded);
   if (!alreadyOpen) _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
 
-  var overlay = document.getElementById('lightboxOverlay');
-  var img = document.getElementById('lightboxImg');
-  var label = document.getElementById('lightboxFilename');
-  var inspectBtn = document.getElementById('lightboxInspect');
-  var similarBtn = document.getElementById('lightboxSimilar');
-  var inatBtn = document.getElementById('lightboxInat');
-  var wrap = document.getElementById('lightboxWrap');
-  var detailData = null;
+  var overlayCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxOverlay')); if (!overlayCandidate) return; const overlay = overlayCandidate;
+  var imgCandidate = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg')); if (!imgCandidate) return; const img = imgCandidate;
+  var labelCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxFilename')); if (!labelCandidate) return; const label = labelCandidate;
+  var inspectBtnCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxInspect')); if (!inspectBtnCandidate) return; const inspectBtn = inspectBtnCandidate;
+  var similarBtnCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxSimilar')); if (!similarBtnCandidate) return; const similarBtn = similarBtnCandidate;
+  var inatBtnCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxInat')); if (!inatBtnCandidate) return; const inatBtn = inatBtnCandidate;
+  var wrapCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxWrap')); if (!wrapCandidate) return; const wrap = wrapCandidate;
+  /** @type {LightboxPhoto | null} */ var detailData = null;
 
   // The browser keeps painting the outgoing bitmap while a newly assigned
   // image source loads. Keep the visible filename and position paired with
@@ -189,7 +189,7 @@ function openLightbox(photoId, filename, photoList, options) {
       detailData && detailData.keywords || currentFromList && currentFromList.keywords || []
     );
     _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
-    var counter = document.getElementById('lightboxCounter');
+    var counterCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxCounter')); if (!counterCandidate) return; const counter = counterCandidate;
     if (_lightboxPhotoList.length > 1) {
       var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === photoId; });
       var counterFilename = filename || (currentFromList && currentFromList.filename) || '';
@@ -235,7 +235,7 @@ function openLightbox(photoId, filename, photoList, options) {
     _lbRememberEditRecipe(photoId, currentFromList.edit_recipe);
     window.vireoRememberPhotoRenderKey(photoId, currentFromList.render_key);
   }
-  var incomingPhoto = Object.assign({}, _lbPhotoDataByPhoto[String(photoId)] || {}, currentFromList || {});
+  /** @type {LightboxPhoto} */ var incomingPhoto = Object.assign({id: photoId}, _lbPhotoDataByPhoto[String(photoId)] || {}, currentFromList || {});
   // Catalog geometry lets us select a tier before the next image has loaded.
   // Never consult the outgoing bitmap for the incoming photo's dimensions.
   _lbPhotoW = incomingPhoto.width || null;
@@ -273,7 +273,7 @@ function openLightbox(photoId, filename, photoList, options) {
   var editFetchSeq = _lbAdjustSeq;
   fetch('/api/photos/' + photoId)
     .then(function(r) { return r.ok ? r.json() : null; })
-    .then(function(data) {
+    .then(function(/** @type {LightboxPhoto} */ data) {
       if (!data || !vireoLightboxSession.isCurrent(openToken)) return;
       var pairWasKnown = !!_vireoPairKnownByPhoto[String(photoId)];
       if (typeof window.vireoRememberPhotoPair === 'function') {
@@ -283,7 +283,7 @@ function openLightbox(photoId, filename, photoList, options) {
         window.vireoUpdatePairSourceControls(photoId);
       }
       if (!pairWasKnown && _vireoPairKnownByPhoto[String(photoId)]) {
-        var pairImg = document.getElementById('lightboxImg');
+        var pairImgCandidate = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg')); if (!pairImgCandidate) return; const pairImg = pairImgCandidate;
         vireoLightboxSession.watchImage(pairImg, function() {
           _vireoPairSourceImageLoaded(photoId, 'jpeg', pairImg);
         });
@@ -332,7 +332,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoOrientation = _lbMetadataOrientation(data.metadata);
       var currentLayoutRecipe = _lbEditRecipeByPhoto[String(photoId)];
       _lbCurrentEditRecipe = _lbRecipeHasEdits(currentLayoutRecipe)
-        ? currentLayoutRecipe
+        ? currentLayoutRecipe || null
         : null;
       if (!_lbSourceOverlaysAvailable()) {
         var detContainer2 = document.getElementById('lightboxDetections');
@@ -499,10 +499,10 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbCurrentSrcKey = _lbProgressiveTargetKey;
       _lbProgressiveTargetKey = null;
       _lbSetPreviewLoading(false);
-      img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
+      img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey || 'full');
       return;
     }
-    if (['1920', '2560', '3840'].indexOf(_lbCurrentSrcKey) !== -1) {
+    if (['1920', '2560', '3840'].indexOf(_lbCurrentSrcKey || '') !== -1) {
       // Sized tiers can now be the initial source. A failed render must not
       // leave navigation on a broken image: try the original, whose existing
       // error path falls back to /full if the original is unavailable too.
@@ -526,7 +526,7 @@ function openLightbox(photoId, filename, photoList, options) {
     img.src = _lbSrcUrl(photoId, 'full');
   }
   vireoLightboxSession.watchInitialImage(img, handleInitialImageLoad, handleInitialImageError);
-  var initialSrc = _lbSrcUrl(photoId, _lbCurrentSrcKey);
+  var initialSrc = _lbSrcUrl(photoId, _lbCurrentSrcKey || 'full');
   // Reopening the photo already on screen at the same source starts no load:
   // the bitmap is decoded and still displayed. Reassigning an identical src is
   // not guaranteed to emit a fresh load event, so arming a pending decode here
@@ -585,7 +585,7 @@ function openLightbox(photoId, filename, photoList, options) {
 
 }
 
-function lightboxNav(delta) {
+function lightboxNav(/** @type {number} */ delta) {
   // A one-photo list can still be one page of a larger lazy-loaded dataset.
   // Let the normal boundary event fire so the owning page can fetch the next
   // or previous page instead of swallowing the first navigation attempt.
@@ -608,9 +608,9 @@ function lightboxNav(delta) {
   }
   var currentViewportState = vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
   var eyeTrackAnchor = vireoLightboxViewport.captureEyeAnchor();
-  var next = _lightboxPhotoList[newIdx];
+  var next = _lightboxPhotoList[newIdx]; if (!next) return;
   vireoLightboxSession.noteDirection(delta);
-  var navOptions = {
+  /** @type {LightboxOpenOptions} */ var navOptions = {
     fallbackViewportState: currentViewportState,
     preserveOneToOne: vireoLightboxViewport.isOneToOne(),
     eyeTrackAnchor: eyeTrackAnchor
@@ -633,7 +633,7 @@ function lightboxNav(delta) {
 }
 
 function requestLightboxFullscreen() {
-  var overlay = document.getElementById('lightboxOverlay');
+  var overlayCandidate = /** @type {HTMLElement | null} */ (document.getElementById('lightboxOverlay')); if (!overlayCandidate) return; const overlay = overlayCandidate;
   if (!overlay || !overlay.classList.contains('active')) return;
   if (document.fullscreenElement === overlay || document.webkitFullscreenElement === overlay) return;
   var request = overlay.requestFullscreen || overlay.webkitRequestFullscreen;
@@ -654,7 +654,7 @@ function exitLightboxFullscreen() {
   } catch(e) {}
 }
 
-function lightboxKeyMatchesConfiguredBrowseShortcut(e) {
+function lightboxKeyMatchesConfiguredBrowseShortcut(/** @type {KeyboardEvent} */ e) {
   var browse = window._vireoShortcuts && window._vireoShortcuts.browse;
   if (!browse) return false;
   for (var action in browse) {

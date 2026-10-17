@@ -350,27 +350,11 @@ def evict_if_over_quota(
         }
 
 
-def _evict_once(
-    db, working_dir, max_bytes, *, startup, protect_paths=frozenset(),
-):
-    """One snapshot-consistent eviction pass; ``None`` on data_version change.
+def _scan_working_dir(working_dir):
+    """Return ``({name: (path, stat)}, total_bytes)`` for ``working/``.
 
-    Returns the same result payload as ``evict_if_over_quota`` when the pass
-    completed against a stable catalog snapshot. Returns ``None`` when the
-    catalog changed between our scan and the writer lock so the caller can
-    retake the snapshot and retry.
-
-    ``_eviction_lock`` must already be held by the caller so this pass stays
-    serialized with canonical publication.
-
-    ``protect_paths`` — see ``evict_if_over_quota``.
+    Private render tempfiles are left out of both; stale ones are removed.
     """
-    catalog_data_version = db.conn.execute(
-        "PRAGMA data_version"
-    ).fetchone()[0]
-    rows = db.conn.execute(
-        "SELECT id, working_copy_path, file_mtime FROM photos "
-    ).fetchall()
     files = {}
     total = 0
     stale_temp_cutoff_ns = (
@@ -418,7 +402,15 @@ def _evict_once(
                 total += st.st_size
     except OSError as exc:
         log.warning("Could not inspect working-copy cache %s: %s", working_dir, exc)
+    return files, total
 
+
+def _eviction_candidates(rows, files, working_dir, *, startup):
+    """Return ``(entries, stale_tracked_ids)`` for one eviction pass.
+
+    ``entries`` are the LRU-sortable candidates; ``stale_tracked_ids`` the
+    rows whose tracked working copy is already gone from disk.
+    """
     entries = []
     known_canonical_names = {f"{row['id']}.jpg" for row in rows}
     untracked_cutoff_ns = (
@@ -489,42 +481,34 @@ def _evict_once(
                     f"working/{photo_id}.jpg", _file_identity(st),
                 )
             )
+    return entries, stale_tracked_ids
 
-    if stale_tracked_ids:
-        # A publisher may have replaced a file after the directory scan
-        # observed it missing. Revalidate while holding the same lock
-        # used by canonical publication before clearing the catalog row.
-        still_missing = [
-            (pid, f"working/{pid}.jpg")
-            for pid, path in stale_tracked_ids
-            if not os.path.exists(path)
-        ]
-        db.conn.executemany(
-            "UPDATE photos SET working_copy_path=NULL "
-            "WHERE id=? AND working_copy_path=?",
-            still_missing,
-        )
-        if still_missing:
-            commit_with_retry(db.conn)
 
-    if total <= max_bytes:
-        return {
-            "evicted": 0, "freed_bytes": 0, "remaining_bytes": total,
-            "quota_bytes": max_bytes, "evicted_paths": [],
-        }
+def _clear_stale_tracked_rows(db, stale_tracked_ids):
+    """Clear ``working_copy_path`` for tracked rows whose file is gone."""
+    # A publisher may have replaced a file after the directory scan
+    # observed it missing. Revalidate while holding the same lock
+    # used by canonical publication before clearing the catalog row.
+    still_missing = [
+        (pid, f"working/{pid}.jpg")
+        for pid, path in stale_tracked_ids
+        if not os.path.exists(path)
+    ]
+    db.conn.executemany(
+        "UPDATE photos SET working_copy_path=NULL "
+        "WHERE id=? AND working_copy_path=?",
+        still_missing,
+    )
+    if still_missing:
+        commit_with_retry(db.conn)
 
-    if not _begin_stable_eviction_transaction(
-        db, catalog_data_version,
-    ):
-        log.info(
-            "Working-copy quota eviction snapshot invalidated by concurrent "
-            "catalog writer; retaking snapshot"
-        )
-        # Signal the caller to retake the snapshot and retry. Leaving stale
-        # files here (as an earlier revision did) let a lowered quota persist
-        # them indefinitely because the settings handler only called us once.
-        return None
 
+def _remove_eviction_candidates(entries, total, max_bytes, protect_paths):
+    """Unlink oldest candidates until ``total`` fits ``max_bytes``.
+
+    Returns ``(evicted, freed_bytes, total)``; ``evicted`` holds
+    ``(photo_id, expected_rel, path)`` for every file that went.
+    """
     evicted = []
     freed_bytes = 0
     for (
@@ -557,7 +541,11 @@ def _evict_once(
         evicted.append((photo_id, expected_rel, path))
         total -= size
         freed_bytes += size
+    return evicted, freed_bytes, total
 
+
+def _record_evictions(db, evicted):
+    """Mark evicted rows in the catalog and commit the eviction transaction."""
     for photo_id, expected_rel, path in evicted:
         # Between the ``os.remove`` above and this UPDATE, an on-demand
         # ``/photos/<id>/original`` request can regenerate the same
@@ -577,6 +565,59 @@ def _evict_once(
             (photo_id, expected_rel),
         )
     commit_with_retry(db.conn)
+
+
+def _evict_once(
+    db, working_dir, max_bytes, *, startup, protect_paths=frozenset(),
+):
+    """One snapshot-consistent eviction pass; ``None`` on data_version change.
+
+    Returns the same result payload as ``evict_if_over_quota`` when the pass
+    completed against a stable catalog snapshot. Returns ``None`` when the
+    catalog changed between our scan and the writer lock so the caller can
+    retake the snapshot and retry.
+
+    ``_eviction_lock`` must already be held by the caller so this pass stays
+    serialized with canonical publication.
+
+    ``protect_paths`` — see ``evict_if_over_quota``.
+    """
+    catalog_data_version = db.conn.execute(
+        "PRAGMA data_version"
+    ).fetchone()[0]
+    rows = db.conn.execute(
+        "SELECT id, working_copy_path, file_mtime FROM photos "
+    ).fetchall()
+    files, total = _scan_working_dir(working_dir)
+    entries, stale_tracked_ids = _eviction_candidates(
+        rows, files, working_dir, startup=startup,
+    )
+
+    if stale_tracked_ids:
+        _clear_stale_tracked_rows(db, stale_tracked_ids)
+
+    if total <= max_bytes:
+        return {
+            "evicted": 0, "freed_bytes": 0, "remaining_bytes": total,
+            "quota_bytes": max_bytes, "evicted_paths": [],
+        }
+
+    if not _begin_stable_eviction_transaction(
+        db, catalog_data_version,
+    ):
+        log.info(
+            "Working-copy quota eviction snapshot invalidated by concurrent "
+            "catalog writer; retaking snapshot"
+        )
+        # Signal the caller to retake the snapshot and retry. Leaving stale
+        # files here (as an earlier revision did) let a lowered quota persist
+        # them indefinitely because the settings handler only called us once.
+        return None
+
+    evicted, freed_bytes, total = _remove_eviction_candidates(
+        entries, total, max_bytes, protect_paths,
+    )
+    _record_evictions(db, evicted)
     if evicted:
         log.info(
             "Working-copy quota eviction: removed %d files, freed %.1f MB",

@@ -1,22 +1,22 @@
 /* ---------- iNat Submission ---------- */
-var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
+/** @type {InatQueueItem[]} */ var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
 var _inatSubmitOwner = 0;
 var _inatSubmitting = false;  // true while inatDoSubmit's loop is running
 var _inatCancelled = false;   // set by closeInatModal to stop the loop gracefully
-var _inatQuickFailures = [];
+/** @type {InatPreparationFailure[]} */ var _inatQuickFailures = [];
 var _inatModalGeneration = 0;
-var _inatExportStream = null;
+/** @type {EventSource | null} */ var _inatExportStream = null;
 
 function _closeInatExportStream() {
   if (!_inatExportStream) return;
-  try { _inatExportStream.close(); } catch(e) {}
+  try { _inatExportStream.close(); } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));}
   _inatExportStream = null;
 }
 
-function _inatQueueItem(photoId, data) {
+function _inatQueueItem(/** @type {number} */ photoId, /** @type {InatPreparedPhoto} */ data) {
   return {
     photo_id: photoId,
-    taxon_name: data.scientific_name || data.species,
+    taxon_name: data.scientific_name || data.species || '',
     observed_on: data.timestamp ? data.timestamp.substring(0, 10) : '',
     latitude: data.latitude != null ? data.latitude : '',
     longitude: data.longitude != null ? data.longitude : '',
@@ -30,23 +30,23 @@ function _inatQueueItem(photoId, data) {
   };
 }
 
-async function _inatOpenUrl(url) {
+async function _inatOpenUrl(/** @type {string} */ url) {
   try {
     if (typeof openExternal === 'function') {
       return await openExternal(url);
     }
-  } catch(e) {}
+  } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));}
   return false;
 }
 
-function _inatQuickUploadUrl(idx) {
-  var item = inatQueue[idx];
+function _inatQuickUploadUrl(/** @type {number} */ idx) {
+  var item = inatQueue[idx]; if (!item) return 'https://www.inaturalist.org/observations/upload';
   var base = (item && item.upload_url) || 'https://www.inaturalist.org/observations/upload';
-  base = base.split('?')[0];
+  base = base.split('?')[0] || base;
   var params = [];
-  var taxon = document.getElementById('inatIncludeTaxon' + idx);
-  var date = document.getElementById('inatIncludeDate' + idx);
-  var location = document.getElementById('inatIncludeLocation' + idx);
+  var taxon = /** @type {HTMLInputElement} */ (document.getElementById('inatIncludeTaxon' + idx));
+  var date = /** @type {HTMLInputElement} */ (document.getElementById('inatIncludeDate' + idx));
+  var location = /** @type {HTMLInputElement} */ (document.getElementById('inatIncludeLocation' + idx));
   if (taxon && taxon.checked && item.taxon_name) {
     params.push('taxon_name=' + encodeURIComponent(item.taxon_name));
   }
@@ -60,7 +60,7 @@ function _inatQuickUploadUrl(idx) {
   return base + (params.length ? '?' + params.join('&') : '');
 }
 
-async function _openInatQuickUploadNative(url) {
+async function _openInatQuickUploadNative(/** @type {string} */ url) {
   if (await _inatOpenUrl(url)) {
     showToast('Opened iNaturalist in your browser.', 'success');
     return;
@@ -73,10 +73,10 @@ async function _openInatQuickUploadNative(url) {
   }
 }
 
-function openInatQuickUpload(event, idx) {
+function openInatQuickUpload(/** @type {MouseEvent | undefined} */ event, /** @type {number} */ idx) {
   var url = _inatQuickUploadUrl(idx);
   var link = event && event.currentTarget;
-  if (link) link.href = url;
+  if (link instanceof HTMLAnchorElement) link.href = url;
 
   if (typeof isTauri === 'function' && isTauri()) {
     if (event) event.preventDefault();
@@ -93,14 +93,14 @@ function openInatQuickUpload(event, idx) {
   return true;
 }
 
-function copyInatQuickUploadUrl(idx) {
+function copyInatQuickUploadUrl(/** @type {number} */ idx) {
   return copyExternalUrl(_inatQuickUploadUrl(idx));
 }
 
-async function submitToInat(photoId) {
+async function submitToInat(/** @type {number} */ photoId) {
   if (_lbGuardReadOnly()) return false;
   try {
-    var data = await safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false });
+    var data = await /** @type {Promise<InatPreparedPhoto>} */ (safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false }));
     if (data.error) { alert(data.error); return; }
 
     if (data.mode === 'quick') {
@@ -111,29 +111,30 @@ async function submitToInat(photoId) {
     // Direct mode: open modal
     inatQueue = [_inatQueueItem(photoId, data)];
     openInatModal([]);
-  } catch(e) {
-    alert('Error: ' + e.message);
+  } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
+    alert('Error: ' + failure.message);
   }
 }
 
-async function submitToInatBatch(photoIds) {
+async function submitToInatBatch(/** @type {number[]} */ photoIds) {
   if (_lbGuardReadOnly()) return false;
   // Prepare all photos
   inatQueue = [];
-  var quickQueue = [];
-  var failures = [];
+  /** @type {InatQueueItem[]} */ var quickQueue = [];
+  /** @type {InatPreparationFailure[]} */ var failures = [];
   for (var i = 0; i < photoIds.length; i++) {
+    const photoId = photoIds[i]; if (photoId == null) continue;
     try {
-      var data = await safeFetch('/api/inat/prepare/' + photoIds[i], {}, { toast: false });
+      var data = await /** @type {Promise<InatPreparedPhoto>} */ (safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false }));
       if (data.error) {
-        failures.push({photo_id: photoIds[i], error: data.error});
+        failures.push({photo_id: photoId, error: data.error});
         continue;
       }
-      var item = _inatQueueItem(photoIds[i], data);
+      var item = _inatQueueItem(photoId, data);
       if (data.mode === 'quick') quickQueue.push(item);
       else inatQueue.push(item);
-    } catch(e) {
-      failures.push({photo_id: photoIds[i], error: e.message || 'Could not prepare iNaturalist upload'});
+    } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
+      failures.push({photo_id: photoId, error: failure.message || 'Could not prepare iNaturalist upload'});
     }
   }
   if (quickQueue.length) {
@@ -150,7 +151,7 @@ async function submitToInatBatch(photoIds) {
   openInatModal(failures);
 }
 
-async function openInatQuickModal(items, failures) {
+async function openInatQuickModal(/** @type {InatQueueItem[]} */ items, /** @type {InatPreparationFailure[]} */ failures) {
   _inatModalGeneration++;
   _closeInatExportStream();
   if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
@@ -159,10 +160,10 @@ async function openInatQuickModal(items, failures) {
   inatQueue = items.slice();
   _inatQuickFailures = (failures || []).slice();
   var title = items.length === 1 ? 'Send to iNaturalist' : 'Send ' + items.length + ' photos to iNaturalist';
-  document.getElementById('inatModalTitle').textContent = title;
-  document.getElementById('inatProgress').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('inatModalTitle')).textContent = title;
+  /** @type {HTMLElement} */ (document.getElementById('inatProgress')).style.display = 'none';
 
-  var submitBtn = document.getElementById('inatSubmitBtn');
+  var submitBtn = /** @type {HTMLButtonElement} */ (document.getElementById('inatSubmitBtn'));
   submitBtn.style.display = '';
   submitBtn.disabled = true;
   submitBtn.textContent = items.length === 1 ? 'Send to iNaturalist' : 'Send All to iNaturalist';
@@ -170,15 +171,15 @@ async function openInatQuickModal(items, failures) {
   var cancelBtn = document.querySelector('#inatActions .modal-btn-cancel');
   if (cancelBtn) cancelBtn.textContent = 'Close';
 
-  function _inatAlreadySubmittedWarning(item) {
+  function _inatAlreadySubmittedWarning(/** @type {InatQueueItem} */ item) {
     if (!item.already_submitted) return '';
     var linkOrText = item.existing_url
-      ? '<a href="' + escapeAttr(item.existing_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url) + '</a>'
+      ? '<a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a>'
       : 'no observation URL recorded';
     return '<div class="inat-card-status warning" style="margin-top:6px;">&#9888; Already submitted to iNaturalist: ' + linkOrText + '. Opening a new upload will create a duplicate observation.</div>';
   }
 
-  function _inatQuickOptions(item, idx) {
+  function _inatQuickOptions(/** @type {InatQueueItem} */ item, /** @type {number} */ idx) {
     var hasTaxon = !!item.taxon_name;
     var hasDate = !!item.observed_on;
     var hasLocation = item.latitude !== '' && item.longitude !== '';
@@ -217,7 +218,7 @@ async function openInatQuickModal(items, failures) {
     '</div>' +
     '<div class="inat-card-status" id="inatQuickTokenStatus">The Send button will be enabled after validation.</div>' +
   '</div>';
-  if (items.length === 1) {
+  if (items.length === 1 && items[0]) {
     html += '<div class="inat-card">' +
       '<div class="inat-card-header">' +
         '<img class="inat-card-thumb" src="/thumbnails/' + items[0].photo_id + '.jpg" alt="">' +
@@ -272,14 +273,14 @@ async function openInatQuickModal(items, failures) {
     '<div class="inat-card-status" id="inatQuickExportStatus"></div>' +
   '</div>';
 
-  document.getElementById('inatCards').innerHTML = html;
-  document.getElementById('inatModal').classList.add('open');
+  /** @type {HTMLElement} */ (document.getElementById('inatCards')).innerHTML = html;
+  /** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.add('open');
 }
 
 async function validateAndSaveInatToken() {
-  var input = document.getElementById('inatQuickToken');
-  var status = document.getElementById('inatQuickTokenStatus');
-  var button = document.getElementById('inatQuickTokenBtn');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('inatQuickToken'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('inatQuickTokenStatus'));
+  var button = /** @type {HTMLButtonElement} */ (document.getElementById('inatQuickTokenBtn'));
   var generation = _inatModalGeneration;
   var token = input ? input.value.trim() : '';
   if (!token) {
@@ -292,24 +293,24 @@ async function validateAndSaveInatToken() {
   status.className = 'inat-card-status';
   status.textContent = 'Checking with iNaturalist\u2026';
   try {
-    var data = await safeFetch('/api/inat/token', {
+    var data = await /** @type {Promise<{login?: string}>} */ (safeFetch('/api/inat/token', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({token: token}),
-    }, { toast: false });
+    }, { toast: false }));
     if (
       generation !== _inatModalGeneration ||
-      !document.getElementById('inatModal').classList.contains('open') ||
-      document.getElementById('inatQuickToken') !== input
+      !/** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.contains('open') ||
+      /** @type {HTMLInputElement} */ (document.getElementById('inatQuickToken')) !== input
     ) return;
     status.className = 'inat-card-status success';
     status.textContent = '\u2713 Valid token' + (data.login ? ' for ' + data.login : '') + '. Opening direct submission\u2026';
     _inatApplyQuickChoicesToQueue();
     openInatModal(_inatQuickFailures);
-  } catch(e) {
+  } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
     if (generation !== _inatModalGeneration) return;
     status.className = 'inat-card-status error';
-    status.textContent = '\u2717 ' + e.message;
+    status.textContent = '\u2717 ' + failure.message;
     button.disabled = false;
     button.textContent = 'Validate & Save';
   }
@@ -317,17 +318,17 @@ async function validateAndSaveInatToken() {
 
 function _inatQuickExportSubmissions() {
   return inatQueue.map(function(item, idx) {
-    var description = document.getElementById('inatQuickDescription' + idx);
+    var description = /** @type {HTMLTextAreaElement} */ (document.getElementById('inatQuickDescription' + idx));
     return {
       photo_id: item.photo_id,
       taxon_name: item.taxon_name || '',
       observed_on: item.observed_on || '',
       latitude: item.latitude,
       longitude: item.longitude,
-      include_taxon: !!(document.getElementById('inatIncludeTaxon' + idx) || {}).checked,
-      include_date: !!(document.getElementById('inatIncludeDate' + idx) || {}).checked,
-      include_location: !!(document.getElementById('inatIncludeLocation' + idx) || {}).checked,
-      include_description: !!(document.getElementById('inatIncludeDescription' + idx) || {}).checked,
+      include_taxon: !!(/** @type {HTMLInputElement | null} */ (document.getElementById('inatIncludeTaxon' + idx)) || {checked: false}).checked,
+      include_date: !!(/** @type {HTMLInputElement | null} */ (document.getElementById('inatIncludeDate' + idx)) || {checked: false}).checked,
+      include_location: !!(/** @type {HTMLInputElement | null} */ (document.getElementById('inatIncludeLocation' + idx)) || {checked: false}).checked,
+      include_description: !!(/** @type {HTMLInputElement | null} */ (document.getElementById('inatIncludeDescription' + idx)) || {checked: false}).checked,
       description: description ? description.value.trim() : '',
     };
   });
@@ -349,8 +350,8 @@ function _inatApplyQuickChoicesToQueue() {
 }
 
 async function exportInatQuickPhotos() {
-  var status = document.getElementById('inatQuickExportStatus');
-  var button = document.getElementById('inatQuickExportBtn');
+  var status = /** @type {HTMLElement} */ (document.getElementById('inatQuickExportStatus'));
+  var button = /** @type {HTMLButtonElement} */ (document.getElementById('inatQuickExportBtn'));
   if (!button || button.disabled) return;
   var generation = _inatModalGeneration;
   var queue = inatQueue;
@@ -366,10 +367,10 @@ async function exportInatQuickPhotos() {
     } else {
       destination = window.prompt('Export folder path:');
     }
-  } catch(e) {
+  } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
     if (generation !== _inatModalGeneration) return;
     status.className = 'inat-card-status error';
-    status.textContent = '\u2717 Could not open the folder picker: ' + e.message;
+    status.textContent = '\u2717 Could not open the folder picker: ' + failure.message;
     button.disabled = false;
     button.textContent = exportLabel;
     return;
@@ -384,13 +385,13 @@ async function exportInatQuickPhotos() {
   if (
     generation !== _inatModalGeneration ||
     inatQueue !== queue ||
-    !document.getElementById('inatModal').classList.contains('open')
+    !/** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.contains('open')
   ) return;
   button.textContent = 'Exporting\u2026';
   status.className = 'inat-card-status';
   status.textContent = 'Rendering edited JPEG' + (itemCount === 1 ? '' : 's') + ' and writing metadata\u2026';
   try {
-    var started = await safeFetch('/api/inat/export', {
+    var started = await /** @type {Promise<{job_id: number}>} */ (safeFetch('/api/inat/export', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -398,11 +399,11 @@ async function exportInatQuickPhotos() {
         submissions: submissions,
         reveal: typeof isTauri === 'function' && isTauri(),
       }),
-    }, { toast: false });
+    }, { toast: false }));
     if (generation !== _inatModalGeneration || inatQueue !== queue) return;
     _closeInatExportStream();
     var exportStream = safeEventSource('/api/jobs/' + started.job_id + '/stream', {
-      onProgress: function(progress) {
+      onProgress: function(/** @type {InatExportProgress} */ progress) {
         if (
           generation !== _inatModalGeneration ||
           _inatExportStream !== exportStream
@@ -411,10 +412,10 @@ async function exportInatQuickPhotos() {
         var total = progress.total || itemCount;
         status.textContent = 'Exporting ' + current + ' of ' + total + '\u2026';
       },
-      onComplete: function(done) {
+      onComplete: function(/** @type {InatExportCompletion} */ done) {
         var isCurrentStream = _inatExportStream === exportStream;
         if (!isCurrentStream || generation !== _inatModalGeneration) return;
-        try { exportStream.close(); } catch(e) {}
+        try { exportStream.close(); } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));}
         _inatExportStream = null;
         var result = done.result || {};
         var count = (result.exported || []).length;
@@ -425,7 +426,7 @@ async function exportInatQuickPhotos() {
         } else if (!count) {
           status.className = 'inat-card-status error';
           status.textContent = '\u2717 ' + (
-            failed ? result.errors[0].error : 'No photos were exported.'
+            failed ? (result.errors?.[0]?.error || 'Export failed') : 'No photos were exported.'
           );
         } else {
           status.className = failed ? 'inat-card-status warning' : 'inat-card-status success';
@@ -439,7 +440,7 @@ async function exportInatQuickPhotos() {
       onError: function() {
         var isCurrentStream = _inatExportStream === exportStream;
         if (!isCurrentStream || generation !== _inatModalGeneration) return;
-        try { exportStream.close(); } catch(e) {}
+        try { exportStream.close(); } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));}
         _inatExportStream = null;
         status.className = 'inat-card-status error';
         status.textContent = '\u2717 Lost the export progress connection.';
@@ -448,25 +449,25 @@ async function exportInatQuickPhotos() {
       },
     });
     _inatExportStream = exportStream;
-  } catch(e) {
+  } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
     if (generation !== _inatModalGeneration) return;
     status.className = 'inat-card-status error';
-    status.textContent = '\u2717 ' + e.message;
+    status.textContent = '\u2717 ' + failure.message;
     button.disabled = false;
     button.textContent = exportLabel;
   }
 }
 
-function openInatModal(failures) {
+function openInatModal(/** @type {InatPreparationFailure[]} */ failures) {
   _inatModalGeneration++;
   _closeInatExportStream();
   if (window._inatEscToken) Keymap.popEsc(window._inatEscToken);
   window._inatEscToken = Keymap.pushEsc(function() { closeInatModal(); });
 
   var title = inatQueue.length === 1 ? 'Submit to iNaturalist' : 'Submit ' + inatQueue.length + ' observations to iNaturalist';
-  document.getElementById('inatModalTitle').textContent = title;
-  document.getElementById('inatProgress').style.display = 'none';
-  var submitBtn = document.getElementById('inatSubmitBtn');
+  /** @type {HTMLElement} */ (document.getElementById('inatModalTitle')).textContent = title;
+  /** @type {HTMLElement} */ (document.getElementById('inatProgress')).style.display = 'none';
+  var submitBtn = /** @type {HTMLButtonElement} */ (document.getElementById('inatSubmitBtn'));
   submitBtn.style.display = '';
   submitBtn.disabled = false;
   submitBtn.textContent = inatQueue.length === 1 ? 'Send to iNaturalist' : 'Send All to iNaturalist';
@@ -477,9 +478,9 @@ function openInatModal(failures) {
   inatQueue.forEach(function(item, idx) {
     var warn = '';
     if (item.already_submitted) {
-      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url) + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url) + '</a></div>';
+      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url || '') + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--warning);">' + escapeHtml(item.existing_url || '') + '</a></div>';
     }
-    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(item) : '/thumbnails/' + item.photo_id + '.jpg';
+    var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl({id: item.photo_id, edit_recipe: item.edit_recipe}) : '/thumbnails/' + item.photo_id + '.jpg';
     html += '<div class="inat-card" id="inatCard' + idx + '">' +
       '<div class="inat-card-header">' +
         '<img class="inat-card-thumb" src="' + escapeAttr(thumbUrl) + '" alt="">' +
@@ -505,15 +506,15 @@ function openInatModal(failures) {
       escapeHtml(failures.length + ' photo' + (failures.length === 1 ? '' : 's') + ' could not be prepared.') +
       '</div>';
   }
-  document.getElementById('inatCards').innerHTML = html;
-  document.getElementById('inatModal').classList.add('open');
+  /** @type {HTMLElement} */ (document.getElementById('inatCards')).innerHTML = html;
+  /** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.add('open');
 }
 
 function closeInatModal() {
   _inatModalGeneration++;
   _closeInatExportStream();
   if (window._inatEscToken) { Keymap.popEsc(window._inatEscToken); window._inatEscToken = null; }
-  document.getElementById('inatModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('inatModal')).classList.remove('open');
   if (_inatSubmitting) {
     // Cancel/Esc during an in-flight submit: don't clear the queue out from
     // under the loop — flag it so it stops after the current item and
@@ -527,13 +528,13 @@ function closeInatModal() {
 
 async function inatDoSubmit() {
   if (_lbGuardReadOnly()) return false;
-  var btn = document.getElementById('inatSubmitBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('inatSubmitBtn'));
   btn.disabled = true;
   btn.textContent = 'Submitting...';
 
-  var progress = document.getElementById('inatProgress');
-  var fill = document.getElementById('inatProgressFill');
-  var text = document.getElementById('inatProgressText');
+  var progress = /** @type {HTMLElement} */ (document.getElementById('inatProgress'));
+  var fill = /** @type {HTMLElement} */ (document.getElementById('inatProgressFill'));
+  var text = /** @type {HTMLElement} */ (document.getElementById('inatProgressText'));
   progress.style.display = 'block';
 
   var queue = inatQueue;
@@ -547,31 +548,31 @@ async function inatDoSubmit() {
 
   for (var i = 0; i < total; i++) {
     if (_inatCancelled || generation !== _inatModalGeneration) break;
-    var item = queue[i];
-    var statusEl = document.getElementById('inatStatus' + i);
-    var latValue = document.getElementById('inatLat' + i).value.trim();
-    var lngValue = document.getElementById('inatLng' + i).value.trim();
+    var item = queue[i]; if (!item) continue;
+    var statusEl = /** @type {HTMLElement} */ (document.getElementById('inatStatus' + i));
+    var latValue = /** @type {HTMLInputElement} */ (document.getElementById('inatLat' + i)).value.trim();
+    var lngValue = /** @type {HTMLInputElement} */ (document.getElementById('inatLng' + i)).value.trim();
 
     // Read possibly-edited fields from the form
     var submission = {
       photo_id: item.photo_id,
-      taxon_name: document.getElementById('inatTaxon' + i).value.trim(),
-      observed_on: document.getElementById('inatDate' + i).value,
+      taxon_name: /** @type {HTMLInputElement} */ (document.getElementById('inatTaxon' + i)).value.trim(),
+      observed_on: /** @type {HTMLInputElement} */ (document.getElementById('inatDate' + i)).value,
       latitude: latValue === '' ? null : parseFloat(latValue),
       longitude: lngValue === '' ? null : parseFloat(lngValue),
-      description: document.getElementById('inatDesc' + i).value.trim(),
-      geoprivacy: document.getElementById('inatGeo' + i).value,
+      description: /** @type {HTMLTextAreaElement} */ (document.getElementById('inatDesc' + i)).value.trim(),
+      geoprivacy: /** @type {HTMLSelectElement} */ (document.getElementById('inatGeo' + i)).value,
     };
 
     statusEl.className = 'inat-card-status';
     statusEl.textContent = 'Submitting...';
 
     try {
-      var result = await safeFetch('/api/inat/submit', {
+      var result = await /** @type {Promise<{error?: string, observation_url?: string}>} */ (safeFetch('/api/inat/submit', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(submission),
-      }, { toast: false });
+      }, { toast: false }));
 
       if (generation !== _inatModalGeneration) {
         if (!result.error) succeeded++;
@@ -583,21 +584,21 @@ async function inatDoSubmit() {
         statusEl.textContent = '✗ ' + result.error;
       } else {
         statusEl.className = 'inat-card-status success';
-        statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url) + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);">View on iNaturalist</a>';
+        statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url || '') + '" target="_blank" onclick="return openExternalLink(event, this.href)" style="color:var(--accent);">View on iNaturalist</a>';
         if (total === 1 && result.observation_url && isTauri()) {
           var opened = await openExternal(result.observation_url);
           if (!opened) showToast('Submitted, but could not open iNaturalist: ' + result.observation_url, 'error');
         }
         succeeded++;
       }
-    } catch(e) {
+    } catch(e) { const failure = /** @type {Error & {body?: {partial?: boolean, observation_url?: string}}} */ (e instanceof Error ? e : new Error(String(e)));
       if (generation !== _inatModalGeneration) break;
       statusEl.className = 'inat-card-status error';
-      if (e.body && e.body.partial && e.body.observation_url) {
-        statusEl.innerHTML = '&#10007; ' + escapeHtml(e.message) +
-          ' <a href="' + escapeAttr(e.body.observation_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--danger);text-decoration:underline;">View created observation</a>';
+      if (failure.body && failure.body.partial && failure.body.observation_url) {
+        statusEl.innerHTML = '&#10007; ' + escapeHtml(failure.message) +
+          ' <a href="' + escapeAttr(failure.body.observation_url) + '" target="_blank" rel="noopener" onclick="return openExternalLink(event, this.href)" style="color:var(--danger);text-decoration:underline;">View created observation</a>';
       } else {
-        statusEl.textContent = '✗ ' + e.message;
+        statusEl.textContent = '✗ ' + failure.message;
       }
     }
 
@@ -619,5 +620,5 @@ async function inatDoSubmit() {
   }
   btn.textContent = 'Done';
   // Change cancel to Close
-  document.querySelector('#inatActions .modal-btn-cancel').textContent = 'Close';
+  var cancel = document.querySelector('#inatActions .modal-btn-cancel'); if (cancel) cancel.textContent = 'Close';
 }

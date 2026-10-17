@@ -19,7 +19,7 @@
 
   browse.panelLoaders = {
     keywords: global.VireoPanelLoader.create({
-      panel: document.getElementById('selectionKeywordSuggestions'),
+      panel: /** @type {HTMLElement} */ (document.getElementById('selectionKeywordSuggestions')),
       lane: lanes.keywords,
       accepts: acceptsSelection, key: selectionIdsKey, snapshot: snapshot, isActive: isActiveSelection,
       reset: function() { state.keywords.reset(); },
@@ -34,7 +34,7 @@
       retryLabel: 'Retry loading keyword suggestions',
     }),
     predictions: global.VireoPanelLoader.create({
-      panel: document.getElementById('selectionPredictions'),
+      panel: /** @type {HTMLElement} */ (document.getElementById('selectionPredictions')),
       lane: lanes.predictions,
       accepts: acceptsSelection, key: selectionIdsKey, snapshot: snapshot, isActive: isActiveSelection,
       reset: function() { state.predictions.reset(); },
@@ -49,7 +49,7 @@
       retryLabel: 'Retry loading selection predictions',
     }),
     detailPredictions: global.VireoPanelLoader.create({
-      panel: document.getElementById('detailPredictions'),
+      panel: /** @type {HTMLElement} */ (document.getElementById('detailPredictions')),
       lane: lanes.detailPredictions,
       accepts: function(/** @type {number} */ id) { return Number.isInteger(id) && id > 0; },
       key: function() { return undefined; },

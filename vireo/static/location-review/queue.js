@@ -4,12 +4,12 @@
 
 function currentGroup() { return state.groups[state.currentIndex] || null; }
 
-function showEmpty(title, message, error) {
-  document.getElementById('locationReviewMain').classList.add('location-review-hidden');
-  var empty = document.getElementById('locationReviewEmpty');
+/** @param {string} title @param {string} message @param {boolean=} error */ function showEmpty(title, message, error) {
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewMain')).classList.add('location-review-hidden');
+  var empty = /** @type {HTMLElement} */ (document.getElementById('locationReviewEmpty'));
   empty.classList.remove('location-review-hidden');
-  document.getElementById('locationReviewEmptyTitle').textContent = title;
-  var messageEl = document.getElementById('locationReviewEmptyMessage');
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewEmptyTitle')).textContent = title;
+  var messageEl = /** @type {HTMLElement} */ (document.getElementById('locationReviewEmptyMessage'));
   messageEl.textContent = message;
   messageEl.classList.toggle('location-review-error', !!error);
 }
@@ -18,19 +18,19 @@ function updateProgress() {
   var completed = state.assignedGroups;
   var total = state.initialGroupCount;
   var pct = total ? Math.round((completed / total) * 100) : 100;
-  document.getElementById('locationReviewProgressText').textContent = completed + ' of ' + total + (state.mode === 'discrepancies' ? ' reviewed' : ' assigned');
-  document.getElementById('locationReviewRemaining').textContent = state.groups.length ? state.groups.length + ' in queue' : '';
-  document.getElementById('locationReviewProgressFill').style.width = pct + '%';
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewProgressText')).textContent = completed + ' of ' + total + (state.mode === 'discrepancies' ? ' reviewed' : ' assigned');
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewRemaining')).textContent = state.groups.length ? state.groups.length + ' in queue' : '';
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewProgressFill')).style.width = pct + '%';
 }
 
-function refreshGroupMetadata(group) {
+/** @param {LocationGroup} group */ function refreshGroupMetadata(group) {
   if (!group || !group.photos.length) return;
   if (state.mode === 'time' || state.mode === 'discrepancies') {
-    group.captured_from = group.photos[0].timestamp;
-    group.captured_to = group.photos[group.photos.length - 1].timestamp;
+    group.captured_from = group.photos[0]?.timestamp;
+    group.captured_to = group.photos[group.photos.length - 1]?.timestamp;
     return;
   }
-  var referenceLng = Number(group.photos[0].longitude);
+  var referenceLng = Number(group.photos[0]?.longitude);
   var centerLat = group.photos.reduce(function(total, photo) {
     return total + Number(photo.latitude);
   }, 0) / group.photos.length;
@@ -55,19 +55,19 @@ function refreshGroupMetadata(group) {
   group.captured_to = timestamps.length ? timestamps[timestamps.length - 1] : null;
 }
 
-function renderGroupFacts(group) {
-  document.getElementById('locationReviewGroupTitle').textContent = formatNumber(group.count) + (group.count === 1 ? ' photo' : ' photos');
-  document.getElementById('locationReviewGroupPosition').textContent = (state.mode === 'time' ? 'Suggested outing ' : 'Coordinate group ') + (state.currentIndex + 1) + ' of ' + state.groups.length;
-  document.getElementById('locationReviewCaptured').textContent = formatCaptureRange(group);
-  document.getElementById('locationReviewSpread').textContent = state.mode === 'time' ? (group.captured_from ? 'Capture time · review before assigning' : 'Date unavailable · review individually') : group.spread_m < 10 ? 'Same point' : formatDistance(group.spread_m) + ' from center';
-  document.getElementById('locationReviewCoordinates').textContent =
+/** @param {LocationGroup} group */ function renderGroupFacts(group) {
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewGroupTitle')).textContent = formatNumber(group.count) + (group.count === 1 ? ' photo' : ' photos');
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewGroupPosition')).textContent = (state.mode === 'time' ? 'Suggested outing ' : 'Coordinate group ') + (state.currentIndex + 1) + ' of ' + state.groups.length;
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewCaptured')).textContent = formatCaptureRange(group);
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewSpread')).textContent = state.mode === 'time' ? (group.captured_from ? 'Capture time · review before assigning' : 'Date unavailable · review individually') : group.spread_m < 10 ? 'Same point' : formatDistance(group.spread_m) + ' from center';
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewCoordinates')).textContent =
     state.mode === 'time' ? 'No usable GPS. Assigning a saved or searched place uses that place’s coordinates; a custom name adds a location label only.' :
-    'Center: ' + group.center.lat.toFixed(6) + ', ' + group.center.lng.toFixed(6) + '. These are the original photo coordinates; assigning a name will not change them.';
-  document.getElementById('locationReviewFilenames').innerHTML = group.photos.map(function(photo) {
+    'Center: ' + locationGroupCenter(group).lat.toFixed(6) + ', ' + locationGroupCenter(group).lng.toFixed(6) + '. These are the original photo coordinates; assigning a name will not change them.';
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewFilenames')).innerHTML = group.photos.map(function(photo) {
     return '<div>' + escapeHtml(photo.filename) + '</div>';
   }).join('');
-  document.getElementById('locationReviewPrevious').disabled = state.groups.length < 2;
-  document.getElementById('locationReviewNext').disabled = state.groups.length < 2;
+  /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewPrevious')).disabled = state.groups.length < 2;
+  /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewNext')).disabled = state.groups.length < 2;
   renderThumbnails(group);
 }
 
@@ -91,15 +91,15 @@ function renderCurrentGroup() {
       showEmpty('All locations reviewed', 'There are no remaining groups in this set.');
     }
     if (state.mode === 'discrepancies' && state.queuedCorrections) {
-      document.getElementById('locationReviewEmptyMessage').textContent += ' ' + state.queuedCorrections +
+      /** @type {HTMLElement} */ (document.getElementById('locationReviewEmptyMessage')).textContent += ' ' + state.queuedCorrections +
         ' corrections were queued. Review queued metadata changes and sync to write them to the sidecars.';
     }
     updateProgress();
     return;
   }
   // History can restore a group after the completed/empty screen hid these.
-  document.getElementById('locationReviewMain').classList.remove('location-review-hidden');
-  document.getElementById('locationReviewEmpty').classList.add('location-review-hidden');
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewMain')).classList.remove('location-review-hidden');
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewEmpty')).classList.add('location-review-hidden');
   state.photoPage = 0;
   state.renderToken += 1;
   if (state.mode === 'discrepancies') { renderDiscrepancyGroup(group); updateProgress(); return; }
@@ -110,20 +110,32 @@ function renderCurrentGroup() {
   state.googleCandidatesLoaded = false;
   state.regionCandidates = [];
   state.searchedCandidate = null;
-  document.getElementById('locationReviewSearch').value = '';
-  var assign = document.getElementById('locationReviewAssign');
+  /** @type {HTMLInputElement} */ (document.getElementById('locationReviewSearch')).value = '';
+  var assign = /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewAssign'));
   assign.disabled = true;
   assign.textContent = 'Select a location';
-  document.getElementById('locationReviewSuggestionStatus').textContent = 'Looking nearby…';
-  document.getElementById('locationReviewCandidates').innerHTML = '<div class="location-review-loading">Finding saved and nearby locations…</div>';
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewSuggestionStatus')).textContent = 'Looking nearby…';
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewCandidates')).innerHTML = '<div class="location-review-loading">Finding saved and nearby locations…</div>';
   renderGroupFacts(group);
   renderPhotoMarkers(group);
   updateProgress();
   loadSuggestions(group, token);
 }
 
-function moveGroup(direction) {
+/** @param {number} direction */ function moveGroup(direction) {
   if (state.isAssigning || hasPartialAssignmentProgress() || state.groups.length < 2) return;
   state.currentIndex = (state.currentIndex + direction + state.groups.length) % state.groups.length;
   renderCurrentGroup();
+}
+
+/** @param {LocationGroup} group @returns {LocationPoint} */
+function locationGroupCenter(group) {
+  if (!group.center) throw new Error('The coordinate group has no center');
+  return group.center;
+}
+
+/** @param {LocationGroup} group @returns {{name:string;latitude:number;longitude:number}} */
+function locationAssignedPlace(group) {
+  if (!group.assigned_location) throw new Error('The GPS review group has no assigned location');
+  return group.assigned_location;
 }

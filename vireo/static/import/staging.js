@@ -1,18 +1,19 @@
 // Orphaned staging verification, cleanup, and paused-job polling.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {number} jobId */
 async function pollJobResult(jobId) {
   for (let i = 0; i < 180; i++) {
     const resp = await fetch('/api/jobs/' + jobId);
     if (resp.ok) {
-      const job = await resp.json();
+      /** @type {{status: string; errors?: string[]; result?: ImportStaging}} */ const job = await resp.json();
       if (['queued', 'running', 'pausing', 'paused'].includes(job.status)) i = -1;
       if (['completed', 'failed', 'cancelled', 'expired'].includes(job.status)) {
         if (job.status === 'failed') {
           const msg = (job.errors && job.errors[0]) || 'job failed';
           throw new Error(msg);
         }
-        return job.result || {};
+        if (!job.result) throw new Error('job result missing'); return job.result;
       }
     }
     await new Promise(r => setTimeout(r, 1000));
@@ -24,16 +25,17 @@ async function loadOrphanedStaging() {
   try {
     const resp = await fetch('/api/import/orphaned-staging');
     if (!resp.ok) return;
-    const data = await resp.json();
+    /** @type {{items?: ImportStaging[]; error?: string; job_id: number}} */ const data = await resp.json();
     renderOrphanedStaging(data.items || []);
   } catch (e) {
     // Recovery card is best-effort; import itself should remain usable.
   }
 }
 
+/** @param {ImportStaging[]} items */
 function renderOrphanedStaging(items) {
-  const card = document.getElementById('orphanedStagingCard');
-  const box = document.getElementById('orphanedStagingItems');
+  const card = /** @type {HTMLElement} */ (document.getElementById('orphanedStagingCard'));
+  const box = /** @type {HTMLElement} */ (document.getElementById('orphanedStagingItems'));
   box.innerHTML = '';
   if (!items.length) {
     card.style.display = 'none';
@@ -65,8 +67,9 @@ function renderOrphanedStaging(items) {
   });
 }
 
+/** @param {HTMLElement} row @param {ImportStaging} result */
 function appendStagingDetail(row, result) {
-  const old = row.querySelector('.staging-details');
+  const old = /** @type {HTMLElement} */ (row.querySelector('.staging-details'));
   if (old) old.remove();
   const bad = (result.details || []).filter(d => d.status !== 'verified');
   if (!bad.length) return;
@@ -85,12 +88,13 @@ function appendStagingDetail(row, result) {
   row.appendChild(list);
 }
 
+/** @param {ImportStaging} result */
 function renderStagingVerification(result) {
   stagingResultsByPath[result.path] = result;
-  const row = Array.from(document.querySelectorAll('.staging-item'))
+  const row = Array.from(/** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.staging-item')))
     .find(el => el.dataset.path === result.path);
   if (!row) return;
-  const meta = row.querySelector('.staging-meta');
+  const meta = /** @type {HTMLElement} */ (row.querySelector('.staging-meta'));
   const parts = [
     result.file_count + ' files',
     formatBytes(result.bytes),
@@ -101,7 +105,7 @@ function renderStagingVerification(result) {
   if (result.inferred_destination) parts.push('archive: ' + result.inferred_destination);
   meta.textContent = parts.join(' · ');
 
-  const actions = row.querySelector('.staging-actions');
+  const actions = /** @type {HTMLElement} */ (row.querySelector('.staging-actions'));
   actions.innerHTML = '';
   if (result.can_delete) {
     const del = document.createElement('button');
@@ -124,6 +128,7 @@ function renderStagingVerification(result) {
   appendStagingDetail(row, result);
 }
 
+/** @param {string} path @param {HTMLButtonElement} btn */
 async function verifyStaging(path, btn) {
   const oldText = btn.textContent;
   btn.disabled = true;
@@ -134,17 +139,18 @@ async function verifyStaging(path, btn) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path }),
     });
-    const data = await resp.json();
+    /** @type {{items?: ImportStaging[]; error?: string; job_id: number}} */ const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'verification failed');
     const result = await pollJobResult(data.job_id);
     renderStagingVerification(result);
   } catch (e) {
-    showError(String(e.message || e));
+    showError(String(e instanceof Error ? e.message : e));
     btn.disabled = false;
     btn.textContent = oldText;
   }
 }
 
+/** @param {string} path @param {HTMLButtonElement} btn */
 async function deleteStaging(path, btn) {
   btn.disabled = true;
   btn.textContent = 'Re-verifying...';
@@ -154,16 +160,17 @@ async function deleteStaging(path, btn) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path }),
     });
-    const data = await resp.json();
+    /** @type {{items?: ImportStaging[]; error?: string; job_id: number}} */ const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'cleanup failed');
     await loadOrphanedStaging();
   } catch (e) {
-    showError(String(e.message || e));
+    showError(String(e instanceof Error ? e.message : e));
     btn.disabled = false;
     btn.textContent = 'Delete verified staging copy';
   }
 }
 
+/** @param {ImportStaging} result */
 function useStagingAsImportSource(result) {
   sources = [result.source_root];
   hideDestStructure();
@@ -171,13 +178,13 @@ function useStagingAsImportSource(result) {
   // Staging recovery must copy the temporary staging tree into the archive.
   // In-place would catalog paths that disappear once staging is cleaned,
   // leaving missing-folder rows, so force Copy to archive here.
-  const copyRadio = document.getElementById('modeCopy');
+  const copyRadio = /** @type {HTMLInputElement} */ (document.getElementById('modeCopy'));
   if (copyRadio) {
     copyRadio.checked = true;
     updateImportMode();
   }
   if (result.inferred_destination) {
-    const destination = document.getElementById('destInput');
+    const destination = /** @type {HTMLInputElement} */ (document.getElementById('destInput'));
     destination.value = result.inferred_destination;
     // Dispatch AFTER the value is set so every destInput listener
     // (dest-structure invalidation, NAS-move row) re-evaluates against the
@@ -187,5 +194,5 @@ function useStagingAsImportSource(result) {
     hideDestStructure();
   }
   scheduleImportPreview();
-  document.getElementById('sourceCard').scrollIntoView({ behavior: preferredScrollBehavior(), block: 'start' });
+  /** @type {HTMLElement} */ (document.getElementById('sourceCard')).scrollIntoView({ behavior: preferredScrollBehavior(), block: 'start' });
 }

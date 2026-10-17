@@ -2,6 +2,7 @@
 // and Apply & Next button labels, titles and enabled state.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {number} n @param {string} one @param {string} [many] */
 function rapidPlural(n, one, many) {
   return n === 1 ? one : (many || one + 's');
 }
@@ -10,10 +11,11 @@ function rapidPlural(n, one, many) {
 // An empty field never removes anything: clearing the input is treated as
 // "no species work", not "strip every species", so an accidental clear can't
 // untag a burst.
+/** @param {string[]} targetList @param {string[]} currentList */
 function rapidSpeciesSetDiff(targetList, currentList) {
-  var currentKeys = {};
+  var currentKeys = /** @type {Record<string,boolean>} */ ({});
   currentList.forEach(function(name) { currentKeys[speciesKey(name)] = true; });
-  var targetKeys = {};
+  var targetKeys = /** @type {Record<string,boolean>} */ ({});
   targetList.forEach(function(name) { targetKeys[speciesKey(name)] = true; });
   if (!targetList.length) return { added: [], removed: [], kept: [] };
   return {
@@ -24,7 +26,7 @@ function rapidSpeciesSetDiff(targetList, currentList) {
 }
 
 function rapidComputeApplyDiff() {
-  var speciesEl = document.getElementById('speciesInput');
+  var speciesEl = /** @type {HTMLInputElement} */ (document.getElementById('speciesInput'));
   var targetList = parseSpeciesList(speciesEl ? speciesEl.value : '');
   var species = joinSpecies(targetList);
   var initialList = parseSpeciesList(rapid.initialSpecies || '');
@@ -63,6 +65,7 @@ function rapidComputeApplyDiff() {
   return diff;
 }
 
+/** @param {RapidApplyDiff} diff */
 function rapidApplyLabelParts(diff) {
   var parts = [];
   if (diff.flagNew > 0) parts.push('Flag ' + diff.flagNew);
@@ -73,6 +76,7 @@ function rapidApplyLabelParts(diff) {
   return parts;
 }
 
+/** @param {RapidApplyDiff} diff @param {boolean} openNext */
 function rapidApplyTitle(diff, openNext) {
   var actions = [];
   if (diff.flagNew > 0) actions.push('flag ' + diff.flagNew + ' ' + rapidPlural(diff.flagNew, 'photo') + ' as ' + rapidPlural(diff.flagNew, 'a pick', 'picks'));
@@ -92,6 +96,7 @@ function rapidApplyTitle(diff, openNext) {
   return text;
 }
 
+/** @param {string} prefix @param {RapidApplyDiff} diff */
 function rapidApplyButtonText(prefix, diff) {
   var parts = rapidApplyLabelParts(diff);
   return parts.length ? (prefix + ': ' + parts.join(' · ')) : (prefix + ': no DB changes');
@@ -99,12 +104,12 @@ function rapidApplyButtonText(prefix, diff) {
 
 function renderApplyState() {
   var disabled = !rapid.seeded || rapid.applying || rapid.sessionIndex < 0;
-  document.getElementById('undoBtn').disabled = disabled || rapid.history.length === 0;
-  document.querySelectorAll('.decision-btn').forEach(function(btn) {
+  /** @type {HTMLButtonElement} */ (document.getElementById('undoBtn')).disabled = disabled || rapid.history.length === 0;
+  /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.decision-btn')).forEach(function(btn) {
     btn.disabled = disabled || !currentPhoto();
   });
-  var applyBtn = document.getElementById('applyBtn');
-  var applyNextBtn = document.getElementById('applyNextBtn');
+  var applyBtn = /** @type {HTMLButtonElement} */ (document.getElementById('applyBtn'));
+  var applyNextBtn = /** @type {HTMLButtonElement} */ (document.getElementById('applyNextBtn'));
   var diff = rapidComputeApplyDiff();
   var waitingForState = !rapid.seeded && rapid.sessionIndex >= 0 && rapid.items && rapid.items.length && !rapid.loadError;
   var stateFailed = !rapid.seeded && rapid.loadError;

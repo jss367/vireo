@@ -2,25 +2,28 @@
 // outside the group list so category/filter renders cannot detach it.
 
 var _duplicateTrashActive = false;
-var _duplicateBucketOperations = new Map();
-var _duplicateFileTrashState = new Map();
+/** @type {Map<Element,{snapshot:DuplicateScan|null;index:number}>} */ var _duplicateBucketOperations = new Map();
+/** @type {Map<number,DuplicateTrashState>} */ var _duplicateFileTrashState = new Map();
 
+/** @param {number} photoId */
 function duplicateFileTrashIsPending(photoId) {
   var state = _duplicateFileTrashState.get(photoId);
   return !!(state && state.pending);
 }
 
+/** @param {number} photoId @param {Element|null} [currentCard] */
 function updateDuplicateFileTrashCard(photoId, currentCard) {
   var state = _duplicateFileTrashState.get(photoId);
   var card = currentCard || document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
   if (!state || !card) return;
-  var button = card.querySelector('.trash-btn');
+  var button = card.querySelector(/** @type {'button'} */ ('.trash-btn'));
   if (!button) return;
   button.disabled = state.pending || state.terminal;
-  var status = card.querySelector('[data-trash-status]');
+  var status = card.querySelector(/** @type {'div'} */ ('[data-trash-status]'));
   if (status) status.textContent = state.message;
 }
 
+/** @param {number[]} photoIds @param {object} owner */
 function prepareDuplicateTrashBatch(photoIds, owner) {
   if (photoIds.some(duplicateFileTrashIsPending)) {
     throw new Error('Some files are already being cleaned up. Wait for that cleanup to finish.');
@@ -28,12 +31,13 @@ function prepareDuplicateTrashBatch(photoIds, owner) {
   photoIds.forEach(function(id) {
     _duplicateFileTrashState.set(id, {owner: owner, pending: true, terminal: false, message: 'Waiting to move to Trash...'});
   });
-  document.querySelectorAll('.dup-card[data-photo-id]').forEach(function(card) {
+  document.querySelectorAll(/** @type {'div'} */ ('.dup-card[data-photo-id]')).forEach(function(card) {
     updateDuplicateFileTrashCard(Number(card.getAttribute('data-photo-id')), card);
   });
-  refreshTrashAllButton(document.getElementById('trashAllBtn'));
+  refreshTrashAllButton(/** @type {HTMLButtonElement} */ (document.getElementById('trashAllBtn')));
 }
 
+/** @param {DuplicateTrashResponse} data @param {number[]} photoIds @param {object} owner */
 function recordDuplicateTrashBatch(data, photoIds, owner) {
   var failed = new Map((data.failed || []).map(function(item) { return [item.id, item]; }));
   var skipped = new Map((data.skipped || []).map(function(item) { return [item.id, item]; }));
@@ -50,6 +54,7 @@ function recordDuplicateTrashBatch(data, photoIds, owner) {
   });
 }
 
+/** @param {number[]} photoIds @param {object} owner */
 function releasePausedDuplicateTrashBatch(photoIds, owner) {
   photoIds.forEach(function(id) {
     var state = _duplicateFileTrashState.get(id);
@@ -58,19 +63,20 @@ function releasePausedDuplicateTrashBatch(photoIds, owner) {
     state.message = 'Cleanup paused. Retry this file.';
     updateDuplicateFileTrashCard(id);
   });
-  refreshTrashAllButton(document.getElementById('trashAllBtn'));
+  refreshTrashAllButton(/** @type {HTMLButtonElement} */ (document.getElementById('trashAllBtn')));
 }
 
+/** @param {number} photoId */
 async function trashOneLoserFile(photoId) {
   if (duplicateFileTrashIsPending(photoId)) return;
   var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
-  if (!card || !card.querySelector('.trash-btn')) return;
+  if (!card || !card.querySelector(/** @type {'button'} */ ('.trash-btn'))) return;
   var state = {pending: true, terminal: false, message: 'Moving to Trash...'};
   _duplicateFileTrashState.set(photoId, state);
   updateDuplicateFileTrashCard(photoId);
-  refreshTrashAllButton(document.getElementById('trashAllBtn'));
+  refreshTrashAllButton(/** @type {HTMLButtonElement} */ (document.getElementById('trashAllBtn')));
   try {
-    var data = await safeFetch('/api/duplicates/delete-loser-files', {
+    /** @type {DuplicateTrashResponse} */ var data = await safeFetch('/api/duplicates/delete-loser-files', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: [photoId]}),
     });
@@ -80,7 +86,7 @@ async function trashOneLoserFile(photoId) {
       forgetCleanedDuplicateCopies(new Set([photoId]));
       showToast('Moved 1 file to Trash', 'success');
     } else if ((data.skipped || []).length) {
-      var reason = data.skipped[0].reason || 'skipped';
+      var reason = data.skipped?.[0]?.reason || 'skipped';
       if (reason === 'file already missing') {
         state.terminal = true;
         state.message = 'Cleaned up (file was already gone)';
@@ -89,13 +95,13 @@ async function trashOneLoserFile(photoId) {
         state.message = 'Skipped: ' + reason;
       }
     } else if ((data.failed || []).length) {
-      var error = data.failed[0].error || 'failed';
-      state.message = 'Failed: ' + error;
-      showToast('Trash failed: ' + error, 'error');
+      var failureText = data.failed?.[0]?.error || 'failed';
+      state.message = 'Failed: ' + failureText;
+      showToast('Trash failed: ' + failureText, 'error');
     } else {
       state.message = 'No file was moved. Try again.';
     }
-  } catch (error) {
+  } catch (caught) { const error = duplicateRequestError(caught);
     state.message = 'Failed: ' + (error.message || 'request failed');
   } finally {
     state.pending = false;
@@ -103,11 +109,12 @@ async function trashOneLoserFile(photoId) {
     // state by photo ID rather than retaining a node detached by a filter.
     if (!state.terminal && !_scanInProgress && _lastScanResult) renderResults(_lastScanResult);
     updateDuplicateFileTrashCard(photoId);
-    refreshTrashAllButton(document.getElementById('trashAllBtn'));
+    refreshTrashAllButton(/** @type {HTMLButtonElement} */ (document.getElementById('trashAllBtn')));
     if (state.terminal) _duplicateFileTrashState.delete(photoId);
   }
 }
 
+/** @param {Element} card @param {number} bi */
 function pinDuplicateBucketOperation(card, bi) {
   var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
   if (!card.hasAttribute('data-reveal-paths')) {
@@ -115,16 +122,18 @@ function pinDuplicateBucketOperation(card, bi) {
     card.setAttribute('data-reveal-paths', JSON.stringify((visible && visible.folders || []).slice()));
   }
   _duplicateBucketOperations.set(card, {snapshot: _lastScanResult, index: bi});
-  document.getElementById('duplicateBucketOperationList').appendChild(card);
-  document.getElementById('duplicateBucketOperations').hidden = false;
+  /** @type {HTMLElement} */ (document.getElementById('duplicateBucketOperationList')).appendChild(card);
+  /** @type {HTMLElement} */ (document.getElementById('duplicateBucketOperations')).hidden = false;
 }
 
+/** @param {Element} card */
 function unpinDuplicateBucketOperation(card) {
   _duplicateBucketOperations.delete(card);
   card.remove();
-  document.getElementById('duplicateBucketOperations').hidden = !_duplicateBucketOperations.size;
+  /** @type {HTMLElement} */ (document.getElementById('duplicateBucketOperations')).hidden = !_duplicateBucketOperations.size;
 }
 
+/** @param {DuplicateScan|null} snapshot @param {number} bi */
 function duplicateBucketIsPinned(snapshot, bi) {
   return Array.from(_duplicateBucketOperations.values()).some(function(operation) {
     return operation.snapshot === snapshot && operation.index === bi;
@@ -132,12 +141,12 @@ function duplicateBucketIsPinned(snapshot, bi) {
 }
 
 function clearDuplicateTrashProgress() {
-  var progress = document.getElementById('trashAllProgress');
+  var progress = /** @type {HTMLElement} */ (document.getElementById('trashAllProgress'));
   if (progress && !_duplicateTrashActive) progress.hidden = true;
 }
 
 function refreshDuplicateTrashControls() {
-  var button = document.getElementById('trashAllBtn');
+  var button = /** @type {HTMLButtonElement} */ (document.getElementById('trashAllBtn'));
   if (button && _duplicateTrashActive) button.disabled = true;
 }
 
@@ -153,7 +162,7 @@ async function trashAllLoserFiles() {
   var resolved = _proposals.filter(function(p) {
     return p.status === 'resolved' && groupMatchesFilter(p);
   });
-  var ids = [];
+  /** @type {number[]} */ var ids = [];
   resolved.forEach(function(p) {
     if (isBulkTrashProtected(p)) return;
     (p.losers || []).forEach(function(l) {
@@ -176,8 +185,8 @@ async function trashAllLoserFiles() {
     return;
   }
 
-  var btn = document.getElementById('trashAllBtn');
-  var progressEl = document.getElementById('trashAllProgress');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('trashAllBtn'));
+  var progressEl = /** @type {HTMLElement} */ (document.getElementById('trashAllProgress'));
   _duplicateTrashActive = true;
   if (btn) { btn.disabled = true; btn.textContent = 'Moving to Trash...'; }
 
@@ -196,17 +205,18 @@ async function trashAllLoserFiles() {
     if (failed) msg += ', ' + failed + ' failed';
     showToast(msg, failed ? 'error' : 'success');
 
-  } catch (e) {
+  } catch (caught) { const e = duplicateRequestError(caught);
     var completed = e.trashSummary ? e.trashSummary.completed : 0;
     showToast('Trash cleanup paused after ' + completed + ' of ' + ids.length +
               ' files: ' + (e.message || 'request failed') +
               '. Use the button to retry the remaining files.', 'error');
   } finally {
     _duplicateTrashActive = false;
-    refreshTrashAllButton(document.getElementById('trashAllBtn'));
+    refreshTrashAllButton(/** @type {HTMLButtonElement} */ (document.getElementById('trashAllBtn')));
   }
 }
 
+/** @param {Element|null} card @param {number[]} remainingIds @param {string[]|Set<string>|null} [resolvedHashes] */
 function showBucketTrashRetry(card, remainingIds, resolvedHashes) {
   if (!card) return;
   card.setAttribute('data-pending-trash', JSON.stringify(remainingIds));
@@ -216,7 +226,7 @@ function showBucketTrashRetry(card, remainingIds, resolvedHashes) {
     card.setAttribute('data-pending-resolved-hashes', JSON.stringify(hashList));
   }
   var bi = card.getAttribute('data-bi');
-  var actions = card.querySelector('.bucket-actions');
+  var actions = card.querySelector(/** @type {'div'} */ ('.bucket-actions'));
   if (!actions) return;
   var n = remainingIds.length;
   actions.innerHTML =
@@ -226,31 +236,32 @@ function showBucketTrashRetry(card, remainingIds, resolvedHashes) {
     bucketRevealButton(Number(bi), card);
 }
 
+/** @param {HTMLButtonElement} btn */
 async function retryBucketTrash(btn) {
   var card = btn.closest('.bucket-card');
   if (!card) return;
   var raw = card.getAttribute('data-pending-trash');
   if (!raw) return;
-  var ids;
+  /** @type {unknown} */ var ids;
   try { ids = JSON.parse(raw); } catch (e) { return; }
-  if (!Array.isArray(ids) || ids.length === 0) return;
+  if (!duplicateNumberList(ids) || ids.length === 0) return;
 
   // Recover the resolved-hash subset stashed by the initial
   // bulkResolveByFolder failure path. Falling back to
   // ``bucket.file_hashes`` would over-prune whenever bulk-resolve
   // returned any hashes in ``skipped`` — those groups were never
   // resolved and must stay visible on the page.
-  var resolvedHashes = null;
+  /** @type {string[]|null} */ var resolvedHashes = null;
   var rawHashes = card.getAttribute('data-pending-resolved-hashes');
   if (rawHashes) {
     try {
-      var parsed = JSON.parse(rawHashes);
-      if (Array.isArray(parsed)) resolvedHashes = parsed;
+      /** @type {unknown} */ var parsed = JSON.parse(rawHashes);
+      if (duplicateStringList(parsed)) resolvedHashes = parsed;
     } catch (e) { /* fall through */ }
   }
 
-  var status = card.querySelector('[data-bucket-status]');
-  var actionBtns = card.querySelectorAll('.bucket-actions button');
+  var status = card.querySelector(/** @type {'div'} */ ('[data-bucket-status]'));
+  var actionBtns = card.querySelectorAll(/** @type {'button'} */ ('.bucket-actions button'));
   Array.prototype.forEach.call(actionBtns, function(b) { b.disabled = true; });
   card.classList.add('applying');
   if (status) {
@@ -277,7 +288,7 @@ async function retryBucketTrash(btn) {
       showToast('Moved ' + trashed + ' file' + (trashed === 1 ? '' : 's') +
                 ' to Trash', 'success');
     }
-  } catch (e) {
+  } catch (caught) { const e = duplicateRequestError(caught);
     terminalError = e;
     var s = e.trashSummary || {trashed: 0, failed: [], completed: 0};
     var completed = s.completed || 0;
@@ -307,7 +318,7 @@ async function retryBucketTrash(btn) {
     // Legacy fallback for cards that were retry-armed before this data
     // attribute existed. In practice these only appear when bulk-resolve
     // resolved every hash in the bucket, so bucket.file_hashes matches.
-    var bi = parseInt(card.getAttribute('data-bi'), 10);
+    var bi = parseInt(card.getAttribute('data-bi') || '', 10);
     var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
     hashesToPrune = (bucket && bucket.file_hashes) || [];
   }
@@ -320,6 +331,7 @@ async function retryBucketTrash(btn) {
   }
 }
 
+/** @param {number} bi @param {string} keepFolder */
 async function bulkResolveByFolder(bi, keepFolder) {
   var card = document.querySelector('#results .bucket-card[data-bi="' + bi + '"]');
   if (!card) return;
@@ -330,10 +342,10 @@ async function bulkResolveByFolder(bi, keepFolder) {
   var bucket = visibleBucket((_lastScanResult && _lastScanResult.buckets || [])[bi]);
   if (!bucket) return;
 
-  var deleteToggle = card.querySelector('input[data-delete-toggle]');
+  var deleteToggle = card.querySelector(/** @type {'input'} */ ('input[data-delete-toggle]'));
   var deleteFiles = !!(deleteToggle && deleteToggle.checked);
-  var status = card.querySelector('[data-bucket-status]');
-  var btns = card.querySelectorAll('.keep-btn');
+  var status = card.querySelector(/** @type {'div'} */ ('[data-bucket-status]'));
+  var btns = card.querySelectorAll(/** @type {'button'} */ ('.keep-btn'));
 
   var n = bucket.group_count;
   var label = keepFolder.split('/').filter(Boolean).pop() || keepFolder;
@@ -348,7 +360,7 @@ async function bulkResolveByFolder(bi, keepFolder) {
   if (status) status.textContent = 'Resolving ' + n + ' group' + (n === 1 ? '' : 's') + '...';
 
   try {
-    var data = await safeFetch('/api/duplicates/bulk-resolve', {
+    /** @type {{resolved?:Array<{file_hash:string;loser_ids?:number[]}>;skipped?:unknown[]}} */ var data = await safeFetch('/api/duplicates/bulk-resolve', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -358,7 +370,7 @@ async function bulkResolveByFolder(bi, keepFolder) {
     });
     var resolved = data.resolved || [];
     var skippedCount = (data.skipped || []).length;
-    var loserIds = [];
+    /** @type {number[]} */ var loserIds = [];
     resolved.forEach(function(r) {
       (r.loser_ids || []).forEach(function(id) { loserIds.push(id); });
     });
@@ -394,7 +406,7 @@ async function bulkResolveByFolder(bi, keepFolder) {
             .map(function(f) { return f.id; })
             .filter(function(id) { return id != null; });
         }
-      } catch (e) {
+      } catch (caught) { const e = duplicateRequestError(caught);
         // Whole-batch failure mid-loop. Completed batches are already
         // trashed + DB-deleted; remaining batches never fired. Any
         // per-file failures inside completed batches also need retry.
@@ -438,7 +450,7 @@ async function bulkResolveByFolder(bi, keepFolder) {
     if (!_scanInProgress && _lastScanResult) {
       renderResults(_lastScanResult);
     }
-  } catch (e) {
+  } catch (caught) { const e = duplicateRequestError(caught);
     card.classList.remove('applying');
     btns.forEach(function(b) { b.disabled = false; });
     if (status) status.textContent = '';
@@ -448,8 +460,9 @@ async function bulkResolveByFolder(bi, keepFolder) {
   }
 }
 
+/** @param {number[]} photoIds @param {(progress:DuplicateTrashProgress)=>void} [onProgress] @param {(data:DuplicateTrashResponse,ids:number[])=>void} [onBatch] */
 async function trashLoserFilesInBatches(photoIds, onProgress, onBatch) {
-  var summary = {trashed: 0, skipped: [], failed: [], completed: 0,
+  /** @type {DuplicateTrashSummary} */ var summary = {trashed: 0, skipped: [], failed: [], completed: 0,
                  total: photoIds.length};
   var owner = {};
   prepareDuplicateTrashBatch(photoIds, owner);
@@ -457,11 +470,11 @@ async function trashLoserFilesInBatches(photoIds, onProgress, onBatch) {
     for (var offset = 0; offset < photoIds.length; offset += TRASH_BATCH_SIZE) {
       var batch = photoIds.slice(offset, offset + TRASH_BATCH_SIZE);
       batch.forEach(function(id) {
-        _duplicateFileTrashState.get(id).message = 'Moving to Trash...';
+        var state = _duplicateFileTrashState.get(id); if (state) state.message = 'Moving to Trash...';
         updateDuplicateFileTrashCard(id);
       });
       var actionableSkipSoFar = summary.skipped.filter(isActionableSkip).length;
-      var progress = {
+      /** @type {DuplicateTrashProgress} */ var progress = {
         phase: 'moving', total: photoIds.length, completed: offset,
         batchStart: offset + 1, batchEnd: offset + batch.length,
         trashed: summary.trashed, skipped: actionableSkipSoFar,
@@ -469,14 +482,14 @@ async function trashLoserFilesInBatches(photoIds, onProgress, onBatch) {
       };
       if (onProgress) onProgress(progress);
 
-      var data;
+      /** @type {DuplicateTrashResponse} */ var data;
       try {
         data = await safeFetch('/api/duplicates/delete-loser-files', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ photo_ids: batch }),
         }, {toast: false});
-      } catch (e) {
+      } catch (caught) { const e = duplicateRequestError(caught);
         recordDuplicateTrashBatch({failed: batch.map(function(id) {
           return {id: id, error: e.message || 'request failed'};
         })}, batch, owner);
@@ -513,6 +526,7 @@ async function trashLoserFilesInBatches(photoIds, onProgress, onBatch) {
   }
 }
 
+/** @param {DuplicateTrashResponse} data @param {number[]} requestedIds */
 function applyTrashBatchToCards(data, requestedIds) {
   // "file already missing" still deletes the orphan DB row, so it is a
   // terminal completion even though no file needed to be moved.
@@ -526,7 +540,7 @@ function applyTrashBatchToCards(data, requestedIds) {
     var card = document.querySelector('.dup-card[data-photo-id="' + pid + '"]');
     if (card) {
       card.classList.add('trashed');
-      var status = card.querySelector('[data-trash-status]');
+      var status = card.querySelector(/** @type {'div'} */ ('[data-trash-status]'));
       if (status) status.textContent = 'Cleaned up';
     }
   });
@@ -535,19 +549,20 @@ function applyTrashBatchToCards(data, requestedIds) {
     if (terminalSkips.has(s.reason)) return;
     var card = document.querySelector('.dup-card[data-photo-id="' + s.id + '"]');
     if (card) {
-      var status = card.querySelector('[data-trash-status]');
+      var status = card.querySelector(/** @type {'div'} */ ('[data-trash-status]'));
       if (status) status.textContent = 'Skipped: ' + (s.reason || '');
     }
   });
   (data.failed || []).forEach(function(f) {
     var card = document.querySelector('.dup-card[data-photo-id="' + f.id + '"]');
     if (card) {
-      var status = card.querySelector('[data-trash-status]');
+      var status = card.querySelector(/** @type {'div'} */ ('[data-trash-status]'));
       if (status) status.textContent = 'Failed: ' + (f.error || '');
     }
   });
 }
 
+/** @param {HTMLButtonElement|null} btn */
 function refreshTrashAllButton(btn) {
   var remaining = 0;
   _proposals.forEach(function(p) {
@@ -565,8 +580,8 @@ function refreshTrashAllButton(btn) {
   });
   if (remaining > 0) {
     if (!btn) {
-      var toggle = document.getElementById('resolvedToggle');
-      var actions = toggle && toggle.closest('.section-header').querySelector('.section-actions');
+      var toggle = /** @type {HTMLElement} */ (document.getElementById('resolvedToggle'));
+      var actions = toggle && toggle.closest('.section-header')?.querySelector(/** @type {'div'} */ ('.section-actions'));
       if (!actions) return;
       btn = document.createElement('button');
       btn.id = 'trashAllBtn';
@@ -580,4 +595,39 @@ function refreshTrashAllButton(btn) {
   } else if (btn) {
     btn.remove();
   }
+}
+
+/** @param {unknown} value @returns {value is number[]} */
+function duplicateNumberList(value) {
+  return Array.isArray(value) && value.every(function(id) { return typeof id === 'number' && Number.isInteger(id) && id > 0; });
+}
+
+/** @param {unknown} value @returns {value is string[]} */
+function duplicateStringList(value) {
+  return Array.isArray(value) && value.every(function(item) { return typeof item === 'string'; });
+}
+
+/** @param {unknown} value @returns {value is DuplicateTrashSummary} */
+function duplicateTrashSummary(value) {
+  if (!value || typeof value !== 'object') return false;
+  return 'trashed' in value && typeof value.trashed === 'number' &&
+    'completed' in value && typeof value.completed === 'number' &&
+    'total' in value && typeof value.total === 'number' &&
+    'failed' in value && Array.isArray(value.failed) && value.failed.every(function(item) {
+      return item && typeof item === 'object' && typeof item.id === 'number' &&
+        (item.error === undefined || typeof item.error === 'string');
+    }) && 'skipped' in value && Array.isArray(value.skipped) && value.skipped.every(function(item) {
+      return item && typeof item === 'object' && typeof item.id === 'number' && typeof item.reason === 'string';
+    });
+}
+
+/** @param {unknown} value @returns {DuplicateTrashError} */
+function duplicateRequestError(value) {
+  /** @type {DuplicateTrashError} */ var error = value instanceof Error ? value : new Error(
+    value && typeof value === 'object' && 'message' in value && typeof value.message === 'string'
+      ? value.message : '');
+  if (value && typeof value === 'object' && 'trashSummary' in value && duplicateTrashSummary(value.trashSummary)) {
+    error.trashSummary = value.trashSummary;
+  }
+  return error;
 }

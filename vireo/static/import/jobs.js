@@ -1,10 +1,11 @@
 // Import submission, job progress, completion, and failed-file retries.
 // Classic page script; load boot.js after all definitions.
 
+/** @param {HTMLElement} el @param {Record<string,ImportFolderCounts>} folders */
 function renderFolderTable(el, folders) {
   el.innerHTML = '';
   Object.keys(folders).sort().forEach((rel) => {
-    const c = folders[rel];
+    const c = folders[rel]; if (!c) return;
     const tr = document.createElement('tr');
     const name = document.createElement('td');
     name.textContent = rel;
@@ -32,21 +33,21 @@ async function startImport() {
     updateStartGate();
     return;
   }
-  const allowMissingExiftool = !!document.getElementById('chkAllowMissingExiftool')?.checked;
+  const allowMissingExiftool = !!/** @type {HTMLInputElement} */ (document.getElementById('chkAllowMissingExiftool'))?.checked;
   const copyMode = newImagesSnapshotId === null && selectedImportMode() === 'copy';
-  const body = newImagesSnapshotId !== null ? {
+  /** @type {ImportRequest} */ const body = newImagesSnapshotId !== null ? {
     source_snapshot_id: newImagesSnapshotId,
   } : {
       sources: sources,
-      recursive: document.getElementById('chkRecursive').checked,
+      recursive: /** @type {HTMLInputElement} */ (document.getElementById('chkRecursive')).checked,
     };
   if (allowMissingExiftool) body.allow_missing_exiftool = true;
   if (importTags.length) body.tags = importTags.slice();
-  if (document.getElementById('chkLocationFromGps').checked) {
+  if (/** @type {HTMLInputElement} */ (document.getElementById('chkLocationFromGps')).checked) {
     body.location_from_gps = true;
   }
-  if (document.getElementById('workspaceNew').checked) {
-    const name = (document.getElementById('newWorkspaceName').value || '').trim();
+  if (/** @type {HTMLInputElement} */ (document.getElementById('workspaceNew')).checked) {
+    const name = (/** @type {HTMLInputElement} */ (document.getElementById('newWorkspaceName')).value || '').trim();
     if (!name) { showError('Name the new workspace.'); return; }
     body.new_workspace_name = name;
   }
@@ -64,18 +65,18 @@ async function startImport() {
       }
       body.remote_target_id = remoteId;
       body.remote_subpath = normalizeRemoteSubpath(
-        document.getElementById('remoteSubpath').value).value;
+        /** @type {HTMLInputElement} */ (document.getElementById('remoteSubpath')).value).value;
     } else {
-      const destination = (document.getElementById('destInput').value || '').trim();
+      const destination = (/** @type {HTMLInputElement} */ (document.getElementById('destInput')).value || '').trim();
       if (!destination) { showError('Choose a destination folder.'); return; }
       body.destination = destination;
     }
     body.folder_template = selectedFolderTemplate();
     body.file_types = fileTypes;
-    body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
-    body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
+    body.skip_duplicates = /** @type {HTMLInputElement} */ (document.getElementById('chkSkipDuplicates')).checked;
+    body.verify_by_hash = /** @type {HTMLInputElement} */ (document.getElementById('chkVerifyByHash')).checked;
     body.trust_likely_duplicates =
-      document.getElementById('chkTrustLikelyDuplicates').checked;
+      /** @type {HTMLInputElement} */ (document.getElementById('chkTrustLikelyDuplicates')).checked;
     // Only a COMPLETED preview describes a file list; with none the import
     // sends no selection at all and copies everything, which is what the
     // screen says. This branch is copy-mode only for a second reason:
@@ -143,40 +144,42 @@ async function startImport() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const data = await resp.json();
+    /** @type {{job_id: number; error?: string; workspace?: {id: number; name: string}}} */ const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'import failed to start');
     if (data.workspace && data.workspace.name) {
-      const activeName = document.getElementById('activeWorkspaceName');
+      const activeName = /** @type {HTMLElement} */ (document.getElementById('activeWorkspaceName'));
       if (activeName) activeName.textContent = '(' + data.workspace.name + ')';
     }
     activeJobId = data.job_id;
     importStartPending = false;
     updateStartGate();
-    document.getElementById('progressCard').style.display = '';
-    document.getElementById('resultCard').style.display = 'none';
-    watchJob(activeJobId);
+    /** @type {HTMLElement} */ (document.getElementById('progressCard')).style.display = '';
+    /** @type {HTMLElement} */ (document.getElementById('resultCard')).style.display = 'none';
+    watchJob(data.job_id);
   } catch (e) {
     importStartPending = false;
-    showError(String(e.message || e), document.getElementById('btnStart'));
+    showError(String(e instanceof Error ? e.message : e), /** @type {HTMLButtonElement} */ (document.getElementById('btnStart')));
     updateStartGate();
   }
 }
 
+/** @param {number} jobId */
 function watchJob(jobId) {
-  if (es) { es.close(); es = null; }
+  if (es) { es?.close(); es = null; }
   es = new EventSource('/api/jobs/' + jobId + '/stream');
   es.addEventListener('progress', (evt) => {
     try { renderProgress(JSON.parse(evt.data)); } catch (e) { /* ignore */ }
   });
-  es.addEventListener('complete', () => { es.close(); es = null; finishJob(jobId); });
+  es.addEventListener('complete', () => { es?.close(); es = null; finishJob(jobId); });
   es.addEventListener('error', () => {
     // Stream dropped (server restart, network) — fall back to polling the
     // job once rather than pretending progress continues.
-    if (es) { es.close(); es = null; }
+    if (es) { es?.close(); es = null; }
     finishJob(jobId);
   });
 }
 
+/** @param {ImportProgress} data */
 function renderProgress(data) {
   let phaseText =
     (data.phase || '') + (data.current_file ? ' · ' + data.current_file : '');
@@ -189,7 +192,7 @@ function renderProgress(data) {
     phaseText += ' · ' + data.phase_label + ' ' +
       (data.phase_current || 0) + ' / ' + data.phase_total;
   }
-  document.getElementById('progressPhase').textContent = phaseText;
+  /** @type {HTMLElement} */ (document.getElementById('progressPhase')).textContent = phaseText;
   // Once indexing finishes, working-copy generation becomes the active phase.
   // Drive the visible bar from that phase instead of leaving it pinned at the
   // indexing counter's 100% while thousands of files are still being rendered.
@@ -197,21 +200,22 @@ function renderProgress(data) {
   // to one batch and must not replace the import's overall progress bar.
   const workingCopyPhase =
     data.phase_label === 'Generating working copies' && data.phase_total > 0;
-  const visibleCurrent = workingCopyPhase ? (data.phase_current || 0) : data.current;
+  const visibleCurrent = workingCopyPhase ? (data.phase_current || 0) : (data.current || 0);
   const visibleTotal = workingCopyPhase ? data.phase_total : data.total;
   const pct = visibleTotal ? Math.round(100 * visibleCurrent / visibleTotal) : 0;
-  document.getElementById('progressFill').style.width = pct + '%';
+  /** @type {HTMLElement} */ (document.getElementById('progressFill')).style.width = pct + '%';
   if (data.folders && Object.keys(data.folders).length) {
-    renderFolderTable(document.getElementById('folderProgress'), data.folders);
+    renderFolderTable(/** @type {HTMLElement} */ (document.getElementById('folderProgress')), data.folders);
   }
 }
 
+/** @param {number} jobId */
 async function finishJob(jobId) {
-  let job = null;
+  /** @type {ImportJob | null} */ let job = null;
   for (let i = 0; i < 30; i++) {
     const resp = await fetch('/api/jobs/' + jobId);
     if (resp.ok) {
-      job = await resp.json();
+      job = /** @type {ImportJob} */ (await resp.json());
       if (['queued', 'running', 'pausing', 'paused'].includes(job.status)) i = -1;
       if (['completed', 'failed', 'cancelled', 'expired'].includes(job.status)) break;
     }
@@ -231,16 +235,17 @@ async function finishJob(jobId) {
   renderResult(job.result, job.status);
 }
 
+/** @param {ImportJob | null} job */
 async function refreshImportRecoveryOptions(job) {
   const generation = ++importRecoveryGeneration;
-  if (!canRetryImportDirectToNas(job)) return;
+  if (!job || !canRetryImportDirectToNas(job)) return;
   try {
     const response = await fetch('/api/import/' + encodeURIComponent(job.id) + '/recovery-options', {cache: 'no-store'});
-    const options = await response.json();
+    /** @type {{direct_to_nas_allowed?: boolean}} */ const options = await response.json();
     if (generation !== importRecoveryGeneration || lastFinishedImportJob !== job) return;
     if (response.ok && options.direct_to_nas_allowed === true) {
-      document.getElementById('btnRetryImportDirectToNas').style.display = '';
-      const directHint = document.getElementById('retryImportDirectHint');
+      /** @type {HTMLButtonElement} */ (document.getElementById('btnRetryImportDirectToNas')).style.display = '';
+      const directHint = /** @type {HTMLElement} */ (document.getElementById('retryImportDirectHint'));
       directHint.textContent = 'Direct to NAS skips the local copy of the originals and keeps the same processing settings.';
       directHint.style.display = '';
     }
@@ -253,14 +258,15 @@ async function refreshImportRecoveryOptions(job) {
 function bindImportRecoveryRefresh() {
   function refresh() {
     if (document.hidden || importStartPending || activeJobId || !lastFinishedImportJob) return;
-    document.getElementById('btnRetryImportDirectToNas').style.display = 'none';
-    document.getElementById('retryImportDirectHint').style.display = 'none';
+    /** @type {HTMLButtonElement} */ (document.getElementById('btnRetryImportDirectToNas')).style.display = 'none';
+    /** @type {HTMLElement} */ (document.getElementById('retryImportDirectHint')).style.display = 'none';
     refreshImportRecoveryOptions(lastFinishedImportJob);
   }
   window.addEventListener('focus', refresh);
   document.addEventListener('visibilitychange', refresh);
 }
 
+/** @param {ImportJob | null} job */
 function retryBodyFromFinishedJob(job) {
   const cfg = (job && job.config) || {};
   // Recovery retry always POSTs to /api/jobs/import-photos, which rejects
@@ -294,7 +300,7 @@ function retryBodyFromFinishedJob(job) {
   // parent value still avoids re-copying files that landed successfully.
   const parentSkipDuplicates = cfg.skip_duplicates != null
     ? !!cfg.skip_duplicates : true;
-  const body = {
+  /** @type {ImportRequest} */ const body = {
     sources: cfg.sources.slice(),
     destination: cfg.destination,
     recursive: cfg.recursive !== false,
@@ -321,9 +327,9 @@ function retryBodyFromFinishedJob(job) {
     ? cfg.carry_photo_ids : [];
   // Everything the parent carried (its own carry list plus photos a
   // resume recovered from an interrupted run) stays in scope too.
-  const parentImported = ['photo_ids', 'carried_photo_ids', 'recovered_photo_ids']
-    .flatMap((key) => (Array.isArray(job.result && job.result[key]) ? job.result[key] : []));
-  const carry = [];
+  const parentImported = /** @type {const} */ (['photo_ids', 'carried_photo_ids', 'recovered_photo_ids'])
+    .flatMap((key) => (job.result?.[key] || []));
+  /** @type {number[]} */ const carry = [];
   const carrySeen = new Set();
   parentCarry.concat(parentImported).forEach((pid) => {
     if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return;
@@ -365,11 +371,12 @@ function retryBodyFromFinishedJob(job) {
   return body;
 }
 
+/** @param {boolean} [directToNas] */
 async function retryFailedImport(directToNas) {
   if (importStartPending || activeJobId) return;
-  const button = document.getElementById(directToNas ? 'btnRetryImportDirectToNas' : 'btnRetryImport');
-  const otherButton = document.getElementById(directToNas ? 'btnRetryImport' : 'btnRetryImportDirectToNas');
-  const hint = document.getElementById('retryImportHint');
+  const button = /** @type {HTMLButtonElement} */ (document.getElementById(directToNas ? 'btnRetryImportDirectToNas' : 'btnRetryImport'));
+  const otherButton = /** @type {HTMLButtonElement} */ (document.getElementById(directToNas ? 'btnRetryImport' : 'btnRetryImportDirectToNas'));
+  const hint = /** @type {HTMLElement} */ (document.getElementById('retryImportHint'));
   let body = retryBodyFromFinishedJob(lastFinishedImportJob);
   if (directToNas) body = directNasImportRetryBody(lastFinishedImportJob, body);
   if (!body) {
@@ -398,8 +405,8 @@ async function retryFailedImport(directToNas) {
   let directAllowed = !directToNas;
   try {
     if (directToNas) {
-      const optionsResponse = await fetch('/api/import/' + encodeURIComponent(body.parent_import_job_id) + '/recovery-options', {cache: 'no-store'});
-      const options = await optionsResponse.json().catch(() => ({}));
+      const optionsResponse = await fetch('/api/import/' + encodeURIComponent(body.parent_import_job_id || '') + '/recovery-options', {cache: 'no-store'});
+      /** @type {{direct_to_nas_allowed?: boolean; error?: string}} */ const options = await optionsResponse.json().catch(() => ({}));
       directAllowed = optionsResponse.ok && options.direct_to_nas_allowed === true;
       if (!directAllowed) throw new Error(options.error || 'Direct-to-NAS recovery is no longer available for this import. Continue from Jobs.');
     }
@@ -408,15 +415,15 @@ async function retryFailedImport(directToNas) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const data = await resp.json().catch(() => ({}));
+    /** @type {{job_id: number; error?: string; workspace?: {id: number; name: string}}} */ const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || 'retry failed to start');
     activeJobId = data.job_id;
-    document.getElementById('progressCard').style.display = '';
-    document.getElementById('resultCard').style.display = 'none';
-    document.getElementById('progressCard').scrollIntoView({
+    /** @type {HTMLElement} */ (document.getElementById('progressCard')).style.display = '';
+    /** @type {HTMLElement} */ (document.getElementById('resultCard')).style.display = 'none';
+    /** @type {HTMLElement} */ (document.getElementById('progressCard')).scrollIntoView({
       behavior: preferredScrollBehavior(), block: 'center',
     });
-    watchJob(activeJobId);
+    watchJob(data.job_id);
   } catch (e) {
     importStartPending = false;
     updateStartGate();
@@ -425,8 +432,8 @@ async function retryFailedImport(directToNas) {
     button.textContent = originalLabel;
     if (directToNas && !directAllowed) {
       button.style.display = 'none';
-      document.getElementById('retryImportDirectHint').style.display = 'none';
+      /** @type {HTMLElement} */ (document.getElementById('retryImportDirectHint')).style.display = 'none';
     }
-    hint.textContent = String(e.message || e);
+    hint.textContent = String(e instanceof Error ? e.message : e);
   }
 }

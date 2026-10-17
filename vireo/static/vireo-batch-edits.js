@@ -2,27 +2,32 @@
  * disabling the controls while saving; each committed gesture is undoable. */
 window.VireoBatchEdits = (function() {
   'use strict';
-  var definitions;
+  /** @type {Promise<BatchEditField[]> | null} */
+  var definitions = null;
   var opening = false;
-  var activeDialog;
+  /** @type {HTMLDialogElement | null} */
+  var activeDialog = null;
   function fields() {
-    if (!definitions) definitions = safeFetch('/api/edit-fields', {}, {toast: false})
+    if (!definitions) definitions = (/** @type {Promise<{fields: BatchEditField[]}>} */ (safeFetch('/api/edit-fields', {}, {toast: false})))
       .then(function(data) { return data.fields; })
       .catch(function(error) { definitions = null; throw error; });
     return definitions;
   }
+  /** @template {keyof HTMLElementTagNameMap} K @param {K} tag @param {string | null} [text] @param {Node} [parent] @returns {HTMLElementTagNameMap[K]} */
   function element(tag, text, parent) {
     var el = document.createElement(tag);
     if (text != null) el.textContent = text;
     if (parent) parent.appendChild(el);
     return el;
   }
+  /** @param {string} text @param {Node} parent @param {(event: MouseEvent) => unknown} action */
   function button(text, parent, action) {
     var el = element('button', text, parent);
     el.type = 'button';
     el.addEventListener('click', action);
     return el;
   }
+  /** @param {string} title */
   function dialog(title) {
     var el = element('dialog', null, document.body);
     el.className = 'development-dialog';
@@ -33,6 +38,7 @@ window.VireoBatchEdits = (function() {
     el.addEventListener('keydown', function(event) { event.stopPropagation(); });
     return el;
   }
+  /** @param {BatchEditSelectionOptions} options @returns {Promise<string[] | null>} */
   async function selectFields(options) {
     var defs = await fields();
     return new Promise(function(resolve) {
@@ -41,15 +47,18 @@ window.VireoBatchEdits = (function() {
       var chosen = new Set(options.fields || defs.filter(function(f) {
         return f.group !== 'Geometry' && f.path !== 'local';
       }).map(function(f) { return f.path; }));
+      /** @type {HTMLInputElement[]} */
       var inputs = [];
+      /** @type {Record<string, HTMLDivElement>} */
       var groups = {};
       defs.forEach(function(def) {
         if (options.available && options.available.indexOf(def.path) === -1) return;
         if (!groups[def.group]) {
           var group = element('fieldset', null, modal);
           element('legend', def.group, group);
-          groups[def.group] = element('div', null, group);
-          groups[def.group].className = 'development-fields';
+          var fieldsGroup = element('div', null, group);
+          fieldsGroup.className = 'development-fields';
+          groups[def.group] = fieldsGroup;
         }
         var label = element('label', null, groups[def.group]);
         var input = element('input', null, label);
@@ -61,6 +70,7 @@ window.VireoBatchEdits = (function() {
       button('Select all', actions, function() { inputs.forEach(function(i) { i.checked = true; }); update(); });
       button('Select none', actions, function() { inputs.forEach(function(i) { i.checked = false; }); update(); });
       button('Cancel', actions, function() { modal.close(); });
+      /** @type {string[] | null} */
       var result = null;
       var apply = button(options.action || 'Apply selected settings', actions, function() {
         result = inputs.filter(function(i) { return i.checked; }).map(function(i) { return i.value; });
@@ -73,11 +83,13 @@ window.VireoBatchEdits = (function() {
       modal.showModal();
     });
   }
+  /** @param {BatchEditResult} data */
   function refresh(data) {
     if (typeof window.vireoRefreshEditRecipeCache === 'function') {
       window.vireoRefreshEditRecipeCache(data.recipes || {});
     }
   }
+  /** @param {BatchEditResult} data */
   function resultMessage(data) {
     var message = 'Updated ' + data.count.toLocaleString() + ' photo' + (data.count === 1 ? '' : 's') + '.';
     if (data.skipped && data.skipped.length) {
@@ -87,9 +99,11 @@ window.VireoBatchEdits = (function() {
     }
     return message;
   }
+  /** @param {number[]} ids @param {BatchRecipe} recipe @param {string[]} selectedFields @param {string} [mode] @param {string} [description] */
   async function apply(ids, recipe, selectedFields, mode, description) {
     var status = activeDialog && activeDialog.querySelector('.development-status');
     if (status) status.textContent = 'Applying…';
+    /** @type {BatchEditResult} */
     var data = await safeFetch('/api/photos/edit-recipe/apply', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: ids, recipe: recipe, fields: selectedFields, mode: mode || 'merge', description: description}),
@@ -97,6 +111,7 @@ window.VireoBatchEdits = (function() {
     refresh(data);
     return data;
   }
+  /** @param {number[]} ids */
   async function paste(ids) {
     var copied = window.vireoEditNav && window.vireoEditNav.getCopiedRecipe();
     if (!copied || !copied.recipe) throw new Error('Copy development settings from a photo first.');
@@ -104,27 +119,57 @@ window.VireoBatchEdits = (function() {
     if (!selectedFields) return null;
     return apply(ids.slice(), copied.recipe, selectedFields, 'merge', 'Pasted selected development settings');
   }
+  /** @param {BatchRecipe} recipe @param {string} path @param {number} value */
   function put(recipe, path, value) {
     var parts = path.split('.'); var node = recipe;
-    parts.slice(0, -1).forEach(function(part) { node = node[part] || (node[part] = {}); });
-    node[parts[parts.length - 1]] = value;
+    parts.slice(0, -1).forEach(function(part) {
+      var child = node[part];
+      node = child && typeof child === 'object' && !Array.isArray(child)
+        ? /** @type {BatchRecipe} */ (child) : (node[part] = {});
+    });
+    var leaf = parts[parts.length - 1];
+    if (leaf) node[leaf] = value;
   }
+  /** @param {number[]} ids @param {HTMLDialogElement} modal */
+  function selectionPreview(ids, modal) {
+    var preview = element('div', null, modal); preview.className = 'development-preview';
+    ids.slice(0, 6).forEach(function(id) {
+      var img = element('img', null, preview); img.dataset.photoId = String(id); img.alt = 'Selected photo ' + id;
+      img.src = '/thumbnails/' + id + '.jpg';
+    });
+    if (ids.length > 6) element('p', 'Showing 6 of ' + ids.length.toLocaleString() + ' selected photos.', modal);
+    return preview;
+  }
+
+  /** @param {NumericBatchEditField} def @param {boolean} relative @param {Record<string, number | null>} summary
+   * @param {HTMLInputElement} slider @param {HTMLInputElement} number @param {HTMLElement} note */
+  function configureAdjustment(def, relative, summary, slider, number, note) {
+    var span = def.max - def.min;
+    [slider, number].forEach(function(input) {
+      input.min = String(relative ? -span : def.min); input.max = String(relative ? span : def.max); input.step = String(def.step);
+    });
+    var current = summary[def.path];
+    slider.value = String(relative ? 0 : (typeof current === 'number' ? current : def.default));
+    number.value = !relative && current === null ? '' : slider.value;
+    number.placeholder = current === null ? 'Mixed' : '';
+    note.textContent = relative
+      ? 'Adds this amount to each existing value, limited to the supported range. The amount resets after each change.'
+      : (current === null ? 'Current values differ. Changing this control sets the same value on every selected photo.' : 'Sets this setting on every selected photo.');
+  }
+
+  /** @param {number[]} ids */
   async function open(ids) {
     ids = Array.from(new Set(ids));
     if (!ids.length) return;
     if (opening || activeDialog) return;
     opening = true;
+    /** @type {BatchEditField[]} */
     var defs;
     try { defs = await fields(); } finally { opening = false; }
     var modal = dialog('Edit ' + ids.length.toLocaleString() + ' selected photos');
     activeDialog = modal;
     element('p', 'Changes save to this selection when you release a slider or finish entering a value. Each change can be undone from Edit History. Other settings stay unchanged.', modal);
-    var preview = element('div', null, modal); preview.className = 'development-preview';
-    ids.slice(0, 6).forEach(function(id) {
-      var img = element('img', null, preview); img.dataset.photoId = id; img.alt = 'Selected photo ' + id;
-      img.src = '/thumbnails/' + id + '.jpg';
-    });
-    if (ids.length > 6) element('p', 'Showing 6 of ' + ids.length.toLocaleString() + ' selected photos.', modal);
+    var preview = selectionPreview(ids, modal);
     var controls = element('fieldset', null, modal);
     element('legend', 'Adjust the selection', controls);
     var row = element('div', null, controls); row.className = 'development-control';
@@ -134,7 +179,7 @@ window.VireoBatchEdits = (function() {
     });
     var mode = element('select', null, row); mode.setAttribute('aria-label', 'Adjustment mode');
     [['merge', 'Set every photo to'], ['relative', 'Add to each photo']].forEach(function(pair) {
-      var option = element('option', pair[1], mode); option.value = pair[0];
+      var option = element('option', pair[1], mode); option.value = pair[0] || '';
     });
     var note = element('p', '', controls);
     var sliderRow = element('div', null, controls); sliderRow.className = 'development-control';
@@ -150,30 +195,31 @@ window.VireoBatchEdits = (function() {
     var status = element('div', null, modal); status.className = 'development-status'; status.setAttribute('role', 'status');
     var actions = element('div', null, modal); actions.className = 'development-actions';
     var done = button('Done', actions, function() { modal.close(); });
-    var busy = false; var summary = {}; var presets = [];
-    function selectedDef() { return defs.find(function(f) { return f.path === setting.value; }); }
-    function configure() {
-      var def = selectedDef(); var relative = mode.value === 'relative';
-      var span = def.max - def.min;
-      [slider, number].forEach(function(input) {
-        input.min = relative ? -span : def.min; input.max = relative ? span : def.max; input.step = def.step;
-      });
-      var current = summary[def.path];
-      slider.value = relative ? 0 : (typeof current === 'number' ? current : def.default);
-      number.value = !relative && current === null ? '' : slider.value;
-      number.placeholder = current === null ? 'Mixed' : '';
-      note.textContent = relative
-        ? 'Adds this amount to each existing value, limited to the supported range. The amount resets after each change.'
-        : (current === null ? 'Current values differ. Changing this control sets the same value on every selected photo.' : 'Sets this setting on every selected photo.');
+    var busy = false;
+    /** @type {Record<string, number | null>} */
+    var summary = {};
+    /** @type {BatchEditPreset[]} */
+    var presets = [];
+    function selectedDef() {
+      var def = defs.find(function(f) { return f.path === setting.value; });
+      if (!def || def.min == null || def.max == null || def.step == null || def.default == null) {
+        throw new Error('No numeric adjustment selected');
+      }
+      return /** @type {NumericBatchEditField} */ (def);
     }
+    function configure() { configureAdjustment(selectedDef(), mode.value === 'relative', summary, slider, number, note); }
+
     async function reloadSummary() {
+      /** @type {{values: Record<string, number | null>}} */
       var data = await safeFetch('/api/photos/edit-recipe/summary', {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({photo_ids: ids}),
       }, {toast: false});
       summary = data.values;
       configure();
     }
+    /** @param {boolean} value */
     function setBusy(value) { busy = value; controls.disabled = value; more.disabled = value; done.disabled = value; }
+    /** @param {() => Promise<BatchEditResult | null>} action */
     async function perform(action) {
       if (busy) return;
       setBusy(true); status.classList.remove('error'); status.textContent = '';
@@ -185,7 +231,7 @@ window.VireoBatchEdits = (function() {
           try { await reloadSummary(); } catch (_) { status.textContent += ' Reopen the editor to refresh current values.'; }
         } else status.textContent = '';
       } catch (error) {
-        status.textContent = error.message || 'Could not apply settings. Reopen the editor to check current values before retrying.';
+        status.textContent = (error instanceof Error ? error.message : '') || 'Could not apply settings. Reopen the editor to check current values before retrying.';
         status.classList.add('error');
         // Never automatically retry a relative edit: a lost response can
         // arrive after the server committed the delta.
@@ -200,7 +246,7 @@ window.VireoBatchEdits = (function() {
       await perform(function() { return apply(ids, recipe, [path], operation, (operation === 'relative' ? 'Adjusted ' : 'Set ') + selectedDef().label.toLowerCase() + ' on selection'); });
     }
     async function applyPreset() {
-      var preset = presets.find(function(p) { return String(p.id) === presetSelect.value; });
+      const preset = presets.find(function(p) { return String(p.id) === presetSelect.value; });
       if (!preset) return;
       await perform(async function() {
         var available = preset.fields || defs.filter(function(f) { return f.path.indexOf('adjustments.') === 0; }).map(function(f) { return f.path; });
@@ -220,10 +266,10 @@ window.VireoBatchEdits = (function() {
     modal.showModal(); setBusy(true);
     // Presets are optional: a slow or failed request must not prevent
     // adjustments and clipboard paste once the selection summary is ready.
-    safeFetch('/api/edit-presets', {}, {toast: false}).then(function(data) {
+    (/** @type {Promise<{presets?: BatchEditPreset[]}>} */ (safeFetch('/api/edit-presets', {}, {toast: false}))).then(function(data) {
       if (!modal.isConnected) return;
       presets = data.presets || [];
-      presets.forEach(function(preset) { element('option', preset.name, presetSelect).value = preset.id; });
+      presets.forEach(function(preset) { element('option', preset.name, presetSelect).value = String(preset.id); });
       presetPlaceholder.textContent = presets.length ? 'Select a preset…' : 'No presets saved';
       presetSelect.disabled = !presets.length;
     }).catch(function() {
@@ -235,7 +281,7 @@ window.VireoBatchEdits = (function() {
       await reloadSummary();
       setBusy(false);
     } catch (error) {
-      status.textContent = error.message || 'Could not load selection settings.'; status.classList.add('error');
+      status.textContent = (error instanceof Error ? error.message : '') || 'Could not load selection settings.'; status.classList.add('error');
       busy = false; done.disabled = false;
     }
   }

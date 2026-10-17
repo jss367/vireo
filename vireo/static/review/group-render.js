@@ -5,13 +5,13 @@ function renderGroupModal() {
   var items = grmState.items.filter(function(it) { return !grmState.removed.has(it.id); });
 
   // Find AI best
-  var bestId = null;
+  /** @type {number|null} */ var bestId = null;
   var bestScore = -1;
   items.forEach(function(it) {
     if ((it.quality_score || 0) > bestScore) { bestScore = it.quality_score || 0; bestId = it.photo_id; }
   });
 
-  function renderCard(it) {
+  /** @param {ReviewPrediction} it */ function renderCard(it) {
     var isBest = it.photo_id === bestId;
     var isSelected = grmState.selectedIds && grmState.selectedIds.has(it.photo_id);
     var cls = 'grm-card' + (isSelected ? ' selected' : '') + (isBest ? ' ai-best' : '');
@@ -47,42 +47,42 @@ function renderGroupModal() {
   var candidateItems = items.filter(function(it) { return !grmState.picks.has(it.photo_id) && !grmState.rejects.has(it.photo_id); });
   var rejectItems = items.filter(function(it) { return grmState.rejects.has(it.photo_id); });
 
-  document.getElementById('grmPicks').innerHTML = pickItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">Drag or press ↑ to add picks</span>';
-  document.getElementById('grmCandidates').innerHTML = candidateItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">All sorted</span>';
-  document.getElementById('grmRejects').innerHTML = rejectItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">Drag or press ↓ to reject</span>';
+  /** @type {HTMLElement} */ (document.getElementById('grmPicks')).innerHTML = pickItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">Drag or press ↑ to add picks</span>';
+  /** @type {HTMLElement} */ (document.getElementById('grmCandidates')).innerHTML = candidateItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">All sorted</span>';
+  /** @type {HTMLElement} */ (document.getElementById('grmRejects')).innerHTML = rejectItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">Drag or press ↓ to reject</span>';
 
   // Species input — prefill with the group consensus. Matches the backend
   // consensus_prediction algorithm: pick the species with the highest sum of
   // per-frame confidence (== count × avg_confidence), tie-broken by vote count.
-  if (!document.getElementById('grmSpecies').value && items.length > 0) {
-    var votes = {};
+  if (!/** @type {HTMLInputElement} */ (document.getElementById('grmSpecies')).value && items.length > 0) {
+    /** @type {Record<string,{count:number;confSum:number}>} */ var votes = {};
     items.forEach(function(it) {
       if (!it.species) return;
       if (!votes[it.species]) votes[it.species] = { count: 0, confSum: 0 };
-      votes[it.species].count += 1;
-      votes[it.species].confSum += (it.confidence || 0);
+      var vote = votes[it.species]; if (vote) vote.count += 1;
+      if (vote) vote.confSum += (it.confidence || 0);
     });
     var consensus = '';
     var bestConf = -1, bestCount = -1;
     Object.keys(votes).forEach(function(sp) {
-      var v = votes[sp];
+      var v = votes[sp]; if (!v) return;
       if (v.confSum > bestConf || (v.confSum === bestConf && v.count > bestCount)) {
         bestConf = v.confSum;
         bestCount = v.count;
         consensus = sp;
       }
     });
-    document.getElementById('grmSpecies').value = consensus;
+    /** @type {HTMLInputElement} */ (document.getElementById('grmSpecies')).value = consensus;
   }
 
-  document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
+  /** @type {HTMLElement} */ (document.getElementById('grmCount')).textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
 
   grmUpdateApplyLabel();
 
   // Re-apply offset indicators and the per-card transforms — cover-fit
   // always needs an explicit transform now that <img>s are laid out at
   // natural source-pixel size. innerHTML wipes inline styles each render.
-  document.querySelectorAll('.grm-card').forEach(function(card) {
+  document.querySelectorAll(/** @type {'div'} */ ('.grm-card')).forEach(function(card) {
     _grmUpdateIndicator(card);
   });
   _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
@@ -100,8 +100,8 @@ function _grmEnsureSelectedIds() {
 
 function grmSyncSelectionClasses() {
   var selectedIds = grmState && grmState.selectedIds ? grmState.selectedIds : new Set();
-  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
-    var id = card.getAttribute('data-photo-id');
+  document.querySelectorAll(/** @type {'div'} */ ('#grmOverlay .grm-card[data-photo-id]')).forEach(function(card) {
+    var id = card.getAttribute('data-photo-id') || '';
     card.classList.toggle(
       'selected',
       selectedIds.has(parseInt(id, 10)) || selectedIds.has(id)
@@ -109,7 +109,7 @@ function grmSyncSelectionClasses() {
   });
 }
 
-function grmZonePlaceholder(text) {
+/** @param {string} text */ function grmZonePlaceholder(text) {
   var span = document.createElement('span');
   span.style.cssText = 'font-size:12px;color:var(--text-ghost,#555);';
   span.textContent = text;
@@ -118,8 +118,8 @@ function grmZonePlaceholder(text) {
 
 function grmSyncZoneCards() {
   if (!grmState) return;
-  var zones = { picks: [], candidates: [], rejects: [] };
-  var visible = {};
+  /** @type {Record<'picks'|'candidates'|'rejects',string[]>} */ var zones = { picks: [], candidates: [], rejects: [] };
+  /** @type {Record<string,boolean>} */ var visible = {};
   _grmVisibleItems().forEach(function(it) {
     var id = String(it.photo_id);
     visible[id] = true;
@@ -128,15 +128,15 @@ function grmSyncZoneCards() {
     else zones.candidates.push(id);
   });
 
-  var cardById = {};
-  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
-    var id = card.getAttribute('data-photo-id');
+  /** @type {Record<string,HTMLElement>} */ var cardById = {};
+  document.querySelectorAll(/** @type {'div'} */ ('#grmOverlay .grm-card[data-photo-id]')).forEach(function(card) {
+    var id = card.getAttribute('data-photo-id') || '';
     if (visible[id]) cardById[id] = card;
     else card.remove();
   });
 
-  function syncStrip(stripId, ids, emptyText) {
-    var strip = document.getElementById(stripId);
+  /** @param {string} stripId @param {string[]} ids @param {string} emptyText */ function syncStrip(stripId, ids, emptyText) {
+    const strip = document.getElementById(stripId);
     if (!strip) return;
     Array.from(strip.children).forEach(function(child) {
       if (!child.classList || !child.classList.contains('grm-card')) child.remove();
@@ -152,7 +152,7 @@ function grmSyncZoneCards() {
   syncStrip('grmCandidates', zones.candidates, 'All sorted');
   syncStrip('grmRejects', zones.rejects, 'Drag or press ↓ to reject');
 
-  document.getElementById('grmCount').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('grmCount')).textContent =
     zones.picks.length + ' picks, ' + zones.rejects.length + ' rejects, ' +
     zones.candidates.length + ' unsorted';
   grmSyncSelectionClasses();
@@ -160,7 +160,7 @@ function grmSyncZoneCards() {
   grmUpdateApplyLabel();
 }
 
-function _grmSelectRange(anchorId, photoId) {
+/** @param {number|string} anchorId @param {number|string} photoId */ function _grmSelectRange(anchorId, photoId) {
   var selectedIds = _grmEnsureSelectedIds();
   var items = _grmVisibleItems();
   var a = items.findIndex(function(it) { return it.photo_id === anchorId; });
@@ -172,18 +172,18 @@ function _grmSelectRange(anchorId, photoId) {
   var start = Math.min(a, b);
   var end = Math.max(a, b);
   for (var i = start; i <= end; i++) {
-    selectedIds.add(items[i].photo_id);
+    var item = items[i]; if (item) selectedIds.add(item.photo_id);
   }
 }
 
-function grmSelect(photoId, mode) {
+/** @param {number|string} photoId @param {string} mode */ function grmSelect(photoId, mode) {
   var selectedIds = _grmEnsureSelectedIds();
   if (mode === 'toggle') {
     if (selectedIds.has(photoId)) {
       selectedIds.delete(photoId);
       if (grmState.selected === photoId) {
         var remaining = Array.from(selectedIds);
-        grmState.selected = remaining.length ? remaining[remaining.length - 1] : null;
+        grmState.selected = remaining[remaining.length - 1] ?? null;
       }
     } else {
       selectedIds.add(photoId);
@@ -211,9 +211,9 @@ function grmSelect(photoId, mode) {
 }
 
 function grmRefreshSelectedLoupe() {
-  var loupeImg = document.getElementById('grmLoupePhoto');
-  var loupeInfo = document.getElementById('grmLoupeInfo');
-  var loupePreds = document.getElementById('grmLoupePreds');
+  var loupeImg = /** @type {HTMLImageElement} */ (document.getElementById('grmLoupePhoto'));
+  var loupeInfo = /** @type {HTMLElement} */ (document.getElementById('grmLoupeInfo'));
+  var loupePreds = /** @type {HTMLElement} */ (document.getElementById('grmLoupePreds'));
   if (!loupeImg || !loupeInfo || !loupePreds) return;
   if (grmState.selected) {
     var nextSrc = grmLoupePhotoUrl(grmState.selected);
@@ -241,7 +241,7 @@ function grmRefreshSelectedLoupe() {
   }
 }
 
-function renderLoupePreds(item) {
+/** @param {ReviewPrediction} item */ function renderLoupePreds(item) {
   var preds = [];
   if (item.species) {
     preds.push({ species: item.species, confidence: item.confidence || 0, top: true });

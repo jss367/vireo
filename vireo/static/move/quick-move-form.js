@@ -3,10 +3,10 @@
 
 /* ---------- Quick Move ---------- */
 function onQuickFolderChange() {
-  var sel = document.getElementById('quickFolderSelect');
-  var info = document.getElementById('quickFolderInfo');
-  var nameInput = document.getElementById('quickFolderName');
-  var resetBtn = document.getElementById('quickResetNameBtn');
+  var sel = /** @type {HTMLSelectElement} */ (document.getElementById('quickFolderSelect'));
+  var info = /** @type {HTMLElement} */ (document.getElementById('quickFolderInfo'));
+  var nameInput = /** @type {HTMLInputElement} */ (document.getElementById('quickFolderName'));
+  var resetBtn = /** @type {HTMLButtonElement} */ (document.getElementById('quickResetNameBtn'));
   var fid = parseInt(sel.value);
   // Drop the previous folder's example dates immediately — the next preflight
   // brings this folder's real ones.
@@ -31,6 +31,7 @@ function onQuickFolderChange() {
   updateQuickMoveBtn();
 }
 
+/** @param {MoveFolder | null | undefined} folder */
 function sourceFolderName(folder) {
   var srcPath = (folder && folder.path) || '';
   return (folder && folder.name) ||
@@ -38,27 +39,27 @@ function sourceFolderName(folder) {
 }
 
 function resetQuickFolderName() {
-  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var fid = parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('quickFolderSelect')).value);
   var folder = allFolders.find(function(f) { return f.id === fid; });
-  document.getElementById('quickFolderName').value = sourceFolderName(folder);
+  /** @type {HTMLInputElement} */ (document.getElementById('quickFolderName')).value = sourceFolderName(folder);
   updateQuickMoveBtn();
 }
 
 function quickUsesDateFolders() {
-  return document.getElementById('quickFolderMode').value === 'date';
+  return /** @type {HTMLSelectElement} */ (document.getElementById('quickFolderMode')).value === 'date';
 }
 
 function onQuickFolderModeChange() {
   var byDate = quickUsesDateFolders();
-  document.getElementById('quickSingleFolderControls').style.display = byDate ? 'none' : '';
-  document.getElementById('quickDateFolderControls').style.display = byDate ? '' : 'none';
+  /** @type {HTMLElement} */ (document.getElementById('quickSingleFolderControls')).style.display = byDate ? 'none' : '';
+  /** @type {HTMLElement} */ (document.getElementById('quickDateFolderControls')).style.display = byDate ? '' : 'none';
   updateQuickMoveBtn();
 }
 
 function selectedQuickFolderTemplate() {
-  var preset = document.getElementById('quickFolderTemplatePreset');
+  var preset = /** @type {HTMLSelectElement} */ (document.getElementById('quickFolderTemplatePreset'));
   if (preset.value !== '__custom__') return preset.value;
-  return (document.getElementById('quickFolderTemplate').value || '').trim();
+  return (/** @type {HTMLInputElement} */ (document.getElementById('quickFolderTemplate')).value || '').trim();
 }
 
 // Label each date-format preset with a folder this move would really create.
@@ -74,11 +75,12 @@ function selectedQuickFolderTemplate() {
 //
 // The examples depend on the selected source folder and nothing else, so the
 // only thing that invalidates them is changing that folder.
+/** @param {MoveDateSamples | null | undefined} templateSamples */
 function applyQuickDateSamples(templateSamples) {
-  var preset = document.getElementById('quickFolderTemplatePreset');
-  var hint = document.getElementById('quickDateSampleHint');
+  var preset = /** @type {HTMLSelectElement} */ (document.getElementById('quickFolderTemplatePreset'));
+  var hint = /** @type {HTMLElement} */ (document.getElementById('quickDateSampleHint'));
   var samples = (templateSamples && templateSamples.samples) || {};
-  Array.prototype.forEach.call(preset.options, function(option) {
+  Array.from(preset.options).forEach(function(option) {
     if (option.value === '__custom__') return;
     var sample = samples[option.value];
     option.textContent = sample ? option.value + ' — ' + sample : option.value;
@@ -95,8 +97,8 @@ function applyQuickDateSamples(templateSamples) {
 }
 
 function updateQuickFolderTemplateControls() {
-  var preset = document.getElementById('quickFolderTemplatePreset');
-  var custom = document.getElementById('quickFolderTemplate');
+  var preset = /** @type {HTMLSelectElement} */ (document.getElementById('quickFolderTemplatePreset'));
+  var custom = /** @type {HTMLInputElement} */ (document.getElementById('quickFolderTemplate'));
   custom.style.display = preset.value === '__custom__' ? '' : 'none';
   if (preset.value === '__custom__') custom.focus();
   updateQuickMoveBtn();
@@ -116,7 +118,7 @@ function quickFolderTemplateResult() {
 
 function quickFolderNameResult() {
   if (quickUsesDateFolders()) return {value: '', error: '', rename: false};
-  var raw = document.getElementById('quickFolderName').value;
+  var raw = /** @type {HTMLInputElement} */ (document.getElementById('quickFolderName')).value;
   // "Unchanged from the pre-populated default" is a distinct state from
   // "the user typed something that happens to trim to the source name":
   // if we .trim() a source folder whose real name has leading or trailing
@@ -124,7 +126,7 @@ function quickFolderNameResult() {
   // (landing at /archive/Shoot instead of preserving /archive/ Shoot ).
   // Signal "keep original" with an empty value + rename:false so callers
   // send no destination_name and the backend uses folder.name verbatim.
-  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var fid = parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('quickFolderSelect')).value);
   var folder = fid ? allFolders.find(function(f) { return f.id === fid; }) : null;
   if (folder && raw === sourceFolderName(folder)) {
     return {value: '', error: '', rename: false};

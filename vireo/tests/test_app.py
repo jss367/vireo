@@ -61,7 +61,7 @@ def test_browse_page(app_and_db):
     assert 'id="syncBanner"' in html
     assert 'function refreshPendingSyncBanner()' in html
     assert html.count(
-        "_showLocationError(e && e.message ? e.message : 'Could not"
+        "_showLocationError(e instanceof Error ? e.message : 'Could not"
     ) == 5
 
 
@@ -131,7 +131,7 @@ def test_browse_export_warns_before_numbering_collision_names(app_and_db):
     assert "filenameSpan(rename.export_name)" in html
     assert "var exportRequestGeneration = 0;" in html
     assert "requestGeneration !== exportRequestGeneration" in html
-    assert "function setExportControlsBusy(busy)" in html
+    assert "function setExportControlsBusy(/** @type {boolean} */ busy)" in html
     assert "setExportControlsBusy(true);" in html
     assert "data-export-cancel" in html
 
@@ -144,7 +144,8 @@ def test_browse_export_offers_reveal_after_export(app_and_db):
     assert "Show exported files in the file manager when finished" in html
     assert (
         "exportRequest.reveal_after_export = "
-        "document.getElementById('exportRevealAfter').checked;"
+        "/** @type {HTMLInputElement} */ "
+        "(document.getElementById('exportRevealAfter')).checked;"
     ) in html
 
 
@@ -18009,7 +18010,10 @@ def test_import_page_after_move_eligibility_requires_existing_root(
     app, _ = app_and_db
     html = _page_with_scripts(app.test_client(), '/import')
     start = html.index("function afterMoveEligibleTargets()")
-    body = html[start:html.index("}", start)]
+    # The function uses `/** @type {HTMLInputElement} */` casts internally, so
+    # the first `}` after ``start`` is inside a JSDoc, not the closing brace.
+    # The function's own closing brace sits at column zero.
+    body = html[start:html.index("\n}", start)]
     assert "t.local_archive_root_present !== false" in body
     assert "!t.local_archive_root_volume_offline" in body
     # Targets are re-fetched (throttled) whenever the unavailable hint
@@ -22087,7 +22091,10 @@ def test_browse_sidebar_panels_refresh_on_undo_and_redo(app_and_db):
     # changed here, only the state its rows are computed from.
     assert "loadDetail(" in body
     assert "loadSelectionKeywordSuggestions(" in body
-    key_at = body.find("Vireo.browse.panelRequests.keywords.invalidate()")
+    # The strict-typed form is `(Vireo && Vireo.browse).panelRequests.keywords
+    # .invalidate()`, so the test matches the `.panelRequests.keywords.
+    # invalidate()` suffix that is unique to this call.
+    key_at = body.find(".panelRequests.keywords.invalidate()")
     assert key_at != -1 and key_at < body.find(
         "loadSelectionKeywordSuggestions("
     ), "stale selection key would make the keyword refresh a no-op"
@@ -22165,6 +22172,11 @@ def test_browse_review_deep_link_clears_persisted_filters(app_and_db):
 # vireo-utils.js; the harness supplies only the DOM surface those functions
 # touch and stubs for the calls under assertion.
 _PANEL_DOM_STUB = """
+// Browse's typed delegated click handler narrows ``ev.target`` with
+// ``instanceof Element`` before calling ``closest``. Node has no DOM globals,
+// so the stub supplies a constructor whose prototype the driver below attaches
+// to the fake target.
+var Element = function Element() {};
 var __list = {
   innerHTML: '',
   _handlers: {},
@@ -22214,12 +22226,12 @@ if (process.argv[2] === 'render') {
   process.stdout.write(JSON.stringify({html: __list.innerHTML}));
 } else {
   var __attrs = __input.attrs || {};
-  var __el = {
+  var __el = Object.assign(new Element(), {
     getAttribute: function(name) {
       return Object.prototype.hasOwnProperty.call(__attrs, name)
         ? __attrs[name] : null;
     },
-  };
+  });
   __el.closest = function() {
     return __attrs['data-prediction-action'] ? __el : null;
   };
