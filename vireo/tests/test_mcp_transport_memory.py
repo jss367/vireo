@@ -325,6 +325,38 @@ def test_photo_detail_exposes_only_current_allowlisted_flag_note_fields():
     assert "flag_note" not in ns["photo_detail"]({"id": 7})
 
 
+def test_dependency_contract_matches_the_v2_sdk_import_surface():
+    import tomllib
+    project = tomllib.loads((ROOT.parent / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((ROOT.parent / "uv.lock").read_text(encoding="utf-8"))
+    requirements = [dep for dep in project["project"]["dependencies"] if dep.startswith("mcp>")]
+    assert requirements == ["mcp>=2.0,<3"]
+    app = next(package for package in lock["package"] if package["name"] == "vireo")
+    requirement = next(dep for dep in app["metadata"]["requires-dist"] if dep["name"] == "mcp")
+    assert requirement["specifier"] == ">=2.0,<3"
+    sdk = next(package for package in lock["package"] if package["name"] == "mcp")
+    assert 2 <= int(sdk["version"].split(".")[0]) < 3
+    # Upstream v2.0.0 exports these names; v1.29.0 instead has fastmcp.
+    # Inspect/execute only import statements against invented module maps.
+    tree = ast.parse((ROOT / "mcp_server.py").read_text(encoding="utf-8"))
+    imports = [n for n in tree.body if isinstance(n, ast.ImportFrom) and n.module.startswith("mcp.")]
+    assert {(n.module, tuple(a.name for a in n.names)) for n in imports} == {
+        ("mcp.server.mcpserver", ("Image", "MCPServer")),
+        ("mcp.server.mcpserver.exceptions", ("ToolError",))}
+    for major in (1, 2):
+        def fake_import(name, *a, _major=major, **kw):
+            if _major == 1:
+                raise ModuleNotFoundError(name)
+            return types.SimpleNamespace(Image=FakeImage, MCPServer=Registry, ToolError=RuntimeError)
+        ns = {"__builtins__": {"__import__": fake_import}}
+        try:
+            exec(compile(ast.Module(body=imports, type_ignores=[]), "<inert SDK imports>", "exec"), ns)
+        except ModuleNotFoundError:
+            assert major == 1
+        else:
+            assert major == 2 and ns["MCPServer"] is Registry
+
+
 def test_payload_trimming_and_stdio_are_explicit_without_starting_anything():
     ns = namespace()
     photo = {"id": 7, "quality_score": 0, "token": "must-not-surface", "path": "/invented/a.raw",

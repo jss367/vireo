@@ -3376,7 +3376,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=1.4.1" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100" },
     { name = "imagehash", specifier = ">=4.3.2" },
-    { name = "mcp", specifier = ">=1.27" },
+    { name = "mcp", specifier = ">=2.0,<3" },
     { name = "numpy", specifier = ">=2.4.2" },
     { name = "onnx", marker = "extra == 'export'", specifier = ">=1.17" },
     { name = "onnxruntime", specifier = ">=1.22.0" },
