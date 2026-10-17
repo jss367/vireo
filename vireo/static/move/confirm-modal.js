@@ -61,6 +61,32 @@ function appendConfirmNote(container, icon, title, detail, warning) {
   container.appendChild(note);
 }
 
+/** @param {MoveFolderDetails} details @param {() => unknown} callback */
+function showMoveConfirm(details, callback) {
+  showConfirm('Move Folder', '', callback);
+  var message = /** @type {HTMLElement} */ (document.getElementById('confirmMessage'));
+  var photos = details.photoCount;
+  var lead = document.createElement('p');
+  lead.className = 'confirm-lead';
+  lead.textContent = photos === null
+    ? 'Confirm moving photos:'
+    : 'Confirm moving ' + photos.toLocaleString() + ' photo' + (photos !== 1 ? 's' : '') + ':';
+  message.appendChild(lead);
+
+  // Stack the paths in one aligned column so the user can compare them
+  // segment by segment instead of hunting for the split inside a sentence.
+  var route = document.createElement('div');
+  route.className = 'confirm-route';
+  appendConfirmRoute(route, 'From', details.sourcePath);
+  appendConfirmRoute(route, 'To', details.destinationPath);
+  message.appendChild(route);
+
+  var verifyDetail = details.remote
+    ? 'Transferred over SSH and verified by checksum before originals are removed.'
+    : 'Files will be copied and verified before originals are removed.';
+  message.appendChild(document.createTextNode(verifyDetail));
+}
+
 /** @param {MoveMergeDetails} details @param {() => unknown} callback */
 function showMergeConfirm(details, callback) {
   var heading = /** @type {HTMLElement} */ (document.getElementById('confirmHeading'));

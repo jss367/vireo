@@ -42,16 +42,20 @@ def test_move_folder_button_shows_preflight_progress(live_server, page):
         }),
     )
     expect(page.locator("#confirmModal")).to_have_class(re.compile(r"\bopen\b"))
-    expect(page.locator("#confirmMessage")).to_contain_text(
-        "Confirm moving 3 photos from /photos/park to "
-        "/tmp/vireo-archive/park?"
-    )
-    assert page.locator("#confirmMessage").text_content() == (
-        "Confirm moving 3 photos from /photos/park to "
-        "/tmp/vireo-archive/park?\n\n"
+    message = page.locator("#confirmMessage")
+    expect(message.locator(".confirm-lead")).to_have_text("Confirm moving 3 photos:")
+    labels = message.locator(".confirm-route-label")
+    paths = message.locator(".confirm-route-path")
+    expect(labels).to_have_text(["From", "To"])
+    expect(paths).to_have_text(["/photos/park", "/tmp/vireo-archive/park"])
+    # The two paths start at the same x so they can be compared by eye.
+    from_box = paths.nth(0).bounding_box()
+    to_box = paths.nth(1).bounding_box()
+    assert from_box and to_box and from_box["x"] == to_box["x"]
+    assert to_box["y"] > from_box["y"]
+    expect(message).to_contain_text(
         "Files will be copied and verified before originals are removed."
     )
-    expect(page.locator("#confirmMessage")).to_have_css("white-space", "pre-line")
     expect(btn).to_contain_text("Review move")
     expect(btn).to_be_enabled()
 

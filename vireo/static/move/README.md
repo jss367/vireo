@@ -25,7 +25,7 @@ from `vireo-rsync-help.js`.
 | `rule-form.js` | The rule editor: `showRuleForm()`, `gatherCriteria()`, preview, save, and `hideRuleForm()` |
 | `folder-browser.js` | The destination browser modal: `openBrowser()`, `browseTo()` (Pictures and Volumes shortcuts), the folder list, selection, and New Folder |
 | `recent-destinations.js` | The browser's recent-destination shortcuts and `/api/recent-destinations` |
-| `confirm-modal.js` | `showConfirm()`, the merge review (`showMergeConfirm()` and its route, stat and note builders), `closeConfirm()` and `confirmOk()` |
+| `confirm-modal.js` | `showConfirm()`, the folder-move confirm (`showMoveConfirm()`), the merge review (`showMergeConfirm()` and its route, stat and note builders), `closeConfirm()` and `confirmOk()` |
 | `boot.js` | The two `DOMContentLoaded` handlers: the initial fetches, then the destination-input and folder-browser listeners |
 
 Load `boot.js` last. The other files only declare functions and initialize

@@ -7,6 +7,7 @@ interface MoveRemoteTarget { id: string; name: string; user: string; host: strin
 interface MoveDestination { folder_id?: number; destination?: string; remote_target_id?: string; subpath?: string; destination_name?: string; folder_template?: string; keep_visible?: boolean; merge?: boolean; }
 interface MoveDateSamples { samples: Record<string, string>; dated_count: number; }
 interface MovePreflight { date_organized?: boolean; destinations?: { path: string; photo_count: number; exists: boolean }[]; photo_count: number; destination_count: number; template_samples?: MoveDateSamples; remote?: boolean; reachable?: boolean; error?: string; exists?: boolean; file_count: number; file_count_truncated?: boolean; resolved_dest: string; preview?: {will_copy?: number; will_skip?: number; will_block?: number}; }
+interface MoveFolderDetails { sourcePath: string; destinationPath: string; photoCount: number | null; remote: boolean; }
 interface MoveMergeDetails { sourcePath: string; destinationPath: string; photoCount: string | number; copyCount: number | null; skipCount: number | null; blockCount: number; destinationFileCount: number; destinationFileCountTruncated: boolean; remote: boolean; }
 interface MoveBrowserData { path: string; dirs?: {path: string; name: string}[]; }
 interface MoveConfig { move_keep_visible_in_other_workspaces?: boolean; ingest?: { recent_destinations?: unknown }; }
