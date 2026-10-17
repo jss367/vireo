@@ -122,7 +122,6 @@
   "services/render_cache.py:RenderCache.invalidate_photo_render_cache": 127,
   "services/scan_work.py:build_scan_work": 105,
   "sharpness.py:score_collection_photos": 139,
-  "site_publish.py:_publish_site": 104,
   "sync.py:sync_from_xmp": 141,
   "thumbnails.py:generate_all": 174,
   "timm_classifier.py:TimmClassifier.__init__": 133,
