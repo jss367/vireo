@@ -616,7 +616,7 @@ class SharedGuardTests(unittest.TestCase):
                 error = (service_ns["CachePurgeIncomplete"]({"freed": 7, "failed": [{"key": KEY, "error": "permission"}]})
                          if kind == "partial" else service_ns["UnsafeCacheCleanup"]("identity changed"))
 
-                def purge(_identifier, _error=error):
+                def purge(_identifier, _error=error, **_kwargs):
                     raise _error
 
                 service_module = S(purge_model=purge, purge_subfolder=purge, purge_outcome=service_ns["purge_outcome"])

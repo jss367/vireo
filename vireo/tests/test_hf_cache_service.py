@@ -148,6 +148,24 @@ def test_inventory_ignores_unrelated_repos(hub):
     assert inv["size"] == directory_bytes(str(hub.root / ONNX_DIR))
 
 
+def test_inventory_ignores_unrelated_imageomics_and_bioclip_repos(hub):
+    """A shared cache may hold repositories Vireo never downloaded.
+
+    Earlier revisions matched ``models--imageomics--*`` and
+    ``models--bioclip--*`` as a fallback, which would list another Hub
+    client's ``imageomics/another-project`` or ``bioclip-foo/bar`` as an
+    unused Vireo entry and let ``Remove unused`` evict their blobs.
+    """
+    from services import hf_cache
+
+    hub.add("sam2-small/mask_decoder.onnx", b"m" * 10)
+    hub.add("some.onnx", b"x" * 500, repo="models--imageomics--another-project")
+    hub.add("some.onnx", b"y" * 500, repo="models--bioclip-foo--bar")
+
+    inv = hf_cache.inventory()
+    assert list(_entries(inv)) == ["jss367/vireo-onnx-models/sam2-small"]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
 def test_remove_unused_keeps_installed_entries_and_shared_blobs(hub, tmp_path):
     from services import hf_cache
@@ -262,6 +280,79 @@ def test_purge_model_uses_the_known_models_subfolder(hub):
     assert not blob.exists()
     assert other.exists()
     assert hf_cache.purge_model("custom-abc") == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_purge_model_for_dynamically_downloaded_model_uses_hf_source(hub):
+    """``download_hf_model`` registers ids absent from ``KNOWN_MODELS``.
+
+    ``purge_model`` is called after the entry has been unregistered, so its
+    repo has also left ``huggingface_repositories()``. The ``hf_source``
+    captured before unregistration is what names the cache payload to drop.
+    """
+    from services import hf_cache
+
+    blob = hub.add("model.onnx", b"d" * 400, repo="models--mystery-owner--pretty-model")
+    other = hub.add("sam2-small/mask_decoder.onnx", b"m" * 10)
+
+    freed = hf_cache.purge_model(
+        "hf-mystery-owner-pretty-model",
+        hf_source="hf-hub:mystery-owner/pretty-model",
+    )
+
+    assert freed == 400
+    assert not blob.exists()
+    assert other.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_purge_model_without_hf_source_leaves_an_unknown_dynamic_model_alone(hub):
+    """A known-id lookup is a sufficient signal of what to purge.
+
+    A caller that supplies neither a ``KNOWN_MODELS`` id nor an
+    ``hf_source`` cannot name a specific repository, so the purge is a
+    no-op rather than reaching for an organization-wide prefix.
+    """
+    from services import hf_cache
+
+    blob = hub.add("model.onnx", b"d" * 400, repo="models--mystery-owner--pretty-model")
+
+    assert hf_cache.purge_model("hf-mystery-owner-pretty-model") == 0
+    assert blob.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
+def test_remove_model_purges_cache_for_dynamically_downloaded_model(hub, tmp_path):
+    """``download_hf_model``-registered models leave an ``hf-hub:`` source.
+
+    ``remove_model`` captures that string before unregistering so the
+    cache copy follows the install out instead of lingering invisibly.
+    """
+    import models
+    from services import hf_cache
+
+    install = tmp_path / "models" / "pretty-model"
+    install.mkdir(parents=True)
+    (install / "model.onnx").write_bytes(b"installed")
+    blob = hub.add("model.onnx", b"d" * 400, repo="models--mystery-owner--pretty-model")
+    models._save_config({
+        "models": [{
+            "id": "hf-mystery-owner-pretty-model",
+            "name": "Pretty Model",
+            "model_str": "hf-hub:mystery-owner/pretty-model",
+            "weights_path": str(install),
+            "description": "Downloaded from HuggingFace: mystery-owner/pretty-model",
+            "managed": True,
+        }],
+        "active_model": "hf-mystery-owner-pretty-model",
+    })
+
+    result = models.remove_model("hf-mystery-owner-pretty-model")
+
+    assert result["files_deleted"] is True
+    assert not install.exists()
+    assert not blob.exists()
+    assert hf_cache.inventory()["entries"] == []
 
 
 @pytest.mark.skipif(os.name != "posix", reason="cache cleanup requires POSIX no-follow descriptors")
@@ -599,10 +690,10 @@ def test_remove_decides_on_state_collected_under_the_locks(hub, tmp_path, monkey
     assert not _entries(hf_cache.inventory())["jss367/vireo-onnx-models/dinov2-vit-b14"]["installed"]
     real_collect = hf_cache._collect
 
-    def collect_after_install(cache_dir, models_dir):
+    def collect_after_install(cache_dir, models_dir, extra_repos=()):
         # Simulate the model directory appearing just before the locked collection.
         (tmp_path / "models" / "dinov2-vit-b14").mkdir(parents=True, exist_ok=True)
-        return real_collect(cache_dir, models_dir)
+        return real_collect(cache_dir, models_dir, extra_repos)
 
     monkeypatch.setattr(hf_cache, "_collect", collect_after_install)
     with pytest.raises(ValueError):

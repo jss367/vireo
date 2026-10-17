@@ -27,6 +27,15 @@ An entry is ``installed`` when a model directory exists for it, even an
 empty one: every download creates the directory before fetching, so the
 directory is the user's intent and the cache entry is what will fill it.
 
+Collection scope is the explicit list from ``KNOWN_MODELS`` and the
+still-registered models (plus the legacy BioCLIP checkpoints), never an
+organization-wide prefix: a shared cache may hold repositories owned by
+other Hub clients, and inventorying one of those as a Vireo entry would let
+``Remove unused`` evict it. A purge of a dynamically downloaded model
+(``download_hf_model``, id absent from ``KNOWN_MODELS``) passes the entry's
+``hf-hub:`` identifier captured before unregistration so that one repository
+rejoins the collection scope for the purge.
+
 Cleanup is descriptor-only and fails closed on unsupported platforms. A pinned
 cache tree spans collection, selection and payload deletion. All Vireo cache
 producers share a cross-process lock; the selected blobs' hub lock targets are
@@ -88,16 +97,28 @@ def _cache_dir(cache_dir):
     return huggingface_cache_dir()
 
 
-def _repo_dirs(cache_dir):
-    """Vireo-relevant ``models--*`` directories under the hub cache (no symlinks)."""
+def _repo_dirs(cache_dir, extra_repos=()):
+    """Vireo-relevant ``models--*`` directories under the hub cache (no symlinks).
+
+    The whitelist is the explicit list built from ``KNOWN_MODELS`` and the
+    still-registered models (plus the legacy BioCLIP checkpoints), never an
+    organization-wide prefix: a shared cache may hold repositories owned by
+    other Hugging Face clients, and inventorying one of those as a Vireo
+    entry would let ``Remove unused`` evict it. ``extra_repos`` names repo
+    ids (``owner/name``) a specific purge wants collected on top of the
+    whitelist — used when the entry being purged has already been
+    unregistered, so its repo is no longer in ``huggingface_repositories()``.
+    """
     from services.storage_paths import huggingface_repositories
 
     if not _fs().path.isdir(cache_dir):
         return []
-    wanted = huggingface_repositories()
+    wanted = huggingface_repositories() | {
+        "models--" + repo.replace("/", "--") for repo in extra_repos
+    }
     out = []
     for name in sorted(_fs().listdir(cache_dir)):
-        if name in wanted or name.startswith(("models--imageomics--", "models--bioclip--")):
+        if name in wanted:
             path = os.path.join(cache_dir, name)
             if _fs().path.isdir(path) and not _fs().path.islink(path):
                 out.append((name, path))
@@ -257,7 +278,7 @@ def _size_groups(found):
         group["removable"] = bool(reclaimable)
 
 
-def _collect(cache_dir, models_dir):
+def _collect(cache_dir, models_dir, extra_repos=()):
     """Every group across every Vireo repo, keyed, with install status."""
     from services.storage_paths import directory_bytes
 
@@ -265,7 +286,7 @@ def _collect(cache_dir, models_dir):
     onnx_name = _onnx_repo_dir_name()
     total = 0
     found = {}
-    for dir_name, repo_dir in _repo_dirs(cache_dir):
+    for dir_name, repo_dir in _repo_dirs(cache_dir, extra_repos):
         total += directory_bytes(repo_dir) if _ACTIVE_TREE.get() is None else 0
         repo = _repo_id(dir_name)
         onnx = dir_name == onnx_name
@@ -402,11 +423,11 @@ def _delete_groups(groups):
     return _delete_groups_locked(groups)
 
 
-def _collect_locked(cache_dir, models_dir, locks):
+def _collect_locked(cache_dir, models_dir, locks, extra_repos=()):
     # Recollect after acquiring newly discovered targets. A late *different*
     # blob is never selected without its lock; same-etag writers must wait.
     for _attempt in range(4):
-        _total, found = _collect(cache_dir, models_dir)
+        _total, found = _collect(cache_dir, models_dir, extra_repos)
         targets = _download_lock_targets(found)
         if targets <= locks.held.keys():
             return found
@@ -417,7 +438,7 @@ def _collect_locked(cache_dir, models_dir, locks):
     raise DownloadInProgress("cache download targets keep changing")
 
 
-def _delete_selected(cache_dir, models_dir, select):
+def _delete_selected(cache_dir, models_dir, select, *, extra_repos=()):
     """Pin first, then collect/select/delete under the same download guards."""
     try:
         acquired = DOWNLOAD_LOCK.acquire(blocking=False)
@@ -432,7 +453,7 @@ def _delete_selected(cache_dir, models_dir, select):
             with CacheTree(cache_dir) as tree, HubLocks(tree) as locks:
                 token = _ACTIVE_TREE.set(tree)
                 try:
-                    found = _collect_locked(cache_dir, models_dir, locks)
+                    found = _collect_locked(cache_dir, models_dir, locks, extra_repos)
                     groups = select(found)
                     freed, failures = _delete_groups_locked(groups)
                     return _result(groups, freed, failures)
@@ -520,18 +541,22 @@ def remove_unused(cache_dir=None, models_dir=None):
     return result
 
 
-def _purge_keys(keys, cache_dir, models_dir):
+def _purge_keys(keys, cache_dir, models_dir, *, extra_repos=()):
     """Delete the entries for ``keys`` that exist and back no model directory.
 
     Collected under the download locks like a Storage-page removal: the
     Settings delete that calls this has just removed the install directory,
     so an entry that is installed again means a reinstall began in between,
     and its cache copy is exactly what that reinstall needs.
+    ``extra_repos`` widens the collection scope for keys whose repository is
+    not in the ``huggingface_repositories()`` whitelist (dynamically
+    downloaded models whose entry has already been unregistered).
     """
     result = _delete_selected(
         cache_dir, models_dir,
         lambda found: [found[k] for k in dict.fromkeys(keys)
                        if k in found and not found[k]["installed"]],
+        extra_repos=extra_repos,
     )
     if result["failed"]:
         raise CachePurgeIncomplete(result)
@@ -564,17 +589,36 @@ def purge_subfolder(subfolder, cache_dir=None, models_dir=None):
     return freed
 
 
-def purge_model(model_id, cache_dir=None, models_dir=None):
-    """Drop every cache entry a known model's download produced."""
+def purge_model(model_id, cache_dir=None, models_dir=None, *, hf_source=""):
+    """Drop every cache entry a removed model's download produced.
+
+    ``hf_source`` is the ``hf-hub:<owner>/<repo>`` identifier captured from
+    the entry before unregistration. It is required for a dynamically
+    downloaded model (``download_hf_model``) whose id is absent from
+    ``KNOWN_MODELS`` and whose repo has already left the
+    ``huggingface_repositories()`` whitelist; without it the purge would
+    return ``0`` and leave the cache payload behind. For a ``KNOWN_MODELS``
+    entry it agrees with what the manifest already names and is a harmless
+    hint.
+    """
     import models as models_mod
     from models import ONNX_REPO
 
+    keys = []
+    extra_repos = []
     km = next((m for m in models_mod.KNOWN_MODELS if m["id"] == model_id), None)
-    if km is None:
+    if km is not None:
+        keys.append(f"{ONNX_REPO}/{km.get('hf_subdir', model_id)}")
+        for field in ("model_str", "source"):
+            value = km.get(field, "")
+            if value.startswith("hf-hub:"):
+                keys.append(value.removeprefix("hf-hub:"))
+    if hf_source and hf_source.startswith("hf-hub:"):
+        repo = hf_source.removeprefix("hf-hub:")
+        if repo not in keys:
+            keys.append(repo)
+        extra_repos.append(repo)
+    if not keys:
         return 0
-    keys = [f"{ONNX_REPO}/{km.get('hf_subdir', model_id)}"]
-    for field in ("model_str", "source"):
-        value = km.get(field, "")
-        if value.startswith("hf-hub:"):
-            keys.append(value.removeprefix("hf-hub:"))
-    return _purge_keys(keys, _cache_dir(cache_dir), _models_dir(models_dir))
+    return _purge_keys(keys, _cache_dir(cache_dir), _models_dir(models_dir),
+                       extra_repos=extra_repos)

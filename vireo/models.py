@@ -725,6 +725,16 @@ def remove_model(model_id):
                     return {"files_deleted": True, "kept_path": None, **cache}
             return None
 
+        # Capture the entry's hf-hub identifier before unregistering so a
+        # dynamically downloaded model (``download_hf_model``, id absent
+        # from ``KNOWN_MODELS``) can still have its cache copy purged after
+        # ``get_models()`` no longer returns it.
+        hf_source = ""
+        for field in ("model_str", "source"):
+            value = found.get(field) or ""
+            if value.startswith("hf-hub:"):
+                hf_source = value
+                break
         files_deleted = False
         kept_path = None
         weights_path = found.get("weights_path") or ""
@@ -759,23 +769,25 @@ def remove_model(model_id):
     log.info("Removed model %s (weights: %s, deleted: %s)",
              model_id, weights_path, files_deleted)
     # Outside _CONFIG_LOCK: the purge reads models.json through get_models().
-    cache = _purge_hf_cache_for_model(model_id)
+    cache = _purge_hf_cache_for_model(model_id, hf_source=hf_source)
     return {"files_deleted": files_deleted, "kept_path": kept_path, **cache}
 
 
-def _purge_hf_cache_for_model(model_id):
+def _purge_hf_cache_for_model(model_id, hf_source=""):
     """Drop the Hugging Face cache copy a removed model's download left behind.
 
     The cache copy exists only to let Repair and re-downloads skip the
     network, so once the user removes the model it is invisible dead weight
-    (Settings lists installs, not the cache). Custom models downloaded
-    nothing through the cache, so only known ids have anything to purge.
-    A missing cache is not an error; a failed cleanup is returned explicitly
-    so callers do not report the whole removal as successful.
+    (Settings lists installs, not the cache). ``hf_source`` is the
+    ``hf-hub:<owner>/<repo>`` identifier captured from the entry before
+    unregistration, required for dynamically downloaded models whose id is
+    absent from ``KNOWN_MODELS``. A missing cache is not an error; a failed
+    cleanup is returned explicitly so callers do not report the whole
+    removal as successful.
     """
     try:
         from services.hf_cache import purge_model, purge_outcome
-        return purge_outcome(purge_model, model_id)
+        return purge_outcome(lambda mid: purge_model(mid, hf_source=hf_source), model_id)
     except Exception as exc:  # pragma: no cover - cleanup must not fail the removal
         log.warning("Could not purge HF cache for %s: %s", model_id, exc)
         return {"ok": False, "cache_cleanup": {"freed": 0, "failed": [
