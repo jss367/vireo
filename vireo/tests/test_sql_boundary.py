@@ -64,7 +64,6 @@ CONN_USE_LIMITS = {
     "local_masks.py": 1,
     "location_review.py": 1,
     "misses.py": 4,
-    "move.py": 31,
     "move_cleanup.py": 11,
     "new_images.py": 5,
     "pending_archives.py": 3,
