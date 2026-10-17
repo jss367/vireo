@@ -36,19 +36,136 @@ def forbidden(*_args, **_kwargs):
     raise AssertionError("Unexpected system/product operation")
 
 
+def provenance_scope(registrations):
+    """Use actual ownership/scope definitions with no registry or filesystem I/O."""
+    ns = {"__builtins__": {**vars(builtins), "__import__": forbidden},
+          "_load_config": lambda: {"models": list(registrations)},
+          "DEFAULT_MODELS_DIR": "/invented/models",
+          "os": S(path=S(realpath=posixpath.normpath, join=posixpath.join))}
+    selected(Path("models.py"), {"_model_is_managed", "get_managed_model_registrations"}, ns)
+    # The existing display contract does not carry the raw managed flag.
+    projected = [{key: value for key, value in entry.items() if key != "managed"}
+                 for entry in registrations]
+    fake_models = S(ONNX_REPO="jss367/vireo-onnx-models", KNOWN_MODELS=[],
+                    get_models=lambda: projected,
+                    get_managed_model_registrations=ns["get_managed_model_registrations"])
+    scope = {"__builtins__": {**vars(builtins), "__import__": lambda *_a, **_k: fake_models}}
+    selected(Path("services/storage_paths.py"), {"huggingface_repositories"}, scope)
+    return scope["huggingface_repositories"], projected, ns
+
+
+def invented_repo_payload(fs, repo="outside/client"):
+    path = ROOT + "/models--" + repo.replace("/", "--")
+    inode = fs.add(path + "/blobs/owned-by-another-client", size=23)
+    fs.add(path + "/snapshots/rev/file", "link", target="../../blobs/owned-by-another-client")
+    return inode
+
+
+def pinned_inventory(ns):
+    with ns["CacheTree"](ROOT) as tree:
+        token = ns["_ACTIVE_TREE"].set(tree)
+        try:
+            return ns["inventory"](ROOT, "/invented/models")
+        finally:
+            ns["_ACTIVE_TREE"].reset(token)
+
+
 class ReconciledSafetyTests(unittest.TestCase):
     def test_repository_allowlist_includes_only_manifest_registered_and_exact_legacy_ids(self):
         fake_models = S(ONNX_REPO="invented/onnx", KNOWN_MODELS=[{"model_str": "hf-hub:manifest/one"}],
-                        get_models=lambda: [{"source": "hf-hub:registered/two"}])
+                        get_models=lambda: [{"source": "hf-hub:registered/two"}],
+                        get_managed_model_registrations=lambda: [])
         ns = {"__builtins__": {**vars(builtins), "__import__": lambda *_a, **_k: fake_models}}
         selected(Path("services/storage_paths.py"), {"huggingface_repositories"}, ns)
         self.assertEqual(ns["huggingface_repositories"](), {
             "models--invented--onnx", "models--manifest--one", "models--registered--two",
             "models--imageomics--bioclip", "models--imageomics--bioclip-2", "models--imageomics--bioclip-2.5",
         })
+        self.assertEqual(ns["huggingface_repositories"](managed_only=True), {
+            "models--invented--onnx", "models--manifest--one", "models--imageomics--bioclip",
+            "models--imageomics--bioclip-2", "models--imageomics--bioclip-2.5",
+        })
+
+    def test_managed_scope_uses_raw_provenance_and_preserves_default_reporting(self):
+        entries = [
+            {"id": "custom-outside", "model_str": "hf-hub:outside/custom", "weights_path": "/invented/external"},
+            {"id": "explicit-no", "managed": False, "source": "hf-hub:outside/explicit-no", "weights_path": "/invented/models/explicit-no"},
+            {"id": "external-no-prefix", "model_str": "hf-hub:outside/external", "weights_path": "/invented/external"},
+            {"id": "dynamic", "managed": True, "model_str": "hf-hub:outside/dynamic", "weights_path": "/invented/models/dynamic"},
+            {"id": "legacy", "model_str": "hf-hub:outside/legacy", "weights_path": "/invented/models/legacy"},
+        ]
+        scope, _projected, ownership = provenance_scope(entries)
+        managed = ownership["get_managed_model_registrations"]()
+        self.assertEqual([m["id"] for m in managed], ["dynamic", "legacy"])
+        self.assertEqual(scope() - scope(managed_only=True), {
+            "models--outside--custom", "models--outside--explicit-no", "models--outside--external",
+        })
+        self.assertIn("models--outside--dynamic", scope(managed_only=True))
+        self.assertIn("models--outside--legacy", scope(managed_only=True))
+        self.assertNotIn("managed", entries[0])  # Selection does not mutate registrations.
+
+    def test_unmanaged_external_weights_never_authorize_inventory_or_bulk_cleanup(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                scope, projected, _ns = provenance_scope([{
+                    "id": "custom-client", "managed": False, "model_str": "hf-hub:outside/client",
+                    "weights_path": "/invented/external",
+                }])
+                fs, ns = service(repositories=scope, model_entries=projected)
+                payload(fs)
+                outsider = invented_repo_payload(fs)
+                if existing:
+                    fs.add("/invented/external", "dir")
+                inventory = pinned_inventory(ns)
+                self.assertEqual([entry["key"] for entry in inventory["entries"]], [KEY])
+                self.assertEqual(inventory["unused_size"], 10)
+                with self.assertRaises(KeyError):
+                    ns["remove"](["outside/client"], ROOT, "/invented/models")
+                result = ns["remove_unused"](ROOT, "/invented/models")
+                self.assertEqual(result, {"removed": [KEY], "failed": [], "freed": 10})
+                self.assertNotIn(outsider, fs.unlinked)
+                self.assertFalse(fs.fds)
+
+    def test_managed_dynamic_scope_retains_installed_and_cleans_missing_payload(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                scope, projected, _ns = provenance_scope([{
+                    "id": "dynamic", "managed": True, "model_str": "hf-hub:outside/client",
+                    "weights_path": "/invented/models/dynamic",
+                }])
+                fs, ns = service(repositories=scope, model_entries=projected)
+                inode = invented_repo_payload(fs)
+                if existing:
+                    fs.add("/invented/models/dynamic", "dir")
+                inventory = pinned_inventory(ns)
+                self.assertEqual([entry["key"] for entry in inventory["entries"]], ["outside/client"])
+                self.assertEqual(inventory["entries"][0]["installed"], existing)
+                self.assertEqual(inventory["unused_size"], 0 if existing else 23)
+                result = ns["remove_unused"](ROOT, "/invented/models")
+                self.assertEqual(result["freed"], 0 if existing else 23)
+                self.assertEqual(inode in fs.unlinked, not existing)
+                self.assertFalse(fs.fds)
+
+    def test_unmanaged_live_install_still_protects_a_shared_managed_repository(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                scope, projected, _ns = provenance_scope([
+                    {"id": "dynamic", "managed": True, "model_str": "hf-hub:outside/client", "weights_path": "/invented/models/dynamic"},
+                    {"id": "custom-client", "managed": False, "model_str": "hf-hub:outside/client", "weights_path": "/invented/external"},
+                ])
+                fs, ns = service(repositories=scope, model_entries=projected)
+                inode = invented_repo_payload(fs)
+                if existing:
+                    fs.add("/invented/external", "dir")
+                self.assertEqual(pinned_inventory(ns)["unused_size"], 0 if existing else 23)
+                result = ns["remove_unused"](ROOT, "/invented/models")
+                self.assertEqual(result["freed"], 0 if existing else 23)
+                self.assertEqual(inode in fs.unlinked, not existing)
+                self.assertFalse(fs.fds)
 
     def test_explicit_scope_retains_other_repositories_in_the_same_organization(self):
-        fs, ns = service()
+        scope, _projected, _ownership = provenance_scope([])
+        fs, ns = service(repositories=scope)
         payload(fs)
         outsiders = []
         for org in ("imageomics", "bioclip", "jss367"):

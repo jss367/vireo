@@ -197,7 +197,7 @@ def service(*, repositories=(NAME,), model_entries=()):
     modules = {
         "fcntl": S(flock=fs.flock, LOCK_EX=1, LOCK_NB=2, LOCK_UN=4),
         "models": fake_models,
-        "services.storage_paths": S(huggingface_repositories=lambda: set(repositories), directory_bytes=lambda _p: 0),
+        "services.storage_paths": S(huggingface_repositories=lambda **kwargs: (repositories(**kwargs) if callable(repositories) else set(repositories)), directory_bytes=lambda _p: 0),
     }
 
     def importer(name, *_args, **_kwargs):

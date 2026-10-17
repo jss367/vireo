@@ -28,7 +28,7 @@ empty one: every download creates the directory before fetching, so the
 directory is the user's intent and the cache entry is what will fill it.
 
 Collection scope is the explicit list from ``KNOWN_MODELS`` and the
-still-registered models (plus the legacy BioCLIP checkpoints), never an
+managed registered models (plus the legacy BioCLIP checkpoints), never an
 organization-wide prefix: a shared cache may hold repositories owned by
 other Hub clients, and inventorying one of those as a Vireo entry would let
 ``Remove unused`` evict it. A purge of a dynamically downloaded model
@@ -101,7 +101,7 @@ def _repo_dirs(cache_dir, extra_repos=()):
     """Vireo-relevant ``models--*`` directories under the hub cache (no symlinks).
 
     The whitelist is the explicit list built from ``KNOWN_MODELS`` and the
-    still-registered models (plus the legacy BioCLIP checkpoints), never an
+    managed registered models (plus the legacy BioCLIP checkpoints), never an
     organization-wide prefix: a shared cache may hold repositories owned by
     other Hugging Face clients, and inventorying one of those as a Vireo
     entry would let ``Remove unused`` evict it. ``extra_repos`` names repo
@@ -113,7 +113,7 @@ def _repo_dirs(cache_dir, extra_repos=()):
 
     if not _fs().path.isdir(cache_dir):
         return []
-    wanted = huggingface_repositories() | {
+    wanted = huggingface_repositories(managed_only=True) | {
         "models--" + repo.replace("/", "--") for repo in extra_repos
     }
     out = []

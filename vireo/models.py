@@ -455,6 +455,15 @@ def _model_is_managed(entry):
     return False
 
 
+def get_managed_model_registrations():
+    """Raw registrations whose weights Vireo owns, including missing installs.
+
+    Display entries from ``get_models`` omit explicit ownership provenance;
+    cleanup must use the registered entry and the same policy as removal.
+    """
+    return [entry for entry in _load_config().get("models", []) if _model_is_managed(entry)]
+
+
 def _check_onnx_downloaded(model_dir, files):
     """Check if all required model files exist and look usable.
 
