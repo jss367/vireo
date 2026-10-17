@@ -142,7 +142,7 @@ def _pick_compatible_raw_jpeg_pairs(members, log_conflicts=True):
     companion).
 
     A member may be a JPEG file the scan has not cataloged yet (``id`` is
-    None; see ``_ScanRun._resolve_companion_group``), so the scan decides
+    None; see ``_CompanionGroups.resolve_companion_group``), so the scan decides
     before inserting it whether it becomes a photo or a companion.
     ``log_conflicts=False`` leaves the conflicting-metadata message to the
     end-of-scan pass, which sees the same group.
@@ -651,7 +651,7 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     total.
 
     A scan pairs a JPEG file it has not cataloged yet before inserting it
-    (``_ScanRun._resolve_companion_group``), so what reaches this pass is
+    (``_CompanionGroups.resolve_companion_group``), so what reaches this pass is
     a JPEG that is already a photo of its own: one cataloged before its
     RAW arrived, or a pair left pending.
     """

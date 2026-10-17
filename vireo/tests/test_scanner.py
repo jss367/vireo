@@ -1335,7 +1335,7 @@ def test_incremental_scan_skips_unchanged(tmp_path):
 def test_incremental_index_reads_only_requested_photos(tmp_path, requested_count):
     """Lookup cost follows the manifest, including across query batches."""
     from db import Database
-    from scanner.scan_run import _incremental_photo_index
+    from scanner.triage import _incremental_photo_index
 
     with Database(str(tmp_path / "test.db")) as db:
         folder = tmp_path / "archive_%"
@@ -1457,7 +1457,7 @@ def test_incremental_scan_retries_after_hash_failure(tmp_path, monkeypatch):
     Image.new('RGB', (150, 150)).save(path)
 
     # Scan with feature computation failing (simulated unreadable file)
-    monkeypatch.setattr(scanner.scan_run, '_compute_file_features', lambda p: (None, None))
+    monkeypatch.setattr(scanner.features, '_compute_file_features', lambda p: (None, None))
     scan(root, db, options=ScanOptions(incremental=True))
     photo = _row()
     assert photo['file_hash'] == old_row['file_hash']  # hash untouched
@@ -2045,7 +2045,7 @@ class _PairedCatalog:
         self.merges = []
         self.row_merges = []
         real_merge = scanner.companions._merge_companion_into_primary
-        real_attach = scanner.scan_run._ScanRun._attach_companion
+        real_attach = scanner.companion_attach._CompanionGroups._attach_companion
 
         def merge(db, primary, companion, *args, **kwargs):
             self.merges.append(companion["filename"])
@@ -2059,7 +2059,7 @@ class _PairedCatalog:
             return attached
 
         monkeypatch.setattr(scanner.companions, "_merge_companion_into_primary", merge)
-        monkeypatch.setattr(scanner.scan_run._ScanRun, "_attach_companion", attach)
+        monkeypatch.setattr(scanner.companion_attach._CompanionGroups, "_attach_companion", attach)
         self.extracted = []
         real_extract = scanner.scan_run.extract_metadata
         # The dummy RAW is 200 null bytes and the JPEG has no EXIF, so a
@@ -2304,10 +2304,10 @@ def test_deferred_companion_fill_does_not_follow_a_reused_photo_id(
     import scanner
 
     cat = _PairedCatalog(tmp_path, monkeypatch)
-    real_refill = scanner.scan_run._ScanRun._refill_owners_from_companions
+    real_refill = scanner.companion_keep._CompanionFills.refill_owners_from_companions
 
     def replace_owner_then_refill(run):
-        assert cat.raw_id in run._pending_companion_fills
+        assert cat.raw_id in run.pending
         # A separate connection makes the deletion/insertion a committed
         # concurrent edit, rather than an uncommitted change in the scan.
         with sqlite3.connect(cat.vireo_dir / "test.db") as writer:
@@ -2332,7 +2332,7 @@ def test_deferred_companion_fill_does_not_follow_a_reused_photo_id(
         real_refill(run)
 
     monkeypatch.setattr(
-        scanner.scan_run._ScanRun, "_refill_owners_from_companions",
+        scanner.companion_keep._CompanionFills, "refill_owners_from_companions",
         replace_owner_then_refill,
     )
     cat.scan(incremental=False)
@@ -2367,12 +2367,12 @@ def test_pending_companion_fill_is_revalidated_before_owner_metadata_write(
         (cat.raw_id,),
     )
     cat.db.conn.commit()
-    real_write = scanner.scan_run._ScanRun._write_photo_columns
+    real_write = scanner.indexing._FileIndexer._write_photo_columns
     replaced = []
 
     def replace_owner_then_write(run, photo_id, item):
         if photo_id == cat.raw_id:
-            assert photo_id in run._pending_companion_fills
+            assert photo_id in run.fills.pending
             with sqlite3.connect(cat.vireo_dir / "test.db") as writer:
                 writer.execute("PRAGMA foreign_keys = ON")
                 writer.execute("DELETE FROM photos WHERE id=?", (photo_id,))
@@ -2383,7 +2383,7 @@ def test_pending_companion_fill_is_revalidated_before_owner_metadata_write(
             replaced.append(photo_id)
         real_write(run, photo_id, item)
 
-    monkeypatch.setattr(scanner.scan_run._ScanRun, "_write_photo_columns", replace_owner_then_write)
+    monkeypatch.setattr(scanner.indexing._FileIndexer, "_write_photo_columns", replace_owner_then_write)
     cat.scan(incremental=False)
     assert replaced == [cat.raw_id]
     assert cat.db.conn.execute(
@@ -2410,7 +2410,7 @@ def test_recovered_companion_waits_for_a_readable_scan_before_synchronizing(
         return (phash, None) if path.endswith(".jpg") else (phash, file_hash)
 
     with monkeypatch.context() as patch:
-        patch.setattr(scanner.scan_run, "_compute_file_features", unreadable_jpeg)
+        patch.setattr(scanner.features, "_compute_file_features", unreadable_jpeg)
         cat.scan()
     assert cat.merges == []
     assert [tuple(row) for row in cat.identity()] == recovered
@@ -2438,7 +2438,7 @@ def test_unreadable_companion_keeps_its_stored_identity(tmp_path, monkeypatch):
         phash, file_hash = real_features(path_str)
         return (phash, None) if path_str.endswith(".jpg") else (phash, file_hash)
 
-    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", unreadable_jpeg)
+    monkeypatch.setattr(scanner.features, "_compute_file_features", unreadable_jpeg)
     counts = cat.scan()
 
     assert cat.merges == []
@@ -2598,13 +2598,13 @@ def test_raw_reread_companion_refill_survives_interrupted_scan(
     class _Boom(RuntimeError):
         pass
 
-    original_refill = scanner.scan_run._ScanRun._refill_owners_from_companions
+    original_refill = scanner.companion_keep._CompanionFills.refill_owners_from_companions
 
     def _boom(self):
         raise _Boom("simulated interruption after RAW's columns were cleared")
 
     monkeypatch.setattr(
-        scanner.scan_run._ScanRun, "_refill_owners_from_companions", _boom,
+        scanner.companion_keep._CompanionFills, "refill_owners_from_companions", _boom,
     )
     with pytest.raises(_Boom):
         cat.scan(incremental=incremental)
@@ -2614,7 +2614,7 @@ def test_raw_reread_companion_refill_survives_interrupted_scan(
     # interrupted scan) or will be filled by the companion re-read the
     # file_mtime=NULL marker forces here.
     monkeypatch.setattr(
-        scanner.scan_run._ScanRun, "_refill_owners_from_companions", original_refill,
+        scanner.companion_keep._CompanionFills, "refill_owners_from_companions", original_refill,
     )
     cat.scan(incremental=incremental)
     assert cat.merges == []
@@ -3042,7 +3042,7 @@ def test_stat_unchanged_companion_settle_discards_stale_credit_after_owner_mutat
         hierarchical_keywords=set(),
     )
 
-    real_settle = scanner.scan_run._ScanRun._settle_stat_unchanged_companions
+    real_settle = scanner.triage._IncrementalTriage._settle_stat_unchanged_companions
     races = {"ran": False}
 
     def race_overlay(self, files_to_process):
@@ -3069,7 +3069,7 @@ def test_stat_unchanged_companion_settle_discards_stale_credit_after_owner_mutat
         return real_settle(self, files_to_process)
 
     monkeypatch.setattr(
-        scanner.scan_run._ScanRun, "_settle_stat_unchanged_companions",
+        scanner.triage._IncrementalTriage, "_settle_stat_unchanged_companions",
         race_overlay,
     )
     cat.merges.clear()
@@ -3147,16 +3147,16 @@ def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
                 evidence["blocked"] = True
 
         if boundary == "stat-settle":
-            original = scanner.scan_run._ScanRun._settle_stat_unchanged_companions
+            original = scanner.triage._IncrementalTriage._settle_stat_unchanged_companions
 
             def settle(run, files):
                 assert run.stat_unchanged_companions
                 replace_owner()
                 return original(run, files)
 
-            monkeypatch.setattr(scanner.scan_run._ScanRun, "_settle_stat_unchanged_companions", settle)
+            monkeypatch.setattr(scanner.triage._IncrementalTriage, "_settle_stat_unchanged_companions", settle)
         elif boundary in {"before-sidecar", "after-sidecar"}:
-            original = scanner.scan_run._ScanRun._import_companion_sidecar
+            original = scanner.companion_keep._KnownCompanionKeeper.import_companion_sidecar
 
             def sidecar(run, path, known):
                 if boundary == "before-sidecar":
@@ -3166,7 +3166,7 @@ def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
                     replace_owner()
                 return result
 
-            monkeypatch.setattr(scanner.scan_run._ScanRun, "_import_companion_sidecar", sidecar)
+            monkeypatch.setattr(scanner.companion_keep._KnownCompanionKeeper, "import_companion_sidecar", sidecar)
         else:
             original = cat.db.add_keyword
 
@@ -3218,8 +3218,8 @@ def test_jpeg_first_shared_sidecar_survives_later_raw_disappearance(
     cat.db.conn.commit()
     future = time.time() + 60
     os.utime(raw, (future, future))
-    original_triage = scanner.scan_run._ScanRun._triage_files
-    original_index = scanner.scan_run._ScanRun._index_file
+    original_triage = scanner.triage._IncrementalTriage.triage_files
+    original_index = scanner.indexing._FileIndexer.index_file
 
     def sidecar_after_triage(run):
         files = original_triage(run)
@@ -3232,12 +3232,12 @@ def test_jpeg_first_shared_sidecar_survives_later_raw_disappearance(
 
     def vanish_when_raw_indexes(run, path, *args):
         if path == raw:
-            assert run.counts["known_companions"] == 1
+            assert run.tally.counts["known_companions"] == 1
             raw.unlink()
         return original_index(run, path, *args)
 
-    monkeypatch.setattr(scanner.scan_run._ScanRun, "_triage_files", sidecar_after_triage)
-    monkeypatch.setattr(scanner.scan_run._ScanRun, "_index_file", vanish_when_raw_indexes)
+    monkeypatch.setattr(scanner.triage._IncrementalTriage, "triage_files", sidecar_after_triage)
+    monkeypatch.setattr(scanner.indexing._FileIndexer, "index_file", vanish_when_raw_indexes)
     counts = cat.scan(incremental=incremental)
 
     assert counts["vanished"] == 1
@@ -4900,7 +4900,7 @@ def test_restricted_scan_reports_discovery_progress(tmp_path, monkeypatch):
             yields[0] += 1
             yield entry
 
-    monkeypatch.setattr(scanner.scan_run, "safe_iter_dir", spy_iter_dir)
+    monkeypatch.setattr(scanner.discovery, "safe_iter_dir", spy_iter_dir)
 
     db = Database(str(tmp_path / "test.db"))
     statuses = []  # list of (msg, yields_when_emitted)
@@ -5489,7 +5489,7 @@ def test_scan_does_not_construct_worker_pool_while_pause_remains_pending(
         time.sleep(0.12)
         pause_active.clear()
 
-    monkeypatch.setattr(scanner.scan_run, "ProcessPoolExecutor", FakeProcessPool)
+    monkeypatch.setattr(scanner.features, "ProcessPoolExecutor", FakeProcessPool)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=2)
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     resume_thread = threading.Thread(target=clear_pause)
@@ -5751,7 +5751,7 @@ def test_scan_pause_requeues_worker_result(
                 pause_state["active"] = True
                 if pause_after_result:
                     return self.function(self.path)
-                raise scanner.scan_run.TimeoutError()
+                raise scanner.features.TimeoutError()
             return self.function(self.path)
 
     class FakeProcessPool:
@@ -5770,7 +5770,7 @@ def test_scan_pause_requeues_worker_result(
         pause_state["active"] = False
         return False
 
-    monkeypatch.setattr(scanner.scan_run, "ProcessPoolExecutor", FakeProcessPool)
+    monkeypatch.setattr(scanner.features, "ProcessPoolExecutor", FakeProcessPool)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=2)
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     try:
@@ -5819,7 +5819,7 @@ def test_sequential_scan_pause_after_compute_releases_lease(tmp_path, monkeypatc
         pause_state["active"] = False
         return False
 
-    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", compute_then_pause)
+    monkeypatch.setattr(scanner.features, "_compute_file_features", compute_then_pause)
     try:
         scanner.scan(
             root, db,
@@ -5880,7 +5880,7 @@ def test_scan_consumer_pause_resumes_generator_before_parking(
         pause_state["active"] = False
         return False
 
-    monkeypatch.setattr(scanner.scan_run, "ProcessPoolExecutor", FakeProcessPool)
+    monkeypatch.setattr(scanner.features, "ProcessPoolExecutor", FakeProcessPool)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=2)
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     try:
@@ -6722,7 +6722,7 @@ def test_initial_scan_does_not_invoke_invalidation_for_new_photos(tmp_path, monk
 
     monkeypatch.setattr(scanner, "_invalidate_derived_caches", counting_invalidate)
     monkeypatch.setattr(scanner.companions, "_invalidate_derived_caches", counting_invalidate)
-    monkeypatch.setattr(scanner.scan_run, "_invalidate_derived_caches", counting_invalidate)
+    monkeypatch.setattr(scanner.indexing, "_invalidate_derived_caches", counting_invalidate)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -8886,7 +8886,7 @@ def _leave_unpaired_pair(db, monkeypatch, folder, basename="OLD_001"):
     monkeypatch.setattr(
         _sc.companions, "_pick_compatible_raw_jpeg_pairs", lambda *a, **k: [])
     monkeypatch.setattr(
-        _sc.scan_run, "_pick_compatible_raw_jpeg_pairs", lambda *a, **k: [])
+        _sc.companion_attach, "_pick_compatible_raw_jpeg_pairs", lambda *a, **k: [])
     scan(str(folder), db)
     monkeypatch.undo()
 

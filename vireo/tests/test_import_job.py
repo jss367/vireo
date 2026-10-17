@@ -471,7 +471,7 @@ def _count_feature_computations(monkeypatch):
         read_paths.append(path_str)
         return real(path_str)
 
-    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", _counting)
+    monkeypatch.setattr(scanner.features, "_compute_file_features", _counting)
     return read_paths
 
 
@@ -4206,7 +4206,7 @@ def test_remote_zero_byte_reimport_invalidates_derived_caches(
     monkeypatch.setattr(_scanner, "scan", tracking_scan)
     monkeypatch.setattr(_scanner, "_invalidate_derived_caches", spy_inval)
     monkeypatch.setattr(_scanner.companions, "_invalidate_derived_caches", spy_inval)
-    monkeypatch.setattr(_scanner.scan_run, "_invalidate_derived_caches", spy_inval)
+    monkeypatch.setattr(_scanner.indexing, "_invalidate_derived_caches", spy_inval)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,
@@ -4298,7 +4298,7 @@ def test_local_zero_byte_reimport_invalidates_derived_caches(
     monkeypatch.setattr(_scanner, "scan", tracking_scan)
     monkeypatch.setattr(_scanner, "_invalidate_derived_caches", spy_inval)
     monkeypatch.setattr(_scanner.companions, "_invalidate_derived_caches", spy_inval)
-    monkeypatch.setattr(_scanner.scan_run, "_invalidate_derived_caches", spy_inval)
+    monkeypatch.setattr(_scanner.indexing, "_invalidate_derived_caches", spy_inval)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,

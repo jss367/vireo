@@ -8589,7 +8589,7 @@ def test_import_in_place_reuses_catalog_across_workspaces(
         metadata_reads.extend(paths)
         return real_metadata(paths, **kwargs)
 
-    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", compute_features)
+    monkeypatch.setattr(scanner.features, "_compute_file_features", compute_features)
     monkeypatch.setattr(scanner.scan_run, "extract_metadata", extract_metadata)
     resp = client.post("/api/jobs/import-in-place", json={
         "sources": [str(source)],
