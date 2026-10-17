@@ -1528,3 +1528,156 @@ def test_keyword_repository_never_hands_itself_out_as_the_database():
     ]
     # The only one is ``__init__`` storing the façade (``setattr(self, ...)``).
     assert len(bare) == 1
+
+
+# -- species filed in the user's tree vs. top-level twins ----------------------------------
+
+
+def _placed_robin(db, parent_name="Thrushes"):
+    """``<parent_name> > American Robin``: the user's own taxonomy row."""
+    parent = _raw_kw(db, parent_name)
+    return parent, _raw_kw(
+        db, "American Robin", parent, kw_type="taxonomy", is_species=1, taxon_id=3,
+    )
+
+
+def _top_level_rows(db, name):
+    return db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE AND parent_id IS NULL",
+        (name,),
+    ).fetchall()
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"kw_type": "taxonomy"},
+    {"is_species": True},
+    {},
+    {"_resolve_alias": True},
+])
+def test_add_keyword_reuses_species_filed_in_tree(db, lib, kwargs):
+    _parent, placed = _placed_robin(db)
+    db.conn.commit()
+    assert db.add_keyword("american robin", **kwargs) == placed
+    assert _top_level_rows(db, "American Robin") == []
+
+
+def test_add_keyword_taxonomy_passes_over_top_level_general_for_placed_species(db, lib):
+    _parent, placed = _placed_robin(db)
+    general = _raw_kw(db, "American Robin")
+    db.conn.commit()
+    assert db.add_keyword("American Robin", kw_type="taxonomy") == placed
+    # Promoting the general row would have minted the twin.
+    assert _kw(db, general)[2:4] == ("general", 0)
+    # A type-agnostic add keeps the top-level row it names.
+    assert db.add_keyword("American Robin") == general
+
+
+def test_add_keyword_ambiguous_placed_species_mints_top_level(db, lib):
+    _placed_robin(db, "Thrushes")
+    _placed_robin(db, "Backyard birds")
+    db.conn.commit()
+    kid = db.add_keyword("American Robin", kw_type="taxonomy")
+    assert _kw(db, kid)[1:3] == (None, "taxonomy")
+
+
+def test_add_keyword_explicit_general_ignores_placed_species(db, lib):
+    _parent, placed = _placed_robin(db)
+    db.conn.commit()
+    kid = db.add_keyword("American Robin", kw_type="general")
+    assert kid != placed
+    assert _kw(db, kid)[1:3] == (None, "general")
+
+
+def test_add_source_species_keyword_binds_species_filed_in_tree(db, lib):
+    _parent, placed = _placed_robin(db)
+    db.conn.commit()
+    assert db._add_source_species_keyword("American Robin", 12727) == placed
+    assert _kw(db, placed)[4:] == (3, 12727)
+    assert _top_level_rows(db, "American Robin") == []
+
+
+def test_add_source_species_keyword_ambiguous_placed_rows_mint_top_level(db, lib):
+    _placed_robin(db, "Thrushes")
+    _placed_robin(db, "Backyard birds")
+    db.conn.commit()
+    kid = db._add_source_species_keyword("American Robin", 12727)
+    assert _kw(db, kid)[1] is None
+
+
+def test_merge_taxonomy_root_twins_folds_top_level_rows_into_tree(db, lib):
+    p0, p1, p2 = lib["p"][:3]
+    _parent, placed = _placed_robin(db)
+    twin = _raw_kw(db, "American robin", kw_type="taxonomy", is_species=1, taxon_id=3)
+    db.conn.execute("UPDATE keywords SET source_taxon_id = 12727 WHERE id = ?", (twin,))
+    # Not twins: a top-level row with children, one whose placed row claims
+    # another iNat id, and one whose only same-name row is another taxon.
+    parent_root = _raw_kw(db, "Cougar", kw_type="taxonomy", is_species=1, taxon_id=5)
+    _raw_kw(db, "Cougar", _raw_kw(db, "Cats"), kw_type="taxonomy", is_species=1, taxon_id=5)
+    _raw_kw(db, "Cougar kitten", parent_root)
+    conflicting = _raw_kw(db, "Puma", kw_type="taxonomy", taxon_id=4)
+    db.conn.execute("UPDATE keywords SET source_taxon_id = 1 WHERE id = ?", (conflicting,))
+    placed_puma = _raw_kw(db, "Puma", _raw_kw(db, "Genera"), kw_type="taxonomy", taxon_id=4)
+    db.conn.execute("UPDATE keywords SET source_taxon_id = 2 WHERE id = ?", (placed_puma,))
+    other_taxon = _raw_kw(db, "Turdus", kw_type="taxonomy", taxon_id=2)
+    _raw_kw(db, "Turdus", _raw_kw(db, "Aves"), kw_type="taxonomy", taxon_id=1)
+    db.conn.commit()
+    db.tag_photo(p0, twin, source=None)
+    db.tag_photo(p1, placed, source=None)
+    db.tag_photo(p1, twin)
+    db.tag_photo(p2, placed, source=None)
+    db.queue_change(p1, "keyword_add", "American Robin")
+    pending = _visible(db, "SELECT photo_id, change_type, value FROM pending_changes")
+
+    assert db.merge_taxonomy_root_twins() == 1
+
+    assert not db.conn.in_transaction
+    assert _visible(db, "SELECT id FROM keywords WHERE id = ?", (twin,)) == []
+    assert _visible(
+        db, "SELECT photo_id, source FROM photo_keywords WHERE keyword_id = ? ORDER BY photo_id",
+        (placed,),
+    ) == [(p0, None), (p1, "manual"), (p2, None)]
+    assert _kw(db, placed)[4:] == (3, 12727)
+    # Same flat keyword in every sidecar: the merge queues no XMP change.
+    assert _visible(db, "SELECT photo_id, change_type, value FROM pending_changes") == pending
+    for kept in (parent_root, conflicting, other_taxon):
+        assert _kw(db, kept) is not None
+    assert db.merge_taxonomy_root_twins() == 0
+
+
+def test_merge_taxonomy_root_twins_rolls_back_on_failure(db, lib, monkeypatch):
+    _parent, placed = _placed_robin(db)
+    twin = _raw_kw(db, "American Robin", kw_type="taxonomy", is_species=1, taxon_id=3)
+    db.conn.commit()
+    db.tag_photo(lib["p"][0], twin)
+
+    def boom(src, dst, **kwargs):
+        db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (src,))
+        raise RuntimeError("merge failed")
+
+    monkeypatch.setattr(db, "_merge_keyword_into", boom)
+    with pytest.raises(RuntimeError, match="merge failed"):
+        db.merge_taxonomy_root_twins()
+    assert not db.conn.in_transaction
+    assert _visible(db, "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                    (twin,)) == [(lib["p"][0],)]
+
+
+def test_startup_repairs_merge_taxonomy_root_twins(db, lib, monkeypatch, caplog):
+    import logging
+
+    from services.startup_tasks import StartupTasks
+
+    _parent, placed = _placed_robin(db)
+    twin = _raw_kw(db, "American Robin", kw_type="taxonomy", is_species=1, taxon_id=3)
+    db.conn.commit()
+    tasks = StartupTasks(app=None, db_path=db._db_path, init_db=db)
+    tasks.run_catalog_repairs()
+    assert _kw(db, twin) is None
+
+    def boom():
+        raise RuntimeError("disk I/O error")
+
+    monkeypatch.setattr(db, "merge_taxonomy_root_twins", boom)
+    with caplog.at_level(logging.ERROR, logger="services.startup_tasks"):
+        tasks.run_catalog_repairs()
+    assert "Could not merge top-level species keyword twins" in caplog.text

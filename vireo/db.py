@@ -5770,6 +5770,24 @@ class Database:
             keyword_id, allow_leaf=allow_leaf,
         )
 
+    def merge_taxonomy_root_twins(self):
+        """Fold each top-level species twin into the row filed in the tree.
+
+        The pairs are ``KeywordRepository.taxonomy_root_twins``. Both rows
+        carry the same name, so the sidecars already hold the survivor's
+        flat keyword and the merge queues no XMP change. All-or-nothing;
+        returns the number of rows merged away.
+        """
+        merged = 0
+        with self.transaction():
+            for root_id, placed_id in self.keywords.taxonomy_root_twins():
+                merged += self._merge_keyword_into(
+                    root_id, placed_id, pending_source_only=True,
+                )
+        if merged:
+            log.info("merged %d top-level species keyword twin(s)", merged)
+        return merged
+
     def repair_misclassified_location_ancestors(self):
         """Restore every location-tree node damaged by legacy taxonomy marking.
 

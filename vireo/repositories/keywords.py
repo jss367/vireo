@@ -700,6 +700,18 @@ class KeywordRepository:
             "ORDER BY (name = ? COLLATE NOCASE) DESC, (type = 'taxonomy') DESC, id LIMIT 1",
             (parent_id, source_taxon_id, local_id, name),
         ).fetchone()
+        if existing is None and parent_id is None:
+            # An accept names no parent, but the taxon may already be filed
+            # in the user's tree; bind to that row rather than mint a
+            # top-level twin (see ``_find_add_candidate``).
+            placed = self.conn.execute(
+                "SELECT id FROM keywords WHERE parent_id IS NOT NULL AND type = 'taxonomy' "
+                "AND (source_taxon_id = ? OR (source_taxon_id IS NULL AND taxon_id = ?)) "
+                "LIMIT 2",
+                (source_taxon_id, local_id),
+            ).fetchall()
+            if len(placed) == 1:
+                existing = placed[0]
         if existing:
             kid = existing["id"]
             self.conn.execute(
@@ -1095,7 +1107,62 @@ class KeywordRepository:
                     "ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, parent_id, kw_type, kw_type),
                 ).fetchone()
+        # A top-level add by name (Pipeline Review's Confirm species on a
+        # Browse selection, a flat dc:subject on import) names the species
+        # the user already filed in their tree (``Birds > ... > Western
+        # meadowlark``). Minting a top-level twin instead splits the
+        # species across two rows and queues an XMP add of a keyword the
+        # sidecar already holds. A top-level ``general`` row is passed over
+        # too when taxonomy is asked for: promoting it would mint the twin.
+        if parent_id is None and kw_type in (None, 'taxonomy') and (
+            existing is None
+            or (kw_type == 'taxonomy' and existing['type'] == 'general')
+        ):
+            existing = self._placed_taxonomy_keyword(name) or existing
         return existing
+
+    def _placed_taxonomy_keyword(self, name):
+        """The one taxonomy row named ``name`` below a parent, or None.
+
+        Two such rows (``Raptors > Osprey`` and ``Accipitriformes >
+        Osprey``) leave a flat name ambiguous, so neither is chosen.
+        """
+        rows = self.conn.execute(
+            "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
+            "AND parent_id IS NOT NULL AND type = 'taxonomy' LIMIT 2",
+            (name,),
+        ).fetchall()
+        return rows[0] if len(rows) == 1 else None
+
+    def taxonomy_root_twins(self):
+        """``(top_level_id, placed_id)`` pairs naming one taxon twice.
+
+        A pair is a childless top-level taxonomy row and the single
+        taxonomy row of the same name and taxon filed below a parent,
+        with no conflicting iNaturalist ids. Older top-level adds minted
+        the top-level row beside the user's own (see
+        ``_find_add_candidate``). A row with two placed twins, or whose
+        twin differs in name or taxon, is left for a reviewed merge.
+        """
+        return [
+            (row["root_id"], row["placed_id"]) for row in self.conn.execute(
+                """SELECT r.id AS root_id, MIN(p.id) AS placed_id
+                   FROM keywords r
+                   JOIN keywords p
+                     ON p.type = 'taxonomy' AND p.parent_id IS NOT NULL
+                    AND p.taxon_id = r.taxon_id
+                    AND p.name = r.name COLLATE NOCASE
+                   WHERE r.type = 'taxonomy' AND r.parent_id IS NULL
+                     AND r.taxon_id IS NOT NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM keywords c WHERE c.parent_id = r.id
+                     )
+                     AND (r.source_taxon_id IS NULL OR p.source_taxon_id IS NULL
+                          OR r.source_taxon_id = p.source_taxon_id)
+                   GROUP BY r.id HAVING COUNT(*) = 1
+                   ORDER BY r.id"""
+            )
+        ]
 
     def merge_duplicates(self):
         """Find and merge normalized duplicate keywords in active workspace.
