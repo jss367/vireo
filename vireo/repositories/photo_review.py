@@ -22,6 +22,7 @@ edit and commits once) lives here but is reached only through that method.
 
 import sqlite3
 from collections.abc import Collection, Iterable, Iterator
+from contextlib import contextmanager
 
 
 class PhotoReviewRepository:
@@ -117,7 +118,7 @@ class PhotoReviewRepository:
         return states
 
     def set_flags(
-        self, photo_ids: Collection[int], flag: str, *, verify_workspace: bool = True,
+        self, photo_ids: Collection[int], flag: str, *, verify_workspace: bool = True, _commit: bool = True,
     ) -> None:
         """Set the flag of several photos in one transaction; see ``set_ratings``."""
         self._set_many(
@@ -125,9 +126,10 @@ class PhotoReviewRepository:
             "flag",
             flag,
             verify_workspace=verify_workspace,
+            _commit=_commit,
         )
 
-    def _set_many(self, photo_ids, column, value, *, verify_workspace):
+    def _set_many(self, photo_ids, column, value, *, verify_workspace, _commit=True):
         if not photo_ids:
             return
         if verify_workspace:
@@ -140,10 +142,63 @@ class PhotoReviewRepository:
                     f"UPDATE photos SET {column} = ? WHERE id IN ({placeholders})",
                     [value, *chunk],
                 )
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if _commit:
+                self.conn.rollback()
             raise
+
+    @contextmanager
+    def flag_write(self):
+        """One flag/history/note transaction; preserve an existing caller's transaction."""
+        owns_transaction = not self.conn.in_transaction
+        if owns_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("SAVEPOINT flag_review_write")
+        try:
+            yield owns_transaction
+        except BaseException:
+            self.conn.execute("ROLLBACK TO flag_review_write")
+            self.conn.execute("RELEASE flag_review_write")
+            if owns_transaction:
+                self.conn.rollback()
+            raise
+        else:
+            self.conn.execute("RELEASE flag_review_write")
+            if owns_transaction:
+                try:
+                    self.conn.commit()
+                except BaseException:
+                    self.conn.rollback()
+                    raise
+
+    def set_current_flag_note(self, photo_ids, flag, description, *, source=None, reason=None):
+        """Publish only inside the flag writer's transaction, with no history dependency."""
+        if self.workspace_id is None:
+            raise RuntimeError("No active workspace set")
+        if not self.conn.in_transaction:
+            raise RuntimeError("Current flag attribution requires the flag write transaction")
+        if not source and not reason:
+            return
+        self.conn.executemany(
+            """INSERT OR REPLACE INTO current_flag_attribution
+               (photo_id, workspace_id, flag, source, reason, description)
+               SELECT id, ?, flag, ?, ?, ? FROM photos WHERE id=? AND flag IS ?""",
+            [(self.workspace_id, source, reason, description, pid, flag) for pid in photo_ids],
+        )
+
+    def current_flag_note(self, photo_id):
+        """Current provenance only; pruning, replay and unattributed writes cannot revive history."""
+        if self.workspace_id is None:
+            raise RuntimeError("No active workspace set")
+        row = self.conn.execute(
+            """SELECT a.flag, a.source, a.reason, a.description, a.created_at AS at
+               FROM current_flag_attribution a JOIN photos p ON p.id=a.photo_id
+               WHERE a.photo_id=? AND a.workspace_id=? AND a.flag IS p.flag""",
+            (photo_id, self.workspace_id),
+        ).fetchone()
+        return dict(row) if row else None
 
     def _verify_photo(self, photo_id):
         if self.workspace_id is None:
