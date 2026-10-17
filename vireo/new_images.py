@@ -193,6 +193,49 @@ def mapped_roots(db, workspace_id, *, include_missing=False):
     ]
 
 
+def snapshot_folder_counts(paths):
+    """Captured file count per containing folder of a new-images snapshot.
+
+    The folders are the snapshot paths' exact ``os.path.dirname`` strings —
+    the same spelling the Import page lists and sends back in
+    ``exclude_folders``.
+    """
+    counts = {}
+    for path in paths:
+        folder = os.path.dirname(path)
+        counts[folder] = counts.get(folder, 0) + 1
+    return counts
+
+
+def exclude_snapshot_folders(paths, exclude_folders):
+    """Drop the snapshot files that sit directly in ``exclude_folders``.
+
+    Returns the kept paths. Exclusion is per folder, not per subtree: a
+    captured parent folder and its captured subfolders are separate rows,
+    so leaving out ``2020`` keeps ``2020/2020-10-08``. Raises ValueError
+    for a folder the snapshot never captured (rather than a silent no-op)
+    and for leaving out every folder.
+    """
+    if exclude_folders is None:
+        return list(paths)
+    if not isinstance(exclude_folders, list) or not all(
+        isinstance(folder, str) and folder for folder in exclude_folders
+    ):
+        raise ValueError("exclude_folders must be a list of folder paths")
+    excluded = set(exclude_folders)
+    captured = {os.path.dirname(path) for path in paths}
+    unknown = sorted(excluded - captured)
+    if unknown:
+        raise ValueError(
+            "exclude_folders names a folder this snapshot did not capture: "
+            + unknown[0]
+        )
+    kept = [path for path in paths if os.path.dirname(path) not in excluded]
+    if paths and not kept:
+        raise ValueError("every captured folder is left out; nothing to import")
+    return kept
+
+
 class _RootOffline(Exception):
     """Raised from the walk's ``onerror`` to abandon one root's traversal."""
 

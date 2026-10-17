@@ -17,7 +17,7 @@ async function createNewImagesImportSnapshot(onPending) {
       await sleepNewImagesImport(3000);
       continue;
     }
-    /** @type {{snapshot_id: number; error?: string; folder_paths?: string[]; file_count?: number}} */ const data = await resp.json().catch(() => ({}));
+    /** @type {{snapshot_id: number; error?: string; file_count?: number}} */ const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || 'snapshot failed');
     if (data.snapshot_id == null) throw new Error('snapshot missing');
     return data.snapshot_id;
@@ -35,17 +35,17 @@ async function activateNewImagesImport(snapshotId) {
   const resp = await fetch(
     '/api/workspaces/active/new-images/snapshot/' +
     encodeURIComponent(snapshotId));
-  /** @type {{snapshot_id: number; error?: string; folder_paths?: string[]; file_count?: number}} */ const data = await resp.json().catch(() => ({}));
+  /** @type {{snapshot_id: number; error?: string; folder_paths?: string[]; folder_counts?: Record<string, number>; file_count?: number}} */ const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.error || 'snapshot expired');
 
   newImagesSnapshotId = Number(snapshotId);
+  newImagesFolderCounts = data.folder_counts || {};
+  newImagesFileCount = Number(data.file_count || 0);
+  newImagesExcludedFolders = new Set();
   sources = data.folder_paths || [];
   sourceCounts = {};
   sources.forEach(path => {
-    sourceCounts[path] = {
-      status: 'loaded',
-      text: 'Captured source folder',
-    };
+    sourceCounts[path] = newImagesSourceCount(path);
   });
 
   /** @type {HTMLInputElement} */ (document.getElementById('modeInPlace')).checked = true;
@@ -56,15 +56,103 @@ async function activateNewImagesImport(snapshotId) {
   /** @type {HTMLInputElement} */ (document.getElementById('workspaceCurrent')).checked = true;
   /** @type {HTMLInputElement} */ (document.getElementById('workspaceCurrent')).disabled = true;
   /** @type {HTMLInputElement} */ (document.getElementById('workspaceNew')).disabled = true;
-  sourceNote.textContent = Number(data.file_count || 0).toLocaleString() +
-    ' newly detected image' + (Number(data.file_count || 0) === 1 ? '' : 's') +
-    ' captured from registered folders. Import will add exactly this list in place.';
+  sourceNote.textContent = newImagesSourceNoteText();
   renderSources();
   updateImportMode();
   /** @type {HTMLButtonElement} */ (document.getElementById('btnPreview')).textContent = 'Refresh preview';
   newImagesStartBlocked = Number(data.file_count || 0) === 0;
   updateStartGate();
   await previewImport({ automatic: true });
+}
+
+/** @param {number} n */
+function formatNewImageCount(n) {
+  return Number(n || 0).toLocaleString() + ' new image' + (n === 1 ? '' : 's');
+}
+
+// The folders left out, in the order the source list shows them.
+function newImagesExcludedFolderList() {
+  return sources.filter(path => newImagesExcludedFolders.has(path));
+}
+
+function newImagesExcludedFileCount() {
+  return newImagesExcludedFolderList().reduce(
+    (sum, path) => sum + Number(newImagesFolderCounts[path] || 0), 0);
+}
+
+// What Start will add: the capture minus the folders left out.
+function newImagesIncludedFileCount() {
+  return Math.max(0, newImagesFileCount - newImagesExcludedFileCount());
+}
+
+/** @param {string} path */
+function newImagesSourceCount(path) {
+  const count = formatNewImageCount(Number(newImagesFolderCounts[path] || 0));
+  return {
+    status: 'loaded',
+    text: newImagesExcludedFolders.has(path) ? 'Left out · ' + count : count,
+  };
+}
+
+function newImagesSourceNoteText() {
+  const captured = newImagesFileCount.toLocaleString() +
+    ' newly detected image' + (newImagesFileCount === 1 ? '' : 's') +
+    ' captured from registered folders.';
+  const folders = newImagesExcludedFolderList().length;
+  if (!folders) return captured + ' Import will add exactly this list in place.';
+  const leftOut = folders.toLocaleString() + ' folder' + (folders === 1 ? '' : 's') +
+    ' (' + formatNewImageCount(newImagesExcludedFileCount()) + ') left out.';
+  const included = newImagesIncludedFileCount();
+  if (!included) {
+    return captured + ' ' + leftOut + ' Include at least one folder to import.';
+  }
+  return captured + ' ' + leftOut + ' Import will add the other ' +
+    included.toLocaleString() + ' in place.';
+}
+
+/** @returns {ImportRequest} */
+function newImagesImportBody() {
+  return {
+    source_snapshot_id: Number(newImagesSnapshotId),
+    exclude_folders: newImagesExcludedFolderList(),
+  };
+}
+
+function newImagesPreviewBody() {
+  return {
+    snapshot_id: newImagesSnapshotId,
+    exclude_folders: newImagesExcludedFolderList(),
+  };
+}
+
+// Leave a captured folder out of this import, or bring it back. Only that
+// folder's own files: its captured subfolders are separate rows.
+/** @param {string} path */
+function toggleNewImagesFolder(path) {
+  if (newImagesExcludedFolders.has(path)) newImagesExcludedFolders.delete(path);
+  else newImagesExcludedFolders.add(path);
+  sourceCounts[path] = newImagesSourceCount(path);
+  /** @type {HTMLElement} */ (document.getElementById('newImagesImportSource')).textContent =
+    newImagesSourceNoteText();
+  renderSources();
+  scheduleImportPreview();
+}
+
+// A captured folder's row can't be removed (the capture is frozen); its
+// button leaves the folder out of this import instead, or brings it back.
+/**
+ * @param {HTMLElement} row
+ * @param {HTMLButtonElement} btn
+ * @param {string} path
+ */
+function configureNewImagesFolderRow(row, btn, path) {
+  const excluded = newImagesExcludedFolders.has(path);
+  row.classList.toggle('source-item-excluded', excluded);
+  btn.textContent = excluded ? 'Include' : '×';
+  btn.title = excluded
+    ? 'Include this folder in the import'
+    : 'Leave this folder out of the import';
+  btn.onclick = () => toggleNewImagesFolder(path);
 }
 
 /** @param {string} deepLinkId */

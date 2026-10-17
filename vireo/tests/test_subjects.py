@@ -356,8 +356,8 @@ def test_reclassify_cancellation_clears_previous_subject(db, subject_photo, monk
         return ([{"box": {"x": .1, "y": .1, "w": .2, "h": .2},
                   "confidence": .9, "category": "animal"}] if replacement else [])
 
-    monkeypatch.setattr(classify_job, "detect_animals", detect)
-    monkeypatch.setattr(classify_job, "get_primary_detection", lambda detections: None)
+    monkeypatch.setattr(classify_job.detection, "detect_animals", detect)
+    monkeypatch.setattr(classify_job.detection, "get_primary_detection", lambda detections: None)
     monkeypatch.setattr("subjects.analyze_image", lambda *args: pytest.fail("Stop must not start analysis"))
     runner = SimpleNamespace(is_cancelled=lambda _: True)
     photo = dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
@@ -410,7 +410,7 @@ def test_detectorless_cached_run_clears_ineligible_primary(db, subject_photo, mo
         db.conn.execute("UPDATE detections SET detector_confidence=.1 WHERE photo_id=?", (photo_id,))
     db.conn.commit()
     path.unlink()  # Cleanup requires no source read or detector module.
-    monkeypatch.setattr(classify_job, "detect_animals", None)
+    monkeypatch.setattr(classify_job.detection, "detect_animals", None)
     photo = dict(db.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
     classify_job._detect_batch([photo], {photo["folder_id"]: str(path.parent)},
         None, {"id": 1}, False, db, det_conf_threshold=.2,

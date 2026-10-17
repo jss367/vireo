@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
+from import_job_patching import patch_import_job
 from page_scripts import page_with_scripts
 from PIL import Image
 from testing.waits import synchronization_timeout
@@ -9681,6 +9682,83 @@ def test_import_in_place_snapshot_admits_only_frozen_files(
     assert "process_job_id" not in replay_job["result"]
 
 
+def test_import_in_place_snapshot_leaves_out_excluded_folders(
+    app_and_db, tmp_path,
+):
+    """A folder left out on the Import page never reaches the catalog, and
+    the result says how much was left out. Leaving out a subfolder keeps
+    the files directly in its captured parent."""
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    trip = root / "trip"
+    trip.mkdir(parents=True)
+    kept = root / "kept.jpg"
+    left_out = trip / "left_out.jpg"
+    for path in (kept, left_out):
+        Image.new("RGB", (16, 16), "red").save(path)
+    db.add_folder(str(root), name="registered")
+    snap_id = db.workspaces.create_new_images_snapshot(
+        [str(kept), str(left_out)],
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "exclude_folders": [str(trip)],
+            "after_import": None,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        job_id = resp.get_json()["job_id"]
+        job = wait_for_job_via_client(client, job_id)
+        config = _job_config(client, job_id)
+
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["ok"] is True
+    assert result["requested"] == 1
+    assert result["imported"] == 1
+    assert result["excluded"] == 1
+    assert result["excluded_folders"] == 1
+    assert config["exclude_folders"] == [str(trip)]
+    filenames = {
+        row["filename"] for row in db.conn.execute("SELECT filename FROM photos")
+    }
+    assert "kept.jpg" in filenames
+    assert "left_out.jpg" not in filenames
+
+
+def test_import_in_place_snapshot_rejects_bad_exclusions(app_and_db, tmp_path):
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    root.mkdir()
+    photo = root / "photo.jpg"
+    Image.new("RGB", (16, 16), "red").save(photo)
+    db.add_folder(str(root), name="registered")
+    snap_id = db.workspaces.create_new_images_snapshot([str(photo)])
+    photos_before = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+
+    bad_bodies = [
+        # Not a list of folder paths.
+        {"source_snapshot_id": snap_id, "exclude_folders": str(root)},
+        # A folder the snapshot never captured: a typo must not silently
+        # import everything.
+        {"source_snapshot_id": snap_id,
+         "exclude_folders": [str(tmp_path / "elsewhere")]},
+        # Every captured folder left out: nothing to import.
+        {"source_snapshot_id": snap_id, "exclude_folders": [str(root)]},
+        # Explicit-source imports have no captured folders to leave out.
+        {"sources": [str(root)], "exclude_folders": [str(root)]},
+    ]
+    with app.test_client() as client:
+        for body in bad_bodies:
+            resp = client.post(
+                "/api/jobs/import-in-place", json={**body, "after_import": None},
+            )
+            assert resp.status_code == 400, (body, resp.get_json())
+    photos_after = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+    assert photos_after == photos_before
+
+
 def test_import_in_place_snapshot_reports_missing_without_processing(
     app_and_db, tmp_path,
 ):
@@ -11569,7 +11647,7 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
     archive = tmp_path / "arch"
 
     partials = {}
-    real_publish = import_job._publish_resume_scope
+    real_publish = import_job.resume._publish_resume_scope
 
     def recording_publish(job, db_, state, source_snapshots, runner=None, **kw):
         published = real_publish(
@@ -11577,7 +11655,7 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
         partials[job["id"]] = job["partial_result"]
         return published
 
-    monkeypatch.setattr(import_job, "_publish_resume_scope", recording_publish)
+    patch_import_job(monkeypatch, "_publish_resume_scope", recording_publish)
 
     with app.test_client() as client:
         parent_id = _post_import(client, card, archive, quick_look_id)
@@ -11688,7 +11766,7 @@ def test_interrupted_import_resume_tags_the_carried_photos(
     tag_name = "Kenya trip"
 
     partials = {}
-    real_publish = import_job._publish_resume_scope
+    real_publish = import_job.resume._publish_resume_scope
 
     def recording_publish(job, db_, state, source_snapshots, runner=None, **kw):
         published = real_publish(
@@ -11696,7 +11774,7 @@ def test_interrupted_import_resume_tags_the_carried_photos(
         partials[job["id"]] = job["partial_result"]
         return published
 
-    monkeypatch.setattr(import_job, "_publish_resume_scope", recording_publish)
+    patch_import_job(monkeypatch, "_publish_resume_scope", recording_publish)
 
     with app.test_client() as client:
         # Parent import with common tags, no chained after-import so the

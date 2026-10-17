@@ -23,6 +23,15 @@ from dataclasses import dataclass
 
 import config as cfg
 from best_batch import best_batch_scope, build_best_batch_response
+from burst_evidence import (
+    DEFAULT_CLOSE_CALL_MARGIN,
+    DEFAULT_FOCUS_CROP_SIZE,
+    MAX_CLOSE_CALL_MARGIN,
+    MAX_FOCUS_CROP_SIZE,
+    MIN_FOCUS_CROP_SIZE,
+    build_evidence_pack,
+    numeric_query_arg,
+)
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from db import Database
 from file_replace import replace_file
@@ -53,6 +62,7 @@ from render_source import (
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
+from services.photo_review import flag_note
 from services.visual_scope import inject_active_visual_model, validate_visual_arg
 from web.app_hooks import claim_search_lane
 from web.background_jobs import make_background_job
@@ -1058,6 +1068,10 @@ def create_photos_blueprint(
         result["location"] = serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
         result["render_key"] = render_key_for_recipe(result["edit_recipe"])
+        # Who set the current flag and why, when a reviewer said so (a
+        # headless adjudicator's reject carries its source and reason); None
+        # for a hand flag or a flag changed since without history.
+        result["flag_note"] = flag_note(db, photo_id, result.get("flag"))
         from camera_denoise import resolve_profile
         result["denoise_profile"] = resolve_profile(photo)
         # The shared lightbox normally warms /original after /full settles.
@@ -1158,34 +1172,47 @@ def create_photos_blueprint(
         attach_nested_edit_recipes(db, result)
         return jsonify(result)
 
-    @blueprint.route("/api/photos/best-batch", methods=["POST"])
-    def api_selected_photos_best_batch():
-        """Rank an explicit selected set as a temporary best-batch group."""
-        db = get_db()
-        body = request.get_json(silent=True) or {}
+    def _selected_best_batch_rows(db, body):
+        """``(photo_ids, rows, None)`` for a selected-photos batch body, or
+        ``(None, None, error_response)``.
+
+        Shared by the Best Batch and burst-evidence POST routes so both
+        accept exactly the same selection: at most 500 integer ids, at least
+        two of which the workspace can see in an online folder.
+        """
         raw_ids = body.get("photo_ids", [])
         if not isinstance(raw_ids, list) or not raw_ids:
-            return json_error("photo_ids required")
+            return None, None, json_error("photo_ids required")
         if len(raw_ids) > 500:
-            return json_error("too many photo_ids", 400)
+            return None, None, json_error("too many photo_ids", 400)
 
         photo_ids = []
         seen = set()
         for raw in raw_ids:
             if isinstance(raw, bool) or not isinstance(raw, int):
-                return json_error("photo_ids must be integers", 400)
+                return None, None, json_error("photo_ids must be integers", 400)
             if raw in seen:
                 continue
             seen.add(raw)
             photo_ids.append(raw)
         if len(photo_ids) < 2:
-            return json_error("at least two selected photos are required", 400)
+            return None, None, json_error("at least two selected photos are required", 400)
 
-        rows = db.get_best_batch_rows_by_ids(photo_ids)
+        rows = db.photos.best_batch_rows_by_ids(photo_ids)
         by_id = {row["id"]: row for row in rows}
         rows = [by_id[pid] for pid in photo_ids if pid in by_id]
         if len(rows) < 2:
-            return json_error("at least two selected photos are required", 400)
+            return None, None, json_error("at least two selected photos are required", 400)
+        return photo_ids, rows, None
+
+    @blueprint.route("/api/photos/best-batch", methods=["POST"])
+    def api_selected_photos_best_batch():
+        """Rank an explicit selected set as a temporary best-batch group."""
+        db = get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids, rows, err = _selected_best_batch_rows(db, body)
+        if err is not None:
+            return err
 
         result, error = build_best_batch_response(db, photo_ids[0], rows)
         if error:
@@ -1193,6 +1220,76 @@ def create_photos_blueprint(
         result["scope_method"] = "selected_photos"
         attach_nested_edit_recipes(db, result)
         return jsonify(result)
+
+    def _evidence_pack_args():
+        """``(margin, focus_size, None)`` from the request, or ``(None, None, error)``."""
+        try:
+            margin = numeric_query_arg(request.args, "margin", DEFAULT_CLOSE_CALL_MARGIN,
+                                       float, 0, MAX_CLOSE_CALL_MARGIN)
+            focus_size = numeric_query_arg(request.args, "focus_size", DEFAULT_FOCUS_CROP_SIZE,
+                                           int, MIN_FOCUS_CROP_SIZE, MAX_FOCUS_CROP_SIZE)
+        except ValueError as exc:
+            return None, None, json_error(str(exc))
+        return margin, focus_size, None
+
+    @blueprint.route("/api/photos/<int:photo_id>/burst-evidence")
+    def api_photo_burst_evidence(photo_id):
+        """The burst around one photo as an evidence pack.
+
+        The Best Batch ranking (same scope rules and scorer as
+        ``/api/photos/<id>/best-batch``) plus ``coverage`` (how many frames
+        have detection, mask, quality and eye features), ``ambiguity`` (the
+        rule-based reasons the scorer's pick needs a reviewer), ``scoring``
+        (the settings the verdict depends on) and, per card, the 1:1
+        ``focus_crop_url`` and its mask-shaded twin. ``margin`` and
+        ``focus_size`` tune the close-call gap and the crop side. See
+        ``docs/plans/2026-10-17-burst-evidence-adjudication-design.md``.
+        """
+        db = get_db()
+        margin, focus_size, err = _evidence_pack_args()
+        if err is not None:
+            return err
+        try:
+            max_gap = numeric_query_arg(request.args, "gap_seconds", 8.0, float, 0, 120)
+            max_photos = numeric_query_arg(request.args, "max_photos", 120, int, 2, 500)
+        except ValueError as exc:
+            return json_error(str(exc))
+        rows, method_or_error = best_batch_scope(
+            db, photo_id, max_gap_seconds=max_gap, max_photos=max_photos,
+        )
+        if rows is None:
+            return json_error(method_or_error, 404)
+        pack = build_evidence_pack(
+            db, photo_id, rows,
+            effective_cfg=db.get_effective_config(cfg.load()),
+            margin=margin, focus_size=focus_size,
+        )
+        pack["scope_method"] = method_or_error
+        return jsonify(pack)
+
+    @blueprint.route("/api/photos/burst-evidence", methods=["POST"])
+    def api_selected_photos_burst_evidence():
+        """The evidence pack for an explicit selection (``{"photo_ids": [...]}``).
+
+        Same selection contract as ``POST /api/photos/best-batch``; same pack
+        as ``GET /api/photos/<id>/burst-evidence`` with ``scope_method``
+        ``selected_photos``.
+        """
+        db = get_db()
+        margin, focus_size, err = _evidence_pack_args()
+        if err is not None:
+            return err
+        body = request.get_json(silent=True) or {}
+        photo_ids, rows, err = _selected_best_batch_rows(db, body)
+        if err is not None:
+            return err
+        pack = build_evidence_pack(
+            db, photo_ids[0], rows,
+            effective_cfg=db.get_effective_config(cfg.load()),
+            margin=margin, focus_size=focus_size,
+        )
+        pack["scope_method"] = "selected_photos"
+        return jsonify(pack)
 
     def _map_request_scope(db, folder_id):
         """``(selection_ids, rules, visual_info)`` for a Map request.

@@ -59,6 +59,7 @@ GET          /api/filters/shortcuts
 GET          /api/filters/values
 GET          /api/folders
 GET          /api/folders/<int:folder_id>
+GET          /api/folders/<int:folder_id>/bursts
 GET          /api/folders/<int:folder_id>/workspaces
 GET          /api/folders/missing
 GET          /api/health
@@ -103,6 +104,7 @@ GET          /api/photos
 GET          /api/photos/<int:photo_id>
 GET          /api/photos/<int:photo_id>/auto-tone
 GET          /api/photos/<int:photo_id>/best-batch
+GET          /api/photos/<int:photo_id>/burst-evidence
 GET          /api/photos/<int:photo_id>/edit-history
 GET          /api/photos/<int:photo_id>/edit-recipe
 GET          /api/photos/<int:photo_id>/pipeline
@@ -151,10 +153,13 @@ GET          /api/taxonomy/info
 GET          /api/undo/status
 GET          /api/v1/collections
 GET          /api/v1/collections/<int:collection_id>/photos
+GET          /api/v1/folders/<int:folder_id>/bursts
 GET          /api/v1/health
 GET          /api/v1/keywords
 GET          /api/v1/photos
 GET          /api/v1/photos/<int:photo_id>
+GET          /api/v1/photos/<int:photo_id>/burst-evidence
+GET          /api/v1/photos/<int:photo_id>/focus-crop
 GET          /api/v1/version
 GET          /api/v1/workspaces
 GET          /api/version
@@ -199,6 +204,7 @@ GET          /move
 GET          /photos/<int:photo_id>/crop
 GET          /photos/<int:photo_id>/edit-mask-preview
 GET          /photos/<int:photo_id>/edit-preview
+GET          /photos/<int:photo_id>/focus-crop
 GET          /photos/<int:photo_id>/full
 GET          /photos/<int:photo_id>/original
 GET          /photos/<int:photo_id>/preview
@@ -363,6 +369,7 @@ POST         /api/photos/<int:photo_id>/rating
 POST         /api/photos/<int:photo_id>/subjects/analyze
 POST         /api/photos/<int:photo_id>/wildlife_excluded
 POST         /api/photos/best-batch
+POST         /api/photos/burst-evidence
 POST         /api/photos/by-ids
 POST         /api/photos/companion-count
 POST         /api/photos/edit-recipe/apply
@@ -424,6 +431,9 @@ POST         /api/sync/discard
 POST         /api/sync/location-writes
 POST         /api/system/install-exiftool
 POST         /api/undo
+POST         /api/v1/batch/flag
+POST         /api/v1/photos/<int:photo_id>/flag
+POST         /api/v1/photos/burst-evidence
 POST         /api/v1/shutdown
 POST         /api/v1/workspaces/<int:ws_id>/activate
 POST         /api/workspace/tabs/pin

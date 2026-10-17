@@ -61,6 +61,25 @@ that information for interactive use.
   Existing helper entry points remain in `pipeline_job.py` for callers and
   diagnostics, and `PipelineParams` remains importable from there. New stage
   work belongs in the stage modules, not inside `run_pipeline_job`.
+- The standalone classify job (`/api/jobs/classify`) is the
+  `vireo/classify_job/` package, one module per responsibility: label loading,
+  the classifier_runs gate, cache coverage, label-source naming, detection,
+  the classify pass, prediction storage, the cached-only finalize, and the
+  `run_classify_job` entry point with `_ClassifyJobRun`. `__init__.py`
+  re-exports what other modules import (the pipeline stages reuse its
+  detection, batching and storage helpers through the package). Tests patch
+  a name in the submodule that looks it up, because a patch of the package
+  attribute reaches only callers that read it through the package.
+- The import job is the `vireo/import_job/` package, one module per
+  responsibility (planning, the batch loop, preflight, the duplicate gate,
+  transports, copy-and-verify, cataloging, resume, the result). Its
+  `__init__.py` re-exports only what callers outside the package import
+  (`run_import_job`, `ImportParams`, `copy_and_hash_verify`,
+  `DestReadCancelled`, and the snapshot and fingerprint helpers the import
+  services use). Its catalog SQL goes through `db.imports`
+  (`repositories/imports.py`). The modules import shared helpers by name, so
+  a test patches a helper in the module that looks it up, or with
+  `vireo/tests/import_job_patching.patch_import_job` when several do.
 - Repositories (`vireo/repositories/`) own SQL for one domain; `Database`
   is the façade over them. Simple persistence operations are reached through
   a domain accessor, a property that builds a fresh repository through the

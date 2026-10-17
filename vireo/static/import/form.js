@@ -91,7 +91,7 @@ function selectionUnavailableText() {
   if (newImagesSnapshotId !== null) {
     return 'File selection is not available for this import. It adds exactly'
       + ' the captured list of newly detected images, leaving the originals'
-      + ' where they are.';
+      + ' where they are. Use × on a source folder to leave that folder out.';
   }
   return 'File selection is available in Copy to archive mode. Add in place'
     + ' catalogs every file it finds in your source folders.';
@@ -165,6 +165,13 @@ function importFormProblem() {
   if (!sources.length && newImagesSnapshotId === null) {
     return {
       message: 'Add at least one source folder.',
+      target: /** @type {HTMLElement} */ (document.getElementById('sourceCard')),
+    };
+  }
+  if (newImagesSnapshotId !== null && newImagesFileCount > 0
+      && newImagesIncludedFileCount() === 0) {
+    return {
+      message: 'Every folder is left out. Include at least one to import.',
       target: /** @type {HTMLElement} */ (document.getElementById('sourceCard')),
     };
   }

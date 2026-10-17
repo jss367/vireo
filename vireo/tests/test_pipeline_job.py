@@ -2510,7 +2510,7 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     models.set_active_model("bioclip-vit-b-16")
     # Short-circuit taxonomy and label loading so the test stays focused on
     # model-loading behavior.
-    monkeypatch.setattr(classify_job, "_load_taxonomy", lambda *a, **k: {})
+    monkeypatch.setattr(classify_job.common, "_load_taxonomy", lambda *a, **k: {})
     monkeypatch.setattr(
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False, [])
     )
@@ -2546,7 +2546,7 @@ def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
         extra_files=("tol_embeddings.npy", "tol_classes.json"),
     )
     models.set_active_model("bioclip-vit-b-16")
-    monkeypatch.setattr(classify_job, "_load_taxonomy", lambda *a, **k: {})
+    monkeypatch.setattr(classify_job.common, "_load_taxonomy", lambda *a, **k: {})
     monkeypatch.setattr(
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False, [])
     )
@@ -2872,10 +2872,11 @@ def test_pipeline_classify_step_names_the_label_set(tmp_path, monkeypatch):
             [{"labels_file": "/l/birds.txt", "name": "California, US Birds"}],
         ),
     )
-    monkeypatch.setattr(
-        classify_job, "get_active_labels",
-        lambda: [{"labels_file": "/l/birds.txt", "name": "California, US Birds"}],
-    )
+    for module in (classify_job.label_loading, classify_job.label_source):
+        monkeypatch.setattr(
+            module, "get_active_labels",
+            lambda: [{"labels_file": "/l/birds.txt", "name": "California, US Birds"}],
+        )
 
     monkeypatch.setattr(classifier_mod, "Classifier", _ZeroEmbeddingClassifier)
 
@@ -3046,8 +3047,8 @@ def test_pipeline_classifies_full_image_when_detector_finds_nothing(
 
     _setup_fake_downloaded_model(tmp_path, monkeypatch)
     monkeypatch.setattr(detector, "ensure_megadetector_weights", lambda **_k: None)
-    monkeypatch.setattr(classify_job, "detect_animals", lambda _path: [])
-    monkeypatch.setattr(classify_job, "get_primary_detection", lambda _dets: None)
+    monkeypatch.setattr(classify_job.detection, "detect_animals", lambda _path: [])
+    monkeypatch.setattr(classify_job.detection, "get_primary_detection", lambda _dets: None)
 
     classify_calls = []
 
@@ -3154,7 +3155,7 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
 
     A completed classifier run whose every label fell under the confidence
     floor writes a ``classifier_runs`` marker and a ``classifier_match_scores``
-    row but no ``predictions`` rows. ``classify_job.py`` treats that as a
+    row but no ``predictions`` rows. ``classify_job`` treats that as a
     cache hit; ``pipeline_job.py`` used to fall through to re-inference —
     which on a partially cached run silently replaces the authoritative
     "nothing in this list fits" verdict with fresh predictions, and on an
@@ -3181,8 +3182,8 @@ def test_pipeline_honors_measured_zero_candidate_run_in_combined_gate(
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
     import detector
     monkeypatch.setattr(detector, "ensure_megadetector_weights", lambda **_k: None)
-    monkeypatch.setattr(classify_job, "detect_animals", lambda _path: [])
-    monkeypatch.setattr(classify_job, "get_primary_detection", lambda _dets: None)
+    monkeypatch.setattr(classify_job.detection, "detect_animals", lambda _path: [])
+    monkeypatch.setattr(classify_job.detection, "get_primary_detection", lambda _dets: None)
 
     classify_calls = []
 
@@ -5925,14 +5926,14 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
 ):
     """extract_masks_stage must treat detector_model='full-image' rows as
     non-detections: they are classify-anchor rows (created by the
-    standalone classify path in classify_job.py for photos where
+    standalone classify path in classify_job for photos where
     MegaDetector found nothing), not real subject boxes. Counting them
     toward photos_with_detections hides the "weights missing / no
     detections" diagnostic and drives mask extraction on useless full-frame
     boxes.
 
     The pipeline classify stage no longer creates synthetic full-image
-    detections — but classify_job.py still does, and this filter is the
+    detections — but classify_job still does, and this filter is the
     last line of defense regardless of the source.
     """
     import classifier as classifier_mod

@@ -99,7 +99,7 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   /** @type {HTMLElement} */ (document.getElementById('detailRating')).innerHTML = ratingHtml;
 
   // Flags
-  updateDetailFlagButtons(photo.flag);
+  updateDetailFlagButtons(photo.flag, photo.flag_note);
 
   // Color labels
   updateDetailColors();
@@ -215,13 +215,51 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   renderMetadataGroups(photo.metadata);
 }
 
-function updateDetailFlagButtons(/** @type {string | null | undefined} */ flag) {
+// Also renders the note under the buttons saying who set the flag and why,
+// when the detail payload carried one. Callers that only know the flag (a
+// hand click, the batch inspector) pass no note, and a hand flag has none.
+function updateDetailFlagButtons(
+  /** @type {string | null | undefined} */ flag,
+  /** @type {BrowseFlagNote | null | undefined} */ note = null,
+) {
   /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.detail-flag-btn')).forEach(function(btn) {
     btn.className = 'detail-flag-btn';
   });
   var flagBtns = /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.detail-flag-btn'));
   if (flag === 'flagged') flagBtns[1]?.classList.add('active-flag');
   else if (flag === 'rejected') flagBtns[2]?.classList.add('active-reject');
+  renderDetailFlagNote(flag, note);
+}
+
+// The line under the flag buttons: "Rejected — claude-fable-5-1: eye soft at
+// 1:1 · 2026-10-17". Pure: the detail payload's flag and flag_note in, text
+// out ('' when the flag was a hand click, which carries no provenance).
+function flagNoteText(
+  /** @type {string | null | undefined} */ flag,
+  /** @type {BrowseFlagNote | null | undefined} */ note,
+) {
+  if (!note || (!note.source && !note.reason)) return '';
+  var normalized = flag || 'none';
+  if ((note.flag || 'none') !== normalized) return '';
+  var verb = normalized === 'rejected' ? 'Rejected'
+    : normalized === 'flagged' ? 'Flagged'
+    : 'Flag cleared';
+  var who = note.source && note.reason ? note.source + ': ' + note.reason
+    : note.source ? 'by ' + note.source
+    : String(note.reason);
+  var when = note.at ? ' \u00b7 ' + String(note.at).slice(0, 10) : '';
+  return verb + ' \u2014 ' + who + when;
+}
+
+function renderDetailFlagNote(
+  /** @type {string | null | undefined} */ flag,
+  /** @type {BrowseFlagNote | null | undefined} */ note,
+) {
+  var el = document.getElementById('detailFlagNote');
+  if (!el) return;
+  var text = flagNoteText(flag, note);
+  el.textContent = text;
+  el.hidden = !text;
 }
 
 function renderMetadataGroups(/** @type {BrowseMetadata | undefined} */ metadata) {
@@ -435,6 +473,41 @@ async function loadSummary() {
   }
 }
 
+// Recorded completed runs and qualifying results are distinct: no animal
+// box does not imply the detector never ran. Missing run coverage on an
+// older response is unknown, rather than zero.
+// Empty when the scope has no photos or the server sent no coverage.
+function analysisCoverageText(/** @type {BrowseSummary} */ summary) {
+  var total = Number(summary && summary.filtered_total) || 0;
+  var analysis = summary && summary.analysis;
+  if (total <= 0 || !analysis) return '';
+  var totalText = total.toLocaleString();
+  function count(/** @type {number | undefined} */ value) {
+    return Math.min(Math.max(Number(value) || 0, 0), total);
+  }
+  function dataSegment(/** @type {string} */ noun, /** @type {string} */ preposition, /** @type {number | undefined} */ value) {
+    var n = count(value);
+    if (n === 0) return noun + ' never computed';
+    return noun + ' ' + preposition + ' ' + n.toLocaleString() + ' of ' + totalText;
+  }
+  var misses = count(analysis.with_misses);
+  var missesSegment = misses === 0 ? 'misses never computed'
+    : misses === total ? 'misses checked on ' + totalText
+    : 'misses checked on ' + misses.toLocaleString() + ' of ' + totalText;
+  var detected = count(analysis.with_detection);
+  var text = [
+    analysis.with_detection_run == null ? '' : count(analysis.with_detection_run) === 0
+      ? 'no completed detection runs recorded'
+      : 'detection checked on ' + count(analysis.with_detection_run).toLocaleString() + ' of ' + totalText,
+    detected === 0 ? 'no qualifying animal detections recorded'
+      : 'animal detections recorded on ' + detected.toLocaleString() + ' of ' + totalText,
+    dataSegment('quality data', 'for', analysis.with_quality),
+    dataSegment('eye focus', 'for', analysis.with_eye),
+    missesSegment,
+  ].filter(Boolean).join(' · ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function renderSummary(/** @type {BrowseSummary} */ data) {
   var isFiltered = data.filtered_total !== data.total;
 
@@ -444,6 +517,7 @@ function renderSummary(/** @type {BrowseSummary} */ data) {
 
   /** @type {HTMLElement} */ (document.getElementById('summaryClassified')).textContent = data.classified.toLocaleString() + ' classified';
   /** @type {HTMLElement} */ (document.getElementById('summaryUnclassified')).textContent = data.unclassified.toLocaleString() + ' unclassified';
+  /** @type {HTMLElement} */ (document.getElementById('summaryAnalysis')).textContent = analysisCoverageText(data);
 
   // Top species
   var speciesSection = /** @type {HTMLElement} */ (document.getElementById('summarySpeciesSection'));

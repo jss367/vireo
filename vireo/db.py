@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from repositories.photo_labels import PhotoLabelRepository
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
+    from repositories.photos import PhotoRepository
     from repositories.predictions import PredictionRepository
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
@@ -569,7 +570,7 @@ def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
 # keyword (see ``vireo/catalog.py``) and the classifier already treats
 # ancestor tags as "broader labels for the same taxon" rather than
 # separate identifications (see ``_can_auto_accept_detection_prediction``
-# in ``vireo/classify_job.py``). Without a hierarchy filter, a normal
+# in ``vireo/classify_job/store_predictions.py``). Without a hierarchy filter, a normal
 # species-tagged robin would also inflate ``Turdus`` / ``Turdidae`` /
 # ``Aves`` Life List buckets on those catalogs.
 #
@@ -3223,6 +3224,23 @@ class Database:
 
     # -- Photos --
 
+    @property
+    def photos(self) -> PhotoRepository:
+        """Workspace-scoped photo rows: ``db.photos.best_batch_rows_by_ids(ids)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_photos_repository`` for the active
+        workspace (raising when none is active), so never hold one across
+        ``set_active_workspace``. Serves the simple reads that need no
+        coordination: the Best Batch scope rows (``best_batch_rows_by_ids``,
+        ``best_batch_sequence_rows``, ``best_batch_folder_rows``,
+        ``count_folder_photos``) and ``analysis_evidence_rows``. The older
+        photo methods still reach the repository through forwarding
+        wrappers (``get_photo``, ``get_photos`` ...); composition such as
+        ``add_photo`` stays on ``Database``.
+        """
+        return self._photos_repository()
+
     def _photos_repository(self, *, scoped=True):
         """Build the core photo-row repository on this connection.
 
@@ -3612,13 +3630,6 @@ class Database:
         nothing instead of raising.
         """
         return self._photos_repository(scoped=False).file_in_workspace(photo_id, workspace_id)
-
-    def get_best_batch_rows_by_ids(self, photo_ids):
-        """Best Batch rows for the named workspace photos in online folders, unordered.
-
-        One unchunked statement, so the caller bounds ``photo_ids``.
-        """
-        return self._photos_repository().best_batch_rows_by_ids(photo_ids)
 
     def get_photo_flags_ratings_and_eyes(self, photo_ids):
         """``{photo_id: Row}`` with ``id``, ``flag``, ``rating``, ``eye_x``, ``eye_y``, ``eye_conf``, ``eye_tenengrad``."""
@@ -8920,7 +8931,10 @@ class Database:
         """
         return self._edit_history_repository()
 
-    def record_edit(self, action_type, description, new_value, items, is_batch=False, _commit=True):
+    def record_edit(
+        self, action_type, description, new_value, items, is_batch=False, _commit=True,
+        *, source=None, reason=None,
+    ):
         """Record an edit action with per-photo before/after values.
 
         Clears the redo stack (any undone entries) since a new action invalidates them.
@@ -8929,10 +8943,12 @@ class Database:
             _commit: If False, skip the internal commit and the history prune
                      (caller is responsible for committing the transaction;
                      prune can be run later).
+            source, reason: the edit's provenance when the caller stated it
+                     (who decided, and why); None for the user's own clicks.
         """
         edit_id = self._edit_history_repository().record(
             action_type, description, new_value, items,
-            is_batch=is_batch, _commit=_commit,
+            is_batch=is_batch, _commit=_commit, source=source, reason=reason,
         )
         if _commit:
             self._prune_edit_history()
@@ -9563,6 +9579,10 @@ class Database:
         if not pred_id:
             return
         self.update_prediction_status(int(pred_id), "rejected", _commit=False)
+
+    def prune_edit_history(self):
+        """Apply the configured history bound after a caller-owned edit transaction commits."""
+        return self._prune_edit_history()
 
     def _prune_edit_history(self):
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""

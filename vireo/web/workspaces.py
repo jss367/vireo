@@ -1493,12 +1493,15 @@ def create_workspace_blueprint(
         snap = db.get_new_images_snapshot(snapshot_id)
         if snap is None:
             abort(404)
+        from new_images import snapshot_folder_counts
+
         paths = snap["file_paths"]
-        folder_paths = sorted({os.path.dirname(p) for p in paths})
+        folder_counts = snapshot_folder_counts(paths)
         files_sample = paths[:5]
         return jsonify({
             "file_count": snap["file_count"],
-            "folder_paths": folder_paths,
+            "folder_paths": sorted(folder_counts),
+            "folder_counts": folder_counts,
             "files_sample": files_sample,
         })
 

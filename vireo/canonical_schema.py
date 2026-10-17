@@ -20,7 +20,7 @@ This module must not import ``db``: ``schema.py`` imports ``db``, and
 # database it creates from nothing. It is the newest registry migration in
 # ``schema.MIGRATIONS``: ``create_tables`` builds every migration's end state,
 # so a fresh database has nothing to migrate.
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 20
 
 # Schema objects that the code which first wrote them used to create on
 # demand (the job runner's history, the preview cache's "do not adopt"
@@ -115,6 +115,37 @@ def create_formerly_lazy_objects(conn):
     if "workspace_id" in job_history_columns(conn):
         for statement in JOB_HISTORY_WORKSPACE_OBJECTS:
             conn.execute(statement)
+
+
+
+CURRENT_FLAG_ATTRIBUTION_OBJECTS = (
+    """CREATE TABLE IF NOT EXISTS current_flag_attribution (
+        photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+        workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        flag TEXT NOT NULL,
+        source TEXT,
+        reason TEXT,
+        description TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
+    """CREATE TRIGGER IF NOT EXISTS invalidate_current_flag_attribution
+    AFTER UPDATE OF flag ON photos
+    BEGIN
+        DELETE FROM current_flag_attribution WHERE photo_id = NEW.id;
+    END""",
+)
+
+
+def create_current_flag_attribution(conn):
+    """Legacy flags stay unattributed; every subsequent flag write invalidates its note."""
+    for statement in CURRENT_FLAG_ATTRIBUTION_OBJECTS:
+        conn.execute(statement)
+
+
+def create_auxiliary_schema_objects(conn):
+    """Shared auxiliary objects for fresh catalogs; migrations use the same DDL."""
+    create_formerly_lazy_objects(conn)
+    create_current_flag_attribution(conn)
 
 
 class CanonicalSchema:
@@ -641,6 +672,9 @@ class CanonicalSchema:
                 UNIQUE(photo_id, observation_id)
             );
 
+            -- source/reason: who made the edit and why, when the caller said
+            -- (a headless reviewer recording a cull decision). NULL for the
+            -- user's own clicks. Migration 19 adds them to older catalogs.
             CREATE TABLE IF NOT EXISTS edit_history (
                 id           INTEGER PRIMARY KEY,
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -649,7 +683,9 @@ class CanonicalSchema:
                 new_value    TEXT,
                 is_batch     INTEGER DEFAULT 0,
                 undone       INTEGER DEFAULT 0,
-                created_at   TEXT DEFAULT (datetime('now'))
+                created_at   TEXT DEFAULT (datetime('now')),
+                source       TEXT,
+                reason       TEXT
             );
 
             CREATE TABLE IF NOT EXISTS edit_history_items (
@@ -1129,7 +1165,7 @@ class CanonicalSchema:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_keywords_place_id "
             "ON keywords(place_id) WHERE place_id IS NOT NULL"
         )
-        create_formerly_lazy_objects(self.conn)
+        create_auxiliary_schema_objects(self.conn)
 
         # Seed user-editable saved processes once. db_meta-guarded (NOT
         # user_version-guarded) because the live DB's user_version can run
