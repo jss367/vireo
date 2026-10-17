@@ -221,7 +221,9 @@ def assess_ambiguity(cards, coverage, *, eye_detect_enabled, margin=DEFAULT_CLOS
 
     cards = list(cards or [])
     ranked = [c for c in cards if c.get("label") != "REJECT"]
-    if cards and not ranked:
+    # Scoring stores only hard failures in reject_reasons. Rarity protection
+    # can promote REJECT to REVIEW while retaining those failures.
+    if cards and all(c.get("label") == "REJECT" or c.get("reject_reasons") for c in cards):
         reasons.append({
             "code": "all_rejected",
             "detail": "every frame failed a hard-reject rule",

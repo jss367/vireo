@@ -180,7 +180,7 @@ class Image:
         buf.write(b"fake-jpeg")
 
 
-def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None, detections=None, active_prompt=None):
+def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None, detections=None, active_prompt=None, original_size=None):
     events = []
     photo = (
         photo
@@ -219,7 +219,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         ),
         "image_loader": types.SimpleNamespace(
             load_working_image=loader,
-            load_image=lambda path, max_size=None: events.append(("original", path)) or Image(size, events, "original"),
+            load_image=lambda path, max_size=None: events.append(("original", path)) or Image(original_size or size, events, "original"),
         ),
         "PIL": types.SimpleNamespace(Image=pil),
         "io": io,
@@ -236,7 +236,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         "os": types.SimpleNamespace(
             path=types.SimpleNamespace(
                 dirname=posixpath.dirname, join=posixpath.join, realpath=posixpath.normpath,
-                isfile=lambda path: False,
+                isfile=lambda path: original_size is not None,
             ),
             sep="/",
         ),
@@ -653,6 +653,39 @@ def test_evidence_pack_states():
         pack_checks()
     finally:
         pure["build_best_batch_response"] = previous
+
+
+
+
+def test_focus_center_and_original_source_with_fake_images():
+    for center in ("nan,0.5", "0.5,inf", "-0.1,0.5", "0.5", "0.5,0.5,0.5"):
+        result, events = focus(args={"center": center})
+        assert result[1] == 400 and not any(e[0] == "loader" for e in events)
+    result, _ = focus(args={"source": "original"})
+    assert result[1] == 404
+    result, events = focus(args={"source": "original", "center": "0.25,0.75"}, original_size=(6000, 4000))
+    assert any(e[0] == "original" for e in events)
+    assert not any(e[0] == "loader" for e in events)
+    assert result.headers["X-Vireo-Focus-Basis"] == "point"
+    assert result.headers["X-Vireo-Focus-Source"] == "original"
+    result, events = focus(args={"source": "working"}, original_size=(6000, 4000))
+    assert not any(e[0] == "original" for e in events)
+    assert result.headers["X-Vireo-Focus-Source"] == "working_copy"
+    print("PASS center rejection/override and explicit original/working source with fake paths and rasters")
+
+
+def test_all_hard_rejected_survives_rarity_promotion():
+    coverage = dict(photos=2, with_quality=2)
+    protected = dict(label="REVIEW", reject_reasons=["out_of_focus (F=0.1 < 0.35)"], sharpness=80)
+    rejected = dict(label="REJECT", reject_reasons=["no_subject_mask"], sharpness=40)
+    def codes(cards):
+        return {r["code"] for r in pure["assess_ambiguity"](cards, coverage, eye_detect_enabled=False)["reasons"]}
+    assert "all_rejected" in codes([protected, rejected])
+    assert "all_rejected" in codes([protected])
+    assert "all_rejected" not in codes([protected, dict(label="REVIEW", reject_reasons=[])])
+    assert "all_rejected" not in codes([dict(label="KEEP", reject_reasons=[])])
+    assert "all_rejected" not in codes([])
+    print("PASS hard-reject warning survives rarity promotion; clean REVIEW/KEEP and empty packs stay clear")
 
 
 if __name__ == "__main__":

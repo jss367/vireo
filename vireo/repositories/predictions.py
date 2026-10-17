@@ -29,6 +29,12 @@ This module owns the SQL behind the predictions domain:
   reviewed) share ``get_decision_row``, which selects the union of their
   columns.
 
+- the classify job's two statements (``replace_row``, the ``INSERT OR
+  REPLACE`` of one classifier output, and ``id_for_key``, which
+  ``_existing_prediction_id`` shares), SQL unchanged from ``classify_job``.
+  They are the domain's first operations reached through the
+  ``db.predictions`` accessor rather than a ``Database`` wrapper.
+
 The other method bodies were moved verbatim from ``Database``. The only edits are
 ``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
 the ``db`` module helpers and constants listed in ``__init__``; the SQL text,
@@ -185,13 +191,7 @@ class PredictionRepository:
 
         Returns ``None`` when no such row exists.
         """
-        row = self.conn.execute(
-            """SELECT id FROM predictions
-                   WHERE detection_id = ? AND classifier_model = ?
-                     AND labels_fingerprint = ? AND species IS ?""",
-            (detection_id, model, labels_fingerprint, species),
-        ).fetchone()
-        pred_id = row["id"] if row else None
+        pred_id = self.id_for_key(detection_id, model, labels_fingerprint, species)
         if pred_id is not None and refresh_output:
             self.conn.execute(
                 """UPDATE predictions SET confidence=?, category=?,
@@ -1904,3 +1904,60 @@ class PredictionRepository:
                  ON wf.photo_id = p.id AND wf.workspace_id = ?""",
             (self.workspace_id,),
         ).fetchone()[0]
+
+    # -- classify job ---------------------------------------------------------
+    #
+    # The two prediction statements ``classify_job`` used to run on
+    # ``db.conn``, SQL unchanged. Reached through ``db.predictions``.
+
+    def replace_row(
+        self, detection_id, classifier_model, labels_fingerprint, species,
+        confidence, category, tax, raw_score,
+    ):
+        """``INSERT OR REPLACE`` one classifier output row, without committing.
+
+        Keyed on the UNIQUE (detection_id, classifier_model,
+        labels_fingerprint, species), so a re-classify refreshes the row in
+        place. ``tax`` is the prediction's taxonomy dict (``scientific_name``,
+        the ranks, ``taxon_id``) and ``raw_score`` lands in ``match_score``.
+        The caller commits. Writes no review state.
+        """
+        self.conn.execute(
+            """INSERT OR REPLACE INTO predictions
+                (detection_id, classifier_model, labels_fingerprint, species,
+                 confidence, category, scientific_name,
+                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
+                 taxonomy_order, taxonomy_family, taxonomy_genus, source_taxon_id,
+                 match_score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                detection_id,
+                classifier_model,
+                labels_fingerprint,
+                species,
+                confidence,
+                category,
+                tax.get("scientific_name"),
+                tax.get("kingdom"),
+                tax.get("phylum"),
+                tax.get("class"),
+                tax.get("order"),
+                tax.get("family"),
+                tax.get("genus"),
+                tax.get("taxon_id"),
+                raw_score,
+            ),
+        )
+
+    def id_for_key(self, detection_id, classifier_model, labels_fingerprint, species):
+        """The id of the prediction with this cache key, or None.
+
+        ``species IS ?``, so a NULL species matches a NULL row.
+        """
+        row = self.conn.execute(
+            """SELECT id FROM predictions
+               WHERE detection_id = ? AND classifier_model = ?
+                 AND labels_fingerprint = ? AND species IS ?""",
+            (detection_id, classifier_model, labels_fingerprint, species),
+        ).fetchone()
+        return row["id"] if row else None

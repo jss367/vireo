@@ -83,6 +83,7 @@
       "POST /api/config",
       "POST /api/duplicates/apply",
       "POST /api/duplicates/bulk-resolve",
+      "POST /api/duplicates/keep",
       "POST /api/edit-presets",
       "POST /api/export/presets",
       "POST /api/folders/<int:folder_id>/relocate",
