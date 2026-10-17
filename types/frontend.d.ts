@@ -77,15 +77,22 @@ interface BrowseSelectionPanel {
   bindActions?: () => void;
 }
 
-interface Window {
-  Vireo?: {
-    browse?: {
-      panelRequests?: Record<'keywords' | 'predictions' | 'detailPredictions' | 'predictionPhotos' | 'wildlife', PanelRequestLane>;
-      selectionPanel?: BrowseSelectionPanel;
-      panelLoaders?: BrowsePanelLoaders;
-    };
+interface VireoNamespace {
+  browse?: {
+    panelRequests?: Record<'keywords' | 'predictions' | 'detailPredictions' | 'predictionPhotos' | 'wildlife', PanelRequestLane>;
+    selectionPanel?: BrowseSelectionPanel;
+    panelLoaders?: BrowsePanelLoaders;
   };
+  pollWhileVisible?: VisiblePoll;
+  predictions?: GroupedPredictions;
 }
+
+interface Window {
+  Vireo?: VireoNamespace;
+}
+
+// The DOM-free prediction tracker also runs under Node's globalThis in tests.
+declare var Vireo: VireoNamespace | undefined;
 
 declare function openBatchDevelopmentEditor(): Promise<void>;
 declare function pasteEditSettingsToSelection(): Promise<void>;

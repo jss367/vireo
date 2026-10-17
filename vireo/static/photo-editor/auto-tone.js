@@ -14,16 +14,16 @@
 // the subject, letting the background go bright) and Gentle (half strength).
 // The buttons share one request at a time.
 
-var AUTO_TONE_KEYS = ['exposure', 'highlights', 'shadows', 'contrast', 'whites', 'blacks', 'vibrance', 'saturation'];
-var AUTO_TONE_STYLES = {
+/** @type {EditorNumericKey[]} */ var AUTO_TONE_KEYS = ['exposure', 'highlights', 'shadows', 'contrast', 'whites', 'blacks', 'vibrance', 'saturation'];
+/** @type {Record<string,{button:string;label:string}>} */ var AUTO_TONE_STYLES = {
   balanced: {button: 'autoToneBtn', label: 'Auto Tone'},
   subject: {button: 'autoToneSubjectBtn', label: 'Auto Tone (Subject style)'},
   gentle: {button: 'autoToneGentleBtn', label: 'Auto Tone (Gentle style)'},
 };
 
-function autoToneMessage(result, changedControls) {
+/** @param {EditorAutoTone} result @param {boolean} changedControls */ function autoToneMessage(result, changedControls) {
   var notes = (result && result.notes) || [];
-  var style = AUTO_TONE_STYLES[result && result.style] || AUTO_TONE_STYLES.balanced;
+  var style = AUTO_TONE_STYLES[result.style || ''] || {button:'autoToneBtn',label:'Auto Tone'};
   var name = style.label;
   var metering = '';
   if (result && result.metering === 'subject') {
@@ -44,7 +44,7 @@ function autoToneMessage(result, changedControls) {
     '. White balance left unchanged.';
 }
 
-function _loadImage(src) {
+/** @param {string} src @returns {Promise<HTMLImageElement>} */ function _loadImage(src) {
   return new Promise(function(resolve, reject) {
     var im = new Image();
     im.onload = function() { resolve(im); };
@@ -55,18 +55,18 @@ function _loadImage(src) {
 
 function autoToneButtons() {
   return Object.keys(AUTO_TONE_STYLES).map(function(key) {
-    return document.getElementById(AUTO_TONE_STYLES[key].button);
-  }).filter(Boolean);
+    return /** @type {HTMLElement} */ (document.getElementById(AUTO_TONE_STYLES[key]?.button || ''));
+  }).filter(function(button) { return button instanceof HTMLButtonElement; });
 }
 
-async function autoTone(style) {
+/** @param {string} style */ async function autoTone(style) {
   if (!editorState.photoId) return;
   if (!AUTO_TONE_STYLES[style]) style = 'balanced';
   var photoId = editorState.photoId;
   var loadSeq = editorState.loadSeq;
   var buttons = autoToneButtons();
   if (buttons.some(function(b) { return b.disabled; })) return;
-  var btn = document.getElementById(AUTO_TONE_STYLES[style].button);
+  var btn = /** @type {HTMLElement} */ (document.getElementById(AUTO_TONE_STYLES[style]?.button || ''));
   var prevLabel = btn ? btn.textContent : '';
   buttons.forEach(function(b) { b.disabled = true; });
   if (btn) btn.textContent = 'Analyzing...';
@@ -79,7 +79,7 @@ async function autoTone(style) {
     var startKey = recipeKey(editorState.recipe);
     var analysed = previewRecipeFor(editorState.recipe, true);
     delete analysed.local;
-    var result = await safeFetch('/api/photos/' + photoId + '/auto-tone?style=' + style +
+    /** @type {EditorAutoTone} */ var result = await safeFetch('/api/photos/' + photoId + '/auto-tone?style=' + style +
       '&recipe=' + encodeURIComponent(JSON.stringify(analysed)), {}, {toast: false});
     if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq ||
         recipeKey(editorState.recipe) !== startKey) return;
@@ -105,7 +105,7 @@ async function autoTone(style) {
     if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq) return;
     if (typeof showToast === 'function') {
       showToast('Could not analyze this photo for Auto Tone' +
-        (e && e.message ? ': ' + e.message : ''), 'error');
+        (e && editorErrorMessage(e) ? ': ' + editorErrorMessage(e) : ''), 'error');
     }
   } finally {
     buttons.forEach(function(b) { b.disabled = false; });

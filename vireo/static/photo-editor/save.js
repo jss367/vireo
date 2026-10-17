@@ -12,7 +12,7 @@ function resetAllEdits() {
   markChanged(true);
 }
 
-async function saveRecipe(description) {
+/** @param {string=} description */ async function saveRecipe(description) {
   if (!editorState.photoId || editorState.loading || maskBrush.busy || maskBrush.stroke) return false;
   if (editorState.savingPhotoIds[String(editorState.photoId)]) return false;
   // Capture the photo being saved so a Prev/Next during the PUT can't make us
@@ -24,14 +24,14 @@ async function saveRecipe(description) {
   if (window.renderHistoryControls) window.renderHistoryControls();
   var acceptingCropEdit = editorState.cropEditing &&
     !!recipeForSave(editorState.recipe).crop;
-  var btn = document.getElementById('saveBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('saveBtn'));
   btn.disabled = true;
   setStatus('Saving...');
   // The sliders stay live during the PUT, so remember what we sent: an edit
   // made while the request is in flight must survive its response.
   var sentKey = recipeKey(editorState.recipe);
   try {
-    var data = await safeFetch('/api/photos/' + savedPhotoId + '/edit-recipe', {
+    /** @type {{recipe?:EditorRecipe;local_mask_stale?:boolean}} */ var data = await safeFetch('/api/photos/' + savedPhotoId + '/edit-recipe', {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -42,7 +42,7 @@ async function saveRecipe(description) {
     // Sync the shared edit-recipe cache against the photo we actually saved,
     // regardless of where the editor is now.
     if (typeof window.vireoRefreshEditRecipeCache === 'function') {
-      var updates = {};
+      /** @type {Record<string,EditorRecipe|null>} */ var updates = {};
       updates[String(savedPhotoId)] = data.recipe || null;
       window.vireoRefreshEditRecipeCache(updates);
     }
@@ -83,7 +83,7 @@ async function saveRecipe(description) {
     // own these surfaces.
     if (editorState.photoId === savedPhotoId) {
       btn.disabled = false;
-      setStatus(e.message || 'Save failed', true);
+      setStatus(editorErrorMessage(e) || 'Save failed', true);
     }
     return false;
   } finally {

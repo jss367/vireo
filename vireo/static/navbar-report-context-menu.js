@@ -1,27 +1,27 @@
 function openReportModal() {
-  if (window._reportEscToken) Keymap.popEsc(window._reportEscToken);
+  if (window._reportEscToken) Keymap.popEsc(window._reportEscToken ?? -1);
   window._reportEscToken = Keymap.pushEsc(function() { closeReportModal(); });
 
-  document.getElementById('reportModal').classList.add('active');
-  document.getElementById('reportDescription').value = '';
-  document.getElementById('reportStatus').className = 'report-status';
-  document.getElementById('reportStatus').textContent = '';
-  document.getElementById('reportSendBtn').disabled = false;
-  document.getElementById('reportDescription').focus();
+  /** @type {HTMLElement} */ (document.getElementById('reportModal')).classList.add('active');
+  /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).value = '';
+  /** @type {HTMLElement} */ (document.getElementById('reportStatus')).className = 'report-status';
+  /** @type {HTMLElement} */ (document.getElementById('reportStatus')).textContent = '';
+  /** @type {HTMLButtonElement} */ (document.getElementById('reportSendBtn')).disabled = false;
+  /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).focus();
 }
 function closeReportModal() {
-  if (window._reportEscToken) { Keymap.popEsc(window._reportEscToken); window._reportEscToken = null; }
-  document.getElementById('reportModal').classList.remove('active');
+  if (window._reportEscToken) { Keymap.popEsc(window._reportEscToken ?? -1); window._reportEscToken = null; }
+  /** @type {HTMLElement} */ (document.getElementById('reportModal')).classList.remove('active');
 }
 function sendReport() {
-  var desc = document.getElementById('reportDescription').value.trim();
+  var desc = /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).value.trim();
   if (!desc) {
-    document.getElementById('reportDescription').style.borderColor = 'var(--danger)';
-    document.getElementById('reportDescription').focus();
+    /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).style.borderColor = 'var(--danger)';
+    /** @type {HTMLTextAreaElement} */ (document.getElementById('reportDescription')).focus();
     return;
   }
-  var btn = document.getElementById('reportSendBtn');
-  var status = document.getElementById('reportStatus');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('reportSendBtn'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('reportStatus'));
   btn.disabled = true;
   btn.textContent = 'Sending...';
   status.className = 'report-status';
@@ -33,7 +33,7 @@ function sendReport() {
     body: JSON.stringify({description: desc})
   })
   .then(function(r) { return r.json(); })
-  .then(function(data) {
+  .then(function(/** @type {{status?: string; diagnostics?: unknown; error?: string}} */ data) {
     if (data.status === 'sent') {
       status.className = 'report-status success';
       status.textContent = 'Report sent — thanks!';
@@ -65,9 +65,9 @@ function sendReport() {
 
 /* Shared right-click context menu component. */
 (function(){
-  let _ctxEl = null;
-  let _ctxDismiss = null;
-  let _ctxEscToken = null;
+  /** @type {HTMLElement | null} */ let _ctxEl = null;
+  /** @type {(() => void) | null} */ let _ctxDismiss = null;
+  /** @type {number | null} */ let _ctxEscToken = null;
 
   window.closeContextMenu = function(){
     if (_ctxEscToken !== null) { Keymap.popEsc(_ctxEscToken); _ctxEscToken = null; }
@@ -77,14 +77,15 @@ function sendReport() {
     if (_ctxDismiss) { const f = _ctxDismiss; _ctxDismiss = null; f(); }
   };
 
+  /** @param {Event} e */
   function _outside(e){
-    if (_ctxEl && !_ctxEl.contains(e.target)) {
+    if (_ctxEl && !_ctxEl.contains(e.target instanceof Node ? e.target : null)) {
       // Swallow the click that will follow this mousedown so that outside-
       // click dismissal does not also trigger underlying handlers (e.g. the
       // lightbox overlay's onclick=closeLightbox). Only applies when
       // dismissal was triggered by mousedown — Escape / item selection paths
       // don't install the swallow because no click follows.
-      const swallow = (ev) => {
+      const swallow = (/** @type {MouseEvent} */ ev) => {
         ev.stopPropagation();
         ev.preventDefault();
         window.removeEventListener('click', swallow, true);
@@ -98,6 +99,7 @@ function sendReport() {
     }
   }
 
+  /** @param {NavMenuItem} item */
   function _renderItem(item){
     if (item.separator) {
       const s = document.createElement('div');
@@ -111,7 +113,7 @@ function sendReport() {
         const b = document.createElement('span');
         b.className = 'vireo-ctx-chip' + (c.active ? ' is-active' : '') +
           (c.disabled ? ' vireo-ctx-disabled' : '');
-        b.textContent = c.label;
+        b.textContent = c.label ?? '';
         if (c.disabled && c.disabledHint) b.title = c.disabledHint;
         else if (c.title) b.title = c.title;
         if (c.color) {
@@ -142,7 +144,7 @@ function sendReport() {
     }
     const d = document.createElement('div');
     d.className = 'vireo-ctx-item' + (item.disabled ? ' vireo-ctx-disabled' : '');
-    d.textContent = item.label;
+    d.textContent = item.label ?? '';
     if (item.disabled && item.disabledHint) d.title = item.disabledHint;
     if (!item.disabled) {
       d.addEventListener('click', ev => {

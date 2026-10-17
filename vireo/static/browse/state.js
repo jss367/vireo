@@ -9,7 +9,7 @@ window.GOOGLE_MAPS_API_KEY = '';
 window.GOOGLE_MAPS_PREFER_ENGLISH = true;
 
 /* ---------- State ---------- */
-var photos = [];
+/** @type {BrowsePhoto[]} */ var photos = [];
 var totalPhotos = 0;
 var totalUnderlyingPhotos = 0;
 var totalBrowseStacks = 0;
@@ -23,12 +23,12 @@ var earliestPage = 1;
 // bootstrap or a deep link is still pending; an "unaffected scope" is only
 // safe to preserve once there is an initialized dataset to preserve.
 var browseDatasetReady = false;
-var selectedPhotoId = null;
+/** @type {number | null} */ var selectedPhotoId = null;
 var selectedIndex = -1;
 // The card the user clicked most recently. Usually selectedPhotoId, but a
 // cmd-click can fold the focused photo into selectedPhotos and null the focus
 // id, and that card is still the one the user is looking at.
-var lastClickedPhotoId = null;
+/** @type {number | null} */ var lastClickedPhotoId = null;
 var anchorRestoreEpoch = 0;
 var anchorScanDepth = 0;
 // Focused reloads (sort changes) capture the selection, then clear it and
@@ -39,9 +39,9 @@ var anchorScanDepth = 0;
 // feature exists to preserve. Hold the in-flight target here so a newer
 // focused reload can pick up the older one's anchor (Codex review
 // r4021334323). Cleared once every in-flight focused reload has settled.
-var pendingFocusAnchor = null;
+/** @type {BrowseAnchor | null} */ var pendingFocusAnchor = null;
 // Which photo the last focused load was actually placed by (see loadPhotos).
-var browseResolvedFocusPhotoId = null;
+/** @type {number | null} */ var browseResolvedFocusPhotoId = null;
 // How many photos one focused lookup may be asked about, matching
 // ``MAX_FOCUS_PHOTO_IDS`` on the server. Requests are kept inside it rather
 // than allowed to fail: see buildBrowsePageRequest.
@@ -51,21 +51,21 @@ var BROWSE_MAX_FOCUS_CANDIDATES = 200;
 // left, so the anchor must not survive into the new one.
 var pendingFocusAnchorScopeGen = -1;
 var focusReloadInFlight = 0;
-var selectedPhotos = new Set(); // multi-select
-var expandedBrowseStacks = new Set();
-var browseStackMembers = {};
-var browseStackErrors = {};
+/** @type {Set<number>} */ var selectedPhotos = new Set(); // multi-select
+/** @type {Set<number>} */ var expandedBrowseStacks = new Set();
+/** @type {Record<string, BrowsePhoto[]>} */ var browseStackMembers = {};
+/** @type {Record<string, string>} */ var browseStackErrors = {};
 var browseStackHydrationSeq = 0;
 // In-flight cover hydrations, keyed by cover id: {seq, memberIds, stale}.
 // Same invalidation contract as browseStackExpansionRequests below (a mutation
 // marks any request whose members it just changed), but a different ownership
 // rule: only one hydration may own a cover key at a time, so `seq` lets a newer
 // reconciliation supersede an older one's response instead of both caching.
-var browseStackHydrationRequests = {};
+/** @type {Record<string, BrowseStackHydration>} */ var browseStackHydrationRequests = {};
 // Cover ids whose reconciliation could not finish (the members never loaded).
 // The grid is still showing the pre-edit cover for these stacks, so the badge
 // says so and expanding one re-runs the reconciliation from the loaded members.
-var browseStackCoverRecheck = new Set();
+/** @type {Set<number>} */ var browseStackCoverRecheck = new Set();
 // In-flight stack expansions, keyed by cover id: {memberIds, stale}.
 // A tray's header offers "Select all" the moment it opens, so a stack-wide
 // edit can be applied while its members are still loading. Those members are
@@ -82,9 +82,9 @@ var browseStackCoverRecheck = new Set();
 // all of them, so an untracked earlier response cannot cache pre-edit
 // members while only the newest request was marked stale. Codex P2 on
 // PR #1561.
-var browseStackExpansionRequests = {};
+/** @type {Record<string, BrowseStackRequest[]>} */ var browseStackExpansionRequests = {};
 
-function _pushBrowseStackExpansionRequest(cacheKey, request) {
+function _pushBrowseStackExpansionRequest(/** @type {string} */ cacheKey, /** @type {BrowseStackRequest} */ request) {
   var list = browseStackExpansionRequests[cacheKey];
   if (!list) {
     list = [];
@@ -93,7 +93,7 @@ function _pushBrowseStackExpansionRequest(cacheKey, request) {
   list.push(request);
 }
 
-function _removeBrowseStackExpansionRequest(cacheKey, request) {
+function _removeBrowseStackExpansionRequest(/** @type {string} */ cacheKey, /** @type {BrowseStackRequest} */ request) {
   var list = browseStackExpansionRequests[cacheKey];
   if (!list) return;
   var idx = list.indexOf(request);
@@ -101,24 +101,24 @@ function _removeBrowseStackExpansionRequest(cacheKey, request) {
   if (!list.length) delete browseStackExpansionRequests[cacheKey];
 }
 
-function setBrowseTotals(data) {
+function setBrowseTotals(/** @type {BrowseTotals | null} */ data) {
   totalPhotos = Number(data && data.total) || 0;
   totalBrowseStacks = Number(data && data.stack_count) || 0;
   totalUnderlyingPhotos = data && data.underlying_total != null
     ? Number(data.underlying_total) || 0
     : totalPhotos;
 }
-// Panel request ownership lives in Vireo.browse.panelRequests.
+// Panel request ownership lives in /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.
 // A photo can carry dozens of low-confidence guesses, and most users never set
 // a confidence floor. Show the strongest few and collapse the tail behind a
 // counted "show all" rather than either flooding the panel or inventing a
 // threshold the user's settings don't specify.
 var PREDICTION_COLLAPSE_AT = 5;
 var detailPredictionsExpanded = false;
-var _detailPredictionData = null;
+/** @type {{data: DetailPredictionsResponse, photoId: number} | null} */ var _detailPredictionData = null;
 // The single-photo panel's rendered rows, in render order, so its buttons can
 // carry a bare index instead of the row's data. The selection panel uses
-// Vireo.browse.selectionPanel for its row snapshots; the detail panel matches it,
+// /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel for its row snapshots; the detail panel matches it,
 // for a reason worth stating: it used to interpolate the species straight
 // into an inline handler attribute —
 // `onclick='acceptDetailPredictions([12],44,"Say\'s Phoebe")'` — and the
@@ -128,17 +128,17 @@ var _detailPredictionData = null;
 // birds, which is most of what this app is pointed at. Escaping that one
 // interpolation would have fixed that one line; keeping row data out of the
 // markup is what stops the next button added here from reintroducing it.
-var detailPredictionGroups = [];
-var detailPredictionGroupsPhotoId = null;
+/** @type {BrowsePredictionGroup[]} */ var detailPredictionGroups = [];
+/** @type {number | null} */ var detailPredictionGroupsPhotoId = null;
 var showDetectionBoxes = false;
 var cardFields = ["filename", "location_status", "rating", "flag", "sharpness"]; // default, overridden by config
-var inatSubmitted = {};  // {photo_id: true}
-var colorLabels = {};    // {photo_id: color_string}
+/** @type {Record<string, boolean>} */ var inatSubmitted = {};  // {photo_id: true}
+/** @type {Record<string, string>} */ var colorLabels = {};    // {photo_id: color_string}
 // Which photo ids we've confirmed color-label state for. `colorLabels[id]`
 // missing is ambiguous — either the photo has no color set OR we haven't
 // fetched its color labels yet — so the batch inspector needs this to avoid
 // rendering "everything is uncoloured" for a still-loading selection.
-var colorLabelsFetched = new Set();
+/** @type {Set<number>} */ var colorLabelsFetched = new Set();
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 // Per-id record of the generation each id was last locally edited at, so a
 // slow fetch that started before an edit still cannot overwrite that edit for
@@ -146,7 +146,7 @@ var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch re
 // nothing-changed case; a concurrent edit to one id would otherwise let the
 // stale response's values for every other id overwrite them anyway, and the
 // stale value for the edited id survive.
-var colorLabelEditGen = Object.create(null);
+/** @type {Record<string, number>} */ var colorLabelEditGen = Object.create(null);
 // Stamp ids at a NEW generation. Called twice per write — once before the POST
 // and once after it lands. The trailing stamp is what covers a fetch that
 // starts while the write is still in flight: it captured the same generation
@@ -154,7 +154,7 @@ var colorLabelEditGen = Object.create(null);
 // server before the write committed) overwrite the fresh local value once it
 // resolves. Re-stamping on completion puts every such fetch strictly behind
 // the write (Codex P2 on PR #1668).
-function _noteColorLabelEdits(ids) {
+function _noteColorLabelEdits(/** @type {number[]} */ ids) {
   colorLabelGen++;
   ids.forEach(function(id) { colorLabelEditGen[id] = colorLabelGen; });
 }
@@ -175,14 +175,14 @@ function _noteColorLabelEdits(ids) {
 // (Codex P2, second pass). Dropping the fetched marker is kept — until the
 // refetch lands we genuinely do not know this photo's color, and the batch
 // inspector should say so rather than assert "no color".
-function _recoverColorLabelsAfterFailedWrite(ids) {
+function _recoverColorLabelsAfterFailedWrite(/** @type {number[]} */ ids) {
   ids.forEach(function(id) { colorLabelsFetched.delete(id); });
   return fetchColorLabels(ids).then(function() {
     refreshGridCards(ids);
     refreshExpandedBrowseStackMembers(ids);
     // fetchColorLabels already re-rendered a batch inspector; only the
     // single-photo panel is left to catch up.
-    var detail = document.getElementById('detailContent');
+    var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
     if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1
         && !(detail && detail.classList.contains('batch-mode'))) {
       updateDetailColors();
@@ -196,9 +196,9 @@ var loadEpoch = 0;
 var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
 // rating/flag/color/date/keyword filter state now lives in VireoFilter
 // (the universal filter bar); Browse keeps only page-scope state.
-var activeFolderId = null;
-var activeKeyword = null;
-var activeCollectionId = null;
+/** @type {number | null} */ var activeFolderId = null;
+/** @type {string | null} */ var activeKeyword = null;
+/** @type {number | null} */ var activeCollectionId = null;
 // A Dashboard deep link can combine a collection with date/keyword filters.
 // Normal collection clicks keep the historical collection-only behavior.
 var dashboardCollectionScope = false;
@@ -213,7 +213,7 @@ var dashboardCollectionScope = false;
 // r3620473562). Cleared by the filter bar's onChange when the user edits
 // the expression (so a user-edited chip set isn't silently reverted to
 // the saved collection on the next membership refresh).
-var openedCollectionId = null;
+/** @type {number | null} */ var openedCollectionId = null;
 // A saved collection's logical membership includes photos whose storage is
 // offline. They stay hidden by default and, when revealed, render as read-only
 // cards; selection endpoints remain accessible-only.
@@ -224,7 +224,7 @@ var collectionOfflineTotal = 0;
 // Sidebar collections render before the universal filter registry necessarily
 // finishes loading. Keep the init promise so an early collection click can
 // wait for the filter bar instead of being silently discarded.
-var browseFilterInitPromise = null;
+/** @type {Promise<unknown> | null} */ var browseFilterInitPromise = null;
 // Monotonic counter bumped by every sidebar scope switch
 // (filterByFolder/filterByKeyword/filterByCollection). A queued collection
 // open captures the gen at entry and aborts on resume if a later scope
@@ -234,15 +234,15 @@ var browseScopeGen = 0;
 
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
-var selectedDay = null;
-var calendarData = null;
+/** @type {string | null} */ var selectedDay = null;
+/** @type {BrowseCalendar | null} */ var calendarData = null;
 // CLIP search is now the filter bar's visual clause (VireoFilter.getVisual).
 
-var bestBatchData = null;
-var keywordAutocompleteCache = null;
-var keywordAutocompletePromise = null;
-var keywordAutocompleteStates = {};
-var collectionCountRefreshTimer = null;
+/** @type {BrowseBestBatch | null} */ var bestBatchData = null;
+/** @type {BrowseKeywordOption[] | null} */ var keywordAutocompleteCache = null;
+/** @type {Promise<BrowseKeywordOption[]> | null} */ var keywordAutocompletePromise = null;
+/** @type {Record<string, BrowseKeywordAutocomplete>} */ var keywordAutocompleteStates = {};
+/** @type {number | null} */ var collectionCountRefreshTimer = null;
 var collectionCountLoadGen = 0;
 // Same superseded-response guard as loadCollectionCounts, extended to the
 // summary and calendar loaders so a slow /api/browse/summary or
@@ -250,17 +250,17 @@ var collectionCountLoadGen = 0;
 // after a newer scope selection triggered a fresh load
 // (CodeRabbit review r3684913398).
 var summaryLoadGen = 0;
-var summaryLoadStates = {};
+/** @type {Record<string, BrowseLoadState<BrowseSummary>>} */ var summaryLoadStates = {};
 var summaryRenderDecisionGen = 0;
 var calendarDataLoadGen = 0;
-var calendarDataLoadStates = {};
+/** @type {Record<string, BrowseLoadState<BrowseCalendar>>} */ var calendarDataLoadStates = {};
 var calendarRenderDecisionGen = 0;
 // Server-side cancellation lanes for the same two loaders. The sequence
 // advances only when the params change: a reload with unchanged params can
 // still be rendered from an older response, so it must not cancel one.
-var summaryLane = { key: null, seq: 0 };
-var calendarLane = { key: null, seq: 0 };
-function searchLaneSeq(lane, key) {
+/** @type {BrowseSearchLane} */ var summaryLane = { key: null, seq: 0 };
+/** @type {BrowseSearchLane} */ var calendarLane = { key: null, seq: 0 };
+function searchLaneSeq(/** @type {BrowseSearchLane} */ lane, /** @type {string} */ key) {
   if (lane.key !== key) {
     lane.key = key;
     lane.seq++;
@@ -279,15 +279,15 @@ function searchLaneSeq(lane, key) {
 // newer call has since started, so last-started always wins regardless of
 // which call site issued it.
 var folderLoadGen = 0;
-var folderLoadStates = {};
+/** @type {Record<string, BrowseLoadState<BrowseFolder[]>>} */ var folderLoadStates = {};
 var folderRenderDecisionGen = 0;
 var keywordLoadGen = 0;
-var keywordLoadStates = {};
+/** @type {Record<string, BrowseLoadState<BrowseKeyword[]>>} */ var keywordLoadStates = {};
 var keywordRenderDecisionGen = 0;
 var collectionLoadGen = 0;
-var collectionLoadStates = {};
+/** @type {Record<string, BrowseLoadState<BrowseCollection[]>>} */ var collectionLoadStates = {};
 var collectionRenderDecisionGen = 0;
-var browseFolderRows = [];
+/** @type {BrowseFolder[]} */ var browseFolderRows = [];
 // The workspace ID whose folder tree is currently reflected in the DOM.
 // Captured atomically with the tree from /api/browse/init and refreshed
 // from the same server snapshot on every /api/folders?with_workspace=1
@@ -295,5 +295,5 @@ var browseFolderRows = [];
 // the workspace the user actually saw. Trusting ``/api/workspaces/active``
 // at click time would let a cross-tab workspace switch redirect the
 // destructive call to the wrong workspace (Codex review r3798912101).
-var browseWorkspaceId = null;
-var collectionsById = {};
+/** @type {number | null} */ var browseWorkspaceId = null;
+/** @type {Record<string, BrowseCollection>} */ var collectionsById = {};

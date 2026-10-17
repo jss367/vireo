@@ -4,7 +4,7 @@
 // Classic page script; load boot.js after all definitions.
 
 /* ---------- Bulk reject ---------- */
-async function bulkReject(cat, e) {
+/** @param {MissCategory} cat @param {Event=} e */ async function bulkReject(cat, e) {
   if (e) e.stopPropagation();
   if (previewActive) {
     if (typeof showToast === 'function') {
@@ -52,7 +52,7 @@ async function bulkReject(cat, e) {
 // context menu's Already-representative hint keep treating the just-rejected
 // card as current until that later refetch. Walk missesData across all
 // categories in place — same shape the lifelist:changed listener uses.
-function _clearMissRepresentativeStateIfIneligible(photoIds, flag) {
+/** @param {number[]|Set<number>} photoIds @param {string | undefined} flag */ function _clearMissRepresentativeStateIfIneligible(photoIds, flag) {
   if (flag !== 'rejected') return false;
   var ids = photoIds instanceof Set ? photoIds : new Set(photoIds || []);
   if (!ids.size) return false;
@@ -86,7 +86,7 @@ function refreshAppliedFlagFilter() {
   if (missRulesContainField(appliedMissFilters.rules, 'flag')) loadMisses();
 }
 
-async function flagFocusedMiss(photoId, flag) {
+/** @param {number} photoId @param {string} flag */ async function flagFocusedMiss(photoId, flag) {
   try {
     var r = await fetch('/api/photos/' + photoId + '/flag', {
       method: 'POST',
@@ -114,7 +114,7 @@ async function flagFocusedMiss(photoId, flag) {
  * place for the same reason as flagFocusedMiss — list_misses excludes
  * flag='rejected' on the next refetch.
  */
-async function bulkFlagSelection(flag) {
+/** @param {string} flag */ async function bulkFlagSelection(flag) {
   if (selection.size === 0) return;
   var ids = Array.from(selection);
   try {
@@ -155,7 +155,7 @@ async function bulkUnflagSelection() {
   // Build the (id, category) work list from the current in-memory data so
   // we don't need an extra round-trip to discover which categories each
   // photo lives in.
-  var pairs = [];
+  /** @type {{id:number;cat:MissCategory}[]} */ var pairs = [];
   CATEGORY_ORDER.forEach(function(cat) {
     (missesData[cat] || []).forEach(function(p) {
       if (selection.has(p.id)) pairs.push({ id: p.id, cat: cat });
@@ -178,7 +178,7 @@ async function bulkUnflagSelection() {
 }
 
 /* ---------- Per-card unflag ---------- */
-async function unflagMiss(cat, photoId, e) {
+/** @param {MissCategory} cat @param {number} photoId @param {Event=} e */ async function unflagMiss(cat, photoId, e) {
   if (e) e.stopPropagation();
   if (previewActive) {
     if (typeof showToast === 'function') {
@@ -204,7 +204,7 @@ async function unflagMiss(cat, photoId, e) {
   render();
 }
 
-async function unflagLightboxMiss(photoId) {
+/** @param {number} photoId */ async function unflagLightboxMiss(photoId) {
   if (previewActive) {
     if (typeof showToast === 'function') {
       showToast('Save or reset the preview before unmarking misses', 'error');

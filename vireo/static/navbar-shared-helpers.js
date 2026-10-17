@@ -14,14 +14,15 @@ VireoViewPreferences.restoreAll(document);
   document.body.appendChild(container);
 })();
 
+/** @param {string} msg @param {string} [type] */
 function showToast(msg, type) {
-  var colors = {
+  /** @type {Record<string,string>} */ var colors = {
     success: 'var(--success)',
     info: 'var(--info)',
     warning: 'var(--warning)',
     error: 'var(--danger)'
   };
-  var textColors = {
+  /** @type {Record<string,string>} */ var textColors = {
     success: 'var(--success-text)',
     info: 'var(--info-text)',
     warning: 'var(--warning-text)',
@@ -30,8 +31,8 @@ function showToast(msg, type) {
   // A missing or unknown type is neutral information. Callers that need an
   // assertive error must opt into it instead of making routine confirmations
   // look like failures.
-  type = Object.prototype.hasOwnProperty.call(colors, type) ? type : 'info';
-  var container = document.getElementById('toastContainer');
+  type = Object.prototype.hasOwnProperty.call(colors, type || '') ? (type || 'info') : 'info';
+  var container = /** @type {HTMLElement} */ (document.getElementById('toastContainer'));
   if (!container) return;
   var toast = document.createElement('div');
   var bg = colors[type];
@@ -54,6 +55,7 @@ function showToast(msg, type) {
 // plain `target="_blank"` anchor does nothing, so route the open through the
 // OS browser via openExternal (tauri-bridge.js) and prevent the dead in-app
 // navigation. Use on <a> tags as: onclick="return openExternalLink(event, this.href)".
+/** @param {Event} event @param {string} url */
 function openExternalLink(event, url) {
   if (event) event.preventDefault();
   if (typeof openExternalWithRecovery !== 'function') {
@@ -65,24 +67,31 @@ function openExternalLink(event, url) {
 }
 
 /* ---------- Safe Fetch ---------- */
+/** @template [T=unknown] @param {RequestInfo | URL} url @param {RequestInit} [opts]
+ * @param {{toast?: boolean}} [options] @returns {Promise<T>} */
 async function safeFetch(url, opts, options) {
-  return window.Vireo.api.json(url, opts, options);
+  var api = window.Vireo && window.Vireo.api;
+  if (!api) throw new Error('Browser transport is unavailable');
+  return api.json(url, opts, options);
 }
 
 /* ---------- Native Menu Commands ----------
  * The Tauri menu bar dispatches command IDs here. Keep this layer thin:
  * call the same page helpers, modals, and API endpoints used by visible UI.
  */
+/** @param {string} msg */
 function nativeMenuInfo(msg) {
   if (typeof showToast === 'function') showToast(msg, 'info');
   else console.info(msg);
 }
 
+/** @param {string} msg */
 function nativeMenuError(msg) {
   if (typeof showToast === 'function') showToast(msg, 'error');
   else console.error(msg);
 }
 
+/** @param {NavRevealResult | null | undefined} data */
 function revealFeedbackMessage(data) {
   if (data && data.ok === false) {
     return 'Reveal failed: ' + (data.reason || 'unknown error');
@@ -90,6 +99,7 @@ function revealFeedbackMessage(data) {
   return 'Revealed in ' + (window.VIREO_FILE_MANAGER_NAME || 'file manager');
 }
 
+/** @param {NavRevealResult | null | undefined} data */
 function showRevealFeedback(data) {
   var isError = data && data.ok === false;
   var msg = revealFeedbackMessage(data);
@@ -98,12 +108,13 @@ function showRevealFeedback(data) {
   else console.info(msg);
 }
 
+/** @param {string} path */
 function nativeMenuRoute(path) {
   window.location.href = window.vireoResolveNavigationHref(path);
 }
 
 function nativeMenuLightboxOpen() {
-  var overlay = document.getElementById('lightboxOverlay');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('lightboxOverlay'));
   return !!(overlay && overlay.classList.contains('active'));
 }
 
@@ -117,12 +128,12 @@ function nativeMenuActivePhotoIds() {
     if (typeof vireoLightboxSession === 'undefined' || vireoLightboxSession.requestedPhotoId() == null) {
       return [];
     }
-    return [vireoLightboxSession.requestedPhotoId()];
+    return [Number(vireoLightboxSession.requestedPhotoId())];
   }
   if (
     typeof grmState !== 'undefined' &&
-    document.getElementById('grmOverlay') &&
-    document.getElementById('grmOverlay').classList.contains('open')
+    /** @type {HTMLElement} */ (document.getElementById('grmOverlay')) &&
+    /** @type {HTMLElement} */ (document.getElementById('grmOverlay')).classList.contains('open')
   ) {
     if (grmState.selectedIds && grmState.selectedIds.size) {
       return Array.from(grmState.selectedIds);
@@ -139,15 +150,17 @@ function nativeMenuActivePhotoIds() {
   return [];
 }
 
+/** @param {string | undefined} commandName @returns {[number, ...number[]] | null} */
 function nativeMenuRequirePhotos(commandName) {
-  var ids = nativeMenuActivePhotoIds();
+  const ids = nativeMenuActivePhotoIds();
   if (!ids.length) {
     nativeMenuError(commandName + ' needs a selected photo.');
     return null;
   }
-  return ids;
+  return /** @type {[number, ...number[]]} */ (ids);
 }
 
+/** @param {string} endpoint @param {Record<string,unknown>} payload @param {string} [success] */
 async function nativeMenuBatch(endpoint, payload, success) {
   await safeFetch(endpoint, {
     method: 'POST',
@@ -159,7 +172,7 @@ async function nativeMenuBatch(endpoint, payload, success) {
 
 function nativeMenuOpenLightbox() {
   if (typeof openBrowseShortcutPhoto === 'function' && openBrowseShortcutPhoto(false)) return;
-  var ids = nativeMenuRequirePhotos('Open in Lightbox');
+  const ids = nativeMenuRequirePhotos('Open in Lightbox');
   if (!ids) return;
   if (typeof window.openPipelineLightbox === 'function') {
     window.openPipelineLightbox(ids[0]);
@@ -194,12 +207,13 @@ function nativeMenuOpenBrowse() {
 }
 
 function nativeMenuPhotoIdsForWrite() {
-  var ids = nativeMenuActivePhotoIds();
-  if (ids.length) return ids;
+  const ids = nativeMenuActivePhotoIds();
+  if (ids.length) return /** @type {[number, ...number[]]} */ (ids);
   nativeMenuError('Select one or more photos first.');
   return null;
 }
 
+/** @param {number[]} ids */
 function nativeMenuSetPhotoIdsOverride(ids) {
   window._vireoNativeMenuPhotoIdsOverride = ids ? ids.slice() : null;
 }
@@ -210,6 +224,7 @@ function nativeMenuCloseLightboxForModal() {
   }
 }
 
+/** @param {number} rating */
 async function nativeMenuSetRating(rating) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
@@ -219,8 +234,7 @@ async function nativeMenuSetRating(rating) {
       return;
     }
     if (typeof setReviewRating === 'function') {
-      setReviewRating(ids[0], rating);
-      nativeMenuInfo('Rating updated');
+      await setReviewRating(ids[0], rating);
       return;
     }
   }
@@ -229,13 +243,13 @@ async function nativeMenuSetRating(rating) {
     return;
   }
   if (ids.length === 1 && typeof setReviewRating === 'function') {
-    setReviewRating(ids[0], rating);
-    nativeMenuInfo('Rating updated');
+    await setReviewRating(ids[0], rating);
     return;
   }
   await nativeMenuBatch('/api/batch/rating', {photo_ids: ids, rating: rating}, 'Rating updated');
 }
 
+/** @param {string} flag */
 async function nativeMenuSetFlag(flag) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
@@ -246,7 +260,6 @@ async function nativeMenuSetFlag(flag) {
     }
     if (typeof setReviewFlag === 'function') {
       await setReviewFlag(ids[0], flag);
-      nativeMenuInfo('Flag updated');
       return;
     }
   }
@@ -256,12 +269,12 @@ async function nativeMenuSetFlag(flag) {
   }
   if (ids.length === 1 && typeof setReviewFlag === 'function') {
     await setReviewFlag(ids[0], flag);
-    nativeMenuInfo('Flag updated');
     return;
   }
   await nativeMenuBatch('/api/batch/flag', {photo_ids: ids, flag: flag}, 'Flag updated');
 }
 
+/** @param {number[]} ids @param {boolean} excluded */
 function nativeMenuRefreshWildlifeExcludedState(ids, excluded) {
   if (typeof photos !== 'undefined' && Array.isArray(photos)) {
     ids.forEach(function(id) {
@@ -270,19 +283,20 @@ function nativeMenuRefreshWildlifeExcludedState(ids, excluded) {
     });
     if (typeof refreshGridCards === 'function') refreshGridCards(ids);
     else if (typeof renderGrid === 'function') renderGrid();
-    if (typeof selectedPhotoId !== 'undefined' && ids.indexOf(selectedPhotoId) !== -1 && typeof loadDetail === 'function') {
+    if (typeof selectedPhotoId !== 'undefined' && ids.indexOf(selectedPhotoId ?? -1) !== -1 && typeof loadDetail === 'function') {
       loadDetail(selectedPhotoId);
     }
   }
 }
 
+/** @param {boolean} excluded */
 async function nativeMenuSetWildlifeExcluded(excluded) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
   var usePageHelper = typeof window.setWildlifeExcludedFor === 'function';
   var results = await Promise.all(ids.map(function(id) {
     if (usePageHelper) {
-      return window.setWildlifeExcludedFor(id, excluded);
+      return window.setWildlifeExcludedFor?.(id, excluded);
     }
     return safeFetch('/api/photos/' + id + '/wildlife_excluded', {
       method: 'POST',
@@ -294,7 +308,7 @@ async function nativeMenuSetWildlifeExcluded(excluded) {
     return false;
   }
   if (!usePageHelper) nativeMenuRefreshWildlifeExcludedState(ids, excluded);
-  if (typeof vireoLightboxSession !== 'undefined' && ids.indexOf(vireoLightboxSession.requestedPhotoId()) !== -1) {
+  if (typeof vireoLightboxSession !== 'undefined' && ids.indexOf(vireoLightboxSession.requestedPhotoId() ?? -1) !== -1) {
     _lbCurrentWildlifeExcluded = excluded;
   }
   nativeMenuInfo(excluded ? 'Excluded from wildlife classification' : 'Marked as wildlife');
@@ -305,8 +319,9 @@ function nativeMenuPendingPredictions() {
   return predictions.filter(function(p) { return p.status === 'pending'; });
 }
 
+/** @param {string} endpoint @param {Record<string,unknown>} body @param {string} [label] */
 async function nativeMenuJob(endpoint, body, label) {
-  var data = await safeFetch(endpoint, {
+  /** @type {{job_id?: string}} */ var data = await safeFetch(endpoint, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body || {}),
@@ -315,6 +330,7 @@ async function nativeMenuJob(endpoint, body, label) {
   nativeMenuInfo(label + suffix);
 }
 
+/** @param {NavJob} job */
 function isLiveJob(job) {
   return !!job && (
     job.status === 'running' ||
@@ -325,20 +341,23 @@ function isLiveJob(job) {
   );
 }
 
+/** @param {NavJob} job */
 function countsForBadge(job) {
   return !job || job.counts_for_badge !== false;
 }
 
+/** @param {NavJob} job */
 function isAttentionJob(job) {
   return isLiveJob(job) && countsForBadge(job);
 }
 
+/** @param {NavJob} job */
 function isWaitingJob(job) {
   return !!job && (job.status === 'queued' || job.status === 'pending');
 }
 
 async function nativeMenuCancelCurrentJob() {
-  var jobs = await safeFetch('/api/jobs', {}, {toast: false});
+  /** @type {NavJob[] | NavJobsPayload} */ var jobs = await safeFetch('/api/jobs', {}, {toast: false});
   var list = Array.isArray(jobs) ? jobs : (jobs.active || jobs.jobs || []);
   // Queued pipelines are cancellable too (runner.cancel_job handles
   // the queued path atomically), so the native menu's "cancel current
@@ -361,6 +380,7 @@ async function nativeMenuCancelCurrentJob() {
       : 'No active job to cancel');
     return;
   }
+  /** @param {NavJob} j */
   function rank(j) {
     if (j.status === 'running' || j.status === 'pausing') return 0;
     if (j.status === 'paused') return 1;
@@ -373,6 +393,7 @@ async function nativeMenuCancelCurrentJob() {
     return sa < sb ? 1 : sa > sb ? -1 : 0;
   });
   var target = inWorkspace[0];
+  if (!target) return;
   var name = window.formatJobType ? window.formatJobType(target.type) : (target.type || 'job');
   await safeFetch('/api/jobs/' + target.id + '/cancel', {method: 'POST'});
   nativeMenuInfo('Cancel requested: ' + name);
@@ -397,7 +418,7 @@ window.handleNativeMenuCommand = async function(command) {
   try {
     switch (command) {
       case 'find':
-        window.VireoPageFind.open();
+        window.VireoPageFind?.open();
         break;
       case 'new_workspace':
         if (window.vireoWorkspaceSwitcher) vireoWorkspaceSwitcher.showCreate();
@@ -513,14 +534,14 @@ window.handleNativeMenuCommand = async function(command) {
       case 'photo_flag_reject': await nativeMenuSetFlag('rejected'); break;
       case 'photo_flag_clear': await nativeMenuSetFlag('none'); break;
       case 'review_accept': {
-        var acceptPending = nativeMenuPendingPredictions();
-        if (acceptPending.length && typeof acceptPrediction === 'function') await acceptPrediction(acceptPending[0].id);
+        var acceptPending = nativeMenuPendingPredictions()[0];
+        if (acceptPending && typeof acceptPrediction === 'function') await acceptPrediction(acceptPending.id);
         else nativeMenuError('No pending prediction to accept.');
         break;
       }
       case 'review_reject': {
-        var rejectPending = nativeMenuPendingPredictions();
-        if (rejectPending.length && typeof rejectPrediction === 'function') await rejectPrediction(rejectPending[0].id);
+        var rejectPending = nativeMenuPendingPredictions()[0];
+        if (rejectPending && typeof rejectPrediction === 'function') await rejectPrediction(rejectPending.id);
         else nativeMenuError('No pending prediction to reject.');
         break;
       }
@@ -582,7 +603,7 @@ window.handleNativeMenuCommand = async function(command) {
         console.warn('Unknown native menu command:', command);
     }
   } catch (e) {
-    nativeMenuError(e && e.message ? e.message : 'Menu command failed');
+    nativeMenuError(e instanceof Error ? e.message : 'Menu command failed');
   }
 };
 
@@ -597,19 +618,19 @@ window.handleNativeMenuCommand = async function(command) {
  * via window.invalidateEditorsCache() after saving so the next action picks
  * up changes.
  */
-var _externalEditorsCache = null;
-var _externalEditorsLoading = null;
+/** @type {NavExternalEditor[] | null} */ var _externalEditorsCache = null;
+/** @type {Promise<NavExternalEditor[]> | null} */ var _externalEditorsLoading = null;
 
 async function getExternalEditors() {
   if (_externalEditorsCache !== null) return _externalEditorsCache;
   if (_externalEditorsLoading) return _externalEditorsLoading;
   _externalEditorsLoading = (async function() {
-    var arr;
+    /** @type {unknown[]} */ var arr;
     try {
-      var cfg = await safeFetch('/api/config', {}, { toast: false });
+      /** @type {{external_editors?: unknown; external_editor?: string}} */ var cfg = await safeFetch('/api/config', {}, { toast: false });
       arr = Array.isArray(cfg.external_editors) ? cfg.external_editors : [];
       if (arr.length === 0 && (cfg.external_editor || '').trim()) {
-        arr = [{ name: 'Editor', path: cfg.external_editor.trim() }];
+        arr = [{ name: 'Editor', path: (cfg.external_editor || '').trim() }];
       }
     } catch(_) {
       arr = [];
@@ -623,18 +644,19 @@ async function getExternalEditors() {
     _externalEditorsCache = [];
     arr.forEach(function(e) {
       if (!e || typeof e !== 'object') return;
-      var path = e.path;
-      if (typeof path !== 'string') return;
-      path = path.trim();
+      const rawPath = 'path' in e ? e.path : undefined;
+      if (typeof rawPath !== 'string') return;
+      const path = rawPath.trim();
       if (!path) return;
-      var name = e.name;
-      if (typeof name !== 'string' || !name.trim()) {
+      const rawName = 'name' in e ? e.name : undefined;
+      let name;
+      if (typeof rawName !== 'string' || !rawName.trim()) {
         var parts = path.replace(/\/+$/, '').split('/');
         name = parts[parts.length - 1] || 'Editor';
       } else {
-        name = name.trim();
+        name = rawName.trim();
       }
-      _externalEditorsCache.push({ name: name, path: path });
+      _externalEditorsCache?.push({ name: name, path: path });
     });
     _externalEditorsLoading = null;
     return _externalEditorsCache;
@@ -665,6 +687,7 @@ function photoExternalEditDisabledHint() {
     : null;
 }
 
+/** @param {number[]} photoIds @param {number} [editorIndex] */
 async function openInEditor(photoIds, editorIndex) {
   if (!photoIds || !photoIds.length) return;
   var disabledHint = photoExternalEditDisabledHint();
@@ -672,17 +695,17 @@ async function openInEditor(photoIds, editorIndex) {
     showToast(disabledHint, 'warning');
     return false;
   }
-  var body = { photo_ids: photoIds };
+  /** @type {{photo_ids: number[]; editor_index?: number}} */ var body = { photo_ids: photoIds };
   if (typeof editorIndex === 'number') body.editor_index = editorIndex;
   try {
-    var data = await safeFetch('/api/photos/open-external', {
+    /** @type {{opened: number}} */ var data = await safeFetch('/api/photos/open-external', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
     showToast('Opened ' + data.opened + ' photo(s) in editor', 'success');
   } catch(e) {
-    showToast(e.message || 'Failed to open in editor', 'error');
+    showToast(e instanceof Error ? e.message : 'Failed to open in editor', 'error');
   }
 }
 
@@ -728,6 +751,7 @@ window.buildOpenInEditorMenuItems = function(photoIds) {
  * of photo IDs. Checks availability, confirms, posts the job, and streams
  * progress via SSE.
  */
+/** @param {number[]} photoIds */
 async function developPhotos(photoIds) {
   if (!photoIds || !photoIds.length) return;
   var disabledHint = photoExternalEditDisabledHint();
@@ -736,7 +760,7 @@ async function developPhotos(photoIds) {
     return false;
   }
   try {
-    var status = await safeFetch('/api/darktable/status', {}, { toast: false });
+    /** @type {{available?: boolean}} */ var status = await safeFetch('/api/darktable/status', {}, { toast: false });
     if (!status.available) {
       showToast('darktable-cli not found. Configure it in Settings.', 'warning');
       return;
@@ -747,17 +771,17 @@ async function developPhotos(photoIds) {
   }
   if (!confirm('Develop ' + photoIds.length + ' photo(s) with darktable?')) return;
   try {
-    var data = await safeFetch('/api/jobs/develop', {
+    /** @type {{job_id: string}} */ var data = await safeFetch('/api/jobs/develop', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: photoIds}),
     });
     showToast('Developing ' + photoIds.length + ' photo(s)...', 'info');
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-      onProgress: function(prog) {
+      onProgress: function(/** @type {NavProgress} */ prog) {
         showToast('Developing: ' + prog.current + '/' + prog.total + ' — ' + (prog.current_file || ''), 'info');
       },
-      onComplete: function(event) {
+      onComplete: function(/** @type {{status: string; result?: {developed?: number; errors?: number}}} */ event) {
         var result = (event && event.result) || {};
         var developedCount = result.developed || 0;
         var errorCount = result.errors || 0;
@@ -772,7 +796,7 @@ async function developPhotos(photoIds) {
       onError: function() {}
     });
   } catch(e) {
-    showToast(e.message || 'Error starting develop job', 'error');
+    showToast(e instanceof Error ? e.message : 'Error starting develop job', 'error');
   }
 }
 
@@ -789,6 +813,7 @@ function preferredScrollBehavior() {
 /* ---------- Safe EventSource ---------- */
 // A dropped stream toasts "Connection lost" unless the caller passes
 // quietError: true because its onError shows a more specific message.
+/** @template [Progress=unknown] @template [Complete=unknown] @param {string} url @param {SafeEventSourceCallbacks<Progress, Complete>} [callbacks] */
 function safeEventSource(url, callbacks) {
   callbacks = callbacks || {};
   var source = new EventSource(url);
@@ -812,6 +837,7 @@ function safeEventSource(url, callbacks) {
 }
 
 /* ---------- Bottom Panel ---------- */
+/** @param {number | null | undefined} seconds */
 function formatDuration(seconds) {
   if (seconds == null) return '-';
   if (seconds < 60) return seconds.toFixed(1) + 's';
@@ -826,29 +852,32 @@ function formatDuration(seconds) {
 }
 
 (function() {
-  var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
-  var lpLines = [];
-  var lpSource = null;
+  /** @type {Record<string,number>} */ var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
+  /** @type {NavLogRecord[]} */ var lpLines = [];
+  /** @type {EventSource | null} */ var lpSource = null;
   var lpMaxLines = 200;
-  var activeJobs = [];
-  var _activeWsId = null;
+  /** @type {NavJob[]} */ var activeJobs = [];
+  /** @type {number | null} */ var _activeWsId = null;
   var currentBpTab = 'jobs';
-  var _jobPollTimer = null;
-  var _navJobPollTimer = null;
+  /** @type {VisiblePollHandle | null} */ var _jobPollTimer = null;
+  /** @type {VisiblePollHandle | null} */ var _navJobPollTimer = null;
 
   // Job polls pause while the window is hidden, except while a job is live:
   // the dock/taskbar progress is read from a minimized window. (``active``
   // also carries jobs that finished within the last hour.)
+  /** @param {number} intervalMs */
   function startJobPoll(intervalMs) {
-    return Vireo.pollWhileVisible(pollJobs, intervalMs, {
+    return /** @type {VisiblePoll} */ (/** @type {VireoNamespace} */ (Vireo).pollWhileVisible)(pollJobs, intervalMs, {
       runWhileHidden: function() { return activeJobs.some(isLiveJob); },
     });
   }
+  /** @param {VisiblePollHandle | null} poll */
   function stopJobPoll(poll) {
     if (poll) poll.stop();
     return null;
   }
 
+  /** @param {string} id */
   function runtimeWarningDismissKey(id) {
     return 'vireo_runtime_warning_dismissed_' + String(id || '');
   }
@@ -856,14 +885,14 @@ function formatDuration(seconds) {
   function findRuntimeWarning() {
     for (var i = 0; i < activeJobs.length; i++) {
       var j = activeJobs[i];
-      if (j.status === 'running' && j.runtime_warning) return j.runtime_warning;
+      if (j?.status === 'running' && j.runtime_warning) return j.runtime_warning;
     }
     return null;
   }
 
   function updateRuntimeWarningBanner() {
-    var banner = document.getElementById('runtimeWarningBanner');
-    var text = document.getElementById('runtimeWarningText');
+    var banner = /** @type {HTMLElement} */ (document.getElementById('runtimeWarningBanner'));
+    var text = /** @type {HTMLElement} */ (document.getElementById('runtimeWarningText'));
     if (!banner || !text) return;
 
     var warning = findRuntimeWarning();
@@ -883,7 +912,7 @@ function formatDuration(seconds) {
   }
 
   window.dismissRuntimeWarning = function() {
-    var banner = document.getElementById('runtimeWarningBanner');
+    var banner = /** @type {HTMLElement} */ (document.getElementById('runtimeWarningBanner'));
     if (!banner) return;
     var id = banner.dataset.warningId || 'cpu-only-ml';
     localStorage.setItem(runtimeWarningDismissKey(id), '1');
@@ -915,6 +944,7 @@ function formatDuration(seconds) {
     applyTheme(saved, true);
   })();
 
+  /** @param {string} themeId @param {boolean} [skipSave] */
   function applyTheme(themeId, skipSave) {
     document.documentElement.setAttribute('data-theme', themeId);
     if (!skipSave) localStorage.setItem('vireo_theme', themeId);
@@ -929,16 +959,16 @@ function formatDuration(seconds) {
     var current = document.documentElement.getAttribute('data-theme') || 'vireo-dark';
     var idx = THEMES.findIndex(function(t) { return t.id === current; });
     var next = THEMES[(idx + 1) % THEMES.length];
-    applyTheme(next.id);
+    if (next) applyTheme(next.id);
   };
 
   function updateThemeIcon() {
-    var btn = document.getElementById('themeToggle');
+    var btn = /** @type {HTMLElement} */ (document.getElementById('themeToggle'));
     if (!btn) return;
     var current = document.documentElement.getAttribute('data-theme') || 'vireo-dark';
     var theme = THEMES.find(function(t) { return t.id === current; }) || THEMES[0];
-    btn.textContent = theme.icon;
-    btn.title = 'Theme: ' + theme.name + ' (click to cycle)';
+    btn.textContent = theme?.icon || '';
+    btn.title = 'Theme: ' + (theme?.name || current) + ' (click to cycle)';
   }
 
   // Advanced mode system. Keep the old dev-mode names as aliases so pages
@@ -949,7 +979,7 @@ function formatDuration(seconds) {
     var on = stored === 'true';
     document.documentElement.setAttribute('data-advanced-mode', on ? 'true' : 'false');
     document.documentElement.setAttribute('data-dev-mode', on ? 'true' : 'false');
-    var btn = document.getElementById('devModeToggle');
+    var btn = /** @type {HTMLElement} */ (document.getElementById('devModeToggle'));
     if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Advanced mode: ' + (on ? 'ON' : 'OFF'); }
   })();
 
@@ -964,7 +994,7 @@ function formatDuration(seconds) {
     document.documentElement.setAttribute('data-dev-mode', on ? 'true' : 'false');
     localStorage.setItem('vireo_advanced_mode', on ? 'true' : 'false');
     localStorage.setItem('vireo_dev_mode', on ? 'true' : 'false');
-    var btn = document.getElementById('devModeToggle');
+    var btn = /** @type {HTMLElement} */ (document.getElementById('devModeToggle'));
     if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Advanced mode: ' + (on ? 'ON' : 'OFF'); }
     // Notify pages that may want to re-render
     window.dispatchEvent(new Event('advancedmodechange'));
@@ -975,11 +1005,11 @@ function formatDuration(seconds) {
   function init() {
     // Restore panel state and height
     if (localStorage.getItem('vireo_panel_open') === 'true') {
-      var savedH = parseInt(localStorage.getItem('vireo_panel_height')) || 240;
-      var panel = document.getElementById('bottomPanel');
+      var savedH = parseInt(localStorage.getItem('vireo_panel_height') || '') || 240;
+      var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
       panel.classList.add('open');
       panel.style.height = savedH + 'px';
-      document.getElementById('bottomToggle').classList.add('open');
+      /** @type {HTMLElement} */ (document.getElementById('bottomToggle')).classList.add('open');
       document.body.style.paddingBottom = (savedH + 28) + 'px';
       document.body.style.setProperty('--bottom-offset', (savedH + 28) + 'px');
     }
@@ -987,7 +1017,7 @@ function formatDuration(seconds) {
     switchBpTab(savedTab);
 
     // Infinite scroll for history pane
-    document.getElementById('bpHistoryList').addEventListener('scroll', function() {
+    /** @type {HTMLElement} */ (document.getElementById('bpHistoryList')).addEventListener('scroll', function() {
       var el = this;
       if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20) {
         loadEditHistory(true);
@@ -1000,10 +1030,10 @@ function formatDuration(seconds) {
     // Close SSE and stop polling immediately on link click (before unload)
     var isInternalNav = false;
     document.addEventListener('click', function(e) {
-      var link = e.target.closest('a[href]');
-      if (link && !e.defaultPrevented && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey &&
+      var link = /** @type {HTMLElement} */ (e.target).closest('a[href]');
+      if (link instanceof HTMLAnchorElement && !e.defaultPrevented && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey &&
           (!e.button || e.button === 0) && link.target !== '_blank' && !link.hasAttribute('download') &&
-          link.hostname === location.hostname && !link.getAttribute('href').startsWith('#') &&
+          link.hostname === location.hostname && !link.getAttribute('href')?.startsWith('#') &&
           !(link.pathname === location.pathname && link.search === location.search && link.hash)) {
         isInternalNav = true;
         // Kill SSE and polling NOW so threads are freed for the next page
@@ -1031,7 +1061,7 @@ function formatDuration(seconds) {
     });
 
     // Restore logs from sessionStorage (persisted across page navigations)
-    var savedLogs = [];
+    /** @type {NavLogRecord[]} */ var savedLogs = [];
     try {
       var raw = sessionStorage.getItem('vireo_logs');
       if (raw) savedLogs = JSON.parse(raw);
@@ -1040,10 +1070,10 @@ function formatDuration(seconds) {
     if (savedLogs.length > 0) {
       // Use saved logs and merge with any newer server logs
       savedLogs.forEach(function(l) { addLpLine(l, true); });
-      var lastTime = savedLogs[savedLogs.length - 1].time || 0;
+      var lastTime = savedLogs[savedLogs.length - 1]?.time || 0;
       fetch('/api/logs/recent?count=200')
         .then(function(r) { return r.json(); })
-        .then(function(logs) {
+        .then(function(/** @type {NavLogRecord[]} */ logs) {
           logs.forEach(function(l) {
             if (l.time > lastTime) addLpLine(l, true);
           });
@@ -1052,7 +1082,7 @@ function formatDuration(seconds) {
     } else {
       fetch('/api/logs/recent?count=200')
         .then(function(r) { return r.json(); })
-        .then(function(logs) {
+        .then(function(/** @type {NavLogRecord[]} */ logs) {
           logs.forEach(function(l) { addLpLine(l, true); });
           lpApplyFilter();
         });
@@ -1080,11 +1110,11 @@ function formatDuration(seconds) {
   window.switchBpTab = function(tab) {
     currentBpTab = tab;
     var tabNames = ['jobs', 'history', 'logs'];
-    var paneIds = {'jobs': 'bpJobs', 'history': 'bpHistory', 'logs': 'bpLogs'};
-    document.querySelectorAll('.bp-tab').forEach(function(t, i) {
+    /** @type {Record<string,string>} */ var paneIds = {'jobs': 'bpJobs', 'history': 'bpHistory', 'logs': 'bpLogs'};
+    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.bp-tab')).forEach(function(t, i) {
       t.classList.toggle('active', tabNames[i] === tab);
     });
-    document.querySelectorAll('.bp-pane').forEach(function(p) {
+    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.bp-pane')).forEach(function(p) {
       p.classList.toggle('active', p.id === paneIds[tab]);
     });
     localStorage.setItem('vireo_panel_tab', tab);
@@ -1096,17 +1126,18 @@ function formatDuration(seconds) {
   var _historyLoadSeq = 0;
   var _historyAppendPending = false;
 
+  /** @param {boolean} [append] */
   function loadEditHistory(append) {
     if (append && _historyAppendPending) return;
     if (!append) { _historyLoadSeq++; _historyAppendPending = false; }
     var sequence = _historyLoadSeq;
-    var list = document.getElementById('bpHistoryList');
+    var list = /** @type {HTMLElement} */ (document.getElementById('bpHistoryList'));
     if (!list) return;
     _historyAppendPending = true;
-    var offset = append ? list.querySelectorAll('.bp-history-row').length : 0;
-    var historyPromise = safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false});
-    var redoPromise = !append ? safeFetch('/api/redo/status', {}, {toast: false}).catch(function() { return null; }) : Promise.resolve(null);
-    var undoPromise = safeFetch('/api/undo/status', {}, {toast: false});
+    var offset = append ? /** @type {NodeListOf<HTMLElement>} */ (list.querySelectorAll('.bp-history-row')).length : 0;
+    /** @type {Promise<NavHistoryEntry[]>} */ var historyPromise = safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false});
+    /** @type {Promise<NavHistoryStatus | null>} */ var redoPromise = !append ? /** @type {Promise<NavHistoryStatus>} */ (safeFetch('/api/redo/status', {}, {toast: false})).catch(function() { return null; }) : Promise.resolve(null);
+    /** @type {Promise<NavHistoryStatus>} */ var undoPromise = safeFetch('/api/undo/status', {}, {toast: false});
     Promise.all([historyPromise, redoPromise, undoPromise])
       .then(function(results) {
         if (sequence !== _historyLoadSeq) return;
@@ -1125,14 +1156,14 @@ function formatDuration(seconds) {
           list.appendChild(redoRow);
         }
         if (!data || data.length === 0) {
-          if (!append && !list.querySelector('.bp-history-redo')) list.innerHTML = '<div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>';
+          if (!append && !/** @type {HTMLElement | null} */ (list.querySelector('.bp-history-redo'))) list.innerHTML = '<div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>';
           return;
         }
         data.forEach(function(entry) {
           if (list.querySelector('[data-edit-id="' + entry.id + '"]')) return;
           var row = document.createElement('div');
           row.className = 'bp-history-row';
-          row.dataset.editId = entry.id;
+          row.dataset.editId = String(entry.id);
           row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border-subtle);';
 
           var icon = entry.action_type === 'rating' ? '\u2605' :
@@ -1154,23 +1185,24 @@ function formatDuration(seconds) {
       });
   }
 
+  /** @param {unknown} s */
   function _escapeHtml(s) {
     if (typeof escapeHtml === 'function') return escapeHtml(s);
     var d = document.createElement('div');
-    d.textContent = s;
+    d.textContent = String(s ?? '');
     return d.innerHTML;
   }
 
   var historyBusy = false;
   var historyPendingWrites = 0;
   var historyStatusSeq = 0;
-  var historyStatus = {undo: {available: false}, redo: {available: false}};
+  /** @type {{undo: NavHistoryStatus; redo: NavHistoryStatus}} */ var historyStatus = {undo: {available: false}, redo: {available: false}};
 
   function renderHistoryControls() {
     var blocked = historyBusy || historyPendingWrites > 0;
     ['undo', 'redo'].forEach(function(operation) {
-      var button = document.getElementById(operation === 'undo' ? 'historyUndoBtn' : 'historyRedoBtn');
-      var status = (typeof window.localHistoryStatus === 'function' && window.localHistoryStatus(operation)) || historyStatus[operation];
+      var button = /** @type {HTMLButtonElement} */ (document.getElementById(operation === 'undo' ? 'historyUndoBtn' : 'historyRedoBtn'));
+      var status = (typeof window.localHistoryStatus === 'function' && window.localHistoryStatus(operation)) || historyStatus[operation === 'undo' ? 'undo' : 'redo'];
       button.disabled = blocked || !status.available;
       var label = operation === 'undo' ? 'Undo' : 'Redo';
       button.title = status.available ? label + ': ' + status.description : 'Nothing to ' + operation;
@@ -1180,15 +1212,15 @@ function formatDuration(seconds) {
       button.setAttribute('aria-keyshortcuts', operation === 'undo' ? 'Control+z Meta+z' : 'Control+Shift+z Meta+Shift+z');
     });
     var status = (typeof window.localHistoryStatus === 'function' && window.localHistoryStatus('undo')) || historyStatus.undo;
-    document.getElementById('undoMsg').textContent = historyBusy ? 'Updating…' : (status.description || '');
-    document.getElementById('undoToast').setAttribute('aria-busy', String(blocked));
+    /** @type {HTMLElement} */ (document.getElementById('undoMsg')).textContent = historyBusy ? 'Updating…' : (status.description || '');
+    /** @type {HTMLElement} */ (document.getElementById('undoToast')).setAttribute('aria-busy', String(blocked));
   }
 
   function refreshHistoryControls() {
     var seq = ++historyStatusSeq;
     return Promise.all([
-      safeFetch('/api/undo/status', {}, {toast: false}),
-      safeFetch('/api/redo/status', {}, {toast: false})
+      /** @type {Promise<NavHistoryStatus>} */ (safeFetch('/api/undo/status', {}, {toast: false})),
+      /** @type {Promise<NavHistoryStatus>} */ (safeFetch('/api/redo/status', {}, {toast: false}))
     ]).then(function(results) {
       if (seq !== historyStatusSeq) return;
       historyStatus = {undo: results[0], redo: results[1]};
@@ -1204,6 +1236,7 @@ function formatDuration(seconds) {
   window.addEventListener('focus', refreshHistoryControls);
   window.vireoHistoryBusy = function() { return historyBusy; };
 
+  /** @param {string} operation @param {HTMLButtonElement} [btn] */
   async function changeHistory(operation, btn) {
     if (historyBusy || historyPendingWrites) return false;
     if (typeof window.changeLocalHistory === 'function') {
@@ -1216,7 +1249,7 @@ function formatDuration(seconds) {
     if (btn) btn.disabled = true;
     renderHistoryControls();
     try {
-      var data = await safeFetch('/api/' + operation, {method: 'POST'});
+      /** @type {NavHistoryChange} */ var data = await safeFetch('/api/' + operation, {method: 'POST'});
       if (!data || !data.ok) return false;
       _lbRefreshEditRecipeCache(data.edit_recipes);
       // Invalidate older in-flight lightbox flag reads before refreshing it.
@@ -1224,7 +1257,7 @@ function formatDuration(seconds) {
       var description = data[operation === 'undo' ? 'undone' : 'redone'];
       showToast((operation === 'undo' ? 'Undone: ' : 'Redone: ') + description, 'success');
       _historySessionCount = Math.max(0, _historySessionCount + (operation === 'undo' ? -1 : 1));
-      document.getElementById('historyBadge').textContent = _historySessionCount || '';
+      /** @type {HTMLElement} */ (document.getElementById('historyBadge')).textContent = String(_historySessionCount || '');
       loadEditHistory();
       document.dispatchEvent(new CustomEvent('vireo:edit-history-changed', {
         detail: { operation: operation, result: data }
@@ -1250,11 +1283,11 @@ function formatDuration(seconds) {
   async function refreshHistoryLightbox() {
     var photoId = vireoLightboxSession.requestedPhotoId();
     var openToken = vireoLightboxSession.capture();
-    if (photoId == null || !document.getElementById('lightboxOverlay').classList.contains('active')) return;
+    if (photoId == null || !/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) return;
     try {
-      var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
+      /** @type {NavPhoto} */ var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
       if (!vireoLightboxSession.isCurrent(openToken)) return;
-      _lbPhotoDataByPhoto[String(photoId)] = photo;
+      _lbPhotoDataByPhoto[photoId] = photo;
       _lbRecordFlag(photoId, photo.flag);
       _lbRenderKeywords(photo.keywords);
       _lbRenderLifeListPanel(photoId);
@@ -1274,17 +1307,19 @@ function formatDuration(seconds) {
   Keymap.register('global', {name: 'redo_history', key: 'ctrl+shift+z', action: function(e) {
     return historyShortcut(e, 'redo');
   }});
+  /** @param {Event} e @param {string} operation */
   function historyShortcut(e, operation) {
     if (location.pathname === '/browse' || location.pathname.indexOf('/edit') === 0) return false;
-    if (document.querySelector('.modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active, .folder-browser-overlay.open, .shortcuts-overlay.open')) return false;
+    if (/** @type {HTMLElement | null} */ (document.querySelector('.modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active, .folder-browser-overlay.open, .shortcuts-overlay.open'))) return false;
     e.stopImmediatePropagation();
     changeHistory(operation);
     return true;
   }
 
+  /** @param {{action_type?: string; edit_recipes?: {photo_id: number; recipe?: NavRecipe | null}[]}} data */
   function _refreshEditRecipeHistoryChanges(data) {
     if (!data || data.action_type !== 'edit_recipe' || !Array.isArray(data.edit_recipes)) return;
-    var photoIds = [];
+    /** @type {number[]} */ var photoIds = [];
     data.edit_recipes.forEach(function(update) {
       if (!update || update.photo_id == null) return;
       var photoId = Number(update.photo_id);
@@ -1292,8 +1327,9 @@ function formatDuration(seconds) {
       photoIds.push(photoId);
       _lbMarkEditRecipeWrite(photoId);
       _lbRememberEditRecipe(photoId, update.recipe);
-      if (_lbPhotoDataByPhoto[String(photoId)]) {
-        _lbPhotoDataByPhoto[String(photoId)].edit_recipe = update.recipe || null;
+      const cachedPhoto = _lbPhotoDataByPhoto[photoId];
+      if (cachedPhoto) {
+        cachedPhoto.edit_recipe = update.recipe || null;
       }
       _vireoBumpRenderVersion(photoId);
     });
@@ -1308,20 +1344,20 @@ function formatDuration(seconds) {
 
   function _bumpHistoryBadge() {
     _historySessionCount++;
-    var badge = document.getElementById('historyBadge');
-    if (badge) badge.textContent = _historySessionCount;
+    var badge = /** @type {HTMLElement} */ (document.getElementById('historyBadge'));
+    if (badge) badge.textContent = String(_historySessionCount);
     if (currentBpTab === 'history') loadEditHistory();
   }
 
   // Track at the shared transport so fetch, Request objects, and safeFetch
   // all participate in the same pending-write guard exactly once.
-  Vireo.api.trackHistoryRequest = function(input, opts, send) {
+  /** @type {VireoApi} */ (/** @type {VireoNamespace} */ (Vireo).api).trackHistoryRequest = function(input, opts, send) {
     var url = input instanceof Request ? input.url : String(input);
     var method = (opts && opts.method) || (input instanceof Request ? input.method : 'GET');
     var mutation = /^(POST|PUT|PATCH|DELETE)$/i.test(method);
     var historyWrite = mutation && /\/(rating|flag|color_label|keywords|edit-recipe|batch\/|predictions\/|culling\/|misses\/reject|highlights\/(confirm|relabel)|species\/label-cluster|encounters\/species|sync\/discard|pipeline\/(detach-|group\/apply|save-cache)|photos\/\d+\/(wildlife_excluded|location))/.test(url);
     if (historyWrite && historyBusy) {
-      var error = new Error('Undo or redo is still finishing — try again in a moment');
+      /** @type {Error & {code?: string}} */ var error = new Error('Undo or redo is still finishing — try again in a moment');
       error.code = 'history_busy';
       showToast(error.message, 'warning');
       return Promise.reject(error);
@@ -1339,10 +1375,11 @@ function formatDuration(seconds) {
     });
   };
 
+  /** @param {string | undefined} isoStr */
   function _timeAgo(isoStr) {
     var d = new Date(isoStr + 'Z');
     var now = new Date();
-    var sec = Math.floor((now - d) / 1000);
+    var sec = Math.floor((now.getTime() - d.getTime()) / 1000);
     if (sec < 60) return 'just now';
     if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
     if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
@@ -1350,14 +1387,14 @@ function formatDuration(seconds) {
   }
 
   window.toggleBottomPanel = function() {
-    var panel = document.getElementById('bottomPanel');
-    var toggle = document.getElementById('bottomToggle');
+    var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
+    var toggle = /** @type {HTMLElement} */ (document.getElementById('bottomToggle'));
     panel.classList.add('animating');
     panel.classList.toggle('open');
     toggle.classList.toggle('open');
     var isOpen = panel.classList.contains('open');
-    localStorage.setItem('vireo_panel_open', isOpen);
-    var h = isOpen ? (parseInt(localStorage.getItem('vireo_panel_height')) || 240) : 0;
+    localStorage.setItem('vireo_panel_open', String(isOpen));
+    var h = isOpen ? (parseInt(localStorage.getItem('vireo_panel_height') || '') || 240) : 0;
     panel.style.height = h + 'px';
     var newPad = isOpen ? (h + 28) + 'px' : '28px';
     document.body.style.paddingBottom = newPad;
@@ -1379,10 +1416,10 @@ function formatDuration(seconds) {
 
   /* ---------- Panel drag resize ---------- */
   (function() {
-    var handle = document.getElementById('bpDragHandle');
-    var panel = document.getElementById('bottomPanel');
+    var handle = /** @type {HTMLElement} */ (document.getElementById('bpDragHandle'));
+    var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
     var dragging = false;
-    var startY, startH;
+    var startY = 0, startH = 0;
 
     handle.addEventListener('mousedown', function(e) {
       dragging = true;
@@ -1406,7 +1443,7 @@ function formatDuration(seconds) {
       dragging = false;
       handle.classList.remove('dragging');
       document.body.style.userSelect = '';
-      localStorage.setItem('vireo_panel_height', panel.offsetHeight);
+      localStorage.setItem('vireo_panel_height', String(panel.offsetHeight));
     });
   })();
 
@@ -1427,7 +1464,7 @@ function formatDuration(seconds) {
   // Pages signal job completion via this event so activeJobs stays current
   window.addEventListener('vireo-job-done', function(e) {
     refreshHistoryControls();
-    var jobId = e.detail && e.detail.job_id;
+    var jobId = /** @type {CustomEvent<{job_id?: string}>} */ (e).detail?.job_id;
     if (jobId) {
       activeJobs = activeJobs.filter(function(j) { return j.id !== jobId; });
       renderJobs();
@@ -1441,7 +1478,7 @@ function formatDuration(seconds) {
   function pollJobs() {
     fetch('/api/jobs')
       .then(function(r) { return r.json(); })
-      .then(function(data) {
+      .then(function(/** @type {NavJobsPayload} */ data) {
         // Import tags and other worker edits commit after their start request
         // returns. Reconcile even if a short job finished between two polls.
         refreshHistoryControls();
@@ -1460,21 +1497,22 @@ function formatDuration(seconds) {
   // job so users can see progress when the window is minimized. No-op outside
   // Tauri. With multiple concurrent jobs we pick the one that started first
   // (earliest started_at); phases without a known total pulse instead.
-  var _lastDockProgress = { state: null, value: -1 };
+  /** @type {{state: string | null; value: number | null}} */ var _lastDockProgress = { state: null, value: -1 };
+  /** @param {NavProgress | null | undefined} progress */
   function bpActiveProgress(progress) {
     if (!progress) return null;
-    if (typeof progress.phase_current === 'number' && progress.phase_total > 0) {
+    if (typeof progress.phase_current === 'number' && Number(progress.phase_total) > 0) {
       return {
         current: progress.phase_current,
-        total: progress.phase_total,
+        total: Number(progress.phase_total),
         label: progress.phase_label || progress.phase || 'Current phase',
         phase: true,
       };
     }
-    if (progress.total > 0) {
+    if (Number(progress.total) > 0) {
       return {
         current: progress.current || 0,
-        total: progress.total,
+        total: Number(progress.total),
         label: 'Overall',
         phase: false,
       };
@@ -1482,6 +1520,7 @@ function formatDuration(seconds) {
     return null;
   }
 
+  /** @param {{current: number; total: number} | null} info */
   function bpProgressPct(info) {
     if (!info || !info.total) return 0;
     return Math.max(0, Math.min(100, Math.round((info.current / info.total) * 100)));
@@ -1496,11 +1535,11 @@ function formatDuration(seconds) {
     if (running.length === 0) {
       state = 'none'; value = null;
     } else {
-      var longest = running[0];
-      for (var i = 1; i < running.length; i++) {
-        var a = running[i].started_at || '';
+      var longest = /** @type {NavJob} */ (running[0]);
+      for (const candidate of running.slice(1)) {
+        var a = candidate.started_at || '';
         var b = longest.started_at || '';
-        if (a && (!b || a < b)) longest = running[i];
+        if (a && (!b || a < b)) longest = candidate;
       }
       var progressInfo = bpActiveProgress(longest.progress);
       if (progressInfo) {
@@ -1521,7 +1560,7 @@ function formatDuration(seconds) {
   }
 
   function renderJobs() {
-    var container = document.getElementById('bpJobsList');
+    var container = /** @type {HTMLElement} */ (document.getElementById('bpJobsList'));
     // "Active" includes queued/pending work waiting behind a busy slot,
     // not just running ones. Otherwise the bottom panel shows nothing
     // when the user has queued work and the slot is held by a sibling
@@ -1542,8 +1581,8 @@ function formatDuration(seconds) {
 
     // Badges count attention-worthy work across workspaces. Ambient system
     // jobs stay visible in the panel without asking for attention.
-    document.getElementById('jobsBadge').textContent = attentionJobs.length;
-    var navBadge = document.getElementById('navJobBadge');
+    /** @type {HTMLElement} */ (document.getElementById('jobsBadge')).textContent = String(attentionJobs.length);
+    var navBadge = /** @type {HTMLElement} */ (document.getElementById('navJobBadge'));
     if (navBadge) navBadge.textContent = attentionJobs.length > 0 ? ' (' + attentionJobs.length + ')' : '';
 
     if (allRunning.length === 0) {
@@ -1585,6 +1624,7 @@ function formatDuration(seconds) {
     container.innerHTML = html;
   }
 
+  /** @param {NavJob[]} jobs */
   function renderJobList(jobs) {
     var html = '';
     jobs.forEach(function(j) {
@@ -1616,7 +1656,7 @@ function formatDuration(seconds) {
   }
 
   function updateSummary() {
-    var summary = document.getElementById('jobSummary');
+    var summary = /** @type {HTMLElement} */ (document.getElementById('jobSummary'));
     var liveJobs = activeJobs.filter(isLiveJob);
     var attentionJobs = liveJobs.filter(countsForBadge);
     var running = attentionJobs.filter(function(j) { return j.status === 'running'; });
@@ -1627,7 +1667,7 @@ function formatDuration(seconds) {
 
     if (running.length === 0 && waiting.length === 0 && paused.length > 0) {
       summary.textContent = paused.length === 1
-        ? window.formatJobType(paused[0].type) + ' ' + paused[0].status
+        ? window.formatJobType(paused[0]?.type) + ' ' + paused[0]?.status
         : paused.length + ' jobs paused';
       summary.classList.add('idle');
       summary.classList.remove('active');
@@ -1637,7 +1677,7 @@ function formatDuration(seconds) {
     if (running.length === 0 && waiting.length === 0) {
       if (liveJobs.length > 0) {
         summary.textContent = liveJobs.length === 1
-          ? 'Background: ' + window.formatJobType(liveJobs[0].type)
+          ? 'Background: ' + window.formatJobType(liveJobs[0]?.type)
           : liveJobs.length + ' background jobs';
       } else {
         summary.textContent = 'No active jobs';
@@ -1661,7 +1701,7 @@ function formatDuration(seconds) {
       return;
     }
 
-    var j = running[0];
+    var j = /** @type {NavJob} */ (running[0]);
     var text = window.formatJobType(j.type);
     if (j.progress && j.progress.phase) {
       text += ' — ' + j.progress.phase;
@@ -1675,8 +1715,8 @@ function formatDuration(seconds) {
       } else {
         text += ' ' + progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString() + ' (' + pct + '%)';
       }
-      if (j.progress.rate > 0) {
-        text += ' ' + (j.progress.rate / (1024*1024)).toFixed(1) + ' MB/s';
+      if ((j.progress?.rate || 0) > 0) {
+        text += ' ' + ((j.progress?.rate || 0) / (1024*1024)).toFixed(1) + ' MB/s';
       }
     } else if (j.progress && j.progress.current_file) {
       text += ' ' + j.progress.current_file;
@@ -1694,10 +1734,11 @@ function formatDuration(seconds) {
     // The dot signals attention-worthy work; ambient system jobs remain in
     // the Jobs panel without lighting up the navbar.
     var running = activeJobs.filter(isAttentionJob);
-    var dot = document.getElementById('navActivityDot');
+    var dot = /** @type {HTMLElement} */ (document.getElementById('navActivityDot'));
     if (dot) dot.classList.toggle('active', running.length > 0);
   }
 
+  /** @param {number} secs */
   function formatElapsed(secs) {
     if (secs < 60) return Math.round(secs) + 's';
     if (secs < 3600) return Math.floor(secs / 60) + 'm ' + Math.round(secs % 60) + 's';
@@ -1715,14 +1756,15 @@ function formatDuration(seconds) {
   // with the level filter read once and applied inline per new node (no
   // O(n) re-scan). lpApplyFilter() stays for the filter <select> onchange,
   // where a full re-scan of existing lines is genuinely required.
-  var _lpPending = [];
+  /** @type {NavLogRecord[]} */ var _lpPending = [];
   var _lpFlushScheduled = false;
 
   function _lpMinOrder() {
-    var sel = document.getElementById('lpLevelFilter');
+    var sel = /** @type {HTMLSelectElement} */ (document.getElementById('lpLevelFilter'));
     return LEVEL_ORDER[sel ? sel.value : 'DEBUG'] || 0;
   }
 
+  /** @param {NavLogRecord} record @param {number} minOrder */
   function _lpMakeLineEl(record, minOrder) {
     var time = new Date(record.time * 1000);
     var timeStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -1743,11 +1785,11 @@ function formatDuration(seconds) {
     if (_lpPending.length === 0) return;
     var batch = _lpPending;
     _lpPending = [];
-    var container = document.getElementById('lpContent');
+    var container = /** @type {HTMLElement} */ (document.getElementById('lpContent'));
     if (!container) return;
     var minOrder = _lpMinOrder();
 
-    for (var i = 0; i < batch.length; i++) lpLines.push(batch[i]);
+    for (const record of batch) lpLines.push(record);
     var overflow = lpLines.length - lpMaxLines;
     if (overflow > 0) lpLines.splice(0, overflow);
 
@@ -1755,20 +1797,20 @@ function formatDuration(seconds) {
     // the cap would otherwise create (and immediately discard) thousands.
     var keepFrom = Math.max(0, batch.length - lpMaxLines);
     var frag = document.createDocumentFragment();
-    for (var j = keepFrom; j < batch.length; j++) {
-      frag.appendChild(_lpMakeLineEl(batch[j], minOrder));
+    for (const record of batch.slice(keepFrom)) {
+      frag.appendChild(_lpMakeLineEl(record, minOrder));
     }
     container.appendChild(frag);
     while (container.childNodes.length > lpMaxLines && container.firstChild) {
       container.firstChild.remove();
     }
 
-    var autoScroll = document.getElementById('lpAutoScroll');
+    var autoScroll = /** @type {HTMLInputElement} */ (document.getElementById('lpAutoScroll'));
     if (autoScroll && autoScroll.checked) {
       container.scrollTop = container.scrollHeight;
     }
-    document.getElementById('lpCount').textContent = lpLines.length;
-    document.getElementById('logsBadge').textContent = lpLines.length;
+    /** @type {HTMLElement} */ (document.getElementById('lpCount')).textContent = String(lpLines.length);
+    /** @type {HTMLElement} */ (document.getElementById('logsBadge')).textContent = String(lpLines.length);
   }
 
   window.addLpLine = function(record, bulk) {
@@ -1778,15 +1820,15 @@ function formatDuration(seconds) {
       // still no per-line scroll.
       if (lpLines.length >= lpMaxLines) {
         lpLines.shift();
-        var firstB = document.getElementById('lpContent').firstChild;
+        var firstB = /** @type {HTMLElement} */ (document.getElementById('lpContent')).firstChild;
         if (firstB) firstB.remove();
       }
       lpLines.push(record);
-      document.getElementById('lpContent').appendChild(
+      /** @type {HTMLElement} */ (document.getElementById('lpContent')).appendChild(
         _lpMakeLineEl(record, _lpMinOrder())
       );
-      document.getElementById('lpCount').textContent = lpLines.length;
-      document.getElementById('logsBadge').textContent = lpLines.length;
+      /** @type {HTMLElement} */ (document.getElementById('lpCount')).textContent = String(lpLines.length);
+      /** @type {HTMLElement} */ (document.getElementById('logsBadge')).textContent = String(lpLines.length);
       return;
     }
     _lpPending.push(record);
@@ -1807,14 +1849,15 @@ function formatDuration(seconds) {
   };
 
   window.lpApplyFilter = function() {
-    var minLevel = document.getElementById('lpLevelFilter').value;
+    var minLevel = /** @type {HTMLSelectElement} */ (document.getElementById('lpLevelFilter')).value;
     var minOrder = LEVEL_ORDER[minLevel] || 0;
-    document.querySelectorAll('#lpContent .lp-line').forEach(function(el) {
-      var ok = (LEVEL_ORDER[el.dataset.level] || 0) >= minOrder;
+    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#lpContent .lp-line')).forEach(function(el) {
+      var ok = (LEVEL_ORDER[el.dataset.level || ''] || 0) >= minOrder;
       el.style.display = ok ? '' : 'none';
     });
   };
 
+  /** @param {unknown} str */
   function bpEscape(str) {
     if (str == null) return '';
     var div = document.createElement('div');

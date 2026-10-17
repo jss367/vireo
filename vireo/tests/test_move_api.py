@@ -3,6 +3,7 @@
 import os
 
 import pytest
+from page_scripts import page_with_scripts
 
 
 def _seed_missing_originals_cache(app, db):
@@ -26,7 +27,7 @@ def test_move_page_returns_200(app_and_db):
 
 def test_move_page_offers_capture_date_folder_formats(app_and_db):
     app, _ = app_and_db
-    html = app.test_client().get("/move").data.decode()
+    html = page_with_scripts(app.test_client(), "/move")
 
     assert 'id="quickFolderMode"' in html
     assert "Organize photos by capture date" in html
@@ -47,7 +48,7 @@ def test_move_page_ships_no_hardcoded_example_folder_date(app_and_db):
     import re
 
     app, _ = app_and_db
-    html = app.test_client().get("/move").data.decode()
+    html = page_with_scripts(app.test_client(), "/move")
 
     select = re.search(
         r'<select[^>]*id="quickFolderTemplatePreset".*?</select>',
@@ -70,9 +71,7 @@ def test_move_page_folder_browser_exposes_volumes_shortcut(app_and_db):
     since mount roots vary per host (drive letters; /media, /run/media,
     /mnt)."""
     app, _ = app_and_db
-    client = app.test_client()
-    resp = client.get("/move")
-    html = resp.data.decode()
+    html = page_with_scripts(app.test_client(), "/move")
 
     assert "browseTo('__volumes__')" in html
     # Non-Mac hosts (Windows + Linux) fan through /api/volumes.
@@ -90,9 +89,7 @@ def test_move_page_browser_stamps_requests(app_and_db):
     destination can land after a Pictures/Volumes shortcut click and
     silently revert the list."""
     app, _ = app_and_db
-    client = app.test_client()
-    resp = client.get("/move")
-    html = resp.data.decode()
+    html = page_with_scripts(app.test_client(), "/move")
 
     assert "var browseSeq = 0;" in html
     assert "var seq = ++browseSeq;" in html
@@ -102,9 +99,7 @@ def test_move_page_browser_stamps_requests(app_and_db):
 def test_move_page_loads_every_photo_page_for_selection(app_and_db):
     """Photo Move must not stop at the API's 500-photo per-request cap."""
     app, _ = app_and_db
-    client = app.test_client()
-    resp = client.get("/move")
-    html = resp.data.decode()
+    html = page_with_scripts(app.test_client(), "/move")
 
     assert "var photoLoadSeq = 0;" in html
     assert "while (total === null || loadedPhotos.length < total)" in html
@@ -119,9 +114,7 @@ def test_move_page_pictures_shortcut_resolves_home_on_demand(app_and_db):
     destination (which skips the initial browseTo(null)) sends an absolute
     '/Pictures' to the backend and lands at the wrong root."""
     app, _ = app_and_db
-    client = app.test_client()
-    resp = client.get("/move")
-    html = resp.data.decode()
+    html = page_with_scripts(app.test_client(), "/move")
 
     assert "if (path === '__pictures__')" in html
     # The on-demand home fetch must happen inside the Pictures branch.
@@ -138,9 +131,7 @@ def test_move_page_windows_parent_preserves_drive_root(app_and_db):
     Without the trailing backslash the backend treats it as the drive's cwd
     and the '..' link sends users to the wrong place."""
     app, _ = app_and_db
-    client = app.test_client()
-    resp = client.get("/move")
-    html = resp.data.decode()
+    html = page_with_scripts(app.test_client(), "/move")
 
     assert "/^[A-Za-z]:$/.test(parent)" in html
     assert "parent += '\\\\'" in html

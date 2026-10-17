@@ -2,9 +2,10 @@
 window.VireoReleaseOriginals = (function() {
   var running = false;
 
+  /** @param {boolean} value @param {{current: number, total: number}} [progress] */
   function setRunning(value, progress) {
     running = value;
-    var button = document.getElementById('releaseLocalOriginalsBtn');
+    var button = /** @type {HTMLButtonElement | null} */ (document.getElementById('releaseLocalOriginalsBtn'));
     if (!button) return;
     button.disabled = value;
     button.textContent = progress
@@ -12,6 +13,7 @@ window.VireoReleaseOriginals = (function() {
       : value ? 'Releasing…' : 'Release local originals…';
   }
 
+  /** @param {ReleaseScope} scope @param {string} description */
   async function release(scope, description) {
     if (running) return;
     if (!window.confirm(
@@ -23,13 +25,16 @@ window.VireoReleaseOriginals = (function() {
     )) return;
     setRunning(true);
     try {
+      /** @type {{job_id: string}} */
       var data = await safeFetch('/api/jobs/release-local-originals', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(scope),
       });
       showToast('Checking source files and releasing local originals…', 'info');
       safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        /** @param {{current: number, total: number}} progress */
         onProgress: function(progress) { setRunning(true, progress); },
+        /** @param {{status?: string, result?: ReleaseResult}} done */
         onComplete: function(done) {
           setRunning(false);
           var result = done.result;
@@ -59,7 +64,7 @@ window.VireoReleaseOriginals = (function() {
       });
     } catch (error) {
       setRunning(false);
-      showToast('Could not start release: ' + error.message, 'error');
+      showToast('Could not start release: ' + (error instanceof Error ? error.message : String(error)), 'error');
     }
   }
 

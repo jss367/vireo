@@ -1,8 +1,8 @@
 async function loadPipelineModels() {
-  var container = document.getElementById('pipelineModelsContainer');
+  var container = /** @type {HTMLElement} */ (document.getElementById('pipelineModelsContainer'));
   if (!container) return;
   try {
-    var data = await safeFetch('/api/models/pipeline', {}, { toast: false });
+    /** @type {{models:SettingsModel[]}} */ var data = await safeFetch('/api/models/pipeline', {}, { toast: false });
     var html = '<table style="width:100%;border-collapse:collapse;">';
     html += '<tr style="border-bottom:1px solid var(--border-primary);font-size:11px;color:var(--text-dim);">';
     html += '<td style="padding:6px 8px;">Model</td><td>Role</td><td>Status</td><td>Size</td><td></td></tr>';
@@ -33,12 +33,12 @@ async function loadPipelineModels() {
     html += '</table>';
     container.innerHTML = html;
   } catch(e) {
-    container.textContent = 'Error loading models: ' + e;
+    container.textContent = String('Error loading models: ' + e);
   }
 }
 
-async function downloadPipelineModel(modelId, btn) {
-  if (btn) { btn.disabled = true; btn.textContent = 'Downloading...'; }
+/** @param {string} modelId @param {HTMLButtonElement=} btn */ async function downloadPipelineModel(modelId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = String('Downloading...'); }
   try {
     var data = await safeFetch('/api/models/pipeline/download', {
       method: 'POST',
@@ -48,27 +48,27 @@ async function downloadPipelineModel(modelId, btn) {
     if (data.job_id) {
       safeEventSource('/api/jobs/' + data.job_id + '/stream', {
         onProgress: function(p) {
-          if (btn) btn.textContent = p.phase || 'Downloading...';
+          if (btn) btn.textContent = String(p.phase || 'Downloading...');
         },
         onComplete: function(result) {
           if (result.status === 'completed') {
-            if (btn) { btn.textContent = 'Done!'; btn.style.color = 'var(--accent)'; }
+            if (btn) { btn.textContent = String('Done!'); btn.style.color = 'var(--accent)'; }
           } else {
-            if (btn) { btn.textContent = 'Failed'; btn.style.color = 'var(--danger)'; btn.disabled = false; }
+            if (btn) { btn.textContent = String('Failed'); btn.style.color = 'var(--danger)'; btn.disabled = false; }
           }
           setTimeout(loadPipelineModels, 500);
         },
         onError: function() {
-          if (btn) { btn.textContent = 'Error'; btn.style.color = 'var(--danger)'; btn.disabled = false; }
+          if (btn) { btn.textContent = String('Error'); btn.style.color = 'var(--danger)'; btn.disabled = false; }
         }
       });
     }
   } catch(e) {
-    if (btn) { btn.textContent = 'Error'; btn.style.color = 'var(--danger)'; btn.disabled = false; }
+    if (btn) { btn.textContent = String('Error'); btn.style.color = 'var(--danger)'; btn.disabled = false; }
   }
 }
 
-async function deletePipelineModel(modelId, modelName) {
+/** @param {string} modelId @param {string} modelName */ async function deletePipelineModel(modelId, modelName) {
   if (!confirm('Delete ' + modelName + ' weights?')) return;
   try {
     await safeFetch('/api/models/pipeline/delete', {
@@ -81,10 +81,10 @@ async function deletePipelineModel(modelId, modelName) {
 }
 
 /* ---------- Models ---------- */
-var _modelsById = {};
+/** @type {Record<string,SettingsModel>} */ var _modelsById = {};
 async function loadModels() {
   try {
-    var data = await safeFetch('/api/models', {}, { toast: false });
+    /** @type {{models?:SettingsModel[];active_id?:string}} */ var data = await safeFetch('/api/models', {}, { toast: false });
     var models = data.models || [];
     var activeId = data.active_id;
 
@@ -92,7 +92,7 @@ async function loadModels() {
     models.forEach(function(m) { _modelsById[m.id] = m; });
 
     if (models.length === 0) {
-      document.getElementById('modelsContent').innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No models available.</span>';
+      /** @type {HTMLElement} */ (document.getElementById('modelsContent')).innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No models available.</span>';
       return;
     }
 
@@ -191,13 +191,13 @@ async function loadModels() {
       html += '</div>';
       html += '</div>';
     });
-    document.getElementById('modelsContent').innerHTML = html;
+    /** @type {HTMLElement} */ (document.getElementById('modelsContent')).innerHTML = html;
   } catch(e) {
-    document.getElementById('modelsContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load models</span>';
+    /** @type {HTMLElement} */ (document.getElementById('modelsContent')).innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load models</span>';
   }
 }
 
-async function downloadModel(modelId) {
+/** @param {string} modelId */ async function downloadModel(modelId) {
   try {
     var data = await safeFetch('/api/jobs/download-model', {
       method: 'POST',
@@ -206,28 +206,28 @@ async function downloadModel(modelId) {
     }, { toast: false });
 
     // Show inline progress
-    var progressDiv = document.getElementById('modelProgress-' + modelId);
-    var progressFill = document.getElementById('modelProgressFill-' + modelId);
-    var progressText = document.getElementById('modelProgressText-' + modelId);
+    var progressDiv = /** @type {HTMLElement} */ (document.getElementById('modelProgress-' + modelId));
+    var progressFill = /** @type {HTMLElement} */ (document.getElementById('modelProgressFill-' + modelId));
+    var progressText = /** @type {HTMLElement} */ (document.getElementById('modelProgressText-' + modelId));
     if (progressDiv) progressDiv.style.display = '';
 
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onProgress: function(p) {
-        if (progressFill && p.total > 0 && p.current > 0) {
-          var pct = Math.round((p.current / p.total) * 100);
+        if (progressFill && (p.total || 0) > 0 && (p.current || 0) > 0) {
+          var pct = Math.round(((p.current || 0) / (p.total || 1)) * 100);
           progressFill.style.width = pct + '%';
         }
         if (progressText && p.current_file) {
-          progressText.textContent = p.current_file;
+          progressText.textContent = String(p.current_file);
         }
       },
       onComplete: function(result) {
         if (result.status === 'completed') {
-          if (progressText) progressText.textContent = 'Download complete!';
+          if (progressText) progressText.textContent = String('Download complete!');
           if (progressFill) progressFill.style.width = '100%';
         } else {
           if (progressText) {
-            progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
+            progressText.textContent = String('Failed: ' + (result.errors || []).join(', '));
             progressText.style.color = 'var(--danger)';
           }
         }
@@ -235,7 +235,7 @@ async function downloadModel(modelId) {
       },
       onError: function() {
         if (progressText) {
-          progressText.textContent = 'Connection lost';
+          progressText.textContent = String('Connection lost');
           progressText.style.color = 'var(--danger)';
         }
       }
@@ -244,10 +244,10 @@ async function downloadModel(modelId) {
 }
 
 async function verifyAllModels() {
-  var btn = document.getElementById('verifyAllBtn');
-  var status = document.getElementById('verifyAllStatus');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('verifyAllBtn'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('verifyAllStatus'));
   btn.disabled = true;
-  status.textContent = 'Starting...';
+  status.textContent = String('Starting...');
   status.style.color = 'var(--text-dim)';
   try {
     var data = await safeFetch('/api/jobs/verify-all-models', {
@@ -257,7 +257,7 @@ async function verifyAllModels() {
     }, { toast: false });
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onProgress: function(p) {
-        if (p.current_file) status.textContent = p.current_file;
+        if (p.current_file) status.textContent = String(p.current_file);
       },
       onComplete: function(result) {
         btn.disabled = false;
@@ -267,32 +267,32 @@ async function verifyAllModels() {
           var ok = (result.result.ok || []).length;
           var failed = (result.result.failed || []);
           if (failed.length > 0) {
-            status.textContent = ok + ' ok, ' + failed.length + ' failed: ' + failed.join(', ');
+            status.textContent = String(ok + ' ok, ' + failed.length + ' failed: ' + failed.join(', '));
             status.style.color = 'var(--danger)';
           } else {
-            status.textContent = 'All ' + ok + ' models verified';
+            status.textContent = String('All ' + ok + ' models verified');
             status.style.color = 'var(--accent)';
           }
         } else {
-          status.textContent = 'Verification failed';
+          status.textContent = String('Verification failed');
           status.style.color = 'var(--danger)';
         }
         loadModels();
       },
       onError: function() {
         btn.disabled = false;
-        status.textContent = 'Connection lost';
+        status.textContent = String('Connection lost');
         status.style.color = 'var(--danger)';
       }
     });
   } catch(e) {
     btn.disabled = false;
-    status.textContent = 'Error: ' + e.message;
+    status.textContent = String('Error: ' + settingsErrorMessage(e));
     status.style.color = 'var(--danger)';
   }
 }
 
-async function removeModel(modelId) {
+/** @param {string} modelId */ async function removeModel(modelId) {
   if (!confirm('Remove this model? Weights Vireo downloaded are deleted from disk, including its copy in the Hugging Face cache; weights in your own folders are left in place.')) return;
   try {
     var result = await safeFetch('/api/models/' + encodeURIComponent(modelId), {
@@ -305,7 +305,7 @@ async function removeModel(modelId) {
   loadModels();
 }
 
-async function setActiveModel(modelId) {
+/** @param {string} modelId */ async function setActiveModel(modelId) {
   var m = _modelsById[modelId];
   if (m && !m.downloaded) {
     var sizeStr = m.size_mb ? (m.size_mb >= 1000 ? (m.size_mb / 1000).toFixed(1) + ' GB' : m.size_mb + ' MB') : '';
@@ -317,24 +317,24 @@ async function setActiveModel(modelId) {
         body: JSON.stringify({model_id: modelId}),
       }, { toast: false });
 
-      var progressDiv = document.getElementById('modelProgress-' + modelId);
-      var progressFill = document.getElementById('modelProgressFill-' + modelId);
-      var progressText = document.getElementById('modelProgressText-' + modelId);
+      var progressDiv = /** @type {HTMLElement} */ (document.getElementById('modelProgress-' + modelId));
+      var progressFill = /** @type {HTMLElement} */ (document.getElementById('modelProgressFill-' + modelId));
+      var progressText = /** @type {HTMLElement} */ (document.getElementById('modelProgressText-' + modelId));
       if (progressDiv) progressDiv.style.display = '';
 
       safeEventSource('/api/jobs/' + data.job_id + '/stream', {
         onProgress: function(p) {
-          if (progressFill && p.total > 0 && p.current > 0) {
-            var pct = Math.round((p.current / p.total) * 100);
+          if (progressFill && (p.total || 0) > 0 && (p.current || 0) > 0) {
+            var pct = Math.round(((p.current || 0) / (p.total || 1)) * 100);
             progressFill.style.width = pct + '%';
           }
           if (progressText && p.current_file) {
-            progressText.textContent = p.current_file;
+            progressText.textContent = String(p.current_file);
           }
         },
         onComplete: function(result) {
           if (result.status === 'completed') {
-            if (progressText) progressText.textContent = 'Download complete!';
+            if (progressText) progressText.textContent = String('Download complete!');
             if (progressFill) progressFill.style.width = '100%';
             // Now set as active
             safeFetch('/api/models/active', {
@@ -345,7 +345,7 @@ async function setActiveModel(modelId) {
             setTimeout(loadModels, 1000);
           } else {
             if (progressText) {
-              progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
+              progressText.textContent = String('Failed: ' + (result.errors || []).join(', '));
               progressText.style.color = 'var(--danger)';
             }
             setTimeout(loadModels, 1000);
@@ -353,7 +353,7 @@ async function setActiveModel(modelId) {
         },
         onError: function() {
           if (progressText) {
-            progressText.textContent = 'Connection lost';
+            progressText.textContent = String('Connection lost');
             progressText.style.color = 'var(--danger)';
           }
         }
@@ -372,13 +372,13 @@ async function setActiveModel(modelId) {
 }
 
 async function addHfModel() {
-  var repoId = document.getElementById('hfRepoId').value.trim();
+  var repoId = /** @type {HTMLInputElement} */ (document.getElementById('hfRepoId')).value.trim();
   if (!repoId) return;
   // Clean up input — handle full URLs or repo IDs
   repoId = repoId.replace('https://huggingface.co/', '').replace(/\/$/, '');
 
-  var status = document.getElementById('modelActionStatus');
-  status.textContent = 'Starting download from HuggingFace...';
+  var status = /** @type {HTMLElement} */ (document.getElementById('modelActionStatus'));
+  status.textContent = String('Starting download from HuggingFace...');
   status.style.color = 'var(--text-dim)';
 
   try {
@@ -387,36 +387,36 @@ async function addHfModel() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({repo_id: repoId}),
     }, { toast: false });
-    status.textContent = 'Downloading...';
+    status.textContent = String('Downloading...');
 
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onProgress: function(p) {
-        if (p.current_file) status.textContent = p.current_file;
+        if (p.current_file) status.textContent = String(p.current_file);
       },
       onComplete: function(result) {
         if (result.status === 'completed') {
-          status.textContent = 'Downloaded! Model ready to use.';
+          status.textContent = String('Downloaded! Model ready to use.');
           status.style.color = 'var(--accent)';
-          document.getElementById('hfRepoId').value = '';
+          /** @type {HTMLInputElement} */ (document.getElementById('hfRepoId')).value = String('');
         } else {
-          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          status.textContent = String('Failed: ' + (result.errors || []).join(', '));
           status.style.color = 'var(--danger)';
         }
         loadModels();
       },
       onError: function() {
-        status.textContent = 'Connection lost';
+        status.textContent = String('Connection lost');
       }
     });
   } catch(e) {
-    status.textContent = 'Error: ' + e.message;
+    status.textContent = String('Error: ' + settingsErrorMessage(e));
     status.style.color = 'var(--danger)';
   }
 }
 
 async function addCustomModel() {
-  var name = document.getElementById('customModelName').value.trim();
-  var path = document.getElementById('customModelPath').value.trim();
+  var name = /** @type {HTMLInputElement} */ (document.getElementById('customModelName')).value.trim();
+  var path = /** @type {HTMLInputElement} */ (document.getElementById('customModelPath')).value.trim();
   if (!name || !path) return;
   try {
     await safeFetch('/api/models/custom', {
@@ -424,8 +424,8 @@ async function addCustomModel() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: name, weights_path: path}),
     });
-    document.getElementById('customModelName').value = '';
-    document.getElementById('customModelPath').value = '';
+    /** @type {HTMLInputElement} */ (document.getElementById('customModelName')).value = String('');
+    /** @type {HTMLInputElement} */ (document.getElementById('customModelPath')).value = String('');
   } catch(e) {}
   loadModels();
 }

@@ -4,12 +4,12 @@
 // the manual card editor above stays the advanced/edit path.
 // ---------------------------------------------------------------------
 
-var _nw = null;   // wizard state; null when closed
+/** @type {SettingsNasWizard|null} */ var _nw = null;   // wizard state; null when closed
 
-function _nwEl(tag, css, text) {
+/** @template {keyof HTMLElementTagNameMap} K @param {K} tag @param {string=} css @param {string=} text @returns {HTMLElementTagNameMap[K]} */ function _nwEl(tag, css, text) {
   var el = document.createElement(tag);
   if (css) el.style.cssText = css;
-  if (text != null) el.textContent = text;
+  if (text != null) el.textContent = String(text);
   return el;
 }
 
@@ -23,17 +23,17 @@ function openNasWizard() {
   _nw = { step: 'volume', mounts: [], mount: null, host: '', user: '',
           port: 22, keyAuthOk: false, pubKeyLine: '', remotePath: '',
           archiveRoot: '', browsePath: '', remoteBrowsePath: '/' };
-  document.getElementById('nasWizard').style.display = 'flex';
+  /** @type {HTMLElement} */ (document.getElementById('nasWizard')).style.display = 'flex';
   nwRender();
 }
 
 function closeNasWizard() {
   _nw = null;
-  document.getElementById('nasWizard').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('nasWizard')).style.display = 'none';
 }
 
 var _nwSteps = ['volume', 'ssh', 'share', 'archive', 'review'];
-var _nwTitles = {
+/** @type {Record<string,string>} */ var _nwTitles = {
   volume: 'Step 1 of 5 — Pick your NAS volume',
   ssh: 'Step 2 of 5 — Connect over SSH',
   share: 'Step 3 of 5 — Locate the share on the NAS',
@@ -43,61 +43,61 @@ var _nwTitles = {
 
 function nwBack() {
   if (!_nw) return;
-  var i = _nwSteps.indexOf(_nw.step);
+  var i = _nwSteps.indexOf(nasWizardState().step);
   if (i <= 0) { closeNasWizard(); return; }
-  _nw.step = _nwSteps[i - 1];
+  nasWizardState().step = _nwSteps[i - 1] || 'volume';
   nwRender();
 }
 
 function nwNext() {
   if (!_nw) return;
-  var i = _nwSteps.indexOf(_nw.step);
-  if (_nw.step === 'review') { nwSave(); return; }
+  var i = _nwSteps.indexOf(nasWizardState().step);
+  if (nasWizardState().step === 'review') { nwSave(); return; }
   if (i < _nwSteps.length - 1) {
-    _nw.step = _nwSteps[i + 1];
+    nasWizardState().step = _nwSteps[i + 1] || 'review';
     nwRender();
   }
 }
 
-function _nwSetNext(enabled, label) {
-  var btn = document.getElementById('nwNext');
+/** @param {boolean} enabled @param {string=} label */ function _nwSetNext(enabled, label) {
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('nwNext'));
   btn.disabled = !enabled;
   btn.style.opacity = enabled ? '1' : '0.5';
-  btn.textContent = label || (_nw && _nw.step === 'review' ? 'Save' : 'Next');
+  btn.textContent = String(label || (_nw && nasWizardState().step === 'review' ? 'Save' : 'Next'));
 }
 
 function nwRender() {
   if (!_nw) return;
-  document.getElementById('nwTitle').textContent = _nwTitles[_nw.step];
-  document.getElementById('nwBack').textContent =
-    _nw.step === 'volume' ? 'Cancel' : 'Back';
-  var body = document.getElementById('nwBody');
+  /** @type {HTMLElement} */ (document.getElementById('nwTitle')).textContent = String(_nwTitles[nasWizardState().step]);
+  /** @type {HTMLButtonElement} */ (document.getElementById('nwBack')).textContent =
+    String(nasWizardState().step === 'volume' ? 'Cancel' : 'Back');
+  var body = /** @type {HTMLElement} */ (document.getElementById('nwBody'));
   body.replaceChildren();
-  ({ volume: nwVolumeStep, ssh: nwSshStep, share: nwShareStep,
-     archive: nwArchiveStep, review: nwReviewStep })[_nw.step](body);
+  (/** @type {Record<string,(body:HTMLElement)=>unknown>} */ ({ volume: nwVolumeStep, ssh: nwSshStep, share: nwShareStep,
+     archive: nwArchiveStep, review: nwReviewStep }))[nasWizardState().step]?.(body);
 }
 
 // --- Step 1: volume ----------------------------------------------------
 
-async function nwVolumeStep(body) {
+/** @param {HTMLElement} body */ async function nwVolumeStep(body) {
   _nwSetNext(false);
   body.appendChild(_nwEl('div', _nwHintCss, 'Looking for mounted network volumes…'));
   var res;
   try {
     res = await safeFetch('/api/remote-setup/mounts', {}, { toast: false });
   } catch (e) {
-    body.replaceChildren(_nwEl('div', _nwErrCss, 'Could not list volumes: ' + (e && e.message || e)));
+    body.replaceChildren(_nwEl('div', _nwErrCss, 'Could not list volumes: ' + (settingsErrorMessage(e) || String(e))));
     return;
   }
-  if (!_nw || _nw.step !== 'volume') return;
-  _nw.mounts = res.mounts || [];
+  if (!_nw || nasWizardState().step !== 'volume') return;
+  nasWizardState().mounts = res.mounts || [];
   body.replaceChildren();
   if (res.unsupported_platform) {
     body.appendChild(_nwEl('div', _nwErrCss,
       'Automatic volume detection is only available on macOS for now. Use "+ Add manually" instead.'));
     return;
   }
-  if (!_nw.mounts.length) {
+  if (!nasWizardState().mounts.length) {
     body.appendChild(_nwEl('div', _nwHintCss,
       'No network volumes are mounted. Connect to your NAS in Finder first (Go → Connect to Server, or ⌘K), then refresh.'));
     var refresh = _nwEl('button', _nwBtnCss, 'Refresh');
@@ -107,12 +107,12 @@ async function nwVolumeStep(body) {
     return;
   }
   body.appendChild(_nwEl('div', _nwHintCss, 'Pick the volume that lives on your NAS:'));
-  _nw.mounts.forEach(function(m, i) {
+  nasWizardState().mounts.forEach(function(m, i) {
     var row = _nwEl('label', 'display:flex;gap:8px;align-items:center;padding:8px;border:1px solid var(--border-secondary);border-radius:6px;margin-bottom:6px;cursor:pointer;');
     var radio = document.createElement('input');
     radio.type = 'radio';
     radio.name = 'nwMount';
-    radio.checked = _nw.mount ? _nw.mount.mount_point === m.mount_point : i === 0;
+    radio.checked = nasWizardState().mount ? nasWizardMount().mount_point === m.mount_point : i === 0;
     radio.onchange = function() { _nwPickMount(m); };
     var info = _nwEl('div', 'display:flex;flex-direction:column;gap:2px;');
     info.appendChild(_nwEl('div', 'font-weight:600;', m.share + ' on ' + (m.display_name || m.host)));
@@ -122,44 +122,44 @@ async function nwVolumeStep(body) {
     row.appendChild(info);
     body.appendChild(row);
   });
-  _nwPickMount(_nw.mount && _nw.mounts.some(function(m) { return m.mount_point === _nw.mount.mount_point; })
-    ? _nw.mount : _nw.mounts[0]);
+  _nwPickMount(nasWizardState().mount && nasWizardState().mounts.some(function(m) { return m.mount_point === nasWizardMount().mount_point; })
+    ? nasWizardState().mount : nasWizardState().mounts[0]);
 }
 
-function _nwPickMount(m) {
-  _nw.mount = m;
+/** @param {SettingsMount|null|undefined} m */ function _nwPickMount(m) { if (!m || !_nw) return;
+  nasWizardState().mount = m;
   // Pin SSH ops to the mount's verified network address — a stale or spoofed
   // PTR record could otherwise steer the password prompt at install-key time
   // to a different machine. `display_name` in the picker still surfaces the
   // friendly name; users can override the host in step 2 if they need to.
-  _nw.host = m.host;
-  _nw.user = m.user || _nw.user;
+  nasWizardState().host = m.host;
+  nasWizardState().user = m.user || nasWizardState().user;
   _nwSetNext(true);
 }
 
 // --- Step 2: ssh ---------------------------------------------------------
 
 function _nwLooksSynology() {
-  var probe = ((_nw.mount && _nw.mount.display_name) || '') + ' ' + _nw.host;
+  var probe = ((nasWizardState().mount && nasWizardMount().display_name) || '') + ' ' + nasWizardState().host;
   return /synology|diskstation|dsm/i.test(probe);
 }
 
-function nwSshStep(body) {
+/** @param {HTMLElement} body */ function nwSshStep(body) {
   _nwSetNext(false);
   var fields = _nwEl('div', 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;');
-  var mk = function(label, value, width, oninput) {
+  /** @param {string} label @param {string|number} value @param {string|null} width @param {(value:string)=>void} oninput */ var mk = function(label, value, width, oninput) {
     var wrap = _nwEl('div', 'display:flex;flex-direction:column;gap:3px;' + (width ? 'width:' + width + ';' : 'flex:1;'));
     wrap.appendChild(_nwEl('label', 'font-size:11px;color:var(--text-dim);', label));
     var inp = document.createElement('input');
-    inp.value = value;
+    inp.value = String(value);
     inp.style.cssText = _nwInputCss;
     inp.addEventListener('input', function() { oninput(inp.value); });
     wrap.appendChild(inp);
     return wrap;
   };
-  fields.appendChild(mk('User', _nw.user, null, function(v) { _nw.user = v.trim(); }));
-  fields.appendChild(mk('Host', _nw.host, null, function(v) { _nw.host = v.trim(); }));
-  fields.appendChild(mk('Port', String(_nw.port), '70px', function(v) { _nw.port = parseInt(v, 10) || 22; }));
+  fields.appendChild(mk('User', nasWizardState().user, null, function(v) { nasWizardState().user = v.trim(); }));
+  fields.appendChild(mk('Host', nasWizardState().host, null, function(v) { nasWizardState().host = v.trim(); }));
+  fields.appendChild(mk('Port', String(nasWizardState().port), '70px', function(v) { nasWizardState().port = parseInt(v, 10) || 22; }));
   body.appendChild(fields);
   var status = _nwEl('div', '');
   body.appendChild(status);
@@ -170,20 +170,20 @@ function nwSshStep(body) {
   _nwRunSshCheck(status, recheck);
 }
 
-async function _nwRunSshCheck(status, recheck) {
-  status.replaceChildren(_nwEl('div', _nwHintCss, 'Checking SSH on ' + _nw.host + '…'));
+/** @param {HTMLElement} status @param {HTMLButtonElement} recheck */ async function _nwRunSshCheck(status, recheck) {
+  status.replaceChildren(_nwEl('div', _nwHintCss, 'Checking SSH on ' + nasWizardState().host + '…'));
   var res;
   try {
     res = await safeFetch('/api/remote-setup/ssh-check', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ host: _nw.host, user: _nw.user, port: _nw.port }),
+      body: JSON.stringify({ host: nasWizardState().host, user: nasWizardState().user, port: nasWizardState().port }),
     }, { toast: false });
   } catch (e) {
-    status.replaceChildren(_nwEl('div', _nwErrCss, (e && e.message) || 'Check failed.'));
+    status.replaceChildren(_nwEl('div', _nwErrCss, settingsErrorMessage(e) || 'Check failed.'));
     return;
   }
-  if (!_nw || _nw.step !== 'ssh') return;
-  _nw.pubKeyLine = res.pub_key_line || '';
+  if (!_nw || nasWizardState().step !== 'ssh') return;
+  nasWizardState().pubKeyLine = res.pub_key_line || '';
   status.replaceChildren();
   if (res.ssh_missing) {
     status.appendChild(_nwEl('div', _nwErrCss,
@@ -192,22 +192,22 @@ async function _nwRunSshCheck(status, recheck) {
   }
   if (!res.port_open) {
     status.appendChild(_nwEl('div', _nwErrCss,
-      'SSH is not reachable on ' + _nw.host + ':' + _nw.port + '.\n' +
+      'SSH is not reachable on ' + nasWizardState().host + ':' + nasWizardState().port + '.\n' +
       (_nwLooksSynology()
         ? 'On a Synology NAS: Control Panel → Terminal & SNMP → Enable SSH service, then check again.'
         : 'Enable the SSH service on your NAS (check its admin console), then check again.')));
     return;
   }
   if (res.key_auth_ok) {
-    _nw.keyAuthOk = true;
-    status.appendChild(_nwEl('div', _nwOkCss, '✓ This Mac is already authorized on ' + _nw.host + '.'));
+    nasWizardState().keyAuthOk = true;
+    status.appendChild(_nwEl('div', _nwOkCss, '✓ This Mac is already authorized on ' + nasWizardState().host + '.'));
     _nwSetNext(true);
     return;
   }
   // Password form. Used once server-side to authorize this Mac's key —
   // never stored, never logged.
   status.appendChild(_nwEl('div', _nwHintCss,
-    'Enter the NAS password for "' + _nw.user + '" once. Vireo uses it to authorize this Mac’s key on the NAS, then never needs it again — it is not stored or logged.'));
+    'Enter the NAS password for "' + nasWizardState().user + '" once. Vireo uses it to authorize this Mac’s key on the NAS, then never needs it again — it is not stored or logged.'));
   var row = _nwEl('div', 'display:flex;gap:8px;align-items:center;margin:6px 0;');
   var pw = document.createElement('input');
   pw.type = 'password';
@@ -219,37 +219,37 @@ async function _nwRunSshCheck(status, recheck) {
   submit.onclick = async function() {
     if (!pw.value) return;
     submit.disabled = true;
-    msg.textContent = 'Authorizing…';
+    msg.textContent = String('Authorizing…');
     msg.style.cssText = _nwHintCss;
     try {
       var r = await safeFetch('/api/remote-setup/install-key', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ host: _nw.host, user: _nw.user,
-                               port: _nw.port, password: pw.value }),
+        body: JSON.stringify({ host: nasWizardState().host, user: nasWizardState().user,
+                               port: nasWizardState().port, password: pw.value }),
       }, { toast: false });
       if (r.ok && r.key_auth_ok) {
-        _nw.keyAuthOk = true;
+        nasWizardState().keyAuthOk = true;
         status.replaceChildren(_nwEl('div', _nwOkCss,
           '✓ Authorized. ' + (r.fingerprint ? 'Key: ' + r.fingerprint : '')));
         _nwSetNext(true);
         return;
       }
       msg.style.cssText = _nwErrCss;
-      msg.textContent = {
+      msg.textContent = String(/** @type {Record<string,string>} */ ({
         wrong_password: 'That password was not accepted — try again.',
         password_auth_disabled: 'The NAS refuses password logins over SSH. Use the Terminal option below, or enable password authentication on the NAS.',
         host_key: 'The NAS’s host key changed since a previous connection — fix ~/.ssh/known_hosts and retry.',
         timeout: 'The NAS did not respond in time — try again.',
-      }[r.error] || ('Setup failed: ' + (r.detail || r.error || 'unknown error'));
-      if (r.error === 'wrong_password') pw.value = '';
+      })[r.error] || ('Setup failed: ' + (r.detail || r.error || 'unknown error')));
+      if (r.error === 'wrong_password') pw.value = String('');
     } catch (e) {
       msg.style.cssText = _nwErrCss;
-      msg.textContent = (e && e.message) || 'Setup failed.';
+      msg.textContent = String((e && settingsErrorMessage(e)) || 'Setup failed.');
     } finally {
       submit.disabled = false;
     }
   };
-  pw.addEventListener('keydown', function(ev) { if (ev.key === 'Enter') submit.onclick(); });
+  pw.addEventListener('keydown', function(ev) { if (ev.key === 'Enter') submit.click(); });
   row.appendChild(pw);
   row.appendChild(submit);
   status.appendChild(row);
@@ -258,14 +258,14 @@ async function _nwRunSshCheck(status, recheck) {
   var details = document.createElement('details');
   details.style.cssText = 'margin-top:10px;font-size:12px;color:var(--text-dim);';
   var summary = document.createElement('summary');
-  summary.textContent = 'Prefer to do this yourself in Terminal?';
+  summary.textContent = String('Prefer to do this yourself in Terminal?');
   summary.style.cursor = 'pointer';
   details.appendChild(summary);
-  var cmd = 'ssh' + (_nw.port !== 22 ? ' -p ' + _nw.port : '') + ' ' +
-    _nw.user + '@' + _nw.host +
+  var cmd = 'ssh' + (nasWizardState().port !== 22 ? ' -p ' + nasWizardState().port : '') + ' ' +
+    nasWizardState().user + '@' + nasWizardState().host +
     ' "umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; ' +
-    "grep -qxF '" + _nw.pubKeyLine + "' ~/.ssh/authorized_keys || " +
-    "echo '" + _nw.pubKeyLine + "' >> ~/.ssh/authorized_keys\"";
+    "grep -qxF '" + nasWizardState().pubKeyLine + "' ~/.ssh/authorized_keys || " +
+    "echo '" + nasWizardState().pubKeyLine + "' >> ~/.ssh/authorized_keys\"";
   var pre = _nwEl('pre', 'background:var(--bg-input);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;user-select:all;', cmd);
   details.appendChild(_nwEl('div', _nwHintCss, 'Run this in Terminal (it asks for the NAS password), then click Verify:'));
   details.appendChild(pre);
@@ -278,30 +278,30 @@ async function _nwRunSshCheck(status, recheck) {
 
 // --- Step 3: share -------------------------------------------------------
 
-async function nwShareStep(body) {
+/** @param {HTMLElement} body */ async function nwShareStep(body) {
   _nwSetNext(false);
   body.appendChild(_nwEl('div', _nwHintCss,
-    'Verifying where "' + _nw.mount.share + '" lives on the NAS… (Vireo drops a marker file on the mounted volume and finds it over SSH — proof, not a guess.)'));
+    'Verifying where "' + nasWizardMount().share + '" lives on the NAS… (Vireo drops a marker file on the mounted volume and finds it over SSH — proof, not a guess.)'));
   var res;
   try {
     res = await safeFetch('/api/remote-setup/locate-share', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ mount_path: _nw.mount.mount_point,
-                             share: _nw.mount.share, host: _nw.host,
-                             user: _nw.user, port: _nw.port }),
+      body: JSON.stringify({ mount_path: nasWizardMount().mount_point,
+                             share: nasWizardMount().share, host: nasWizardState().host,
+                             user: nasWizardState().user, port: nasWizardState().port }),
     }, { toast: false });
   } catch (e) {
-    if (!_nw || _nw.step !== 'share') return;
-    body.replaceChildren(_nwEl('div', _nwErrCss, (e && e.message) || 'Verification failed.'));
+    if (!_nw || nasWizardState().step !== 'share') return;
+    body.replaceChildren(_nwEl('div', _nwErrCss, settingsErrorMessage(e) || 'Verification failed.'));
     _nwShareFallback(body);
     return;
   }
-  if (!_nw || _nw.step !== 'share') return;
+  if (!_nw || nasWizardState().step !== 'share') return;
   body.replaceChildren();
   if (res.remote_path) {
-    _nw.remotePath = res.remote_path;
+    nasWizardState().remotePath = res.remote_path;
     body.appendChild(_nwEl('div', _nwOkCss,
-      '✓ Verified: ' + _nw.mount.mount_point + ' is ' + res.remote_path + ' on the NAS.'));
+      '✓ Verified: ' + nasWizardMount().mount_point + ' is ' + res.remote_path + ' on the NAS.'));
     _nwSetNext(true);
     return;
   }
@@ -310,25 +310,25 @@ async function nwShareStep(body) {
   _nwShareFallback(body);
 }
 
-function _nwShareFallback(body) {
+/** @param {HTMLElement} body */ function _nwShareFallback(body) {
   var list = _nwEl('div', 'border:1px solid var(--border-secondary);border-radius:6px;max-height:180px;overflow-y:auto;margin:6px 0;');
   var pathLabel = _nwEl('div', 'font-family:monospace;font-size:12px;margin:6px 0;', '');
   var manual = document.createElement('input');
-  manual.placeholder = '/volume1/' + _nw.mount.share;
+  manual.placeholder = '/volume1/' + nasWizardMount().share;
   manual.style.cssText = _nwInputCss + 'width:100%;margin-top:6px;';
   manual.addEventListener('input', function() {
-    _nw.remotePath = manual.value.trim();
-    _nwSetNext(!!_nw.remotePath && _nw.remotePath.startsWith('/'));
+    nasWizardState().remotePath = manual.value.trim();
+    _nwSetNext(!!nasWizardState().remotePath && nasWizardState().remotePath.startsWith('/'));
   });
-  var load = async function(path) {
-    _nw.remoteBrowsePath = path;
-    pathLabel.textContent = path;
+  /** @param {string} path */ var load = async function(path) {
+    nasWizardState().remoteBrowsePath = path;
+    pathLabel.textContent = String(path);
     list.replaceChildren(_nwEl('div', _nwHintCss + 'padding:8px;', 'Loading…'));
     var res;
     try {
       res = await safeFetch('/api/remote-setup/list-remote-dirs', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ path: path, host: _nw.host, user: _nw.user, port: _nw.port }),
+        body: JSON.stringify({ path: path, host: nasWizardState().host, user: nasWizardState().user, port: nasWizardState().port }),
       }, { toast: false });
     } catch (e) {
       list.replaceChildren(_nwEl('div', _nwErrCss + 'padding:8px;', 'Listing failed.'));
@@ -340,12 +340,12 @@ function _nwShareFallback(body) {
       up.onclick = function() { load(path.replace(/\/[^/]+$/, '') || '/'); };
       list.appendChild(up);
     }
-    (res.dirs || []).forEach(function(name) {
+    (res.dirs || []).forEach(/** @param {string} name */ function(name) {
       var row = _nwEl('div', 'padding:6px 10px;cursor:pointer;font-family:monospace;border-top:1px solid var(--border-secondary);', name + '/');
       row.onclick = function() {
         var next = (path === '/' ? '' : path) + '/' + name;
-        manual.value = next;
-        _nw.remotePath = next;
+        manual.value = String(next);
+        nasWizardState().remotePath = next;
         _nwSetNext(true);
         load(next);
       };
@@ -359,12 +359,12 @@ function _nwShareFallback(body) {
   body.appendChild(list);
   body.appendChild(_nwEl('div', _nwHintCss, 'Selected NAS path (click a folder above or type it):'));
   body.appendChild(manual);
-  load(_nw.remoteBrowsePath || '/');
+  load(nasWizardState().remoteBrowsePath || '/');
 }
 
 // --- Step 4: archive root ------------------------------------------------
 
-async function nwArchiveStep(body) {
+/** @param {HTMLElement} body */ async function nwArchiveStep(body) {
   _nwSetNext(false);
   body.appendChild(_nwEl('div', _nwHintCss,
     'Pick a folder on this Mac. Photos you import here are processed locally (fast), then moved to the NAS automatically.'));
@@ -372,12 +372,12 @@ async function nwArchiveStep(body) {
   try {
     home = (await safeFetch('/api/browse', {}, { toast: false })).path;
   } catch (e) { home = ''; }
-  if (!_nw || _nw.step !== 'archive') return;
+  if (!_nw || nasWizardState().step !== 'archive') return;
   var suggestion = home ? home + '/Pictures/Vireo Archive' : '';
   var chosen = _nwEl('div', 'font-family:monospace;font-size:12px;margin:6px 0;', '');
   var freeLine = _nwEl('div', _nwHintCss, '');
   var err = _nwEl('div', _nwErrCss, '');
-  var setChosen = async function(p) {
+  /** @param {string} p */ var setChosen = async function(p) {
     // Filesystem-aware containment: the same check _coerce_remote_target
     // performs at save time. A purely-lexical prefix compare on the client
     // (which we used to do here) misses symlink aliases — e.g. ~/Archive
@@ -385,38 +385,38 @@ async function nwArchiveStep(body) {
     // would then silently blank local_archive_root, leaving the wizard's
     // target unable to offer the chained move. Fail here instead so the
     // user gets an actionable error while still in step 4.
-    err.textContent = '';
+    err.textContent = String('');
     _nwSetNext(false);
     try {
       var chk = await safeFetch('/api/remote-setup/check-archive-root', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({path: p, mount_path: _nw.mount.mount_point}),
+        body: JSON.stringify({path: p, mount_path: nasWizardMount().mount_point}),
       }, { toast: false });
       if (chk && chk.inside_mount) {
-        err.textContent = 'That folder resolves inside the NAS mount (symlink or alias). Pick a folder on this Mac instead.';
+        err.textContent = String('That folder resolves inside the NAS mount (symlink or alias). Pick a folder on this Mac instead.');
         return;
       }
     } catch (e) {
       // Endpoint unavailable (e.g. offline test harness) — fall back to a
       // lexical check so this step still gates the obvious case.
-      var norm = function(x) { return String(x || '').replace(/\/+$/, '').toLowerCase(); };
-      var inMount = norm(p) === norm(_nw.mount.mount_point) ||
-        norm(p).indexOf(norm(_nw.mount.mount_point) + '/') === 0;
+      /** @param {string} x */ var norm = function(x) { return String(x || '').replace(/\/+$/, '').toLowerCase(); };
+      var inMount = norm(p) === norm(nasWizardMount().mount_point) ||
+        norm(p).indexOf(norm(nasWizardMount().mount_point) + '/') === 0;
       if (inMount) {
-        err.textContent = 'The archive folder must be on this Mac, not on the NAS volume itself.';
+        err.textContent = String('The archive folder must be on this Mac, not on the NAS volume itself.');
         return;
       }
     }
-    err.textContent = '';
-    _nw.archiveRoot = p;
-    chosen.textContent = 'Archive folder: ' + p;
+    err.textContent = String('');
+    nasWizardState().archiveRoot = p;
+    chosen.textContent = String('Archive folder: ' + p);
     _nwSetNext(true);
     try {
       var df = await safeFetch('/api/remote-setup/disk-free?path=' +
         encodeURIComponent(p), {}, { toast: false });
-      freeLine.textContent = (df.free_bytes / (1024 * 1024 * 1024)).toFixed(0) +
-        ' GB free on this volume. Staged photos live here until each move to the NAS completes.';
-    } catch (e) { freeLine.textContent = ''; }
+      freeLine.textContent = String((df.free_bytes / (1024 * 1024 * 1024)).toFixed(0) +
+        ' GB free on this volume. Staged photos live here until each move to the NAS completes.');
+    } catch (e) { freeLine.textContent = String(''); }
   };
   if (suggestion) {
     var sugRow = _nwEl('div', 'display:flex;gap:8px;align-items:center;margin:6px 0;');
@@ -431,7 +431,7 @@ async function nwArchiveStep(body) {
         }, { toast: false });
         setChosen(suggestion);
       } catch (e) {
-        err.textContent = (e && e.message) || 'Could not create the folder.';
+        err.textContent = String((e && settingsErrorMessage(e)) || 'Could not create the folder.');
       }
     };
     sugRow.appendChild(mk);
@@ -440,9 +440,9 @@ async function nwArchiveStep(body) {
   body.appendChild(_nwEl('div', _nwHintCss, 'Or pick an existing folder:'));
   var list = _nwEl('div', 'border:1px solid var(--border-secondary);border-radius:6px;max-height:160px;overflow-y:auto;margin:6px 0;');
   var pathLabel = _nwEl('div', 'font-family:monospace;font-size:12px;margin:4px 0;', '');
-  var browse = async function(path) {
-    _nw.browsePath = path;
-    pathLabel.textContent = path;
+  /** @param {string} path */ var browse = async function(path) {
+    nasWizardState().browsePath = path;
+    pathLabel.textContent = String(path);
     list.replaceChildren(_nwEl('div', _nwHintCss + 'padding:8px;', 'Loading…'));
     var res;
     try {
@@ -458,7 +458,7 @@ async function nwArchiveStep(body) {
       up.onclick = function() { browse(parent); };
       list.appendChild(up);
     }
-    (res.dirs || []).forEach(function(d) {
+    (res.dirs || []).forEach(/** @param {{name:string;path:string}} d */ function(d) {
       var row = _nwEl('div', 'padding:6px 10px;cursor:pointer;font-family:monospace;border-top:1px solid var(--border-secondary);', d.name + '/');
       row.onclick = function() { browse(d.path); };
       list.appendChild(row);
@@ -473,8 +473,8 @@ async function nwArchiveStep(body) {
   body.appendChild(chosen);
   body.appendChild(freeLine);
   body.appendChild(err);
-  browse(_nw.browsePath || home || '/');
-  if (_nw.archiveRoot) setChosen(_nw.archiveRoot);
+  browse(nasWizardState().browsePath || home || '/');
+  if (nasWizardState().archiveRoot) setChosen(nasWizardState().archiveRoot);
 }
 
 // --- Step 5: review + test ------------------------------------------------
@@ -482,29 +482,29 @@ async function nwArchiveStep(body) {
 function _nwAssembledTarget() {
   return {
     id: _genTargetId(),
-    name: (_nw.mount && (_nw.mount.display_name || _nw.mount.share)) || _nw.host,
-    host: _nw.host, user: _nw.user, port: _nw.port,
-    ssh_key: _nw.keyPath || '',   // the wizard-managed key, from ssh-check
-    remote_path: _nw.remotePath,
-    mount_path: _nw.mount ? _nw.mount.mount_point : '',
-    local_archive_root: _nw.archiveRoot,
+    name: (nasWizardState().mount && (nasWizardMount().display_name || nasWizardMount().share)) || nasWizardState().host,
+    host: nasWizardState().host, user: nasWizardState().user, port: nasWizardState().port,
+    ssh_key: nasWizardState().keyPath || '',   // the wizard-managed key, from ssh-check
+    remote_path: nasWizardState().remotePath,
+    mount_path: nasWizardState().mount ? nasWizardMount().mount_point : '',
+    local_archive_root: nasWizardState().archiveRoot,
     bwlimit_kbps: 0,
   };
 }
 
-async function nwReviewStep(body) {
+/** @param {HTMLElement} body */ async function nwReviewStep(body) {
   _nwSetNext(false, 'Save');
   // The server knows the real key path; ask it rather than guessing "~".
   var keyPath = '';
   try {
     var chk = await safeFetch('/api/remote-setup/ssh-check', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ host: _nw.host, user: _nw.user, port: _nw.port }),
+      body: JSON.stringify({ host: nasWizardState().host, user: nasWizardState().user, port: nasWizardState().port }),
     }, { toast: false });
     keyPath = chk.key_path || '';
   } catch (e) { /* key path shown blank; save still works via default */ }
-  if (!_nw || _nw.step !== 'review') return;
-  _nw.keyPath = keyPath;
+  if (!_nw || nasWizardState().step !== 'review') return;
+  nasWizardState().keyPath = keyPath;
   var t = _nwAssembledTarget();
   var rows = [
     ['Name', t.name], ['SSH', t.user + '@' + t.host + (t.port !== 22 ? ':' + t.port : '')],
@@ -524,15 +524,15 @@ async function nwReviewStep(body) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(t),
     }, { toast: false });
-    if (!_nw || _nw.step !== 'review') return;
+    if (!_nw || nasWizardState().step !== 'review') return;
     status.style.cssText = res.ok ? _nwOkCss : _nwErrCss;
-    status.textContent = (res.ok ? '✓ ' : '⚠ ') + (res.message || '');
+    status.textContent = String((res.ok ? '✓ ' : '⚠ ') + (res.message || ''));
     appendRsyncInstallCommands(status, res.rsync_install_commands);
     if (res.ok) _nwSetNext(true, 'Save');
   } catch (e) {
-    if (!_nw || _nw.step !== 'review') return;
+    if (!_nw || nasWizardState().step !== 'review') return;
     status.style.cssText = _nwErrCss;
-    status.textContent = '⚠ ' + ((e && e.message) || 'Test failed.');
+    status.textContent = String('⚠ ' + ((e && settingsErrorMessage(e)) || 'Test failed.'));
   }
 }
 
@@ -544,9 +544,9 @@ async function nwSave() {
   // 500 ms out; if the user reloads or closes the tab in that window the
   // target is lost. This is an explicit Save action, so flush immediately
   // and keep the modal up until the write lands.
-  clearTimeout(_saveTimer);
+  clearTimeout(_saveTimer ?? undefined);
   _nwSetNext(false, 'Saving…');
-  document.getElementById('nwBack').disabled = true;
+  /** @type {HTMLButtonElement} */ (document.getElementById('nwBack')).disabled = true;
   try {
     await _saveConfigNow();
   } catch (e) {
@@ -555,14 +555,27 @@ async function nwSave() {
     var idx = _remoteTargetsState.indexOf(t);
     if (idx >= 0) _remoteTargetsState.splice(idx, 1);
     renderRemoteTargets();
-    var body = document.getElementById('nwBody');
+    var body = /** @type {HTMLElement} */ (document.getElementById('nwBody'));
     if (body) body.appendChild(_nwEl('div', _nwErrCss,
-      '⚠ Could not save: ' + ((e && e.message) || e)));
+      '⚠ Could not save: ' + ((e && settingsErrorMessage(e)) || e)));
     _nwSetNext(true, 'Save');
-    document.getElementById('nwBack').disabled = false;
+    /** @type {HTMLButtonElement} */ (document.getElementById('nwBack')).disabled = false;
     return;
   }
   closeNasWizard();
-  var listEl = document.getElementById('cfgRemoteTargetsList');
+  var listEl = /** @type {HTMLElement} */ (document.getElementById('cfgRemoteTargetsList'));
   if (listEl) listEl.scrollIntoView({ behavior: preferredScrollBehavior(), block: 'center' });
+}
+
+/** @returns {SettingsNasWizard} */
+function nasWizardState() {
+  if (!_nw) throw new Error('The NAS setup dialog is closed');
+  return _nw;
+}
+
+/** @returns {SettingsMount} */
+function nasWizardMount() {
+  var mount = nasWizardState().mount;
+  if (!mount) throw new Error('Select a NAS volume first');
+  return mount;
 }

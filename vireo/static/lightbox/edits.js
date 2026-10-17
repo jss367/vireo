@@ -1,27 +1,27 @@
 
-var _lbEditRecipe = null;
+/** @type {LightboxRecipe | null} */ var _lbEditRecipe = null;
 var _lbEditRecipeLoaded = false;
-var _lbAdjustmentSource = null;
+/** @type {LightboxAdjustmentSource | null} */ var _lbAdjustmentSource = null;
 var _lbAdjustmentPreviewSeq = 0;
-var _lbAdjustmentPreviewTimer = null;
-var _lbAdjustSaveTimer = null;
+/** @type {number | null} */ var _lbAdjustmentPreviewTimer = null;
+/** @type {number | null} */ var _lbAdjustSaveTimer = null;
 var _lbAdjustSeq = 0;
 var _lbAdjustmentInputSeq = 0;
-var _lbAdjustmentInputSeqByPhoto = {};
-var _lbAdjustSaveInFlightByPhoto = {};
-var _lbQueuedAdjustmentSaveByPhoto = {};
-var _lbRecipeBustByPhotoId = {};
-var _lbEditVersionByPhoto = {};
+/** @type {Record<string, number>} */ var _lbAdjustmentInputSeqByPhoto = {};
+/** @type {Record<string, boolean>} */ var _lbAdjustSaveInFlightByPhoto = {};
+/** @type {Record<string, {recipe: LightboxRecipe, inputSeq: number}>} */ var _lbQueuedAdjustmentSaveByPhoto = {};
+/** @type {Record<string, number>} */ var _lbRecipeBustByPhotoId = {};
+/** @type {Record<string, string>} */ var _lbEditVersionByPhoto = {};
 var _lbEditWritePending = false;
-var _cropRecipe = null;
-var _cropPhotoId = null;
+/** @type {LightboxRecipe | null} */ var _cropRecipe = null;
+/** @type {number | null} */ var _cropPhotoId = null;
 var _cropPreviewSeq = 0;
 var _cropSessionSeq = 0;
-var _cropDrag = null;
-var _cropPreviewTimer = null;
-var _cropEscToken = null;
+/** @type {LightboxCropDrag | null} */ var _cropDrag = null;
+/** @type {number | null} */ var _cropPreviewTimer = null;
+/** @type {number | null} */ var _cropEscToken = null;
 
-function _vireoUrlWithQueryParam(url, key, value) {
+function _vireoUrlWithQueryParam(/** @type {string} */ url, /** @type {string} */ key, /** @type {string | number | boolean | null} */ value) {
   if (!url || !key || value == null || value === '') return url;
   var hash = '';
   var hashIdx = url.indexOf('#');
@@ -33,14 +33,14 @@ function _vireoUrlWithQueryParam(url, key, value) {
   return url + joiner + encodeURIComponent(key) + '=' + encodeURIComponent(value) + hash;
 }
 
-function _vireoUrlWithRenderVersion(url, photoId) {
+function _vireoUrlWithRenderVersion(/** @type {string} */ url, /** @type {LightboxPhotoId | null} */ photoId) {
   if (!url || photoId == null) return url;
   var version = _lbRenderVersionByPhoto[String(photoId)];
   if (!version) return url;
   return _vireoUrlWithQueryParam(url, 'rv', version);
 }
 
-function _vireoUrlWithPhotoSource(url, source) {
+function _vireoUrlWithPhotoSource(/** @type {string} */ url, /** @type {string | null} */ source) {
   // Source is a mutable choice, unlike cache-bust params. Remove any prior
   // value before appending so toggling JPEG -> RAW cannot leave Flask reading
   // the first of two conflicting ``source`` query parameters.
@@ -52,7 +52,7 @@ function _vireoUrlWithPhotoSource(url, source) {
   return source ? _vireoUrlWithQueryParam(url, 'source', source) : url;
 }
 
-function _vireoCleanRenderSearch(search) {
+function _vireoCleanRenderSearch(/** @type {string} */ search) {
   if (!search) return '';
   try {
     var params = new URLSearchParams(search);
@@ -63,27 +63,27 @@ function _vireoCleanRenderSearch(search) {
     var qs = params.toString();
     return qs ? '?' + qs : '';
   } catch (_) {
-    return search
+    return String(search)
       .replace(/([?&])(rv|er|editv|v)=[^&]*&?/g, '$1')
       .replace(/\?&/, '?')
       .replace(/[?&]$/, '');
   }
 }
 
-function _vireoBaseRenderedUrl(src) {
+function _vireoBaseRenderedUrl(/** @type {string} */ src) {
   if (!src) return '';
   try {
     var parsed = new URL(src, window.location.origin);
     return parsed.pathname + _vireoCleanRenderSearch(parsed.search);
   } catch (_) {
-    return src
+    return String(src)
       .replace(/([?&])(rv|er|editv|v)=[^&]*&?/g, '$1')
       .replace(/\?&/, '?')
       .replace(/[?&]$/, '');
   }
 }
 
-function _vireoBumpRenderVersion(photoId) {
+function _vireoBumpRenderVersion(/** @type {LightboxPhotoId | null} */ photoId) {
   if (photoId == null) return null;
   var version = Date.now() + '-' + Math.floor(Math.random() * 1000000);
   _lbRenderVersionByPhoto[String(photoId)] = version;
@@ -93,13 +93,13 @@ function _vireoBumpRenderVersion(photoId) {
 // A RAW+JPEG pair stays one logical photo, but the user can choose which
 // physical file supplies the displayed pixels. A newly discovered pair starts
 // on JPEG because that file is commonly the photographer's developed result.
-var _vireoPairKnownByPhoto = {};
-var _vireoPairSourceByPhoto = {};
-var _vireoPairPendingSourceByPhoto = {};
+/** @type {Record<string, boolean>} */ var _vireoPairKnownByPhoto = {};
+/** @type {Record<string, string>} */ var _vireoPairSourceByPhoto = {};
+/** @type {Record<string, string>} */ var _vireoPairPendingSourceByPhoto = {};
 
 window.vireoPhotoIsRawJpegPair = function(photo) {
   if (!photo || !photo.companion_path) return false;
-  var rawExtensions = {
+  /** @type {Record<string, boolean>} */ var rawExtensions = {
     '.nef': true,
     '.cr2': true,
     '.cr3': true,
@@ -117,7 +117,7 @@ window.vireoPhotoIsRawJpegPair = function(photo) {
     if (primaryExt && primaryExt.charAt(0) !== '.') primaryExt = '.' + primaryExt;
   }
   var companionMatch = String(photo.companion_path).toLowerCase().match(/(\.[^./\\]+)$/);
-  var companionExt = companionMatch ? companionMatch[1] : '';
+  var companionExt = companionMatch ? companionMatch[1] || '' : '';
   return !!rawExtensions[primaryExt] && (companionExt === '.jpg' || companionExt === '.jpeg');
 };
 
@@ -133,7 +133,7 @@ window.vireoRememberPhotoPair = function(photo) {
   }
 };
 
-function _vireoPairSource(photoId) {
+function _vireoPairSource(/** @type {LightboxPhotoId | null} */ photoId) {
   return _vireoPairSourceByPhoto[String(photoId)] || null;
 }
 
@@ -149,7 +149,7 @@ window.vireoUpdatePairSourceControls = function(photoId) {
       ? 'Viewing JPEG · Show RAW'
       : 'Viewing RAW · Show JPEG');
 
-  var lightboxControl = document.getElementById('lightboxSourceControl');
+  var lightboxControl = /** @type {HTMLButtonElement | null} */ (document.getElementById('lightboxSourceControl'));
   if (lightboxControl && String(vireoLightboxSession.requestedPhotoId()) === key) {
     lightboxControl.style.display = paired ? '' : 'none';
     lightboxControl.textContent = text;
@@ -158,7 +158,7 @@ window.vireoUpdatePairSourceControls = function(photoId) {
     _lbSetAdjustmentControlsDisabled(!_lbEditRecipeLoaded);
     if (_lbAdjustmentSourceHint()) _lbClearAdjustmentPreview();
   }
-  var detailControl = document.getElementById('detailSourceControl');
+  var detailControl = /** @type {HTMLButtonElement | null} */ (document.getElementById('detailSourceControl'));
   if (detailControl && String(window._detailPhotoId) === key) {
     detailControl.style.display = paired ? 'block' : 'none';
     detailControl.textContent = paired
@@ -175,27 +175,27 @@ window.vireoUpdatePairSourceControls = function(photoId) {
 
 // Queued grid images display blob URLs; retain the canonical URL for edits
 // and RAW/JPEG switches, and send replacements through the same bounded queue.
-function _vireoRenderedImageSource(img) {
+function _vireoRenderedImageSource(/** @type {HTMLImageElement} */ img) {
   return img.getAttribute('data-thumbnail-src') || img.getAttribute('src') || '';
 }
 
-function _vireoSetRenderedImageSource(img, url) {
+function _vireoSetRenderedImageSource(/** @type {HTMLImageElement} */ img, /** @type {string} */ url) {
   if (img.hasAttribute('data-thumbnail-src')) img.setAttribute('data-thumbnail-src', url);
   else img.src = url;
 }
 
-function _vireoPairAnchorImage(photoId) {
+function _vireoPairAnchorImage(/** @type {LightboxPhotoId | null} */ photoId) {
   var key = String(photoId);
   if (String(vireoLightboxSession.requestedPhotoId()) === key) {
-    return document.getElementById('lightboxImg');
+    return /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
   }
   if (String(window._detailPhotoId) === key) {
-    return document.getElementById('detailImg');
+    return /** @type {HTMLImageElement | null} */ (document.getElementById('detailImg'));
   }
-  return document.querySelector('.grid-card[data-id="' + key + '"] img');
+  return /** @type {HTMLImageElement | null} */ (document.querySelector('.grid-card[data-id="' + key + '"] img'));
 }
 
-function _vireoPairAnchorStillCurrent(anchor, photoId) {
+function _vireoPairAnchorStillCurrent(/** @type {HTMLImageElement | null} */ anchor, /** @type {LightboxPhotoId | null} */ photoId) {
   if (!anchor) return false;
   var key = String(photoId);
   if (anchor.id === 'lightboxImg') return String(vireoLightboxSession.requestedPhotoId()) === key;
@@ -214,14 +214,14 @@ function _vireoPairAnchorStillCurrent(anchor, photoId) {
   return !card || String(card.getAttribute('data-id')) === key;
 }
 
-function _vireoCancelPairSourceChange(photoId, requested) {
+function _vireoCancelPairSourceChange(/** @type {LightboxPhotoId | null} */ photoId, /** @type {string} */ requested) {
   var key = String(photoId);
   if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
   delete _vireoPairPendingSourceByPhoto[key];
   window.vireoUpdatePairSourceControls(photoId);
 }
 
-function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
+function _vireoPairSourceLoadFailed(/** @type {LightboxPhotoId | null} */ photoId, /** @type {string} */ requested, /** @type {HTMLImageElement | null} */ anchor, /** @type {string} */ oldSrc) {
   var key = String(photoId);
   if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
   var anchorStillCurrent = (
@@ -230,7 +230,7 @@ function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
   );
   delete _vireoPairPendingSourceByPhoto[key];
   window.vireoUpdatePairSourceControls(photoId);
-  if (anchorStillCurrent && oldSrc) {
+  if (anchorStillCurrent && anchor && oldSrc) {
     // A RAW edit may have finished saving while the target was loading.
     // Restore the selected source with its current recipe/render version,
     // rather than the stale URL captured before that save.
@@ -243,7 +243,7 @@ function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
   }
 }
 
-function _vireoPairSourceImageLoaded(photoId, requested, anchor) {
+function _vireoPairSourceImageLoaded(/** @type {number} */ photoId, /** @type {string} */ requested, /** @type {HTMLImageElement | null} */ anchor) {
   var key = String(photoId);
   if (
     !anchor || anchor.id !== 'lightboxImg' ||
@@ -265,7 +265,7 @@ function _vireoPairSourceImageLoaded(photoId, requested, anchor) {
   _lbApplyMaskVisibility();
 }
 
-function _vireoCommitPairSource(photoId, requested, anchor) {
+function _vireoCommitPairSource(/** @type {number} */ photoId, /** @type {string} */ requested, /** @type {HTMLImageElement | null} */ anchor) {
   var key = String(photoId);
   if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
   _vireoPairSourceByPhoto[key] = requested;
@@ -286,7 +286,7 @@ window.vireoTogglePairSource = function(photoId) {
     : 'raw';
   // Commit input made on the RAW before source switching disables controls.
   if (String(vireoLightboxSession.requestedPhotoId()) === key) _lbFlushPendingAdjustmentSave();
-  var anchor = _vireoPairAnchorImage(photoId);
+  const anchor = _vireoPairAnchorImage(photoId);
   var oldSrc = anchor ? _vireoRenderedImageSource(anchor) : '';
   var base = oldSrc ? _vireoBaseRenderedUrl(oldSrc) : '/thumbnails/' + key + '.jpg';
   _vireoBumpRenderVersion(photoId);
@@ -307,7 +307,7 @@ window.vireoTogglePairSource = function(photoId) {
       _vireoCancelPairSourceChange(photoId, requested);
       return;
     }
-    function cleanup() {
+    function cleanup() { if (!anchor) return;
       anchor.removeEventListener('load', loaded);
       anchor.removeEventListener('error', failed);
       anchor.removeEventListener('vireo:thumbnail-cancelled', cancelled);
@@ -323,7 +323,7 @@ window.vireoTogglePairSource = function(photoId) {
     function cancelled() {
       cleanup();
       _vireoCancelPairSourceChange(photoId, requested);
-      _vireoSetRenderedImageSource(anchor, oldSrc);
+      if (anchor) _vireoSetRenderedImageSource(anchor, oldSrc);
     }
     function failed() {
       cleanup();
@@ -347,13 +347,13 @@ window.vireoTogglePairSource = function(photoId) {
 
 window.vireoRefreshPhotoRenders = function(photoIds) {
   if (!Array.isArray(photoIds)) photoIds = [photoIds];
-  var idSet = {};
+  /** @type {Record<string, boolean>} */ var idSet = {};
   photoIds.forEach(function(id) {
     if (id == null) return;
     idSet[String(id)] = true;
   });
   if (!Object.keys(idSet).length) return;
-  var imgs = document.querySelectorAll('img[src], img[data-thumbnail-src]');
+  var imgs = /** @type {NodeListOf<HTMLImageElement>} */ (document.querySelectorAll('img[src], img[data-thumbnail-src]'));
   imgs.forEach(function(img) {
     var attr = _vireoRenderedImageSource(img);
     var base = _vireoBaseRenderedUrl(attr);
@@ -390,7 +390,7 @@ window.vireoRenderedUrl = function(url, photoId, sourceOverride) {
 // go stale at different moments — the server key is authoritative on page load
 // and after a refetch, while a recipe this page just wrote is newer than any
 // key the last payload carried.
-function _vireoPhotoRenderKey(photoId) {
+function _vireoPhotoRenderKey(/** @type {LightboxPhotoId | null} */ photoId) {
   if (photoId == null) return '';
   var serverKey = _lbRenderKeyByPhoto[String(photoId)];
   if (serverKey) return serverKey;
@@ -401,7 +401,7 @@ function _vireoPhotoRenderKey(photoId) {
 
 window.vireoThumbnailUrl = function(photoOrId) {
   var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
-  var photoId = photo ? (photo.photo_id != null ? photo.photo_id : photo.id) : photoOrId;
+  var photoId = photo ? (photo.photo_id != null ? photo.photo_id : photo.id) : (typeof photoOrId === 'object' ? null : photoOrId);
   if (photoId == null) return '';
   if (photo && typeof window.vireoRememberPhotoPair === 'function') {
     window.vireoRememberPhotoPair(photo);
@@ -431,11 +431,11 @@ window.vireoThumbnailUrl = function(photoOrId) {
     : _vireoUrlWithRenderVersion(url, photoId);
 };
 
-function vireoThumbnailUrl(photoOrId) {
+/** @returns {string} */ function vireoThumbnailUrl(/** @type {LightboxPhoto | LightboxPhotoId | null} */ photoOrId) {
   return window.vireoThumbnailUrl(photoOrId);
 }
 
-function vireoCacheBustedPhotoUrl(photoId, url) {
+function vireoCacheBustedPhotoUrl(/** @type {LightboxPhotoId | null} */ photoId, /** @type {string} */ url) {
   url = String(url || '')
     .replace(/([?&])editv=[^&]*(&?)/, function(match, prefix, suffix) {
       return suffix ? prefix : '';
@@ -454,16 +454,16 @@ function vireoCacheBustedPhotoUrl(photoId, url) {
   return url;
 }
 
-function vireoPreviewUrl(photoId, size) {
+function vireoPreviewUrl(/** @type {LightboxPhotoId | null} */ photoId, /** @type {number | undefined} */ size = undefined) {
   return vireoCacheBustedPhotoUrl(photoId, '/photos/' + photoId + '/preview?size=' + (size || 1920));
 }
 
 window.vireoPreviewUrl = vireoPreviewUrl;
 window.vireoCacheBustedPhotoUrl = vireoCacheBustedPhotoUrl;
 
-function _lbCloneEditRecipe(recipe) {
+/** @returns {LightboxRecipe} */ function _lbCloneEditRecipe(/** @type {LightboxRecipe | null | undefined} */ recipe) {
   if (!recipe || typeof recipe !== 'object') return {};
-  var out = {};
+  /** @type {LightboxRecipe} */ var out = {};
   if (recipe.rotation) out.rotation = recipe.rotation;
   if (Math.abs(Number(recipe.straighten || 0)) > 1e-9) {
     out.straighten = Number(recipe.straighten);
@@ -488,7 +488,7 @@ function _lbCloneEditRecipe(recipe) {
   return out;
 }
 
-function _vireoHashString(s) {
+function _vireoHashString(/** @type {string} */ s) {
   var hash = 5381;
   for (var i = 0; i < s.length; i++) {
     hash = ((hash << 5) + hash) ^ s.charCodeAt(i);
@@ -510,13 +510,13 @@ var _VIREO_EDIT_MATH_VERSION = 8;
 // the recipe's *content*. Two payloads can serialize the same recipe with
 // different property order, and JSON.stringify would hash them differently —
 // which costs a needless refetch of an image that did not change.
-function _vireoCanonicalRecipeJson(value) {
+/** @returns {string} */ function _vireoCanonicalRecipeJson(/** @type {unknown} */ value) {
   if (Array.isArray(value)) {
     return '[' + value.map(_vireoCanonicalRecipeJson).join(',') + ']';
   }
   if (value && typeof value === 'object') {
     return '{' + Object.keys(value).sort().map(function(key) {
-      return JSON.stringify(key) + ':' + _vireoCanonicalRecipeJson(value[key]);
+      return JSON.stringify(key) + ':' + _vireoCanonicalRecipeJson(/** @type {Record<string, unknown>} */ (value)[key]);
     }).join(',') + '}';
   }
   return JSON.stringify(value === undefined ? null : value);
@@ -530,19 +530,19 @@ function _vireoCanonicalRecipeJson(value) {
 // for the full 24h max-age. Prefer ``render_key`` from the server (see
 // ``_vireoPhotoRenderKey``); this is the fallback for payloads that predate
 // it and for recipes this page wrote itself.
-function _vireoEditRecipeCacheKey(recipe) {
+function _vireoEditRecipeCacheKey(/** @type {LightboxRecipe | null | undefined} */ recipe) {
   if (!_lbRecipeHasEdits(recipe)) return '';
   return _vireoHashString(_vireoCanonicalRecipeJson(recipe))
     + '.m' + _VIREO_EDIT_MATH_VERSION;
 }
 
-function _lbRecipeHasEdits(recipe) {
+function _lbRecipeHasEdits(/** @type {LightboxRecipe | null | undefined} */ recipe) {
   return !!(recipe && typeof recipe === 'object' && Object.keys(recipe).some(function(k) {
     return k !== 'version';
   }));
 }
 
-function _lbRecipeHasOrientation(recipe) {
+function _lbRecipeHasOrientation(/** @type {LightboxRecipe | null | undefined} */ recipe) {
   return !!(
     recipe &&
     typeof recipe === 'object' &&
@@ -581,7 +581,7 @@ window.vireoPhotoEditRecipe = function(photoId) {
   return _lbCloneEditRecipe(_lbEditRecipeByPhoto[String(photoId)]);
 };
 
-function _lbRememberEditRecipe(photoId, recipe, preserveAdjustmentInput) {
+function _lbRememberEditRecipe(/** @type {LightboxPhotoId | null} */ photoId, /** @type {LightboxRecipe | null | undefined} */ recipe, /** @type {boolean} */ preserveAdjustmentInput = false) {
   if (photoId == null) return;
   var numericId = Number(photoId);
   // Keep the unclipped recipe for fingerprinting, and drop any server render
@@ -610,12 +610,12 @@ function _lbRememberEditRecipe(photoId, recipe, preserveAdjustmentInput) {
   _lbApplyEditButtonState();
 }
 
-function _lbEditRecipeWriteSeqFor(photoId) {
+function _lbEditRecipeWriteSeqFor(/** @type {LightboxPhotoId | null} */ photoId) {
   if (photoId == null) return 0;
   return _lbEditRecipeWriteSeqByPhoto[String(photoId)] || 0;
 }
 
-function _lbMarkEditRecipeWrite(photoId) {
+function _lbMarkEditRecipeWrite(/** @type {LightboxPhotoId | null} */ photoId) {
   if (photoId == null) return;
   _lbEditRecipeWriteSeq += 1;
   _lbEditRecipeWriteSeqByPhoto[String(photoId)] = _lbEditRecipeWriteSeq;
@@ -626,8 +626,8 @@ function _lbCurrentEditRecipeClone() {
   return _lbCloneEditRecipe(_lbEditRecipeByPhoto[String(vireoLightboxSession.requestedPhotoId())]);
 }
 
-function _lbNormalizeClientRecipe(recipe) {
-  var out = _lbCloneEditRecipe(recipe);
+function _lbNormalizeClientRecipe(/** @type {LightboxRecipe | null | undefined} */ recipe) {
+  /** @type {LightboxRecipe} */ var out = _lbCloneEditRecipe(recipe);
   if (!out.rotation) delete out.rotation;
   if (Math.abs(Number(out.straighten || 0)) < 0.0001) delete out.straighten;
   else out.straighten = Math.round(Number(out.straighten) * 10000) / 10000;
@@ -639,7 +639,7 @@ function _lbNormalizeClientRecipe(recipe) {
   return _lbRecipeHasEdits(out) ? out : null;
 }
 
-function _lbRecipeAfterEditOperation(recipe, op) {
+function _lbRecipeAfterEditOperation(/** @type {LightboxRecipe | null | undefined} */ recipe, /** @type {string} */ op) {
   var next = _lbCloneEditRecipe(recipe);
   if (op === 'reset') {
     var removedFlip = next.flip || {};
@@ -676,7 +676,7 @@ function _lbRecipeAfterEditOperation(recipe, op) {
   return _lbNormalizeClientRecipe(next);
 }
 
-function _lbApplyDisplayedOrientationOperation(point, op) {
+function _lbApplyDisplayedOrientationOperation(/** @type {LightboxPoint} */ point, /** @type {string} */ op) {
   var x = point.x;
   var y = point.y;
   if (op === 'rotate-right') return { x: 1 - y, y: x };
@@ -686,7 +686,7 @@ function _lbApplyDisplayedOrientationOperation(point, op) {
   return { x: x, y: y };
 }
 
-function _lbTransformBoxByEditOperation(box, op) {
+function _lbTransformBoxByEditOperation(/** @type {LightboxCrop} */ box, /** @type {string} */ op) {
   var opRecipe = null;
   if (op === 'rotate-right') opRecipe = { rotation: 90 };
   else if (op === 'rotate-left') opRecipe = { rotation: 270 };
@@ -697,11 +697,11 @@ function _lbTransformBoxByEditOperation(box, op) {
 }
 
 function _lbOrientationCandidates() {
-  var candidates = [];
+  /** @type {LightboxRecipe[]} */ var candidates = [];
   [0, 90, 180, 270].forEach(function(rotation) {
     [false, true].forEach(function(horizontal) {
       [false, true].forEach(function(vertical) {
-        var candidate = {};
+        /** @type {LightboxRecipe} */ var candidate = {};
         if (rotation) candidate.rotation = rotation;
         if (horizontal || vertical) {
           candidate.flip = {};
@@ -715,7 +715,7 @@ function _lbOrientationCandidates() {
   return candidates;
 }
 
-function _lbComposeDisplayedOrientation(recipe, op) {
+function _lbComposeDisplayedOrientation(/** @type {LightboxRecipe | null | undefined} */ recipe, /** @type {string} */ op) {
   var samplePoints = [
     { x: 0.125, y: 0.25 },
     { x: 0.8, y: 0.2 },
@@ -727,19 +727,20 @@ function _lbComposeDisplayedOrientation(recipe, op) {
       op
     );
   });
-  var candidates = _lbOrientationCandidates();
+  /** @type {LightboxRecipe[]} */ var candidates = _lbOrientationCandidates();
   for (var i = 0; i < candidates.length; i++) {
-    var candidate = candidates[i];
+    var candidate = candidates[i]; if (!candidate) continue;
     var matches = true;
     for (var j = 0; j < samplePoints.length; j++) {
+      var sample = samplePoints[j], target = desired[j]; if (!sample || !target) continue;
       var actual = _lbTransformPointByRecipe(
-        samplePoints[j].x,
-        samplePoints[j].y,
+        sample.x,
+        sample.y,
         candidate
       );
       if (
-        Math.abs(actual.x - desired[j].x) > 0.000001 ||
-        Math.abs(actual.y - desired[j].y) > 0.000001
+        Math.abs(actual.x - target.x) > 0.000001 ||
+        Math.abs(actual.y - target.y) > 0.000001
       ) {
         matches = false;
         break;
@@ -750,18 +751,18 @@ function _lbComposeDisplayedOrientation(recipe, op) {
   return {};
 }
 
-function _lbInverseOrientationRecipe(recipe) {
+function _lbInverseOrientationRecipe(/** @type {LightboxRecipe | null | undefined} */ recipe) {
   var samplePoints = [
     { x: 0.125, y: 0.25 },
     { x: 0.8, y: 0.2 },
     { x: 0.3, y: 0.85 },
   ];
-  var candidates = _lbOrientationCandidates();
+  /** @type {LightboxRecipe[]} */ var candidates = _lbOrientationCandidates();
   for (var i = 0; i < candidates.length; i++) {
-    var candidate = candidates[i];
+    var candidate = candidates[i]; if (!candidate) continue;
     var matches = true;
     for (var j = 0; j < samplePoints.length; j++) {
-      var original = samplePoints[j];
+      var original = samplePoints[j]; if (!original) continue;
       var oriented = _lbTransformPointByRecipe(original.x, original.y, recipe);
       var restored = _lbTransformPointByRecipe(oriented.x, oriented.y, candidate);
       if (
@@ -789,22 +790,22 @@ function _lbApplyEditButtonState() {
     'lightboxResetEdit',
   ];
   ids.forEach(function(id) {
-    var btn = document.getElementById(id);
+    var btn = /** @type {HTMLButtonElement | null} */ (document.getElementById(id));
     if (!btn) return;
     btn.disabled = _lbEditWritePending || vireoLightboxSession.requestedPhotoId() == null || !known || (id === 'lightboxResetEdit' && !hasOrientation);
   });
 }
 
-function _lbSetEditBusy(busy) {
+function _lbSetEditBusy(/** @type {boolean} */ busy) {
   _lbEditWritePending = !!busy;
   _lbApplyEditButtonState();
 }
 
-function _lbReloadCurrentRenderAfterEdit(photoId) {
+function _lbReloadCurrentRenderAfterEdit(/** @type {number} */ photoId) {
   if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
   _lbClearAdjustmentPreview();
   vireoLightboxSession.cancelOriginal();
-  var img = document.getElementById('lightboxImg');
+  const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
   var wrap = document.getElementById('lightboxWrap');
   if (!img) return;
   vireoLightboxViewport.resetForEdit();
@@ -864,9 +865,9 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
   _lbLoadMaskVariants(photoId);
 }
 
-async function lightboxApplyEdit(op) {
-  if (vireoLightboxSession.requestedPhotoId() == null || _lbEditWritePending) return;
+async function lightboxApplyEdit(/** @type {string} */ op) {
   var photoId = vireoLightboxSession.requestedPhotoId();
+  if (photoId == null || _lbEditWritePending) return;
   _lbSetEditBusy(true);
   try {
     _lbFlushPendingAdjustmentSave();
@@ -874,17 +875,17 @@ async function lightboxApplyEdit(op) {
     if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
     var baseRecipe = _lbEditRecipeLoaded ? _lbCloneEditRecipe(_lbEditRecipe) : _lbCurrentEditRecipeClone();
     var nextRecipe = _lbRecipeAfterEditOperation(baseRecipe, op);
-    var data;
+    /** @type {{recipe?: LightboxRecipe | null}} */ var data;
     if (nextRecipe) {
-      data = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {
+      data = await /** @type {Promise<{recipe?: LightboxRecipe | null}>} */ (safeFetch('/api/photos/' + photoId + '/edit-recipe', {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ recipe: nextRecipe }),
-      }, { toast: false });
+      }, { toast: false }));
     } else {
-      data = await safeFetch('/api/photos/' + photoId + '/edit-recipe', {
+      data = await /** @type {Promise<{recipe?: LightboxRecipe | null}>} */ (safeFetch('/api/photos/' + photoId + '/edit-recipe', {
         method: 'DELETE',
-      }, { toast: false });
+      }, { toast: false }));
     }
     _lbMarkEditRecipeWrite(photoId);
     _lbRememberEditRecipe(photoId, data ? data.recipe : null);
@@ -897,13 +898,13 @@ async function lightboxApplyEdit(op) {
       if (typeof showToast === 'function') showToast('Updated photo edit', 'success');
     }
   } catch (e) {
-    if (typeof showToast === 'function') showToast(e.message || 'Could not update photo edit', 'error');
+    if (typeof showToast === 'function') showToast((e instanceof Error && e.message) || 'Could not update photo edit', 'error');
   } finally {
     _lbSetEditBusy(false);
   }
 }
 
-function _lbTransformPointByRecipe(x, y, recipe) {
+function _lbTransformPointByRecipe(/** @type {number} */ x, /** @type {number} */ y, /** @type {LightboxRecipe | null | undefined} */ recipe) {
   recipe = recipe || {};
   var rotation = Number(recipe.rotation) || 0;
   var nx = x;
@@ -927,7 +928,7 @@ function _lbTransformPointByRecipe(x, y, recipe) {
   };
 }
 
-function _lbTransformBoxByRecipe(box, recipe) {
+function _lbTransformBoxByRecipe(/** @type {LightboxCrop} */ box, /** @type {LightboxRecipe | null | undefined} */ recipe) {
   recipe = recipe || {};
   var x = Number(box.x);
   var y = Number(box.y);
@@ -963,7 +964,7 @@ function _lbTransformBoxByRecipe(box, recipe) {
   return { x: nx, y: ny, w: nw, h: nh };
 }
 
-function _lbCloneRecipe(recipe) {
+/** @param {LightboxRecipe | null | undefined} recipe @returns {LightboxRecipe} */ function _lbCloneRecipe(recipe) {
   if (!recipe) return {};
   try {
     return JSON.parse(JSON.stringify(recipe));
@@ -972,18 +973,18 @@ function _lbCloneRecipe(recipe) {
   }
 }
 
-function _lbAdjustmentInputSeqFor(photoId) {
+function _lbAdjustmentInputSeqFor(/** @type {LightboxPhotoId | null} */ photoId) {
   return _lbAdjustmentInputSeqByPhoto[String(photoId)] || 0;
 }
 
-function _lbBumpAdjustmentInputSeq(photoId) {
+function _lbBumpAdjustmentInputSeq(/** @type {LightboxPhotoId | null} */ photoId) {
   var key = String(photoId);
   _lbAdjustmentInputSeq += 1;
   _lbAdjustmentInputSeqByPhoto[key] = (_lbAdjustmentInputSeqByPhoto[key] || 0) + 1;
   return _lbAdjustmentInputSeqByPhoto[key];
 }
 
-function _lbAdjustmentValues(recipe) {
+function _lbAdjustmentValues(/** @type {LightboxRecipe | null | undefined} */ recipe) {
   var adj = (recipe && recipe.adjustments) || {};
   var wb = adj.white_balance || {};
   return {
@@ -1000,20 +1001,20 @@ function _lbAdjustmentValues(recipe) {
   };
 }
 
-function _lbSetAdjustmentStatus(text, isError) {
+function _lbSetAdjustmentStatus(/** @type {string} */ text, /** @type {boolean | undefined} */ isError = undefined) {
   var el = document.getElementById('lightboxAdjustStatus');
   if (!el) return;
   el.textContent = text || '';
   el.classList.toggle('error', !!isError);
 }
 
-function _lbFormatAdjustmentValue(name, value) {
+function _lbFormatAdjustmentValue(/** @type {string | undefined} */ name, /** @type {number | string} */ value) {
   if (name === 'exposure') return Number(value || 0).toFixed(1);
   return String(Math.round(Number(value || 0)));
 }
 
-function _lbSetAdjustmentControl(id, value) {
-  var input = document.getElementById(id);
+function _lbSetAdjustmentControl(/** @type {string} */ id, /** @type {number} */ value) {
+  var input = /** @type {HTMLInputElement | null} */ (document.getElementById(id));
   var label = document.getElementById(id + 'Value');
   if (input) input.value = String(value || 0);
   if (label && input) {
@@ -1021,7 +1022,7 @@ function _lbSetAdjustmentControl(id, value) {
   }
 }
 
-function _lbSetAdjustmentControlsDisabled(disabled) {
+function _lbSetAdjustmentControlsDisabled(/** @type {boolean} */ disabled) {
   disabled = !!disabled || _lbReadOnly || !!_lbAdjustmentSourceHint();
   [
     'lbAdjExposure',
@@ -1035,10 +1036,10 @@ function _lbSetAdjustmentControlsDisabled(disabled) {
     'lbAdjVibrance',
     'lbAdjSaturation',
   ].forEach(function(id) {
-    var input = document.getElementById(id);
+    var input = /** @type {HTMLInputElement | null} */ (document.getElementById(id));
     if (input) input.disabled = !!disabled;
   });
-  var reset = document.querySelector('#lightboxAdjustPanel .lb-adjust-reset');
+  var reset = /** @type {HTMLButtonElement | null} */ (document.querySelector('#lightboxAdjustPanel .lb-adjust-reset'));
   if (reset) reset.disabled = !!disabled;
 }
 
@@ -1077,8 +1078,8 @@ function _lbRenderAdjustmentControls() {
 }
 
 function _lbReadAdjustmentControls() {
-  function val(id) {
-    var el = document.getElementById(id);
+  function val(/** @type {string} */ id) {
+    var el = /** @type {HTMLInputElement | null} */ (document.getElementById(id));
     return el ? Number(el.value || 0) : 0;
   }
   return {
@@ -1095,20 +1096,20 @@ function _lbReadAdjustmentControls() {
   };
 }
 
-function _lbRecipeWithAdjustments(values) {
+function _lbRecipeWithAdjustments(/** @type {LightboxAdjustmentValues} */ values) {
   var recipe = _lbCloneRecipe(_lbEditRecipe);
   delete recipe.version;
-  var adj = _lbCloneRecipe(recipe.adjustments || {});
-  ['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation'].forEach(function(key) {
+  var adj = Object.assign({}, recipe.adjustments || {});
+  /** @type {(keyof LightboxAdjustmentValues)[]} */ (['exposure', 'highlights', 'shadows', 'whites', 'blacks', 'contrast', 'vibrance', 'saturation']).forEach(function(key) {
     var value = Number(values[key] || 0);
     if (Math.abs(value) > 0.000001) adj[key] = value;
     else delete adj[key];
   });
 
-  var wb = _lbCloneRecipe(adj.white_balance || {});
+  var wb = Object.assign({}, adj.white_balance || {});
   delete adj.temperature;
   delete adj.tint;
-  ['temperature', 'tint'].forEach(function(key) {
+  /** @type {('temperature' | 'tint')[]} */ (['temperature', 'tint']).forEach(function(key) {
     var value = Number(values[key] || 0);
     if (Math.abs(value) > 0.000001) wb[key] = value;
     else delete wb[key];
@@ -1123,7 +1124,7 @@ function _lbRecipeWithAdjustments(values) {
 
 // Mirror tone.white_balance_gains: per-channel linear-light gains. Keep these
 // coefficients in sync with the server so the live preview matches the render.
-function _lbWhiteBalanceGains(temperature, tint) {
+function _lbWhiteBalanceGains(/** @type {number} */ temperature, /** @type {number} */ tint) {
   var t = Number(temperature || 0) / 100;
   var ti = Number(tint || 0) / 100;
   return {
@@ -1137,8 +1138,12 @@ function _lbWhiteBalanceGains(temperature, tint) {
 // complete adjustment values. Keep shader math in sync with the server.
 var VireoToneGL = (function() {
   var KNEE = 0.85; // == tone.HIGHLIGHT_KNEE
-  var canvas = null, gl = null, prog = null, tex = null, locs = null;
-  var texKey = null, failed = false, maxTextureSize = 0;
+  /** @type {HTMLCanvasElement | null} */ var canvas = null;
+  /** @type {WebGLRenderingContext | null} */ var gl = null;
+  /** @type {WebGLProgram | null} */ var prog = null;
+  /** @type {WebGLTexture | null} */ var tex = null;
+  /** @type {Record<'tex' | 'exposure' | 'wbGain' | 'highlights' | 'shadows' | 'whites' | 'blacks' | 'contrast' | 'vibrance' | 'saturation' | 'rolloff' | 'knee', WebGLUniformLocation | null> | null} */ var locs = null;
+  /** @type {string | null} */ var texKey = null; var failed = false, maxTextureSize = 0;
 
   var VERT = [
     'attribute vec2 aPos;',
@@ -1257,8 +1262,9 @@ var VireoToneGL = (function() {
     '}'
   ].join('\n');
 
-  function compile(type, src) {
-    var s = gl.createShader(type);
+  function compile(/** @type {number} */ type, /** @type {string} */ src) {
+    if (!gl) return null;
+    var s = gl.createShader(type); if (!s) return null;
     gl.shaderSource(s, src);
     gl.compileShader(s);
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
@@ -1271,17 +1277,17 @@ var VireoToneGL = (function() {
   function init() {
     if (gl) return true;
     if (failed) return false;
-    canvas = document.getElementById('lightboxToneCanvas');
+    canvas = /** @type {HTMLCanvasElement | null} */ (document.getElementById('lightboxToneCanvas'));
     if (!canvas) { failed = true; return false; }
     try {
       var opts = { premultipliedAlpha: false, preserveDrawingBuffer: false };
-      gl = canvas.getContext('webgl', opts) || canvas.getContext('experimental-webgl', opts);
+      gl = /** @type {WebGLRenderingContext | null} */ (canvas.getContext('webgl', opts)) || /** @type {WebGLRenderingContext | null} */ (canvas.getContext('experimental-webgl', opts));
     } catch (e) { gl = null; }
     if (!gl) { failed = true; return false; }
     var vs = compile(gl.VERTEX_SHADER, VERT);
     var fs = compile(gl.FRAGMENT_SHADER, FRAG);
     if (!vs || !fs) { failed = true; gl = null; return false; }
-    prog = gl.createProgram();
+    prog = gl.createProgram(); if (!prog) { failed = true; gl = null; return false; }
     gl.attachShader(prog, vs);
     gl.attachShader(prog, fs);
     gl.linkProgram(prog);
@@ -1323,7 +1329,8 @@ var VireoToneGL = (function() {
     return true;
   }
 
-  function uploadSource(img) {
+  function uploadSource(/** @type {HTMLImageElement} */ img) {
+    if (!canvas || !gl) return false;
     var w = img.naturalWidth, h = img.naturalHeight;
     if (!w || !h) return false;
     // GPU limit: oversized images make texImage2D emit a GL error (e.g.
@@ -1360,8 +1367,8 @@ var VireoToneGL = (function() {
     supported: function() { return init(); },
     // Force a texture re-upload (call when the underlying image pixels change).
     invalidate: function() { texKey = null; },
-    render: function(img, u) {
-      if (!init() || !uploadSource(img)) return false;
+    render: function(/** @type {HTMLImageElement} */ img, /** @type {Omit<LightboxAdjustmentValues, "temperature" | "tint"> & {wbGain: [number, number, number], rolloff: boolean}} */ u) {
+      if (!init() || !uploadSource(img) || !gl || !canvas || !locs) return false;
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.uniform1f(locs.exposure, u.exposure);
       gl.uniform3f(locs.wbGain, u.wbGain[0], u.wbGain[1], u.wbGain[2]);
@@ -1382,9 +1389,9 @@ var VireoToneGL = (function() {
 // Always preview from a neutral, geometry-matched source. Applying deltas to
 // the last saved render is history-dependent: rolloff and clipping cannot be
 // undone, and contrast/saturation do not commute with the other tone controls.
-function _lbAdjustmentPreviewUrl(recipe, neutral) {
-  var img = document.getElementById('lightboxImg');
-  var size = Math.max(img.naturalWidth, img.naturalHeight) || 1920;
+function _lbAdjustmentPreviewUrl(/** @type {LightboxRecipe | null | undefined} */ recipe, /** @type {boolean} */ neutral) {
+  const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
+  var size = Math.max(img ? img.naturalWidth : 0, img ? img.naturalHeight : 0) || 1920;
   return '/photos/' + vireoLightboxSession.requestedPhotoId() + '/edit-preview?size=' + size +
     '&apply_crop=1' + (neutral ? '&analysis=1' : '') +
     '&recipe=' + encodeURIComponent(JSON.stringify(recipe));
@@ -1397,7 +1404,7 @@ function _lbLoadAdjustmentSource() {
   delete recipe.local;
   var url = _lbAdjustmentPreviewUrl(recipe, true);
   if (_lbAdjustmentSource && _lbAdjustmentSource.url === url) return _lbAdjustmentSource;
-  var source = {url: url, image: new Image()};
+  /** @type {LightboxAdjustmentSource} */ var source = {url: url, image: new Image(), ready: Promise.resolve(false)};
   source.ready = new Promise(function(resolve) {
     source.image.onload = function() { resolve(true); };
     source.image.onerror = function() { resolve(false); };
@@ -1410,24 +1417,24 @@ function _lbLoadAdjustmentSource() {
 // Advanced color, detail, and local edits must run in their canonical order
 // with the global adjustments. Use the full server recipe for those, and for
 // devices where WebGL cannot render the source, instead of stacking filters.
-function _lbPreviewNeedsServer(recipe) {
+function _lbPreviewNeedsServer(/** @type {LightboxRecipe | null | undefined} */ recipe) {
   // RAW controls must run before display encoding; a JPEG WebGL texture has
   // already lost the scene highlight headroom and cannot match saved renders.
   var photo = _lightboxPhotoList.find(function(p) { return p.id === vireoLightboxSession.requestedPhotoId(); });
-  var filename = (photo && photo.filename) || document.getElementById('lightboxFilename').textContent;
+  var filename = (photo && photo.filename) || document.getElementById('lightboxFilename')?.textContent;
   if (/\.(nef|cr2|cr3|arw|raf|dng|rw2|orf)$/i.test(filename || '')) return true;
   // Range adjustments preserve texture using neighboring luminance samples.
   // The single-pass shader cannot reproduce this shared preview/export math.
-  var adjustments = recipe.adjustments || {};
+  var adjustments = (recipe && recipe.adjustments) || {};
   if (adjustments.shadows || adjustments.highlights) return true;
   var supported = ['exposure', 'highlights', 'shadows', 'whites', 'blacks',
     'contrast', 'vibrance', 'saturation', 'white_balance', 'temperature', 'tint'];
-  return !!recipe.local || Object.keys(recipe.adjustments || {}).some(function(key) {
+  return !!(recipe && recipe.local) || Object.keys((recipe && recipe.adjustments) || {}).some(function(key) {
     return supported.indexOf(key) === -1;
   });
 }
 
-function _lbApplyServerAdjustmentPreview(recipe, seq) {
+function _lbApplyServerAdjustmentPreview(/** @type {LightboxRecipe | null | undefined} */ recipe, /** @type {number} */ seq) {
   var url = _lbAdjustmentPreviewUrl(recipe, false);
   // Coalesce slider events before starting an expensive server render.
   _lbAdjustmentPreviewTimer = setTimeout(function() {
@@ -1435,18 +1442,18 @@ function _lbApplyServerAdjustmentPreview(recipe, seq) {
     var preview = new Image();
     preview.onload = function() {
       if (seq !== _lbAdjustmentPreviewSeq) return;
-      var overlay = document.getElementById('lightboxAdjustmentImage');
+      var overlay = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxAdjustmentImage')); if (!overlay) return;
       overlay.src = url;
       overlay.classList.add('show');
-      document.getElementById('lightboxToneCanvas').classList.remove('show');
+      /** @type {HTMLCanvasElement | null} */ (document.getElementById('lightboxToneCanvas'))?.classList.remove('show');
     };
     preview.src = url;
   }, 80);
 }
 
-function _lbApplyAdjustmentPreview(values) {
+function _lbApplyAdjustmentPreview(/** @type {LightboxAdjustmentValues} */ values) {
   var seq = ++_lbAdjustmentPreviewSeq;
-  clearTimeout(_lbAdjustmentPreviewTimer);
+  if (_lbAdjustmentPreviewTimer != null) clearTimeout(_lbAdjustmentPreviewTimer);
   var recipe = _lbCloneRecipe(_lbEditRecipe);
   if (_lbPreviewNeedsServer(recipe) || !VireoToneGL.supported()) {
     _lbApplyServerAdjustmentPreview(recipe, seq);
@@ -1471,8 +1478,8 @@ function _lbApplyAdjustmentPreview(values) {
       rolloff: pushed
     });
     if (ok) {
-      document.getElementById('lightboxAdjustmentImage').classList.remove('show');
-      document.getElementById('lightboxToneCanvas').classList.add('show');
+      /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxAdjustmentImage'))?.classList.remove('show');
+      /** @type {HTMLCanvasElement | null} */ (document.getElementById('lightboxToneCanvas'))?.classList.add('show');
     } else {
       _lbApplyServerAdjustmentPreview(recipe, seq);
     }
@@ -1481,24 +1488,24 @@ function _lbApplyAdjustmentPreview(values) {
 
 function _lbClearAdjustmentPreview() {
   ++_lbAdjustmentPreviewSeq;
-  clearTimeout(_lbAdjustmentPreviewTimer);
+  if (_lbAdjustmentPreviewTimer != null) clearTimeout(_lbAdjustmentPreviewTimer);
   _lbAdjustmentPreviewTimer = null;
-  document.getElementById('lightboxToneCanvas').classList.remove('show');
-  document.getElementById('lightboxAdjustmentImage').classList.remove('show');
+  /** @type {HTMLCanvasElement | null} */ (document.getElementById('lightboxToneCanvas'))?.classList.remove('show');
+  /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxAdjustmentImage'))?.classList.remove('show');
 }
 
-function _lbBumpRecipeBust(photoId) {
+function _lbBumpRecipeBust(/** @type {LightboxPhotoId | null} */ photoId) {
   var key = String(photoId);
   _lbRecipeBustByPhotoId[key] = Date.now();
 }
 
-function _lbRefreshVisiblePhotoImages(photoId) {
+function _lbRefreshVisiblePhotoImages(/** @type {LightboxPhotoId | null} */ photoId) {
   var bust = _lbRecipeBustByPhotoId[String(photoId)];
   if (!bust) return;
   var thumbUrl = vireoThumbnailUrl(photoId);
-  var refreshed = [];
+  /** @type {HTMLImageElement[]} */ var refreshed = [];
 
-  function refreshImg(img, url) {
+  function refreshImg(/** @type {HTMLImageElement | null} */ img, /** @type {string | undefined} */ url = undefined) {
     if (!img || refreshed.indexOf(img) !== -1) return;
     refreshed.push(img);
     // Route through _vireoSetRenderedImageSource so grid cards update
@@ -1508,11 +1515,11 @@ function _lbRefreshVisiblePhotoImages(photoId) {
     _vireoSetRenderedImageSource(img, url || thumbUrl);
   }
 
-  refreshImg(document.querySelector('.grid-card[data-id="' + photoId + '"] img'));
-  document.querySelectorAll('img[data-photo-id="' + photoId + '"]').forEach(function(img) {
+  refreshImg(/** @type {HTMLImageElement | null} */ (document.querySelector('.grid-card[data-id="' + photoId + '"] img')));
+  /** @type {NodeListOf<HTMLImageElement>} */ (document.querySelectorAll('img[data-photo-id="' + photoId + '"]')).forEach(function(img) {
     refreshImg(img);
   });
-  document.querySelectorAll('[data-photo-id="' + photoId + '"] img').forEach(function(img) {
+  /** @type {NodeListOf<HTMLImageElement>} */ (document.querySelectorAll('[data-photo-id="' + photoId + '"] img')).forEach(function(img) {
     var src = img.getAttribute('src') || '';
     if (src.indexOf('/thumbnails/' + photoId + '.jpg') !== -1) {
       refreshImg(img);
@@ -1524,18 +1531,18 @@ function _lbRefreshVisiblePhotoImages(photoId) {
     }
   });
 
-  var detailImg = document.getElementById('detailImg');
+  var detailImg = /** @type {HTMLImageElement | null} */ (document.getElementById('detailImg'));
   if (detailImg && window._detailPhotoId === photoId) {
     refreshImg(detailImg);
   }
 }
 
-function _lbReloadEditedSource(photoId, seq) {
+function _lbReloadEditedSource(/** @type {number} */ photoId, /** @type {number} */ seq) {
   if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
   // The source switch owns the visible image until its target has decoded.
   if (_vireoPairPendingSourceByPhoto[String(photoId)]) return;
   vireoLightboxSession.cancelOriginal();
-  var img = document.getElementById('lightboxImg');
+  const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
   if (!img) return;
   var key = _lbCurrentSrcKey || 'full';
   img.addEventListener('load', function onEditedReload() {
@@ -1549,7 +1556,7 @@ function _lbReloadEditedSource(photoId, seq) {
   img.src = _lbSrcUrl(photoId, key);
 }
 
-function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
+function _lbStartAdjustmentRecipeSave(/** @type {number} */ photoId, /** @type {LightboxRecipe | null | undefined} */ recipe, /** @type {number} */ inputSeq) {
   var seq = vireoLightboxSession.requestedPhotoId() === photoId ? ++_lbAdjustSeq : _lbAdjustSeq;
   var key = String(photoId);
   _lbAdjustSaveInFlightByPhoto[key] = true;
@@ -1599,10 +1606,10 @@ function _lbStartAdjustmentRecipeSave(photoId, recipe, inputSeq) {
     });
 }
 
-function _lbSaveAdjustmentRecipe(values) {
+function _lbSaveAdjustmentRecipe(/** @type {LightboxAdjustmentValues} */ values) {
   if (_lbGuardAdjustmentSource()) return false;
-  if (!vireoLightboxSession.requestedPhotoId() || !_lbEditRecipeLoaded) return;
   var photoId = vireoLightboxSession.requestedPhotoId();
+  if (photoId == null || !_lbEditRecipeLoaded) return;
   var key = String(photoId);
   var inputSeq = _lbAdjustmentInputSeqFor(photoId);
   var recipe = _lbRecipeWithAdjustments(values);
@@ -1625,9 +1632,9 @@ function _lbFlushPendingAdjustmentSave() {
   _lbSaveAdjustmentRecipe(_lbReadAdjustmentControls());
 }
 
-function _lbWaitForAdjustmentSaveIdle(photoId) {
+function _lbWaitForAdjustmentSaveIdle(/** @type {LightboxPhotoId | null} */ photoId) {
   var key = String(photoId);
-  return new Promise(function(resolve, reject) {
+  return new Promise(function(/** @type {(value?: void) => void} */ resolve, reject) {
     var started = Date.now();
     function check() {
       if (
@@ -1648,7 +1655,7 @@ function _lbWaitForAdjustmentSaveIdle(photoId) {
   });
 }
 
-function onLightboxAdjustmentInput(input) {
+function onLightboxAdjustmentInput(/** @type {HTMLInputElement} */ input) {
   if (_lbGuardAdjustmentSource()) return false;
   if (!_lbEditRecipeLoaded) {
     _lbSetAdjustmentStatus('Loading recipe...');

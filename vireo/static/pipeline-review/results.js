@@ -4,20 +4,21 @@
 // Compare the generated markup rather than object identity: review actions
 // update photos and encounters in place. Retaining unchanged cards also keeps
 // their decoded thumbnails and horizontal burst scroll positions intact.
-var pipelineReviewRenderedCards = new Map();
+/** @type {Map<number,{node: Element; html: string | null}>} */ var pipelineReviewRenderedCards = new Map();
 
+/** @param {HTMLElement} container @param {{html: string; index: number}[]} cards */
 function reconcilePipelineReviewCards(container, cards) {
-  var nextCards = new Map();
-  var nextNodes = new Set();
-  cards.forEach(function(entry) {
+  /** @type {Map<number,{node: Element; html: string | null}>} */ var nextCards = new Map();
+  /** @type {Set<Element>} */ var nextNodes = new Set();
+  requireReviewValue(cards).forEach(function(entry) {
     var previous = pipelineReviewRenderedCards.get(entry.index);
-    var card;
+    /** @type {Element} */ var card;
     if (previous && previous.html === entry.html && previous.node.parentNode === container) {
       card = previous.node;
     } else {
       var template = document.createElement('template');
       template.innerHTML = entry.html;
-      card = template.content.firstElementChild;
+      card = requireReviewValue(template.content.firstElementChild);
     }
     nextCards.set(entry.index, {html: entry.html, node: card});
     nextNodes.add(card);
@@ -27,55 +28,55 @@ function reconcilePipelineReviewCards(container, cards) {
   });
   var cursor = container.firstElementChild;
   nextCards.forEach(function(entry) {
-    if (entry.node === cursor) cursor = cursor.nextElementSibling;
+    if (entry.node === cursor) cursor = requireReviewValue(cursor).nextElementSibling;
     else container.insertBefore(entry.node, cursor);
   });
   pipelineReviewRenderedCards = nextCards;
 }
 
 function renderResults() {
-  clearTimeout(_speciesFilterRenderTimer);
+  clearTimeout(_speciesFilterRenderTimer || undefined);
   _speciesFilterRenderTimer = null;
   if (!pipelineResults) return;
-  var container = document.getElementById('encountersContainer');
+  var container = /** @type {HTMLElement} */ (document.getElementById('encountersContainer'));
   if (!container) return;
   // Build photo lookup
-  var photoMap = {};
-  pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+  /** @type {Record<number,ReviewPhoto>} */ var photoMap = {};
+  currentReviewResults().photos.forEach(function(p) { photoMap[p.id] = p; });
   var speciesConflictEvidence = buildSpeciesConflictEvidence(photoMap);
   // Folder/Collection scope: photos outside it are hidden like any other
   // filter, while pipelineResults keeps the whole saved review.
   var scopeIds = activeReviewScopeFilter();
-  function inScope(pid) { return !scopeIds || scopeIds.has(pid); }
+  function inScope(/** @type {number} */ pid) { return !scopeIds || scopeIds.has(pid); }
 
   // Build the photo set for encounters matching the species/filename search.
-  var speciesVisibleIds = null;
-  var speciesVisibleEncounters = null;
+  /** @type {Set<number> | null} */ var speciesVisibleIds = null;
+  /** @type {Set<number> | null} */ var speciesVisibleEncounters = null;
   if (speciesFilter) {
     speciesVisibleIds = new Set();
     speciesVisibleEncounters = new Set();
-    pipelineResults.encounters.forEach(function(enc, ei) {
+    currentReviewResults().encounters.forEach(function(enc, ei) {
       if (encounterMatchesSearch(enc, photoMap, inScope)) {
-        speciesVisibleEncounters.add(ei);
-        (enc.photo_ids || []).forEach(function(pid) { speciesVisibleIds.add(pid); });
+        requireReviewValue(speciesVisibleEncounters).add(ei);
+        (enc.photo_ids || []).forEach(function(pid) { requireReviewValue(speciesVisibleIds).add(pid); });
       }
     });
   }
 
   // Build set of photos hidden because their burst/encounter is confirmed
-  var confirmedHiddenIds = null;
+  /** @type {Set<number> | null} */ var confirmedHiddenIds = null;
   if (hideConfirmed) {
     confirmedHiddenIds = new Set();
-    pipelineResults.encounters.forEach(function(enc) {
+    currentReviewResults().encounters.forEach(function(enc) {
       if (enc.bursts && enc.bursts.length > 0) {
         enc.bursts.forEach(function(burst) {
           if (isBurstConfirmed(enc, burst)) {
             var ids = burst.photo_ids || burst || [];
-            ids.forEach(function(pid) { confirmedHiddenIds.add(pid); });
+            ids.forEach(function(pid) { requireReviewValue(confirmedHiddenIds).add(pid); });
           }
         });
       } else if (enc.species_confirmed) {
-        (enc.photo_ids || []).forEach(function(pid) { confirmedHiddenIds.add(pid); });
+        (enc.photo_ids || []).forEach(function(pid) { requireReviewValue(confirmedHiddenIds).add(pid); });
       }
     });
   }
@@ -83,45 +84,45 @@ function renderResults() {
   // This toggle mirrors the encounter-level species widget: if the header
   // would render "Add species", hide the entire encounter and exclude its
   // photos from the toolbar counts.
-  var withoutSuggestionHiddenIds = null;
+  /** @type {Set<number> | null} */ var withoutSuggestionHiddenIds = null;
   if (hideWithoutSuggestions) {
     withoutSuggestionHiddenIds = new Set();
-    pipelineResults.encounters.forEach(function(enc) {
+    currentReviewResults().encounters.forEach(function(enc) {
       if (encounterHasSpeciesSuggestion(enc)) return;
-      (enc.photo_ids || []).forEach(function(pid) { withoutSuggestionHiddenIds.add(pid); });
+      (enc.photo_ids || []).forEach(function(pid) { requireReviewValue(withoutSuggestionHiddenIds).add(pid); });
     });
   }
 
   // Update filter counts (respecting search and both hide toggles)
-  var counts = {all: 0, KEEP: 0, REVIEW: 0, REJECT: 0, SPECIES_CONFLICT: 0};
-  pipelineResults.photos.forEach(function(p) {
+  /** @type {Record<string,number>} */ var counts = {all: 0, KEEP: 0, REVIEW: 0, REJECT: 0, SPECIES_CONFLICT: 0};
+  currentReviewResults().photos.forEach(function(p) {
     if (!inScope(p.id)) return;
     if (speciesVisibleIds && !speciesVisibleIds.has(p.id)) return;
     if (confirmedHiddenIds && confirmedHiddenIds.has(p.id)) return;
     if (withoutSuggestionHiddenIds && withoutSuggestionHiddenIds.has(p.id)) return;
-    counts.all++;
+    counts.all = (counts.all || 0) + 1;
     if (p.label) counts[p.label] = (counts[p.label] || 0) + 1;
-    if (speciesConflictEvidence[p.id] && speciesConflictEvidence[p.id].severity) {
-      counts.SPECIES_CONFLICT++;
+    if (speciesConflictEvidence[p.id] && requireReviewValue(speciesConflictEvidence[p.id]).severity) {
+      counts.SPECIES_CONFLICT = (counts.SPECIES_CONFLICT || 0) + 1;
     }
   });
-  var ce = document.getElementById('countAll'); if (ce) ce.textContent = ' (' + counts.all + ')';
-  ce = document.getElementById('countKeep'); if (ce) ce.textContent = ' (' + (counts.KEEP||0) + ')';
-  ce = document.getElementById('countReview'); if (ce) ce.textContent = ' (' + (counts.REVIEW||0) + ')';
-  ce = document.getElementById('countReject'); if (ce) ce.textContent = ' (' + (counts.REJECT||0) + ')';
-  ce = document.getElementById('countSpeciesConflict'); if (ce) ce.textContent = ' (' + counts.SPECIES_CONFLICT + ')';
+  var ce = /** @type {HTMLElement} */ (document.getElementById('countAll')); if (ce) ce.textContent = ' (' + counts.all + ')';
+  ce = /** @type {HTMLElement} */ (document.getElementById('countKeep')); if (ce) ce.textContent = ' (' + (counts.KEEP||0) + ')';
+  ce = /** @type {HTMLElement} */ (document.getElementById('countReview')); if (ce) ce.textContent = ' (' + (counts.REVIEW||0) + ')';
+  ce = /** @type {HTMLElement} */ (document.getElementById('countReject')); if (ce) ce.textContent = ' (' + (counts.REJECT||0) + ')';
+  ce = /** @type {HTMLElement} */ (document.getElementById('countSpeciesConflict')); if (ce) ce.textContent = ' (' + counts.SPECIES_CONFLICT + ')';
 
-  var cards = [];
+  /** @type {{html: string; index: number}[]} */ var cards = [];
   // Track which encounter indices actually produced a card so focus
   // management below can pick a *visible* encounter (not one that was
   // filtered out by species filter, hide-confirmed, or label filter).
-  var renderedIndices = [];
+  /** @type {number[]} */ var renderedIndices = [];
   // Reset the click-time target cache; it's rebuilt below to mirror the exact
   // set of photos each Reject/Clear button represents on screen.
   pipelineReviewVisibleTargets = {};
   encounterSortOrder().forEach(function(ei) {
-    var enc = pipelineResults.encounters[ei];
-    var timeRange = formatEncounterTimeRange(enc.time_range);
+    const enc = requireReviewValue(currentReviewResults().encounters[ei]);
+    var timeRange = formatEncounterTimeRange(requireReviewValue(enc).time_range);
 
     // Check if the encounter passes the species/filename search.
     if (speciesVisibleEncounters && !speciesVisibleEncounters.has(ei)) return;
@@ -133,7 +134,7 @@ function renderResults() {
     // set is non-empty, and the encounter-level Reject/Clear button targets
     // exactly this set so it can never flip flags on photos the user can't
     // see.
-    var encPhotoIds = enc.photo_ids || [];
+    var encPhotoIds = requireReviewValue(enc).photo_ids || [];
     var visibleEncIds = encPhotoIds.filter(function(pid) {
       var p = photoMap[pid];
       if (!p) return false;
@@ -148,11 +149,11 @@ function renderResults() {
 
     var encKey = encounterKey(enc);
     var isCollapsed = encKey != null && collapsedEncounters.has(encKey);
-    function burstInScope(burst) {
+    function burstInScope(/** @type {ReviewBurst} */ burst) {
       return !scopeIds || (burst.photo_ids || burst || []).some(inScope);
     }
-    var visibleBurstCount = enc.bursts && enc.bursts.length
-      ? enc.bursts.filter(function(burst) {
+    var visibleBurstCount = requireReviewValue(enc).bursts && requireReviewValue(enc).bursts.length
+      ? requireReviewValue(enc).bursts.filter(function(burst) {
         return (!hideConfirmed || !isBurstConfirmed(enc, burst)) && burstInScope(burst);
       }).length
       : visibleEncIds.length;
@@ -176,8 +177,8 @@ function renderResults() {
     html += '</div>';
     html += '<div class="encounter-body" id="encBody' + ei + '"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
 
-    if (enc.bursts && enc.bursts.length > 0) {
-      enc.bursts.forEach(function(burst, bi) {
+    if (requireReviewValue(enc).bursts && requireReviewValue(enc).bursts.length > 0) {
+      requireReviewValue(enc).bursts.forEach(function(burst, bi) {
         if (hideConfirmed && isBurstConfirmed(enc, burst)) return;
         if (!burstInScope(burst)) return;
         var burstIds = burst.photo_ids || burst;
@@ -193,14 +194,14 @@ function renderResults() {
         pipelineReviewVisibleTargets['burst:' + ei + ':' + bi] = visibleBurstIds;
         html += '<div class="burst-strip">';
         html += '<div class="burst-controls">';
-        if (enc.bursts.length > 1) {
+        if (requireReviewValue(enc).bursts.length > 1) {
           html += '<span class="burst-label">B' + (bi+1) + '</span>';
         }
         // Burst-level species widget (only show if overridden or multiple bursts)
-        if (enc.bursts.length > 1 || (burst.species_override)) {
+        if (requireReviewValue(enc).bursts.length > 1 || (burst.species_override)) {
           html += renderSpeciesWidget(enc, ei, 'burst', bi);
         }
-        if (!burst.species_override && enc.bursts.length > 1) {
+        if (!burst.species_override && requireReviewValue(enc).bursts.length > 1) {
           html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ',\'top\')">&#9998;</span>';
         }
         html += renderBurstSpeciesConflict(enc, ei, burst, bi, speciesConflictEvidence, inScope);
@@ -255,7 +256,7 @@ function renderResults() {
   } else if (_focusedEncounterIdx === null || renderedIndices.indexOf(_focusedEncounterIdx) === -1) {
     // No focus yet, or current focus is hidden — fall back to the first
     // visible encounter.
-    setFocusedEncounter(renderedIndices[0]);
+    setFocusedEncounter(requireReviewValue(renderedIndices[0]));
   } else {
     // Re-apply focus highlight (DOM was rebuilt) and refresh trace panel.
     setFocusedEncounter(_focusedEncounterIdx);
@@ -265,6 +266,7 @@ function renderResults() {
 // Photo and burst counts for an encounter header. Under a Folder/Collection
 // scope an encounter can be partly outside it; say so, since species
 // confirmation still applies to the whole encounter or burst.
+/** @param {ReviewEncounter} enc @param {Set<number> | null} scopeIds @param {(burst: ReviewBurst) => boolean} burstInScope */
 function encounterScopeMeta(enc, scopeIds, burstInScope) {
   var photoTotal = enc.photo_count;
   var burstTotal = enc.burst_count;
@@ -286,6 +288,7 @@ function encounterScopeMeta(enc, scopeIds, burstInScope) {
   return html;
 }
 
+/** @param {ReviewPhoto} p @param {number | null} encIdx @param {number | null} [burstIdx] @param {ReviewConflict | null | undefined} [speciesConflict] */
 function renderPhotoCard(p, encIdx, burstIdx, speciesConflict) {
   var label = (p.label || '').toLowerCase();
   var manualLabel = '';
@@ -293,7 +296,7 @@ function renderPhotoCard(p, encIdx, burstIdx, speciesConflict) {
   var visibleLabelClass = label;
   var hasQuality = hasQualityScore(p);
   var q = hasQuality ? Number(p.quality_composite) : null;
-  var qPct = hasQuality ? Math.round(q * 100) : 0;
+  var qPct = hasQuality ? Math.round(requireReviewValue(q) * 100) : 0;
   if (p.flag === 'flagged') {
     manualLabel = 'KEEP';
     visibleLabelClass = 'keep';
@@ -316,7 +319,7 @@ function renderPhotoCard(p, encIdx, burstIdx, speciesConflict) {
   }
   if (hasQuality) {
     html += '<div class="photo-score-bar"><div class="photo-score-fill" style="width:' + qPct + '%"></div></div>';
-    html += '<div class="photo-info">' + escapeHtml(p.filename || '') + ' &middot; Q=' + q.toFixed(2) + '</div>';
+    html += '<div class="photo-info">' + escapeHtml(p.filename || '') + ' &middot; Q=' + requireReviewValue(q).toFixed(2) + '</div>';
   } else {
     html += '<div class="photo-info">' + escapeHtml(p.filename || '') + '</div>';
   }

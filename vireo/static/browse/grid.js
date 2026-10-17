@@ -5,18 +5,18 @@
 // Fold any already-loaded workspace descriptions into freshly rendered
 // color-label badges so lazily inserted cards get the same title and
 // accessible name as cards rendered after descriptions finished loading.
-function refreshColorLabelControlsIn(scope) {
+function refreshColorLabelControlsIn(/** @type {HTMLElement | null} */ scope) {
   if (!scope) return;
   if (window.VireoColorLabels && typeof window.VireoColorLabels.refreshControls === 'function') {
     window.VireoColorLabels.refreshControls(scope);
   }
 }
 
-function appendGridPhotos(newPhotos, startIdx) {
+function appendGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos, /** @type {number} */ startIdx) {
   if (!newPhotos.length) return;
-  var grid = document.getElementById('grid');
+  var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var html = '';
-  newPhotos.forEach(function(p, offset) {
+  newPhotos.forEach(function(p, /** @type {number} */ offset) {
     html += renderPhotoCard(p, startIdx + offset);
   });
   var tail = document.getElementById('gridTail');
@@ -26,21 +26,21 @@ function appendGridPhotos(newPhotos, startIdx) {
   refreshColorLabelControlsIn(grid);
 }
 
-function prependGridPhotos(newPhotos) {
+function prependGridPhotos(/** @type {BrowsePhoto[]} */ newPhotos) {
   if (!newPhotos.length) return;
-  var grid = document.getElementById('grid');
+  var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var html = '';
-  newPhotos.forEach(function(p, idx) {
+  newPhotos.forEach(function(p, /** @type {number} */ idx) {
     html += renderPhotoCard(p, idx);
   });
 
   // Existing cards keep their DOM nodes (and therefore their already-decoded
   // thumbnails), but their array indices move when a preceding page arrives.
   // Keep the inline selection handlers in lockstep with the new indices.
-  Array.from(grid.getElementsByClassName('grid-card')).forEach(function(card) {
-    var idx = parseInt(card.dataset.idx, 10) + newPhotos.length;
-    var id = parseInt(card.dataset.id, 10);
-    card.dataset.idx = idx;
+  Array.from(/** @type {HTMLCollectionOf<HTMLElement>} */ (grid.getElementsByClassName('grid-card'))).forEach(function(card) {
+    var idx = parseInt(card.dataset.idx || '', 10) + newPhotos.length;
+    var id = parseInt(card.dataset.id || '', 10);
+    card.dataset.idx = String(idx);
     if (!card.classList.contains('offline')) {
       card.setAttribute('onclick', 'selectPhoto(event,' + id + ',' + idx + ')');
     }
@@ -61,12 +61,12 @@ function prependGridPhotos(newPhotos) {
 var SKEL_POOL = 300;
 
 function updateGridTail() {
-  var grid = document.getElementById('grid');
+  var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   var tail = document.getElementById('gridTail');
   // Photos before the loaded window are reached with "Browse from beginning",
   // not by scrolling down — they must not inflate the downward runway.
   var remaining = allLoaded ? 0 : totalPhotos - loadedWindowOffset() - photos.length;
-  var cards = grid.getElementsByClassName('grid-card');
+  var cards = /** @type {HTMLCollectionOf<HTMLElement>} */ (grid.getElementsByClassName('grid-card'));
   var lastCard = cards.length ? cards[cards.length - 1] : null;
   if (remaining <= 0 || !lastCard) {
     if (tail) tail.remove();
@@ -75,7 +75,7 @@ function updateGridTail() {
 
   // Size skeleton cells to match real cards: the thumb tracks column width
   // via aspect-ratio, the info block copies its measured height.
-  var infoEl = lastCard.querySelector('.grid-card-info');
+  var infoEl = /** @type {HTMLElement | null} */ (lastCard.querySelector('.grid-card-info'));
   if (infoEl && infoEl.offsetHeight) {
     grid.style.setProperty('--skel-info-h', infoEl.offsetHeight + 'px');
   }
@@ -98,18 +98,18 @@ function updateGridTail() {
 // stack members share the same `.grid-card-img-wrap` + `.grid-card-info`
 // shape, so both are repainted here rather than re-rendered: the card keeps
 // its <img>, and therefore the thumbnail it has already decoded.
-function refreshCardBadgesAndInfo(card, p) {
+function refreshCardBadgesAndInfo(/** @type {HTMLElement} */ card, /** @type {BrowsePhoto} */ p) {
   applyCardColorLabel(card, p.id);
-  var info = card.querySelector('.grid-card-info');
+  var info = /** @type {HTMLElement | null} */ (card.querySelector('.grid-card-info'));
   if (info) {
     info.innerHTML = renderCardInfo(p);
     refreshColorLabelControlsIn(info);
   }
   // iNat badge lives in img-wrap (not grid-card-info), so sync it explicitly
   // when async metadata arrives after the card was appended.
-  var wrap = card.querySelector('.grid-card-img-wrap');
+  var wrap = /** @type {HTMLElement | null} */ (card.querySelector('.grid-card-img-wrap'));
   if (!wrap) return;
-  var speciesBadges = wrap.querySelector('.species-badges');
+  var speciesBadges = /** @type {HTMLElement | null} */ (wrap.querySelector('.species-badges'));
   var speciesBadgeHtml = cardFields.indexOf('species') === -1
     ? renderSpeciesBadges(p.species, false)
     : '';
@@ -118,17 +118,17 @@ function refreshCardBadgesAndInfo(card, p) {
   } else if (speciesBadges) {
     speciesBadges.remove();
   } else if (speciesBadgeHtml) {
-    var bottomOverlay = wrap.querySelector('.grid-card-bottom-overlay') || wrap;
+    var bottomOverlay = /** @type {HTMLElement | null} */ (wrap.querySelector('.grid-card-bottom-overlay')) || wrap;
     bottomOverlay.insertAdjacentHTML('afterbegin', speciesBadgeHtml);
   }
-  var existing = wrap.querySelector('.inat-badge');
+  var existing = /** @type {HTMLElement | null} */ (wrap.querySelector('.inat-badge'));
   var shouldShow = !!inatSubmitted[String(p.id)];
   if (shouldShow && !existing) {
     wrap.insertAdjacentHTML('beforeend', '<span class="inat-badge">iNat</span>');
   } else if (!shouldShow && existing) {
     existing.remove();
   }
-  var rep = wrap.querySelector('.representative-badge');
+  var rep = /** @type {HTMLElement | null} */ (wrap.querySelector('.representative-badge'));
   if (p.is_species_representative && !rep) {
     wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Representative</span>');
   } else if (!p.is_species_representative && rep) {
@@ -136,11 +136,11 @@ function refreshCardBadgesAndInfo(card, p) {
   }
 }
 
-function refreshGridCards(photoIds) {
+function refreshGridCards(/** @type {number[]} */ photoIds) {
   photoIds.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
     if (!p) return;
-    var card = document.querySelector('.grid-card[data-id="' + id + '"]');
+    var card = /** @type {HTMLElement | null} */ (document.querySelector('.grid-card[data-id="' + id + '"]'));
     if (!card) return;
     refreshCardBadgesAndInfo(card, p);
   });
@@ -152,13 +152,13 @@ function refreshGridCards(photoIds) {
 // order. Rebuilding the tray for that would give every member a fresh <img>
 // (blanking thumbnails that were already decoded) and swap the DOM out from
 // under a click the user has started.
-function refreshStackMemberCards(photoIds) {
+function refreshStackMemberCards(/** @type {number[]} */ photoIds) {
   photoIds.forEach(function(id) {
-    var p = findBrowsePhoto(id);
+    const p = findBrowsePhoto(id);
     if (!p) return;
-    document.querySelectorAll(
+    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll(
       '.browse-stack-member[data-id="' + id + '"]'
-    ).forEach(function(member) {
+    )).forEach(function(member) {
       refreshCardBadgesAndInfo(member, p);
     });
   });
@@ -166,12 +166,12 @@ function refreshStackMemberCards(photoIds) {
 
 document.addEventListener('lifelist:changed', function(e) {
   var detail = e && e.detail ? e.detail : {};
-  var species = detail.species;
+  const species = detail.species;
   var photoId = detail.photoId;
   if (!species || !photoId) return;
-  var changed = [];
+  /** @type {number[]} */ var changed = [];
   loadedBrowsePhotoIds().forEach(function(id) {
-    var p = findBrowsePhoto(id);
+    const p = findBrowsePhoto(id);
     if (!p) return;
     var entries = Array.isArray(p.life_list) ? p.life_list : [];
     var touched = false;
@@ -204,16 +204,16 @@ document.addEventListener('lifelist:changed', function(e) {
   }
 });
 
-function getGridCard(photoId) {
-  return document.querySelector('.grid-card[data-id="' + photoId + '"]');
+function getGridCard(/** @type {number | null} */ photoId) {
+  return /** @type {HTMLElement | null} */ (document.querySelector('.grid-card[data-id="' + photoId + '"]'));
 }
 
-function getBrowsePhotoElement(photoId) {
+function getBrowsePhotoElement(/** @type {number | null} */ photoId) {
   return getGridCard(photoId) ||
-    document.querySelector('.browse-stack-member[data-id="' + photoId + '"]');
+    /** @type {HTMLElement | null} */ (document.querySelector('.browse-stack-member[data-id="' + photoId + '"]'));
 }
 
-function loadedBrowseStackCoverForPhoto(photoId) {
+function loadedBrowseStackCoverForPhoto(/** @type {number | null} */ photoId) {
   var wantedId = Number(photoId);
   return photos.find(function(photo) {
     return photo.browse_stack && (photo.browse_stack.photo_ids || []).some(function(id) {
@@ -223,23 +223,23 @@ function loadedBrowseStackCoverForPhoto(photoId) {
 }
 
 /* ---------- Grid Rendering ---------- */
-function renderGrid(options) {
-  var grid = document.getElementById('grid');
-  var empty = document.getElementById('emptyState');
-  var welcome = document.getElementById('welcomeState');
+function renderGrid(/** @type {{preserveThumbnails?: boolean}} */ options = {}) {
+  var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
+  var empty = /** @type {HTMLElement} */ (document.getElementById('emptyState'));
+  var welcome = /** @type {HTMLElement} */ (document.getElementById('welcomeState'));
   var thumbnails = new Map();
   var trayScroll = new Map();
-  function thumbnailKey(img) {
-    var card = img.closest('.grid-card, .browse-stack-member');
+  function thumbnailKey(/** @type {HTMLImageElement} */ img) {
+    var card = /** @type {HTMLElement | null} */ (img.closest('.grid-card, .browse-stack-member'));
     return card && (card.classList.contains('grid-card') ? 'cover:' : 'member:') + card.dataset.id;
   }
   if (options && options.preserveThumbnails) {
-    grid.querySelectorAll('img[data-thumbnail-src]').forEach(function(img) {
+    /** @type {NodeListOf<HTMLImageElement>} */ (grid.querySelectorAll('img[data-thumbnail-src]')).forEach(function(img) {
       thumbnails.set(thumbnailKey(img), img);
     });
-    grid.querySelectorAll('.browse-stack-tray').forEach(function(tray) {
-      var members = tray.querySelector('.browse-stack-members');
-      if (members) trayScroll.set(tray.dataset.stackCoverId, members.scrollLeft);
+    /** @type {NodeListOf<HTMLElement>} */ (grid.querySelectorAll('.browse-stack-tray')).forEach(function(tray) {
+      var members = /** @type {HTMLElement | null} */ (tray.querySelector('.browse-stack-members'));
+      if (members) trayScroll.set(tray.dataset.stackCoverId || '', members.scrollLeft);
     });
   }
 
@@ -267,16 +267,16 @@ function renderGrid(options) {
   refreshColorLabelControlsIn(grid);
   restoreExpandedBrowseStacks();
   if (thumbnails.size) {
-    grid.querySelectorAll('img[data-thumbnail-src]').forEach(function(img) {
+    /** @type {NodeListOf<HTMLImageElement>} */ (grid.querySelectorAll('img[data-thumbnail-src]')).forEach(function(img) {
       var previous = thumbnails.get(thumbnailKey(img));
       if (previous && previous.dataset.thumbnailSrc === img.dataset.thumbnailSrc) {
         img.replaceWith(previous);
       }
     });
-    grid.querySelectorAll('.browse-stack-tray').forEach(function(tray) {
-      var members = tray.querySelector('.browse-stack-members');
-      if (members && trayScroll.has(tray.dataset.stackCoverId)) {
-        members.scrollLeft = trayScroll.get(tray.dataset.stackCoverId);
+    /** @type {NodeListOf<HTMLElement>} */ (grid.querySelectorAll('.browse-stack-tray')).forEach(function(tray) {
+      var members = /** @type {HTMLElement | null} */ (tray.querySelector('.browse-stack-members'));
+      if (members && trayScroll.has(tray.dataset.stackCoverId || '')) {
+        members.scrollLeft = trayScroll.get(tray.dataset.stackCoverId || '') || 0;
       }
     });
   }

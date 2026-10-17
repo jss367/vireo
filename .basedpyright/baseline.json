@@ -96,22 +96,6 @@
                     "endColumn": 78,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 45,
-                    "endColumn": 48,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 55,
-                    "endColumn": 58,
-                    "lineCount": 1
-                }
             }
         ],
         "./vireo/repositories/moves_merge.py": [
@@ -204,40 +188,6 @@
                 }
             }
         ],
-        "./vireo/services/folder_moves.py": [
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 20,
-                    "endColumn": 39,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAssignmentType",
-                "range": {
-                    "startColumn": 30,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 30,
-                    "endColumn": 104,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 30,
-                    "endColumn": 104,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./vireo/services/gps_locations.py": [
             {
                 "code": "reportOptionalMemberAccess",
@@ -257,14 +207,6 @@
             }
         ],
         "./vireo/services/import_in_place.py": [
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 31,
-                    "endColumn": 38,
-                    "lineCount": 1
-                }
-            },
             {
                 "code": "reportArgumentType",
                 "range": {
@@ -304,14 +246,6 @@
                 "range": {
                     "startColumn": 26,
                     "endColumn": 47,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalSubscript",
-                "range": {
-                    "startColumn": 35,
-                    "endColumn": 55,
                     "lineCount": 1
                 }
             }

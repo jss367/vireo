@@ -9,7 +9,8 @@ async function lint(code, filePath) {
 }
 
 for (const file of ['browse/panel-requests.js', 'browse/panel-loaders.js', 'vireo-panel-loader.js',
-  'import-recovery.js', 'pipeline-messages.js', 'map-focus.js', 'vireo-export-job.js']) {
+  'import-recovery.js', 'pipeline-messages.js', 'map-focus.js', 'vireo-export-job.js',
+  'vireo-visible-poll.js', 'vireo-thumbnail-queue.js', 'vireo-predictions.js']) {
   test(file + ': strict controllers reject undefined names and unused variables', async () => {
     const messages = await lint(
       '(function() { const unused = 1; misspelledPanelAction(); })();',

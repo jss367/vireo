@@ -27,12 +27,9 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "duplicates.html": 820,
     "highlights.html": 1151,
     "id_conflicts.html": 968,
-    "keywords.html": 1204,
     "lightroom.html": 135,
     "logs.html": 64,
     "map.html": 389,
-    "move.html": 1652,
-    "pipeline_rapid_review.html": 1606,
     "shortcuts.html": 251,
     "stats.html": 992,
     "storage.html": 867,
@@ -87,11 +84,14 @@ SPLIT_PAGES = {
     "/life-list": "life-list",
     "/pipeline": "pipeline",
     "/pipeline/review": "pipeline-review",
+    "/pipeline/rapid-review": "pipeline-rapid-review",
     "/edit": "photo-editor",
     "/locations/review": "location-review",
     "/jobs": "jobs",
     "/review": "review",
     "/misses": "misses",
+    "/move": "move",
+    "/keywords": "keywords",
 }
 
 

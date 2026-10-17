@@ -1,4 +1,4 @@
-var vireoLightboxViewport = VireoLightboxViewport.create({
+/** @type {LightboxViewport} */ var vireoLightboxViewport = VireoLightboxViewport.create({
   photoId: function() { return vireoLightboxSession.requestedPhotoId(); },
   photo: function() {
     var id = vireoLightboxSession.requestedPhotoId();
@@ -24,7 +24,7 @@ var vireoLightboxViewport = VireoLightboxViewport.create({
   handledClick: function() { window._lightboxZoomHandled = true; }
 });
 
-var vireoLightboxSession = VireoLightboxSession.create({
+/** @type {LightboxSession} */ var vireoLightboxSession = VireoLightboxSession.create({
   photos: function() { return _lightboxPhotoList; },
   photoData: function(id) { return _lbPhotoDataByPhoto[String(id)]; },
   view: function() {
@@ -44,49 +44,49 @@ var vireoLightboxSession = VireoLightboxSession.create({
   rememberRenderKey: function(id, key) { window.vireoRememberPhotoRenderKey(id, key); }
 });
 
-var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
+/** @type {LightboxPhoto[]} */ var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
 var _lbReadOnly = false;
 var _lbReadOnlyMessage = 'This lightbox is read-only';
 
-var _lbPhotoW = null;       // original photo width (px)
-var _lbPhotoH = null;       // original photo height (px)
-var _lbPhotoOrientation = null; // original EXIF orientation, when API metadata has it
-var _lbCurrentEditRecipe = null; // active non-destructive recipe for layout math
-var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
-var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
+/** @type {number | null} */ var _lbPhotoW = null;       // original photo width (px)
+/** @type {number | null} */ var _lbPhotoH = null;       // original photo height (px)
+/** @type {unknown} */ var _lbPhotoOrientation = null; // original EXIF orientation, when API metadata has it
+/** @type {LightboxRecipe | null} */ var _lbCurrentEditRecipe = null; // active non-destructive recipe for layout math
+/** @type {string | null} */ var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
+/** @type {number | null} */ var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
 // Bootstrap before opening any photo; metadata refreshes the workspace cap later.
 var _lbPreviewMaxSize = window.VIREO_FULL_PREVIEW_MAX_SIZE ?? null; // 0 means original
 var _lbOriginalUnavailable = false;  // true after /original fails; fall back to current decoded source dimensions
-var _lbFullUsesOriginal = null; // metadata-backed: preview_max_size=0 makes /full redirect to /original
+/** @type {boolean | null} */ var _lbFullUsesOriginal = null; // metadata-backed: preview_max_size=0 makes /full redirect to /original
 var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
 var _lbFlagPendingWrites = 0;
-var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; lightbox:flagchanged is emitted once a photo's count hits 0 so listeners see its settled flag, not a guessed per-write one
-var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
-var _lbProvisionalFlags = {}; // page-owned staged flags (for example Group Review before Apply)
-var _lbProvisionalFlagSeq = {}; // edit sequence that produced each staged flag
+/** @type {Record<string, number>} */ var _lbFlagPendingByPhoto = {};  // count of in-flight flag writes PER photo; lightbox:flagchanged is emitted once a photo's count hits 0 so listeners see its settled flag, not a guessed per-write one
+/** @type {Record<string, LightboxFlag>} */ var _lbConfirmedFlags = {};   // last server-confirmed flag per photo, isolated from optimistic page helpers
+/** @type {Record<string, LightboxFlag>} */ var _lbProvisionalFlags = {}; // page-owned staged flags (for example Group Review before Apply)
+/** @type {Record<string, number>} */ var _lbProvisionalFlagSeq = {}; // edit sequence that produced each staged flag
 var _lbVisualTransitionPending = false; // keep the outgoing bitmap/transform frozen until the incoming image is decoded
-var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
+/** @type {(() => void) | null} */ var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
 var _lbPreviewLoading = false;
-var _lbProgressiveTargetKey = null;
-var _lbSessionFullUsesOriginal = null;
-var _lbEditRecipeByPhoto = {};
+/** @type {string | null} */ var _lbProgressiveTargetKey = null;
+/** @type {boolean | null} */ var _lbSessionFullUsesOriginal = null;
+/** @type {Record<string, LightboxRecipe>} */ var _lbEditRecipeByPhoto = {};
 // The recipe exactly as the server sent it, kept alongside the clipped
 // ``_lbEditRecipeByPhoto`` view above. ``_lbCloneEditRecipe`` only models the
 // fields the lightbox itself can edit, so it drops sections such as ``local``;
 // a cache fingerprint computed from the clipped copy cannot tell two different
 // local-adjustment recipes apart. Fingerprints read this map instead.
-var _lbRawEditRecipeByPhoto = {};
+/** @type {Record<string, LightboxRecipe | null>} */ var _lbRawEditRecipeByPhoto = {};
 // Server-computed render keys (``photo_payload.render_key_for_recipe``),
 // remembered per photo from whichever payload delivered the photo dict. The
 // server derives its key from the whole canonical recipe, so preferring it
 // over the client's own fingerprint keeps the two from drifting.
-var _lbRenderKeyByPhoto = {};
-var _lbEditRecipeKnownByPhoto = {};
+/** @type {Record<string, string>} */ var _lbRenderKeyByPhoto = {};
+/** @type {Record<string, boolean>} */ var _lbEditRecipeKnownByPhoto = {};
 var _lbEditRecipeWriteSeq = 0;
-var _lbEditRecipeWriteSeqByPhoto = {};
-var _lbPhotoDataByPhoto = {};
-var _lbRenderVersionByPhoto = {};
+/** @type {Record<string, number>} */ var _lbEditRecipeWriteSeqByPhoto = {};
+/** @type {Record<string, LightboxPhoto>} */ var _lbPhotoDataByPhoto = {};
+/** @type {Record<string, string>} */ var _lbRenderVersionByPhoto = {};
 
 function _lbGuardReadOnly() {
   if (!_lbReadOnly) return false;
@@ -95,7 +95,7 @@ function _lbGuardReadOnly() {
 }
 
 function _lbApplyReadOnlyState() {
-  var controls = [
+  /** @type {[string, string][]} */ var controls = [
     ['lightboxFlagBtn', 'Flag photo (p)'],
     ['lightboxRejectBtn', 'Reject photo (x)'],
     ['lightboxInat', 'Submit to iNaturalist'],
@@ -103,13 +103,13 @@ function _lbApplyReadOnlyState() {
     ['lightboxDeleteBtn', 'Delete photo'],
   ];
   controls.forEach(function(entry) {
-    var button = document.getElementById(entry[0]);
+    var button = /** @type {HTMLButtonElement | null} */ (document.getElementById(entry[0]));
     if (!button) return;
     button.disabled = _lbReadOnly;
     button.title = _lbReadOnly ? _lbReadOnlyMessage : entry[1];
   });
   var adjustmentHint = _lbAdjustmentSourceHint();
-  var adjustmentButton = document.getElementById('lightboxAdjustBtn');
+  var adjustmentButton = /** @type {HTMLButtonElement | null} */ (document.getElementById('lightboxAdjustBtn'));
   if (adjustmentButton && adjustmentHint && !_lbReadOnly) {
     adjustmentButton.disabled = true;
     adjustmentButton.title = adjustmentHint;
@@ -119,7 +119,7 @@ function _lbApplyReadOnlyState() {
     panel.classList.remove('open');
     if (adjustmentButton) adjustmentButton.setAttribute('aria-expanded', 'false');
   }
-  var editButton = document.getElementById('lightboxEditPhoto');
+  var editButton = /** @type {HTMLButtonElement | null} */ (document.getElementById('lightboxEditPhoto'));
   if (editButton) {
     var editHint = _lbReadOnly
       ? _lbReadOnlyMessage
@@ -137,7 +137,7 @@ window.setLightboxReadOnlyMode = function(readOnly, message) {
   _lbApplyReadOnlyState();
 };
 
-function _lbSetPhotoTransitionPending(pending) {
+/** @param {boolean} pending */ function _lbSetPhotoTransitionPending(pending) {
   ['lightboxActions', 'lightboxAdjustPanel', 'syncLightboxPanel'].forEach(function(id) {
     var controls = document.getElementById(id);
     if (!controls) return;

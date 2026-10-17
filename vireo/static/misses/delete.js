@@ -1,7 +1,7 @@
 // Deleting the selected photos through the shared delete dialog.
 // Classic page script; load boot.js after all definitions.
 
-function removePhotosFromMissesData(ids) {
+/** @param {number[]} ids */ function removePhotosFromMissesData(ids) {
   var deleted = new Set(ids);
   CATEGORY_ORDER.forEach(function(cat) {
     missesData[cat] = (missesData[cat] || []).filter(function(p) {
@@ -12,13 +12,13 @@ function removePhotosFromMissesData(ids) {
 }
 
 function getSelectedPhotoRows() {
-  var rowsById = {};
+  /** @type {Record<number,MissPhoto>} */ var rowsById = {};
   CATEGORY_ORDER.forEach(function(cat) {
     (missesData[cat] || []).forEach(function(p) {
       if (selection.has(p.id) && !rowsById[p.id]) rowsById[p.id] = p;
     });
   });
-  return Object.keys(rowsById).map(function(id) { return rowsById[id]; });
+  return Object.values(rowsById);
 }
 
 async function deleteSelectedMisses() {
@@ -27,7 +27,7 @@ async function deleteSelectedMisses() {
   var ids = rows.map(function(p) { return p.id; });
   var companionCount = rows.filter(function(p) { return !!p.companion_path; }).length;
 
-  var afterDelete = function(data) {
+  /** @param {{failed_photo_ids?:number[]}} data */ var afterDelete = function(data) {
     // Rows the server retained after Trash failures must remain visible —
     // dropping them from ``missesData`` would hide files still on disk until
     // reload. Callback receives the same ``data`` shape as other delete

@@ -95,6 +95,21 @@ def effective_category_resolver(db, photo_ids):
     from species_identity import SpeciesResolver
     resolver = SpeciesResolver(db=db)
     species_by_photo = db.get_species_keywords_for_photos(photo_ids, include_identities=True)
+    return _category_resolver(
+        db, resolver, photo_ids, species_by_photo,
+        compare_prediction_to_keywords, taxonomy,
+    )
+
+
+def _category_resolver(
+    db, resolver, photo_ids, species_by_photo, compare_prediction_to_keywords, taxonomy,
+):
+    """Build the ``_category`` closure ``effective_category_resolver`` returns.
+
+    ``species_by_photo`` is the photos' current species keywords; the
+    keyword comparison names and the per-detection holder index are built
+    here, in that order, before the closure is returned.
+    """
     resolved = {}
     cache = {}
 
@@ -115,19 +130,9 @@ def effective_category_resolver(db, photo_ids):
             names.append((entry["key"], comparison_name(entry["name"], identity)))
         keyword_names[photo_id] = names
 
-    # Which detections on each photo name each species identity. Keyed by
-    # ``consensus`` so a mixed-label burst's minority frame is attributed
-    # to the species acceptance would actually tag (its burst consensus),
-    # not the row's own raw label — otherwise accepting the minority frame
-    # adds a keyword this index has no holder for and a neighbouring
-    # detection's prediction reads it as another subject's conflict.
-    detections_by_key = {}
-    for photo_id, rows in db.get_live_prediction_rows_by_photo(
-        [pid for pid in photo_ids if pid in species_by_photo]
-    ).items():
-        held = detections_by_key.setdefault(photo_id, {})
-        for row in rows:
-            held.setdefault(resolver.consensus(row).key, set()).add(row["detection_id"])
+    detections_by_key = _detections_by_consensus_key(
+        db, resolver, photo_ids, species_by_photo,
+    )
 
     def _held_by_other_subject(photo_id, keyword_key, detection_id):
         holders = detections_by_key.get(photo_id, {}).get(keyword_key)
@@ -158,6 +163,24 @@ def effective_category_resolver(db, photo_ids):
         return cache[key]
 
     return _category
+
+
+def _detections_by_consensus_key(db, resolver, photo_ids, species_by_photo):
+    """Map each photo to ``{species identity key: {detection ids}}``."""
+    # Which detections on each photo name each species identity. Keyed by
+    # ``consensus`` so a mixed-label burst's minority frame is attributed
+    # to the species acceptance would actually tag (its burst consensus),
+    # not the row's own raw label — otherwise accepting the minority frame
+    # adds a keyword this index has no holder for and a neighbouring
+    # detection's prediction reads it as another subject's conflict.
+    detections_by_key = {}
+    for photo_id, rows in db.get_live_prediction_rows_by_photo(
+        [pid for pid in photo_ids if pid in species_by_photo]
+    ).items():
+        held = detections_by_key.setdefault(photo_id, {})
+        for row in rows:
+            held.setdefault(resolver.consensus(row).key, set()).add(row["detection_id"])
+    return detections_by_key
 
 
 # Fresh-comparison categories a bare Accept must not act on.

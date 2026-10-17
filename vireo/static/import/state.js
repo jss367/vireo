@@ -4,17 +4,17 @@
 /* Import page: adds folders in place or copies them to an archive, renders
    live progress from the job's SSE stream, and only shows safe-to-format
    messaging for verified archive-copy imports. */
-let sources = [];
-let activeJobId = null;
-let es = null;
+/** @type {string[]} */ let sources = [];
+/** @type {number | null} */ let activeJobId = null;
+/** @type {EventSource | null} */ let es = null;
 // Card folders the finished import copied from — handed to the Card
 // cleanup page by the result card's "Free up card space…" button.
-let cardCleanupImportSources = [];
-let stagingResultsByPath = {};
-let sourceCounts = {};
-let sourceCountTickTimer = null;
+/** @type {string[]} */ let cardCleanupImportSources = [];
+/** @type {Record<string, ImportStaging>} */ let stagingResultsByPath = {};
+/** @type {Record<string, ImportSourceCount>} */ let sourceCounts = {};
+/** @type {ReturnType<typeof setInterval> | null} */ let sourceCountTickTimer = null;
 let activeImportMode = 'in_place';
-let importRemoteTargets = [];
+/** @type {ImportRemoteTarget[]} */ let importRemoteTargets = [];
 let importRsyncAvailable = false;
 let importSshAvailable = false;
 let destStructureSeq = 0;
@@ -23,29 +23,29 @@ let destStructureSeq = 0;
 // or trigger a folder-structure render on top of a newer preview's
 // results. Incremented at the top of previewImport().
 let importPreviewSeq = 0;
-let importPreviewTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ let importPreviewTimer = null;
 // Own every request spawned by the active preview. Starting a new preview
 // aborts this controller so an obsolete byte-for-byte duplicate check does
 // not keep reading the card / archive in the background.
-let importPreviewAbort = null;
-let importThumbSchedulerCancel = null;
+/** @type {AbortController | null} */ let importPreviewAbort = null;
+/** @type {(() => void) | null} */ let importThumbSchedulerCancel = null;
 // Last args passed to renderImportPreviewGrid, so the "Hide duplicates"
 // filter can re-render locally.
-let lastImportPreviewRender = null;
-let importTags = [];
+/** @type {ImportGridRender | null} */ let lastImportPreviewRender = null;
+/** @type {string[]} */ let importTags = [];
 // User intent ONLY: paths the user explicitly unchecked. Duplicate verdicts
 // are a separate eligibility overlay and are never written in here — see the
 // import-file-selection spec §1. Keeping these separate is what makes the
 // checkbox state safe to re-derive on every render.
-let importDeselected = new Set();
-let importPreviewedPaths = [];
+/** @type {Set<string>} */ let importDeselected = new Set();
+/** @type {string[]} */ let importPreviewedPaths = [];
 // Current preview's verified interrupted-import leftovers. They remain
 // selectable for adoption, but require no transfer.
-let importRecoveredPaths = new Set();
-let importSelectionAnchor = null;
-let importDayGroups = new Map();
-let importCollapsedDays = new Set();
-let newImagesSnapshotId = null;
+/** @type {Set<string>} */ let importRecoveredPaths = new Set();
+/** @type {string | null} */ let importSelectionAnchor = null;
+/** @type {Map<string,ImportDayEntry[]>} */ let importDayGroups = new Map();
+/** @type {Set<string>} */ let importCollapsedDays = new Set();
+/** @type {number | null} */ let newImagesSnapshotId = null;
 // Preview lifecycle, read only by updateStartGate(). The four states below
 // must stay distinguishable — collapsing "no preview run" with "in flight"
 // is what would let a user who picked 100 of 5,000 files hit Start during the
@@ -61,7 +61,7 @@ let newImagesSnapshotId = null;
 let importPreviewInFlight = false;
 let importDupStreamPending = false;
 let importPreviewFailed = false;
-let importPreviewCapturedSignature = null;
+/** @type {string | null} */ let importPreviewCapturedSignature = null;
 // True between POSTing the import job and learning its id — activeJobId is
 // still null across that await, and without this the gate would re-enable
 // Start and allow a double submit.
@@ -70,7 +70,7 @@ let importStartPending = false;
 // list loads, when the capture found nothing, and after a load failure. It
 // contributes no label — #newImagesImportSource already says why.
 let newImagesStartBlocked = false;
-let importExiftoolReady = null;
+/** @type {boolean | null} */ let importExiftoolReady = null;
 let importExiftoolRequired = true;
-let lastFinishedImportJob = null;
+/** @type {ImportJob | null} */ let lastFinishedImportJob = null;
 let importRecoveryGeneration = 0;

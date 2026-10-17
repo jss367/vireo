@@ -2,7 +2,7 @@
 // Classic page script; load boot.js after all definitions.
 'use strict';
 
-var NATURAL_TYPES = {
+/** @type {Record<string,string>} */ var NATURAL_TYPES = {
   park: 'Park', state_park: 'State park', national_park: 'National park',
   wildlife_refuge: 'Wildlife refuge', nature_preserve: 'Nature preserve',
   natural_feature: 'Natural feature', hiking_area: 'Hiking area', campground: 'Campground',
@@ -10,7 +10,7 @@ var NATURAL_TYPES = {
   scenic_spot: 'Scenic spot',
 };
 
-var AREA_TYPES = {
+/** @type {Record<string,{label:string;scope:string}>} */ var AREA_TYPES = {
   neighborhood: {label: 'Neighborhood', scope: 'local'},
   colloquial_area: {label: 'Local area', scope: 'local'},
   sublocality_level_5: {label: 'Local area', scope: 'local'},
@@ -27,44 +27,44 @@ var AREA_TYPES = {
   country: {label: 'Country', scope: 'broad'},
 };
 
-var PLACE_TYPES = {
+/** @type {Record<string,string>} */ var PLACE_TYPES = {
   tourist_attraction: 'Landmark', museum: 'Museum', place_of_worship: 'Place of worship',
   lodging: 'Lodging', restaurant: 'Restaurant', store: 'Business', establishment: 'Place',
 };
 
-function candidateKey(choice) {
+/** @param {LocationChoice|null} choice */ function candidateKey(choice) {
   if (!choice) return '';
   if (choice.place_id) return 'place:' + choice.place_id;
   if (choice.kind === 'keyword') return 'keyword:' + choice.keyword_id;
   return 'custom:' + choice.name;
 }
 
-function typeDetails(types) {
+/** @param {string[]|undefined} types */ function typeDetails(types) {
   types = Array.isArray(types) ? types : [];
   for (var index = 0; index < types.length; index += 1) {
-    if (AREA_TYPES[types[index]]) {
+    if (AREA_TYPES[types[index] || '']) {
       return {
         category: 'areas',
-        type: types[index],
-        label: AREA_TYPES[types[index]].label,
-        areaScope: AREA_TYPES[types[index]].scope,
+        type: types[index] || '',
+        label: AREA_TYPES[types[index] || '']?.label,
+        areaScope: AREA_TYPES[types[index] || '']?.scope,
       };
     }
   }
   for (var naturalIndex = 0; naturalIndex < types.length; naturalIndex += 1) {
-    if (NATURAL_TYPES[types[naturalIndex]]) {
-      return {category: 'nature', type: types[naturalIndex], label: NATURAL_TYPES[types[naturalIndex]]};
+    if (NATURAL_TYPES[types[naturalIndex] || '']) {
+      return {category: 'nature', type: types[naturalIndex] || '', label: NATURAL_TYPES[types[naturalIndex] || '']};
     }
   }
   for (var placeIndex = 0; placeIndex < types.length; placeIndex += 1) {
-    if (PLACE_TYPES[types[placeIndex]]) {
-      return {category: 'places', type: types[placeIndex], label: PLACE_TYPES[types[placeIndex]]};
+    if (PLACE_TYPES[types[placeIndex] || '']) {
+      return {category: 'places', type: types[placeIndex] || '', label: PLACE_TYPES[types[placeIndex] || '']};
     }
   }
   return {category: 'places', type: types[0] || 'place', label: 'Place'};
 }
 
-function normalizeCandidate(choice) {
+/** @param {LocationChoice} choice */ function normalizeCandidate(choice) {
   if (!choice) return choice;
   if (choice.kind === 'custom') {
     choice.category = 'places';
@@ -88,7 +88,7 @@ function normalizeCandidate(choice) {
   return choice;
 }
 
-function candidateType(choice) {
+/** @param {LocationChoice} choice */ function candidateType(choice) {
   if (choice.kind === 'custom') {
     return {label: 'Custom friendly name', category: 'custom'};
   }
@@ -102,7 +102,7 @@ function candidateType(choice) {
   return {label: choice.type_label || 'Place', category: category};
 }
 
-function candidateMeta(choice) {
+/** @param {LocationChoice} choice */ function candidateMeta(choice) {
   var parts = [];
   if (choice.kind === 'keyword') {
     parts.push(formatNumber(choice.photo_count) + (choice.photo_count === 1 ? ' photo' : ' photos'));
@@ -113,7 +113,7 @@ function candidateMeta(choice) {
   return parts.join(' · ');
 }
 
-function candidateCoordinates(choice) {
+/** @param {LocationChoice} choice */ function candidateCoordinates(choice) {
   if (!choice || choice.latitude == null || choice.longitude == null) return '';
   var latitude = Number(choice.latitude);
   var longitude = Number(choice.longitude);
@@ -122,12 +122,12 @@ function candidateCoordinates(choice) {
 }
 
 function allCandidates() {
-  var indexes = {};
-  var values = [];
+  /** @type {Record<string,number>} */ var indexes = {};
+  /** @type {LocationChoice[]} */ var values = [];
   var nearby = state.savedCandidates.concat(state.googleCandidates);
   nearby.sort(function(a, b) {
-    var aDistance = parseFloat(a.distance_m);
-    var bDistance = parseFloat(b.distance_m);
+    var aDistance = parseFloat(String(a.distance_m));
+    var bDistance = parseFloat(String(b.distance_m));
     var aHasDistance = Number.isFinite(aDistance);
     var bHasDistance = Number.isFinite(bDistance);
     if (aHasDistance && bHasDistance && aDistance !== bDistance) return aDistance - bDistance;
@@ -142,7 +142,7 @@ function allCandidates() {
     var key = candidateKey(choice);
     if (!key) return;
     if (indexes[key] != null) {
-      var existing = values[indexes[key]];
+      var existing = values[indexes[key] ?? -1]; if (!existing) return;
       if (choice.previously_used) {
         existing.previously_used = true;
         existing.photo_count = choice.photo_count;
@@ -182,7 +182,7 @@ function visibleCandidates() {
   });
 }
 
-function candidateGroup(choice) {
+/** @param {LocationChoice} choice */ function candidateGroup(choice) {
   var selectedKey = candidateKey(state.selectedChoice);
   if (
     state.suggestionMode !== 'recommended'
@@ -195,7 +195,7 @@ function candidateGroup(choice) {
   return 'nearby';
 }
 
-function candidateGroupLabel(group) {
+/** @param {string} group */ function candidateGroupLabel(group) {
   return {
     selected: 'Selected location',
     at: 'At the photos',
@@ -204,10 +204,10 @@ function candidateGroupLabel(group) {
   }[group] || '';
 }
 
-function selectChoice(choice) {
-  if (state.isAssigning) return;
+/** @param {LocationChoice | undefined} choice */ function selectChoice(choice) {
+  if (!choice || state.isAssigning) return;
   var choiceKey = candidateKey(choice);
-  if (hasPartialAssignmentProgress() && state.assignment.choiceKey !== choiceKey) {
+  if (hasPartialAssignmentProgress() && state.assignment && state.selectedChoice && state.assignment.choiceKey !== choiceKey) {
     showToast('Finish or retry the pending assignment — ' +
       formatNumber(state.assignment.completed) + ' of ' +
       formatNumber(state.assignment.total) + ' photos already got “' +
@@ -221,7 +221,7 @@ function selectChoice(choice) {
   state.selectedChoice = choice;
   renderCandidates();
   renderCandidateMarkers();
-  var assign = document.getElementById('locationReviewAssign');
+  var assign = /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewAssign'));
   assign.disabled = false;
   if (state.assignment && state.assignment.choiceKey === choiceKey && state.assignment.completed) {
     assign.textContent = 'Retry ' + formatNumber(state.assignment.total - state.assignment.completed) + ' remaining';
@@ -231,7 +231,7 @@ function selectChoice(choice) {
 }
 
 function renderCandidates() {
-  var container = document.getElementById('locationReviewCandidates');
+  var container = /** @type {HTMLElement} */ (document.getElementById('locationReviewCandidates'));
   var candidates = visibleCandidates();
   var setupPrompt = '';
   if (state.googleMapsUnavailableReason === 'missing_key') {
@@ -250,13 +250,13 @@ function renderCandidates() {
       (state.mode === 'time' ? 'Search for a place or enter a custom location name.' : 'No nearby named places found. Search the map or enter a custom friendly name.') + '</div>';
     return;
   }
-  var groupedByName = {selected: [], at: [], nearby: [], broader: []};
+  /** @type {Record<string,{choice:LocationChoice;index:number}[]>} */ var groupedByName = {selected: [], at: [], nearby: [], broader: []};
   candidates.forEach(function(choice, index) {
     var group = candidateGroup(choice);
-    groupedByName[group].push({choice: choice, index: index});
+    groupedByName[group]?.push({choice: choice, index: index});
   });
   var grouped = ['selected', 'at', 'nearby', 'broader'].map(function(name) {
-    return {name: name, choices: groupedByName[name]};
+    return {name: name, choices: groupedByName[name] || []};
   }).filter(function(group) { return group.choices.length; });
   container.innerHTML = setupPrompt + grouped.map(function(group) {
     var label = candidateGroupLabel(group.name);
@@ -284,22 +284,22 @@ function renderCandidates() {
           '</span></button>';
       }).join('') + '</div>';
   }).join('');
-  container.querySelectorAll('[data-candidate-index]').forEach(function(button) {
+  container.querySelectorAll(/** @type {'button'} */ ('[data-candidate-index]')).forEach(function(button) {
     button.addEventListener('click', function() {
-      selectChoice(candidates[parseInt(button.dataset.candidateIndex, 10)]);
+      selectChoice(candidates[parseInt(button.dataset.candidateIndex || '', 10)]);
     });
   });
 }
 
 function updateSuggestionModeControls() {
-  document.querySelectorAll('[data-suggestion-mode]').forEach(function(button) {
+  document.querySelectorAll(/** @type {'button'} */ ('[data-suggestion-mode]')).forEach(function(button) {
     var active = button.dataset.suggestionMode === state.suggestionMode;
     button.classList.toggle('active', active);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
 }
 
-function setSuggestionMode(mode) {
+/** @param {string} mode */ function setSuggestionMode(mode) {
   // Guard against programmatic calls that can bypass the disabled
   // attribute and detach a pending batch assignment from its choice.
   if (state.isAssigning || hasPartialAssignmentProgress()) return;

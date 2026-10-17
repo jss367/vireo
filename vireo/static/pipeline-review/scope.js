@@ -3,30 +3,32 @@
 
 // -- Init --
 
+/** @param {string[] | null | undefined} enhancingMissing */
 function renderDegradedBanner(enhancingMissing) {
   if (!enhancingMissing || enhancingMissing.length === 0) return;
   if (sessionStorage.getItem('degradedBannerDismissed')) return;
-  var labelMap = {
+  /** @type {Record<string,string>} */ var labelMap = {
     masks_partial: 'full mask coverage',
     embeddings: 'embeddings',
     eye_keypoints: 'eye keypoints',
     species_predictions: 'species predictions'
   };
   var labels = enhancingMissing.map(function(k) { return labelMap[k] || k; });
-  document.getElementById('degradedBannerText').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('degradedBannerText')).textContent =
     'These results were computed without ' + labels.join(', ')
     + '. Re-run those stages to improve quality.';
-  document.getElementById('degradedBanner').style.display = '';
+  /** @type {HTMLElement} */ (document.getElementById('degradedBanner')).style.display = '';
 }
 
 function dismissDegradedBanner() {
   sessionStorage.setItem('degradedBannerDismissed', '1');
-  document.getElementById('degradedBanner').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('degradedBanner')).style.display = 'none';
 }
 
+/** @param {ReviewCacheInfo | null} info */
 function renderCacheScopeBanner(info) {
-  var banner = document.getElementById('cacheScopeBanner');
-  var text = document.getElementById('cacheScopeBannerText');
+  var banner = /** @type {HTMLElement} */ (document.getElementById('cacheScopeBanner'));
+  var text = /** @type {HTMLElement} */ (document.getElementById('cacheScopeBannerText'));
   if (!banner || !text) return;
   banner.style.display = 'none';
 
@@ -61,8 +63,9 @@ function renderCacheScopeBanner(info) {
   banner.style.display = 'flex';
 }
 
+/** @template T @param {T} data @returns {T} */
 function cloneReviewData(data) {
-  return data ? JSON.parse(JSON.stringify(data)) : null;
+  return data ? JSON.parse(JSON.stringify(data)) : data;
 }
 
 // Whole workspace scope, and a folder/collection the user chose to regroup,
@@ -90,6 +93,7 @@ function activeReviewScopeFilter() {
   return reviewScopePhotoIds;
 }
 
+/** @param {number} photoId */
 function photoInReviewScope(photoId) {
   var ids = activeReviewScopeFilter();
   return !ids || ids.has(photoId);
@@ -113,23 +117,26 @@ function photoInReviewScope(photoId) {
 // burst, including members outside the scope, so the members of the open
 // Group Review session stay actionable. Nothing else changes when no filter
 // is active (All reviewed photos, regrouped views, browse selection).
+/** @param {number} photoId */
 function photoInOpenGroupReview(photoId) {
   if (typeof grmState === 'undefined' || !grmState || !Array.isArray(grmState.items)) {
     return false;
   }
-  var overlay = document.getElementById('grmOverlay');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('grmOverlay'));
   if (!overlay || !overlay.classList.contains('open')) return false;
   return grmState.items.some(function(p) { return p && p.id === photoId; });
 }
 
+/** @param {number} photoId */
 function isPhotoActionableInReviewScope(photoId) {
   var ids = activeReviewScopeFilter();
   if (!ids) return true;
-  var pid = parseInt(photoId, 10);
+  var pid = parseInt(String(photoId), 10);
   if (!pid) return false;
   return ids.has(pid) || photoInOpenGroupReview(pid);
 }
 
+/** @param {number[]} photoIds */
 function photoIdsInReviewScope(photoIds) {
   return (photoIds || []).filter(isPhotoActionableInReviewScope);
 }
@@ -158,15 +165,16 @@ function reconcileReviewScopeTargets() {
   }
 }
 
+/** @param {Set<number>} ids */
 function countReviewedPhotosInScope(ids) {
   if (!pipelineResults || !ids) return 0;
-  return (pipelineResults.photos || []).filter(function(p) {
+  return (currentReviewResults().photos || []).filter(function(p) {
     return ids.has(p.id);
   }).length;
 }
 
 function scopedViewEditHint() {
-  if (pipelineResults && pipelineResults.source === 'browse-selection') {
+  if (pipelineResults && currentReviewResults().source === 'browse-selection') {
     return 'Browse selection is view-only';
   }
   if (reviewScopeRegrouped) return 'Click Show saved grouping to make changes';
@@ -174,7 +182,7 @@ function scopedViewEditHint() {
 }
 
 function scopedViewReadOnlyMessage() {
-  if (pipelineResults && pipelineResults.source === 'browse-selection') {
+  if (pipelineResults && currentReviewResults().source === 'browse-selection') {
     return 'Browse selection is view-only.';
   }
   var label = reviewScopeRegrouped ? 'This regrouped view' : 'Whole workspace (regrouped)';
@@ -185,8 +193,9 @@ function notifyReadOnlyScopedView() {
   showToast(scopedViewReadOnlyMessage(), 'warning');
 }
 
+/** @param {string} text @param {boolean} [isError] */
 function setReviewScopeStatus(text, isError) {
-  var el = document.getElementById('reviewScopeStatus');
+  var el = /** @type {HTMLElement} */ (document.getElementById('reviewScopeStatus'));
   if (!el) return;
   el.textContent = text || '';
   el.style.color = isError ? 'var(--danger)' : 'var(--text-dim)';
@@ -199,18 +208,18 @@ function reviewScopeSelectionId() {
 }
 
 function updateReviewScopeControls() {
-  var scopeSel = document.getElementById('reviewScopeSelect');
-  var folderSel = document.getElementById('reviewScopeFolderSelect');
-  var collectionSel = document.getElementById('reviewScopeCollectionSelect');
-  var regroupBtn = document.getElementById('reviewScopeRegroupBtn');
+  var scopeSel = /** @type {HTMLSelectElement} */ (document.getElementById('reviewScopeSelect'));
+  var folderSel = /** @type {HTMLSelectElement} */ (document.getElementById('reviewScopeFolderSelect'));
+  var collectionSel = /** @type {HTMLSelectElement} */ (document.getElementById('reviewScopeCollectionSelect'));
+  var regroupBtn = /** @type {HTMLButtonElement} */ (document.getElementById('reviewScopeRegroupBtn'));
   if (scopeSel) scopeSel.value = reviewScopeMode;
   if (folderSel) {
     folderSel.style.display = reviewScopeMode === 'folder' ? '' : 'none';
-    folderSel.value = reviewScopeFolderId || '';
+    folderSel.value = String(reviewScopeFolderId || '');
   }
   if (collectionSel) {
     collectionSel.style.display = reviewScopeMode === 'collection' ? '' : 'none';
-    collectionSel.value = reviewScopeCollectionId || '';
+    collectionSel.value = String(reviewScopeCollectionId || '');
   }
   if (regroupBtn) {
     regroupBtn.style.display = isReviewScopeFilterMode() && reviewScopeSelectionId() ? '' : 'none';
@@ -222,6 +231,7 @@ function updateReviewScopeControls() {
   }
 }
 
+/** @param {ReviewResults} data */
 function updateReviewScopeStatusFromResults(data) {
   var scopeIds = activeReviewScopeFilter();
   if (scopeIds) {
@@ -241,9 +251,10 @@ function updateReviewScopeStatusFromResults(data) {
     + (reviewScopeRegrouped ? ', regrouped' : ''));
 }
 
+/** @param {ReviewCollection[]} collections */
 function populateReviewScopeCollections(collections) {
   reviewScopeCollections = Array.isArray(collections) ? collections : [];
-  var sel = document.getElementById('reviewScopeCollectionSelect');
+  var sel = /** @type {HTMLSelectElement} */ (document.getElementById('reviewScopeCollectionSelect'));
   if (!sel) return;
   sel.innerHTML = '<option value="">Select collection...</option>';
   reviewScopeCollections.forEach(function(c) {
@@ -282,27 +293,28 @@ function populateReviewScopeCollections(collections) {
 // /api/folders lists visible folders ordered by path with parents rewritten
 // to the nearest visible ancestor. Indent by depth and count each folder's
 // whole subtree, because the scope includes subfolders.
+/** @param {ReviewFolder[]} folders */
 function populateReviewScopeFolders(folders) {
   reviewScopeFolders = Array.isArray(folders) ? folders : [];
-  var sel = document.getElementById('reviewScopeFolderSelect');
+  var sel = /** @type {HTMLSelectElement} */ (document.getElementById('reviewScopeFolderSelect'));
   if (!sel) return;
-  var byId = {};
+  /** @type {Record<number,ReviewFolderNode>} */ var byId = {};
   reviewScopeFolders.forEach(function(f) {
     byId[f.id] = {folder: f, children: [], total: Number(f.photo_count || 0)};
   });
-  var roots = [];
+  /** @type {ReviewFolderNode[]} */ var roots = [];
   reviewScopeFolders.forEach(function(f) {
     var parent = f.parent_id != null ? byId[f.parent_id] : null;
-    if (parent) parent.children.push(byId[f.id]);
-    else roots.push(byId[f.id]);
+    if (parent) parent.children.push(requireReviewValue(byId[f.id]));
+    else roots.push(requireReviewValue(byId[f.id]));
   });
-  function subtreeTotal(node) {
+  function subtreeTotal(/** @type {ReviewFolderNode} */ node) {
     node.children.forEach(function(child) { node.total += subtreeTotal(child); });
     return node.total;
   }
   roots.forEach(subtreeTotal);
   sel.innerHTML = '<option value="">Select folder...</option>';
-  function addOptions(node, depth) {
+  function addOptions(/** @type {ReviewFolderNode} */ node, /** @type {number} */ depth) {
     var opt = document.createElement('option');
     opt.value = String(node.folder.id);
     opt.textContent = '  '.repeat(depth) + node.folder.name
@@ -324,6 +336,7 @@ function loadReviewScopeOptions() {
     .catch(function() { populateReviewScopeFolders([]); });
 }
 
+/** @param {Record<string,unknown>} config */
 function reviewScopePayload(config) {
   // Saved review (All reviewed photos, or a folder/collection filter over
   // it): send the pre-scope request shape (config only) so the backend
@@ -335,13 +348,13 @@ function reviewScopePayload(config) {
   if (!isScopedReviewView()) {
     return { config: config || {} };
   }
-  var body = {
+  /** @type {{config: Record<string,unknown>; save_cache: boolean; collection_id?: number; photo_ids?: number[]}} */ var body = {
     config: config || {},
     save_cache: false,
   };
   if (reviewScopeMode === 'collection') {
     if (!reviewScopeCollectionId) return null;
-    body.collection_id = parseInt(reviewScopeCollectionId, 10);
+    body.collection_id = Number(reviewScopeCollectionId);
   } else if (reviewScopeMode === 'folder') {
     if (!reviewScopePhotoIds) return null;
     body.photo_ids = Array.from(reviewScopePhotoIds);
@@ -349,18 +362,19 @@ function reviewScopePayload(config) {
   return body;
 }
 
+/** @param {ReviewResults} data @param {ReviewCacheInfo | null} info */
 function applyReviewResults(data, info) {
   if (!data || !data.encounters) return;
-  var empty = document.getElementById('emptyState');
+  var empty = /** @type {HTMLElement} */ (document.getElementById('emptyState'));
   if (empty) empty.style.display = 'none';
   pipelineResults = data;
   resultsCacheInfo = info || null;
   collapsedEncounters = new Set();
   updatePipelineReviewSidebarVisibility();
-  var sb = document.getElementById('summaryBar');
+  var sb = /** @type {HTMLElement} */ (document.getElementById('summaryBar'));
   if (sb) sb.style.display = '';
   updateSummaryBar(data.summary);
-  var fb = document.getElementById('filterBar');
+  var fb = /** @type {HTMLElement} */ (document.getElementById('filterBar'));
   if (fb) fb.style.display = '';
   applyPipelineReviewToolbarState();
   renderResults();
@@ -372,6 +386,7 @@ function applyReviewResults(data, info) {
   refreshLatestScopeSnapshotIfCurrent();
 }
 
+/** @param {ReviewResults} data */
 function scopedCacheInfoFor(data) {
   var workspaceTotal = reviewReadiness ? reviewReadiness.total_photos : (
     data && data.summary ? data.summary.total_photos : 0
@@ -411,7 +426,7 @@ function refreshLatestScopeSnapshotIfCurrent() {
 // server after each mutation (debounced to a single trailing request per
 // burst of edits) so the filter stays honest. Folders are skipped —
 // folder membership doesn't change from this view.
-var _reviewScopeMembershipRefreshTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var _reviewScopeMembershipRefreshTimer = null;
 var _reviewScopeMembershipRefreshSeq = 0;
 
 function maybeRefreshCollectionScopeMembership() {
@@ -419,7 +434,7 @@ function maybeRefreshCollectionScopeMembership() {
   if (!reviewScopeCollectionId) return;
   var selectionId = reviewScopeCollectionId;
   if (_reviewScopeMembershipRefreshTimer) {
-    clearTimeout(_reviewScopeMembershipRefreshTimer);
+    clearTimeout(_reviewScopeMembershipRefreshTimer || undefined);
   }
   _reviewScopeMembershipRefreshTimer = setTimeout(function() {
     _reviewScopeMembershipRefreshTimer = null;
@@ -433,10 +448,10 @@ function maybeRefreshCollectionScopeMembership() {
     // local-seq, mode, and collection-id checks and overwrite the freshly
     // loaded membership from the scope's own fetch.
     var scopeSeq = reviewScopeMembershipSeq;
-    safeFetch(
-      '/api/pipeline/scope-photos?collection_id=' + encodeURIComponent(selectionId),
+    /** @type {Promise<{photo_ids?: number[]}>} */ (safeFetch(
+      `/api/pipeline/scope-photos?collection_id=${encodeURIComponent(selectionId)}`,
       {}, { toast: false }
-    ).then(function(data) {
+    )).then(function(/** @type {{photo_ids?: number[]}} */ data) {
       if (seq !== _reviewScopeMembershipRefreshSeq) return;
       if (scopeSeq !== reviewScopeMembershipSeq) return;
       if (!data || !Array.isArray(data.photo_ids)) return;
@@ -446,7 +461,7 @@ function maybeRefreshCollectionScopeMembership() {
       var current = reviewScopePhotoIds;
       var unchanged = !!current && current.size === newIds.size;
       if (unchanged) {
-        current.forEach(function(id) {
+        requireReviewValue(current).forEach(function(id) {
           if (!newIds.has(id)) unchanged = false;
         });
       }
@@ -462,8 +477,8 @@ function maybeRefreshCollectionScopeMembership() {
       // scope-filtered through scopedSummaryCounts, so a membership change
       // must redraw the summary bar too. Without this they continue showing
       // pre-edit totals even after the dropped photo correctly disappears.
-      if (pipelineResults) updateSummaryBar(pipelineResults.summary);
-      updateReviewScopeStatusFromResults(pipelineResults);
+      if (pipelineResults) updateSummaryBar(currentReviewResults().summary);
+      updateReviewScopeStatusFromResults(currentReviewResults());
       renderCacheScopeBanner(resultsCacheInfo);
     }).catch(function() { /* leave the stale set; the next mutation retries */ });
   }, 250);
@@ -478,6 +493,7 @@ function showSavedReview() {
   }
 }
 
+/** @param {number} seq */
 function loadRegroupedScopeResults(seq) {
   var body = reviewScopePayload(Object.assign({}, getGroupingConfig(), getScoringConfig()));
   if (!body) {
@@ -550,13 +566,13 @@ function loadReviewScopeResults() {
   // still check reviewScopeRequestSeq below so a scope change in flight
   // through onReviewScope*Change (which also bumps membership seq) is caught.
   var memSeq = ++reviewScopeMembershipSeq;
-  safeFetch('/api/pipeline/scope-photos?' + param + '=' + encodeURIComponent(selectionId), {}, { toast: false })
-  .then(function(data) {
+  /** @type {Promise<{photo_ids?: number[]}>} */ (safeFetch(`/api/pipeline/scope-photos?${param}=${encodeURIComponent(selectionId)}`, {}, { toast: false }))
+  .then(function(/** @type {{photo_ids?: number[]}} */ data) {
     if (memSeq !== reviewScopeMembershipSeq || !data || !Array.isArray(data.photo_ids)) return;
     reviewScopePhotoIds = new Set(data.photo_ids);
     reviewScopeTotal = data.photo_ids.length;
     reconcileReviewScopeTargets();
-    applyReviewResults(pipelineResults, resultsCacheInfo);
+    applyReviewResults(currentReviewResults(), resultsCacheInfo);
   })
   .catch(function(e) {
     if (memSeq !== reviewScopeMembershipSeq) return;
@@ -564,6 +580,7 @@ function loadReviewScopeResults() {
   });
 }
 
+/** @param {string} mode */
 function onReviewScopeModeChange(mode) {
   if (['cache', 'folder', 'collection', 'workspace'].indexOf(mode) === -1) return;
   // Capture the current saved-review state before switching away so a later
@@ -578,6 +595,7 @@ function onReviewScopeModeChange(mode) {
   loadReviewScopeResults();
 }
 
+/** @param {string} value */
 function onReviewScopeFolderChange(value) {
   refreshLatestScopeSnapshotIfCurrent();
   clearPipelineReviewContextSelection();
@@ -587,6 +605,7 @@ function onReviewScopeFolderChange(value) {
   loadReviewScopeResults();
 }
 
+/** @param {string} value */
 function onReviewScopeCollectionChange(value) {
   refreshLatestScopeSnapshotIfCurrent();
   clearPipelineReviewContextSelection();

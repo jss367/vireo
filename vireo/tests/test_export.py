@@ -1953,6 +1953,73 @@ def test_preview_export_renames_reports_same_batch_collision(export_env):
     ]
 
 
+@pytest.mark.parametrize("beside_originals", [False, True])
+def test_export_preview_matches_numbering_and_batch_sequences(export_env, beside_originals):
+    """Preflight and rendering agree across species directories and repeated runs."""
+    env = export_env
+    destination = None if beside_originals else env["dest"]
+    base = env["src"] if beside_originals else Path(env["dest"])
+    output = base / "shared"
+    for species in ("Red-tailed Hawk", "unknown"):
+        folder = output / species
+        folder.mkdir(parents=True)
+        (folder / "0001.jpg").write_bytes(b"existing export")
+    photo_ids = [env["p1"], env["p2"], env["p1"]]
+    options = {
+        "naming_template": "{species}/{seq}",
+        "format": "jpeg",
+        "export_to_subfolder": True,
+        "subfolder_name": "shared",
+        "collect_files": True,
+    }
+
+    preview = export_mod.preview_export(env["db"], photo_ids, destination, options)
+    result = export_photos(env["db"], env["vireo_dir"], photo_ids, destination, options)
+
+    assert preview["destination_folders"] == [str(base)]
+    assert result["errors"] == []
+    assert result["exported"] == 3
+    assert result["files"] == [
+        str(output / "Red-tailed Hawk" / "0001_2.jpg"),
+        str(output / "unknown" / "0001_2.jpg"),
+        str(output / "Red-tailed Hawk" / "0002.jpg"),
+    ]
+    assert result["renames"] == [
+        {key: value for key, value in rename.items() if key not in ("photo_id", "destination")}
+        for rename in preview["renames"]
+    ]
+    for species in ("Red-tailed Hawk", "unknown"):
+        assert (output / species / "0001.jpg").read_bytes() == b"existing export"
+
+    # A subsequent export starts a fresh sequence while respecting files
+    # written by the earlier batch.
+    again = export_photos(env["db"], env["vireo_dir"], [env["p1"]], destination, options)
+    assert again["errors"] == []
+    assert again["files"] == [str(output / "Red-tailed Hawk" / "0001_3.jpg")]
+
+
+def test_export_preview_and_render_reject_symlink_escape(export_env, tmp_path):
+    env = export_env
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    destination = Path(env["dest"])
+    destination.mkdir()
+    try:
+        (destination / "escape").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    options = {"naming_template": "escape/{original}"}
+    photo_ids = [env["p1"]]
+
+    preview = export_mod.preview_export(env["db"], photo_ids, str(destination), options)
+    result = export_photos(env["db"], env["vireo_dir"], photo_ids, str(destination), options)
+
+    assert preview == {"renames": [], "destination_folders": []}
+    assert result["exported"] == 0
+    assert result["errors"] == ["bird1.jpg: unsafe output path rejected"]
+    assert list(outside.iterdir()) == []
+
+
 def _mock_destination_reservations(monkeypatch, key):
     """Install an in-memory destination with a chosen filename comparison."""
 

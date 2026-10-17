@@ -31,6 +31,34 @@ from typing import Any
 from repositories import UNSET
 
 
+def _first_eye_stage_row_per_photo(rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
+    """The best-ordered row for each photo, as the eye stage consumes it."""
+    seen = set()
+    result = []
+    for r in rows:
+        if r["id"] in seen:
+            continue
+        seen.add(r["id"])
+        result.append({
+            "id": r["id"],
+            "folder_id": r["folder_id"],
+            "filename": r["filename"],
+            "width": r["width"],
+            "height": r["height"],
+            "mask_path": r["mask_path"],
+            "detection_id": r["detection_id"],
+            "box_x": r["box_x"],
+            "box_y": r["box_y"],
+            "box_w": r["box_w"],
+            "box_h": r["box_h"],
+            "species_conf": r["species_conf"],
+            "taxonomy_class": r["taxonomy_class"],
+            "scientific_name": r["scientific_name"],
+            "species": r["species"],
+        })
+    return result
+
+
 class MasksFeaturesRepository:
     def __init__(
         self,
@@ -790,30 +818,7 @@ class MasksFeaturesRepository:
             params,
         ).fetchall()
 
-        seen = set()
-        result = []
-        for r in rows:
-            if r["id"] in seen:
-                continue
-            seen.add(r["id"])
-            result.append({
-                "id": r["id"],
-                "folder_id": r["folder_id"],
-                "filename": r["filename"],
-                "width": r["width"],
-                "height": r["height"],
-                "mask_path": r["mask_path"],
-                "detection_id": r["detection_id"],
-                "box_x": r["box_x"],
-                "box_y": r["box_y"],
-                "box_w": r["box_w"],
-                "box_h": r["box_h"],
-                "species_conf": r["species_conf"],
-                "taxonomy_class": r["taxonomy_class"],
-                "scientific_name": r["scientific_name"],
-                "species": r["species"],
-            })
-        return result
+        return _first_eye_stage_row_per_photo(rows)
 
     # -- embeddings ----------------------------------------------------------
 

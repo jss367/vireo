@@ -1,17 +1,17 @@
 /* ---------- Labels ---------- */
-var selectedPlaceId = null;
+/** @type {number|null} */ var selectedPlaceId = null;
 var selectedPlaceName = '';
-var searchTimer = null;
+/** @type {ReturnType<typeof setTimeout>|null} */ var searchTimer = null;
 
 async function loadLabels() {
   try {
-    var data = await safeFetch('/api/labels', {}, { toast: false });
+    /** @type {{labels?:SettingsLabel[];active?:SettingsLabel[]}} */ var data = await safeFetch('/api/labels', {}, { toast: false });
     var labels = data.labels || [];
     var active = data.active || [];
     var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
 
     if (labels.length === 0) {
-      document.getElementById('labelsContent').innerHTML = '<span style="color:var(--text-faint);font-size:13px;">No species lists downloaded yet. Use the form below to download one.</span>';
+      /** @type {HTMLElement} */ (document.getElementById('labelsContent')).innerHTML = '<span style="color:var(--text-faint);font-size:13px;">No species lists downloaded yet. Use the form below to download one.</span>';
       return;
     }
 
@@ -56,15 +56,15 @@ async function loadLabels() {
               totalSpecies.toLocaleString() + ' species</div>';
     }
 
-    document.getElementById('labelsContent').innerHTML = html;
+    /** @type {HTMLElement} */ (document.getElementById('labelsContent')).innerHTML = html;
   } catch(e) {
-    document.getElementById('labelsContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+    /** @type {HTMLElement} */ (document.getElementById('labelsContent')).innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
 async function updateActiveLabels() {
-  var paths = [];
-  document.querySelectorAll('.label-active-cb:checked').forEach(function(cb) {
+  /** @type {string[]} */ var paths = [];
+  document.querySelectorAll(/** @type {'input'} */ ('.label-active-cb:checked')).forEach(function(cb) {
     paths.push(cb.value);
   });
   try {
@@ -77,7 +77,7 @@ async function updateActiveLabels() {
   loadLabels();
 }
 
-async function deleteLabelSet(labelsFile, name) {
+/** @param {string} labelsFile @param {string} name */ async function deleteLabelSet(labelsFile, name) {
   if (!confirm('Delete label set "' + name + '"?')) return;
   try {
     await safeFetch('/api/labels', {
@@ -91,7 +91,7 @@ async function deleteLabelSet(labelsFile, name) {
 
 async function loadTaxonGroups() {
   try {
-    var groups = await safeFetch('/api/labels/taxon-groups', {}, { toast: false });
+    /** @type {{key:string;name:string}[]} */ var groups = await safeFetch('/api/labels/taxon-groups', {}, { toast: false });
     var html = '';
     groups.forEach(function(g, i) {
       var checked = (g.key === 'birds') ? ' checked' : '';
@@ -99,13 +99,13 @@ async function loadTaxonGroups() {
         '<input type="checkbox" class="taxon-cb" value="' + g.key + '"' + checked + ' style="accent-color:var(--accent);"> ' +
         g.name + '</label>';
     });
-    document.getElementById('taxonCheckboxes').innerHTML = html;
+    /** @type {HTMLElement} */ (document.getElementById('taxonCheckboxes')).innerHTML = html;
   } catch(e) {}
 }
 
 async function loadObservationFilters() {
   try {
-    var filters = await safeFetch('/api/labels/observation-filters', {}, { toast: false });
+    /** @type {{key:string;name:string;description:string}[]} */ var filters = await safeFetch('/api/labels/observation-filters', {}, { toast: false });
     var html = '';
     filters.forEach(function(f) {
       var checked = (f.key === 'research') ? ' checked' : '';
@@ -113,7 +113,7 @@ async function loadObservationFilters() {
         '<input type="radio" name="obs-filter" value="' + f.key + '"' + checked + ' style="accent-color:var(--accent);"> ' +
         f.name + ' <span style="color:var(--text-faint);">— ' + f.description + '</span></label>';
     });
-    document.getElementById('observationFilterRadios').innerHTML = html;
+    /** @type {HTMLElement} */ (document.getElementById('observationFilterRadios')).innerHTML = html;
   } catch(e) {}
 }
 
@@ -122,22 +122,22 @@ function searchPlacesDebounced() {
   if (selectedPlaceId) {
     selectedPlaceId = null;
     selectedPlaceName = '';
-    document.getElementById('fetchLabelsBtn').disabled = true;
-    document.getElementById('placeSearch').style.borderColor = 'var(--border-secondary)';
+    /** @type {HTMLButtonElement} */ (document.getElementById('fetchLabelsBtn')).disabled = true;
+    /** @type {HTMLInputElement} */ (document.getElementById('placeSearch')).style.borderColor = 'var(--border-secondary)';
   }
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(searchPlaces, 300);
 }
 
 async function searchPlaces() {
-  var q = document.getElementById('placeSearch').value.trim();
-  var dropdown = document.getElementById('placeDropdown');
+  var q = /** @type {HTMLInputElement} */ (document.getElementById('placeSearch')).value.trim();
+  var dropdown = /** @type {HTMLElement} */ (document.getElementById('placeDropdown'));
   if (q.length < 2) {
     dropdown.innerHTML = '';
     return;
   }
   try {
-    var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
+    /** @type {{id:number;name:string;display_name?:string}[]} */ var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
     if (places.length === 0) {
       dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-dim);">No places found</div>';
       return;
@@ -153,31 +153,31 @@ async function searchPlaces() {
     });
     dropdown.innerHTML = html;
   } catch(e) {
-    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger);">Error: ' + escapeHtml(String(e.message || e)) + '</div>';
+    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger);">Error: ' + escapeHtml(String(settingsErrorMessage(e) || e)) + '</div>';
   }
 }
 
-function selectPlace(id, name) {
-  selectedPlaceId = parseInt(id);
+/** @param {number} id @param {string} name */ function selectPlace(id, name) {
+  selectedPlaceId = parseInt(String(id), 10);
   selectedPlaceName = name;
-  document.getElementById('placeDropdown').innerHTML = '';
-  document.getElementById('placeSearch').value = name;
-  document.getElementById('placeSearch').style.borderColor = 'var(--accent)';
-  document.getElementById('fetchLabelsBtn').disabled = false;
+  /** @type {HTMLElement} */ (document.getElementById('placeDropdown')).innerHTML = '';
+  /** @type {HTMLInputElement} */ (document.getElementById('placeSearch')).value = String(name);
+  /** @type {HTMLInputElement} */ (document.getElementById('placeSearch')).style.borderColor = 'var(--accent)';
+  /** @type {HTMLButtonElement} */ (document.getElementById('fetchLabelsBtn')).disabled = false;
 }
 
 async function fetchLabels() {
   if (!selectedPlaceId) return;
-  var groups = [];
-  document.querySelectorAll('.taxon-cb:checked').forEach(function(cb) {
+  /** @type {string[]} */ var groups = [];
+  document.querySelectorAll(/** @type {'input'} */ ('.taxon-cb:checked')).forEach(function(cb) {
     groups.push(cb.value);
   });
   if (groups.length === 0) { alert('Select at least one taxon group'); return; }
 
-  var btn = document.getElementById('fetchLabelsBtn');
-  var status = document.getElementById('fetchLabelsStatus');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('fetchLabelsBtn'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('fetchLabelsStatus'));
   btn.disabled = true;
-  status.textContent = 'Starting download...';
+  status.textContent = String('Starting download...');
 
   try {
     var data = await safeFetch('/api/jobs/fetch-labels', {
@@ -187,25 +187,25 @@ async function fetchLabels() {
         place_id: selectedPlaceId,
         place_name: selectedPlaceName,
         taxon_groups: groups,
-        observation_filter: (document.querySelector('input[name="obs-filter"]:checked') || {}).value || 'research',
+        observation_filter: (document.querySelector(/** @type {'input'} */ ('input[name="obs-filter"]:checked')) || {}).value || 'research',
       }),
     }, { toast: false });
-    status.textContent = 'Fetching species...';
+    status.textContent = String('Fetching species...');
 
-    var progressDiv = document.getElementById('fetchLabelsProgress');
-    var progressFill = document.getElementById('fetchLabelsFill');
+    var progressDiv = /** @type {HTMLElement} */ (document.getElementById('fetchLabelsProgress'));
+    var progressFill = /** @type {HTMLElement} */ (document.getElementById('fetchLabelsFill'));
     progressDiv.style.display = '';
 
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onProgress: function(p) {
-        if (p.current_file) status.textContent = p.current_file;
-        if (p.total > 0 && p.current > 0) {
-          progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        if (p.current_file) status.textContent = String(p.current_file);
+        if ((p.total || 0) > 0 && (p.current || 0) > 0) {
+          progressFill.style.width = Math.round(((p.current || 0) / (p.total || 1)) * 100) + '%';
         }
       },
       onComplete: function(result) {
         if (result.status === 'completed' && result.result) {
-          status.textContent = 'Done! ' + result.result.species_count + ' species downloaded.';
+          status.textContent = String('Done! ' + result.result.species_count + ' species downloaded.');
           status.style.color = 'var(--accent)';
           progressFill.style.width = '100%';
           var precompute = result.result.embedding_precompute;
@@ -217,7 +217,7 @@ async function fetchLabels() {
             });
           }
         } else {
-          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          status.textContent = String('Failed: ' + (result.errors || []).join(', '));
           status.style.color = 'var(--danger)';
         }
         btn.disabled = false;
@@ -228,25 +228,25 @@ async function fetchLabels() {
         }
       },
       onError: function() {
-        status.textContent = 'Connection lost';
+        status.textContent = String('Connection lost');
         btn.disabled = false;
       }
     });
   } catch(e) {
-    status.textContent = 'Error: ' + e.message;
+    status.textContent = String('Error: ' + settingsErrorMessage(e));
     btn.disabled = false;
   }
 }
 
-async function startBackgroundEmbeddingPrecompute(precompute, opts) {
+/** @param {SettingsEmbeddingPrecompute} precompute @param {{status?:HTMLElement;progressDiv?:HTMLElement;progressFill?:HTMLElement}=} opts */ async function startBackgroundEmbeddingPrecompute(precompute, opts) {
   if (!precompute || !precompute.model_id || !precompute.labels_file) return;
   opts = opts || {};
   var status = opts.status;
-  var progressDiv = opts.progressDiv;
+  const progressDiv = opts.progressDiv;
   var progressFill = opts.progressFill;
   var modelName = precompute.model_name || 'active model';
   if (status) {
-    status.textContent = 'Pre-computing embeddings for ' + modelName + ' in background...';
+    status.textContent = String('Pre-computing embeddings for ' + modelName + ' in background...');
     status.style.color = 'var(--text-dim)';
   }
   if (progressDiv) progressDiv.style.display = '';
@@ -265,16 +265,16 @@ async function startBackgroundEmbeddingPrecompute(precompute, opts) {
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onProgress: function(p) {
         if (status && p.current_file) {
-          status.textContent = p.current_file.replace(/^Computing embeddings/, 'Pre-computing embeddings');
+          status.textContent = String(p.current_file.replace(/^Computing embeddings/, 'Pre-computing embeddings'));
         }
-        if (progressFill && p.total > 0) {
-          progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        if (progressFill && (p.total || 0) > 0) {
+          progressFill.style.width = Math.round(((p.current || 0) / (p.total || 1)) * 100) + '%';
         }
       },
       onComplete: function(result) {
         if (result.status === 'completed') {
           if (status) {
-            status.textContent = 'Embeddings cached for ' + modelName + '.';
+            status.textContent = String('Embeddings cached for ' + modelName + '.');
             status.style.color = 'var(--accent)';
           }
           if (progressFill) progressFill.style.width = '100%';
@@ -287,8 +287,8 @@ async function startBackgroundEmbeddingPrecompute(precompute, opts) {
           // Keep the actionable explanation while hiding the usually long
           // ONNXRuntime diagnostic that follows it. The complete exception
           // remains available in Jobs and Logs.
-          detail = detail.split(' Underlying error:')[0];
-          status.textContent = 'Species list downloaded, but embedding precompute failed: ' + detail;
+          detail = detail.split(' Underlying error:')[0] || detail;
+          status.textContent = String('Species list downloaded, but embedding precompute failed: ' + detail);
           status.style.color = 'var(--warning)';
         }
         loadEmbeddingMatrix();
@@ -296,14 +296,14 @@ async function startBackgroundEmbeddingPrecompute(precompute, opts) {
       },
       onError: function() {
         if (status) {
-          status.textContent = 'Species list downloaded; embedding precompute is still listed in Jobs.';
+          status.textContent = String('Species list downloaded; embedding precompute is still listed in Jobs.');
           status.style.color = 'var(--warning)';
         }
       }
     });
   } catch(e) {
     if (status) {
-      status.textContent = 'Species list downloaded; embedding precompute did not start: ' + e.message;
+      status.textContent = String('Species list downloaded; embedding precompute did not start: ' + settingsErrorMessage(e));
       status.style.color = 'var(--warning)';
     }
     if (progressDiv) setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
@@ -332,16 +332,16 @@ async function loadTaxonomy() {
       html += '</div>';
       html += '<button onclick="downloadTaxonomy()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:8px 20px;font-size:13px;cursor:pointer;">Download iNaturalist Taxonomy</button>';
     }
-    document.getElementById('taxonomyContent').innerHTML = html;
+    /** @type {HTMLElement} */ (document.getElementById('taxonomyContent')).innerHTML = html;
   } catch(e) {
-    document.getElementById('taxonomyContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+    /** @type {HTMLElement} */ (document.getElementById('taxonomyContent')).innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
 async function downloadTaxonomy() {
   try {
     var data = await safeFetch('/api/jobs/download-taxonomy', { method: 'POST' }, { toast: false });
-    document.getElementById('taxonomyContent').innerHTML = '<span style="color:var(--text-dim);font-size:13px;">Downloading... (check Jobs panel for progress)</span>';
+    /** @type {HTMLElement} */ (document.getElementById('taxonomyContent')).innerHTML = '<span style="color:var(--text-dim);font-size:13px;">Downloading... (check Jobs panel for progress)</span>';
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onComplete: function() {
         loadTaxonomy();

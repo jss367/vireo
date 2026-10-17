@@ -1,0 +1,24 @@
+interface WorkLocalClientState {id:string;seq:number}
+interface WorkLocalBlocker {id?:string;type:string;status:string}
+interface WorkLocalBlockerData {blocking_job?:WorkLocalBlocker|null;folder_blocking_jobs?:Record<string,WorkLocalBlocker>;residency_fingerprint?:string}
+interface WorkLocalChanges {created:number;modified:number;deleted:number}
+interface WorkLocalFolder {requested_folder_id:number;root_folder_id:number;state:string;source_path?:string;display_path?:string;local_folder_name?:string;default_local_base?:string;default_local_path?:string;workspace_ids?:number[];changes?:WorkLocalChanges;sync_available?:boolean;recovery_kind?:string;job_running?:boolean}
+interface WorkLocalJob {id:string;type:string;folder_ids?:number[];progress?:WorkLocalProgress|null}
+interface WorkLocalLegacy {state:string;recovery_kind?:string;changes?:WorkLocalChanges;job?:{id:string}}
+interface WorkLocalData extends WorkLocalBlockerData {workspace_id:number;legacy_workspace_session?:boolean;legacy?:WorkLocalLegacy;folders?:WorkLocalFolder[];jobs?:WorkLocalJob[];linked_workspaces?:Array<{id:number;name:string}>;folder_count?:number;local_folder_count?:number}
+interface WorkLocalPreflightFolder {folder_id:number;total_bytes?:number;total_files?:number;free_bytes?:number}
+interface WorkLocalVolume {can_copy:boolean;copy_bytes?:number;free_bytes?:number;reserve_bytes?:number;after_copy_bytes?:number}
+interface WorkLocalPreflight {can_copy:boolean;total_bytes?:number;folders?:WorkLocalPreflightFolder[];volumes?:WorkLocalVolume[]}
+interface WorkLocalStep {status?:string;id?:string;label?:string;current_file?:string;progress?:WorkLocalProgress}
+interface WorkLocalProgress {steps?:WorkLocalStep[];root_folder_id?:number;current_file?:string;phase?:string;current?:number;total?:number;bytes_current?:number;bytes_total?:number}
+interface WorkLocalWatch {id:string;progress:WorkLocalProgress|null;progressByRoot:Record<string,WorkLocalProgress>;completedRoots:Record<string,boolean>;source:EventSource|null;eventCount:number}
+interface WorkLocalStarted {job_id:string;folder_ids?:number[]}
+declare var Vireo:{api:{fetch(url:string,options?:RequestInit):Promise<Response>;json<T>(url:string,options?:RequestInit,settings?:{toast?:boolean}):Promise<T>}};
+declare function formatBytes(value:number):string;
+declare function escapeHtml(value:string):string;
+declare function escapeAttr(value:string):string;
+declare function showToast(message:string,kind:string):void;
+declare function loadWsFolders():void;
+declare function pickDirectory(title:string,options:{defaultPath:string}):Promise<string|string[]|null>;
+declare function safeEventSource(url:string,handlers:{onProgress(progress:WorkLocalProgress):void;onComplete(event:{status:string;errors?:string[]}):void;onError():void}):EventSource;
+interface Window {formatJobType?:(type:string)=>string;vireoLocalFolderData:WorkLocalData|null;vireoLocalFolders:{load():Promise<WorkLocalData|null>;statusFor(folderId:number):WorkLocalFolder|null;jobFor(folderId:number):WorkLocalJob|null;blockingJob():WorkLocalBlocker|null|undefined;blockingJobFor(folderId:number):WorkLocalBlocker|null;blockingMessage(job?:WorkLocalBlocker|null):string;stage(folderId:number):Promise<boolean>;sync(folderId:number):Promise<void>;discard(folderId:number):Promise<void>}}

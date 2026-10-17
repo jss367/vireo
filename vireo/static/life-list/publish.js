@@ -1,26 +1,26 @@
 // Website publishing: options, the preflight summary, the folder browser, and the job.
 // Classic page script; load boot.js after all definitions.
 
-var publishPreflightTimer = null;
+/** @type {ReturnType<typeof setTimeout>|null} */ var publishPreflightTimer = null;
 var publishPreflightSequence = 0;
 var publishPreflightReady = false;
 
-function publishRequestOptions() {
+/** @returns {LifePublishOptions} */ function publishRequestOptions() {
   return {
-    include_life_list: document.getElementById('publishLifeList').checked,
-    photos_per_species: parseInt(document.getElementById('publishLifeListPhotos').value, 10),
-    include_highlights: document.getElementById('publishHighlights').checked,
-    limit_per_bucket: parseInt(document.getElementById('publishHighlightPhotos').value, 10),
-    include_locations: document.getElementById('publishLocations').checked,
-    max_size: document.getElementById('publishMaxSize').value,
+    include_life_list: /** @type {HTMLInputElement} */ (document.getElementById('publishLifeList')).checked,
+    photos_per_species: parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('publishLifeListPhotos')).value, 10),
+    include_highlights: /** @type {HTMLInputElement} */ (document.getElementById('publishHighlights')).checked,
+    limit_per_bucket: parseInt(/** @type {HTMLSelectElement} */ (document.getElementById('publishHighlightPhotos')).value, 10),
+    include_locations: /** @type {HTMLInputElement} */ (document.getElementById('publishLocations')).checked,
+    max_size: /** @type {HTMLSelectElement} */ (document.getElementById('publishMaxSize')).value,
   };
 }
 
-function pluralizePublishCount(count, singular, plural) {
+/** @param {number} count @param {string} singular @param {string} plural */ function pluralizePublishCount(count, singular, plural) {
   return count.toLocaleString() + ' ' + (count === 1 ? singular : plural);
 }
 
-function renderPublishPreflight(data) {
+/** @param {LifePublishPreflight} data */ function renderPublishPreflight(data) {
   var options = publishRequestOptions();
   var parts = [];
   if (options.include_life_list) {
@@ -40,14 +40,14 @@ function renderPublishPreflight(data) {
   }
   parts.push(pluralizePublishCount(data.image_count, 'unique photo', 'unique photos'));
   parts.push(pluralizePublishCount(data.data_file_count, 'data file', 'data files'));
-  document.getElementById('publishPreflight').textContent = 'Will publish ' + parts.join(' · ') + '.';
+  /** @type {HTMLElement} */ (document.getElementById('publishPreflight')).textContent = 'Will publish ' + parts.join(' · ') + '.';
 }
 
 async function refreshPublishPreflight() {
   var sequence = ++publishPreflightSequence;
-  var modal = document.getElementById('publishModal');
-  var preview = document.getElementById('publishPreflight');
-  var btn = document.getElementById('publishSubmitBtn');
+  var modal = /** @type {HTMLElement} */ (document.getElementById('publishModal'));
+  var preview = /** @type {HTMLElement} */ (document.getElementById('publishPreflight'));
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('publishSubmitBtn'));
   var options = publishRequestOptions();
   publishPreflightReady = false;
   btn.disabled = true;
@@ -57,7 +57,7 @@ async function refreshPublishPreflight() {
   }
   preview.textContent = 'Calculating what will be published…';
   try {
-    var data = await safeFetch('/api/jobs/publish-site/preflight', {
+    /** @type {LifePublishPreflight} */ var data = await safeFetch('/api/jobs/publish-site/preflight', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(options),
@@ -68,39 +68,39 @@ async function refreshPublishPreflight() {
     btn.disabled = false;
   } catch (error) {
     if (sequence !== publishPreflightSequence || !modal.classList.contains('open')) return;
-    preview.textContent = 'Could not calculate the publish size: ' + error.message;
+    preview.textContent = 'Could not calculate the publish size: ' + (error instanceof Error ? error.message : String(error));
   }
 }
 
 function publishSettingsChanged() {
-  var includeLifeList = document.getElementById('publishLifeList').checked;
-  var includeHighlights = document.getElementById('publishHighlights').checked;
-  document.getElementById('publishLifeListPhotos').disabled = !includeLifeList;
-  document.getElementById('publishLocations').disabled = !includeLifeList;
-  document.getElementById('publishHighlightPhotos').disabled = !includeHighlights;
+  var includeLifeList = /** @type {HTMLInputElement} */ (document.getElementById('publishLifeList')).checked;
+  var includeHighlights = /** @type {HTMLInputElement} */ (document.getElementById('publishHighlights')).checked;
+  /** @type {HTMLSelectElement} */ (document.getElementById('publishLifeListPhotos')).disabled = !includeLifeList;
+  /** @type {HTMLInputElement} */ (document.getElementById('publishLocations')).disabled = !includeLifeList;
+  /** @type {HTMLSelectElement} */ (document.getElementById('publishHighlightPhotos')).disabled = !includeHighlights;
   publishPreflightReady = false;
   publishPreflightSequence++;
-  document.getElementById('publishSubmitBtn').disabled = true;
-  clearTimeout(publishPreflightTimer);
+  /** @type {HTMLButtonElement} */ (document.getElementById('publishSubmitBtn')).disabled = true;
+  clearTimeout(publishPreflightTimer ?? undefined);
   publishPreflightTimer = setTimeout(refreshPublishPreflight, 250);
 }
 
 function openPublishModal() {
-  var modal = document.getElementById('publishModal');
-  var status = document.getElementById('publishStatus');
+  var modal = /** @type {HTMLElement} */ (document.getElementById('publishModal'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('publishStatus'));
   if (status) status.textContent = '';
   modal.classList.add('open');
   publishSettingsChanged();
   setTimeout(function() {
-    var input = document.getElementById('publishDest');
+    var input = /** @type {HTMLInputElement} */ (document.getElementById('publishDest'));
     if (input) input.focus();
   }, 0);
 }
 
 function closePublishModal() {
-  clearTimeout(publishPreflightTimer);
+  clearTimeout(publishPreflightTimer ?? undefined);
   publishPreflightSequence++;
-  document.getElementById('publishModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('publishModal')).classList.remove('open');
 }
 
 function createPublishFolderBrowser() {
@@ -112,18 +112,18 @@ function createPublishFolderBrowser() {
         title: 'Select Site Export Folder',
         multiple: false,
         showCounts: false,
-        startPath: function() { return document.getElementById('siteExportDest').value.trim(); },
-        onSelect: function(path) { document.getElementById('siteExportDest').value = path; },
+        startPath: function() { return /** @type {HTMLInputElement} */ (document.getElementById('siteExportDest')).value.trim(); },
+        onSelect: function(path) { /** @type {HTMLInputElement} */ (document.getElementById('siteExportDest')).value = path; },
       },
       destination: {
         title: 'Select Website Publish Folder',
         multiple: false,
         showCounts: false,
         startPath: function() {
-          return document.getElementById('publishDest').value.trim();
+          return /** @type {HTMLInputElement} */ (document.getElementById('publishDest')).value.trim();
         },
         onSelect: function(path) {
-          document.getElementById('publishDest').value = path;
+          /** @type {HTMLInputElement} */ (document.getElementById('publishDest')).value = path;
         },
       },
     },
@@ -131,7 +131,7 @@ function createPublishFolderBrowser() {
 }
 
 async function browsePublishDest() {
-  var destination = document.getElementById('publishDest');
+  var destination = /** @type {HTMLInputElement} */ (document.getElementById('publishDest'));
   if (typeof pickDirectory === 'function') {
     var seqBeforePicker = publishFolderBrowser.sequence;
     try {
@@ -139,7 +139,7 @@ async function browsePublishDest() {
         defaultPath: destination.value.trim() || undefined,
       });
       if (selected) {
-        destination.value = Array.isArray(selected) ? selected[0] : selected;
+        destination.value = Array.isArray(selected) ? selected[0] || '' : selected;
         return;
       }
       if (typeof isTauri === 'function' && isTauri()) return;
@@ -155,9 +155,9 @@ async function browsePublishDest() {
 }
 
 async function startPublishSite() {
-  var dest = document.getElementById('publishDest').value.trim();
-  var status = document.getElementById('publishStatus');
-  var btn = document.getElementById('publishSubmitBtn');
+  var dest = /** @type {HTMLInputElement} */ (document.getElementById('publishDest')).value.trim();
+  var status = /** @type {HTMLElement} */ (document.getElementById('publishStatus'));
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('publishSubmitBtn'));
   if (!dest) {
     status.textContent = 'Destination folder is required.';
     return;
@@ -171,7 +171,7 @@ async function startPublishSite() {
   try {
     var publishOptions = publishRequestOptions();
     publishOptions.destination = dest;
-    var data = await safeFetch('/api/jobs/publish-site', {
+    /** @type {{job_id:string}} */ var data = await safeFetch('/api/jobs/publish-site', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(publishOptions),

@@ -5,8 +5,8 @@
   // actual state on success.
   let allPages = (window.NAV_ALL_PAGES || []).slice();
   let pinnedSet = new Set(window.NAV_DEFAULT_TABS || []);
-  let fuse = null;
-  let results = [];
+  /** @type {Fuse<NavPage> | null} */ let fuse = null;
+  /** @type {NavPage[]} */ let results = [];
   let selectedIndex = 0;
 
   function rebuildFuse() {
@@ -25,7 +25,7 @@
   rebuildFuse();
 
   function refreshFromTabsState() {
-    return fetch('/api/workspace/tabs').then(r => r.json()).then(state => {
+    return fetch('/api/workspace/tabs').then(r => r.json()).then((/** @type {NavTabState} */ state) => {
       if (Array.isArray(state.all_pages) && state.all_pages.length) {
         allPages = state.all_pages;
       }
@@ -50,9 +50,9 @@
     // alphabetically by label.
     const pinnedOrder = (window._navTabs ? window._navTabs.getTabs() : []);
     const pinnedById = new Map(allPages.map(p => [p.id, p]));
-    const out = [];
+    /** @type {NavPage[]} */ const out = [];
     pinnedOrder.forEach(id => {
-      if (pinnedById.has(id)) out.push(pinnedById.get(id));
+      if (pinnedById.has(id)) out.push(/** @type {NavPage} */ (pinnedById.get(id)));
     });
     const unpinned = allPages
       .filter(p => !pinnedSet.has(p.id))
@@ -60,8 +60,9 @@
     return out.concat(unpinned);
   }
 
+  /** @param {string} query */
   function render(query) {
-    const list = document.getElementById('cmdPaletteResults');
+    const list = /** @type {HTMLElement} */ (document.getElementById('cmdPaletteResults'));
     if (!list) return;
     list.textContent = '';
     if (!query) {
@@ -103,6 +104,7 @@
     });
   }
 
+  /** @param {NavPage} page */
   function navigateTo(page) {
     window.closeCommandPalette();
     window.location.href = window.vireoResolveNavigationHref(page.href);
@@ -110,7 +112,7 @@
 
   // Wire input handlers
   document.addEventListener('DOMContentLoaded', () => {
-    const input = document.getElementById('cmdPaletteInput');
+    const input = /** @type {HTMLInputElement} */ (document.getElementById('cmdPaletteInput'));
     if (!input) return;
     input.addEventListener('input', () => {
       selectedIndex = 0;

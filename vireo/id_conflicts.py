@@ -540,6 +540,45 @@ def _best_for_model(subject, model):
     )[0]
 
 
+def _ranked_consensus_groups(top_preds):
+    """Group each model's top prediction by taxon, strongest group first."""
+    groups = {}
+    order = []
+    for item in top_preds:
+        key = item["identity"]
+        group = groups.get(key)
+        if group is None:
+            groups[key] = {"species": item["display"], "count": 0, "confidence": 0.0}
+            order.append(key)
+            group = groups[key]
+        elif not group["species"] and item["display"]:
+            group["species"] = item["display"]
+        group["count"] += 1
+        group["confidence"] += item["confidence"]
+    return sorted(
+        (groups[key] for key in order),
+        key=lambda g: (-g["count"], -g["confidence"], _text_key(g["species"])),
+    )
+
+
+def _strongest_disagreement(top_preds):
+    """``(pair, score)`` for the most confident pair of disagreeing models."""
+    disagreement_pair = None
+    disagreement_score = 0.0
+    for i in range(len(top_preds)):
+        for j in range(i + 1, len(top_preds)):
+            if top_preds[i]["identity"] == top_preds[j]["identity"]:
+                continue
+            # A disagreement is only as strong as its least confident side.
+            pair_score = min(
+                top_preds[i]["confidence"] or 0, top_preds[j]["confidence"] or 0,
+            ) * 100
+            if disagreement_pair is None or pair_score > disagreement_score:
+                disagreement_pair = [top_preds[i], top_preds[j]]
+                disagreement_score = pair_score
+    return disagreement_pair, disagreement_score
+
+
 def subject_signal(subject, models, min_confidence):
     """Model agreement and keyword conflict evidence for one detected subject."""
     top_preds = []
@@ -593,37 +632,8 @@ def subject_signal(subject, models, min_confidence):
         max_confidence = max(max_confidence, conf)
         min_conf_seen = conf if min_conf_seen is None else min(min_conf_seen, conf)
 
-    groups = {}
-    order = []
-    for item in top_preds:
-        key = item["identity"]
-        group = groups.get(key)
-        if group is None:
-            groups[key] = {"species": item["display"], "count": 0, "confidence": 0.0}
-            order.append(key)
-            group = groups[key]
-        elif not group["species"] and item["display"]:
-            group["species"] = item["display"]
-        group["count"] += 1
-        group["confidence"] += item["confidence"]
-    ranked = sorted(
-        (groups[key] for key in order),
-        key=lambda g: (-g["count"], -g["confidence"], _text_key(g["species"])),
-    )
-
-    disagreement_pair = None
-    disagreement_score = 0.0
-    for i in range(len(top_preds)):
-        for j in range(i + 1, len(top_preds)):
-            if top_preds[i]["identity"] == top_preds[j]["identity"]:
-                continue
-            # A disagreement is only as strong as its least confident side.
-            pair_score = min(
-                top_preds[i]["confidence"] or 0, top_preds[j]["confidence"] or 0,
-            ) * 100
-            if disagreement_pair is None or pair_score > disagreement_score:
-                disagreement_pair = [top_preds[i], top_preds[j]]
-                disagreement_score = pair_score
+    ranked = _ranked_consensus_groups(top_preds)
+    disagreement_pair, disagreement_score = _strongest_disagreement(top_preds)
 
     return {
         "all_predictions": all_preds,
@@ -761,6 +771,45 @@ def _row_status(statuses):
     }
 
 
+def _row_signal_labels(
+    subjects, disagreement_pair, disagreement_subject, consensus_count,
+    consensus_species, consensus_subject, keyword_conflict_count,
+):
+    """The row's disagreement, consensus and keyword-conflict labels."""
+    multi_subject = len(subjects) > 1
+    # The strongest disagreement and the strongest consensus are often
+    # different subjects of the same photo; an unlabelled "X vs Y ·
+    # Consensus: Z" reads as a contradiction, so name the subject.
+    disagreement_prefix = (
+        f"Subject {disagreement_subject + 1}: "
+        if multi_subject and disagreement_subject is not None else ""
+    )
+    if disagreement_pair:
+        first = disagreement_pair[0]["display"] or disagreement_pair[0]["species"]
+        second = disagreement_pair[1]["display"] or disagreement_pair[1]["species"]
+        model_disagreement_label = f"{disagreement_prefix}{first} vs {second}"
+    else:
+        model_disagreement_label = ""
+    if consensus_count >= 2 and consensus_species:
+        consensus_prefix = (
+            f"Subject {consensus_subject + 1}: "
+            if multi_subject and consensus_subject is not None else ""
+        )
+        consensus_label = (
+            f"{consensus_prefix}{consensus_count} models agree on {consensus_species}"
+        )
+    else:
+        consensus_label = ""
+    keyword_disagreement_label = (
+        f"{keyword_conflict_count} model conflict"
+        f"{'' if keyword_conflict_count == 1 else 's'}"
+        if keyword_conflict_count else ""
+    )
+    return (
+        model_disagreement_label, consensus_label, keyword_disagreement_label,
+    )
+
+
 def _row_signal(subjects, signals, statuses):
     missing = 0
     keyword_conflict_score = 0.0
@@ -816,34 +865,11 @@ def _row_signal(subjects, signals, statuses):
                 signal["max_keyword_conflict_confidence"],
             )
 
-    multi_subject = len(subjects) > 1
-    # The strongest disagreement and the strongest consensus are often
-    # different subjects of the same photo; an unlabelled "X vs Y ·
-    # Consensus: Z" reads as a contradiction, so name the subject.
-    disagreement_prefix = (
-        f"Subject {disagreement_subject + 1}: "
-        if multi_subject and disagreement_subject is not None else ""
-    )
-    if disagreement_pair:
-        first = disagreement_pair[0]["display"] or disagreement_pair[0]["species"]
-        second = disagreement_pair[1]["display"] or disagreement_pair[1]["species"]
-        model_disagreement_label = f"{disagreement_prefix}{first} vs {second}"
-    else:
-        model_disagreement_label = ""
-    if consensus_count >= 2 and consensus_species:
-        consensus_prefix = (
-            f"Subject {consensus_subject + 1}: "
-            if multi_subject and consensus_subject is not None else ""
-        )
-        consensus_label = (
-            f"{consensus_prefix}{consensus_count} models agree on {consensus_species}"
-        )
-    else:
-        consensus_label = ""
-    keyword_disagreement_label = (
-        f"{keyword_conflict_count} model conflict"
-        f"{'' if keyword_conflict_count == 1 else 's'}"
-        if keyword_conflict_count else ""
+    (
+        model_disagreement_label, consensus_label, keyword_disagreement_label,
+    ) = _row_signal_labels(
+        subjects, disagreement_pair, disagreement_subject, consensus_count,
+        consensus_species, consensus_subject, keyword_conflict_count,
     )
 
     return {

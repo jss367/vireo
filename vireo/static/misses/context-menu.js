@@ -1,13 +1,13 @@
 // The right-click menu for miss cards.
 // Classic page script; load boot.js after all definitions.
 
-function buildMissContextMenu(photoId, cat, idx) {
-  return [
+/** @param {number} photoId @param {MissCategory} cat @param {number} idx */ function buildMissContextMenu(photoId, cat, idx) {
+  return /** @type {MissMenuItem[]} */ ([
     { label: 'Open in Browse',
       onClick: function() { openPhotoInBrowse(photoId); } },
     { label: 'Open in Lightbox',
       onClick: function() { openMiss(cat, idx); } },
-  ].concat(
+  ]).concat(
     typeof window.buildSpeciesHighlightMenuItems === 'function'
       ? window.buildSpeciesHighlightMenuItems([photoId], { showFetchFallback: true })
       : []
@@ -28,15 +28,16 @@ function buildMissContextMenu(photoId, cat, idx) {
 
 function bindMissContextMenu() {
   document.addEventListener('contextmenu', function(e) {
-    var card = e.target.closest('.miss-card');
+    if (!(e.target instanceof Element)) return;
+    var card = e.target.closest(/** @type {'div'} */ ('.miss-card'));
     if (!card || !card.dataset.photoId) return;
     if (e.target.closest('.vireo-ctx-menu')) return;
     e.preventDefault();
     e.stopPropagation();
     var photoId = parseInt(card.dataset.photoId, 10);
-    var cat = card.dataset.cat;
-    var idx = parseInt(card.dataset.idx, 10);
-    if (isNaN(photoId) || !cat || isNaN(idx)) return;
+    var cat = /** @type {MissCategory} */ (card.dataset.cat);
+    var idx = parseInt(card.dataset.idx || '', 10);
+    if (isNaN(photoId) || !CATEGORY_ORDER.includes(/** @type {MissCategory} */ (cat)) || isNaN(idx)) return;
     setFocused(cat, idx);
     if (!selection.has(photoId)) {
       clearSelection();

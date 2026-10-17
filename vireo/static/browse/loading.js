@@ -29,7 +29,7 @@
 function claimBrowseWindow() {
   return observeBrowseWindow(++loadEpoch);
 }
-function observeBrowseWindow(epoch) {
+function observeBrowseWindow(/** @type {number | undefined} */ epoch = undefined) {
   var claimedEpoch = (epoch === undefined) ? loadEpoch : epoch;
   return function() { return loadEpoch === claimedEpoch; };
 }
@@ -39,22 +39,22 @@ async function refreshBrowseWindowInPlace() {
   selectAllRequestSeq++;
   loading = true;
   var firstPage = earliestPage;
-  var nextPhotos = [];
-  var data;
+  /** @type {BrowsePhoto[]} */ var nextPhotos = [];
+  /** @type {BrowsePage | undefined} */ var data;
   var page = firstPage;
   var succeeded = false;
   var scrollContainer = null;
-  var previousOverflowAnchor;
+  /** @type {string | undefined} */ var previousOverflowAnchor;
 
   function neededEndPage() {
-    var viewport = document.getElementById('gridContainer').getBoundingClientRect();
+    var viewport = /** @type {HTMLElement} */ (document.getElementById('gridContainer')).getBoundingClientRect();
     var anchor = captureBrowseViewportAnchor();
     // No real card on screen means the user reached the placeholder tail;
     // retain the loaded prefix beneath that position rather than truncating it.
     var lastIndex = anchor ? Math.max(0, anchor.index) : Math.max(0, photos.length - 1);
-    var cards = document.querySelectorAll('#grid > .grid-card');
+    var cards = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#grid > .grid-card'));
     for (var i = lastIndex; i < cards.length; i++) {
-      if (cards[i].getBoundingClientRect().top >= viewport.bottom) break;
+      var card = cards[i]; if (!card) continue; if (card.getBoundingClientRect().top >= viewport.bottom) break;
       lastIndex = i;
     }
     // Keep selected photos too, including selected members of a stack. The
@@ -78,7 +78,7 @@ async function refreshBrowseWindowInPlace() {
       var chunk = Math.max(1, Math.min(Math.floor(500 / perPage), neededEndPage() - page + 1));
       while ((page - 1) % chunk !== 0) chunk--;
       var request = buildBrowsePageRequest((page - 1) / chunk + 1, perPage * chunk);
-      data = await safeFetch(request.url, request.options);
+      data = await /** @type {Promise<BrowsePage>} */ (safeFetch(request.url, request.options));
       if (!windowIsCurrent()) return false;
       if (data.total === 0) {
         firstPage = 1;
@@ -105,7 +105,7 @@ async function refreshBrowseWindowInPlace() {
     // stack, even if its cover changed. Hydrate them before the atomic paint
     // so a loading tray cannot temporarily shrink the grid under the user.
     function expandedMemberIds() {
-      var ids = new Set();
+      /** @type {Set<number>} */ var ids = new Set();
       photos.forEach(function(photo) {
         if (expandedBrowseStacks.has(photo.id) && photo.browse_stack) {
           photo.browse_stack.photo_ids.forEach(function(id) { ids.add(id); });
@@ -113,14 +113,14 @@ async function refreshBrowseWindowInPlace() {
       });
       return ids;
     }
-    var nextMembers = {};
-    var matchingIds = null;
+    /** @type {Record<string, BrowsePhoto[]>} */ var nextMembers = {};
+    /** @type {Set<number> | null} */ var matchingIds = null;
     while (true) {
       if (await stageNeededPages() !== true || !windowIsCurrent()) return null;
       // Recheck after each request so opening another stack while waiting
       // doesn't cause that newly opened tray to collapse on commit.
       var expandedIds = expandedMemberIds();
-      var photo = nextPhotos.find(function(candidate) {
+      const photo = nextPhotos.find(function(candidate) {
         return candidate.browse_stack && !nextMembers[candidate.id]
           && candidate.browse_stack.photo_ids.some(function(id) { return expandedIds.has(id); });
       });
@@ -128,7 +128,7 @@ async function refreshBrowseWindowInPlace() {
         // Selected IDs outside this page may still match: Select all includes
         // unloaded photos, and a confidence change can move a selected photo
         // to another page. Check membership without loading the whole grid.
-        var stagedIds = new Set();
+        /** @type {Set<number>} */ var stagedIds = new Set();
         nextPhotos.forEach(function(candidate) {
           if (!browsePhotoIsAvailable(candidate)) return;
           stagedIds.add(candidate.id);
@@ -136,11 +136,11 @@ async function refreshBrowseWindowInPlace() {
             stagedIds.add(id);
           });
         });
-        if (matchingIds === null && data.total > 0 && Array.from(selectedPhotos).some(function(id) {
+        if (matchingIds === null && data && data.total > 0 && Array.from(selectedPhotos).some(function(id) {
           return !stagedIds.has(id);
         })) {
           var idsRequest = buildBrowseIdsRequest();
-          var idsData = await safeFetch(idsRequest.url, idsRequest.options);
+          /** @type {BrowseIdsResponse} */ var idsData = await safeFetch(idsRequest.url, idsRequest.options);
           if (!windowIsCurrent()) return null;
           matchingIds = new Set(idsData.photo_ids || idsData.ids || []);
           // Scrolling, selection, or stack expansion may have changed while
@@ -149,8 +149,8 @@ async function refreshBrowseWindowInPlace() {
         }
         break;
       }
-      var memberIds = photo.browse_stack.photo_ids;
-      var members = [];
+      var memberIds = photo.browse_stack?.photo_ids || [];
+      /** @type {BrowsePhoto[]} */ var members = [];
       for (var offset = 0; offset < memberIds.length; offset += 500) {
         var memberData = await safeFetch('/api/photos/by-ids', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -166,7 +166,7 @@ async function refreshBrowseWindowInPlace() {
 
     // Capture position and selection at commit time: scrolling or clicking
     // during the request must not be undone by its eventual response.
-    var container = document.getElementById('gridContainer');
+    var container = /** @type {HTMLElement} */ (document.getElementById('gridContainer'));
     var scrollTop = container.scrollTop;
     // Only the synchronous replacement owns scroll position. Other updates,
     // such as a stack finishing loading above the viewport, still need the
@@ -178,7 +178,7 @@ async function refreshBrowseWindowInPlace() {
     expandedBrowseStacks.clear();
     nextPhotos.forEach(function(photo) {
       if (photo.similarity != null) photo._similarity = photo.similarity;
-      if (nextMembers[photo.id] && photo.browse_stack.photo_ids.some(function(id) {
+      if (nextMembers[photo.id] && photo.browse_stack?.photo_ids.some(function(id) {
         return stillExpandedIds.has(id);
       })) expandedBrowseStacks.add(photo.id);
     });
@@ -191,7 +191,7 @@ async function refreshBrowseWindowInPlace() {
     photos.length = 0;
     nextPhotos.forEach(function(photo) { photos.push(photo); });
     earliestPage = firstPage;
-    currentPage = page;
+    currentPage = page; if (!data) return null;
     setBrowseTotals(data);
     allLoaded = loadedWindowOffset() + photos.length >= totalPhotos;
     syncBrowseAvailableLightboxPhotos();
@@ -208,7 +208,7 @@ async function refreshBrowseWindowInPlace() {
       if (!availableIds.has(id)) selectedPhotos.delete(id);
     });
     if (selectedPhotoId != null && !availableIds.has(selectedPhotoId)) closeDetail();
-    var selectedCover = loadedBrowseStackCoverForPhoto(selectedPhotoId);
+    const selectedCover = loadedBrowseStackCoverForPhoto(selectedPhotoId);
     selectedIndex = photos.findIndex(function(photo) {
       return photo.id === selectedPhotoId || (selectedCover && photo.id === selectedCover.id);
     });
@@ -242,7 +242,7 @@ async function refreshBrowseWindowInPlace() {
     // usable rather than replacing them with a partial response.
     return windowIsCurrent() ? false : null;
   } finally {
-    if (scrollContainer) scrollContainer.style.overflowAnchor = previousOverflowAnchor;
+    if (scrollContainer) scrollContainer.style.overflowAnchor = previousOverflowAnchor || '';
     if (windowIsCurrent()) {
       loading = false;
       if (succeeded) {
@@ -255,12 +255,12 @@ async function refreshBrowseWindowInPlace() {
 
 // Both normal Browse and photo deep links initialize the shared filter bar.
 // Keep their reload behavior identical for every way of removing filters.
-function browseFilterReloadOptions(info) {
+function browseFilterReloadOptions(/** @type {BrowseFilterChange | undefined} */ info) {
   var reason = info && info.reason;
   // Removing a filter should keep the photo in view. A removal in an
   // OR/NOT expression can also exclude it, so ask the server for its new
   // position instead of scanning the catalog to find it.
-  if (['quickSearchCleared', 'filtersCleared', 'filterRemoved', 'filtersPaused'].includes(reason)) {
+  if (['quickSearchCleared', 'filtersCleared', 'filterRemoved', 'filtersPaused'].includes(reason || '')) {
     return { preserveAnchor: true, focusAnchor: true, preserveViewport: true };
   }
   // Loading a saved expression replaces the result set wholesale, so the
@@ -283,7 +283,7 @@ function browseFilterReloadOptions(info) {
    past the first chunk are asked about in a further lookup, not discarded
    (Codex P2 on PR #1695). Empty when the reload has no anchor to place or
    is not a focused one. */
-function browseFocusCandidateChunks(anchor, focusAnchor) {
+function browseFocusCandidateChunks(/** @type {BrowseAnchor | null} */ anchor, /** @type {boolean} */ focusAnchor) {
   if (!anchor || !focusAnchor) return [];
   var candidates = [anchor.photoId];
   if (anchor.stackSelection && anchor.stackIds) {
@@ -316,7 +316,7 @@ function clearBrowseLoadedWindow() {
   updatePreviousPhotosButton();
 }
 
-async function resetAndLoad(options) {
+async function resetAndLoad(/** @type {BrowseReloadOptions} */ options = {}) {
   // Membership edits keep the current window on screen until its replacement
   // is complete. A reset followed by anchor restoration still paints page 1
   // while the remaining pages load, even if the final position is correct.
@@ -417,8 +417,8 @@ async function resetAndLoad(options) {
   var preservedCollectionId = preserveCollection ? activeCollectionId : null;
   if (anchor) hideDetailPanel();
   else closeDetail();
-  document.getElementById('grid').innerHTML = '';
-  document.getElementById('gridContainer').scrollTop = 0;
+  /** @type {HTMLElement} */ (document.getElementById('grid')).innerHTML = '';
+  /** @type {HTMLElement} */ (document.getElementById('gridContainer')).scrollTop = 0;
 
   function resetRequestIsCurrent() {
     if (!resetWindowIsCurrent()) return false;
@@ -446,14 +446,14 @@ async function resetAndLoad(options) {
     // restore. Only a chunk that places nothing costs another request, so
     // every stack short enough to ask about at once — which is all of them,
     // in practice — is one request, as before.
-    var focusChunks = browseFocusCandidateChunks(anchor, focusAnchor);
+    var focusChunks = browseFocusCandidateChunks(anchor, /** @type {boolean} */ focusAnchor);
     var initialLoadStatus;
     for (var chunkAt = 0; chunkAt < Math.max(1, focusChunks.length); chunkAt++) {
       var chunk = focusChunks[chunkAt];
       if (chunkAt > 0) {
         // Start the replacement window clean, exactly as this reset did.
         clearBrowseLoadedWindow();
-        document.getElementById('grid').innerHTML = '';
+        /** @type {HTMLElement} */ (document.getElementById('grid')).innerHTML = '';
       }
       initialLoadStatus = await loadPhotos(
         chunk ? { focusPhotoId: chunk[0], focusPhotoIds: chunk.slice(1) } : undefined
@@ -561,7 +561,7 @@ async function resetAndLoad(options) {
       : null;
     var restoredStackIds = currentStackIds
       ? currentStackIds.filter(function(id) {
-          return anchor.stackIds.indexOf(id) !== -1;
+          return !!anchor?.stackIds?.includes(id);
         })
       : null;
     if (restoredStackIds && !restoredStackIds.length) restoredStackIds = null;
@@ -617,19 +617,20 @@ async function resetAndLoad(options) {
   }
 }
 
+/** @returns {BrowseRuleGroup | null} */
 function getBrowseRules() {
   if (!window.VireoFilter || !VireoFilter.getRules) return null;
-  var rules = VireoFilter.getRules();
+  var rules = VireoFilter.getRules(); if (!rules) return null;
   var count = Array.isArray(rules) ? rules.length : (rules.rules || []).length;
   return count ? rules : null;
 }
 
 function buildCurrentBrowseParams() {
   var params = new URLSearchParams();
-  params.set('sort', document.getElementById('sortSelect').value);
-  if (activeFolderId) params.set('folder_id', activeFolderId);
+  params.set('sort', /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value);
+  if (activeFolderId) params.set('folder_id', String(activeFolderId));
   if (activeCollectionId && dashboardCollectionScope) {
-    params.set('collection_id', activeCollectionId);
+    params.set('collection_id', String(activeCollectionId));
   }
   var rules = getBrowseRules();
   if (rules) params.set('rules', JSON.stringify(rules));
@@ -646,14 +647,14 @@ function loadedWindowOffset() {
 }
 
 function updatePreviousPhotosButton() {
-  var banner = document.getElementById('loadPreviousPhotosBanner');
+  var banner = /** @type {HTMLElement} */ (document.getElementById('loadPreviousPhotosBanner'));
   if (!banner) return;
   var offset = loadedWindowOffset();
   if (earliestPage <= 1 || offset <= 0) {
     banner.style.display = 'none';
     return;
   }
-  var textEl = document.getElementById('loadPreviousPhotosText');
+  var textEl = /** @type {HTMLElement} */ (document.getElementById('loadPreviousPhotosText'));
   if (textEl) {
     // With Stacks on the grid pages logical items, not photos, so this
     // offset counts cards — and a single card can stand for a whole burst.
@@ -688,7 +689,7 @@ async function loadPreviousPhotos() {
    endpoint can express it, so the returned request reports back which id it
    actually carries — a saved-collection page has to fall back to loading from
    the top rather than silently believing page 1 holds the photo. */
-function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
+function buildBrowsePageRequest(/** @type {number} */ page, /** @type {number} */ requestPerPage, /** @type {BrowseLoadOptions | null} */ requestOptions = null) {
   var focusPhotoId = (requestOptions && requestOptions.focusPhotoId != null)
     ? requestOptions.focusPhotoId
     : null;
@@ -711,11 +712,11 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
       : []);
   if (activeCollectionId && !dashboardCollectionScope) {
     var cparams = new URLSearchParams();
-    cparams.set('page', page);
-    cparams.set('per_page', requestPerPage);
-    cparams.set('sort', document.getElementById('sortSelect').value);
+    cparams.set('page', String(page));
+    cparams.set('per_page', String(requestPerPage));
+    cparams.set('sort', /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value);
     if (browseStacksEnabled()) cparams.set('stacks', '1');
-    if (focusPhotoId != null) cparams.set('focus_photo_id', focusPhotoId);
+    if (focusPhotoId != null) cparams.set('focus_photo_id', String(focusPhotoId));
     if (focusPhotoIds.length) {
       cparams.set('focus_photo_ids', focusPhotoIds.join(','));
     }
@@ -726,9 +727,9 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
     };
   }
 
-  var body = {
+  /** @type {BrowseQueryBody} */ var body = {
     rules: getBrowseRules() || [],
-    sort: document.getElementById('sortSelect').value,
+    sort: /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect')).value,
     page: page,
     per_page: requestPerPage,
     stacks: browseStacksEnabled(),
@@ -748,7 +749,7 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
   // the server may abandon one as soon as a newer epoch's request arrives.
   var headers = Object.assign(
     { 'Content-Type': 'application/json' },
-    Vireo.api.searchLaneHeaders('grid', loadEpoch)
+    Vireo?.api?.searchLaneHeaders('grid', loadEpoch)
   );
   return {
     url: '/api/photos/query',
@@ -765,7 +766,7 @@ function buildBrowsePageRequest(page, requestPerPage, requestOptions) {
    "Browse from beginning" action, this preserves the user's viewport: the
    first previously-loaded card remains at the same screen position while the
    new cards are inserted above it. */
-async function prependPreviousPhotos(options) {
+async function prependPreviousPhotos(/** @type {BrowseLoadOptions} */ options = {}) {
   if (loading || earliestPage <= 1) return false;
   loading = true;
   var windowIsCurrent = observeBrowseWindow();
@@ -774,7 +775,7 @@ async function prependPreviousPhotos(options) {
   var request = buildBrowsePageRequest(requestedPage, perPage);
 
   try {
-    var data = await safeFetch(request.url, request.options, {
+    /** @type {BrowsePage} */ var data = await safeFetch(request.url, request.options, {
       toast: !(options && options.silent),
     });
     if (!windowIsCurrent()) return null;
@@ -825,7 +826,7 @@ async function prependPreviousPhotos(options) {
     if (oldFirstPhoto && oldFirstTop != null) {
       var movedFirstCard = getGridCard(oldFirstPhoto.id);
       if (movedFirstCard) {
-        document.getElementById('gridContainer').scrollTop +=
+        /** @type {HTMLElement} */ (document.getElementById('gridContainer')).scrollTop +=
           movedFirstCard.getBoundingClientRect().top - oldFirstTop;
       }
     }
@@ -854,7 +855,7 @@ async function prependPreviousPhotos(options) {
   return loadSucceeded;
 }
 
-async function loadPhotos(options) {
+async function loadPhotos(/** @type {BrowseLoadOptions} */ options = {}) {
   if (loading) return null;
   if (allLoaded) return true;
   loading = true;
@@ -863,7 +864,7 @@ async function loadPhotos(options) {
   var windowIsCurrent = observeBrowseWindow();
   var loadSucceeded = false;
   var showLoading = !(options && options.silent) && photos.length === 0;
-  var loadingState = document.getElementById('loadingState');
+  var loadingState = /** @type {HTMLElement} */ (document.getElementById('loadingState'));
   if (showLoading && loadingState) {
     loadingState.textContent = 'Loading...';
     loadingState.style.display = 'block';
@@ -892,7 +893,7 @@ async function loadPhotos(options) {
   var chunk = 1;
   var tailEl = document.getElementById('gridTail');
   if (focusPhotoId == null && tailEl && tailEl.firstElementChild) {
-    var contRect = document.getElementById('gridContainer').getBoundingClientRect();
+    var contRect = /** @type {HTMLElement} */ (document.getElementById('gridContainer')).getBoundingClientRect();
     if (tailEl.firstElementChild.getBoundingClientRect().top < contRect.bottom) {
       var pagesLoaded = currentPage - 1;
       if (perPage * 4 <= 500 && pagesLoaded % 4 === 0) chunk = 4;
@@ -910,7 +911,7 @@ async function loadPhotos(options) {
   );
 
   try {
-    var data = await safeFetch(request.url, request.options);
+    /** @type {BrowsePage} */ var data = await /** @type {Promise<BrowsePage>} */ (safeFetch(request.url, request.options));
     if (!windowIsCurrent()) return null;  // grid was reset mid-flight; drop stale response
     setBrowseTotals(data);
     // Availability totals are photo counts, so they are read from the same
@@ -932,15 +933,15 @@ async function loadPhotos(options) {
     // server served the page we asked for, so leave the window alone.
     var focusedPage = null;
     if (request.focusPhotoId != null && (data.photos || []).length > 0
-        && Number.isInteger(data.focus_index) && data.focus_index >= 0
-        && Number.isInteger(data.focus_page) && data.focus_page >= 1) {
+        && typeof data.focus_index === 'number' && Number.isInteger(data.focus_index) && data.focus_index >= 0
+        && typeof data.focus_page === 'number' && Number.isInteger(data.focus_page) && data.focus_page >= 1) {
       focusedPage = data.focus_page;
       earliestPage = focusedPage;
       currentPage = focusedPage;
       // Which candidate the server placed the page by. Usually the one we
       // asked about first; a stack whose leading frames this result set
       // dropped answers with a frame it kept.
-      browseResolvedFocusPhotoId = Number.isInteger(data.focus_photo_id)
+      browseResolvedFocusPhotoId = typeof data.focus_photo_id === 'number' && Number.isInteger(data.focus_photo_id)
         ? data.focus_photo_id
         : request.focusPhotoId;
     }

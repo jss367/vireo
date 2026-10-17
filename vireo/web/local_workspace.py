@@ -17,6 +17,81 @@ from services.local_workspace import (
 )
 
 
+def _stage_callbacks(runner, job):
+    """Build the stage job's ``(report, begin_commit)`` callbacks."""
+
+    def report(current, total, current_bytes, total_bytes, path):
+        job["progress"].update(
+            {
+                "current": current,
+                "total": total,
+                "current_file": path,
+                "phase": "Copying workspace locally",
+                "bytes_current": current_bytes,
+                "bytes_total": total_bytes,
+            }
+        )
+        runner.update_step(
+            job["id"],
+            "stage",
+            progress={"current": current, "total": total},
+            current_file=path,
+        )
+        runner.push_event(job["id"], "progress", dict(job["progress"]))
+
+    def begin_commit():
+        # The catalog rebase is about to run; a cancel landing
+        # after this point must not mark the job cancelled while
+        # the workspace actually activated.
+        if not runner.begin_uncancellable(job["id"]):
+            return False
+        runner.update_step(
+            job["id"],
+            "stage",
+            status="completed",
+            summary="Workspace copied locally",
+        )
+        runner.update_step(job["id"], "activate", status="running")
+        return True
+
+    return report, begin_commit
+
+
+def _sync_callbacks(runner, job):
+    """Build the sync job's ``(begin_commit, report)`` callbacks."""
+
+    def begin_commit():
+        if not runner.begin_uncancellable(job["id"]):
+            return False
+        runner.update_step(
+            job["id"],
+            "verify",
+            status="completed",
+            summary="No source conflicts",
+        )
+        runner.update_step(job["id"], "publish", status="running")
+        return True
+
+    def report(current, total, path):
+        job["progress"].update(
+            {
+                "current": current,
+                "total": total,
+                "current_file": path,
+                "phase": "Syncing local changes to source",
+            }
+        )
+        runner.update_step(
+            job["id"],
+            "publish",
+            progress={"current": current, "total": total},
+            current_file=path,
+        )
+        runner.push_event(job["id"], "progress", dict(job["progress"]))
+
+    return begin_commit, report
+
+
 def create_local_workspace_blueprint(
     get_db, json_error, get_runner, db_path, vireo_dir, invalidate_missing_originals=None
 ):
@@ -134,41 +209,7 @@ def create_local_workspace_blueprint(
                     ],
                 )
                 runner.update_step(job["id"], "stage", status="running")
-
-                def report(current, total, current_bytes, total_bytes, path):
-                    job["progress"].update(
-                        {
-                            "current": current,
-                            "total": total,
-                            "current_file": path,
-                            "phase": "Copying workspace locally",
-                            "bytes_current": current_bytes,
-                            "bytes_total": total_bytes,
-                        }
-                    )
-                    runner.update_step(
-                        job["id"],
-                        "stage",
-                        progress={"current": current, "total": total},
-                        current_file=path,
-                    )
-                    runner.push_event(job["id"], "progress", dict(job["progress"]))
-
-                def begin_commit():
-                    # The catalog rebase is about to run; a cancel landing
-                    # after this point must not mark the job cancelled while
-                    # the workspace actually activated.
-                    if not runner.begin_uncancellable(job["id"]):
-                        return False
-                    runner.update_step(
-                        job["id"],
-                        "stage",
-                        status="completed",
-                        summary="Workspace copied locally",
-                    )
-                    runner.update_step(job["id"], "activate", status="running")
-                    return True
-
+                report, begin_commit = _stage_callbacks(runner, job)
                 result = stage_workspace(
                     thread_db,
                     workspace_id,
@@ -218,6 +259,28 @@ def create_local_workspace_blueprint(
             return validation_error
         return jsonify({"job_id": job_id}), 202
 
+    def _validate_sync(db, workspace_id, allow_deletions):
+        try:
+            current = status(db, workspace_id, vireo_dir)
+        except LocalWorkspaceError as exc:
+            return json_error(str(exc), 409)
+        state = current["state"]
+        is_sync_recovery = state == "recovery" and current.get("recovery_kind") == "sync"
+        if state != "active" and not is_sync_recovery:
+            return json_error("This workspace is not working locally", 409)
+        error = _folder_sessions_error(db, workspace_id)
+        if error is not None:
+            return error
+        if current.get("changes_error"):
+            return json_error(current["changes_error"], 409)
+        deletion_count = (current.get("changes") or {}).get("deleted", 0)
+        if deletion_count and not allow_deletions and not is_sync_recovery:
+            return json_error(
+                f"Sync would delete {deletion_count} source file(s); confirm deletions first",
+                409,
+            )
+        return None
+
     @blueprint.post("/api/workspaces/active/local-workspace/sync")
     def sync_local_workspace():
         db, workspace_id, error = _active_context()
@@ -257,36 +320,7 @@ def create_local_workspace_blueprint(
                     ],
                 )
                 runner.update_step(job["id"], "verify", status="running")
-
-                def begin_commit():
-                    if not runner.begin_uncancellable(job["id"]):
-                        return False
-                    runner.update_step(
-                        job["id"],
-                        "verify",
-                        status="completed",
-                        summary="No source conflicts",
-                    )
-                    runner.update_step(job["id"], "publish", status="running")
-                    return True
-
-                def report(current, total, path):
-                    job["progress"].update(
-                        {
-                            "current": current,
-                            "total": total,
-                            "current_file": path,
-                            "phase": "Syncing local changes to source",
-                        }
-                    )
-                    runner.update_step(
-                        job["id"],
-                        "publish",
-                        progress={"current": current, "total": total},
-                        current_file=path,
-                    )
-                    runner.push_event(job["id"], "progress", dict(job["progress"]))
-
+                begin_commit, report = _sync_callbacks(runner, job)
                 result = sync_back(
                     thread_db,
                     workspace_id,
@@ -314,33 +348,11 @@ def create_local_workspace_blueprint(
             finally:
                 thread_db.close()
 
-        def validate_sync():
-            try:
-                current = status(db, workspace_id, vireo_dir)
-            except LocalWorkspaceError as exc:
-                return json_error(str(exc), 409)
-            state = current["state"]
-            is_sync_recovery = state == "recovery" and current.get("recovery_kind") == "sync"
-            if state != "active" and not is_sync_recovery:
-                return json_error("This workspace is not working locally", 409)
-            error = _folder_sessions_error(db, workspace_id)
-            if error is not None:
-                return error
-            if current.get("changes_error"):
-                return json_error(current["changes_error"], 409)
-            deletion_count = (current.get("changes") or {}).get("deleted", 0)
-            if deletion_count and not allow_deletions and not is_sync_recovery:
-                return json_error(
-                    f"Sync would delete {deletion_count} source file(s); confirm deletions first",
-                    409,
-                )
-            return None
-
         job_id, busy, validation_error = _start_job_exclusive(
             workspace_id,
             "work-locally-sync",
             work,
-            validate_sync,
+            lambda: _validate_sync(db, workspace_id, allow_deletions),
         )
         if busy:
             return _busy_error(busy, "syncing back")

@@ -13,14 +13,15 @@ var GRM_RES_STOPS = [
 // provide originals when the user needs to inspect fine detail.
 var grmResolutionIdx = 1;
 
+/** @param {number} photoId */
 function grmPhotoUrl(photoId) {
   var stop = GRM_RES_STOPS[grmResolutionIdx];
-  if (stop.kind === 'original') return '/photos/' + photoId + '/original';
-  return '/photos/' + photoId + '/preview?size=' + stop.size;
+  if (requireReviewValue(stop).kind === 'original') return '/photos/' + photoId + '/original';
+  return '/photos/' + photoId + '/preview?size=' + requireReviewValue(stop).size;
 }
 
 function grmUpdateResLabel() {
-  var el = document.getElementById('grmResLabel');
+  var el = /** @type {HTMLElement} */ (document.getElementById('grmResLabel'));
   if (!el) return;
   var stop = GRM_RES_STOPS[grmResolutionIdx];
   var dims = '';
@@ -29,7 +30,7 @@ function grmUpdateResLabel() {
     ? grmState.items.find(function(p) { return p.id === grmState.selected; })
     : (grmState && grmState.items[0]);
   if (photo && photo.width && photo.height) {
-    if (stop.kind === 'original') {
+    if (requireReviewValue(stop).kind === 'original') {
       dims = photo.width + '×' + photo.height;
       // Show megapixels alongside the dimensions so users can tell at a
       // glance why two shots in the same library zoom to different
@@ -38,18 +39,19 @@ function grmUpdateResLabel() {
       mpStr = (mp >= 10 ? mp.toFixed(0) : mp.toFixed(1)) + ' MP';
     } else {
       var longest = Math.max(photo.width, photo.height);
-      var scale = longest > stop.size ? stop.size / longest : 1;
+      var scale = longest > requireReviewValue(stop).size ? requireReviewValue(stop).size / longest : 1;
       var w = Math.round(photo.width * scale);
       var h = Math.round(photo.height * scale);
       dims = w + '×' + h;
     }
   }
-  var prefix = dims ? dims : stop.label;
-  el.textContent = prefix + ' · ' + (mpStr ? mpStr + ' · ' : '') + stop.kind;
+  var prefix = dims ? dims : requireReviewValue(stop).label;
+  el.textContent = prefix + ' · ' + (mpStr ? mpStr + ' · ' : '') + requireReviewValue(stop).kind;
 }
 
+/** @param {number} idx */
 function grmSetResolution(idx) {
-  grmResolutionIdx = parseInt(idx, 10) || 0;
+  grmResolutionIdx = Number(idx) || 0;
   var wasOneToOne = _grmLoupeOneToOne || _grmLoupePendingOneToOne;
   _grmLoupePendingOneToOne = false;
   _grmLoupeOneToOne = false;
@@ -62,23 +64,23 @@ function grmSetResolution(idx) {
   // the zoom transforms keeps the loupe locked on the current region while
   // the slider drags. Each card's <img> is laid out at the new served
   // resolution so the rasterized layer matches what's actually being served.
-  document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
-    var pid = parseInt(card.getAttribute('data-photo-id'), 10);
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#grmOverlay .grm-card')).forEach(function(card) {
+    var pid = Number(card.getAttribute('data-photo-id'));
     if (!pid) return;
-    var img = card.querySelector('img');
+    var img = /** @type {HTMLImageElement} */ (card.querySelector('img'));
     if (!img) return;
     var photo = grmState && grmState.items
       ? grmState.items.find(function(p) { return p.id === pid; })
       : null;
     var nat = grmNaturalDims(photo);
-    card.dataset.natW = nat.w;
-    card.dataset.natH = nat.h;
+    card.dataset.natW = String(nat.w);
+    card.dataset.natH = String(nat.h);
     img.style.width = nat.w + 'px';
     img.style.height = nat.h + 'px';
     img.src = grmPhotoUrl(pid);
   });
   if (grmState && grmState.selected) {
-    var loupe = document.getElementById('grmLoupePhoto');
+    var loupe = /** @type {HTMLImageElement} */ (document.getElementById('grmLoupePhoto'));
     if (loupe) {
       loupe.src = grmPhotoUrl(grmState.selected);
       grmApplyLoupeZoom();
@@ -89,22 +91,23 @@ function grmSetResolution(idx) {
   grmUpdateResLabel();
 }
 
+/** @param {number | string} value */
 function grmSetLoupeZoom(value) {
-  var pct = parseInt(value, 10);
+  var pct = Number(value);
   if (!pct) pct = 100;
   pct = Math.max(100, Math.min(_grmLoupeSliderMax(), pct));
   _grmLoupePendingOneToOne = false;
   _grmLoupeOneToOne = false;
   _grmLoupeZoomLevel = pct / 100;
-  var slider = document.getElementById('grmLoupeZoomSlider');
-  if (slider) slider.value = pct;
-  var label = document.getElementById('grmLoupeZoomVal');
+  var slider = /** @type {HTMLInputElement} */ (document.getElementById('grmLoupeZoomSlider'));
+  if (slider) slider.value = String(pct);
+  var label = /** @type {HTMLElement} */ (document.getElementById('grmLoupeZoomVal'));
   if (label) label.textContent = _grmLoupeZoomLevel.toFixed(_grmLoupeZoomLevel >= 2 ? 1 : 2).replace(/\.0$/, '') + '×';
   grmApplyLoupeZoom();
 }
 
 function grmApplyLoupeZoom() {
-  var img = document.getElementById('grmLoupePhoto');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('grmLoupePhoto'));
   if (!img) return;
   var x = _grmLastHoverX == null ? 50 : _grmLastHoverX;
   var y = _grmLastHoverY == null ? 50 : _grmLastHoverY;
@@ -124,34 +127,37 @@ function _grmAfterLoupeSourceChange() {
 }
 
 function _grmLoupeSliderMax() {
-  var slider = document.getElementById('grmLoupeZoomSlider');
+  var slider = /** @type {HTMLInputElement} */ (document.getElementById('grmLoupeZoomSlider'));
   var fromDom = slider ? parseInt(slider.max, 10) : 500;
   return Math.max(500, fromDom || 500);
 }
 
+/** @param {HTMLImageElement} img */
 function _grmLoupeFitScale(img) {
-  var box = document.getElementById('grmLoupeImg');
+  var box = /** @type {HTMLElement} */ (document.getElementById('grmLoupeImg'));
   if (!box || !img || !img.naturalWidth || !img.naturalHeight) return null;
   var rect = box.getBoundingClientRect();
   if (!rect.width || !rect.height) return null;
   return Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
 }
 
+/** @param {HTMLImageElement} img */
 function _grmLoupeNativeZoom(img) {
   var fitScale = _grmLoupeFitScale(img);
   if (!fitScale) return null;
   return Math.max(1, 1 / (fitScale * (window.devicePixelRatio || 1)));
 }
 
+/** @param {number} zoom @param {string} [labelText] */
 function _grmSetLoupeZoomLevel(zoom, labelText) {
   _grmLoupeZoomLevel = Math.max(1, zoom || 1);
   var pct = Math.round(_grmLoupeZoomLevel * 100);
-  var slider = document.getElementById('grmLoupeZoomSlider');
+  var slider = /** @type {HTMLInputElement} */ (document.getElementById('grmLoupeZoomSlider'));
   if (slider) {
     slider.max = String(Math.max(500, pct));
     slider.value = String(pct);
   }
-  var label = document.getElementById('grmLoupeZoomVal');
+  var label = /** @type {HTMLElement} */ (document.getElementById('grmLoupeZoomVal'));
   if (label) {
     label.textContent = labelText || _grmLoupeZoomLevel.toFixed(_grmLoupeZoomLevel >= 2 ? 1 : 2).replace(/\.0$/, '') + '×';
   }
@@ -162,31 +168,32 @@ function _grmSetOriginalResolutionForLoupe() {
   var lastIdx = GRM_RES_STOPS.length - 1;
   if ((GRM_RES_STOPS[grmResolutionIdx] || {}).kind === 'original') return;
   grmResolutionIdx = lastIdx;
-  var slider = document.getElementById('grmResSlider');
-  if (slider) slider.value = grmResolutionIdx;
-  document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
-    var pid = parseInt(card.getAttribute('data-photo-id'), 10);
+  var slider = /** @type {HTMLInputElement} */ (document.getElementById('grmResSlider'));
+  if (slider) slider.value = String(grmResolutionIdx);
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#grmOverlay .grm-card')).forEach(function(card) {
+    var pid = Number(card.getAttribute('data-photo-id'));
     if (!pid) return;
-    var img = card.querySelector('img');
+    var img = /** @type {HTMLImageElement} */ (card.querySelector('img'));
     if (!img) return;
     var photo = grmState && grmState.items
       ? grmState.items.find(function(p) { return p.id === pid; })
       : null;
     var nat = grmNaturalDims(photo);
-    card.dataset.natW = nat.w;
-    card.dataset.natH = nat.h;
+    card.dataset.natW = String(nat.w);
+    card.dataset.natH = String(nat.h);
     img.style.width = nat.w + 'px';
     img.style.height = nat.h + 'px';
     img.src = grmPhotoUrl(pid);
   });
   if (grmState && grmState.selected) {
-    var loupe = document.getElementById('grmLoupePhoto');
+    var loupe = /** @type {HTMLImageElement} */ (document.getElementById('grmLoupePhoto'));
     if (loupe) loupe.src = grmPhotoUrl(grmState.selected);
   }
   grmApplyCardTransforms();
   grmUpdateResLabel();
 }
 
+/** @param {HTMLImageElement} img */
 function grmLoupeImgLoaded(img) {
   grmUpdateSelectedEyeCrosshair();
   if (_grmLoupePendingOneToOne) {
@@ -207,7 +214,7 @@ function grmToggleLoupeOneToOne() {
 }
 
 function _grmFinishLoupeOneToOne() {
-  var img = document.getElementById('grmLoupePhoto');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('grmLoupePhoto'));
   if (!img || !img.complete || !img.naturalWidth || !img.naturalHeight) return;
   var zoom = _grmLoupeNativeZoom(img);
   if (zoom == null) return;

@@ -1,8 +1,8 @@
 // The editor's photo search box and its results.
 // Classic page script; load boot.js after all definitions.
 
-function setSearchStatus(text, isError) {
-  var el = document.getElementById('editorSearchStatus');
+/** @param {string} text @param {boolean=} isError */ function setSearchStatus(text, isError) {
+  var el = /** @type {HTMLElement} */ (document.getElementById('editorSearchStatus'));
   if (!el) return;
   el.textContent = text || '';
   el.classList.toggle('error', !!isError);
@@ -11,7 +11,7 @@ function setSearchStatus(text, isError) {
 function scheduleEditorSearch() {
   if (editorState.searchTimer) clearTimeout(editorState.searchTimer);
   editorState.searchTimer = null;
-  var input = document.getElementById('editorSearchInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('editorSearchInput'));
   var q = input ? input.value.trim() : '';
   if (!q) {
     clearEditorSearchResults();
@@ -49,13 +49,13 @@ function clearEditorSearchResults() {
   updateNavControls();
 }
 
-async function runEditorSearch(opts) {
+/** @param {{immediate?:boolean}=} opts */ async function runEditorSearch(opts) {
   opts = opts || {};
   if (editorState.searchTimer) {
     clearTimeout(editorState.searchTimer);
     editorState.searchTimer = null;
   }
-  var input = document.getElementById('editorSearchInput');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('editorSearchInput'));
   var q = input ? input.value.trim() : '';
   if (!q) {
     clearEditorSearchResults();
@@ -83,7 +83,7 @@ async function runEditorSearch(opts) {
     var params = new URLSearchParams();
     params.set('keyword', q);
     params.set('sort', 'name');
-    var data = await safeFetch('/api/photos/ids?' + params.toString(), {}, {toast: false});
+    /** @type {{photo_ids?:number[]}} */ var data = await safeFetch('/api/photos/ids?' + params.toString(), {}, {toast: false});
     if (seq !== editorState.searchSeq) return;
     var ids = (data.photo_ids || [])
       .map(function(id) { return Number(id); })
@@ -97,7 +97,7 @@ async function runEditorSearch(opts) {
     }
 
     var current = Number(editorState.photoId);
-    var target = ids.indexOf(current) === -1 ? ids[0] : current;
+    var target = ids.indexOf(current) === -1 ? ids[0] || current : current;
     // Dirty state can change during the fetch above. Run the confirm before
     // any nav/status mutation so a dismissed prompt leaves the editor
     // untouched — otherwise the navIds/nav position/status would already
@@ -116,6 +116,6 @@ async function runEditorSearch(opts) {
     }
   } catch (e) {
     if (seq !== editorState.searchSeq) return;
-    setSearchStatus(e.message || 'Search failed', true);
+    setSearchStatus(editorErrorMessage(e) || 'Search failed', true);
   }
 }

@@ -1,24 +1,24 @@
 // --- All settings (schema-rendered, editable) ------------------------------
 
-var ALL_SETTINGS_CACHE = { schema: null, categories: null, values: null };
+/** @type {{schema:Record<string,SettingsSpec>|null;categories:string[]|null;values:SettingsValues|null}} */ var ALL_SETTINGS_CACHE = { schema: null, categories: null, values: null };
 // Keyed by `<key>|<scope>` so a quick edit to the same key in a different
 // scope tab can't clear the pending write of the first scope's edit.
-var ALL_SETTINGS_DEBOUNCE = {};
+/** @type {Record<string,ReturnType<typeof setTimeout>|null>} */ var ALL_SETTINGS_DEBOUNCE = {};
 var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
 
-function setSettingsScope(scope) {
+/** @param {string} scope */ function setSettingsScope(scope) {
   if (scope !== 'global' && scope !== 'workspace') return;
   if (ALL_SETTINGS_SCOPE === scope) return;
   ALL_SETTINGS_SCOPE = scope;
-  document.querySelectorAll('.scope-tab').forEach(function(b) {
+  document.querySelectorAll(/** @type {'div'} */ ('.scope-tab')).forEach(function(b) {
     b.classList.toggle('active', b.dataset.scope === scope);
   });
-  renderAllSettings(document.getElementById('allSettingsCategories'));
+  renderAllSettings(/** @type {HTMLElement} */ (document.getElementById('allSettingsCategories')));
   filterAllSettings();
 }
 
 async function loadAllSettings() {
-  var container = document.getElementById('allSettingsCategories');
+  var container = /** @type {HTMLElement} */ (document.getElementById('allSettingsCategories'));
   try {
     var [schemaRes, valuesRes] = await Promise.all([
       fetch('/api/settings/schema'),
@@ -34,7 +34,7 @@ async function loadAllSettings() {
     filterAllSettings();
   } catch (err) {
     container.innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load settings: '
-      + escapeHtml(err && err.message || String(err)) + '</span>';
+      + escapeHtml(err && settingsErrorMessage(err) || String(err)) + '</span>';
   }
 }
 
@@ -44,21 +44,21 @@ async function refreshAllSettingsValues() {
   ALL_SETTINGS_CACHE.values = await r.json();
 }
 
-function renderAllSettings(container) {
-  var schema = ALL_SETTINGS_CACHE.schema;
+/** @param {HTMLElement} container */ function renderAllSettings(container) {
+  const schema = ALL_SETTINGS_CACHE.schema;
   var categories = ALL_SETTINGS_CACHE.categories;
   var values = ALL_SETTINGS_CACHE.values;
   if (!schema || !categories || !values) return;
 
-  var byCategory = {};
+  /** @type {Record<string,string[]>} */ var byCategory = {};
   categories.forEach(function(c) { byCategory[c] = []; });
   Object.keys(schema).sort().forEach(function(key) {
-    var cat = schema[key].category || 'Other';
+    var cat = schema[key]?.category || 'Other';
     if (!byCategory[cat]) byCategory[cat] = [];
-    byCategory[cat].push(key);
+    byCategory[cat]?.push(key);
   });
 
-  var parts = [];
+  /** @type {string[]} */ var parts = [];
   categories.forEach(function(cat) {
     var keys = byCategory[cat];
     if (!keys || !keys.length) return;
@@ -73,7 +73,7 @@ function renderAllSettings(container) {
   container.innerHTML = parts.join('');
 }
 
-function _settingControlSelector(el) {
+/** @param {Element|null} el */ function _settingControlSelector(el) {
   if (!el || !el.getAttribute) return null;
   var inputKey = el.getAttribute('data-input-key');
   if (inputKey) return '[data-input-key="' + cssEscape(inputKey) + '"]';
@@ -85,8 +85,8 @@ function _settingControlSelector(el) {
   return null;
 }
 
-function rerenderSettingRow(key) {
-  var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
+/** @param {string} key */ function rerenderSettingRow(key) {
+  var row = document.querySelector(/** @type {'div'} */ ('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]'));
   if (!row) return;
   // A save lands asynchronously, and the user may be back in this row's
   // field. Replacing the row would swallow the keystrokes typed since, so
@@ -94,7 +94,7 @@ function rerenderSettingRow(key) {
   // and re-renders then. Otherwise keep focus where it was.
   var active = document.activeElement;
   var focusSelector = (active && row.contains(active)) ? _settingControlSelector(active) : null;
-  if (focusSelector && active.dataset && active.dataset.dirty) return;
+  if (focusSelector && active instanceof HTMLElement && active.dataset.dirty) return;
   var tmp = document.createElement('div');
   tmp.innerHTML = renderSettingRow(key);
   var fresh = tmp.firstElementChild;
@@ -102,24 +102,24 @@ function rerenderSettingRow(key) {
   row.replaceWith(fresh);
   if (focusSelector) {
     var target = fresh.querySelector(focusSelector);
-    if (target) {
+    if (target instanceof HTMLElement) {
       target.focus();
       try {
-        var end = String(target.value || '').length;
-        target.setSelectionRange(end, end);
+        var end = target instanceof HTMLInputElement ? String(target.value || '').length : 0;
+        if (target instanceof HTMLInputElement) target.setSelectionRange(end, end);
       } catch (e) {}  // number / checkbox inputs have no selection range
     }
   }
 }
 
-function cssEscape(s) {
+/** @param {string} s */ function cssEscape(s) {
   if (window.CSS && window.CSS.escape) return window.CSS.escape(s);
   return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
 }
 
-function renderSettingRow(key) {
-  var spec = ALL_SETTINGS_CACHE.schema[key];
-  var values = ALL_SETTINGS_CACHE.values;
+/** @param {string} key */ function renderSettingRow(key) {
+  var spec = ALL_SETTINGS_CACHE.schema?.[key];
+  var values = ALL_SETTINGS_CACHE.values; if (!spec || !values) return '';
   var hasWs = Object.prototype.hasOwnProperty.call(values.workspace, key);
   var hasGlobal = Object.prototype.hasOwnProperty.call(values['global'], key);
   var globalOnly = (spec.scope === 'global');
@@ -205,7 +205,7 @@ function renderSettingRow(key) {
        + '</div>';
 }
 
-function renderSettingWidget(key, spec, effective) {
+/** @param {string} key @param {SettingsSpec} spec @param {SettingsValue|undefined} effective */ function renderSettingWidget(key, spec, effective) {
   var inputStyle = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:12px;';
   var keyAttr = 'data-input-key="' + escapeAttr(key) + '"';
   if (spec.type === 'bool') {
@@ -289,13 +289,13 @@ function renderSettingWidget(key, spec, effective) {
        +     'style="' + inputStyle + 'width:240px;font-family:monospace;">';
 }
 
-function onSchemaInputChange(el, immediate) {
+/** @param {HTMLInputElement|HTMLSelectElement} el @param {boolean} immediate */ function onSchemaInputChange(el, immediate) {
   var key = el.getAttribute('data-input-key');
   if (!key) return;
-  var spec = ALL_SETTINGS_CACHE.schema[key];
+  var spec = ALL_SETTINGS_CACHE.schema?.[key]; if (!spec) return;
   var raw;
   if (spec.type === 'bool') {
-    raw = el.checked;
+    raw = el instanceof HTMLInputElement && el.checked;
   } else if (spec.type === 'int' || spec.type === 'float') {
     raw = el.value;     // server coerces strings to numbers
   } else {
@@ -304,21 +304,21 @@ function onSchemaInputChange(el, immediate) {
   scheduleSchemaSave(key, raw, immediate);
 }
 
-function onSchemaListChange(key) {
-  var checked = [];
-  document.querySelectorAll('input[type="checkbox"][data-list-key="' + cssEscape(key) + '"]:checked').forEach(function(cb) {
+/** @param {string} key */ function onSchemaListChange(key) {
+  /** @type {SettingsValue[]} */ var checked = [];
+  document.querySelectorAll(/** @type {'input'} */ ('input[type="checkbox"][data-list-key="' + cssEscape(key) + '"]:checked')).forEach(function(cb) {
     checked.push(cb.getAttribute('data-list-item'));
   });
   scheduleSchemaSave(key, checked, true);
 }
 
-function scheduleSchemaSave(key, value, immediate) {
+/** @param {string} key @param {SettingsValue} value @param {boolean} immediate */ function scheduleSchemaSave(key, value, immediate) {
   // Capture the scope at edit time so a tab switch during the debounce window
   // doesn't redirect the pending write to the wrong layer.
   var scope = ALL_SETTINGS_SCOPE;
   var token = key + '|' + scope;
   if (ALL_SETTINGS_DEBOUNCE[token]) {
-    clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+    clearTimeout(ALL_SETTINGS_DEBOUNCE[token] ?? undefined);
   }
   var delay = immediate ? 0 : 300;
   ALL_SETTINGS_DEBOUNCE[token] = setTimeout(function() {
@@ -327,18 +327,18 @@ function scheduleSchemaSave(key, value, immediate) {
   }, delay);
 }
 
-function _settingsScopeBaseFor(scope) {
+/** @param {string} scope */ function _settingsScopeBaseFor(scope) {
   return (scope === 'workspace') ? '/api/settings/workspace' : '/api/settings/global';
 }
 
-function confirmWorkingCopyQuotaReduction(data) {
+/** @param {SettingsQuotaError} data */ function confirmWorkingCopyQuotaReduction(data) {
   var quotaMb = Number(data.requested_working_copy_quota_mb);
   var usageBytes = Number(data.current_working_copy_usage_bytes);
   var quotaBytes = Number.isFinite(quotaMb) ? quotaMb * 1024 * 1024 : 0;
   var removalBytes = Number.isFinite(usageBytes)
     ? Math.max(0, usageBytes - quotaBytes)
     : null;
-  var detail = removalBytes > 0
+  var detail = removalBytes != null && removalBytes > 0
     ? 'This will remove approximately ' + formatBytes(removalBytes) +
       ' of the oldest generated working copies.'
     : 'If current usage exceeds the new limit, Vireo will remove the oldest generated working copies.';
@@ -348,11 +348,11 @@ function confirmWorkingCopyQuotaReduction(data) {
   );
 }
 
-async function saveSchemaSetting(key, value, scope, confirmedEviction) {
+/** @param {string} key @param {SettingsValue} value @param {string=} scope @param {boolean=} confirmedEviction */ async function saveSchemaSetting(key, value, scope, confirmedEviction) {
   if (!scope) scope = ALL_SETTINGS_SCOPE;
   setRowStatus(key, 'Saving…', false);
   try {
-    var payload = { key: key, value: value };
+    /** @type {{key:string;value:SettingsValue;_confirm_working_copy_eviction?:boolean}} */ var payload = { key: key, value: value };
     if (confirmedEviction) payload._confirm_working_copy_eviction = true;
     var resp = await fetch(_settingsScopeBaseFor(scope), {
       method: 'PATCH',
@@ -393,7 +393,7 @@ async function saveSchemaSetting(key, value, scope, confirmedEviction) {
   }
 }
 
-async function resetSchemaSetting(key, confirmedEviction) {
+/** @param {string} key @param {boolean=} confirmedEviction */ async function resetSchemaSetting(key, confirmedEviction) {
   setRowStatus(key, 'Resetting…', false);
   try {
     var scope = ALL_SETTINGS_SCOPE;
@@ -403,7 +403,7 @@ async function resetSchemaSetting(key, confirmedEviction) {
     // stick" depending on click timing.
     var token = key + '|' + scope;
     if (ALL_SETTINGS_DEBOUNCE[token]) {
-      clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+      clearTimeout(ALL_SETTINGS_DEBOUNCE[token] ?? undefined);
       ALL_SETTINGS_DEBOUNCE[token] = null;
     }
     var resp = await fetch(_settingsScopeBaseFor(scope) + '/' + encodeURIComponent(key), {
@@ -439,16 +439,16 @@ async function resetSchemaSetting(key, confirmedEviction) {
   }
 }
 
-function setRowStatus(key, msg, isError) {
-  var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
+/** @param {string} key @param {string} msg @param {boolean} isError */ function setRowStatus(key, msg, isError) {
+  var row = document.querySelector(/** @type {'div'} */ ('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]'));
   if (!row) return;
-  var status = row.querySelector('.setting-row-status');
+  var status = row.querySelector(/** @type {'div'} */ ('.setting-row-status'));
   if (!status) return;
-  status.textContent = msg;
+  status.textContent = String(msg);
   status.style.color = isError ? 'var(--danger)' : 'var(--text-dim)';
 }
 
-function formatSettingValue(v, spec, mask) {
+/** @param {SettingsValue|undefined} v @param {SettingsSpec} spec @param {boolean=} mask */ function formatSettingValue(v, spec, mask) {
   if (v === undefined || v === null) return '';
   if (spec.type === 'bool') return v ? 'true' : 'false';
   if (spec.type === 'secret') {
@@ -456,7 +456,7 @@ function formatSettingValue(v, spec, mask) {
     return mask ? '••••••••' : String(v);
   }
   if (spec.type === 'enum') {
-    if (spec.enum_labels && spec.enum_labels[v]) return spec.enum_labels[v];
+    if (spec.enum_labels && spec.enum_labels[String(v)]) return spec.enum_labels[String(v)];
     return String(v);
   }
   if (spec.type === 'list_string') {
@@ -470,7 +470,7 @@ function formatSettingValue(v, spec, mask) {
   return String(v);
 }
 
-async function importSettingsFile(file) {
+/** @param {File} file */ async function importSettingsFile(file) {
   if (!file) return;
   if (!confirm('Replace your global Vireo config with "' + file.name + '"?\n\nWorkspace overrides are not affected.')) {
     return;
@@ -479,7 +479,7 @@ async function importSettingsFile(file) {
   try {
     text = await file.text();
   } catch (err) {
-    alert('Could not read file: ' + (err && err.message || err));
+    alert('Could not read file: ' + (err && settingsErrorMessage(err) || err));
     return;
   }
   // Cancel any queued debounced autosaves first — a PATCH or a curated
@@ -487,7 +487,7 @@ async function importSettingsFile(file) {
   // mid-import would clobber part of the just-restored config.
   Object.keys(ALL_SETTINGS_DEBOUNCE).forEach(function(token) {
     if (ALL_SETTINGS_DEBOUNCE[token]) {
-      clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+      clearTimeout(ALL_SETTINGS_DEBOUNCE[token] ?? undefined);
       ALL_SETTINGS_DEBOUNCE[token] = null;
     }
   });
@@ -505,7 +505,7 @@ async function importSettingsFile(file) {
   // not go through (the form would otherwise show an unsaved value).
   var hadPendingConfigSave = _saveStatus.pending.config !== undefined;
   if (typeof _saveTimer !== 'undefined' && _saveTimer) {
-    clearTimeout(_saveTimer);
+    clearTimeout(_saveTimer ?? undefined);
     _saveTimer = null;
   }
   _autosaveSuspended = true;
@@ -553,7 +553,7 @@ async function importSettingsFile(file) {
     // is on disk.
     _saveStatusMark('config', 'ok', _nextSaveGen());
     await refreshAllSettingsValues();
-    renderAllSettings(document.getElementById('allSettingsCategories'));
+    renderAllSettings(/** @type {HTMLElement} */ (document.getElementById('allSettingsCategories')));
     filterAllSettings();
     // Curated form posts its own snapshot — repull so a later edit doesn't
     // overwrite imported global values with stale form state.
@@ -563,7 +563,7 @@ async function importSettingsFile(file) {
     if (!formReloaded) return;
     alert('Settings imported. Workspace overrides preserved.');
   } catch (err) {
-    alert('Network error: ' + (err && err.message || err));
+    alert('Network error: ' + (err && settingsErrorMessage(err) || err));
   } finally {
     if (imported && !formReloaded) {
       // The config on disk is the imported one but the form could not be
@@ -584,9 +584,9 @@ async function importSettingsFile(file) {
 }
 
 function filterAllSettings() {
-  var q = (document.getElementById('allSettingsSearch').value || '').trim();
+  var q = (/** @type {HTMLInputElement} */ (document.getElementById('allSettingsSearch')).value || '').trim();
   var searchOptions = VireoTextSearch.readOptions('allSettings');
-  var rows = document.querySelectorAll('#allSettingsCategories .setting-row-card');
+  var rows = document.querySelectorAll(/** @type {'div'} */ ('#allSettingsCategories .setting-row-card'));
   rows.forEach(function(row) {
     row.style.display = (!q || VireoTextSearch.matchesFields(
       row.getAttribute('data-search') || '',
@@ -594,9 +594,9 @@ function filterAllSettings() {
       searchOptions
     )) ? '' : 'none';
   });
-  document.querySelectorAll('#allSettingsCategories .setting-category').forEach(function(cat) {
+  document.querySelectorAll(/** @type {'div'} */ ('#allSettingsCategories .setting-category')).forEach(function(cat) {
     var anyVisible = false;
-    cat.querySelectorAll('.setting-row-card').forEach(function(r) {
+    cat.querySelectorAll(/** @type {'div'} */ ('.setting-row-card')).forEach(function(r) {
       if (r.style.display !== 'none') anyVisible = true;
     });
     cat.style.display = anyVisible ? '' : 'none';

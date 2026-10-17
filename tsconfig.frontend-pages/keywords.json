@@ -1,0 +1,25 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/keywords.d.ts",
+    "../vireo/static/keywords/boot.js",
+    "../vireo/static/keywords/bulk.js",
+    "../vireo/static/keywords/context-menu.js",
+    "../vireo/static/keywords/filtering.js",
+    "../vireo/static/keywords/filters.js",
+    "../vireo/static/keywords/link-place.js",
+    "../vireo/static/keywords/loading.js",
+    "../vireo/static/keywords/location-review.js",
+    "../vireo/static/keywords/merge-dialog.js",
+    "../vireo/static/keywords/merge-fields.js",
+    "../vireo/static/keywords/merge-helpers.js",
+    "../vireo/static/keywords/merge-map.js",
+    "../vireo/static/keywords/merge-state.js",
+    "../vireo/static/keywords/merge-summary.js",
+    "../vireo/static/keywords/rename.js",
+    "../vireo/static/keywords/render.js",
+    "../vireo/static/keywords/selection.js",
+    "../vireo/static/keywords/state.js",
+    "../vireo/static/keywords/type-dropdown.js"
+  ]
+}

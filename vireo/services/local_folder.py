@@ -26,6 +26,7 @@ from services.local_workspace import (
     LocalWorkspaceCancelled,
     LocalWorkspaceConflict,
     LocalWorkspaceError,
+    _add_recovery_republish,
     _ancestor_conflicts,
     _atomic_publish,
     _change_summary,
@@ -697,39 +698,10 @@ def _load_sync_recovery(vireo_dir: str, root_folder_id: int) -> set | None:
     return result
 
 
-def _catalog_records(
-    db, root_folder_id: int, local_base: Path, vireo_dir: str
-) -> tuple[list[dict], list[dict]]:
-    row = db.get_folder(root_folder_id)
-    if row is None:
-        raise LocalWorkspaceError("Folder not found")
-    source_path = row["path"]
-
-    # A folder already covered by a broader local root simply shares that
-    # copy; callers should use the covering session instead of creating an
-    # overlapping tree.  A requested broader root over an existing narrower
-    # session must be resolved first because two manifests cannot safely own
-    # the same catalog rows.
-    for existing in db.local_folders.source_roots():
-        if _is_within(source_path, existing["source_path"]) or _is_within(
-            existing["source_path"], source_path
-        ):
-            raise LocalWorkspaceError(
-                f"Folder overlaps an existing local copy: {existing['source_path']}"
-            )
-
-    # Do not overlap a legacy v0.24 workspace session. It remains usable for
-    # sync/discard, but new folder sessions wait until it is resolved.
-    for existing in db.local_workspaces.source_roots():
-        if _is_within(source_path, existing["source_path"]) or _is_within(
-            existing["source_path"], source_path
-        ):
-            raise LocalWorkspaceError(
-                "Folder is part of an older workspace-local session. "
-                "Finish or discard that session before staging this folder."
-            )
-
-    local_root = local_base / _safe_folder_name(source_path, root_folder_id)
+def _check_local_destination(
+    db, root_folder_id: int, source_path: str, local_root: Path, vireo_dir: str
+) -> None:
+    """Refuse a local destination that overlaps anything Vireo already manages."""
     if _physical_is_within(str(local_root), source_path) or _physical_is_within(
         source_path, str(local_root)
     ):
@@ -786,6 +758,42 @@ def _catalog_records(
         raise LocalWorkspaceError(
             f"Local destination already exists: {local_root}. Choose another location or rename the existing folder."
         )
+
+
+def _catalog_records(
+    db, root_folder_id: int, local_base: Path, vireo_dir: str
+) -> tuple[list[dict], list[dict]]:
+    row = db.get_folder(root_folder_id)
+    if row is None:
+        raise LocalWorkspaceError("Folder not found")
+    source_path = row["path"]
+
+    # A folder already covered by a broader local root simply shares that
+    # copy; callers should use the covering session instead of creating an
+    # overlapping tree.  A requested broader root over an existing narrower
+    # session must be resolved first because two manifests cannot safely own
+    # the same catalog rows.
+    for existing in db.local_folders.source_roots():
+        if _is_within(source_path, existing["source_path"]) or _is_within(
+            existing["source_path"], source_path
+        ):
+            raise LocalWorkspaceError(
+                f"Folder overlaps an existing local copy: {existing['source_path']}"
+            )
+
+    # Do not overlap a legacy v0.24 workspace session. It remains usable for
+    # sync/discard, but new folder sessions wait until it is resolved.
+    for existing in db.local_workspaces.source_roots():
+        if _is_within(source_path, existing["source_path"]) or _is_within(
+            existing["source_path"], source_path
+        ):
+            raise LocalWorkspaceError(
+                "Folder is part of an older workspace-local session. "
+                "Finish or discard that session before staging this folder."
+            )
+
+    local_root = local_base / _safe_folder_name(source_path, root_folder_id)
+    _check_local_destination(db, root_folder_id, source_path, local_root, vireo_dir)
 
     root = {
         "folder_id": int(row["id"]),
@@ -852,6 +860,77 @@ def _materialize_ancestor_workspaces(db, source_path: str, folders: list[dict]) 
         db._new_images_cache.invalidate_workspaces(db._db_path, [ws_id])
 
 
+def _claim_staging(
+    db, root_folder_id: int, vireo_dir: str, local_base: str | None
+) -> tuple[list[dict], list[dict]]:
+    """Create the local destination and record the 'staging' claim.
+
+    Runs under the stage boundary lock so concurrent stages see the claim
+    before any copying starts. Returns ``(roots, folders)``.
+    """
+    with stage_boundary_lock():
+        covering = local_root_for_folder(db, root_folder_id)
+        if covering is not None:
+            if covering == root_folder_id:
+                raise LocalWorkspaceError("This folder is already staged locally")
+            raise LocalWorkspaceError(f"This folder is already covered by local folder {covering}")
+        _remove_folder_dir(vireo_dir, root_folder_id)
+        selected_base = Path(local_base).expanduser() if local_base else default_local_base(
+            vireo_dir, root_folder_id
+        )
+        if not selected_base.is_absolute():
+            raise LocalWorkspaceError("Local destination must be an absolute path")
+        roots, folders = _catalog_records(
+            db, root_folder_id, selected_base, vireo_dir
+        )
+        local_root = roots[0]["local_path"]
+        try:
+            os.makedirs(local_root, exist_ok=False)
+        except FileExistsError:
+            raise LocalWorkspaceError(
+                f"Local destination already exists: {local_root}. "
+                "Choose another location or rename the existing folder."
+            ) from None
+        except OSError as exc:
+            raise LocalWorkspaceError(
+                f"Could not create the local destination {local_root}: {exc}"
+            ) from exc
+        try:
+            db.begin_immediate()
+            db.local_folders.create_staging(root_folder_id, time.time())
+            for folder in folders:
+                db.local_folders.add_mapping(root_folder_id, folder)
+            db.commit()
+        except BaseException:
+            db.rollback()
+            _remove_folder_dir(vireo_dir, root_folder_id, local_root)
+            raise
+        # From here the New Images walk leaves the source out.
+        _invalidate_new_images_for_source(db, roots[0]["source_path"])
+    return roots, folders
+
+
+def _copy_folder_entries(root: dict, entries: list, manifest: dict, *, progress=None, cancel_check=None) -> None:
+    """Copy one root's collected source entries locally, recording each in ``manifest["files"]``."""
+    total_files = manifest["total_files"]
+    total_bytes = manifest["total_bytes"]
+    copied = 0
+    copied_bytes = 0
+    for rel, source, st in entries:
+        if cancel_check and cancel_check():
+            raise LocalWorkspaceCancelled("Local folder transfer cancelled")
+        destination = os.path.join(root["local_path"], rel)
+        record = _copy_entry(source, destination, st, root["source_path"], cancel_check)
+        if record is None:
+            continue
+        record.update({"root": 0, "path": rel})
+        manifest["files"].append(record)
+        copied += 1
+        copied_bytes += record.get("size", 0)
+        if progress:
+            progress(copied, total_files, copied_bytes, total_bytes, rel)
+
+
 def stage_folder(
     db,
     root_folder_id: int,
@@ -865,48 +944,8 @@ def stage_folder(
     """Copy one top-level folder locally and atomically rebase the catalog."""
     root_folder_id = int(root_folder_id)
     with _folder_lock(root_folder_id):
-        with stage_boundary_lock():
-            covering = local_root_for_folder(db, root_folder_id)
-            if covering is not None:
-                if covering == root_folder_id:
-                    raise LocalWorkspaceError("This folder is already staged locally")
-                raise LocalWorkspaceError(f"This folder is already covered by local folder {covering}")
-            _remove_folder_dir(vireo_dir, root_folder_id)
-            selected_base = Path(local_base).expanduser() if local_base else default_local_base(
-                vireo_dir, root_folder_id
-            )
-            if not selected_base.is_absolute():
-                raise LocalWorkspaceError("Local destination must be an absolute path")
-            roots, folders = _catalog_records(
-                db, root_folder_id, selected_base, vireo_dir
-            )
-            local_root = roots[0]["local_path"]
-            try:
-                os.makedirs(local_root, exist_ok=False)
-            except FileExistsError:
-                raise LocalWorkspaceError(
-                    f"Local destination already exists: {local_root}. "
-                    "Choose another location or rename the existing folder."
-                ) from None
-            except OSError as exc:
-                raise LocalWorkspaceError(
-                    f"Could not create the local destination {local_root}: {exc}"
-                ) from exc
-            try:
-                db.begin_immediate()
-                db.local_folders.create_staging(root_folder_id, time.time())
-                for folder in folders:
-                    db.local_folders.add_mapping(root_folder_id, folder)
-                db.commit()
-            except BaseException:
-                db.rollback()
-                _remove_folder_dir(vireo_dir, root_folder_id, local_root)
-                raise
-            # From here the New Images walk leaves the source out.
-            _invalidate_new_images_for_source(db, roots[0]["source_path"])
+        roots, folders = _claim_staging(db, root_folder_id, vireo_dir, local_base)
 
-        copied = 0
-        copied_bytes = 0
         try:
             entries_per_root, total_files, total_bytes = _collect_source_entries(
                 roots, Path(roots[0]["local_path"])
@@ -920,20 +959,7 @@ def stage_folder(
                 "roots": [dict(roots[0])],
                 "files": [],
             }
-            root = roots[0]
-            for rel, source, st in entries_per_root[0]:
-                if cancel_check and cancel_check():
-                    raise LocalWorkspaceCancelled("Local folder transfer cancelled")
-                destination = os.path.join(root["local_path"], rel)
-                record = _copy_entry(source, destination, st, root["source_path"], cancel_check)
-                if record is None:
-                    continue
-                record.update({"root": 0, "path": rel})
-                manifest["files"].append(record)
-                copied += 1
-                copied_bytes += record.get("size", 0)
-                if progress:
-                    progress(copied, total_files, copied_bytes, total_bytes, rel)
+            _copy_folder_entries(roots[0], entries_per_root[0], manifest, progress=progress, cancel_check=cancel_check)
 
             if cancel_check and cancel_check():
                 raise LocalWorkspaceCancelled("Local folder transfer cancelled")
@@ -1196,6 +1222,147 @@ def _restore_catalog(db, root_folder_id: int) -> None:
         raise
 
 
+def _verify_folder_sync_root(root: dict) -> None:
+    """Refuse to sync unless the source and managed local roots are intact."""
+    try:
+        source_st = os.lstat(root["source_path"])
+    except OSError:
+        raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}") from None
+    if stat.S_ISLNK(source_st.st_mode) or not stat.S_ISDIR(source_st.st_mode):
+        raise LocalWorkspaceError(f"Source storage is unavailable or unsafe: {root['source_path']}")
+    if _managed_root_state(root["local_path"]) != "ok":
+        raise LocalWorkspaceError(
+            f"Managed local folder is unavailable: {root['local_path']}. Restore it or discard the local copy."
+        )
+
+
+def _check_folder_deletion_confirmation(
+    deleted: list,
+    *,
+    allow_deletions: bool,
+    confirmed_deletions: int | None,
+    resuming: bool,
+    recovery_confirmed: set | None,
+) -> bool:
+    """Refuse source deletions the user has not confirmed.
+
+    Returns whether a resumed sync carries a fresh count-bound confirmation.
+    """
+    if deleted and not allow_deletions:
+        raise LocalWorkspaceError(f"Local work deleted {len(deleted)} file(s); confirm deletions before syncing")
+    if confirmed_deletions is not None and len(deleted) > confirmed_deletions:
+        raise LocalWorkspaceError(
+            f"Local deletions changed since you confirmed: {len(deleted)} file(s) would now be deleted."
+        )
+    fresh_confirmation = resuming and confirmed_deletions == len(deleted)
+    if resuming and recovery_confirmed is not None and not fresh_confirmation:
+        new_deletions = [key for key in deleted if key not in recovery_confirmed]
+        if new_deletions:
+            raise LocalWorkspaceError(
+                "Local deletions changed since sync was interrupted; review and confirm again."
+            )
+    return fresh_confirmation
+
+
+def _folder_sync_conflicts(
+    manifest: dict,
+    baseline: dict,
+    local: dict,
+    changed: list,
+    deleted: list,
+    recovery_republish: set,
+    *,
+    scan_progress=None,
+    cancel_check=None,
+) -> list[str]:
+    """Source paths a sync would clobber, reporting each compared entry."""
+    conflicts = []
+    at_risk = [key for key in changed if key in baseline] + list(deleted)
+    added = [key for key in changed if key not in baseline]
+    # Every at-risk source entry is re-read (and usually re-hashed) before
+    # a single byte is published, so this loop is the slow half of a sync.
+    # Count the files up front and report each one as it is checked.
+    scan_total = len(at_risk) + len(added)
+    scanned = 0
+
+    def note_scanning(rel):
+        """Name the entry about to be compared, before it is counted.
+
+        The count is what the job's throughput and ETA are derived from,
+        so it may only advance once an entry has actually been read —
+        hashing one multi-gigabyte original over SMB is minutes of work
+        that a count-on-entry would already be showing as finished.
+        """
+        if scan_progress:
+            scan_progress(scanned, scan_total, rel)
+
+    for key in at_risk:
+        index, rel = key
+        note_scanning(rel)
+        try:
+            remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
+            remote_matches, remote_sha = _source_state(remote_path, baseline[key], cancel_check)
+            if remote_matches:
+                continue
+            entry = local.get(key)
+            local_path = entry[0] if entry else None
+            if local_path is None and not os.path.lexists(remote_path):
+                continue
+            if key in recovery_republish and not os.path.lexists(remote_path):
+                continue
+            if local_path and _matches_remote(local_path, remote_path, remote_sha, cancel_check):
+                continue
+            conflicts.append(remote_path)
+        finally:
+            scanned += 1
+
+    deleted_set = set(deleted)
+    for key in added:
+        index, rel = key
+        note_scanning(rel)
+        try:
+            remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
+            if not os.path.lexists(remote_path):
+                continue
+            if os.path.isdir(remote_path) and not os.path.islink(remote_path):
+                conflicts.extend(
+                    full
+                    for entry_rel, full, st in _walk_entries(remote_path)
+                    if _entry_type(st) != "dir"
+                    and (index, os.path.join(rel, entry_rel)) not in deleted_set
+                )
+            elif not _matches_remote(local[key][0], remote_path, None, cancel_check):
+                conflicts.append(remote_path)
+        finally:
+            scanned += 1
+
+    if scan_progress:
+        scan_progress(scanned, scan_total, "")
+    conflicts.extend(_ancestor_conflicts(list(changed) + list(deleted), manifest, deleted_set))
+    return conflicts
+
+
+def _publish_folder_changes(manifest: dict, local: dict, changed: list, deleted: list, progress=None) -> None:
+    """Apply local deletions, then publish created and modified files to source."""
+    total = len(changed) + len(deleted)
+    done = 0
+    for index, rel in deleted:
+        remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
+        with suppress(FileNotFoundError):
+            os.unlink(remote_path)
+        done += 1
+        if progress:
+            progress(done, total, rel)
+    for key in changed:
+        index, rel = key
+        remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
+        _prepare_publish_target(remote_path)
+        _atomic_publish(local[key][0], remote_path)
+        done += 1
+        if progress:
+            progress(done, total, rel)
+
+
 def sync_folder(
     db,
     root_folder_id: int,
@@ -1233,104 +1400,22 @@ def sync_folder(
                 "The staged file inventory is missing. Discard restores the catalog without touching source files."
             )
         root = manifest["roots"][0]
-        try:
-            source_st = os.lstat(root["source_path"])
-        except OSError:
-            raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}") from None
-        if stat.S_ISLNK(source_st.st_mode) or not stat.S_ISDIR(source_st.st_mode):
-            raise LocalWorkspaceError(f"Source storage is unavailable or unsafe: {root['source_path']}")
-        if _managed_root_state(root["local_path"]) != "ok":
-            raise LocalWorkspaceError(
-                f"Managed local folder is unavailable: {root['local_path']}. Restore it or discard the local copy."
-            )
+        _verify_folder_sync_root(root)
 
         baseline, local, changed, deleted = _local_changes(manifest)
-        recovery_republish = set()
-        if resuming and recovery_confirmed:
-            changed_set = set(changed)
-            for key in recovery_confirmed:
-                if key in local:
-                    recovery_republish.add(key)
-                    if key not in changed_set:
-                        changed.append(key)
-                        changed_set.add(key)
-        if deleted and not allow_deletions:
-            raise LocalWorkspaceError(f"Local work deleted {len(deleted)} file(s); confirm deletions before syncing")
-        if confirmed_deletions is not None and len(deleted) > confirmed_deletions:
-            raise LocalWorkspaceError(
-                f"Local deletions changed since you confirmed: {len(deleted)} file(s) would now be deleted."
-            )
-        fresh_confirmation = resuming and confirmed_deletions == len(deleted)
-        if resuming and recovery_confirmed is not None and not fresh_confirmation:
-            new_deletions = [key for key in deleted if key not in recovery_confirmed]
-            if new_deletions:
-                raise LocalWorkspaceError(
-                    "Local deletions changed since sync was interrupted; review and confirm again."
-                )
+        recovery_republish = _add_recovery_republish(changed, local, resuming, recovery_confirmed)
+        fresh_confirmation = _check_folder_deletion_confirmation(
+            deleted,
+            allow_deletions=allow_deletions,
+            confirmed_deletions=confirmed_deletions,
+            resuming=resuming,
+            recovery_confirmed=recovery_confirmed,
+        )
 
-        conflicts = []
-        at_risk = [key for key in changed if key in baseline] + list(deleted)
-        added = [key for key in changed if key not in baseline]
-        # Every at-risk source entry is re-read (and usually re-hashed) before
-        # a single byte is published, so this loop is the slow half of a sync.
-        # Count the files up front and report each one as it is checked.
-        scan_total = len(at_risk) + len(added)
-        scanned = 0
-
-        def note_scanning(rel):
-            """Name the entry about to be compared, before it is counted.
-
-            The count is what the job's throughput and ETA are derived from,
-            so it may only advance once an entry has actually been read —
-            hashing one multi-gigabyte original over SMB is minutes of work
-            that a count-on-entry would already be showing as finished.
-            """
-            if scan_progress:
-                scan_progress(scanned, scan_total, rel)
-
-        for key in at_risk:
-            index, rel = key
-            note_scanning(rel)
-            try:
-                remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
-                remote_matches, remote_sha = _source_state(remote_path, baseline[key], cancel_check)
-                if remote_matches:
-                    continue
-                entry = local.get(key)
-                local_path = entry[0] if entry else None
-                if local_path is None and not os.path.lexists(remote_path):
-                    continue
-                if key in recovery_republish and not os.path.lexists(remote_path):
-                    continue
-                if local_path and _matches_remote(local_path, remote_path, remote_sha, cancel_check):
-                    continue
-                conflicts.append(remote_path)
-            finally:
-                scanned += 1
-
-        deleted_set = set(deleted)
-        for key in added:
-            index, rel = key
-            note_scanning(rel)
-            try:
-                remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
-                if not os.path.lexists(remote_path):
-                    continue
-                if os.path.isdir(remote_path) and not os.path.islink(remote_path):
-                    conflicts.extend(
-                        full
-                        for entry_rel, full, st in _walk_entries(remote_path)
-                        if _entry_type(st) != "dir"
-                        and (index, os.path.join(rel, entry_rel)) not in deleted_set
-                    )
-                elif not _matches_remote(local[key][0], remote_path, None, cancel_check):
-                    conflicts.append(remote_path)
-            finally:
-                scanned += 1
-
-        if scan_progress:
-            scan_progress(scanned, scan_total, "")
-        conflicts.extend(_ancestor_conflicts(list(changed) + list(deleted), manifest, deleted_set))
+        conflicts = _folder_sync_conflicts(
+            manifest, baseline, local, changed, deleted, recovery_republish,
+            scan_progress=scan_progress, cancel_check=cancel_check,
+        )
         if conflicts:
             raise LocalWorkspaceConflict(sorted(set(conflicts)))
 
@@ -1345,23 +1430,7 @@ def sync_folder(
         elif fresh_confirmation:
             _write_sync_recovery(vireo_dir, root_folder_id, deleted)
 
-        total = len(changed) + len(deleted)
-        done = 0
-        for index, rel in deleted:
-            remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
-            with suppress(FileNotFoundError):
-                os.unlink(remote_path)
-            done += 1
-            if progress:
-                progress(done, total, rel)
-        for key in changed:
-            index, rel = key
-            remote_path = os.path.join(manifest["roots"][index]["source_path"], rel)
-            _prepare_publish_target(remote_path)
-            _atomic_publish(local[key][0], remote_path)
-            done += 1
-            if progress:
-                progress(done, total, rel)
+        _publish_folder_changes(manifest, local, changed, deleted, progress)
         workspace_ids = affected_workspace_ids(db, root_folder_id)
         _restore_catalog(db, root_folder_id)
         _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])

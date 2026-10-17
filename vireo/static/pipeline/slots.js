@@ -8,23 +8,24 @@
 // "Queue Pipeline" when no slot is free, and (2) show a small
 // "N running . M queued" status line linking to /jobs.
 var _slotInfo = { active: 0, queued: 0, slot_cap: 1 };
-var _slotPollTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */ var _slotPollTimer = null;
 var _SLOT_POLL_MS = 2000;
 
+/** @param {PipelineSlotInfo} info */
 function _applySlotInfo(info) {
   _slotInfo = info || _slotInfo;
   // Label flip — only when *this tab* isn't itself running a pipeline,
   // because while it is, the same button is the Stop button.
   if (!_pipelineRunning) {
-    var btn = document.getElementById('btnStartPipeline');
+    var btn = /** @type {HTMLButtonElement} */ (document.getElementById('btnStartPipeline'));
     if (btn) {
       var queueing = _slotInfo.active >= _slotInfo.slot_cap;
       btn.textContent = queueing ? 'Queue Pipeline' : 'Start Pipeline';
     }
   }
   // Status line: hidden when there's nothing to report.
-  var line = document.getElementById('pipelineSlotStatus');
-  var counts = document.getElementById('pipelineSlotCounts');
+  var line = /** @type {HTMLElement} */ (document.getElementById('pipelineSlotStatus'));
+  var counts = /** @type {HTMLElement} */ (document.getElementById('pipelineSlotCounts'));
   if (!line || !counts) return;
   if (_slotInfo.active === 0 && _slotInfo.queued === 0) {
     line.style.display = 'none';

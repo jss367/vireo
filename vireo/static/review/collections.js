@@ -3,11 +3,11 @@
 
 async function loadCollectionFilter() {
   try {
-    var collections = await safeFetch('/api/collections', {}, { toast: false });
-    var sel = document.getElementById('collectionFilter');
+    /** @type {{id:number;name:string;count_error?:string;photo_count?:number;has_visual?:boolean}[]} */ var collections = await safeFetch('/api/collections', {}, { toast: false });
+    var sel = /** @type {HTMLSelectElement} */ (document.getElementById('collectionFilter'));
     collections.forEach(function(c) {
       var opt = document.createElement('option');
-      opt.value = c.id;
+      opt.value = String(c.id);
       opt.textContent = c.name;
       // count_error means /api/collections couldn't resolve this collection's
       // rules — selecting it would 400 the downstream /photos endpoint and
@@ -44,7 +44,7 @@ async function loadCollectionFilter() {
 // stale collection state and the Review grid stays wrong.
 var _switchCollectionEpoch = 0;
 
-async function switchCollection(val) {
+/** @param {string} val */ async function switchCollection(val) {
   var mySwitchEpoch = ++_switchCollectionEpoch;
   currentCollection = val;
   // Gate mutation entry points immediately: currentCollection has already
@@ -62,7 +62,7 @@ async function switchCollection(val) {
     // safety intersection (allPredictions ∩ collectionPhotoIds) still
     // narrows a stale ``allPredictions`` while the new fetch is in flight.
     try {
-      var data = await safeFetch('/api/collections/' + val + '/photos?per_page=999999', {}, { toast: false });
+      /** @type {{photos:{id:number}[]}} */ var data = await safeFetch('/api/collections/' + val + '/photos?per_page=999999', {}, { toast: false });
       if (mySwitchEpoch !== _switchCollectionEpoch) return;  // superseded — drop
       collectionPhotoIds = new Set(data.photos.map(function(p) { return p.id; }));
     } catch(e) {

@@ -6,8 +6,8 @@
 // edit-mask snapshot on first touch so saved renders never shift under a
 // regenerated mask. See docs/plans/2026-07-03-local-adjustments-design.md.
 
-var LOCAL_REGIONS = ['subject', 'background'];
-var LOCAL_CONTROL_DEFS = [
+/** @type {('subject'|'background')[]} */ var LOCAL_REGIONS = ['subject', 'background'];
+/** @type {[string,string,number,number,number,boolean][]} */ var LOCAL_CONTROL_DEFS = [
   ['exposure', 'Exposure', -5, 5, 0.1, true],
   ['shadows', 'Shadows', -100, 100, 1, false],
   ['highlights', 'Highlights', -100, 100, 1, false],
@@ -18,7 +18,7 @@ var LOCAL_CONTROL_DEFS = [
 
 function buildLocalControls() {
   LOCAL_REGIONS.forEach(function(region) {
-    var host = document.getElementById(region + 'LocalControls');
+    const host = /** @type {HTMLElement} */ (document.getElementById(region + 'LocalControls'));
     if (!host || host.childElementCount) return;
     LOCAL_CONTROL_DEFS.forEach(function(def) {
       var key = def[0];
@@ -32,30 +32,30 @@ function buildLocalControls() {
         '<span class="control-value" id="' + id + 'Value">' +
         (def[5] ? '0.0' : '0') + '</span>';
       host.appendChild(row);
-      row.querySelector('input').addEventListener('input', function() {
+      row.querySelector('input')?.addEventListener('input', function() {
         setLocalAdjustment(region, key, this.value, def[5]);
       });
     });
   });
 }
 
-function localRegionValues(recipe) {
-  var out = {subject: {}, background: {}, feather: 0};
-  var local = recipe && recipe.local || {};
-  (local.regions || []).forEach(function(entry) {
+/** @param {EditorRecipe} recipe */ function localRegionValues(recipe) {
+  /** @type {EditorLocalDraft} */ var out = {subject: {}, background: {}, feather: 0};
+  var local = recipe.local;
+  (local?.regions || []).forEach(function(entry) {
     if (out[entry.region]) {
       out[entry.region] = Object.assign({}, entry.adjustments || {});
     }
   });
-  out.feather = Number((local.mask || {}).feather || 0);
+  out.feather = Number((local?.mask || {}).feather || 0);
   return out;
 }
 
 function rebuildLocalSection() {
   var draft = editorState.localDraft;
-  var regions = [];
+  /** @type {EditorLocalRegion[]} */ var regions = [];
   LOCAL_REGIONS.forEach(function(region) {
-    var adj = {};
+    /** @type {Record<string,number>} */ var adj = {};
     LOCAL_CONTROL_DEFS.forEach(function(def) {
       var v = Number(draft[region][def[0]] || 0);
       if (Math.abs(v) > 0.000001) adj[def[0]] = v;
@@ -79,7 +79,7 @@ function rebuildLocalSection() {
     delete editorState.recipe.local;
     return;
   }
-  var mask = {
+  /** @type {EditorMask} */ var mask = {
     ref: editorState.localMask.ref,
     source_digest: editorState.localMask.source_digest,
   };
@@ -114,34 +114,34 @@ function syncLocalControls() {
   LOCAL_REGIONS.forEach(function(region) {
     LOCAL_CONTROL_DEFS.forEach(function(def) {
       var id = 'local_' + region + '_' + def[0];
-      var input = document.getElementById(id + 'Range');
-      var label = document.getElementById(id + 'Value');
+      var input = /** @type {HTMLInputElement} */ (document.getElementById(id + 'Range'));
+      var label = /** @type {HTMLElement} */ (document.getElementById(id + 'Value'));
       var v = Number(vals[region][def[0]] || 0);
       if (input) input.value = String(v);
       if (label) label.textContent = def[5] ? v.toFixed(1) : String(Math.round(v));
     });
   });
-  var feather = document.getElementById('featherRange');
+  var feather = /** @type {HTMLInputElement} */ (document.getElementById('featherRange'));
   if (feather) feather.value = String(vals.feather || 0);
-  var featherLabel = document.getElementById('featherValue');
+  var featherLabel = /** @type {HTMLElement} */ (document.getElementById('featherValue'));
   if (featherLabel) featherLabel.textContent = String(Math.round(vals.feather || 0));
   updateLocalBandVisibility();
 }
 
 function updateLocalBandVisibility() {
   var available = editorState.localAvailable || !!editorState.recipe.local;
-  var band = document.getElementById('localBand');
-  var unavailable = document.getElementById('localUnavailableBand');
+  var band = /** @type {HTMLElement} */ (document.getElementById('localBand'));
+  var unavailable = /** @type {HTMLElement} */ (document.getElementById('localUnavailableBand'));
   if (band) band.style.display = available ? '' : 'none';
   if (unavailable) unavailable.style.display = available ? 'none' : '';
-  var banner = document.getElementById('localStaleBanner');
+  var banner = /** @type {HTMLElement} */ (document.getElementById('localStaleBanner'));
   if (banner) {
     banner.style.display = editorState.localStale ? '' : 'none';
     var corrected = ((editorState.recipe.local || {}).mask || {}).corrected === true;
-    banner.querySelector('span').textContent = corrected
+    var text = banner.querySelector('span'); if (text) text.textContent = corrected
       ? 'Newer subject mask available. Replacing it clears painted corrections; Undo restores them.'
       : 'Newer subject mask available';
-    banner.querySelector('button').textContent = corrected ? 'Replace Mask' : 'Update';
+    var button = banner.querySelector('button'); if (button) button.textContent = corrected ? 'Replace Mask' : 'Update';
   }
 }
 
@@ -156,7 +156,7 @@ function ensureLocalMask() {
     var pending = safeFetch(
       '/api/photos/' + photoId + '/local-mask/snapshot',
       {method: 'POST'}, {toast: false}
-    ).then(function(data) {
+    ).then(/** @param {{mask:EditorMask}} data */ function(data) {
       if (editorState.photoId === photoId && editorState.localMaskPromise === pending) {
         editorState.localMask = data.mask;
       }
@@ -168,7 +168,7 @@ function ensureLocalMask() {
         if (window.renderHistoryControls) window.renderHistoryControls();
         updateLocalBandVisibility();
         if (typeof showToast === 'function') {
-          showToast(e.message || 'Could not snapshot the subject mask', 'error');
+          showToast(editorErrorMessage(e) || 'Could not snapshot the subject mask', 'error');
         }
       }
       throw e;
@@ -179,11 +179,11 @@ function ensureLocalMask() {
   return editorState.localMaskPromise;
 }
 
-function setLocalAdjustment(region, key, raw, fixed) {
+/** @param {'subject'|'background'} region @param {string} key @param {string} raw @param {boolean} fixed */ function setLocalAdjustment(region, key, raw, fixed) {
   if (editorState.loading) return;
   var v = Number(raw) || 0;
   editorState.localDraft[region][key] = v;
-  var label = document.getElementById('local_' + region + '_' + key + 'Value');
+  var label = /** @type {HTMLElement} */ (document.getElementById('local_' + region + '_' + key + 'Value'));
   if (label) label.textContent = fixed ? v.toFixed(1) : String(Math.round(v));
   if (editorState.localMask) {
     rebuildLocalSection();
@@ -202,11 +202,11 @@ function setLocalAdjustment(region, key, raw, fixed) {
   }
 }
 
-function setLocalFeather(raw) {
+/** @param {string} raw */ function setLocalFeather(raw) {
   if (editorState.loading) return;
   var v = Number(raw) || 0;
   editorState.localDraft.feather = v;
-  var label = document.getElementById('featherValue');
+  var label = /** @type {HTMLElement} */ (document.getElementById('featherValue'));
   if (label) label.textContent = String(Math.round(v));
   // Feather alone previews the live mask. Freeze it only when a region
   // adjustment begins, so the overlay and that adjustment use the same mask.
@@ -242,7 +242,7 @@ async function updateLocalMask() {
   var photoId = editorState.photoId;
   var updateSeq = ++editorState.localMaskUpdateSeq;
   try {
-    var data = await safeFetch(
+    /** @type {{mask:EditorMask}} */ var data = await safeFetch(
       '/api/photos/' + photoId + '/local-mask/snapshot',
       {method: 'POST'}, {toast: false}
     );
@@ -260,7 +260,7 @@ async function updateLocalMask() {
     if (editorState.photoId !== photoId ||
         editorState.localMaskUpdateSeq !== updateSeq) return;
     if (typeof showToast === 'function') {
-      showToast(e.message || 'Could not update the subject mask', 'error');
+      showToast(editorErrorMessage(e) || 'Could not update the subject mask', 'error');
     }
   }
 }
@@ -272,7 +272,7 @@ function toggleMaskOverlay() {
 }
 
 function refreshMaskOverlay() {
-  var overlay = document.getElementById('maskOverlayImg');
+  var overlay = /** @type {HTMLImageElement} */ (document.getElementById('maskOverlayImg'));
   if (!overlay) return;
   // Keep crop in the overlay recipe. /edit-mask-preview strips crop only
   // for geometry alignment with the uncropped editor preview, but still
@@ -330,8 +330,8 @@ function refreshMaskOverlay() {
 }
 
 function positionMaskOverlay() {
-  var img = document.getElementById('editorImg');
-  var overlay = document.getElementById('maskOverlayImg');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
+  var overlay = /** @type {HTMLImageElement} */ (document.getElementById('maskOverlayImg'));
   if (!img || !overlay) return;
   overlay.style.width = img.clientWidth + 'px';
   overlay.style.height = img.clientHeight + 'px';

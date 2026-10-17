@@ -25,6 +25,18 @@ from species_identity import (
 from species_identity_repair import apply_repairs, plan_repairs
 from taxonomy import Taxonomy
 
+# ``species-conflicts.js`` reaches ``pipelineResults`` through two review-state
+# helpers that live in ``pipeline-review/state.js`` and are not loaded when the
+# tests here extract and run a slice of the module under bare Node. Prepend a
+# matching pair so the extracted slice sees the same contract.
+_SPECIES_CONFLICT_SHIM = (
+    "function requireReviewValue(v) {"
+    " if (v == null) throw new Error('review value missing'); return v; }\n"
+    "function currentReviewResults() {"
+    " return requireReviewValue(pipelineResults); }\n"
+)
+
+
 RED = {"taxon_id": 18976, "scientific_name": "Amazona viridigenalis",
        "common_name": "Red-crowned Parrot", "rank": "species"}
 BROWED = {"taxon_id": 18997, "scientific_name": "Amazona rhodocorytha",
@@ -540,7 +552,8 @@ def test_process_review_does_not_flag_confirmed_synonym_as_conflict(taxonomy):
     html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
     start = html.index("var SPECIES_CONFLICT_THRESHOLDS")
     end = html.index("function buildSpeciesConflictEvidence", start)
-    source = ("var pipelineResults = " + json.dumps(data) + ";\n" + html[start:end]
+    source = ("var pipelineResults = " + json.dumps(data) + ";\n"
+              + _SPECIES_CONFLICT_SHIM + html[start:end]
               + "\nprocess.stdout.write(JSON.stringify(analyzePhotoSpeciesConflict("
                 "pipelineResults.photos[0], 'Red-crowned Amazon')));")
     result = subprocess.run([node, "-e", source], capture_output=True, text=True, check=True, timeout=15)
@@ -771,7 +784,8 @@ def test_pipeline_serialization_keeps_unresolved_source_keys(db, tmp_path, same_
     if node:
         html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
         source = html[html.index("var SPECIES_CONFLICT_THRESHOLDS"):html.index("function buildSpeciesConflictEvidence")]
-        script = ("var pipelineResults = " + json.dumps(data) + ";\n" + source
+        script = ("var pipelineResults = " + json.dumps(data) + ";\n"
+                  + _SPECIES_CONFLICT_SHIM + source
                   + "\nprocess.stdout.write(JSON.stringify(analyzePhotoSpeciesConflict("
                     "pipelineResults.photos[1], pipelineResults.photos[0].species_top5[0][0])));")
         result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, timeout=15)
@@ -931,7 +945,8 @@ def test_review_keeps_homonymous_predictions_and_confirmed_tags_distinct(db, tmp
         assert data["species_identities"][display]["key"] not in {"taxon:18976", "taxon:18997"}
     html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
     source = html[html.index("var SPECIES_CONFLICT_THRESHOLDS"):html.index("function formatSpeciesConfidence")]
-    script = ("var pipelineResults = " + json.dumps(data) + ";\n" + source
+    script = ("var pipelineResults = " + json.dumps(data) + ";\n"
+              + _SPECIES_CONFLICT_SHIM + source
               + "\nvar photoMap = {}; pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });"
                 "process.stdout.write(JSON.stringify(buildSpeciesConflictEvidence(photoMap)));")
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, timeout=15)
@@ -946,7 +961,7 @@ def test_review_keeps_homonymous_predictions_and_confirmed_tags_distinct(db, tmp
         db.tag_photo(pid, kid)
     data = payload()
     assert data["encounters"][0]["species_confirmed"] == same_taxon
-    rapid = (Path(__file__).parents[1] / "templates/pipeline_rapid_review.html").read_text(encoding="utf-8")
+    rapid = (Path(__file__).parents[1] / "static/pipeline-rapid-review/queue-filters.js").read_text(encoding="utf-8")
     function = rapid[rapid.index("function hasMixedSpecies"):rapid.index("function needsSpecies")]
     script = ("var data = " + json.dumps(data) + "; var rapid = {results:data};\n"
               "function queueIncludedPhotos() { return data.photos; }\n"
@@ -975,6 +990,7 @@ def _review_conflict(data, expected_species):
     html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
     start = html.index("var SPECIES_CONFLICT_THRESHOLDS")
     source = ("var pipelineResults = " + json.dumps(data) + ";\n"
+              + _SPECIES_CONFLICT_SHIM
               + html[start:html.index("function buildSpeciesConflictEvidence", start)]
               + "\nprocess.stdout.write(JSON.stringify(analyzePhotoSpeciesConflict("
                 "pipelineResults.photos[0], " + json.dumps(expected_species) + ")));")
@@ -1075,6 +1091,7 @@ def test_group_review_modal_reads_the_same_conflict_as_the_card(db, tmp_path):
               + "var photo = pipelineResults.photos[1];\n"
               + "function escapeHtml(s) { return String(s); }\n"
               + "function formatSpeciesConfidence(v) { return Math.round(v * 100) + '%'; }\n"
+              + _SPECIES_CONFLICT_SHIM
               + helpers + "\nvar html = '';\n" + modal + "\nprocess.stdout.write(html);")
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, timeout=15)
     assert "Strong classification conflict" in result.stdout
@@ -1120,7 +1137,8 @@ def test_partially_confirmed_encounter_keeps_a_same_name_taxon_visible(db, tmp_p
 
     html = (Path(__file__).parents[1] / "static/pipeline-review/species-conflicts.js").read_text(encoding="utf-8")
     source = html[html.index("var SPECIES_CONFLICT_THRESHOLDS"):html.index("function formatSpeciesConfidence")]
-    script = ("var pipelineResults = " + json.dumps(data) + ";\n" + source
+    script = ("var pipelineResults = " + json.dumps(data) + ";\n"
+              + _SPECIES_CONFLICT_SHIM + source
               + "\nvar photoMap = {}; pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });"
                 "process.stdout.write(JSON.stringify(buildSpeciesConflictEvidence(photoMap)));")
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, timeout=15)

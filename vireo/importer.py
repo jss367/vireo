@@ -171,26 +171,8 @@ def preview_import(catalog_paths, db):
     }
 
 
-def execute_import(
-    catalog_paths, db, write_xmp=False, strategy="merge_all", progress_callback=None,
-    pause_callback=None,
-):
-    """Import keywords from catalogs into the Vireo database.
-
-    Args:
-        catalog_paths: list of paths to .lrcat files
-        db: Database instance
-        write_xmp: if True, also write XMP sidecars
-        strategy: conflict resolution ('merge_all', 'prefer_first', 'prefer_last')
-        progress_callback: optional callable(current, total)
-
-    Returns:
-        dict with imported, skipped, failed counts, ``errors`` (unreadable
-        catalogs and per-file failures, capped at ``_MAX_IMPORT_ERRORS`` with
-        the full count in ``errors_total``) and ``ok`` — False when any
-        catalog or file failed, which the job runner reports as a failed run.
-    """
-    # Build path -> DB photo lookup.
+def _photo_path_index(db, pause_callback):
+    """Build path -> DB photo lookup."""
     photos_by_path = _PhotoPathIndex()
     all_photos = db.get_photos(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
@@ -199,8 +181,14 @@ def execute_import(
             pause_callback()
         folder_path = folders.get(p["folder_id"], "")
         photos_by_path.add(os.path.join(folder_path, p["filename"]), p)
+    return photos_by_path
 
-    # Merge catalog data
+
+def _merge_catalog_keywords(catalog_paths, photos_by_path, strategy, pause_callback):
+    """Merge every catalog's keywords per photo under the conflict strategy.
+
+    Returns ``(merged, errors, unreadable_catalogs)``.
+    """
     merged = {}  # group key -> {path, photo, flat_keywords, hierarchical_keywords}
     errors = []
     unreadable_catalogs = 0
@@ -246,6 +234,100 @@ def execute_import(
                 merged[key]["hierarchical_keywords"] = kw_data[
                     "hierarchical_keywords"
                 ]
+    return merged, errors, unreadable_catalogs
+
+
+def _import_photo_keywords(db, photo, kw_data, file_path, write_xmp):
+    """Tag one photo with its merged catalog keywords (and write its sidecar)."""
+    # Import keywords into DB. Skip entries that normalize to `""`
+    # (a lone smart quote, whitespace) — add_keyword() rejects those
+    # after this PR, and the surrounding try/except would otherwise
+    # count the whole photo as failed rather than just dropping the
+    # malformed keyword.
+    validate_import_locations(db, photo['id'], kw_data['flat_keywords'], kw_data['hierarchical_keywords'])
+    # Import hierarchical keywords. Skip an entry whose chain
+    # contains any segment that normalizes to `""` — the resulting
+    # `add_keyword()` call would raise and the whole hierarchical
+    # tree for this photo would be lost.
+    hierarchy_leaf_keys = set()
+    for hier in kw_data["hierarchical_keywords"]:
+        parts = hier.split("|")
+        if any(not keyword_match_key(part) for part in parts):
+            continue
+        parent_id = None
+        for index, part in enumerate(parts):
+            kid = db.add_keyword(part, parent_id=parent_id, _resolve_alias=index == len(parts) - 1)
+            parent_id = kid
+        db.tag_photo(photo["id"], parent_id, source="manual")
+        hierarchy_leaf_keys.add(keyword_match_key(parts[-1]))
+
+    # Hierarchical leaves already represent their flat spelling.
+    existing_keys = {keyword_match_key(k["name"])
+                     for k in db.get_photo_keywords(photo["id"])} | hierarchy_leaf_keys
+    for kw_name in kw_data["flat_keywords"]:
+        if not keyword_match_key(kw_name) or keyword_match_key(kw_name) in existing_keys:
+            continue
+        kid = db.add_keyword(kw_name, _resolve_alias=True)
+        # Lightroom catalog metadata was explicitly authored outside
+        # Vireo. Keep that provenance on the association even when
+        # write_xmp=False leaves no sidecar or pending change.
+        db.tag_photo(photo["id"], kid, source="manual")
+        existing_keys.add(keyword_match_key(kw_name))
+
+    # Write XMP if requested. Build normalized keyword sets so the
+    # sidecar matches what we stored/tagged in the DB above:
+    # entries that normalize to `""` are dropped (they were also
+    # skipped by add_keyword), and edge-quote variants are written
+    # in their clean form. Without this, the sidecar can carry a
+    # `‘apapane` <rdf:li> while the DB row is clean `apapane`, and
+    # a later XMP import/prune diff would tag the two as
+    # different keywords.
+    if write_xmp and Path(file_path).exists():
+        xmp_flat = {
+            normalize_keyword_display(kw)
+            for kw in kw_data["flat_keywords"]
+            if keyword_match_key(kw)
+        }
+        xmp_hier = set()
+        for hier in kw_data["hierarchical_keywords"]:
+            parts = hier.split("|")
+            if any(not keyword_match_key(part) for part in parts):
+                continue
+            xmp_hier.add(
+                "|".join(normalize_keyword_display(part) for part in parts)
+            )
+        xmp_path = str(Path(file_path).with_suffix(".xmp"))
+        write_sidecar(
+            xmp_path,
+            flat_keywords=xmp_flat,
+            hierarchical_keywords=xmp_hier,
+        )
+
+
+def execute_import(
+    catalog_paths, db, write_xmp=False, strategy="merge_all", progress_callback=None,
+    pause_callback=None,
+):
+    """Import keywords from catalogs into the Vireo database.
+
+    Args:
+        catalog_paths: list of paths to .lrcat files
+        db: Database instance
+        write_xmp: if True, also write XMP sidecars
+        strategy: conflict resolution ('merge_all', 'prefer_first', 'prefer_last')
+        progress_callback: optional callable(current, total)
+
+    Returns:
+        dict with imported, skipped, failed counts, ``errors`` (unreadable
+        catalogs and per-file failures, capped at ``_MAX_IMPORT_ERRORS`` with
+        the full count in ``errors_total``) and ``ok`` — False when any
+        catalog or file failed, which the job runner reports as a failed run.
+    """
+    photos_by_path = _photo_path_index(db, pause_callback)
+
+    merged, errors, unreadable_catalogs = _merge_catalog_keywords(
+        catalog_paths, photos_by_path, strategy, pause_callback,
+    )
 
     imported = 0
     skipped = 0
@@ -265,70 +347,7 @@ def execute_import(
             continue
 
         try:
-            # Import keywords into DB. Skip entries that normalize to `""`
-            # (a lone smart quote, whitespace) — add_keyword() rejects those
-            # after this PR, and the surrounding try/except would otherwise
-            # count the whole photo as failed rather than just dropping the
-            # malformed keyword.
-            validate_import_locations(db, photo['id'], kw_data['flat_keywords'], kw_data['hierarchical_keywords'])
-            # Import hierarchical keywords. Skip an entry whose chain
-            # contains any segment that normalizes to `""` — the resulting
-            # `add_keyword()` call would raise and the whole hierarchical
-            # tree for this photo would be lost.
-            hierarchy_leaf_keys = set()
-            for hier in kw_data["hierarchical_keywords"]:
-                parts = hier.split("|")
-                if any(not keyword_match_key(part) for part in parts):
-                    continue
-                parent_id = None
-                for index, part in enumerate(parts):
-                    kid = db.add_keyword(part, parent_id=parent_id, _resolve_alias=index == len(parts) - 1)
-                    parent_id = kid
-                db.tag_photo(photo["id"], parent_id, source="manual")
-                hierarchy_leaf_keys.add(keyword_match_key(parts[-1]))
-
-            # Hierarchical leaves already represent their flat spelling.
-            existing_keys = {keyword_match_key(k["name"])
-                             for k in db.get_photo_keywords(photo["id"])} | hierarchy_leaf_keys
-            for kw_name in kw_data["flat_keywords"]:
-                if not keyword_match_key(kw_name) or keyword_match_key(kw_name) in existing_keys:
-                    continue
-                kid = db.add_keyword(kw_name, _resolve_alias=True)
-                # Lightroom catalog metadata was explicitly authored outside
-                # Vireo. Keep that provenance on the association even when
-                # write_xmp=False leaves no sidecar or pending change.
-                db.tag_photo(photo["id"], kid, source="manual")
-                existing_keys.add(keyword_match_key(kw_name))
-
-            # Write XMP if requested. Build normalized keyword sets so the
-            # sidecar matches what we stored/tagged in the DB above:
-            # entries that normalize to `""` are dropped (they were also
-            # skipped by add_keyword), and edge-quote variants are written
-            # in their clean form. Without this, the sidecar can carry a
-            # `‘apapane` <rdf:li> while the DB row is clean `apapane`, and
-            # a later XMP import/prune diff would tag the two as
-            # different keywords.
-            if write_xmp and Path(file_path).exists():
-                xmp_flat = {
-                    normalize_keyword_display(kw)
-                    for kw in kw_data["flat_keywords"]
-                    if keyword_match_key(kw)
-                }
-                xmp_hier = set()
-                for hier in kw_data["hierarchical_keywords"]:
-                    parts = hier.split("|")
-                    if any(not keyword_match_key(part) for part in parts):
-                        continue
-                    xmp_hier.add(
-                        "|".join(normalize_keyword_display(part) for part in parts)
-                    )
-                xmp_path = str(Path(file_path).with_suffix(".xmp"))
-                write_sidecar(
-                    xmp_path,
-                    flat_keywords=xmp_flat,
-                    hierarchical_keywords=xmp_hier,
-                )
-
+            _import_photo_keywords(db, photo, kw_data, file_path, write_xmp)
             imported += 1
         except Exception as exc:
             failed += 1

@@ -924,18 +924,9 @@ class StatsRepository:
         ).fetchone()
         return row["n"] or 0
 
-    def get_dashboard(
-        self, min_conf, preview_size, scope_sql, scope_params,
-        location_conditions,
-    ):
-        """Scoped aggregate statistics and actionable gaps for the Dashboard.
-
-        ``location_conditions`` is the Browse "no location" predicate list
-        (``Database._append_location_status_filter(..., "none")``).
-        """
-        ws = self.workspace_id_fn()
-
-        overview = self.conn.execute(
+    def _dashboard_overview(self, ws, scope_sql, scope_params):
+        """The Dashboard's headline photo, folder and keyword counts."""
+        return self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) AS total_photos,
                        COUNT(DISTINCT p.folder_id) AS folder_count,
                        COUNT(DISTINCT ({identity_sql()})) AS keyword_count,
@@ -955,6 +946,8 @@ class StatsRepository:
             (ws, *scope_params),
         ).fetchone()
 
+    def _dashboard_metadata_charts(self, ws, scope_sql, scope_params):
+        """Top keywords and the month, rating and flag distributions."""
         # The four pure-metadata aggregates below (top_keywords,
         # photos_by_month, rating_dist, flag_dist) intentionally don't filter
         # on folder status. They read DB-resident metadata that doesn't depend
@@ -1016,6 +1009,12 @@ class StatsRepository:
             GROUP BY p.flag""",
             (ws, *scope_params),
         ).fetchall()
+        return top_keywords, photos_by_month, rating_dist, flag_dist
+
+    def _dashboard_classification_counts(
+        self, ws, min_conf, scope_sql, scope_params,
+    ):
+        """Prediction review status and classified-photo counts."""
 
         # Review status lives in prediction_review (workspace-scoped).
         # Left-joining lets us count pending rows (those without a review row)
@@ -1091,7 +1090,12 @@ class StatsRepository:
                  ){scope_sql}""",
             (ws, min_conf, *scope_params),
         ).fetchone()[0]
+        return (
+            prediction_status, classified_count, accessible_classified_count,
+        )
 
+    def _dashboard_hour_and_quality(self, ws, scope_sql, scope_params):
+        """The capture-hour and quality-score distributions."""
         # photos_by_hour and quality_dist are also pure-metadata aggregates;
         # see the comment above the top_keywords block for the rationale.
         photos_by_hour = self.conn.execute(
@@ -1119,6 +1123,13 @@ class StatsRepository:
             ORDER BY bucket""",
             (ws, *scope_params),
         ).fetchall()
+        return photos_by_hour, quality_dist
+
+    def _dashboard_gap_counts(
+        self, ws, min_conf, preview_size, scope_sql, scope_params,
+        location_conditions,
+    ):
+        """Detected photos and the Needs Attention gap counts."""
 
         # min_conf already hoisted at top of get_dashboard_stats.
         # No folder-status filter — detections persist in the DB regardless
@@ -1189,6 +1200,41 @@ class StatsRepository:
                 )""",
             (ws, *scope_params),
         ).fetchone()[0]
+        return (
+            detected_count, missing_location, pending_changes,
+            missing_previews, duplicate_groups,
+        )
+
+    def get_dashboard(
+        self, min_conf, preview_size, scope_sql, scope_params,
+        location_conditions,
+    ):
+        """Scoped aggregate statistics and actionable gaps for the Dashboard.
+
+        ``location_conditions`` is the Browse "no location" predicate list
+        (``Database._append_location_status_filter(..., "none")``).
+        """
+        ws = self.workspace_id_fn()
+
+        overview = self._dashboard_overview(ws, scope_sql, scope_params)
+        top_keywords, photos_by_month, rating_dist, flag_dist = (
+            self._dashboard_metadata_charts(ws, scope_sql, scope_params)
+        )
+        (
+            prediction_status, classified_count, accessible_classified_count,
+        ) = self._dashboard_classification_counts(
+            ws, min_conf, scope_sql, scope_params,
+        )
+        photos_by_hour, quality_dist = self._dashboard_hour_and_quality(
+            ws, scope_sql, scope_params,
+        )
+        (
+            detected_count, missing_location, pending_changes,
+            missing_previews, duplicate_groups,
+        ) = self._dashboard_gap_counts(
+            ws, min_conf, preview_size, scope_sql, scope_params,
+            location_conditions,
+        )
 
         total_photos = overview["total_photos"] or 0
 

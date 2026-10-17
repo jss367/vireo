@@ -11,8 +11,8 @@
 // the caller-supplied single-photo update. Prevents context-menu edits on a
 // multi-selection anchor from collapsing the panel back to a single-detail
 // view via loadDetail(anchorId) while the user still has N photos selected.
-function _refreshInspectorAfterSinglePhotoEdit(photoId, singleFallback) {
-  var detail = document.getElementById('detailContent');
+function _refreshInspectorAfterSinglePhotoEdit(/** @type {number} */ photoId, /** @type {() => void} */ singleFallback) {
+  var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
   if (detail && detail.classList.contains('batch-mode')) {
     // Selection is unchanged — this is a state-only refresh after a
     // context-menu edit. Preserve any in-progress location input.
@@ -22,7 +22,7 @@ function _refreshInspectorAfterSinglePhotoEdit(photoId, singleFallback) {
   if (selectedPhotoId === photoId) singleFallback();
 }
 
-async function setRatingFor(photoId, rating) {
+async function setRatingFor(/** @type {number} */ photoId, /** @type {number} */ rating) {
   try {
     await safeFetch('/api/batch/rating', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -39,7 +39,7 @@ async function setRatingFor(photoId, rating) {
   refreshPendingSyncBanner();
 }
 
-async function setFlagFor(photoId, flag) {
+async function setFlagFor(/** @type {number} */ photoId, /** @type {BrowsePhoto['flag']} */ flag) {
   try {
     await safeFetch('/api/batch/flag', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -48,7 +48,7 @@ async function setFlagFor(photoId, flag) {
   } catch(e) { return false; }
   var p = findBrowsePhoto(photoId);
   if (p) p.flag = flag;
-  _clearRepresentativeStateIfIneligible(photoId, flag);
+  _clearRepresentativeStateIfIneligible(photoId, /** @type {BrowsePhoto['flag']} */ flag);
   await reconcileBrowseStackCovers([photoId]);
   refreshGridCards([photoId]);
   refreshExpandedBrowseStackMembers([photoId]);
@@ -57,7 +57,7 @@ async function setFlagFor(photoId, flag) {
   return true;
 }
 
-async function setColorLabelFor(photoId, color) {
+async function setColorLabelFor(/** @type {number} */ photoId, /** @type {string | null} */ color) {
   _noteColorLabelEdits([photoId]);
   try {
     await safeFetch('/api/batch/color_label', {
@@ -75,7 +75,7 @@ async function setColorLabelFor(photoId, color) {
   scheduleCollectionCountsRefresh();
 }
 
-function revealPhoto(photoId) {
+function revealPhoto(/** @type {number} */ photoId) {
   safeFetch('/api/files/reveal', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_id: photoId}),
@@ -90,16 +90,16 @@ function revealPhoto(photoId) {
   });
 }
 
-function viewPhotoOnMap(photoId) {
+function viewPhotoOnMap(/** @type {number} */ photoId) {
   window.location.href = '/map?photo_id=' + encodeURIComponent(photoId);
 }
 
 // One photo opens the whole map focused on its marker; several open a map of
 // just those photos. The ids travel in sessionStorage because a large
 // selection would not fit in a URL.
-function viewPhotosOnMap(photoIds) {
+function viewPhotosOnMap(/** @type {number[]} */ photoIds) {
   if (photoIds.length === 1) {
-    viewPhotoOnMap(photoIds[0]);
+    if (photoIds[0] != null) viewPhotoOnMap(photoIds[0]);
     return;
   }
   try {
@@ -121,22 +121,22 @@ function viewPhotosOnMap(photoIds) {
 
 // Stack membership comes from the same projection as the visible grid.
 // The old burst_id metadata column is not a reliable burst identifier.
-function filterToBrowseGroup(photoId) {
+function filterToBrowseGroup(/** @type {number} */ photoId) {
   var coverId = browseStackCoverIdForPhoto(photoId);
   var cover = findBrowsePhoto(coverId == null ? photoId : coverId);
   var ids = browseStackMemberIdsFor(cover);
-  if (!ids) return;
+  if (!ids || !cover?.browse_stack) return;
   VireoFilter.selectPhotoGroup(ids,
     (cover.browse_stack.kind === 'burst' ? 'Burst' : 'Duplicate group') + ' containing ' + cover.filename);
 }
 
-async function copyPhotoPaths(photoIds) {
+async function copyPhotoPaths(/** @type {number[]} */ photoIds) {
   var settled = await Promise.allSettled(photoIds.map(function(id) {
     return safeFetch('/api/photos/' + id, {}, { toast: false });
   }));
   var paths = settled
     .filter(function(s) { return s.status === 'fulfilled' && s.value && s.value.path; })
-    .map(function(s) { return s.value.path; });
+    .flatMap(function(s) { return s.status === 'fulfilled' && s.value?.path ? [s.value.path] : []; });
   var failed = settled.length - paths.length;
   if (!paths.length) {
     if (failed > 0) {
@@ -172,7 +172,7 @@ async function copyPhotoPaths(photoIds) {
 // Open a single grid photo straight in the in-app editor, skipping the
 // lightbox. Hand off the current grid's ordered list so the editor can offer
 // Prev/Next, mirroring the lightbox "Edit Photo" handoff.
-function openPhotoEditor(photoId) {
+function openPhotoEditor(/** @type {number} */ photoId) {
   var navigationPhotos = browsePhotoNavigationList(photoId);
   if (window.vireoEditNav) {
     window.vireoEditNav.setList(navigationPhotos, photoId);
@@ -181,7 +181,7 @@ function openPhotoEditor(photoId) {
   window.location.href = '/edit/' + photoId;
 }
 
-function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
+function buildPhotoContextMenu(/** @type {number[]} */ photoIds, /** @type {number | null} */ contextPhotoId, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
   // Capture the opener now: closeContextMenu removes the clicked menu item
   // before invoking its onClick, so document.activeElement would be body
   // (right-click) or an unrelated prior control by the time a batch dialog
@@ -204,13 +204,13 @@ function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
   var oneLoaded = one ? findBrowsePhoto(Number(photoIds[0])) : null;
   var noMapLocation = !!oneLoaded && oneLoaded.location_status === 'none';
   var groupCoverId = browseStackCoverIdForPhoto(developmentSourceId);
-  var groupPhoto = findBrowsePhoto(groupCoverId == null ? developmentSourceId : groupCoverId);
+  var groupPhotoId = groupCoverId == null ? developmentSourceId : groupCoverId; var groupPhoto = groupPhotoId == null ? null : findBrowsePhoto(groupPhotoId);
   var groupStack = groupPhoto && groupPhoto.browse_stack;
   var copiedDevelopment = window.vireoEditNav
     ? window.vireoEditNav.getCopiedRecipe()
     : null;
 
-  var rateChip = function(n) {
+  var rateChip = function(/** @type {number} */ n) {
     return {
       label: n === 0 ? '\u2606' : String(n),
       title: n === 0 ? 'No rating' : 'Rate ' + n,
@@ -219,7 +219,7 @@ function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
       },
     };
   };
-  var colorChip = function(c, icon, title) {
+  var colorChip = function(/** @type {string | null} */ c, /** @type {string} */ icon, /** @type {string} */ title) {
     return {
       label: icon,
       title: c && window.VireoColorLabels
@@ -232,7 +232,7 @@ function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
       },
     };
   };
-  var flagChip = function(f, icon, title) {
+  var flagChip = function(/** @type {NonNullable<BrowsePhoto['flag']>} */ f, /** @type {string} */ icon, /** @type {string} */ title) {
     return {
       label: icon, title: title,
       onClick: function() {
@@ -241,7 +241,7 @@ function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
     };
   };
 
-  return [
+  return /** @type {BrowseMenuItem[]} */ ([
     { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
     { chips: [
       colorChip(null, '\u25CB', 'No color'),
@@ -260,13 +260,13 @@ function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
     { label: 'Filter to This Burst',
       disabled: !groupStack || groupStack.kind !== 'burst',
       disabledHint: 'Enable Stacks and choose a burst',
-      onClick: function() { filterToBrowseGroup(developmentSourceId); } },
+      onClick: function() { if (developmentSourceId != null) filterToBrowseGroup(developmentSourceId); } },
     { label: 'Filter to This Duplicate Group',
       disabled: !groupStack || groupStack.kind !== 'duplicate',
       disabledHint: 'Enable Stacks and choose a duplicate group',
-      onClick: function() { filterToBrowseGroup(developmentSourceId); } },
+      onClick: function() { if (developmentSourceId != null) filterToBrowseGroup(developmentSourceId); } },
     { label: 'Find Similar', disabled: !one, disabledHint: hint,
-      onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
+      onClick: function() { if (typeof findSimilar === 'function' && photoIds[0] != null) findSimilar(photoIds[0]); } },
     { label: 'View on Map', disabled: noMapLocation,
       disabledHint: 'No map coordinates: no EXIF GPS and no location linked to a place',
       onClick: function() { viewPhotosOnMap(photoIds); } },
@@ -282,11 +282,11 @@ function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
       onClick: function() { openSelectedInBurstReview(); } },
     { separator: true },
     { label: 'Edit Photo', disabled: !one, disabledHint: hint,
-      onClick: function() { openPhotoEditor(photoIds[0]); } },
+      onClick: function() { if (photoIds[0] != null) openPhotoEditor(photoIds[0]); } },
     { label: 'Copy Development Settings',
       disabled: developmentSourceId == null,
       disabledHint: 'Right-click a photo to choose the settings to copy',
-      onClick: function() { copyDevelopmentSettingsFromPhoto(developmentSourceId); } },
+      onClick: function() { if (developmentSourceId != null) copyDevelopmentSettingsFromPhoto(developmentSourceId); } },
     { label: 'Paste Development Settings',
       disabled: _browseDevelopmentPasteInFlight || !(copiedDevelopment && copiedDevelopment.recipe),
       disabledHint: _browseDevelopmentPasteInFlight
@@ -295,9 +295,9 @@ function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
       onClick: function() { pasteEditSettingsToSelection(); } },
     { label: 'Develop',
       onClick: function() { developSelected(); } },
-  ].concat(buildOpenInEditorMenuItems(photoIds)).concat([
+  ]).concat(buildOpenInEditorMenuItems(photoIds)).concat([
     { label: window.VIREO_REVEAL_LABEL, disabled: !one, disabledHint: hint,
-      onClick: function() { revealPhoto(photoIds[0]); } },
+      onClick: function() { if (photoIds[0] != null) revealPhoto(photoIds[0]); } },
     { label: 'Copy Path',
       onClick: function() { copyPhotoPaths(photoIds); } },
     { separator: true },
@@ -336,7 +336,7 @@ function buildPhotoContextMenu(photoIds, contextPhotoId, returnFocus) {
 // launched from Add Keyword / Add to Collection restore focus to it on
 // Escape or Cancel instead of falling back to document.body (WebKit does
 // not necessarily focus a button on pointer click).
-function openBatchMoreMenu(btn) {
+function openBatchMoreMenu(/** @type {HTMLElement} */ btn) {
   var ids = getActiveSelection();
   if (!ids.length) return;
   var r = btn.getBoundingClientRect();
@@ -347,12 +347,12 @@ function openBatchMoreMenu(btn) {
 // Document-level delegation: grids re-render on sort/filter/scroll, so
 // per-card listeners would go stale.
 document.addEventListener('contextmenu', function(e) {
-  var card = e.target.closest('.grid-card, .browse-stack-member');
+  var card = /** @type {HTMLElement | null} */ (e.target instanceof Element ? e.target.closest('.grid-card, .browse-stack-member') : null);
   if (!card || !card.dataset.id) return;
   // Ignore right-clicks that came from inside the lightbox or a modal; this
   // handler owns only grid-card context menus. Modal right-clicks are either
   // handled by their own delegation (lightbox) or fall through to the browser.
-  if (e.target.closest('.vireo-ctx-menu')) return;
+  if (/** @type {HTMLElement | null} */ (e.target instanceof Element ? e.target.closest('.vireo-ctx-menu') : null)) return;
   if (card.classList.contains('offline')) return;
   e.preventDefault();
   var pid = parseInt(card.dataset.id, 10);
@@ -426,7 +426,7 @@ document.addEventListener('contextmenu', function(e) {
 });
 
 /* ---------- Folder tree context menu ---------- */
-function revealFolder(fid) {
+function revealFolder(/** @type {number} */ fid) {
   safeFetch('/api/files/reveal', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -442,7 +442,7 @@ function revealFolder(fid) {
   });
 }
 
-async function copyFolderPath(fid) {
+async function copyFolderPath(/** @type {number} */ fid) {
   try {
     var resp = await fetch('/api/folders/' + fid);
     if (!resp.ok) return;
@@ -459,14 +459,14 @@ var folderWorkspacesRequestSeq = 0;
 
 function hideFolderWorkspaces() {
   folderWorkspacesRequestSeq += 1;
-  document.getElementById('folderWorkspacesModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('folderWorkspacesModal')).classList.remove('open');
 }
 
-async function showFolderWorkspaces(fid) {
+async function showFolderWorkspaces(/** @type {number} */ fid) {
   var requestSeq = ++folderWorkspacesRequestSeq;
-  var modal = document.getElementById('folderWorkspacesModal');
-  var path = document.getElementById('folderWorkspacesPath');
-  var list = document.getElementById('folderWorkspacesList');
+  var modal = /** @type {HTMLElement} */ (document.getElementById('folderWorkspacesModal'));
+  var path = /** @type {HTMLElement} */ (document.getElementById('folderWorkspacesPath'));
+  var list = /** @type {HTMLElement} */ (document.getElementById('folderWorkspacesList'));
   path.textContent = '';
   list.textContent = '';
   var loading = document.createElement('div');
@@ -480,7 +480,7 @@ async function showFolderWorkspaces(fid) {
     if (requestSeq !== folderWorkspacesRequestSeq) return;
     path.textContent = data.folder && data.folder.path ? data.folder.path : '';
     list.textContent = '';
-    (data.workspaces || []).forEach(function(workspace) {
+    (data.workspaces || []).forEach(function(/** @type {{name: string, is_root?: boolean, is_active?: boolean}} */ workspace) {
       var row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg-tertiary);border:1px solid var(--border-secondary);border-radius:5px;font-size:13px;';
 
@@ -515,16 +515,16 @@ async function showFolderWorkspaces(fid) {
     list.textContent = '';
     var error = document.createElement('div');
     error.style.cssText = 'color:var(--danger);font-size:13px;';
-    error.textContent = (err && err.message) || 'Could not load associated workspaces.';
+    error.textContent = (err instanceof Error ? err.message : '') || 'Could not load associated workspaces.';
     list.appendChild(error);
   }
 }
 
-function moveFolder(fid) {
+function moveFolder(/** @type {number} */ fid) {
   window.location.href = '/move?folder_id=' + encodeURIComponent(fid);
 }
 
-function workLocallyFolder(fid) {
+function workLocallyFolder(/** @type {number} */ fid) {
   if (window.vireoLocalFolders) {
     window.vireoLocalFolders.stage(fid);
     return;
@@ -532,7 +532,7 @@ function workLocallyFolder(fid) {
   window.location.href = '/workspace#work-locally';
 }
 
-async function rescanFolder(fid) {
+async function rescanFolder(/** @type {number} */ fid) {
   showToast('Starting folder rescan...', 'info');
   try {
     var data = await safeFetch('/api/folders/' + fid + '/rescan', {
@@ -544,11 +544,11 @@ async function rescanFolder(fid) {
     showToast('Folder rescan queued' + suffix + '.', 'success');
   } catch (err) {
     console.error('rescanFolder failed', err);
-    showToast((err && err.message) || 'Could not start folder rescan.', 'error');
+    showToast((err instanceof Error ? err.message : '') || 'Could not start folder rescan.', 'error');
   }
 }
 
-async function removeWorkspaceRootFromBrowse(fid) {
+async function removeWorkspaceRootFromBrowse(/** @type {number} */ fid) {
   var folder = browseFolderRows.find(function(row) {
     return Number(row.id) === Number(fid);
   });
@@ -582,19 +582,19 @@ async function removeWorkspaceRootFromBrowse(fid) {
   // descendant and loads an empty Browse view because the refreshed tree
   // no longer contains it (Codex review r3799361364).
   var removedSubtreeIds = (function collectSubtreeIds() {
-    var childrenByParent = {};
+    var childrenByParent = /** @type {Record<string, number[]>} */ ({});
     browseFolderRows.forEach(function(row) {
       var pid = row.parent_id;
       if (pid == null) return;
       var key = Number(pid);
       if (!childrenByParent[key]) childrenByParent[key] = [];
-      childrenByParent[key].push(Number(row.id));
+      childrenByParent[key]?.push(Number(row.id));
     });
-    var ids = {};
+    var ids = /** @type {Record<string, boolean>} */ ({});
     ids[Number(fid)] = true;
     var queue = [Number(fid)];
     while (queue.length) {
-      var current = queue.shift();
+      var current = queue.shift(); if (current == null) continue;
       (childrenByParent[current] || []).forEach(function(childId) {
         if (!ids[childId]) {
           ids[childId] = true;
@@ -641,7 +641,7 @@ async function removeWorkspaceRootFromBrowse(fid) {
     // case without pulling in catalog ancestry.
     try {
       var urlParams = new URLSearchParams(window.location.search);
-      var urlFolderId = parseInt(urlParams.get('folder_id'), 10);
+      var urlFolderId = parseInt(urlParams.get('folder_id') || '', 10);
       if (!isNaN(urlFolderId)) {
         var stillVisible = !removedSubtreeIds[Number(urlFolderId)] &&
           browseFolderRows.some(function(row) {
@@ -690,7 +690,7 @@ async function removeWorkspaceRootFromBrowse(fid) {
       window.location.reload();
       return;
     }
-    if (activeFolderId && !loaded[0].some(function(row) {
+    if (activeFolderId && !loaded[0].some(function(/** @type {BrowseFolder} */ row) {
       return Number(row.id) === Number(activeFolderId);
     })) {
       activeFolderId = null;
@@ -706,12 +706,12 @@ async function removeWorkspaceRootFromBrowse(fid) {
 }
 
 document.addEventListener('contextmenu', function(e) {
-  var ti = e.target.closest('.tree-item[data-folder-id]');
+  var ti = /** @type {HTMLElement | null} */ (e.target instanceof Element ? e.target.closest('.tree-item[data-folder-id]') : null);
   if (!ti) return;
   // Don't fire if the right-click landed on another context menu.
-  if (e.target.closest('.vireo-ctx-menu')) return;
+  if (/** @type {HTMLElement | null} */ (e.target instanceof Element ? e.target.closest('.vireo-ctx-menu') : null)) return;
   e.preventDefault();
-  var fid = parseInt(ti.dataset.folderId, 10);
+  var fid = parseInt(ti.dataset.folderId || '', 10);
   if (isNaN(fid)) return;
   var items = [
     { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
@@ -739,7 +739,7 @@ document.addEventListener('contextmenu', function(e) {
 });
 
 /* ---------- Collection sidebar context menu ---------- */
-async function renameCollection(cid, currentName) {
+async function renameCollection(/** @type {number} */ cid, /** @type {string} */ currentName) {
   var next = window.prompt('Rename collection', currentName || '');
   if (next === null) return;             // user cancelled
   next = next.trim();
@@ -758,7 +758,7 @@ async function renameCollection(cid, currentName) {
   loadCollectionCounts();
 }
 
-async function duplicateCollection(cid) {
+async function duplicateCollection(/** @type {number} */ cid) {
   try {
     await safeFetch('/api/collections/' + cid + '/duplicate', {
       method: 'POST',
@@ -773,7 +773,7 @@ async function duplicateCollection(cid) {
   loadCollectionCounts();
 }
 
-async function deleteCollectionById(cid, name) {
+async function deleteCollectionById(/** @type {number} */ cid, /** @type {string} */ name) {
   if (!window.confirm('Delete collection "' + (name || '') + '"?')) return;
   try {
     await safeFetch('/api/collections/' + cid, { method: 'DELETE' });
@@ -802,15 +802,15 @@ async function deleteCollectionById(cid, name) {
 }
 
 document.addEventListener('contextmenu', function(e) {
-  var ti = e.target.closest('.tree-item[data-collection-id]');
+  var ti = /** @type {HTMLElement | null} */ (e.target instanceof Element ? e.target.closest('.tree-item[data-collection-id]') : null);
   if (!ti) return;
   // Don't fire inside another menu, and don't collide with folder-tree delegate.
-  if (e.target.closest('.vireo-ctx-menu')) return;
+  if (/** @type {HTMLElement | null} */ (e.target instanceof Element ? e.target.closest('.vireo-ctx-menu') : null)) return;
   if (ti.hasAttribute('data-folder-id')) return;
   e.preventDefault();
-  var cid = parseInt(ti.dataset.collectionId, 10);
+  var cid = parseInt(ti.dataset.collectionId || '', 10);
   if (isNaN(cid)) return;
-  var nameEl = ti.querySelector('.collection-name');
+  var nameEl = /** @type {HTMLElement | null} */ (ti.querySelector('.collection-name'));
   var name = nameEl ? nameEl.textContent : '';
   var meta = collectionsById[cid];
   var isUnavailable = !!(meta && meta.count_error);

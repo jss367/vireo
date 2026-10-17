@@ -135,8 +135,6 @@ def score_collection_photos(db, collection_id, progress_callback=None, vireo_dir
     Returns:
         dict with scored_count, group_count, results (list of scored photos)
     """
-    from datetime import datetime
-
     from grouping import group_by_timestamp, refine_groups_by_similarity
 
     if collection_id:
@@ -147,32 +145,7 @@ def score_collection_photos(db, collection_id, progress_callback=None, vireo_dir
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     total = len(photos)
 
-    # Build photo list with timestamps and stored embeddings for grouping
-    photo_list = []
-    for p in photos:
-        folder_path = folders.get(p["folder_id"], "")
-        image_path = os.path.join(folder_path, p["filename"])
-        timestamp = None
-        if p["timestamp"]:
-            try:
-                timestamp = datetime.fromisoformat(p["timestamp"])
-            except (TypeError, ValueError):
-                log.debug("Ignoring unparseable timestamp %r on photo %s", p["timestamp"], p["id"])
-        # Load stored embedding if available
-        embedding = None
-        emb_blob = p["embedding"] if "embedding" in p.keys() else None
-        if emb_blob:
-            embedding = np.frombuffer(emb_blob, dtype=np.float32)
-        photo_list.append(
-            {
-                "photo_id": p["id"],
-                "path": image_path,
-                "filename": p["filename"],
-                "timestamp": timestamp,
-                "embedding": embedding,
-                "_photo": p,
-            }
-        )
+    photo_list = _photos_for_grouping(photos, folders)
 
     # Group by timestamp, then refine using visual similarity
     groups = group_by_timestamp(photo_list, window_seconds=10)
@@ -213,42 +186,9 @@ def score_collection_photos(db, collection_id, progress_callback=None, vireo_dir
         group_count += 1
         gid = f"burst-{gi + 1:04d}"
 
-        group_scores = []
-        for item in group:
-            score = compute_sharpness_for_photo(
-                item["_photo"], folders, vireo_dir=vireo_dir
-            )
-            group_scores.append(
-                {
-                    "photo_id": item["photo_id"],
-                    "path": item["path"],
-                    "sharpness": score if score is not None else 0,
-                }
-            )
-
-        # Sort by sharpness descending
-        group_scores.sort(key=lambda x: x["sharpness"], reverse=True)
-
-        for rank_i, r in enumerate(group_scores):
-            r["rank"] = rank_i + 1
-            r["is_best"] = rank_i == 0
-            r["is_worst"] = (rank_i == len(group_scores) - 1) and len(group_scores) > 1
-
-        for r in group_scores:
-            item = next(g for g in group if g["photo_id"] == r["photo_id"])
-            all_results.append(
-                {
-                    "photo_id": r["photo_id"],
-                    "filename": item["filename"],
-                    "sharpness": r["sharpness"],
-                    "rank": r["rank"],
-                    "group_size": len(group),
-                    "group_id": gid,
-                    "is_best": r["is_best"],
-                    "is_worst": r["is_worst"],
-                }
-            )
-            scored += 1
+        group_results = _score_and_rank_group(group, gid, folders, vireo_dir)
+        all_results.extend(group_results)
+        scored += len(group_results)
 
     if progress_callback:
         progress_callback(total, total, "Done")
@@ -261,3 +201,77 @@ def score_collection_photos(db, collection_id, progress_callback=None, vireo_dir
         "group_count": group_count,
         "results": all_results,
     }
+
+
+def _photos_for_grouping(photos, folders):
+    """Build the photo list (with timestamps and stored embeddings) for grouping."""
+    from datetime import datetime
+
+    # Build photo list with timestamps and stored embeddings for grouping
+    photo_list = []
+    for p in photos:
+        folder_path = folders.get(p["folder_id"], "")
+        image_path = os.path.join(folder_path, p["filename"])
+        timestamp = None
+        if p["timestamp"]:
+            try:
+                timestamp = datetime.fromisoformat(p["timestamp"])
+            except (TypeError, ValueError):
+                log.debug("Ignoring unparseable timestamp %r on photo %s", p["timestamp"], p["id"])
+        # Load stored embedding if available
+        embedding = None
+        emb_blob = p["embedding"] if "embedding" in p.keys() else None
+        if emb_blob:
+            embedding = np.frombuffer(emb_blob, dtype=np.float32)
+        photo_list.append(
+            {
+                "photo_id": p["id"],
+                "path": image_path,
+                "filename": p["filename"],
+                "timestamp": timestamp,
+                "embedding": embedding,
+                "_photo": p,
+            }
+        )
+    return photo_list
+
+
+def _score_and_rank_group(group, gid, folders, vireo_dir):
+    """Score each photo of a multi-photo burst group and rank them by sharpness."""
+    group_scores = []
+    for item in group:
+        score = compute_sharpness_for_photo(
+            item["_photo"], folders, vireo_dir=vireo_dir
+        )
+        group_scores.append(
+            {
+                "photo_id": item["photo_id"],
+                "path": item["path"],
+                "sharpness": score if score is not None else 0,
+            }
+        )
+
+    # Sort by sharpness descending
+    group_scores.sort(key=lambda x: x["sharpness"], reverse=True)
+
+    for rank_i, r in enumerate(group_scores):
+        r["rank"] = rank_i + 1
+        r["is_best"] = rank_i == 0
+        r["is_worst"] = (rank_i == len(group_scores) - 1) and len(group_scores) > 1
+
+    results = []
+    for r in group_scores:
+        item = next(g for g in group if g["photo_id"] == r["photo_id"])
+        results.append(
+            {
+                "photo_id": r["photo_id"],
+                "filename": item["filename"],
+                "sharpness": r["sharpness"],
+                "rank": r["rank"],
+                "group_size": len(group),
+                "group_id": gid,
+                "is_best": r["is_best"],
+                "is_worst": r["is_worst"],
+            }
+        )
+    return results

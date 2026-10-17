@@ -42,6 +42,62 @@ def _time_gap_seconds(a, b):
         return None
 
 
+def _filename_sequence_batch(
+    db, ws, folder_id, seed_photo_id, seed_key, seed_ext, max_sequence_gap,
+    time_ok,
+):
+    """The run of same-folder sequence numbers around the seed, or None.
+
+    ``time_ok(left, right)`` bounds each step by capture time.
+    """
+    prefix, _, width, _ = seed_key
+    rows = db.conn.execute(
+        """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
+                      p.flag, p.rating, p.quality_score, p.sharpness
+               FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ? AND p.folder_id = ? AND p.filename LIKE ?
+               ORDER BY p.filename ASC, p.id ASC""",
+        (ws, folder_id, f"{prefix}%"),
+    ).fetchall()
+    seq_rows = []
+    for row in rows:
+        key = _filename_sequence_key(row["filename"])
+        row_ext = (row["extension"] or os.path.splitext(row["filename"])[1]).lower()
+        if (
+            key
+            and key[0] == prefix
+            and key[2] == width
+            and row_ext == seed_ext
+        ):
+            seq_rows.append((key[1], row))
+    seq_rows.sort(key=lambda item: (item[0], item[1]["filename"], item[1]["id"]))
+    seed_idx = next(
+        (i for i, (_, row) in enumerate(seq_rows) if row["id"] == seed_photo_id),
+        None,
+    )
+    if seed_idx is not None:
+        left = seed_idx
+        while left > 0:
+            prev_num, prev_row = seq_rows[left - 1]
+            curr_num, curr_row = seq_rows[left]
+            if curr_num - prev_num > max_sequence_gap or not time_ok(prev_row, curr_row):
+                break
+            left -= 1
+        right = seed_idx
+        while right < len(seq_rows) - 1:
+            curr_num, curr_row = seq_rows[right]
+            next_num, next_row = seq_rows[right + 1]
+            if next_num - curr_num > max_sequence_gap or not time_ok(curr_row, next_row):
+                break
+            right += 1
+        batch = [row for _, row in seq_rows[left:right + 1]]
+        if len(batch) >= 2:
+            return batch
+    return None
+
+
 def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2, max_photos=120):
     """Find a likely burst/batch around one seed photo.
 
@@ -79,51 +135,12 @@ def best_batch_scope(db, seed_photo_id, max_gap_seconds=8.0, max_sequence_gap=2,
         return gap <= max_gap_seconds
 
     if seed_key:
-        prefix, _, width, _ = seed_key
-        rows = db.conn.execute(
-            """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
-                      p.flag, p.rating, p.quality_score, p.sharpness
-               FROM photos p
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ? AND p.folder_id = ? AND p.filename LIKE ?
-               ORDER BY p.filename ASC, p.id ASC""",
-            (ws, folder_id, f"{prefix}%"),
-        ).fetchall()
-        seq_rows = []
-        for row in rows:
-            key = _filename_sequence_key(row["filename"])
-            row_ext = (row["extension"] or os.path.splitext(row["filename"])[1]).lower()
-            if (
-                key
-                and key[0] == prefix
-                and key[2] == width
-                and row_ext == seed_ext
-            ):
-                seq_rows.append((key[1], row))
-        seq_rows.sort(key=lambda item: (item[0], item[1]["filename"], item[1]["id"]))
-        seed_idx = next(
-            (i for i, (_, row) in enumerate(seq_rows) if row["id"] == seed_photo_id),
-            None,
+        batch = _filename_sequence_batch(
+            db, ws, folder_id, seed_photo_id, seed_key, seed_ext,
+            max_sequence_gap, _time_ok,
         )
-        if seed_idx is not None:
-            left = seed_idx
-            while left > 0:
-                prev_num, prev_row = seq_rows[left - 1]
-                curr_num, curr_row = seq_rows[left]
-                if curr_num - prev_num > max_sequence_gap or not _time_ok(prev_row, curr_row):
-                    break
-                left -= 1
-            right = seed_idx
-            while right < len(seq_rows) - 1:
-                curr_num, curr_row = seq_rows[right]
-                next_num, next_row = seq_rows[right + 1]
-                if next_num - curr_num > max_sequence_gap or not _time_ok(curr_row, next_row):
-                    break
-                right += 1
-            batch = [row for _, row in seq_rows[left:right + 1]]
-            if len(batch) >= 2:
-                return _limited(batch), "filename_sequence"
+        if batch is not None:
+            return _limited(batch), "filename_sequence"
 
     rows = db.conn.execute(
         """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,

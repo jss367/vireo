@@ -84,3 +84,26 @@ changing this code:
   included. The Group Review handler (`group-changes.js`) acts only while
   `#grmOverlay` is open and the lightbox is not. Boot registers the A/S handler
   first; keep both guard lists and that order.
+
+## Photo action feedback
+
+Rating and flag helpers return promises resolving to a confirmed boolean result.
+They own their success/error toast, including calls from the native Photo menu
+and shared lightbox. Callers must not announce success before the promise settles.
+An undo/redo `history_busy` rejection retains the shared transport's warning
+without adding a second notification. Only a confirmed reject clears local
+Representative badges.
+
+`enqueueReviewPhotoAction` keeps pending actions private. Writes serialize per
+photo and field; consecutive identical pending choices share one request and
+notification. Other photos and fields remain independent. A failure releases
+the queue so the user can retry. Copy Path uses one ordered lane across photos
+and confirms only after a nonempty path has actually reached the clipboard.
+Lookup failures, missing paths and unavailable/denied clipboard access show errors.
+
+`tests/frontend/review-photo-actions.test.mjs` exercises complete action helpers,
+request ordering, duplicate clicks, failed confirmations, badge preservation,
+clipboard completion and native-menu adapters.
+`tests/e2e/test_review_photo_actions.py` covers real grid, Group Review, lightbox
+and native-menu entry points, failed requests and retry recovery in Chromium
+and WebKit.

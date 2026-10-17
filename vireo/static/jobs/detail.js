@@ -1,14 +1,14 @@
 // The detail pane: one job, step toggling, and the Active/History overviews.
 // Classic page script; load boot.js after all definitions.
 
-function renderDetail(job) {
-  var pane = document.getElementById('jobDetailPane');
+/** @param {JobsRow} job */ function renderDetail(job) {
+  var pane = jobsElement('jobDetailPane', HTMLElement);
   pane.innerHTML = '<div style="padding:16px 24px 0;">' + renderJobCard(job) + '</div>';
   var activeStep = pane.querySelector('.tree-status-icon.running');
-  if (activeStep) activeStep.closest('.tree-step').scrollIntoView({ block: 'nearest' });
+  if (activeStep) activeStep.closest('.tree-step')?.scrollIntoView({ block: 'nearest' });
 }
 
-function toggleStep(stepId) {
+/** @param {string} stepId */ function toggleStep(stepId) {
   if (collapsedSteps[stepId] === undefined) collapsedSteps[stepId] = true;
   else collapsedSteps[stepId] = !collapsedSteps[stepId];
   var job = activeJobs.find(function(j) { return j.id === selectedJobId; });
@@ -19,8 +19,8 @@ function toggleStep(stepId) {
   }
 }
 
-function renderHistoryDetail(job) {
-  var pane = document.getElementById('jobDetailPane');
+/** @param {JobsRow} job */ function renderHistoryDetail(job) {
+  var pane = jobsElement('jobDetailPane', HTMLElement);
   pane.innerHTML = '<div style="padding:16px 24px 0;">' + renderJobCard(job) + '</div>';
 }
 
@@ -34,7 +34,7 @@ function renderMainPane() {
 }
 
 function renderActiveOverview() {
-  var pane = document.getElementById('jobDetailPane');
+  var pane = jobsElement('jobDetailPane', HTMLElement);
   if (!jobsPollState.active.loaded) {
     pane.innerHTML = '<div class="jobs-overview-empty">' +
       (jobsPollState.active.error ? 'Active jobs could not be loaded. Retrying automatically.' : 'Loading active jobs…') + '</div>';
@@ -71,7 +71,7 @@ function renderActiveOverview() {
   if (otherWs.length > 0) {
     html += '<div class="jobs-overview-divider">Other Workspaces</div>';
     otherWs.forEach(function(j) {
-      var wsName = workspaceNames[j.workspace_id] || ('Workspace ' + j.workspace_id);
+      var wsName = workspaceNames[j.workspace_id ?? -1] || ('Workspace ' + j.workspace_id);
       html += renderJobCard(j, { workspaceName: wsName });
     });
   }
@@ -81,14 +81,14 @@ function renderActiveOverview() {
 }
 
 function renderHistoryOverview() {
-  var pane = document.getElementById('jobDetailPane');
+  var pane = jobsElement('jobDetailPane', HTMLElement);
   if (!jobsPollState.history.loaded) {
     pane.innerHTML = '<div class="jobs-overview-empty">' +
       (jobsPollState.history.error ? 'Job history could not be loaded. Retrying automatically.' : 'Loading job history…') + '</div>';
     return;
   }
-  var typeFilter = document.getElementById('filterType').value;
-  var statusFilter = document.getElementById('filterStatus').value;
+  var typeFilter = jobsElement('filterType', HTMLSelectElement).value;
+  var statusFilter = jobsElement('filterStatus', HTMLSelectElement).value;
 
   var filtered = historyJobs;
   if (typeFilter) filtered = filtered.filter(function(j) { return j.type === typeFilter; });
@@ -102,7 +102,7 @@ function renderHistoryOverview() {
 
   // Date range note
   var oldest = filtered[filtered.length - 1];
-  var oldestDate = new Date(oldest.started_at).toLocaleDateString();
+  var oldestDate = new Date(oldest?.started_at || '').toLocaleDateString();
   var html = '<div style="padding:16px 24px 0;">';
   html += '<div style="font-size:12px;color:var(--text-ghost);margin-bottom:12px;">Showing ' +
     filtered.length + ' jobs back to ' + oldestDate + '</div>';

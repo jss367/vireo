@@ -1,0 +1,4 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": ["../types/pages/batch.d.ts", "../vireo/static/vireo-batch-edits.js"]
+}

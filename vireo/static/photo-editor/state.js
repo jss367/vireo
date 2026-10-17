@@ -1,7 +1,7 @@
 // Shared editor state, loading freeze, dirty tracking, and status text.
 // Classic page script; load boot.js after all definitions.
 
-var editorState = {
+/** @type {EditorState} */ var editorState = {
   photoId: null,
   photo: null,
   savedRecipe: {},
@@ -52,7 +52,7 @@ var editorState = {
   suppressUnloadPrompt: false,
 };
 
-function setEditorLoading(loading) {
+/** @param {boolean} loading */ function setEditorLoading(loading) {
   // While a new photo is fetching, freeze the editing surface so a slider
   // tweak or crop drag can't mutate state that ends up applied to (and saved
   // onto) the photo currently loading. markChanged() and the crop pointerdown
@@ -60,11 +60,11 @@ function setEditorLoading(loading) {
   editorState.loading = !!loading;
   var shell = document.querySelector('.editor-shell');
   if (shell) shell.classList.toggle('editor-loading', !!loading);
-  var resetAll = document.getElementById('resetAllBtn');
+  var resetAll = /** @type {HTMLButtonElement} */ (document.getElementById('resetAllBtn'));
   if (resetAll) resetAll.disabled = !!loading;
-  var copyBtn = document.getElementById('copySettingsBtn');
+  var copyBtn = /** @type {HTMLButtonElement} */ (document.getElementById('copySettingsBtn'));
   if (copyBtn) copyBtn.disabled = !!loading;
-  var exportBtn = document.getElementById('exportBtn');
+  var exportBtn = /** @type {HTMLButtonElement} */ (document.getElementById('exportBtn'));
   if (exportBtn) exportBtn.disabled = !!loading || !editorState.photoId;
   updateEditorZoomControl();
   updateAspectButtons();
@@ -75,39 +75,44 @@ function isEditorDirty() {
   return recipeKey(editorState.recipe) !== recipeKey(editorState.savedRecipe);
 }
 
-function cloneRecipe(recipe) {
-  if (!recipe || typeof recipe !== 'object') return {};
+/** @template {object} T @param {T} recipe @returns {T} */ function cloneRecipe(recipe) {
+  if (!recipe || typeof recipe !== 'object') return /** @type {T} */ ({});
   try { return JSON.parse(JSON.stringify(recipe)); }
-  catch (_) { return {}; }
+  catch (_) { return /** @type {T} */ ({}); }
 }
 
-function setStatus(text, isError) {
-  var el = document.getElementById('editorStatus');
+/** @param {string} text @param {boolean=} isError */ function setStatus(text, isError) {
+  var el = /** @type {HTMLElement} */ (document.getElementById('editorStatus'));
   if (!el) return;
   el.textContent = text || '';
   el.classList.toggle('error', !!isError);
 }
 
-function setButtonActive(id, active) {
-  var btn = document.getElementById(id);
+/** @param {string} id @param {boolean} active */ function setButtonActive(id, active) {
+  var btn = /** @type {HTMLElement} */ (document.getElementById(id));
   if (btn) btn.classList.toggle('active', !!active);
 }
 
-function setButtonDisabled(id, disabled) {
-  var btn = document.getElementById(id);
-  if (btn) btn.disabled = !!disabled;
+/** @param {string} id @param {boolean} disabled */ function setButtonDisabled(id, disabled) {
+  var btn = /** @type {HTMLElement} */ (document.getElementById(id));
+  if (btn instanceof HTMLButtonElement || btn instanceof HTMLInputElement || btn instanceof HTMLSelectElement) btn.disabled = !!disabled;
 }
 
 function updateFeedbackControls() {
   setButtonActive('beforeBtn', editorState.showBefore);
-  var beforeBtn = document.getElementById('beforeBtn');
+  var beforeBtn = /** @type {HTMLButtonElement} */ (document.getElementById('beforeBtn'));
   if (beforeBtn) beforeBtn.textContent = editorState.showBefore ? 'After' : 'Before';
-  var canvas = document.getElementById('editorCanvas');
+  var canvas = /** @type {HTMLElement} */ (document.getElementById('editorCanvas'));
   if (canvas) canvas.classList.toggle('show-before', !!editorState.showBefore);
-  var note = document.getElementById('feedbackNote');
+  var note = /** @type {HTMLElement} */ (document.getElementById('feedbackNote'));
   if (note) {
     note.textContent = editorState.showBefore ? 'Approximate saved preview' : 'Approximate current preview';
   }
   updateEditorZoomControl();
   updateAspectButtons();
+}
+
+/** @param {unknown} error */
+function editorErrorMessage(error) {
+  return error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' ? error.message : '';
 }

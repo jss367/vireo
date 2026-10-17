@@ -3,7 +3,7 @@
 
 // -- Collection picker --
 async function loadCollections() {
-  var sel = document.getElementById('collectionPicker');
+  var sel = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker'));
   try {
     var collections = await safeFetch('/api/collections', {}, { toast: false });
     if (!Array.isArray(collections)) return;
@@ -40,30 +40,30 @@ async function loadCollections() {
 }
 
 // -- Card 1: Source --
-var _prefillFolderPaths = [];
+/** @type {string[]} */ var _prefillFolderPaths = [];
 
 function selectedFolderIds() {
-  var ids = [];
-  document.querySelectorAll('#folderScopeList input[type=checkbox]:checked')
+  /** @type {number[]} */ var ids = [];
+  /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('#folderScopeList input[type=checkbox]:checked'))
     .forEach(function(cb) { ids.push(parseInt(cb.value, 10)); });
   return ids;
 }
 
 function hasPipelineSource() {
   if (_sourceMode === 'folders') return selectedFolderIds().length > 0;
-  var picker = document.getElementById('collectionPicker');
+  var picker = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker'));
   return _sourceMode === 'collection' && !!(picker && picker.value);
 }
 
 async function loadFolderScopeList() {
-  var list = document.getElementById('folderScopeList');
+  var list = /** @type {HTMLElement} */ (document.getElementById('folderScopeList'));
   if (!list) return;
   try {
     var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
-    var folders = await safeFetch(
+    /** @type {PipelineFolder[]} */ var folders = await safeFetch(
       '/api/workspaces/' + ws.id + '/folders', {}, { toast: false });
     if (!Array.isArray(folders)) return;
-    var byId = {};
+    /** @type {Record<number,PipelineFolder>} */ var byId = {};
     folders.forEach(function(f) { byId[f.id] = f; });
     // Deep links from the audit panel carry the ACTUAL folder path a file
     // sits in (e.g. /root/2026/07), but only top-level roots are rendered
@@ -101,7 +101,7 @@ async function loadFolderScopeList() {
       label.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text-primary);';
       var cb = document.createElement('input');
       cb.type = 'checkbox';
-      cb.value = f.id;
+      cb.value = String(f.id);
       cb.dataset.path = f.path;
       cb.style.accentColor = 'var(--accent)';
       cb.checked = prefillRootIds.has(f.id);
@@ -139,7 +139,7 @@ async function loadFolderScopeList() {
 }
 
 function updateSourceSummary() {
-  var el = document.getElementById('txtSource');
+  var el = /** @type {HTMLElement} */ (document.getElementById('txtSource'));
   if (!el) return;
   if (_sourceMode === 'folders') {
     var n = selectedFolderIds().length;
@@ -149,14 +149,15 @@ function updateSourceSummary() {
 
 var _sourceMode = 'folders'; // 'folders' or 'collection'
 
+/** @param {string} mode */
 function selectSourceMode(mode) {
   _sourceMode = mode;
   var isFolders = (mode === 'folders');
-  document.getElementById('radioFolders').checked = isFolders;
-  document.getElementById('radioCollection').checked = (mode === 'collection');
+  /** @type {HTMLInputElement} */ (document.getElementById('radioFolders')).checked = isFolders;
+  /** @type {HTMLInputElement} */ (document.getElementById('radioCollection')).checked = (mode === 'collection');
 
-  var foldersBody = document.getElementById('sourceImportBody');
-  var collBody = document.getElementById('sourceCollectionBody');
+  var foldersBody = /** @type {HTMLElement} */ (document.getElementById('sourceImportBody'));
+  var collBody = /** @type {HTMLElement} */ (document.getElementById('sourceCollectionBody'));
 
   foldersBody.classList.toggle('dimmed', !isFolders);
   collBody.classList.toggle('dimmed', mode !== 'collection');
@@ -170,8 +171,8 @@ function selectSourceMode(mode) {
 }
 
 function onCollectionChange() {
-  var collId = document.getElementById('collectionPicker').value;
-  var countEl = document.getElementById('collectionPhotoCount');
+  var collId = /** @type {HTMLSelectElement} */ (document.getElementById('collectionPicker')).value;
+  var countEl = /** @type {HTMLElement} */ (document.getElementById('collectionPhotoCount'));
   if (!collId) {
     countEl.textContent = '';
     updateStartButton();
@@ -179,8 +180,8 @@ function onCollectionChange() {
     schedulePlanRefresh();
     return;
   }
-  safeFetch('/api/collections/' + collId + '/photos?per_page=1', {}, { toast: false })
-    .then(function(data) {
+  /** @type {Promise<{total?: number}>} */ (safeFetch('/api/collections/' + collId + '/photos?per_page=1', {}, { toast: false }))
+    .then(function(/** @type {{total?: number}} */ data) {
       countEl.textContent = (data.total || 0) + ' photos';
     })
     .catch(function() { countEl.textContent = ''; });

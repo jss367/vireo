@@ -2,17 +2,17 @@
 // Classic page script; load boot.js after all definitions.
 
 var LIFE_LIST_PAGE_SIZE = 100;
-var lifeListLightboxSpecies = null;
-var lifeListLoadPromises = {};
+/** @type {string|null} */ var lifeListLightboxSpecies = null;
+/** @type {Record<string,Promise<LifePhoto[]>>} */ var lifeListLoadPromises = {};
 
-function photoThumbnailUrl(photo) {
+/** @param {LifePhoto} photo */ function photoThumbnailUrl(photo) {
   if (!photo || photo.id == null) return '';
   return window.vireoThumbnailUrl
     ? window.vireoThumbnailUrl(photo)
     : '/thumbnails/' + photo.id + '.jpg';
 }
 
-function renderCard(entry, displayNumber) {
+/** @param {LifeSpecies} entry @param {number} displayNumber */ function renderCard(entry, displayNumber) {
   var best = entry.best;
   var thumb = best ? photoThumbnailUrl(best) : '';
   var sci = entry.scientific_name && entry.scientific_name !== entry.species
@@ -59,16 +59,16 @@ function renderCard(entry, displayNumber) {
     + '</div></div>';
 }
 
-function lifeListEntry(species) {
+/** @param {string | null} species */ function lifeListEntry(species) {
   return (currentData && currentData.species || []).find(function(entry) {
     return entry.species === species;
   });
 }
 
-function loadMoreLifeListPhotos(entry) {
+/** @param {LifeSpecies | undefined} entry */ function loadMoreLifeListPhotos(entry) {
   if (!entry || !entry.has_more) return Promise.resolve(entry ? entry.photos : []);
-  if (lifeListLoadPromises[entry.species]) {
-    return lifeListLoadPromises[entry.species];
+  const pending = lifeListLoadPromises[entry.species]; if (pending) {
+    return pending;
   }
   entry.loading_more = true;
   render();
@@ -77,8 +77,8 @@ function loadMoreLifeListPhotos(entry) {
     offset: String((entry.photos || []).length),
     limit: String(LIFE_LIST_PAGE_SIZE),
   });
-  var promise = safeFetch('/api/life-list/species?' + params.toString())
-    .then(function(data) {
+  /** @type {Promise<{photos?:LifePhoto[];loaded_count?:number;has_more?:boolean}>} */ var request = safeFetch('/api/life-list/species?' + params.toString());
+  var promise = request.then(function(data) {
       var seen = new Set((entry.photos || []).map(function(photo) { return photo.id; }));
       (data.photos || []).forEach(function(photo) {
         if (!seen.has(photo.id)) {
@@ -103,10 +103,10 @@ function loadMoreLifeListPhotos(entry) {
 }
 
 function render() {
-  var content = document.getElementById('content');
-  var empty = document.getElementById('emptyState');
-  var meta = document.getElementById('meta');
-  var controls = document.getElementById('controlsBar');
+  var content = /** @type {HTMLElement} */ (document.getElementById('content'));
+  var empty = /** @type {HTMLElement} */ (document.getElementById('emptyState'));
+  var meta = /** @type {HTMLElement} */ (document.getElementById('meta'));
+  var controls = /** @type {HTMLElement} */ (document.getElementById('controlsBar'));
 
   if (!currentData || !currentData.species.length) {
     content.innerHTML = '';
@@ -118,9 +118,9 @@ function render() {
   empty.style.display = 'none';
   controls.style.display = '';
 
-  var search = document.getElementById('speciesSearch').value.trim();
-  var taxonomicGroup = document.getElementById('taxonomicGroupSelect').value;
-  var identificationRank = document.getElementById('identificationRankSelect').value;
+  var search = /** @type {HTMLInputElement} */ (document.getElementById('speciesSearch')).value.trim();
+  var taxonomicGroup = /** @type {HTMLSelectElement} */ (document.getElementById('taxonomicGroupSelect')).value;
+  var identificationRank = /** @type {HTMLSelectElement} */ (document.getElementById('identificationRankSelect')).value;
   var searchOptions = VireoTextSearch.readOptions('lifeSpecies');
   var list = sortedSpecies();
   if (search) {
@@ -153,7 +153,7 @@ function render() {
     + currentData.meta.photo_count + ' tagged photos'
     + (filtersActive ? ' · ' + list.length + ' shown' : '');
 
-  var renumberView = document.getElementById('renumberView').checked;
+  var renumberView = /** @type {HTMLInputElement} */ (document.getElementById('renumberView')).checked;
   content.innerHTML = list.map(function(entry, index) {
     return renderCard(entry, renumberView ? index + 1 : entry.number);
   }).join('')
@@ -169,8 +169,8 @@ function render() {
   content.querySelectorAll('.species-card').forEach(function(card) {
     card.addEventListener('click', function() {
       var sp = card.getAttribute('data-species');
-      var entry = (currentData.species || []).find(function(e) { return e.species === sp; });
-      if (entry && entry.best && window.openLightbox) {
+      var entry = (currentData?.species || []).find(function(e) { return e.species === sp; });
+      if (entry && entry.best && typeof window.openLightbox === 'function') {
         // Keep the same array object as pages are appended so the shared
         // lightbox immediately sees newly loaded photos.
         lifeListLightboxSpecies = entry.species;

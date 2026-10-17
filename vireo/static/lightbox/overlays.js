@@ -1,5 +1,5 @@
 
-function _lbStoredBool(key, fallback) {
+function _lbStoredBool(/** @type {string} */ key, /** @type {boolean} */ fallback) {
   try {
     var value = localStorage.getItem(key);
     if (value === '0') return false;
@@ -8,7 +8,7 @@ function _lbStoredBool(key, fallback) {
   return fallback;
 }
 
-function _lbPersistBool(key, value) {
+function _lbPersistBool(/** @type {string} */ key, /** @type {boolean} */ value) {
   try { localStorage.setItem(key, value ? '1' : '0'); } catch (e) {}
 }
 
@@ -19,11 +19,11 @@ var _lbTrackEyeEnabled = _lbStoredBool('vireo.lb.trackEye', false);
 var _lbInfoVisible = _lbStoredBool('vireo.lb.infoVisible', true);
 var _lbChromeVisible = _lbStoredBool('vireo.lb.chromeVisible', true);
 
-function _lbRecipeHasCrop(recipe) {
+function _lbRecipeHasCrop(/** @type {LightboxRecipe | null | undefined} */ recipe) {
   return !!(recipe && recipe.crop && Number(recipe.crop.w) > 0 && Number(recipe.crop.h) > 0);
 }
 
-function _lbRecipeHasGeometricEdit(recipe) {
+function _lbRecipeHasGeometricEdit(/** @type {LightboxRecipe | null | undefined} */ recipe) {
   if (!recipe || typeof recipe !== 'object') return false;
   if (_lbRecipeHasCrop(recipe)) return true;
   if (Number(recipe.rotation || 0)) return true;
@@ -32,22 +32,23 @@ function _lbRecipeHasGeometricEdit(recipe) {
   return !!(flip.horizontal || flip.vertical);
 }
 
-function _lbMetadataOrientation(metadata) {
+function _lbMetadataOrientation(/** @type {unknown} */ metadata) {
   if (!metadata || typeof metadata !== 'object') return null;
   var groups = ['EXIF', 'IFD0', 'TIFF', 'File'];
   for (var i = 0; i < groups.length; i++) {
-    var group = metadata[groups[i]];
-    if (group && Object.prototype.hasOwnProperty.call(group, 'Orientation')) {
+    var key = groups[i]; if (!key) continue;
+    var group = /** @type {Record<string, unknown>} */ (metadata)[key];
+    if (group && typeof group === 'object' && 'Orientation' in group) {
       return group.Orientation;
     }
   }
   if (Object.prototype.hasOwnProperty.call(metadata, 'Orientation')) {
-    return metadata.Orientation;
+    return /** @type {Record<string, unknown>} */ (metadata).Orientation;
   }
   return null;
 }
 
-function _lbOrientationSwapsAxes(orientation) {
+function _lbOrientationSwapsAxes(/** @type {unknown} */ orientation) {
   if (orientation == null || typeof orientation === 'boolean') return false;
   if (typeof orientation === 'number') {
     return [5, 6, 7, 8].indexOf(Math.round(orientation)) !== -1;
@@ -69,10 +70,10 @@ function _lbSourceOverlaysAvailable() {
 }
 
 function _lbApplyBoxesVisibility() {
-  var container = document.getElementById('lightboxDetections');
+  const container = document.getElementById('lightboxDetections');
   var available = _lbSourceOverlaysAvailable();
   if (container) container.style.display = (_lbBoxesVisible && available) ? '' : 'none';
-  var input = document.getElementById('lightboxToggleBoxes');
+  var input = /** @type {HTMLInputElement | null} */ (document.getElementById('lightboxToggleBoxes'));
   if (input) {
     input.disabled = !available;
     input.checked = _lbBoxesVisible;
@@ -90,7 +91,7 @@ function toggleLightboxBoxes() {
 function _lbApplyInfoVisibility() {
   var overlay = document.getElementById('lightboxOverlay');
   if (overlay) overlay.classList.toggle('lb-hide-info', !_lbInfoVisible);
-  var input = document.getElementById('lightboxToggleInfo');
+  var input = /** @type {HTMLInputElement | null} */ (document.getElementById('lightboxToggleInfo'));
   if (input) input.checked = _lbInfoVisible;
 }
 
@@ -104,7 +105,7 @@ function toggleLightboxInfo() {
 function _lbApplyChromeVisibility() {
   var overlay = document.getElementById('lightboxOverlay');
   if (overlay) overlay.classList.toggle('lb-hide-chrome', !_lbChromeVisible);
-  var input = document.getElementById('lightboxToggleChrome');
+  var input = /** @type {HTMLInputElement | null} */ (document.getElementById('lightboxToggleChrome'));
   if (input) input.checked = _lbChromeVisible;
 }
 
@@ -130,7 +131,7 @@ function _lbPositionViewPanel() {
   panel.style.bottom = Math.max(gutter, Math.min(desiredBottom, maxBottom)) + 'px';
 }
 
-var _lbViewPanelPositionFrame = null;
+/** @type {number | null} */ var _lbViewPanelPositionFrame = null;
 function _lbScheduleViewPanelPosition() {
   if (_lbViewPanelPositionFrame !== null) return;
   _lbViewPanelPositionFrame = requestAnimationFrame(function() {
@@ -139,7 +140,7 @@ function _lbScheduleViewPanelPosition() {
   });
 }
 
-function toggleLightboxViewMenu(force) {
+function toggleLightboxViewMenu(/** @type {boolean | undefined} */ force = undefined) {
   var panel = document.getElementById('lightboxViewPanel');
   var btn = document.getElementById('lightboxViewBtn');
   if (!panel || !btn) return;
@@ -180,9 +181,8 @@ function toggleLightboxViewMenu(force) {
   }
 })();
 
-function lightboxSetFlagAction(flag) {
-  if (vireoLightboxSession.requestedPhotoId() == null) return;
-  var pid = vireoLightboxSession.requestedPhotoId();
+function lightboxSetFlagAction(/** @type {LightboxFlag} */ flag) {
+  var pid = vireoLightboxSession.requestedPhotoId(); if (pid == null) return;
   // Clicking the button for the photo's current state clears it, so the pair
   // covers flag/reject/unflag without a third button. Match against the
   // *displayed* flag (which includes provisional edits, e.g. Group Review
@@ -206,7 +206,7 @@ function _lbApplyEyeVisibility() {
     container.style.display =
       (_lbEyeVisible && available && container.childElementCount > 0) ? 'block' : 'none';
   }
-  var input = document.getElementById('lightboxToggleEye');
+  var input = /** @type {HTMLInputElement | null} */ (document.getElementById('lightboxToggleEye'));
   if (input) {
     input.disabled = !available;
     input.checked = _lbEyeVisible;
@@ -221,7 +221,7 @@ function toggleLightboxEye() {
   _lbApplyEyeVisibility();
 }
 
-function _lbPhotoData(photoId) {
+function _lbPhotoData(/** @type {LightboxPhotoId | null} */ photoId) {
   if (photoId == null) return null;
   var cached = _lbPhotoDataByPhoto[String(photoId)];
   if (cached) return cached;
@@ -230,7 +230,7 @@ function _lbPhotoData(photoId) {
   }) || null;
 }
 
-function _lbPhotoEyePoint(photoId, photo) {
+function _lbPhotoEyePoint(/** @type {number | null} */ photoId, /** @type {LightboxPhoto | null | undefined} */ photo) {
   photo = photo || _lbPhotoData(photoId);
   if (!photo || photo.eye_x == null || photo.eye_y == null) return null;
   var x = Number(photo.eye_x);
@@ -244,7 +244,7 @@ function _lbPhotoEyePoint(photoId, photo) {
 }
 
 function _lbApplyTrackEyeState() {
-  var input = document.getElementById('lightboxTrackEye');
+  var input = /** @type {HTMLInputElement | null} */ (document.getElementById('lightboxTrackEye'));
   if (!input) return;
   var photo = _lbPhotoData(vireoLightboxSession.requestedPhotoId());
   var eyeKnown = !!(
@@ -261,7 +261,7 @@ function _lbApplyTrackEyeState() {
       note.textContent = '';
     }
   }
-  var row = input.closest('.lb-view-row');
+  var row = /** @type {HTMLElement | null} */ (input.closest('.lb-view-row'));
   if (row) {
     if (_lbTrackEyeEnabled && !available) {
       row.title = eyeKnown
@@ -284,22 +284,22 @@ function toggleLightboxTrackEye() {
 }
 
 /* Species color palette for lightbox bounding boxes */
-var _lbSpeciesColors = {};
+/** @type {Record<string, string>} */ var _lbSpeciesColors = {};
 var _lbColorPalette = [
   '#24E5CA', '#f0c040', '#e74c3c', '#3498db', '#9b59b6',
   '#1abc9c', '#e67e22', '#2ecc71', '#e84393', '#00cec9'
 ];
 var _lbNextColorIdx = 0;
 
-function _lbGetSpeciesColor(species) {
+function _lbGetSpeciesColor(/** @type {string} */ species) {
   if (!_lbSpeciesColors[species]) {
-    _lbSpeciesColors[species] = _lbColorPalette[_lbNextColorIdx % _lbColorPalette.length];
+    _lbSpeciesColors[species] = (_lbColorPalette[_lbNextColorIdx % _lbColorPalette.length] || '#24E5CA');
     _lbNextColorIdx++;
   }
   return _lbSpeciesColors[species];
 }
 
-function _lbRenderEyeCrosshair(photo) {
+function _lbRenderEyeCrosshair(/** @type {LightboxPhoto | null | undefined} */ photo) {
   // Draws a crosshair at the detected eye keypoint on the current lightbox
   // photo. eye_x / eye_y are stored normalized 0-1 against the oriented
   // (EXIF-transposed) image, same as detection boxes, so we can map
@@ -334,8 +334,8 @@ function _lbRenderEyeCrosshair(photo) {
   _lbApplyTrackEyeState();
 }
 
-function _lbLoadDetections(photoId) {
-  var container = document.getElementById('lightboxDetections');
+function _lbLoadDetections(/** @type {number} */ photoId) {
+  const container = document.getElementById('lightboxDetections');
   if (!container) return;
   container.innerHTML = '';
   if (!_lbSourceOverlaysAvailable()) {
@@ -344,7 +344,7 @@ function _lbLoadDetections(photoId) {
   }
   fetch('/api/detections/' + photoId)
     .then(function(r) { return r.json(); })
-    .then(function(detections) {
+    .then(function(/** @type {LightboxDetection[]} */ detections) {
       if (!detections || detections.length === 0) return;
       // Only render if still viewing the same photo
       if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
@@ -389,13 +389,13 @@ function _lbLoadDetections(photoId) {
  * how the detection-box toggle stays present but inert when there are
  * no detections.
  */
-var _lbMaskActiveVariant = null;     // name of the photo's currently-active variant
-var _lbMaskAvailable = [];           // [{variant, url, created_at}, ...]
-var _lbMaskCurrentUrl = null;
+/** @type {string | null} */ var _lbMaskActiveVariant = null;     // name of the photo's currently-active variant
+/** @type {LightboxMaskVariant[]} */ var _lbMaskAvailable = [];           // [{variant, url, created_at}, ...]
+/** @type {string | null} */ var _lbMaskCurrentUrl = null;
 var _lbMaskLoadSeq = 0;
 
 function _lbResetMaskOverlay() {
-  var img = document.getElementById('lightboxMaskOverlay');
+  const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxMaskOverlay'));
   _lbMaskLoadSeq++;
   if (img) {
     img.classList.remove('show');
@@ -403,9 +403,9 @@ function _lbResetMaskOverlay() {
     img.onerror = null;
     img.removeAttribute('src');
   }
-  var ctrls = document.getElementById('lightboxMaskControls');
+  const ctrls = document.getElementById('lightboxMaskControls');
   if (ctrls) ctrls.classList.remove('has-variants');
-  var sel = document.getElementById('lightboxMaskSelect');
+  const sel = /** @type {HTMLSelectElement | null} */ (document.getElementById('lightboxMaskSelect'));
   if (sel) sel.innerHTML = '';
   _lbMaskActiveVariant = null;
   _lbMaskAvailable = [];
@@ -414,11 +414,11 @@ function _lbResetMaskOverlay() {
 }
 
 function _lbApplyMaskVisibility() {
-  var img = document.getElementById('lightboxMaskOverlay');
+  const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxMaskOverlay'));
   if (!img) return;
   _lbApplyMaskToggleButton();
   if (!_lbSourceOverlaysAvailable()) {
-    var ctrls = document.getElementById('lightboxMaskControls');
+    const ctrls = document.getElementById('lightboxMaskControls');
     if (ctrls) ctrls.classList.remove('has-variants');
   }
   if (!_lbSourceOverlaysAvailable() || !_lbMasksVisible || !_lbMaskCurrentUrl) {
@@ -479,17 +479,17 @@ function _lbApplyMaskVisibility() {
   // `show` here.
 }
 
-function _lbApplyMaskUrl(url) {
+function _lbApplyMaskUrl(/** @type {string | null} */ url) {
   // Set the selected overlay URL. Visibility is controlled separately so
   // users can keep their mask preference across photos and sessions.
-  var img = document.getElementById('lightboxMaskOverlay');
+  const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxMaskOverlay'));
   _lbMaskCurrentUrl = url || null;
   if (!url && img) img.removeAttribute('src');
   _lbApplyMaskVisibility();
 }
 
 function _lbApplyMaskToggleButton() {
-  var input = document.getElementById('lightboxToggleMasks');
+  var input = /** @type {HTMLInputElement | null} */ (document.getElementById('lightboxToggleMasks'));
   if (!input) return;
   var available = _lbSourceOverlaysAvailable();
   input.disabled = !available;
@@ -506,7 +506,7 @@ function toggleLightboxMasks() {
 }
 
 function _lbOnMaskVariantChange() {
-  var sel = document.getElementById('lightboxMaskSelect');
+  const sel = /** @type {HTMLSelectElement | null} */ (document.getElementById('lightboxMaskSelect'));
   if (!sel) return;
   if (_lbCurrentRecipeHasOrientation()) {
     _lbApplyMaskUrl(null);
@@ -529,12 +529,12 @@ function _lbOnMaskVariantChange() {
   _lbApplyMaskUrl(picked ? picked.url : null);
 }
 
-function _lbLoadMaskVariants(photoId) {
+function _lbLoadMaskVariants(/** @type {number} */ photoId) {
   // Fetch the photo's available mask variants and populate the
   // dropdown. Defaults the selection to "active" (which displays the
   // photo's active_mask_variant overlay if one exists).
-  var sel = document.getElementById('lightboxMaskSelect');
-  var ctrls = document.getElementById('lightboxMaskControls');
+  const sel = /** @type {HTMLSelectElement | null} */ (document.getElementById('lightboxMaskSelect'));
+  const ctrls = document.getElementById('lightboxMaskControls');
   if (!sel || !ctrls) return;
   // Reset before the async fetch resolves so a fast nav doesn't show
   // stale options for the previous photo.
@@ -542,7 +542,7 @@ function _lbLoadMaskVariants(photoId) {
 
   fetch('/api/photos/' + photoId + '/masks')
     .then(function(r) { return r.ok ? r.json() : null; })
-    .then(function(data) {
+    .then(function(/** @type {{active?: string, variants?: LightboxMaskVariant[]} | null} */ data) {
       // Bail if the user navigated to a different photo while the
       // request was in flight.
       if (!data || vireoLightboxSession.requestedPhotoId() !== photoId) return;

@@ -2,9 +2,9 @@
 // Classic page script; load boot.js after all definitions.
 
 function renderJobsPollWarning() {
-  var warning = document.getElementById('jobsPollWarning');
+  var warning = /** @type {HTMLElement} */ (document.getElementById('jobsPollWarning'));
   if (!warning) return;
-  var failed = Object.keys(jobsPollState).filter(function(name) { return jobsPollState[name].error; });
+  var failed = [/** @type {const} */ ('active'), /** @type {const} */ ('history')].filter(function(name) { return jobsPollState[name].error; });
   var messages = failed.map(function(name) {
     var lane = jobsPollState[name];
     var label = name === 'active' ? 'Active jobs' : 'Job history';
@@ -13,11 +13,11 @@ function renderJobsPollWarning() {
       : ' could not be loaded.');
   });
   var message = messages.length ? messages.join(' ') + ' Retrying automatically.' : '';
-  var status = document.getElementById('jobsPollMessage');
+  var status = /** @type {HTMLElement} */ (document.getElementById('jobsPollMessage'));
   // Successful polls in the other lane must not repeatedly announce this error.
   if (status.textContent !== message) status.textContent = message;
   warning.hidden = failed.length === 0;
-  var retry = document.getElementById('retryJobsPolling');
+  var retry = /** @type {HTMLButtonElement} */ (document.getElementById('retryJobsPolling'));
   retry.disabled = failed.length > 0 && failed.every(function(name) { return jobsPollState[name].pending; });
   retry.textContent = retry.disabled ? 'Retrying…' : 'Retry now';
 }
@@ -27,18 +27,18 @@ function retryJobsPolling() {
   if (jobsPollState.history.error && !jobsPollState.history.pending) fetchHistory();
 }
 
-function isJobsRecord(value) {
+/** @param {unknown} value @returns {value is Record<string,unknown>} */ function isJobsRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function validateJobRows(rows) {
+/** @param {unknown} rows @returns {asserts rows is JobsRow[]} */ function validateJobRows(rows) {
   if (!Array.isArray(rows) || !rows.every(function(job) {
     return isJobsRecord(job) && typeof job.id === 'string' && job.id.length > 0 &&
       typeof job.type === 'string' && typeof job.status === 'string';
   })) throw new Error('Invalid jobs list');
 }
 
-function validateActiveJobs(data) {
+/** @param {unknown} data @returns {asserts data is JobsSnapshot} */ function validateActiveJobs(data) {
   if (!isJobsRecord(data)) throw new Error('Invalid active jobs response');
   validateJobRows(data.active);
   if (data.workspace_names !== undefined && (!isJobsRecord(data.workspace_names) ||
@@ -53,7 +53,7 @@ function validateActiveJobs(data) {
   }
 }
 
-async function fetchJobsSnapshot(name, url, validate, apply, background) {
+/** @template T @param {'active'|'history'} name @param {string} url @param {(data:unknown)=>asserts data is T} validate @param {(data:T)=>void} apply @param {boolean=} background */ async function fetchJobsSnapshot(name, url, validate, apply, background) {
   var lane = jobsPollState[name];
   if (background && lane.pending) return false;
   var generation = ++lane.generation;
@@ -96,7 +96,7 @@ async function fetchJobsSnapshot(name, url, validate, apply, background) {
   }
 }
 
-function fetchImportRecoveryOptions(jobId) {
+/** @param {string} jobId */ function fetchImportRecoveryOptions(jobId) {
   return fetch('/api/import/' + encodeURIComponent(jobId) + '/recovery-options', {cache: 'no-store'})
     .then(function(response) {
       return response.json().then(function(options) {
@@ -115,7 +115,7 @@ function fetchImportRecoveryOptions(jobId) {
     });
 }
 
-function refreshHistoryImportRecovery(job) {
+/** @param {JobsRow} job */ function refreshHistoryImportRecovery(job) {
   if (job.import_resume_pending || job.import_direct_pending) return;
   if (job.type !== 'import' || job.status !== 'failed' || !job.result) return;
   var interrupted = job.result.interrupted && Array.isArray(job.result.photo_ids);
@@ -131,7 +131,7 @@ function refreshHistoryImportRecovery(job) {
   if (!directCandidate && !missing && ids.length) return;
   job.import_resume_pending = !!interrupted;
   job.import_direct_pending = directCandidate;
-  function applyOptions(options) {
+  /** @param {JobsRecoveryOptions} options */ function applyOptions(options) {
     // A subsequent history refresh or selection must not receive stale eligibility.
     if (historyJobs.indexOf(job) < 0) return;
     job.import_resume_allowed = options.resume_allowed;
@@ -144,19 +144,19 @@ function refreshHistoryImportRecovery(job) {
   fetchImportRecoveryOptions(job.id).then(applyOptions);
 }
 
-function fetchJobs(background) {
+/** @param {boolean=} background */ function fetchJobs(background) {
   return fetchJobsSnapshot('active', '/api/jobs', validateActiveJobs, function(data) {
     activeJobs = data.active || [];
     activeWsId = data.active_workspace_id ?? null;
     workspaceNames = data.workspace_names || {};
-    var awakeNote = document.getElementById('keepingAwakeNote');
+    var awakeNote = /** @type {HTMLElement} */ (document.getElementById('keepingAwakeNote'));
     if (awakeNote) {
       awakeNote.style.display = data.keeping_awake ? '' : 'none';
     }
     // Drop optimistic-cancel state for jobs that have left the active
     // list (server has finalized them; their next render comes from
     // historyJobs which never shows a cancel button).
-    var stillActive = {};
+    /** @type {Record<string,boolean>} */ var stillActive = {};
     activeJobs.forEach(function(j) { stillActive[j.id] = true; });
     Object.keys(cancellingJobIds).forEach(function(id) {
       if (!stillActive[id]) delete cancellingJobIds[id];
@@ -182,7 +182,7 @@ function fetchJobs(background) {
   }, background);
 }
 
-function fetchHistory(refreshMissingSelection, background) {
+/** @param {boolean=} refreshMissingSelection @param {boolean=} background */ function fetchHistory(refreshMissingSelection, background) {
   if (refreshMissingSelection) {
     // The first handoff needs a snapshot requested after the job disappeared.
     // Later active polls must not keep aborting that history request.

@@ -2,15 +2,15 @@
 // disabled state, loading the config, and preview, recompute and reset.
 // Classic page script; load boot.js after all definitions.
 
-function setMissTuningStatus(text) {
-  var el = document.getElementById('missTuningStatus');
+/** @param {string} text */ function setMissTuningStatus(text) {
+  var el = /** @type {HTMLElement} */ (document.getElementById('missTuningStatus'));
   if (el) el.textContent = text || '';
 }
 
-function setMissTuningDisabled(disabled) {
+/** @param {boolean} disabled */ function setMissTuningDisabled(disabled) {
   MISS_TUNING_CONTROL_IDS.forEach(function(id) {
     var el = document.getElementById(id);
-    if (el) el.disabled = !!disabled;
+    if (el instanceof HTMLInputElement || el instanceof HTMLButtonElement) el.disabled = !!disabled;
   });
 }
 
@@ -22,12 +22,12 @@ function invalidateMissPreview() {
   }
 }
 
-function percentValue(id) {
-  return parseInt(document.getElementById(id).value, 10) / 100;
+/** @param {string} id */ function percentValue(id) {
+  return parseInt(/** @type {HTMLInputElement} */ (document.getElementById(id)).value, 10) / 100;
 }
 
-function addChangedSliderValue(body, key, id, scale) {
-  var raw = parseInt(document.getElementById(id).value, 10);
+/** @param {MissBody} body @param {keyof MissConfig} key @param {string} id @param {number} scale */ function addChangedSliderValue(body, key, id, scale) {
+  var raw = parseInt(/** @type {HTMLInputElement} */ (document.getElementById(id)).value, 10);
   var baseline = null;
   if (missConfig && missConfig[key] != null) {
     baseline = Math.round(Number(missConfig[key]) * scale);
@@ -41,7 +41,7 @@ function collectMissThresholds() {
   // No miss_enabled toggle on this page: omit it so preview/recompute (and
   // save_defaults) preserve a workspace's effective value instead of silently
   // re-enabling miss detection for workspaces that disabled it.
-  var body = {};
+  /** @type {MissBody} */ var body = {};
   addChangedSliderValue(body, 'detector_confidence', 'missCfgDetectorFloor', 100);
   addChangedSliderValue(body, 'miss_det_confidence', 'missCfgNoSubject', 100);
   addChangedSliderValue(body, 'miss_classifier_override_conf', 'missCfgClassifierRescue', 100);
@@ -51,24 +51,24 @@ function collectMissThresholds() {
 }
 
 function updateMissSliderLabels() {
-  var det = parseInt(document.getElementById('missCfgDetectorFloor').value, 10);
-  var ns = parseInt(document.getElementById('missCfgNoSubject').value, 10);
-  var rescue = parseInt(document.getElementById('missCfgClassifierRescue').value, 10);
-  var bbox = parseInt(document.getElementById('missCfgBboxMin').value, 10);
-  var oof = parseInt(document.getElementById('missCfgOofRatio').value, 10);
-  document.getElementById('missCfgDetectorFloorVal').textContent = det + '%';
-  document.getElementById('missCfgNoSubjectVal').textContent = ns + '%';
-  document.getElementById('missCfgClassifierRescueVal').textContent = rescue > 100 ? 'off' : rescue + '%';
-  document.getElementById('missCfgBboxMinVal').textContent = (bbox / 1000).toFixed(3);
-  document.getElementById('missCfgOofRatioVal').textContent = (oof / 100).toFixed(2);
+  var det = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('missCfgDetectorFloor')).value, 10);
+  var ns = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('missCfgNoSubject')).value, 10);
+  var rescue = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('missCfgClassifierRescue')).value, 10);
+  var bbox = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('missCfgBboxMin')).value, 10);
+  var oof = parseInt(/** @type {HTMLInputElement} */ (document.getElementById('missCfgOofRatio')).value, 10);
+  /** @type {HTMLElement} */ (document.getElementById('missCfgDetectorFloorVal')).textContent = det + '%';
+  /** @type {HTMLElement} */ (document.getElementById('missCfgNoSubjectVal')).textContent = ns + '%';
+  /** @type {HTMLElement} */ (document.getElementById('missCfgClassifierRescueVal')).textContent = rescue > 100 ? 'off' : rescue + '%';
+  /** @type {HTMLElement} */ (document.getElementById('missCfgBboxMinVal')).textContent = (bbox / 1000).toFixed(3);
+  /** @type {HTMLElement} */ (document.getElementById('missCfgOofRatioVal')).textContent = (oof / 100).toFixed(2);
 }
 
-function setMissSliders(config) {
-  document.getElementById('missCfgDetectorFloor').value = Math.round((config.detector_confidence || 0) * 100);
-  document.getElementById('missCfgNoSubject').value = Math.round((config.miss_det_confidence || 0) * 100);
-  document.getElementById('missCfgClassifierRescue').value = Math.round((config.miss_classifier_override_conf || 0) * 100);
-  document.getElementById('missCfgBboxMin').value = Math.round((config.miss_bbox_area_min || 0) * 1000);
-  document.getElementById('missCfgOofRatio').value = Math.round((config.miss_oof_ratio || 0) * 100);
+/** @param {MissConfig} config */ function setMissSliders(config) {
+  /** @type {HTMLInputElement} */ (document.getElementById('missCfgDetectorFloor')).value = String(Math.round((config.detector_confidence || 0) * 100));
+  /** @type {HTMLInputElement} */ (document.getElementById('missCfgNoSubject')).value = String(Math.round((config.miss_det_confidence || 0) * 100));
+  /** @type {HTMLInputElement} */ (document.getElementById('missCfgClassifierRescue')).value = String(Math.round((config.miss_classifier_override_conf || 0) * 100));
+  /** @type {HTMLInputElement} */ (document.getElementById('missCfgBboxMin')).value = String(Math.round((config.miss_bbox_area_min || 0) * 1000));
+  /** @type {HTMLInputElement} */ (document.getElementById('missCfgOofRatio')).value = String(Math.round((config.miss_oof_ratio || 0) * 100));
   updateMissSliderLabels();
 }
 
@@ -97,7 +97,7 @@ async function loadMissConfig() {
     if (!r.ok) throw new Error('http ' + r.status);
     missConfig = await r.json();
     originalMissConfig = Object.assign({}, missConfig);
-    setMissSliders(missConfig);
+    if (missConfig) setMissSliders(missConfig);
     missConfigLoaded = true;
     // Keep the tuning group frozen when a fail-closed scope is in effect;
     // loadMisses() will re-enable it once a user-supplied replacement
@@ -162,7 +162,7 @@ async function recomputeMisses() {
   if (legacyScopeError || legacyScopeRecoveryPending) return;
   invalidateMissPreview();
   var requestId = ++missLoadRequestId;
-  var btn = document.getElementById('missRecomputeBtn');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('missRecomputeBtn'));
   // Recompute the photos that produced the cards the user is looking at.
   // Live controls may already represent a newer filter whose load is pending.
   var requestedFilters = cloneMissFilterPayload(appliedMissFilters);
@@ -170,7 +170,7 @@ async function recomputeMisses() {
   addFilterPayloadToBody(body, requestedFilters);
   var since = getSinceParam();
   if (since) body.since = since;
-  body.save_defaults = !!document.getElementById('missSaveDefaults').checked;
+  body.save_defaults = !!/** @type {HTMLInputElement} */ (document.getElementById('missSaveDefaults')).checked;
   if (btn) btn.disabled = true;
   previewActive = false;
   previewPayload = null;

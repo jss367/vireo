@@ -1,0 +1,22 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/import.d.ts",
+    "../vireo/static/import/after-import.js",
+    "../vireo/static/import/boot.js",
+    "../vireo/static/import/destinations.js",
+    "../vireo/static/import/folder-browser.js",
+    "../vireo/static/import/form.js",
+    "../vireo/static/import/jobs.js",
+    "../vireo/static/import/loading.js",
+    "../vireo/static/import/new-images.js",
+    "../vireo/static/import/preview-grid.js",
+    "../vireo/static/import/preview.js",
+    "../vireo/static/import/readiness.js",
+    "../vireo/static/import/results.js",
+    "../vireo/static/import/selection.js",
+    "../vireo/static/import/sources.js",
+    "../vireo/static/import/staging.js",
+    "../vireo/static/import/state.js"
+  ]
+}

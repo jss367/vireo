@@ -4,9 +4,9 @@
 
 // Wrapping and inspector/sidebar resizing change the space the bar overlays.
 new ResizeObserver(function(entries) {
-  var bar = entries[0].target;
+  var bar = entries[0]?.target; if (!(bar instanceof HTMLElement) || !bar.parentElement) return;
   bar.parentElement.style.setProperty('--batch-bar-height', bar.offsetHeight + 'px');
-}).observe(document.getElementById('batchBar'));
+}).observe(/** @type {HTMLElement} */ (document.getElementById('batchBar')));
 
 // The bar floats over the photo pane, and the click that raises it is also
 // the first click of a double-click. If the bar accepted clicks the moment
@@ -35,8 +35,8 @@ var BATCH_BAR_ACTIVATE_QUIET_MS = 1500;
 // stationary hand, well below the distance from any card centre to the
 // nearest batch button.
 var BATCH_BAR_ACTIVATE_MOVE_PX = 8;
-var batchBarActivateTimer = null;
-var batchBarLastCardMouseDown = null;
+/** @type {number | null} */ var batchBarActivateTimer = null;
+/** @type {{x: number, y: number} | null} */ var batchBarLastCardMouseDown = null;
 // Whether the pointer has left that mousedown's neighbourhood. This, and not
 // any elapsed time, is what says the click gesture is over: every batch button
 // is somewhere the pointer has to travel to, and a double-click does not
@@ -51,7 +51,7 @@ function scheduleBatchBarActivation() {
 }
 
 function activateBatchBar() {
-  var bar = document.getElementById('batchBar');
+  var bar = /** @type {HTMLElement} */ (document.getElementById('batchBar'));
   if (bar) bar.classList.remove('batch-bar-inert');
   if (batchBarActivateTimer) {
     clearTimeout(batchBarActivateTimer);
@@ -72,15 +72,15 @@ function activateBatchBar() {
 document.addEventListener('mousedown', function(event) {
   if (event.button !== 0) return;
   var target = event.target;
-  if (!target || !target.closest) return;
-  if (target.closest('.grid-card, .browse-stack-member')) {
+  if (!(target instanceof Element)) return;
+  if (/** @type {HTMLElement | null} */ (target.closest('.grid-card, .browse-stack-member'))) {
     batchBarLastCardMouseDown = {x: event.clientX, y: event.clientY};
     batchBarPointerMovedSinceCardDown = false;
   }
-  var bar = document.getElementById('batchBar');
+  var bar = /** @type {HTMLElement} */ (document.getElementById('batchBar'));
   if (!bar || bar.style.display !== 'flex') return;
-  if (target.closest('#batchBar')) return;
-  if (!target.closest('.grid-card, .browse-stack-member')) return;
+  if (/** @type {HTMLElement | null} */ (target.closest('#batchBar'))) return;
+  if (!/** @type {HTMLElement | null} */ (target.closest('.grid-card, .browse-stack-member'))) return;
   if (!bar.classList.contains('batch-bar-inert')) {
     bar.classList.add('batch-bar-inert');
   }
@@ -100,7 +100,7 @@ document.addEventListener('mousemove', function(event) {
   // Recorded whatever the bar is doing, because the straggling-click redirect
   // below reads it after the quiet timer has already released the bar.
   batchBarPointerMovedSinceCardDown = true;
-  var bar = document.getElementById('batchBar');
+  var bar = /** @type {HTMLElement} */ (document.getElementById('batchBar'));
   if (bar && bar.style.display === 'flex'
       && bar.classList.contains('batch-bar-inert')) {
     activateBatchBar();
@@ -116,9 +116,9 @@ document.addEventListener('mousemove', function(event) {
 // instead of the button firing.
 document.addEventListener('click', function(event) {
   var target = event.target;
-  if (!target || !target.closest) return;
-  if (!target.closest('#batchBar')) return;
-  var bar = document.getElementById('batchBar');
+  if (!(target instanceof Element)) return;
+  if (!/** @type {HTMLElement | null} */ (target.closest('#batchBar'))) return;
+  var bar = /** @type {HTMLElement} */ (document.getElementById('batchBar'));
   if (!bar || bar.style.display !== 'flex') return;
   // A keyboard-activated click (Enter/Space on a focused batch button, or a
   // script-dispatched click on one) belongs to that button, not to any
@@ -145,7 +145,7 @@ document.addEventListener('click', function(event) {
   var under = document.elementFromPoint(event.clientX, event.clientY);
   bar.style.pointerEvents = priorPointerEvents;
   var card = under && under.closest
-    ? under.closest('.grid-card, .browse-stack-member')
+    ? /** @type {HTMLElement | null} */ (under.closest('.grid-card, .browse-stack-member'))
     : null;
   if (!card) return;
   card.dispatchEvent(new MouseEvent('dblclick', {
@@ -155,7 +155,7 @@ document.addEventListener('click', function(event) {
 }, true);
 
 function updateBatchBar() {
-  var bar = document.getElementById('batchBar');
+  var bar = /** @type {HTMLElement} */ (document.getElementById('batchBar'));
   if (!bar) return;
   var ids = getActiveSelection();
   if (ids.length >= 1) {
@@ -178,7 +178,7 @@ function updateBatchBar() {
       }
       bar.style.display = 'flex';
     }
-    document.getElementById('batchCount').textContent =
+    /** @type {HTMLElement} */ (document.getElementById('batchCount')).textContent =
       ids.length.toLocaleString() + ' selected' + browseSelectionStackNote(ids);
   } else {
     if (batchBarActivateTimer) {

@@ -1,7 +1,7 @@
 // Crop clamping and how rotation, flip, and straighten carry a crop.
 // Classic page script; load boot.js after all definitions.
 
-function isFullCrop(crop) {
+/** @param {EditorCrop|null|undefined} crop */ function isFullCrop(crop) {
   return !crop || (
     Math.abs(Number(crop.x || 0)) < 0.0005 &&
     Math.abs(Number(crop.y || 0)) < 0.0005 &&
@@ -10,7 +10,7 @@ function isFullCrop(crop) {
   );
 }
 
-function clampCrop(crop) {
+/** @param {EditorCrop} crop */ function clampCrop(crop) {
   var min = 0.02;
   var x = Number(crop.x) || 0;
   var y = Number(crop.y) || 0;
@@ -23,7 +23,7 @@ function clampCrop(crop) {
   return { x: x, y: y, w: w, h: h };
 }
 
-function ensureCrop(recipe) {
+/** @param {EditorRecipe} recipe */ function ensureCrop(recipe) {
   if (!recipe.crop || typeof recipe.crop !== 'object') {
     recipe.crop = { x: 0, y: 0, w: 1, h: 1 };
   }
@@ -31,7 +31,7 @@ function ensureCrop(recipe) {
   return recipe.crop;
 }
 
-function cropFromTransformedCorners(crop, transformPoint) {
+/** @param {EditorCrop} crop @param {(point:EditorPoint)=>EditorPoint} transformPoint */ function cropFromTransformedCorners(crop, transformPoint) {
   var c = clampCrop(crop);
   var corners = [
     { x: c.x, y: c.y },
@@ -48,7 +48,7 @@ function cropFromTransformedCorners(crop, transformPoint) {
   return clampCrop({ x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
 }
 
-function rotatePointInBox(point, clockwiseDegrees, aspect) {
+/** @param {EditorPoint} point @param {number} clockwiseDegrees @param {number} aspect */ function rotatePointInBox(point, clockwiseDegrees, aspect) {
   var angle = Number(clockwiseDegrees || 0) * Math.PI / 180;
   if (!angle || !Number.isFinite(aspect) || aspect <= 0) return point;
   var cos = Math.cos(angle);
@@ -61,8 +61,8 @@ function rotatePointInBox(point, clockwiseDegrees, aspect) {
   };
 }
 
-function imageAspectForTransform(delta) {
-  var img = document.getElementById('editorImg');
+/** @param {number} delta */ function imageAspectForTransform(delta) {
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
   var dims = editorNativeRecipeDimensions(editorState.recipe || {}, false);
   // A committed preview contains only the crop, but crop-coordinate
   // transforms are defined against the whole post-transform source.
@@ -79,7 +79,7 @@ function imageAspectForTransform(delta) {
   };
 }
 
-function transformCropWithStraighten(crop, transformPoint, straighten, aspects) {
+/** @param {EditorCrop} crop @param {(point:EditorPoint)=>EditorPoint} transformPoint @param {number|undefined} straighten @param {{current:number;next:number}|null} aspects */ function transformCropWithStraighten(crop, transformPoint, straighten, aspects) {
   var angle = Number(straighten || 0);
   return cropFromTransformedCorners(crop, function(point) {
     var next = point;
@@ -90,7 +90,7 @@ function transformCropWithStraighten(crop, transformPoint, straighten, aspects) 
   });
 }
 
-function transformCropForRotation(crop, delta, flip) {
+/** @param {EditorCrop} crop @param {number} delta @param {EditorFlip|undefined} flip */ function transformCropForRotation(crop, delta, flip) {
   var normalizedDelta = ((Number(delta) || 0) % 360 + 360) % 360;
   var activeFlip = flip || {};
   var aspects = imageAspectForTransform(normalizedDelta);
@@ -117,7 +117,7 @@ function transformCropForRotation(crop, delta, flip) {
   }, editorState.recipe.straighten, aspects);
 }
 
-function transformCropForFlip(crop, axis) {
+/** @param {EditorCrop} crop @param {keyof EditorFlip} axis */ function transformCropForFlip(crop, axis) {
   var aspects = imageAspectForTransform(0);
   return transformCropWithStraighten(crop, function(point) {
     if (axis === 'horizontal') return { x: 1 - point.x, y: point.y };

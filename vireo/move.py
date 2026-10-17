@@ -889,6 +889,53 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
     never finish). On a pty both openrsync and GNU rsync line-buffer, so
     per-file names stream as they transfer.
     """
+    cmd = _rsync_streamed_command(
+        src_path, dest_spec, rsync_flags, rsync_bin, extra_args,
+        src_specs, src_specs_dest_is_dir)
+    proc, stdout_stream = _spawn_rsync_on_pty(cmd)
+    state = {"timed_out": False}
+    # Last time rsync showed any sign of life (process start counts, so the
+    # silent file-list/scan phase before the first transfer isn't a stall).
+    last_activity = {"t": time.monotonic()}
+    done = threading.Event()
+
+    def _watchdog():
+        # Poll well below stall_timeout so a stall is detected promptly once
+        # the window elapses, without busy-waiting. With a cancel_check the
+        # poll drops to 1s: Stop has to kill the subprocess within a couple
+        # of seconds, not at the stall watchdog's leisurely interval.
+        poll = 1.0 if cancel_check is not None else min(stall_timeout, 30)
+        while not done.wait(poll):
+            if cancel_check is not None and cancel_check():
+                proc.kill()
+                return
+            if time.monotonic() - last_activity["t"] > stall_timeout:
+                state["timed_out"] = True
+                proc.kill()
+                return
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True)
+    watchdog.start()
+
+    stderr_thread, stderr_chunks = _start_stderr_drain(proc, last_activity)
+
+    try:
+        _stream_rsync_progress(
+            stdout_stream, total_files, progress_cb, last_activity)
+        proc.wait()
+    finally:
+        done.set()
+        if stdout_stream is not None and stdout_stream is not proc.stdout:
+            with contextlib.suppress(OSError):
+                stdout_stream.close()
+    stderr_thread.join()
+    watchdog.join()
+    return proc.returncode, "".join(stderr_chunks), state["timed_out"]
+
+
+def _rsync_streamed_command(src_path, dest_spec, rsync_flags, rsync_bin,
+                            extra_args, src_specs, src_specs_dest_is_dir):
+    """Build ``_run_rsync_streamed``'s rsync argv."""
     cmd = [rsync_bin, "-a", "--out-format=%n"]
     cmd += list(extra_args or [])
     cmd += [f for f in (rsync_flags or []) if f]
@@ -897,6 +944,15 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
         cmd += [dest_spec + "/" if src_specs_dest_is_dir else dest_spec]
     else:
         cmd += [src_path + "/", dest_spec + "/"]
+    return cmd
+
+
+def _spawn_rsync_on_pty(cmd):
+    """Start rsync with stdout on a pty where possible.
+
+    Returns ``(proc, stdout_stream)``; the stream is the pty master when one
+    was opened, else ``proc.stdout``. See ``_run_rsync_streamed`` for why.
+    """
     master_fd = slave_fd = None
     if hasattr(os, "openpty"):
         try:
@@ -925,30 +981,11 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
             master_fd = None  # closed via stdout_stream below
     if master_fd is not None:
         os.close(master_fd)
-    state = {"timed_out": False}
-    # Last time rsync showed any sign of life (process start counts, so the
-    # silent file-list/scan phase before the first transfer isn't a stall).
-    last_activity = {"t": time.monotonic()}
-    done = threading.Event()
+    return proc, stdout_stream
 
-    def _watchdog():
-        # Poll well below stall_timeout so a stall is detected promptly once
-        # the window elapses, without busy-waiting. With a cancel_check the
-        # poll drops to 1s: Stop has to kill the subprocess within a couple
-        # of seconds, not at the stall watchdog's leisurely interval.
-        poll = 1.0 if cancel_check is not None else min(stall_timeout, 30)
-        while not done.wait(poll):
-            if cancel_check is not None and cancel_check():
-                proc.kill()
-                return
-            if time.monotonic() - last_activity["t"] > stall_timeout:
-                state["timed_out"] = True
-                proc.kill()
-                return
 
-    watchdog = threading.Thread(target=_watchdog, daemon=True)
-    watchdog.start()
-
+def _start_stderr_drain(proc, last_activity):
+    """Start draining rsync's stderr; return ``(thread, chunks)``."""
     # Drain stderr on a separate thread. rsync can emit a lot of stderr (e.g.
     # many permission-denied or "file vanished" notices); if that fills the
     # pipe buffer while this thread is blocked reading stdout, rsync blocks on
@@ -973,34 +1010,29 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
 
     stderr_thread = threading.Thread(target=_drain_stderr)
     stderr_thread.start()
+    return stderr_thread, stderr_chunks
 
+
+def _stream_rsync_progress(stdout_stream, total_files, progress_cb,
+                           last_activity):
+    """Report each file rsync's ``--out-format=%n`` stream names."""
     copied = 0
     try:
-        try:
-            for line in stdout_stream:
-                # The pty's line discipline translates \n to \r\n (ONLCR),
-                # so strip \r too or every filename grows a trailing CR.
-                name = line.rstrip("\r\n")
-                last_activity["t"] = time.monotonic()
-                if not name or name.endswith("/"):
-                    continue  # directory entry, not a file
-                copied += 1
-                if progress_cb:
-                    progress_cb(copied, total_files, os.path.basename(name),
-                                "Copying files")
-        except OSError:
-            # Reading the pty master after the child exits raises EIO on
-            # Linux (macOS returns plain EOF) — both just mean end-of-output.
-            pass
-        proc.wait()
-    finally:
-        done.set()
-        if stdout_stream is not None and stdout_stream is not proc.stdout:
-            with contextlib.suppress(OSError):
-                stdout_stream.close()
-    stderr_thread.join()
-    watchdog.join()
-    return proc.returncode, "".join(stderr_chunks), state["timed_out"]
+        for line in stdout_stream:
+            # The pty's line discipline translates \n to \r\n (ONLCR),
+            # so strip \r too or every filename grows a trailing CR.
+            name = line.rstrip("\r\n")
+            last_activity["t"] = time.monotonic()
+            if not name or name.endswith("/"):
+                continue  # directory entry, not a file
+            copied += 1
+            if progress_cb:
+                progress_cb(copied, total_files, os.path.basename(name),
+                            "Copying files")
+    except OSError:
+        # Reading the pty master after the child exits raises EIO on
+        # Linux (macOS returns plain EOF) — both just mean end-of-output.
+        pass
 
 
 # Finder writes .DS_Store (window layout, icon positions) into every folder it
@@ -1692,47 +1724,51 @@ def _path_equal_or_descends(candidate, ancestor,
     if case_insensitive_root is _UNPROBED_CI_ROOT:
         case_insensitive_root = _case_insensitive_root(ancestor)
     if case_insensitive_root:
-        root = case_insensitive_root
-        # `root` may already end with `os.sep` — the filesystem root "/"
-        # (deepest existing ancestor is `/` when everything below the
-        # destination is missing on a case-insensitive POSIX volume mounted
-        # at /), or a Windows drive root like "C:\\". `root + os.sep` would
-        # double the boundary to "//" / "C:\\\\" and never match any real
-        # path, silently skipping the case-folded compare and letting a
-        # stale row like `/photos/src` slip past a move into `/Photos/src`.
-        root_with_sep = root if root.endswith(os.sep) else root + os.sep
-        if not (real_a == root or real_a.startswith(root_with_sep)):
-            return False  # ancestor isn't actually inside the probed root.
-        # The case-fold root can appear under a case-only alias in the
-        # candidate (stale row `/Photos/DST/src` against probed root
-        # `/Photos/dst`). Match the root prefix case-insensitively, then
-        # confirm via samefile that the candidate's variant is the same
-        # on-disk directory — that distinguishes a real case-fold alias
-        # from a distinct path on a case-sensitive parent FS (e.g. `/mnt`
-        # vs `/MNT` mount-point pair on Linux), where the case-only twin
-        # of the root doesn't exist and samefile raises.
-        real_c_low = real_c.lower()
-        root_low = root.lower()
-        root_low_with_sep = root_with_sep.lower()
-        if real_c_low != root_low \
-                and not real_c_low.startswith(root_low_with_sep):
-            return False  # candidate is above or beside the case-fold subtree.
-        candidate_root = real_c[:len(root)]
-        if candidate_root != root \
-                and not _samefile_or_false(candidate_root, root):
-            return False  # case-variant of the root is distinct on the parent FS.
-        suffix_c = real_c[len(root):].lower()
-        suffix_a = real_a[len(root):].lower()
-        # suffix_a == "" means real_a IS the root itself; we've already
-        # established real_c is at or under root, so real_c descends from
-        # real_a unconditionally. Without this, a root like `/` strips
-        # to "" for the ancestor while leaving "photos/src" for the
-        # candidate — and `suffix_c.startswith("" + os.sep)` is False
-        # because the leading separator was already consumed by the root.
-        if suffix_a == "" or suffix_c == suffix_a \
-                or suffix_c.startswith(suffix_a + os.sep):
-            return True
+        return _case_folded_descends(real_c, real_a, case_insensitive_root)
     return False
+
+
+def _case_folded_descends(real_c, real_a, root):
+    """``_path_equal_or_descends``'s case-folded compare, scoped to the
+    case-insensitive subtree at ``root`` (a realpath)."""
+    # `root` may already end with `os.sep` — the filesystem root "/"
+    # (deepest existing ancestor is `/` when everything below the
+    # destination is missing on a case-insensitive POSIX volume mounted
+    # at /), or a Windows drive root like "C:\\". `root + os.sep` would
+    # double the boundary to "//" / "C:\\\\" and never match any real
+    # path, silently skipping the case-folded compare and letting a
+    # stale row like `/photos/src` slip past a move into `/Photos/src`.
+    root_with_sep = root if root.endswith(os.sep) else root + os.sep
+    if not (real_a == root or real_a.startswith(root_with_sep)):
+        return False  # ancestor isn't actually inside the probed root.
+    # The case-fold root can appear under a case-only alias in the
+    # candidate (stale row `/Photos/DST/src` against probed root
+    # `/Photos/dst`). Match the root prefix case-insensitively, then
+    # confirm via samefile that the candidate's variant is the same
+    # on-disk directory — that distinguishes a real case-fold alias
+    # from a distinct path on a case-sensitive parent FS (e.g. `/mnt`
+    # vs `/MNT` mount-point pair on Linux), where the case-only twin
+    # of the root doesn't exist and samefile raises.
+    real_c_low = real_c.lower()
+    root_low = root.lower()
+    root_low_with_sep = root_with_sep.lower()
+    if real_c_low != root_low \
+            and not real_c_low.startswith(root_low_with_sep):
+        return False  # candidate is above or beside the case-fold subtree.
+    candidate_root = real_c[:len(root)]
+    if candidate_root != root \
+            and not _samefile_or_false(candidate_root, root):
+        return False  # case-variant of the root is distinct on the parent FS.
+    suffix_c = real_c[len(root):].lower()
+    suffix_a = real_a[len(root):].lower()
+    # suffix_a == "" means real_a IS the root itself; we've already
+    # established real_c is at or under root, so real_c descends from
+    # real_a unconditionally. Without this, a root like `/` strips
+    # to "" for the ancestor while leaving "photos/src" for the
+    # candidate — and `suffix_c.startswith("" + os.sep)` is False
+    # because the leading separator was already consumed by the root.
+    return (suffix_a == "" or suffix_c == suffix_a
+            or suffix_c.startswith(suffix_a + os.sep))
 
 
 def _destination_overlaps_source(src_path, dest_path):
@@ -2080,10 +2116,21 @@ def plan_folder_date_moves_with_capture_dates(
     # traversal that slips past the string-level checks can't escape the
     # chosen root.
     destination_root = os.path.realpath(destination)
+    _refuse_non_directory_date_destination(destination)
+    plans = []
+    for relative in sorted(groups):
+        plans.append(_date_move_plan_item(
+            destination, destination_root, relative, groups[relative]))
+    return plans, capture_dts
+
+
+def _refuse_non_directory_date_destination(destination):
+    """Raise ``ValueError`` if ``destination`` or its first existing
+    ancestor is not a directory."""
     # Reject a destination root that is itself a regular file or dangling
-    # symlink. The ancestor walk below only checks paths *inside*
-    # ``destination`` (``depth`` starts at 1), so without this hoisted
-    # check a template like ``%Y/%m`` against ``destination='/archive'``
+    # symlink. The ancestor walk in ``_date_move_plan_item`` only checks
+    # paths *inside* ``destination`` (``depth`` starts at 1), so without this
+    # hoisted check a template like ``%Y/%m`` against ``destination='/archive'``
     # where ``/archive`` is a plain file would pass preflight — the
     # rendered leaf ``/archive/2026/07`` does not lexist yet — and
     # ``os.makedirs`` in the worker would then raise
@@ -2096,8 +2143,8 @@ def plan_folder_date_moves_with_capture_dates(
         )
     # When ``destination`` does not lexist yet, walk its own ancestors
     # upward until one lexists. The check above and the intermediate-
-    # ancestor loop below only cover ``destination`` itself and paths
-    # *inside* it; without this walk a request like
+    # ancestor loop in ``_date_move_plan_item`` only cover ``destination``
+    # itself and paths *inside* it; without this walk a request like
     # ``destination='/archive/root'`` where ``/archive`` is a plain file
     # (or dangling symlink) passes preflight and ``os.makedirs`` in the
     # worker then raises ``NotADirectoryError``/``FileExistsError``
@@ -2116,47 +2163,48 @@ def plan_folder_date_moves_with_capture_dates(
                 break
             previous = ancestor
             ancestor = os.path.dirname(ancestor)
-    plans = []
-    for relative in sorted(groups):
-        candidate = os.path.join(destination, *relative.split("/"))
-        resolved = os.path.realpath(candidate)
-        try:
-            common = os.path.commonpath([destination_root, resolved])
-        except ValueError:
-            common = ""
-        if common != destination_root:
+
+
+def _date_move_plan_item(destination, destination_root, relative, photo_ids):
+    """Validate one rendered date folder and return its plan entry."""
+    candidate = os.path.join(destination, *relative.split("/"))
+    resolved = os.path.realpath(candidate)
+    try:
+        common = os.path.commonpath([destination_root, resolved])
+    except ValueError:
+        common = ""
+    if common != destination_root:
+        raise ValueError(
+            f"folder template produced an unsafe path: {relative!r}"
+        )
+    # ``lexists`` (not ``exists``) is needed so a dangling symlink still
+    # trips this guard: ``exists`` follows the link and reports False,
+    # but ``os.makedirs(exist_ok=True)`` in ``move_photos`` would then
+    # raise ``FileExistsError`` for that same lexists-true entry and
+    # crash the background job instead of surfacing a normal collision.
+    #
+    # Walk every intermediate ancestor between ``destination`` and the
+    # rendered candidate too. A nested template like ``%Y/%m`` renders
+    # ``2026/07``; if ``destination/2026`` is already a regular file (or
+    # a dangling symlink), the final candidate does not lexist yet and
+    # only the leaf check misses it, but ``os.makedirs`` in the worker
+    # would then raise ``NotADirectoryError``/``FileExistsError`` and
+    # abort the background job with an opaque exception instead of
+    # returning a structured preflight error.
+    parts = relative.split("/")
+    for depth in range(1, len(parts) + 1):
+        ancestor = os.path.join(destination, *parts[:depth])
+        if os.path.lexists(ancestor) and not os.path.isdir(ancestor):
             raise ValueError(
-                f"folder template produced an unsafe path: {relative!r}"
+                f"date destination already exists and is not a directory: "
+                f"{ancestor}"
             )
-        # ``lexists`` (not ``exists``) is needed so a dangling symlink still
-        # trips this guard: ``exists`` follows the link and reports False,
-        # but ``os.makedirs(exist_ok=True)`` in ``move_photos`` would then
-        # raise ``FileExistsError`` for that same lexists-true entry and
-        # crash the background job instead of surfacing a normal collision.
-        #
-        # Walk every intermediate ancestor between ``destination`` and the
-        # rendered candidate too. A nested template like ``%Y/%m`` renders
-        # ``2026/07``; if ``destination/2026`` is already a regular file (or
-        # a dangling symlink), the final candidate does not lexist yet and
-        # only the leaf check misses it, but ``os.makedirs`` in the worker
-        # would then raise ``NotADirectoryError``/``FileExistsError`` and
-        # abort the background job with an opaque exception instead of
-        # returning a structured preflight error.
-        parts = relative.split("/")
-        for depth in range(1, len(parts) + 1):
-            ancestor = os.path.join(destination, *parts[:depth])
-            if os.path.lexists(ancestor) and not os.path.isdir(ancestor):
-                raise ValueError(
-                    f"date destination already exists and is not a directory: "
-                    f"{ancestor}"
-                )
-        plans.append({
-            "relative_path": relative,
-            "destination": candidate,
-            "photo_ids": groups[relative],
-            "photo_count": len(groups[relative]),
-        })
-    return plans, capture_dts
+    return {
+        "relative_path": relative,
+        "destination": candidate,
+        "photo_ids": photo_ids,
+        "photo_count": len(photo_ids),
+    }
 
 
 def move_folder_by_date(db, folder_id, destination, folder_template,
@@ -3009,29 +3057,7 @@ def _plan_moved_file_mtimes(db, src_path, dest_path, progress_cb=None):
     away first-hand evidence at the worst possible moment, so it is handed
     back for the caller to treat as a verification failure.
     """
-    # The repo's literal subtree predicate, not a raw LIKE: LIKE would read
-    # ``_`` and ``%`` in a real folder path as wildcards and match
-    # case-insensitively, pulling in sibling trees this move never touched --
-    # and their rows would then resolve to files outside ``dest_path``. It
-    # also normalizes separators, so Windows descendants stored with
-    # backslashes are matched rather than silently skipped.
-    #
-    # It is a PREFILTER, not the authority. ``_path_for_subtree_match`` folds
-    # ``\\`` to ``/`` on every platform, and ``\\`` is a legal filename
-    # character on POSIX -- so moving ``/photos/shoot\\1`` normalizes to the
-    # same prefix as the unrelated ``/photos/shoot/1`` tree. Every row is
-    # re-checked below against the move module's own alias-folding
-    # containment test (symlinks, Windows case folding, case-insensitive
-    # POSIX), which is FS truth rather than string shape.
-    prefix = _subtree_prefix(src_path)
-    rows = db.conn.execute(
-        """SELECT p.id, p.filename, p.file_mtime, p.file_size,
-                  f.path AS folder_path
-           FROM photos p JOIN folders f ON f.id = p.folder_id
-           WHERE f.path = ?
-              OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?""",
-        (src_path, len(prefix), prefix),
-    ).fetchall()
+    rows = _moved_tree_photo_rows(db, src_path)
     updates = []
     # Hoisted: the probe is per-ancestor, and the containment answer depends
     # only on the folder, so a tree of thousands of photos costs one realpath
@@ -3056,62 +3082,105 @@ def _plan_moved_file_mtimes(db, src_path, dest_path, progress_cb=None):
         if not contained[folder_path]:
             # Prefilter slack: this row is not actually in the moved tree.
             continue
-        stored_mtime, stored_size = row["file_mtime"], row["file_size"]
-        if stored_mtime is None or stored_size is None:
-            continue
-        src_file = os.path.join(folder_path, row["filename"])
-        if os.path.islink(src_file):
-            # Scanner discovery admits file symlinks, and ``os.stat`` below
-            # follows them -- but a relative target resolves against the
-            # directory holding the link, so the same target string can point
-            # at a different file once the link has moved. Re-stamping from
-            # whatever the destination-side link resolves to would tell the
-            # incremental scanner that bytes it has never seen are unchanged,
-            # leaving this row's hash and metadata describing the wrong file.
-            # Leave it stale; a rescan resolves the link itself.
-            continue
-        # Prefix-strip rather than ``os.path.relpath``: relpath is happy to
-        # walk out of the subtree with ``..`` if a row ever slipped past the
-        # predicate above, which would point this at a file the move never
-        # copied.
-        relative = _subtree_relative(folder_path, src_path)
-        dst_file = _join_subtree_path(
-            dest_path,
-            f"{relative}/{row['filename']}" if relative else row["filename"],
-        )
-        try:
-            src_st = os.stat(src_file)
-        except OSError:
-            # A row whose file is already gone: not something this move
-            # copied, and not something verification vouched for.
-            continue
-        try:
-            dst_st = os.stat(dst_file)
-        except OSError:
-            return [], (f"'{dst_file}' is missing or unreadable at the "
-                        f"destination")
-        if src_st.st_mtime != stored_mtime or src_st.st_size != stored_size:
-            # The row does not describe the file being moved -- it was
-            # edited (or replaced) since its last scan. Leave it stale so
-            # the scan that would have caught that still does.
-            continue
-        if dst_st.st_size != stored_size:
-            # The guard above already confirmed the source still matches the
-            # row, so a differently sized copy differs from the file this
-            # move is about to delete. On a merge the verification below
-            # rejects it; a fresh local move only compares file counts, so
-            # nothing else ever would, and the rmtree would take the intact
-            # original with it. Skipping the row would leave that damage
-            # unreported -- the same mistake as swallowing a failed stat.
-            return [], (f"'{dst_file}' does not match the source's size at "
-                        f"the destination")
-        if dst_st.st_mtime == stored_mtime:
-            # The timestamp survived the copy: nothing to correct.
-            continue
-        updates.append((dst_st.st_mtime, row["id"], stored_mtime, stored_size))
+        update, problem = _moved_row_mtime_update(row, src_path, dest_path)
+        if problem is not None:
+            return [], problem
+        if update is not None:
+            updates.append(update)
     if progress_cb:
         progress_cb(total_rows, total_rows, "", "Checking timestamps")
     return updates, None
+
+
+def _moved_tree_photo_rows(db, src_path):
+    """Photo rows (with their folder path) at or under ``src_path``."""
+    # The repo's literal subtree predicate, not a raw LIKE: LIKE would read
+    # ``_`` and ``%`` in a real folder path as wildcards and match
+    # case-insensitively, pulling in sibling trees this move never touched --
+    # and their rows would then resolve to files outside ``dest_path``. It
+    # also normalizes separators, so Windows descendants stored with
+    # backslashes are matched rather than silently skipped.
+    #
+    # It is a PREFILTER, not the authority. ``_path_for_subtree_match`` folds
+    # ``\\`` to ``/`` on every platform, and ``\\`` is a legal filename
+    # character on POSIX -- so moving ``/photos/shoot\\1`` normalizes to the
+    # same prefix as the unrelated ``/photos/shoot/1`` tree. Every row is
+    # re-checked below against the move module's own alias-folding
+    # containment test (symlinks, Windows case folding, case-insensitive
+    # POSIX), which is FS truth rather than string shape.
+    prefix = _subtree_prefix(src_path)
+    return db.conn.execute(
+        """SELECT p.id, p.filename, p.file_mtime, p.file_size,
+                  f.path AS folder_path
+           FROM photos p JOIN folders f ON f.id = p.folder_id
+           WHERE f.path = ?
+              OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?""",
+        (src_path, len(prefix), prefix),
+    ).fetchall()
+
+
+def _moved_row_mtime_update(row, src_path, dest_path):
+    """Check one moved photo row against its copy at ``dest_path``.
+
+    Returns ``(update, problem)``: ``update`` is the row's ``executemany``
+    parameters when its copy needs re-stamping, else None; ``problem``
+    describes a destination copy that contradicts verification, else None.
+    See ``_plan_moved_file_mtimes``.
+    """
+    folder_path = row["folder_path"]
+    stored_mtime, stored_size = row["file_mtime"], row["file_size"]
+    if stored_mtime is None or stored_size is None:
+        return None, None
+    src_file = os.path.join(folder_path, row["filename"])
+    if os.path.islink(src_file):
+        # Scanner discovery admits file symlinks, and ``os.stat`` below
+        # follows them -- but a relative target resolves against the
+        # directory holding the link, so the same target string can point
+        # at a different file once the link has moved. Re-stamping from
+        # whatever the destination-side link resolves to would tell the
+        # incremental scanner that bytes it has never seen are unchanged,
+        # leaving this row's hash and metadata describing the wrong file.
+        # Leave it stale; a rescan resolves the link itself.
+        return None, None
+    # Prefix-strip rather than ``os.path.relpath``: relpath is happy to
+    # walk out of the subtree with ``..`` if a row ever slipped past the
+    # predicate above, which would point this at a file the move never
+    # copied.
+    relative = _subtree_relative(folder_path, src_path)
+    dst_file = _join_subtree_path(
+        dest_path,
+        f"{relative}/{row['filename']}" if relative else row["filename"],
+    )
+    try:
+        src_st = os.stat(src_file)
+    except OSError:
+        # A row whose file is already gone: not something this move
+        # copied, and not something verification vouched for.
+        return None, None
+    try:
+        dst_st = os.stat(dst_file)
+    except OSError:
+        return None, (f"'{dst_file}' is missing or unreadable at the "
+                      f"destination")
+    if src_st.st_mtime != stored_mtime or src_st.st_size != stored_size:
+        # The row does not describe the file being moved -- it was
+        # edited (or replaced) since its last scan. Leave it stale so
+        # the scan that would have caught that still does.
+        return None, None
+    if dst_st.st_size != stored_size:
+        # The guard above already confirmed the source still matches the
+        # row, so a differently sized copy differs from the file this
+        # move is about to delete. On a merge the verification below
+        # rejects it; a fresh local move only compares file counts, so
+        # nothing else ever would, and the rmtree would take the intact
+        # original with it. Skipping the row would leave that damage
+        # unreported -- the same mistake as swallowing a failed stat.
+        return None, (f"'{dst_file}' does not match the source's size at "
+                      f"the destination")
+    if dst_st.st_mtime == stored_mtime:
+        # The timestamp survived the copy: nothing to correct.
+        return None, None
+    return (dst_st.st_mtime, row["id"], stored_mtime, stored_size), None
 
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
@@ -3197,11 +3266,33 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     is included — the archive is committed and ``errors`` stays empty, but
     callers should still surface the leftover originals to the user.
     """
+    src_path, folder_name, landing_name, error = _folder_move_source(
+        db, folder_id, destination_name)
+    if error is not None:
+        return error
+
+    move = _FolderMove(
+        db, folder_id, src_path, landing_name,
+        progress_cb=progress_cb, developed_dir=developed_dir, merge=merge,
+        remote=remote, reject_tracked_ancestor=reject_tracked_ancestor,
+        allow_tracked_merge=allow_tracked_merge,
+        verify_contents=verify_contents, pre_commit_check=pre_commit_check,
+        thumb_cache_dir=thumb_cache_dir,
+    )
+    return _run_folder_move(move, destination, src_path, folder_name)
+
+
+def _folder_move_source(db, folder_id, destination_name):
+    """Resolve ``move_folder``'s source folder and landing name.
+
+    Returns ``(src_path, folder_name, landing_name, error)``; ``error`` is
+    ``move_folder``'s refusal dict (the other three None), else None.
+    """
     folder = db.conn.execute(
         "SELECT id, path, name FROM folders WHERE id = ?", (folder_id,)
     ).fetchone()
     if not folder:
-        return {"moved": 0, "errors": ["Folder not found"]}
+        return None, None, None, {"moved": 0, "errors": ["Folder not found"]}
 
     src_path = folder["path"]
     # rstrip separators before basename() so a legacy row stored with a
@@ -3214,16 +3305,12 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     try:
         landing_name = normalize_destination_name(destination_name) or folder_name
     except ValueError as exc:
-        return {"moved": 0, "errors": [str(exc)]}
+        return None, None, None, {"moved": 0, "errors": [str(exc)]}
+    return src_path, folder_name, landing_name, None
 
-    move = _FolderMove(
-        db, folder_id, src_path, landing_name,
-        progress_cb=progress_cb, developed_dir=developed_dir, merge=merge,
-        remote=remote, reject_tracked_ancestor=reject_tracked_ancestor,
-        allow_tracked_merge=allow_tracked_merge,
-        verify_contents=verify_contents, pre_commit_check=pre_commit_check,
-        thumb_cache_dir=thumb_cache_dir,
-    )
+
+def _run_folder_move(move, destination, src_path, folder_name):
+    """Run a ``_FolderMove``'s checks and phases in order; return its result."""
     error = move.resolve_destination_views(destination)
     if error is not None:
         return error
@@ -3330,6 +3417,84 @@ def _fresh_copy_mismatch(src_path, transfer_dest, progress=None):
         return f"file count mismatch: source={src_count}, dest={dst_count}"
     if progress:
         progress(src_count, "")
+    return None
+
+
+def _folder_move_rsync_args(remote, dest_exists):
+    """Choose ``move_folder``'s rsync binary, transport args and flags.
+
+    Returns ``(rsync_bin, extra_args, rsync_flags, error)``; ``error`` is the
+    move's refusal dict when a remote move has no usable GNU rsync.
+    """
+    # Use rsync for a robust copy. A merge/resume uses --ignore-existing so
+    # rsync only creates files absent at the destination and NEVER overwrites
+    # a file already there: this resumes an interrupted move (missing files get
+    # copied, already-copied ones are left alone) while guaranteeing a merge
+    # cannot destroy pre-existing destination data. A local fresh move uses
+    # --checksum for integrity; a remote fresh move skips it (the destination
+    # is empty, and the post-transfer --checksum dry-run verifies integrity).
+    # Any genuine same-name collision (an existing dest file that differs from
+    # the source) is left untouched here and caught by the post-copy
+    # verification below, which then refuses to delete the originals.
+    #
+    # Remote uses --partial-dir (instead of plain --partial) so a stalled or
+    # cancelled transfer leaves the partial in `.rsync-partial/` rather than
+    # at the destination filename. That keeps --ignore-existing honest: only
+    # *complete* dest files are skipped, so the next run resumes the partial
+    # from `.rsync-partial/` instead of treating it as already-moved (which
+    # would then fail the --checksum verify forever, stranding the partial
+    # until the user manually deletes it).
+    # Prefer a discovered GNU rsync for local moves on POSIX. Finder-launched
+    # macOS apps usually inherit a sparse PATH, so a bare ``rsync`` resolves
+    # to Apple's legacy openrsync even when Homebrew GNU rsync is installed.
+    # openrsync has been observed spinning after a transient SMB short read;
+    # GNU rsync exits with a useful error instead. Windows rsync distributions
+    # expect POSIX-style paths and can misread a native ``C:\...`` source as
+    # remote-shell syntax, so retain the prior bare-name behavior there. Keep
+    # the bare-name fallback on POSIX when GNU rsync is unavailable (and the
+    # shutil fallback in ``_FolderMove.copy_tree`` when no rsync exists at all).
+    rsync_bin = "rsync"
+    if sys.platform != "win32":
+        rsync_bin = resolve_rsync_bin() or rsync_bin
+    extra_args = None
+    if remote:
+        rsync_bin = remote.get("rsync_bin")
+        if not rsync_bin:
+            return None, None, None, {"moved": 0, "errors": [
+                "No usable GNU rsync binary is available for remote moves. "
+                "Install it or set the GNU rsync path in Settings."
+            ]}
+        extra_args = [
+            "-e", _ssh_rsh_string(remote),
+            "--partial-dir=.rsync-partial",
+        ]
+        if remote.get("bwlimit_kbps"):
+            extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
+        rsync_flags = ["--ignore-existing"] if dest_exists else []
+    else:
+        rsync_flags = ["--ignore-existing"] if dest_exists else ["--checksum"]
+    return rsync_bin, extra_args, rsync_flags, None
+
+
+def _rsync_copy_error(returncode, stderr, timed_out):
+    """``move_folder``'s refusal dict for a stalled or failed rsync, or None."""
+    if timed_out:
+        mins = RSYNC_STALL_TIMEOUT // 60
+        # rsync can emit the real cause (for example, the exact NAS file that
+        # returned a short read) and then wedge instead of exiting.  Do not
+        # throw that diagnostic away in favor of the generic watchdog text.
+        # Bound it because stderr can contain one warning per source file.
+        detail = stderr.strip()
+        if len(detail) > 1000:
+            detail = "…" + detail[-999:]
+        reported = f" rsync reported: {detail}" if detail else ""
+        return {"moved": 0, "errors": [
+            f"rsync stalled — no progress for over {mins} minutes, so the "
+            f"copy was stopped. Originals are untouched; re-run with "
+            f"merge/resume to continue from where it left off.{reported}"
+        ]}
+    if returncode != 0:
+        return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
     return None
 
 
@@ -3551,37 +3716,43 @@ class _FolderMove:
             # duplicated. See the ``merge_reconcile_base`` note above.
             self.merge_reconcile_base = tracked["path"]
         if self.reject_tracked_ancestor and self.merge_into_tracked is None:
-            ancestor = _tracked_destination_ancestor(
-                db, self.folder_id, overlap_check_path)
-            if ancestor:
-                if not self.allow_tracked_merge:
-                    return {"moved": 0, "errors": [
-                        f"Destination is inside a folder Vireo already manages "
-                        f"({ancestor['path']}). Pick an untracked archive destination."
-                    ]}
-                # Merge into the existing archive root that contains the
-                # destination. The staged tree lands at its own resolved
-                # catalog_path (inside the tracked ancestor); the reconciliation
-                # rebases staged rows onto that path and leaves the ancestor's own
-                # rows untouched. The user-facing "existing archive" base we
-                # report is the managed-archive root (``ancestor["path"]``), not
-                # the staged landing path inside it.
-                #
-                # The reconciliation base is the STORED ancestor's path with the
-                # relative-below-ancestor suffix appended, NOT the user-entered
-                # ``catalog_path`` — those two only agree when the ancestor probe
-                # matched by pure string prefix. When it matched via a symlink,
-                # Windows case-fold, or POSIX case-only alias (catalog stores
-                # ``/Photos``, user selects ``/photos/NewShoot``),
-                # ``catalog_path`` has an alias prefix that ``merge_staged_tree_
-                # into_archive``'s exact ``WHERE path = ?`` parent lookups miss.
-                # That would land the staged root with ``parent_id=NULL`` under an
-                # alias-prefixed path, spawning a parallel row set outside the
-                # managed archive tree. Fold the alias prefix to the stored form
-                # here.
-                self.merge_into_tracked = ancestor["path"]
-                self.merge_reconcile_base = _rebase_under_stored_ancestor(
-                    self.catalog_path, ancestor["path"])
+            return self._resolve_tracked_ancestor(overlap_check_path)
+        return None
+
+    def _resolve_tracked_ancestor(self, overlap_check_path):
+        """Refuse, or with ``allow_tracked_merge`` merge into, a tracked
+        folder that contains the destination."""
+        ancestor = _tracked_destination_ancestor(
+            self.db, self.folder_id, overlap_check_path)
+        if ancestor:
+            if not self.allow_tracked_merge:
+                return {"moved": 0, "errors": [
+                    f"Destination is inside a folder Vireo already manages "
+                    f"({ancestor['path']}). Pick an untracked archive destination."
+                ]}
+            # Merge into the existing archive root that contains the
+            # destination. The staged tree lands at its own resolved
+            # catalog_path (inside the tracked ancestor); the reconciliation
+            # rebases staged rows onto that path and leaves the ancestor's own
+            # rows untouched. The user-facing "existing archive" base we
+            # report is the managed-archive root (``ancestor["path"]``), not
+            # the staged landing path inside it.
+            #
+            # The reconciliation base is the STORED ancestor's path with the
+            # relative-below-ancestor suffix appended, NOT the user-entered
+            # ``catalog_path`` — those two only agree when the ancestor probe
+            # matched by pure string prefix. When it matched via a symlink,
+            # Windows case-fold, or POSIX case-only alias (catalog stores
+            # ``/Photos``, user selects ``/photos/NewShoot``),
+            # ``catalog_path`` has an alias prefix that ``merge_staged_tree_
+            # into_archive``'s exact ``WHERE path = ?`` parent lookups miss.
+            # That would land the staged root with ``parent_id=NULL`` under an
+            # alias-prefixed path, spawning a parallel row set outside the
+            # managed archive tree. Fold the alias prefix to the stored form
+            # here.
+            self.merge_into_tracked = ancestor["path"]
+            self.merge_reconcile_base = _rebase_under_stored_ancestor(
+                self.catalog_path, ancestor["path"])
         return None
 
     def probe_destination(self):
@@ -3703,53 +3874,10 @@ class _FolderMove:
         self.total_files = total_files
         self.progress(0, total_files, "", "Copying files")
 
-        # Use rsync for a robust copy. A merge/resume uses --ignore-existing so
-        # rsync only creates files absent at the destination and NEVER overwrites
-        # a file already there: this resumes an interrupted move (missing files get
-        # copied, already-copied ones are left alone) while guaranteeing a merge
-        # cannot destroy pre-existing destination data. A local fresh move uses
-        # --checksum for integrity; a remote fresh move skips it (the destination
-        # is empty, and the post-transfer --checksum dry-run verifies integrity).
-        # Any genuine same-name collision (an existing dest file that differs from
-        # the source) is left untouched here and caught by the post-copy
-        # verification below, which then refuses to delete the originals.
-        #
-        # Remote uses --partial-dir (instead of plain --partial) so a stalled or
-        # cancelled transfer leaves the partial in `.rsync-partial/` rather than
-        # at the destination filename. That keeps --ignore-existing honest: only
-        # *complete* dest files are skipped, so the next run resumes the partial
-        # from `.rsync-partial/` instead of treating it as already-moved (which
-        # would then fail the --checksum verify forever, stranding the partial
-        # until the user manually deletes it).
-        # Prefer a discovered GNU rsync for local moves on POSIX. Finder-launched
-        # macOS apps usually inherit a sparse PATH, so a bare ``rsync`` resolves
-        # to Apple's legacy openrsync even when Homebrew GNU rsync is installed.
-        # openrsync has been observed spinning after a transient SMB short read;
-        # GNU rsync exits with a useful error instead. Windows rsync distributions
-        # expect POSIX-style paths and can misread a native ``C:\...`` source as
-        # remote-shell syntax, so retain the prior bare-name behavior there. Keep
-        # the bare-name fallback on POSIX when GNU rsync is unavailable (and the
-        # shutil fallback below when no rsync exists at all).
-        rsync_bin = "rsync"
-        if sys.platform != "win32":
-            rsync_bin = resolve_rsync_bin() or rsync_bin
-        extra_args = None
-        if remote:
-            rsync_bin = remote.get("rsync_bin")
-            if not rsync_bin:
-                return {"moved": 0, "errors": [
-                    "No usable GNU rsync binary is available for remote moves. "
-                    "Install it or set the GNU rsync path in Settings."
-                ]}
-            extra_args = [
-                "-e", _ssh_rsh_string(remote),
-                "--partial-dir=.rsync-partial",
-            ]
-            if remote.get("bwlimit_kbps"):
-                extra_args.append(f"--bwlimit={int(remote['bwlimit_kbps'])}")
-            rsync_flags = ["--ignore-existing"] if dest_exists else []
-        else:
-            rsync_flags = ["--ignore-existing"] if dest_exists else ["--checksum"]
+        rsync_bin, extra_args, rsync_flags, error = _folder_move_rsync_args(
+            remote, dest_exists)
+        if error is not None:
+            return error
         self.rsync_bin = rsync_bin
         # A merge deliberately skips Finder metadata (``.DS_Store``). Without the
         # exclude, rsync ``--ignore-existing`` would leave a same-name file at the
@@ -3793,23 +3921,9 @@ class _FolderMove:
                         shutil.rmtree(self.catalog_path, ignore_errors=True)
                     return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
 
-        if timed_out:
-            mins = RSYNC_STALL_TIMEOUT // 60
-            # rsync can emit the real cause (for example, the exact NAS file that
-            # returned a short read) and then wedge instead of exiting.  Do not
-            # throw that diagnostic away in favor of the generic watchdog text.
-            # Bound it because stderr can contain one warning per source file.
-            detail = stderr.strip()
-            if len(detail) > 1000:
-                detail = "…" + detail[-999:]
-            reported = f" rsync reported: {detail}" if detail else ""
-            return {"moved": 0, "errors": [
-                f"rsync stalled — no progress for over {mins} minutes, so the "
-                f"copy was stopped. Originals are untouched; re-run with "
-                f"merge/resume to continue from where it left off.{reported}"
-            ]}
-        if returncode != 0:
-            return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
+        error = _rsync_copy_error(returncode, stderr, timed_out)
+        if error is not None:
+            return error
         # rsync emits only transferred files. A successful merge also handled
         # the already-present files (and deliberately excluded Finder metadata),
         # so finish the phase's source-file count before entering verification.

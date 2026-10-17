@@ -2,8 +2,8 @@
 // Classic page script; load boot.js after all definitions.
 
 function initCropDrag() {
-  var box = document.getElementById('editorCropBox');
-  var wrap = document.getElementById('editorCanvasWrap');
+  var box = /** @type {HTMLElement} */ (document.getElementById('editorCropBox'));
+  var wrap = /** @type {HTMLElement} */ (document.getElementById('editorCanvasWrap'));
 
   function updatePanCursor() {
     wrap.classList.toggle('space-pan', editorState.spacePan);
@@ -11,7 +11,7 @@ function initCropDrag() {
     if (typeof updateMaskBrushCursor === 'function') updateMaskBrushCursor();
   }
 
-  function startPan(e) {
+  /** @param {PointerEvent} e */ function startPan(e) {
     if (editorState.loading || editorState.pan || e.button !== 0) return;
     // Leave touch scrolling to the browser; this gesture fills the missing
     // mouse interaction without replacing the trackpad/touch behavior.
@@ -28,7 +28,7 @@ function initCropDrag() {
     e.preventDefault();
   }
 
-  function movePan(e) {
+  /** @param {PointerEvent} e */ function movePan(e) {
     var pan = editorState.pan;
     if (!pan || e.pointerId !== pan.pointerId) return;
     wrap.scrollLeft = pan.scrollLeft - (e.clientX - pan.startX);
@@ -36,7 +36,7 @@ function initCropDrag() {
     e.preventDefault();
   }
 
-  function finishPan(e) {
+  /** @param {PointerEvent=} e */ function finishPan(e) {
     var pan = editorState.pan;
     if (!pan || (e && e.pointerId != null && e.pointerId !== pan.pointerId)) return;
     editorState.pan = null;
@@ -61,7 +61,7 @@ function initCropDrag() {
 
   box.addEventListener('pointerdown', function(e) {
     if (editorState.loading || e.button !== 0) return;
-    var img = document.getElementById('editorImg');
+    var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
     if (!img || !img.clientWidth || !img.clientHeight) return;
     // pointerdown is prevented below so the crop gesture does not select or
     // drag the underlying image. That also suppresses the browser's normal
@@ -71,7 +71,7 @@ function initCropDrag() {
     // gesture starts so Enter commits the crop the user just adjusted.
     try { box.focus({preventScroll: true}); }
     catch (_) { box.focus(); }
-    var handle = e.target && e.target.dataset ? e.target.dataset.handle : '';
+    var handle = e.target instanceof HTMLElement ? e.target.dataset.handle : '';
     // At any zoom above Fit, dragging the photo pans it. Corner handles keep
     // resizing the crop, unless Space is held as an explicit pan override.
     if (editorState.spacePan || (editorCanDragToPan() && !handle)) return;

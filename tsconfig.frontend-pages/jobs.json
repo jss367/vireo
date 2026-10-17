@@ -1,0 +1,19 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/jobs.d.ts",
+    "../vireo/static/jobs/actions.js",
+    "../vireo/static/jobs/boot.js",
+    "../vireo/static/jobs/detail.js",
+    "../vireo/static/jobs/format.js",
+    "../vireo/static/jobs/import-retry.js",
+    "../vireo/static/jobs/job-card.js",
+    "../vireo/static/jobs/list.js",
+    "../vireo/static/jobs/move-route.js",
+    "../vireo/static/jobs/polling.js",
+    "../vireo/static/jobs/selection.js",
+    "../vireo/static/jobs/source-cleanup.js",
+    "../vireo/static/jobs/state.js",
+    "../vireo/static/jobs/steps.js"
+  ]
+}

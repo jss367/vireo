@@ -5,7 +5,7 @@
 // JSON dump. Keys the interruption bookkeeping adds (and the error,
 // which renders on its own line) are skipped; nested objects stay as
 // compact JSON so nothing is hidden.
-function renderRichStep(step, job, isLive) {
+/** @param {JobsStep} step @param {JobsRow} job @param {boolean} isLive */ function renderRichStep(step, job, isLive) {
   var isRunning = step.status === 'running';
   var warningCount = step.error_count || (step.error ? 1 : 0);
   var isExpanded = isRunning || step.status === 'failed' || (step.status === 'completed' && warningCount > 0);
@@ -28,14 +28,14 @@ function renderRichStep(step, job, isLive) {
   html += '<span class="tree-step-label' + (step.status === 'pending' ? ' pending' : '') + '">' + escapeHtml(step.label) + '</span>';
 
   // 1-3: Progress counts, bar, percentage (for steps with progress)
-  if (step.progress && step.progress.current > 0) {
-    if (step.progress.total > 0) {
-      var pct = Math.round((step.progress.current / step.progress.total) * 100);
-      html += '<span class="tree-step-progress-text">' + step.progress.current.toLocaleString() + ' / ' + step.progress.total.toLocaleString() + '</span>';
+  if (step.progress && (step.progress.current || 0) > 0) {
+    if ((step.progress.total || 0) > 0) {
+      var pct = Math.round(((step.progress.current || 0) / (step.progress.total || 1)) * 100);
+      html += '<span class="tree-step-progress-text">' + (step.progress.current || 0).toLocaleString() + ' / ' + (step.progress.total || 0).toLocaleString() + '</span>';
       html += '<div class="tree-step-bar"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
       html += '<span class="tree-step-progress-text">' + pct + '%</span>';
     } else {
-      html += '<span class="tree-step-progress-text">' + step.progress.current.toLocaleString() + ' / ?</span>';
+      html += '<span class="tree-step-progress-text">' + (step.progress.current || 0).toLocaleString() + ' / ?</span>';
       html += '<div class="tree-step-bar"><div class="tree-step-bar-fill indeterminate"></div></div>';
     }
   }
@@ -89,10 +89,10 @@ function renderRichStep(step, job, isLive) {
     // header is the truthful progress signal until file processing resumes.
     var importInPlacePhaseActive = job.type === 'import-in-place' &&
       job.progress && typeof job.progress.phase_current === 'number' &&
-      job.progress.phase_total > 0;
+      (job.progress.phase_total || 0) > 0;
 
     // 8: Throughput + ETA for running steps
-    if (isRunning && step.progress && step.progress.current > 0 &&
+    if (isRunning && step.progress && (step.progress.current || 0) > 0 &&
         step.started_at && !importInPlacePhaseActive && step.progress.unit !== 'labels') {
       if (job.type === 'import') {
         // Import's visible counter advances while a batch is prepared,
@@ -160,7 +160,7 @@ function renderRichStep(step, job, isLive) {
       } else {
         var stepSecs = (Date.now() - new Date(step.started_at).getTime()) / 1000;
         if (stepSecs > 0) {
-          var perSec = step.progress.current / stepSecs;
+          var perSec = (step.progress.current || 0) / stepSecs;
           var perMin = perSec * 60;
           var throughput;
           if (perMin >= 1) {
@@ -170,8 +170,8 @@ function renderRichStep(step, job, isLive) {
           }
           var statusLine = throughput;
           // ETA only when we know the total and have a non-zero rate
-          if (step.progress.total > 0 && perSec > 0) {
-            var remaining = step.progress.total - step.progress.current;
+          if ((step.progress.total || 0) > 0 && perSec > 0) {
+            var remaining = (step.progress.total || 0) - (step.progress.current || 0);
             if (remaining > 0) {
               statusLine += ' &middot; ETA ' + formatElapsed(remaining / perSec);
             }
@@ -203,9 +203,9 @@ function renderRichStep(step, job, isLive) {
         html += '<div class="tree-repair-item"><b>' + escapeHtml(label) + '</b>' +
           (photo.reason ? ': ' + escapeHtml(photo.reason) : '') + '</div>';
       });
-      if (stageResult.failed_photos_truncated) {
+      if (stageResult?.failed_photos_truncated) {
         html += '<div class="tree-repair-item">And ' +
-          stageResult.failed_photos_truncated.toLocaleString() +
+          stageResult?.failed_photos_truncated.toLocaleString() +
           ' more. Missing thumbnails remain available for later repair.</div>';
       }
       html += '</div>';
@@ -223,7 +223,7 @@ function renderRichStep(step, job, isLive) {
           leaves.push({ name: step.current_file, status: 'current' });
           if (leaves.length > LEAF_MAX) {
             var nonFailed = leaves.filter(function(l) { return l.status !== 'failed'; });
-            if (nonFailed.length > LEAF_MAX) leaves.splice(leaves.indexOf(nonFailed[0]), 1);
+            var first = nonFailed[0]; if (nonFailed.length > LEAF_MAX && first) leaves.splice(leaves.indexOf(first), 1);
           }
           leafBuffers[step.id] = leaves;
         }

@@ -30,16 +30,26 @@
 
   var Vireo = global.Vireo = global.Vireo || {};
 
+  /** @param {unknown} id @returns {id is number} */
+  function isPredictionId(id) {
+    return typeof id === 'number' && Number.isSafeInteger(id) && id > 0;
+  }
+
   /* The rows a single decision response says its transaction decided.
    *
-   * Absent or malformed ``prediction_ids`` yields an empty list rather than a
-   * throw: an older/errored body must not be read as "this decided nothing
+   * Absent or non-array ``prediction_ids`` yields an empty list; invalid
+   * members are ignored. An older/errored body must not be read as "this decided nothing
    * beyond the row I asked about" *or* crash the loop — callers still credit
    * the row named in the URL themselves.
    */
+  /** @param {unknown} response @returns {number[]} */
   function decidedPredictionIds(response) {
-    var ids = response && response.prediction_ids;
-    return Array.isArray(ids) ? ids : [];
+    if (!response || typeof response !== 'object' || !('prediction_ids' in response)) return [];
+    var ids = response.prediction_ids;
+    if (!Array.isArray(ids)) return [];
+    /** @type {unknown[]} */
+    var values = ids;
+    return values.filter(isPredictionId);
   }
 
   /* Tracks which rows *this* run has already decided.
@@ -52,17 +62,19 @@
    *     decided.record(await post(row.id));
    *   }
    */
+  /** @returns {GroupedDecisionTracker} */
   function groupedDecisionTracker() {
+    /** @type {Set<number>} */
     var decided = new Set();
     return {
-      alreadyDecided: function(predId) {
+      alreadyDecided: function(/** @type {number} */ predId) {
         return decided.has(predId);
       },
       // Records what the response says it wrote and returns those ids, so a
       // caller can update its local rows in the same statement.
-      record: function(response) {
+      record: function(/** @type {unknown} */ response) {
         var ids = decidedPredictionIds(response);
-        for (var i = 0; i < ids.length; i++) decided.add(ids[i]);
+        for (var id of ids) decided.add(id);
         return ids;
       },
       size: function() {
@@ -71,7 +83,8 @@
     };
   }
 
-  Vireo.predictions = Vireo.predictions || {};
-  Vireo.predictions.decidedPredictionIds = decidedPredictionIds;
-  Vireo.predictions.groupedDecisionTracker = groupedDecisionTracker;
+  Vireo.predictions = Object.assign(Vireo.predictions || {}, {
+    decidedPredictionIds: decidedPredictionIds,
+    groupedDecisionTracker: groupedDecisionTracker,
+  });
 })(typeof window !== 'undefined' ? window : globalThis);
