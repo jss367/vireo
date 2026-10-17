@@ -25,17 +25,20 @@
 
   var Vireo = global.Vireo = global.Vireo || {};
 
+  /** @type {VisiblePoll} */
   Vireo.pollWhileVisible = function(fn, intervalMs, opts) {
-    opts = opts || {};
+    const options = opts || {};
     var doc = global.document;
+    /** @type {number | null} */
     var timer = null;
     var stopped = false;
-    var dueAt = Date.now() + (opts.initialDelayMs != null ? opts.initialDelayMs : intervalMs);
+    var dueAt = Date.now() + (options.initialDelayMs != null ? options.initialDelayMs : intervalMs);
 
     function mayRun() {
-      return !doc.hidden || !!(opts.runWhileHidden && opts.runWhileHidden());
+      return !doc.hidden || !!(options.runWhileHidden && options.runWhileHidden());
     }
 
+    /** @param {number} delay */
     function arm(delay) {
       if (timer !== null) clearTimeout(timer);
       timer = setTimeout(tick, Math.max(0, delay));
@@ -49,8 +52,9 @@
       arm(intervalMs);
       try {
         var result = fn();
-        if (result && typeof result.catch === 'function') result.catch(function() {});
-      } catch (e) { /* the next tick retries */ }
+        if (result && (typeof result === 'object' || typeof result === 'function') &&
+            'catch' in result && typeof result.catch === 'function') result.catch(function() {});
+      } catch { /* the next tick retries */ }
     }
 
     function onVisibility() {

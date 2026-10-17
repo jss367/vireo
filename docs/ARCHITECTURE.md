@@ -158,9 +158,14 @@ TypeScript checks those controllers' JavaScript with `checkJs`, strict types,
 DOM types, and no output files. `types/frontend.d.ts` describes Browse state,
 selection data, and legacy action dependencies; `types/dialogs.d.ts` describes the
 shared dialog lifecycle. `types/panel-loaders.d.ts` covers the panel loader inputs,
-selection responses, and renderer dependencies. It checks implementation and
-call contracts; it does not validate server responses at runtime or check the
-implementation of legacy actions outside the selected files.
+selection responses, and renderer dependencies. `types/shared-controllers.d.ts`
+covers visibility-aware polling and grouped prediction decisions. The thumbnail
+queue declares its image/request state locally and narrows observer nodes before
+using image-only properties. These contracts check implementations and
+call sites; legacy actions outside the selected files remain unchecked. Runtime
+validation is separate: grouped prediction responses enter as `unknown`, only
+positive safe-integer ids are credited, and invalid response members cannot
+enter the decision tracker.
 
 When encapsulating another controller, add it to the strict ESLint list and
 `tsconfig.frontend.json`, describe its dependencies with narrow JSDoc or declaration

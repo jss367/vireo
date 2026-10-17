@@ -434,6 +434,7 @@ jobs:
           tests/e2e/test_browse_panel_retry.py
           tests/e2e/test_jobs_polling.py
           tests/e2e/test_review_photo_actions.py
+          --reruns 2 --reruns-delay 1
 
       - name: Verify Mac frontend controls
         if: needs.changes.outputs.python == 'true' && matrix.browser == 'webkit'

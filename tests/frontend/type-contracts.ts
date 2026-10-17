@@ -75,4 +75,36 @@ function verifyFrontendContracts() {
   canRetryImportDirectToNas({type: 'import', status: 'failed'}, []);
   // @ts-expect-error The retry body is an object, not a JSON string.
   directNasImportRetryBody({id: 'j1'}, '{}', []);
+
+  const poll = window.Vireo?.pollWhileVisible;
+  if (poll) {
+    const handle = poll(async () => {}, 2000, {initialDelayMs: 0, runWhileHidden: () => true});
+    poll(() => 1, 1000); // Synchronous callbacks may return incidental values.
+    handle.stop();
+    // @ts-expect-error Poll intervals are numeric milliseconds.
+    poll(() => {}, '2000');
+    // @ts-expect-error Hidden polling requires a predicate returning a boolean.
+    poll(() => {}, 2000, {runWhileHidden: () => 'yes'});
+    // @ts-expect-error Initial delays are numeric milliseconds.
+    poll(() => {}, 2000, {initialDelayMs: '0'});
+    // @ts-expect-error Stop does not take a replacement interval.
+    handle.stop(2000);
+  }
+
+  const grouped = window.Vireo?.predictions;
+  if (grouped) {
+    const tracker = grouped.groupedDecisionTracker();
+    tracker.record({prediction_ids: [11, 12]});
+    tracker.alreadyDecided(11);
+    tracker.size().toFixed();
+    // Server responses are unknown until the implementation validates them.
+    grouped.decidedPredictionIds(null);
+    // @ts-expect-error Prediction ids passed by callers must be numeric.
+    tracker.alreadyDecided('11');
+    // @ts-expect-error Validated response ids are numbers, not unchecked any.
+    tracker.record({prediction_ids: [11]})[0]?.toUpperCase();
+    // @ts-expect-error Validated response arrays cannot acquire string ids.
+    grouped.decidedPredictionIds({prediction_ids: [11]}).push('12');
+  }
+
 }
