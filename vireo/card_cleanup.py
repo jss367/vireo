@@ -171,6 +171,42 @@ def classify_source_files(source, recursive=True, onerror=None, should_cancel=No
     return sorted(candidates), sorted(ignored)
 
 
+def _validate_manifest_entry(entry, root_real):
+    """Raise ``ManifestError`` unless ``entry`` is well formed.
+
+    Only deletable entries are checked beyond their shape: each must carry
+    its size, mtime and hash and resolve inside ``root_real``.
+    """
+    if not isinstance(entry, dict):
+        raise ManifestError(
+            "manifest entries malformed — re-scan the card")
+    if entry.get("bucket") != "deletable":
+        return
+    if not entry.get("path"):
+        raise ManifestError(
+            "manifest entries malformed — re-scan the card")
+    if (not isinstance(entry.get("size"), int)
+            or not isinstance(entry.get("mtime_ns"), int)
+            or not isinstance(entry.get("hash"), str)
+            or not entry.get("hash")):
+        raise ManifestError(
+            "manifest entries malformed — re-scan the card")
+    # Same explicit null-byte rejection as the source root above —
+    # Windows realpath would pass the string through unchanged.
+    if "\x00" in str(entry.get("path", "")):
+        raise ManifestError(
+            "manifest entry outside its source root — re-scan the card")
+    try:
+        child_real = os.path.realpath(str(entry.get("path", "")))
+    except (OSError, ValueError) as e:
+        raise ManifestError(
+            "manifest entry outside its source root — re-scan the card"
+        ) from e
+    if not path_guard.contains_resolved(root_real, child_real):
+        raise ManifestError(
+            "manifest entry outside its source root — re-scan the card")
+
+
 def load_manifest(manifest_dir, scan_job_id,
                   max_age_days=MANIFEST_MAX_AGE_DAYS):
     """Load + validate. Everything here must pass before any delete."""
@@ -243,34 +279,7 @@ def load_manifest(manifest_dir, scan_job_id,
         raise ManifestError(
             "manifest source root unresolvable — re-scan the card") from e
     for entry in entries:
-        if not isinstance(entry, dict):
-            raise ManifestError(
-                "manifest entries malformed — re-scan the card")
-        if entry.get("bucket") != "deletable":
-            continue
-        if not entry.get("path"):
-            raise ManifestError(
-                "manifest entries malformed — re-scan the card")
-        if (not isinstance(entry.get("size"), int)
-                or not isinstance(entry.get("mtime_ns"), int)
-                or not isinstance(entry.get("hash"), str)
-                or not entry.get("hash")):
-            raise ManifestError(
-                "manifest entries malformed — re-scan the card")
-        # Same explicit null-byte rejection as the source root above —
-        # Windows realpath would pass the string through unchanged.
-        if "\x00" in str(entry.get("path", "")):
-            raise ManifestError(
-                "manifest entry outside its source root — re-scan the card")
-        try:
-            child_real = os.path.realpath(str(entry.get("path", "")))
-        except (OSError, ValueError) as e:
-            raise ManifestError(
-                "manifest entry outside its source root — re-scan the card"
-            ) from e
-        if not path_guard.contains_resolved(root_real, child_real):
-            raise ManifestError(
-                "manifest entry outside its source root — re-scan the card")
+        _validate_manifest_entry(entry, root_real)
     return manifest
 
 
@@ -301,6 +310,81 @@ SKIP_OUTSIDE_SOURCE = "path no longer resolves inside the scanned source"
 SKIP_SYMLINK = "path is now a symlink — refuses to follow at delete time"
 SKIP_NOT_REGULAR = (
     "path is not a regular file — refuses to open at delete time")
+
+
+def _qualify_ok_row(row, card_st, contains_check):
+    """Archive-side gates for one ``hash_status='ok'`` row.
+
+    Returns ``(archive_path, None)`` when the row qualifies, else
+    ``(None, keep_reason)``; ``keep_reason`` is ``None`` for a row with no
+    folder path, which leaves the caller's running reason unchanged.
+    """
+    if not row["folder_path"]:
+        return None, None
+    archive_path = os.path.join(row["folder_path"], row["filename"])
+    try:
+        archive_real = os.path.realpath(archive_path)
+    except (OSError, ValueError):
+        # Containment is unknown, not disproven — a row we can't
+        # even resolve must not be treated as "inside the source"
+        # (which would be silently wrong) or crash the whole job.
+        return None, KEEP_ARCHIVE_UNREACHABLE
+    if contains_check(archive_real):
+        return None, KEEP_INSIDE_SOURCE
+    try:
+        ast = os.stat(archive_path)
+    except (OSError, ValueError):
+        return None, KEEP_ARCHIVE_UNREACHABLE
+    # samefile semantics without a second round trip: a mount alias
+    # that survived realpath + case-folding still shares dev+inode.
+    if (ast.st_dev, ast.st_ino) == (card_st.st_dev, card_st.st_ino):
+        return None, KEEP_INSIDE_SOURCE
+    if row["file_size"] is None or row["file_mtime"] is None:
+        return None, KEEP_ARCHIVE_CHANGED
+    # Exact equality — the audit's 1s window classifies an
+    # already-detected mismatch and certifies nothing here; a false
+    # negative just keeps a file.
+    if (ast.st_size != row["file_size"]
+            or ast.st_mtime != row["file_mtime"]):
+        return None, KEEP_ARCHIVE_CHANGED
+    # Bind the containment decision to the statted object (Codex P1):
+    # realpath() and os.stat() above are two separate path walks. A
+    # parent directory swapped between them means containment
+    # approved one target while the metadata gate measured another —
+    # and the dev/inode check only rejects the *candidate* itself,
+    # not some other in-source file the redirect landed on.
+    # Re-resolve after the stat and require the resolution unchanged
+    # and still outside the source. A double swap inside this
+    # microsecond window is the accepted residual, same class as the
+    # stat-to-remove gap at the unlink.
+    try:
+        recheck_real = os.path.realpath(archive_path)
+    except (OSError, ValueError):
+        return None, KEEP_ARCHIVE_UNREACHABLE
+    if recheck_real != archive_real or contains_check(recheck_real):
+        return None, KEEP_INSIDE_SOURCE
+    return archive_path, None
+
+
+def _final_keep_reason(reason, saw_never_checked, saw_check_failed):
+    """The keep reason when no catalog row qualified."""
+    # NULL-hash-status wins over a specific ok-row reason (Codex P2): the
+    # unchecked row is verify's next lever, so the entry must land in the
+    # KEEP_NOT_VERIFIED bucket the callout keys off. Otherwise the reason
+    # already reflects the closest-to-success signal we have, and
+    # KEEP_ARCHIVE_HASH_FAILED only surfaces when no ok row spoke up and
+    # only check-failed rows remain.
+    if saw_never_checked:
+        reason = KEEP_NOT_VERIFIED
+    elif reason is None:
+        if saw_check_failed:
+            reason = KEEP_ARCHIVE_HASH_FAILED
+        else:
+            # No non-ok rows and no ok row got a specific reason — the
+            # only shapes left are ok rows with an empty folder_path. Kept
+            # for a stat-shaped reason we can't state precisely.
+            reason = KEEP_ARCHIVE_UNREACHABLE
+    return reason
 
 
 def qualify_rows(rows, source_root_real, card_path, contains_check=None):
@@ -353,76 +437,14 @@ def qualify_rows(rows, source_root_real, card_path, contains_check=None):
             else:
                 saw_check_failed = True
             continue
-        if not row["folder_path"]:
-            continue
-        archive_path = os.path.join(row["folder_path"], row["filename"])
-        try:
-            archive_real = os.path.realpath(archive_path)
-        except (OSError, ValueError):
-            # Containment is unknown, not disproven — a row we can't
-            # even resolve must not be treated as "inside the source"
-            # (which would be silently wrong) or crash the whole job.
-            reason = KEEP_ARCHIVE_UNREACHABLE
-            continue
-        if contains_check(archive_real):
-            reason = KEEP_INSIDE_SOURCE
-            continue
-        try:
-            ast = os.stat(archive_path)
-        except (OSError, ValueError):
-            reason = KEEP_ARCHIVE_UNREACHABLE
-            continue
-        # samefile semantics without a second round trip: a mount alias
-        # that survived realpath + case-folding still shares dev+inode.
-        if (ast.st_dev, ast.st_ino) == (card_st.st_dev, card_st.st_ino):
-            reason = KEEP_INSIDE_SOURCE
-            continue
-        if row["file_size"] is None or row["file_mtime"] is None:
-            reason = KEEP_ARCHIVE_CHANGED
-            continue
-        # Exact equality — the audit's 1s window classifies an
-        # already-detected mismatch and certifies nothing here; a false
-        # negative just keeps a file.
-        if (ast.st_size != row["file_size"]
-                or ast.st_mtime != row["file_mtime"]):
-            reason = KEEP_ARCHIVE_CHANGED
-            continue
-        # Bind the containment decision to the statted object (Codex P1):
-        # realpath() and os.stat() above are two separate path walks. A
-        # parent directory swapped between them means containment
-        # approved one target while the metadata gate measured another —
-        # and the dev/inode check only rejects the *candidate* itself,
-        # not some other in-source file the redirect landed on.
-        # Re-resolve after the stat and require the resolution unchanged
-        # and still outside the source. A double swap inside this
-        # microsecond window is the accepted residual, same class as the
-        # stat-to-remove gap at the unlink.
-        try:
-            recheck_real = os.path.realpath(archive_path)
-        except (OSError, ValueError):
-            reason = KEEP_ARCHIVE_UNREACHABLE
-            continue
-        if recheck_real != archive_real or contains_check(recheck_real):
-            reason = KEEP_INSIDE_SOURCE
-            continue
-        return archive_path, None
-    # NULL-hash-status wins over a specific ok-row reason (Codex P2): the
-    # unchecked row is verify's next lever, so the entry must land in the
-    # KEEP_NOT_VERIFIED bucket the callout keys off. Otherwise the reason
-    # already reflects the closest-to-success signal we have, and
-    # KEEP_ARCHIVE_HASH_FAILED only surfaces when no ok row spoke up and
-    # only check-failed rows remain.
-    if saw_never_checked:
-        reason = KEEP_NOT_VERIFIED
-    elif reason is None:
-        if saw_check_failed:
-            reason = KEEP_ARCHIVE_HASH_FAILED
-        else:
-            # No non-ok rows and no ok row got a specific reason — the
-            # only shapes left are ok rows with an empty folder_path. Kept
-            # for a stat-shaped reason we can't state precisely.
-            reason = KEEP_ARCHIVE_UNREACHABLE
-    return None, reason
+        archive_path, row_reason = _qualify_ok_row(
+            row, card_st, contains_check)
+        if archive_path is not None:
+            return archive_path, None
+        if row_reason is not None:
+            reason = row_reason
+    return None, _final_keep_reason(
+        reason, saw_never_checked, saw_check_failed)
 
 
 _ROWS_BY_HASH_SQL = """
@@ -1128,6 +1150,182 @@ def scan_card(db, source, recursive, manifest_dir, scan_job_id,
     return manifest
 
 
+def _skipped(path, reason):
+    return "skipped", {"path": path, "reason": reason}
+
+
+def _failed(path, error):
+    return "failed", {"path": path, "error": str(error)}
+
+
+def _card_stat_gate(path, entry):
+    """Pre-hash card gate. Returns ``(st, None)`` or ``(None, outcome)``."""
+    # Card gate: cheap stat pre-check, then full re-hash. Size+mtime
+    # alone cannot detect a swapped card or same-size replacement.
+    #
+    # lstat, not stat: scan rejects symlinks at classification, but a
+    # post-scan swap of the pathname for a symlink to a byte-identical
+    # file would let os.stat follow the link — every content gate
+    # would then operate on the target, and os.remove would unlink
+    # only the link while the delete summary credited the target's
+    # full bytes as reclaimed. Rejecting symlinks here keeps the
+    # delete anchored to the object the scan hashed.
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None, _skipped(path, SKIP_ALREADY_GONE)
+    except OSError as e:
+        return None, _failed(path, e)
+    if stat_mod.S_ISLNK(st.st_mode):
+        return None, _skipped(path, SKIP_SYMLINK)
+    # Codex P2: not just symlinks — any non-regular replacement must
+    # be rejected BEFORE compute_file_hash. A scanned zero-byte photo
+    # replaced by a FIFO (or socket/device) with size 0 and mtime
+    # forced back to the manifest value would pass the S_ISLNK reject
+    # and the size/mtime check, then compute_file_hash would block
+    # forever opening the pipe — cancellation is checked only at file
+    # boundaries, so the delete job hangs.
+    if not stat_mod.S_ISREG(st.st_mode):
+        return None, _skipped(path, SKIP_NOT_REGULAR)
+    if (st.st_size != entry["size"]
+            or st.st_mtime_ns != entry["mtime_ns"]):
+        return None, _skipped(path, SKIP_CHANGED)
+    return st, None
+
+
+def _archive_gate(db, file_hash, source_root_real, path, contains_check):
+    """``None`` when a qualifying archive copy exists, else the skip outcome."""
+    archive_path, reason = qualify_rows(
+        fetch_rows_by_hash(db, file_hash), source_root_real, path,
+        contains_check)
+    if archive_path is None:
+        return _skipped(path, reason)
+    return None
+
+
+def _card_hash_gate(path, entry, st):
+    """Re-hash the card file. Returns ``(hash, None)`` or ``(None, outcome)``."""
+    # CodeRabbit: hash the descriptor we open here rather than
+    # re-opening the pathname. A rename that swaps the card file for
+    # a FIFO after the S_ISREG check on ``st`` but before
+    # compute_file_hash would leave the worker blocking inside
+    # open() — cancellation is checked at file boundaries only, so
+    # the delete job hangs. O_NONBLOCK survives the FIFO open;
+    # fstat then re-proves regular-file + dev/inode identity against
+    # the scanned baseline before any bytes are read.
+    try:
+        card_fd = os.open(path, os.O_RDONLY | O_NONBLOCK | O_BINARY)
+    except FileNotFoundError:
+        return None, _skipped(path, SKIP_ALREADY_GONE)
+    except OSError as e:
+        return None, _failed(path, e)
+    try:
+        try:
+            fst = os.fstat(card_fd)
+        except OSError as e:
+            return None, _failed(path, e)
+        if not stat_mod.S_ISREG(fst.st_mode):
+            return None, _skipped(path, SKIP_NOT_REGULAR)
+        if ((fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino)
+                or fst.st_size != entry["size"]
+                or fst.st_mtime_ns != entry["mtime_ns"]):
+            return None, _skipped(path, SKIP_CHANGED)
+        try:
+            current_hash = compute_fd_hash(card_fd)
+        except OSError as e:
+            return None, _failed(path, e)
+    finally:
+        os.close(card_fd)
+    if current_hash != entry["hash"]:
+        return None, _skipped(path, SKIP_CONTENT_CHANGED)
+    return current_hash, None
+
+
+def _final_path_gate(path, entry, st, contains_check):
+    """Post-hash containment and identity recheck; ``None`` when it passes."""
+    # Path gate (Codex P1): a parent directory swapped for a symlink
+    # DURING the card hash can redirect this pathname to a
+    # byte-identical file outside the scanned source — bytes hash
+    # identically, both archive gates pass, but os.remove would
+    # unlink the external file. Both containment and the final
+    # inode/symlink recheck must run AFTER the final hash, not before
+    # it. Residual race (swap between these checks and the unlink)
+    # is microseconds; full immunity would need dir_fd/O_NOFOLLOW
+    # traversal, out of proportion here.
+    if not contains_check(os.path.realpath(path)):
+        return _skipped(path, SKIP_OUTSIDE_SOURCE)
+    # lstat, not stat: a scanned regular file swapped for a symlink
+    # would otherwise be followed to its (byte-identical) target,
+    # pass every identity check on the target's stats, and then
+    # os.remove would unlink only the link while the summary credits
+    # the target's full size. lstat sees the link itself, whose
+    # inode/size/mtime cannot match the scanned file's baseline.
+    try:
+        st2 = os.lstat(path)
+    except FileNotFoundError:
+        return _skipped(path, SKIP_ALREADY_GONE)
+    except OSError as e:
+        return _failed(path, e)
+    if stat_mod.S_ISLNK(st2.st_mode):
+        return _skipped(path, SKIP_SYMLINK)
+    # Codex P2 (mirror of gate 1): a swap for a FIFO/socket/device
+    # after the final hash would pass the S_ISLNK reject and the
+    # dev/inode baseline (a new inode fails that check anyway), but
+    # defence-in-depth: keep both gates identical so an added
+    # code path can't relax one without the other.
+    if not stat_mod.S_ISREG(st2.st_mode):
+        return _skipped(path, SKIP_NOT_REGULAR)
+    if ((st2.st_dev, st2.st_ino) != (st.st_dev, st.st_ino)
+            or st2.st_size != entry["size"]
+            or st2.st_mtime_ns != entry["mtime_ns"]):
+        return _skipped(path, SKIP_CHANGED)
+    return None
+
+
+def _delete_verified_entry(db, entry, source_root_real, contains_check):
+    """Re-prove the invariant for one deletable entry, then unlink it.
+
+    Returns ``None`` once the file is deleted, else the ``("skipped", item)``
+    or ``("failed", item)`` outcome for the summary.
+    """
+    path = entry["path"]
+    st, outcome = _card_stat_gate(path, entry)
+    if outcome is not None:
+        return outcome
+    # Archive gate 1 is deliberately before the only full card read.
+    # It cheaply rejects an archive that is already unavailable.  The
+    # same archive test runs again after hashing, so neither side's
+    # verdict can go stale during the other side's potentially slow I/O.
+    outcome = _archive_gate(
+        db, entry["hash"], source_root_real, path, contains_check)
+    if outcome is not None:
+        return outcome
+
+    # One full card read, after the first archive round trip.  This
+    # catches ordinary changes plus same-size/same-mtime replacements;
+    # putting it here preserves that protection without reading every
+    # card file twice.
+    current_hash, outcome = _card_hash_gate(path, entry, st)
+    if outcome is not None:
+        return outcome
+
+    # Archive gate 2 makes the archive the last full-copy condition
+    # checked before unlink.  If it disappears while the card is being
+    # read, deletion is skipped.
+    outcome = _archive_gate(
+        db, current_hash, source_root_real, path, contains_check)
+    if outcome is not None:
+        return outcome
+    outcome = _final_path_gate(path, entry, st, contains_check)
+    if outcome is not None:
+        return outcome
+    try:
+        os.remove(path)
+    except OSError as e:
+        return _failed(path, e)
+    return None
+
+
 def delete_verified(db, manifest, progress_cb=None, should_cancel=None):
     """Delete the manifest's deletable bucket, re-proving the invariant
     per file immediately before each unlink. Never reads the kept or
@@ -1160,166 +1358,11 @@ def delete_verified(db, manifest, progress_cb=None, should_cancel=None):
         path = entry["path"]
         if progress_cb is not None:
             progress_cb(i + 1, len(deletable), os.path.basename(path))
-        # Card gate: cheap stat pre-check, then full re-hash. Size+mtime
-        # alone cannot detect a swapped card or same-size replacement.
-        #
-        # lstat, not stat: scan rejects symlinks at classification, but a
-        # post-scan swap of the pathname for a symlink to a byte-identical
-        # file would let os.stat follow the link — every content gate
-        # would then operate on the target, and os.remove would unlink
-        # only the link while the delete summary credited the target's
-        # full bytes as reclaimed. Rejecting symlinks here keeps the
-        # delete anchored to the object the scan hashed.
-        try:
-            st = os.lstat(path)
-        except FileNotFoundError:
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_ALREADY_GONE})
-            continue
-        except OSError as e:
-            summary["failed"].append({"path": path, "error": str(e)})
-            continue
-        if stat_mod.S_ISLNK(st.st_mode):
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_SYMLINK})
-            continue
-        # Codex P2: not just symlinks — any non-regular replacement must
-        # be rejected BEFORE compute_file_hash. A scanned zero-byte photo
-        # replaced by a FIFO (or socket/device) with size 0 and mtime
-        # forced back to the manifest value would pass the S_ISLNK reject
-        # and the size/mtime check, then compute_file_hash would block
-        # forever opening the pipe — cancellation is checked only at file
-        # boundaries, so the delete job hangs.
-        if not stat_mod.S_ISREG(st.st_mode):
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_NOT_REGULAR})
-            continue
-        if (st.st_size != entry["size"]
-                or st.st_mtime_ns != entry["mtime_ns"]):
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_CHANGED})
-            continue
-        # Archive gate 1 is deliberately before the only full card read.
-        # It cheaply rejects an archive that is already unavailable.  The
-        # same archive test runs again after hashing, so neither side's
-        # verdict can go stale during the other side's potentially slow I/O.
-        archive_path, reason = qualify_rows(
-            fetch_rows_by_hash(db, entry["hash"]), source_root_real, path,
-            contains_check)
-        if archive_path is None:
-            summary["skipped"].append({"path": path, "reason": reason})
-            continue
-
-        # One full card read, after the first archive round trip.  This
-        # catches ordinary changes plus same-size/same-mtime replacements;
-        # putting it here preserves that protection without reading every
-        # card file twice.
-        #
-        # CodeRabbit: hash the descriptor we open here rather than
-        # re-opening the pathname. A rename that swaps the card file for
-        # a FIFO after the S_ISREG check on ``st`` but before
-        # compute_file_hash would leave the worker blocking inside
-        # open() — cancellation is checked at file boundaries only, so
-        # the delete job hangs. O_NONBLOCK survives the FIFO open;
-        # fstat then re-proves regular-file + dev/inode identity against
-        # the scanned baseline before any bytes are read.
-        try:
-            card_fd = os.open(path, os.O_RDONLY | O_NONBLOCK | O_BINARY)
-        except FileNotFoundError:
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_ALREADY_GONE})
-            continue
-        except OSError as e:
-            summary["failed"].append({"path": path, "error": str(e)})
-            continue
-        try:
-            try:
-                fst = os.fstat(card_fd)
-            except OSError as e:
-                summary["failed"].append({"path": path, "error": str(e)})
-                continue
-            if not stat_mod.S_ISREG(fst.st_mode):
-                summary["skipped"].append(
-                    {"path": path, "reason": SKIP_NOT_REGULAR})
-                continue
-            if ((fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino)
-                    or fst.st_size != entry["size"]
-                    or fst.st_mtime_ns != entry["mtime_ns"]):
-                summary["skipped"].append(
-                    {"path": path, "reason": SKIP_CHANGED})
-                continue
-            try:
-                current_hash = compute_fd_hash(card_fd)
-            except OSError as e:
-                summary["failed"].append({"path": path, "error": str(e)})
-                continue
-        finally:
-            os.close(card_fd)
-        if current_hash != entry["hash"]:
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_CONTENT_CHANGED})
-            continue
-
-        # Archive gate 2 makes the archive the last full-copy condition
-        # checked before unlink.  If it disappears while the card is being
-        # read, deletion is skipped.
-        archive_path, reason = qualify_rows(
-            fetch_rows_by_hash(db, current_hash), source_root_real, path,
-            contains_check)
-        if archive_path is None:
-            summary["skipped"].append({"path": path, "reason": reason})
-            continue
-        # Path gate (Codex P1): a parent directory swapped for a symlink
-        # DURING the card hash can redirect this pathname to a
-        # byte-identical file outside the scanned source — bytes hash
-        # identically, both archive gates pass, but os.remove would
-        # unlink the external file. Both containment and the final
-        # inode/symlink recheck must run AFTER the final hash, not before
-        # it. Residual race (swap between these checks and the unlink)
-        # is microseconds; full immunity would need dir_fd/O_NOFOLLOW
-        # traversal, out of proportion here.
-        if not contains_check(os.path.realpath(path)):
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_OUTSIDE_SOURCE})
-            continue
-        # lstat, not stat: a scanned regular file swapped for a symlink
-        # would otherwise be followed to its (byte-identical) target,
-        # pass every identity check on the target's stats, and then
-        # os.remove would unlink only the link while the summary credits
-        # the target's full size. lstat sees the link itself, whose
-        # inode/size/mtime cannot match the scanned file's baseline.
-        try:
-            st2 = os.lstat(path)
-        except FileNotFoundError:
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_ALREADY_GONE})
-            continue
-        except OSError as e:
-            summary["failed"].append({"path": path, "error": str(e)})
-            continue
-        if stat_mod.S_ISLNK(st2.st_mode):
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_SYMLINK})
-            continue
-        # Codex P2 (mirror of gate 1): a swap for a FIFO/socket/device
-        # after the final hash would pass the S_ISLNK reject and the
-        # dev/inode baseline (a new inode fails that check anyway), but
-        # defence-in-depth: keep both gates identical so an added
-        # code path can't relax one without the other.
-        if not stat_mod.S_ISREG(st2.st_mode):
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_NOT_REGULAR})
-            continue
-        if ((st2.st_dev, st2.st_ino) != (st.st_dev, st.st_ino)
-                or st2.st_size != entry["size"]
-                or st2.st_mtime_ns != entry["mtime_ns"]):
-            summary["skipped"].append(
-                {"path": path, "reason": SKIP_CHANGED})
-            continue
-        try:
-            os.remove(path)
-        except OSError as e:
-            summary["failed"].append({"path": path, "error": str(e)})
+        outcome = _delete_verified_entry(
+            db, entry, source_root_real, contains_check)
+        if outcome is not None:
+            kind, item = outcome
+            summary[kind].append(item)
             continue
         summary["deleted"] += 1
         summary["deleted_bytes"] += entry["size"]

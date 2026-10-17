@@ -324,6 +324,39 @@ class DescriptorSafetyTests(unittest.TestCase):
         self.assertGreaterEqual(calls, 3)
         self.assertIsNotNone(fs._kind(ROOT + "/.locks/" + NAME + "/new-blob.lock"))
 
+    def test_download_target_churn_refuses_cleanup_before_any_unlink(self):
+        fs, ns = service()
+        payload(fs)
+        collect = ns["_collect"]
+        calls = 0
+
+        def changed(*args):
+            nonlocal calls
+            calls += 1
+            payload(fs, f"late-{calls}", f"blob-{calls}")
+            return collect(*args)
+
+        ns["_collect"] = changed
+        with self.assertRaises(ns["DownloadInProgress"]):
+            cleanup(ns)
+        self.assertEqual(calls, 4)
+        self.assertFalse(fs.unlinked)
+        self.assertFalse(fs.held_locks)
+        self.assertFalse(fs.fds)
+
+    def test_missing_process_lock_support_cannot_silently_continue(self):
+        fs, ns = service()
+        payload(fs)
+
+        def unavailable(**_kwargs):
+            raise ImportError("invented missing lock dependency")
+
+        ns["DOWNLOAD_LOCK"].acquire = unavailable
+        with self.assertRaises(ns["UnsafeCacheCleanup"]):
+            cleanup(ns)
+        self.assertFalse(fs.unlinked)
+        self.assertFalse(fs.fds)
+
     def test_late_unselected_partial_snapshot_and_metadata_survive(self):
         fs, ns = service()
         payload(fs)

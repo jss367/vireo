@@ -580,6 +580,63 @@ def apply_color_grading(rgb, grading):
     return np.clip(out, 0.0, 1.0)
 
 
+def _scene_referred_linear(rgb, *, exposure, white_balance, input_linear):
+    """Exposure, white balance and the display shoulder, in linear light."""
+    lin_pre = rgb if input_linear else srgb_to_linear(rgb)
+    lin = lin_pre
+    exp_gain = 2.0 ** float(exposure)
+    if exposure:
+        lin = lin * np.float32(exp_gain)
+    gr = gg = gb = 1.0
+    if white_balance:
+        gr, gg, gb = white_balance_gains(white_balance)
+        lin = lin * np.array([gr, gg, gb], dtype=np.float32)
+    # RAW always needs a display transform. Legacy display inputs retain the
+    # push-only shoulder so an unadjusted JPEG remains a true no-op.
+    if input_linear:
+        lin = _scene_to_display_linear(lin)
+    elif exp_gain * max(gr, gg, gb) > 1.0 + 1e-6:
+        # The shoulder curve is below identity for inputs in (knee, ∞), so
+        # naively rolling every post-gain value above the knee can darken
+        # near-white pixels — e.g. a 0.95-linear pixel at +0.1 EV becomes
+        # 1.018 post-gain and the shoulder maps that to 0.929. That violates
+        # monotonicity in exposure: a positive boost must never lower a
+        # pixel's output. Clamp per channel to the channel's "would-be" value
+        # without rolloff: that's lin_pre when the channel's net gain >= 1
+        # (the channel can only brighten, so its floor is the input), and
+        # the post-gain value itself when the channel's net gain < 1 (e.g.
+        # a negative-tint blue channel that WB legitimately reduces).
+        # ``min(lin_pre, lin)`` collapses to whichever is the natural floor.
+        rolled = highlight_rolloff(lin)
+        lin = np.maximum(rolled, np.minimum(lin_pre, lin))
+    return lin
+
+
+def _display_referred_ops(
+    disp, *, contrast, tone_curve, point_curves, hsl, color_grading,
+    vibrance, saturation,
+):
+    """Contrast, curves, HSL, grading, vibrance and saturation, in sRGB."""
+    if contrast:
+        c = np.float32(1.0 + float(contrast) / 100.0)
+        disp = (disp - 0.5) * c + 0.5
+    if tone_curve:
+        disp = apply_tone_curve(disp, tone_curve)
+    if point_curves:
+        disp = apply_point_curves(disp, point_curves)
+    if hsl:
+        disp = apply_hsl_mixer(disp, hsl)
+    if color_grading:
+        disp = apply_color_grading(disp, color_grading)
+    if vibrance:
+        disp = apply_vibrance(disp, vibrance)
+    if saturation:
+        s = np.float32(max(0.0, 1.0 + float(saturation) / 100.0))
+        luma = _luma(disp)
+        disp = luma + (disp - luma) * s
+    return disp
+
+
 def apply_adjustments(
     rgb,
     *,
@@ -667,33 +724,10 @@ def apply_adjustments(
         )
 
     # --- scene-referred ops, in linear light ---
-    lin_pre = rgb if input_linear else srgb_to_linear(rgb)
-    lin = lin_pre
-    exp_gain = 2.0 ** float(exposure)
-    if exposure:
-        lin = lin * np.float32(exp_gain)
-    gr = gg = gb = 1.0
-    if white_balance:
-        gr, gg, gb = white_balance_gains(white_balance)
-        lin = lin * np.array([gr, gg, gb], dtype=np.float32)
-    # RAW always needs a display transform. Legacy display inputs retain the
-    # push-only shoulder so an unadjusted JPEG remains a true no-op.
-    if input_linear:
-        lin = _scene_to_display_linear(lin)
-    elif exp_gain * max(gr, gg, gb) > 1.0 + 1e-6:
-        # The shoulder curve is below identity for inputs in (knee, ∞), so
-        # naively rolling every post-gain value above the knee can darken
-        # near-white pixels — e.g. a 0.95-linear pixel at +0.1 EV becomes
-        # 1.018 post-gain and the shoulder maps that to 0.929. That violates
-        # monotonicity in exposure: a positive boost must never lower a
-        # pixel's output. Clamp per channel to the channel's "would-be" value
-        # without rolloff: that's lin_pre when the channel's net gain >= 1
-        # (the channel can only brighten, so its floor is the input), and
-        # the post-gain value itself when the channel's net gain < 1 (e.g.
-        # a negative-tint blue channel that WB legitimately reduces).
-        # ``min(lin_pre, lin)`` collapses to whichever is the natural floor.
-        rolled = highlight_rolloff(lin)
-        lin = np.maximum(rolled, np.minimum(lin_pre, lin))
+    lin = _scene_referred_linear(
+        rgb, exposure=exposure, white_balance=white_balance,
+        input_linear=input_linear,
+    )
 
     # --- perceptually placed range curves, reconstructed in linear RGB ---
     if highlights or shadows or whites or blacks:
@@ -708,23 +742,16 @@ def apply_adjustments(
 
     # --- display-referred ops, in sRGB ---
     disp = linear_to_srgb(lin)
-    if contrast:
-        c = np.float32(1.0 + float(contrast) / 100.0)
-        disp = (disp - 0.5) * c + 0.5
-    if tone_curve:
-        disp = apply_tone_curve(disp, tone_curve)
-    if point_curves:
-        disp = apply_point_curves(disp, point_curves)
-    if hsl:
-        disp = apply_hsl_mixer(disp, hsl)
-    if color_grading:
-        disp = apply_color_grading(disp, color_grading)
-    if vibrance:
-        disp = apply_vibrance(disp, vibrance)
-    if saturation:
-        s = np.float32(max(0.0, 1.0 + float(saturation) / 100.0))
-        luma = _luma(disp)
-        disp = luma + (disp - luma) * s
+    disp = _display_referred_ops(
+        disp,
+        contrast=contrast,
+        tone_curve=tone_curve,
+        point_curves=point_curves,
+        hsl=hsl,
+        color_grading=color_grading,
+        vibrance=vibrance,
+        saturation=saturation,
+    )
 
     # Point Color samples this fully adjusted color, before spatial detail.
     # Keeping it last lets the picker render its exact input by omitting only

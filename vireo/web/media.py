@@ -97,6 +97,11 @@ log = logging.getLogger(__name__)
 _UNSET = object()
 
 
+# ``serve_crop_preview``'s source loader returns this when the photo has no
+# usable working copy and its folder row is gone (a 404, not a decode failure).
+_CROP_FOLDER_MISSING = object()
+
+
 class _ArtifactResponseError(RuntimeError):
     """Carry a producer's non-success Flask response to equal-key waiters."""
 
@@ -2787,6 +2792,69 @@ def _edit_preview_source_guard(photo, folder, cancelled):
     yield
 
 
+def _edit_mask_preview_geometry(photo, normalized, native_dims, size, apply_crop, snapshot):
+    """Source dimensions and feather scale for ``/photos/<id>/edit-mask-preview``.
+
+    Returns ``(source_dims, preview_detail_scale)``: the size the local
+    weight map is rendered at (falling back to the snapshot's own size when
+    the photo's dimensions are unknown) and the detail scale of the saved
+    render, or ``None`` when it cannot be derived.
+    """
+    from image_edits import detail_render_scale
+    from render_source import rendered_recipe_long_edge
+
+    source_size = size
+    if apply_crop and normalized.get("crop") and all(native_dims):
+        native_source_long = max(native_dims)
+        rendered_long = rendered_recipe_long_edge(
+            native_dims[0], native_dims[1], normalized,
+        )
+        if rendered_long > 0:
+            source_size = min(
+                native_source_long,
+                int(math.ceil(size * native_source_long / rendered_long)),
+            )
+    source_dims = _scaled_recipe_source_dimensions(photo, source_size)
+    if not source_dims[0] or not source_dims[1]:
+        source_dims = snapshot.size
+    # Feather scale must reflect the saved cropped render in both modes.
+    # In crop-edit mode the overlay itself is aligned with the uncropped
+    # preview, but its feather still needs to match the pixels the saved
+    # render will actually weight.
+    preview_detail_scale = None
+    if native_dims and native_dims[0] and native_dims[1]:
+        saved_native_long = float(rendered_recipe_long_edge(
+            native_dims[0], native_dims[1], normalized,
+        ))
+        if saved_native_long > 0:
+            saved_rendered_long = min(float(size), saved_native_long)
+            preview_detail_scale = detail_render_scale(
+                (saved_rendered_long, saved_rendered_long),
+                native_dims,
+                normalized,
+            )
+    return source_dims, preview_detail_scale
+
+
+def _tinted_mask_png(weight):
+    """Encode a local weight map as the editor's tinted RGBA PNG overlay."""
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    height, width = weight.shape
+    rgba = np.zeros((height, width, 4), dtype=np.uint8)
+    # Accent teal at up to ~60% opacity where the subject weight is 1.
+    rgba[..., 0] = 112
+    rgba[..., 1] = 199
+    rgba[..., 2] = 186
+    rgba[..., 3] = np.clip(weight * 150.0 + 0.5, 0, 255).astype(np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(rgba, "RGBA").save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def create_media_blueprint(
     get_db,
     json_error,
@@ -3178,33 +3246,13 @@ def create_media_blueprint(
             ],
         })
 
-    @blueprint.route("/photos/<int:photo_id>/crop")
-    def serve_crop_preview(photo_id):
-        """Serve the cropped region that would be sent to BioCLIP."""
-        import config as cfg
+    def _load_crop_source(db, photo):
+        """Decode the crop source: the working copy first, then the original.
+
+        Returns ``_CROP_FOLDER_MISSING`` when there is no working copy and
+        the photo's folder row is gone, and ``None`` when nothing decoded.
+        """
         from image_loader import load_image
-        from PIL import Image
-
-        db = get_db()
-        # verify_workspace: don't serve image bytes for photos hidden from
-        # the active workspace (mirrors serve_thumbnail).
-        photo = db.get_photo(photo_id, verify_workspace=True)
-        if not photo:
-            return "Not found", 404
-
-        # Get primary detection box — global detections table, threshold
-        # resolved from workspace-effective config in get_detections.
-        dets = db.get_detections(photo_id)
-        requested_detection = request.args.get("detection_id")
-        if requested_detection is not None:
-            try:
-                requested_detection = int(requested_detection)
-            except ValueError:
-                return json_error("Invalid detection_id")
-            dets = [d for d in dets if d["id"] == requested_detection
-                    and d["category"] == "animal" and d["detector_model"] != "full-image"]
-            if not dets:
-                return json_error("Subject not found", 404)
 
         # Try working copy first, fall back to original
         vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
@@ -3218,7 +3266,7 @@ def create_media_blueprint(
         if image_path is None:
             folder = db.get_folder(photo["folder_id"])
             if not folder:
-                return "Not found", 404
+                return _CROP_FOLDER_MISSING
             image_path = os.path.join(folder["path"], photo["filename"])
 
         if using_working_copy:
@@ -3256,8 +3304,11 @@ def create_media_blueprint(
             )
             if original_path and os.path.isfile(original_path):
                 img = load_image(original_path, max_size=preview_size)
-        if img is None:
-            return "Could not load image", 500
+        return img
+
+    def _crop_to_detection(img, dets, requested_detection):
+        """Crop to the primary (or requested) subject box with its padding."""
+        import config as cfg
 
         det_box = None
         if dets:
@@ -3281,6 +3332,42 @@ def create_media_blueprint(
             crop = img.crop((x1, y1, x2, y2))
             if requested_detection is not None or (crop.size[0] >= 50 and crop.size[1] >= 50):
                 img = crop
+        return img
+
+    @blueprint.route("/photos/<int:photo_id>/crop")
+    def serve_crop_preview(photo_id):
+        """Serve the cropped region that would be sent to BioCLIP."""
+        import config as cfg
+        from PIL import Image
+
+        db = get_db()
+        # verify_workspace: don't serve image bytes for photos hidden from
+        # the active workspace (mirrors serve_thumbnail).
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return "Not found", 404
+
+        # Get primary detection box — global detections table, threshold
+        # resolved from workspace-effective config in get_detections.
+        dets = db.get_detections(photo_id)
+        requested_detection = request.args.get("detection_id")
+        if requested_detection is not None:
+            try:
+                requested_detection = int(requested_detection)
+            except ValueError:
+                return json_error("Invalid detection_id")
+            dets = [d for d in dets if d["id"] == requested_detection
+                    and d["category"] == "animal" and d["detector_model"] != "full-image"]
+            if not dets:
+                return json_error("Subject not found", 404)
+
+        img = _load_crop_source(db, photo)
+        if img is _CROP_FOLDER_MISSING:
+            return "Not found", 404
+        if img is None:
+            return "Could not load image", 500
+
+        img = _crop_to_detection(img, dets, requested_detection)
 
         if requested_detection is not None and request.args.get("suggested") == "1":
             exposure_ev = db.detections.subject_exposure_ev(requested_detection)
@@ -3320,56 +3407,11 @@ def create_media_blueprint(
         return fixed | {int(pm)}
 
 
-    def _serve_preview(
-        photo_id, size, *, _artifact_flight_guarded=False, _prepare_source=None,
+    def _paired_cache_path_for_request(
+        preview_dir, photo, photo_id, size, pair_source, pair_source_path,
+        render_recipe, bypass_cache,
     ):
-        """Serve a preview at the given size, using the preview_cache LRU.
-
-        This is the single code path behind both /photos/<id>/preview and
-        /photos/<id>/full. Callers have already validated size.
-
-        ``_prepare_source`` is the photo row full-resolution preparation
-        selected: the render publishes only while the catalog still holds
-        that source (see ``_preparation_publication``).
-        """
-        import config as cfg
-        from flask import send_file
-
-        # Confirm the photo still exists before any cache return so that a
-        # deleted photo can't be served from a stale per-size cache (and so
-        # SQLite id reuse can't surface the wrong image). verify_workspace
-        # keeps cross-workspace photos from being served here at all
-        # (mirrors serve_thumbnail).
-        db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
-        if not photo:
-            return "Not found", 404
-        if _prepare_source is not None:
-            from offline_cache import photo_source_matches
-
-            if not photo_source_matches(_prepare_source, photo):
-                return "Photo source changed", 404
-
-        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
-        preview_dir = os.path.join(vireo_dir, "previews")
-        cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
-        recipe = db.get_photo_edit_recipe(photo_id)
-        folder_row = db.get_folder(photo["folder_id"])
-        if not folder_row:
-            return "Not found", 404
-        pair_source, pair_source_path = _requested_pair_source(
-            photo, folder_row["path"],
-        )
-        if pair_source and not pair_source_path:
-            return "Not found", 404
-        # Recipes and local masks use primary-RAW coordinates. The selected
-        # developed JPEG may have different geometry and should be displayed
-        # as-authored rather than receiving the RAW edit a second time.
-        render_recipe = None if pair_source == "jpeg" else recipe
-        # The established preview cache is keyed only by (photo_id, size).
-        # Explicit paired-source views bypass it so RAW and JPEG pixels can
-        # never contaminate one another. Both indexes share the preview disk LRU.
-        bypass_cache = pair_source is not None
+        """The source-keyed shadow cache path, or ``None`` for ordinary previews."""
         # Paired renders coordinate through a distinct source-aware artifact
         # so a browser warmup (prefetch=1) and the visible request that
         # follows can share one decode instead of racing two — the paired
@@ -3381,7 +3423,7 @@ def create_media_blueprint(
         # returning bytes rendered from the previous state indefinitely —
         # regular preview-cache invalidation does not remove these source-keyed
         # files. Old states remain accounted for until LRU eviction.
-        paired_cache_path = (
+        return (
             _paired_preview_path(
                 preview_dir,
                 photo_id,
@@ -3395,6 +3437,16 @@ def create_media_blueprint(
             else None
         )
 
+    def _reconcile_preview_cache_file(
+        db, photo, photo_id, size, cache_path, recipe, render_recipe, bypass_cache,
+    ):
+        """Drop corrupt, invalidated and stale untracked preview files.
+
+        Returns ``(stale_after_failed_invalidation,
+        skip_untracked_preview_adoption)``: whether the cached file is still
+        known stale (it could not be removed) and whether an on-disk file
+        that failed removal must not be adopted as a cache hit.
+        """
         # Reject corrupt zero-byte cache files (prior write interrupted).
         # Treat them as a miss so the regeneration path below produces a
         # real preview.
@@ -3450,6 +3502,15 @@ def create_media_blueprint(
                     "Failed to remove stale untracked preview cache %s",
                     cache_path, exc_info=True,
                 )
+        return stale_after_failed_invalidation, skip_untracked_preview_adoption
+
+    def _serve_cached_preview(
+        db, photo_id, size, cache_path, paired_cache_path, vireo_dir, *,
+        bypass_cache, stale_after_failed_invalidation,
+        skip_untracked_preview_adoption,
+    ):
+        """Serve a tracked, adoptable or paired cache hit; ``None`` on a miss."""
+        from flask import send_file
 
         # Cache hit (tracked): touch and serve. The touch is best-effort
         # bookkeeping — under concurrent traffic SQLite can raise
@@ -3499,62 +3560,67 @@ def create_media_blueprint(
             with contextlib.suppress(sqlite3.Error):
                 db.caches.paired_preview_touch(os.path.basename(paired_cache_path))
             return send_file(paired_cache_path, mimetype="image/jpeg")
+        return None
 
-        # Cache miss: coordinate every durable preview producer in this
-        # process before decoding.  The recursive producer re-runs all cache
-        # and invalidation checks under the flight; equal-key waiters then
-        # re-enter once more and serve the atomically published JPEG through
-        # their own Flask request context.  Paired renders are coordinated
-        # too, keyed by the source-aware paired path so RAW and JPEG variants
-        # of the same photo never share a flight — the shared artifact for
-        # waiters live at that paired path, isolated from ordinary previews.
-        if not _artifact_flight_guarded:
-            artifact_key = os.path.abspath(
-                paired_cache_path if bypass_cache else cache_path,
+    def _coordinate_preview_flight(
+        photo_id, size, cache_path, paired_cache_path, bypass_cache,
+        _prepare_source,
+    ):
+        """Run the cache-miss render under the equal-key artifact flight."""
+        artifact_key = os.path.abspath(
+            paired_cache_path if bypass_cache else cache_path,
+        )
+        speculative = request.args.get("prefetch") == "1"
+        speculative_slot = False
+        if speculative:
+            speculative_slot = preview_prefetch_slots.acquire(blocking=False)
+            if not speculative_slot:
+                return _shed_prefetch_response()
+
+        def coordinated_request(*, guarded):
+            response = make_response(
+                _serve_preview(
+                    photo_id, size, _artifact_flight_guarded=guarded,
+                    _prepare_source=_prepare_source,
+                )
             )
-            speculative = request.args.get("prefetch") == "1"
-            speculative_slot = False
-            if speculative:
-                speculative_slot = preview_prefetch_slots.acquire(blocking=False)
-                if not speculative_slot:
-                    return _shed_prefetch_response()
+            if response.status_code >= 400:
+                raise _ArtifactResponseError(response)
+            return response
 
-            def coordinated_request(*, guarded):
-                response = make_response(
-                    _serve_preview(
-                        photo_id, size, _artifact_flight_guarded=guarded,
-                        _prepare_source=_prepare_source,
-                    )
-                )
-                if response.status_code >= 400:
-                    raise _ArtifactResponseError(response)
-                return response
+        try:
+            result = preview_artifact_flights.run(
+                artifact_key,
+                lambda: coordinated_request(guarded=True),
+                lambda: coordinated_request(guarded=False),
+                join=not speculative,
+            )
+            if result.skipped:
+                return _shed_prefetch_response()
+            return result.value
+        except _ArtifactResponseError as exc:
+            return exc.to_response()
+        except ArtifactProducerFailed as exc:
+            if isinstance(exc.__cause__, _ArtifactResponseError):
+                return exc.__cause__.to_response()
+            if isinstance(exc.__cause__, PreviewMaterializationError):
+                return "Could not load image", 500
+            raise
+        finally:
+            if speculative_slot:
+                preview_prefetch_slots.release()
 
-            try:
-                result = preview_artifact_flights.run(
-                    artifact_key,
-                    lambda: coordinated_request(guarded=True),
-                    lambda: coordinated_request(guarded=False),
-                    join=not speculative,
-                )
-                if result.skipped:
-                    return _shed_prefetch_response()
-                return result.value
-            except _ArtifactResponseError as exc:
-                return exc.to_response()
-            except ArtifactProducerFailed as exc:
-                if isinstance(exc.__cause__, _ArtifactResponseError):
-                    return exc.__cause__.to_response()
-                if isinstance(exc.__cause__, PreviewMaterializationError):
-                    return "Could not load image", 500
-                raise
-            finally:
-                if speculative_slot:
-                    preview_prefetch_slots.release()
+    def _materialize_requested_preview(
+        db, photo, photo_id, size, folder_row, vireo_dir, cache_path,
+        render_recipe, bypass_cache, pair_source, pair_source_path,
+        _prepare_source,
+    ):
+        """Render the preview; ``None`` when the source could not be decoded."""
+        import config as cfg
 
         preview_quality = cfg.load().get("preview_quality", 90)
         try:
-            rendered = materialize_preview(
+            return materialize_preview(
                 db,
                 photo,
                 folder_row["path"],
@@ -3573,8 +3639,13 @@ def create_media_blueprint(
                 ),
             )
         except PreviewMaterializationError:
-            return "Could not load image", 500
+            return None
 
+    def _record_rendered_preview(
+        db, photo_id, photo, size, cache_path, paired_cache_path, vireo_dir,
+        bypass_cache, rendered,
+    ):
+        """Bookkeeping after a render: clear invalidation, evict, publish paired bytes."""
         if not bypass_cache and rendered.published:
             invalid_preview_cache_paths.discard(cache_path)
             clear_preview_cache_invalid(db, photo_id, size)
@@ -3603,6 +3674,102 @@ def create_media_blueprint(
                     "Failed to publish paired preview cache %s",
                     paired_cache_path, exc_info=True,
                 )
+
+    def _serve_preview(
+        photo_id, size, *, _artifact_flight_guarded=False, _prepare_source=None,
+    ):
+        """Serve a preview at the given size, using the preview_cache LRU.
+
+        This is the single code path behind both /photos/<id>/preview and
+        /photos/<id>/full. Callers have already validated size.
+
+        ``_prepare_source`` is the photo row full-resolution preparation
+        selected: the render publishes only while the catalog still holds
+        that source (see ``_preparation_publication``).
+        """
+        from flask import send_file
+
+        # Confirm the photo still exists before any cache return so that a
+        # deleted photo can't be served from a stale per-size cache (and so
+        # SQLite id reuse can't surface the wrong image). verify_workspace
+        # keeps cross-workspace photos from being served here at all
+        # (mirrors serve_thumbnail).
+        db = get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return "Not found", 404
+        if _prepare_source is not None:
+            from offline_cache import photo_source_matches
+
+            if not photo_source_matches(_prepare_source, photo):
+                return "Photo source changed", 404
+
+        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        preview_dir = os.path.join(vireo_dir, "previews")
+        cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+        recipe = db.get_photo_edit_recipe(photo_id)
+        folder_row = db.get_folder(photo["folder_id"])
+        if not folder_row:
+            return "Not found", 404
+        pair_source, pair_source_path = _requested_pair_source(
+            photo, folder_row["path"],
+        )
+        if pair_source and not pair_source_path:
+            return "Not found", 404
+        # Recipes and local masks use primary-RAW coordinates. The selected
+        # developed JPEG may have different geometry and should be displayed
+        # as-authored rather than receiving the RAW edit a second time.
+        render_recipe = None if pair_source == "jpeg" else recipe
+        # The established preview cache is keyed only by (photo_id, size).
+        # Explicit paired-source views bypass it so RAW and JPEG pixels can
+        # never contaminate one another. Both indexes share the preview disk LRU.
+        bypass_cache = pair_source is not None
+        paired_cache_path = _paired_cache_path_for_request(
+            preview_dir, photo, photo_id, size, pair_source, pair_source_path,
+            render_recipe, bypass_cache,
+        )
+
+        stale_after_failed_invalidation, skip_untracked_preview_adoption = (
+            _reconcile_preview_cache_file(
+                db, photo, photo_id, size, cache_path, recipe, render_recipe,
+                bypass_cache,
+            )
+        )
+        cached = _serve_cached_preview(
+            db, photo_id, size, cache_path, paired_cache_path, vireo_dir,
+            bypass_cache=bypass_cache,
+            stale_after_failed_invalidation=stale_after_failed_invalidation,
+            skip_untracked_preview_adoption=skip_untracked_preview_adoption,
+        )
+        if cached is not None:
+            return cached
+
+        # Cache miss: coordinate every durable preview producer in this
+        # process before decoding.  The recursive producer re-runs all cache
+        # and invalidation checks under the flight; equal-key waiters then
+        # re-enter once more and serve the atomically published JPEG through
+        # their own Flask request context.  Paired renders are coordinated
+        # too, keyed by the source-aware paired path so RAW and JPEG variants
+        # of the same photo never share a flight — the shared artifact for
+        # waiters live at that paired path, isolated from ordinary previews.
+        if not _artifact_flight_guarded:
+            return _coordinate_preview_flight(
+                photo_id, size, cache_path, paired_cache_path, bypass_cache,
+                _prepare_source,
+            )
+
+        rendered = _materialize_requested_preview(
+            db, photo, photo_id, size, folder_row, vireo_dir, cache_path,
+            render_recipe, bypass_cache, pair_source, pair_source_path,
+            _prepare_source,
+        )
+        if rendered is None:
+            return "Could not load image", 500
+
+        _record_rendered_preview(
+            db, photo_id, photo, size, cache_path, paired_cache_path, vireo_dir,
+            bypass_cache, rendered,
+        )
         if rendered.data is not None:
             return Response(rendered.data, mimetype="image/jpeg")
         return send_file(cache_path, mimetype="image/jpeg")
@@ -3672,11 +3839,6 @@ def create_media_blueprint(
         instead (the one the first local slider would freeze), feathered by
         the ``feather`` arg, so Show Mask works before any local edit.
         """
-        import io
-
-        import numpy as np
-        from PIL import Image
-
         db = get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
@@ -3705,11 +3867,9 @@ def create_media_blueprint(
         from image_edits import (
             LOCAL_FEATHER_RANGE,
             RecipeError,
-            detail_render_scale,
             local_weight_map,
             normalize_recipe,
         )
-        from render_source import rendered_recipe_long_edge
         try:
             normalized = normalize_recipe(recipe) or {}
         except RecipeError as e:
@@ -3742,38 +3902,9 @@ def create_media_blueprint(
             if snapshot is None:
                 return "Photo has no active subject mask", 404
         native_dims = _recipe_source_dimensions(photo)
-        source_size = size
-        if apply_crop and normalized.get("crop") and all(native_dims):
-            from render_source import rendered_recipe_long_edge
-
-            native_source_long = max(native_dims)
-            rendered_long = rendered_recipe_long_edge(
-                native_dims[0], native_dims[1], normalized,
-            )
-            if rendered_long > 0:
-                source_size = min(
-                    native_source_long,
-                    int(math.ceil(size * native_source_long / rendered_long)),
-                )
-        source_dims = _scaled_recipe_source_dimensions(photo, source_size)
-        if not source_dims[0] or not source_dims[1]:
-            source_dims = snapshot.size
-        # Feather scale must reflect the saved cropped render in both modes.
-        # In crop-edit mode the overlay itself is aligned with the uncropped
-        # preview, but its feather still needs to match the pixels the saved
-        # render will actually weight.
-        preview_detail_scale = None
-        if native_dims and native_dims[0] and native_dims[1]:
-            saved_native_long = float(rendered_recipe_long_edge(
-                native_dims[0], native_dims[1], normalized,
-            ))
-            if saved_native_long > 0:
-                saved_rendered_long = min(float(size), saved_native_long)
-                preview_detail_scale = detail_render_scale(
-                    (saved_rendered_long, saved_rendered_long),
-                    native_dims,
-                    normalized,
-                )
+        source_dims, preview_detail_scale = _edit_mask_preview_geometry(
+            photo, normalized, native_dims, size, apply_crop, snapshot,
+        )
         weight = local_weight_map(
             snapshot, source_dims, display_recipe,
             native_size=native_dims,
@@ -3783,16 +3914,7 @@ def create_media_blueprint(
         if weight is None:
             return "Mask does not fit this photo", 404
 
-        height, width = weight.shape
-        rgba = np.zeros((height, width, 4), dtype=np.uint8)
-        # Accent teal at up to ~60% opacity where the subject weight is 1.
-        rgba[..., 0] = 112
-        rgba[..., 1] = 199
-        rgba[..., 2] = 186
-        rgba[..., 3] = np.clip(weight * 150.0 + 0.5, 0, 255).astype(np.uint8)
-        buf = io.BytesIO()
-        Image.fromarray(rgba, "RGBA").save(buf, format="PNG")
-        return Response(buf.getvalue(), mimetype="image/png")
+        return Response(_tinted_mask_png(weight), mimetype="image/png")
 
     @blueprint.route('/api/edit-preview/cancel', methods=['POST'])
     def api_cancel_edit_preview():

@@ -348,6 +348,58 @@ def delete_stray_sidecars(paths, allowed_roots, trash_paths=None):
     return deleted
 
 
+def _record_integrity_runs(db, stats):
+    """Record a completed verification as both the integrity and orphans run."""
+    problems = stats["modified"] + stats["corrupt"] + stats["unreadable"]
+    db.audit.record_run("integrity", problems)
+    # This walk just applied the orphans check's exact predicate to
+    # its exact population, so record that result too. Missing files
+    # stay under the orphans check (where the UI offers the right
+    # remediation) instead of inflating the integrity count, and a
+    # stale clean orphans verdict can't keep the banner green after
+    # this run saw a missing file.
+    db.audit.record_run("orphans", stats["missing"])
+
+
+def _record_hash_verdict(db, photo, path, actual, stats):
+    """Store the verdict for a photo whose current content hash is ``actual``."""
+    from scanner import EMPTY_FILE_SHA256
+
+    if not photo["file_hash"]:
+        # Zero-byte placeholders must NOT have the empty SHA baselined
+        # back in: scanner.py deliberately clears file_hash for empty
+        # files so they don't collide as exact duplicates of every
+        # other zero-byte image in the archive. Mark the row "ok"
+        # without writing file_hash so its NULL state survives audits.
+        if actual == EMPTY_FILE_SHA256:
+            db.audit.update_photo_hash_check(photo["id"], "ok", commit=False)
+        else:
+            db.audit.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
+                                       commit=False)
+        stats["baselined"] += 1
+    elif actual == photo["file_hash"]:
+        db.audit.update_photo_hash_check(photo["id"], "ok", commit=False)
+        stats["ok"] += 1
+    else:
+        try:
+            disk_mtime = os.path.getmtime(path)
+        except OSError:
+            disk_mtime = None
+        db_mtime = photo["file_mtime"]
+        # 1s tolerance: FAT/exFAT mtimes have 2s resolution and copies
+        # can round; a sub-second wobble is not evidence of an edit.
+        if (
+            disk_mtime is not None
+            and db_mtime is not None
+            and abs(disk_mtime - db_mtime) > 1.0
+        ):
+            status = "modified"
+        else:
+            status = "corrupt"
+        db.audit.update_photo_hash_check(photo["id"], status, commit=False)
+        stats[status] += 1
+
+
 def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None, pause_callback=None):
     """Re-hash every workspace photo and compare against the stored SHA-256.
 
@@ -382,7 +434,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
     Returns stats dict: {checked, ok, baselined, modified, corrupt,
     unreadable, missing, cancelled}
     """
-    from scanner import EMPTY_FILE_SHA256, compute_file_hash
+    from scanner import compute_file_hash
 
     photos = db.audit.get_integrity_photos()
     total = len(photos)
@@ -419,39 +471,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
             continue
 
         stats["checked"] += 1
-        if not photo["file_hash"]:
-            # Zero-byte placeholders must NOT have the empty SHA baselined
-            # back in: scanner.py deliberately clears file_hash for empty
-            # files so they don't collide as exact duplicates of every
-            # other zero-byte image in the archive. Mark the row "ok"
-            # without writing file_hash so its NULL state survives audits.
-            if actual == EMPTY_FILE_SHA256:
-                db.audit.update_photo_hash_check(photo["id"], "ok", commit=False)
-            else:
-                db.audit.update_photo_hash_check(photo["id"], "ok", file_hash=actual,
-                                           commit=False)
-            stats["baselined"] += 1
-        elif actual == photo["file_hash"]:
-            db.audit.update_photo_hash_check(photo["id"], "ok", commit=False)
-            stats["ok"] += 1
-        else:
-            try:
-                disk_mtime = os.path.getmtime(path)
-            except OSError:
-                disk_mtime = None
-            db_mtime = photo["file_mtime"]
-            # 1s tolerance: FAT/exFAT mtimes have 2s resolution and copies
-            # can round; a sub-second wobble is not evidence of an edit.
-            if (
-                disk_mtime is not None
-                and db_mtime is not None
-                and abs(disk_mtime - db_mtime) > 1.0
-            ):
-                status = "modified"
-            else:
-                status = "corrupt"
-            db.audit.update_photo_hash_check(photo["id"], status, commit=False)
-            stats[status] += 1
+        _record_hash_verdict(db, photo, path, actual, stats)
 
         if (i + 1) % 100 == 0:
             db.conn.commit()
@@ -465,15 +485,7 @@ def verify_hashes(db, progress_cb=None, should_cancel=None, pause_requested=None
     if should_cancel and should_cancel():
         stats["cancelled"] = True
     if not stats["cancelled"]:
-        problems = stats["modified"] + stats["corrupt"] + stats["unreadable"]
-        db.audit.record_run("integrity", problems)
-        # This walk just applied the orphans check's exact predicate to
-        # its exact population, so record that result too. Missing files
-        # stay under the orphans check (where the UI offers the right
-        # remediation) instead of inflating the integrity count, and a
-        # stale clean orphans verdict can't keep the banner green after
-        # this run saw a missing file.
-        db.audit.record_run("orphans", stats["missing"])
+        _record_integrity_runs(db, stats)
 
     log.info(
         "Hash verification: %d checked, %d ok, %d baselined, %d modified, "

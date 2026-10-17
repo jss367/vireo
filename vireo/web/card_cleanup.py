@@ -17,6 +17,21 @@ from flask import Blueprint, jsonify, request
 from web.background_jobs import make_background_job
 
 
+def _bound_delete_summary(summary):
+    """Cap the per-file skipped/failed lists of a delete job's result.
+
+    Bound the persisted result: skipped/failed can run to thousands of
+    per-file entries on a wholesale-drifted card, and this dict lands in
+    job_history.result and every /api/jobs/<id> poll. Totals stay exact;
+    the lists carry a generous sample and the UI says when it is showing a
+    sample.
+    """
+    for key in ("skipped", "failed"):
+        summary[f"{key}_total"] = len(summary[key])
+        summary[key] = summary[key][:500]
+    return summary
+
+
 def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, config):
     """Build the card-cleanup blueprint.
 
@@ -332,16 +347,7 @@ def create_card_cleanup_blueprint(get_db, json_error, get_runner, db_path, confi
                     progress_cb=progress_cb,
                     should_cancel=lambda: ctx.runner.is_cancelled(job["id"]),
                 )
-                # Bound the persisted result: skipped/failed can run to
-                # thousands of per-file entries on a wholesale-drifted
-                # card, and this dict lands in job_history.result and
-                # every /api/jobs/<id> poll. Totals stay exact; the
-                # lists carry a generous sample and the UI says when it
-                # is showing a sample.
-                for key in ("skipped", "failed"):
-                    summary[f"{key}_total"] = len(summary[key])
-                    summary[key] = summary[key][:500]
-                return summary
+                return _bound_delete_summary(summary)
             finally:
                 thread_db.close()
 

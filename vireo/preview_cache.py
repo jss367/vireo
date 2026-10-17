@@ -55,6 +55,133 @@ def _mask_directories(vireo_dir, masks_dir=None):
                                 os.path.join(vireo_dir, "masks")]))
 
 
+def _remove_deleted_photo_file(path, what, remove=None):
+    """Unlink one cached derivative of a deleted photo, logging a failure.
+
+    A failure leaves the file as an orphan that Clear Cache reclaims.
+    """
+    try:
+        (remove or os.remove)(path)
+    except OSError as e:
+        log.warning(
+            "Failed to remove " + what + " %s after photo delete — will be "
+            "reclaimed by Clear Cache: %s",
+            path, e,
+        )
+
+
+class _DeletedPhotoCacheDirs:
+    """The id-keyed derivative directories a deleted photo's files live in."""
+
+    def __init__(self, thumb_cache_dir, vireo_dir, masks_dir):
+        self.thumb_cache_dir = thumb_cache_dir
+        self.preview_dir = os.path.join(vireo_dir, "previews")
+        self.working_dir = os.path.join(vireo_dir, "working")
+        self.originals_dir = os.path.join(vireo_dir, "originals")
+        self.mask_dirs = _mask_directories(vireo_dir, masks_dir)
+        self.external_dng_dir = os.path.join(vireo_dir, "external-dng")
+        self.external_edits_dir = os.path.join(vireo_dir, "external-edits")
+        self.inat_uploads_dir = os.path.join(vireo_dir, "inat-uploads")
+        # Offline-cache layout: offline/{originals,xmp,companions}/{pid}{ext}.
+        # The FK cascade drops the offline_originals row when the photo is
+        # deleted, so we lose the exact stored paths — glob by photo id to
+        # cover any source extension and any sidecar/companion that was
+        # copied alongside it.
+        self.offline_dirs = [
+            os.path.join(vireo_dir, "offline", "originals"),
+            os.path.join(vireo_dir, "offline", "xmp"),
+            os.path.join(vireo_dir, "offline", "companions"),
+        ]
+
+
+def _remove_cached_files_for_photo(pid, dirs):
+    """Unlink every cached derivative keyed by ``pid`` (see the caller)."""
+    # {id}.jpg lives in these dirs as a legacy full preview, thumbnail,
+    # working copy, or prepared full-resolution render. {id}_{size}.jpg
+    # is used for sized preview variants.
+    for d in [dirs.thumb_cache_dir, dirs.preview_dir, dirs.working_dir, dirs.originals_dir]:
+        cached = os.path.join(d, f"{pid}.jpg")
+        if os.path.isfile(cached):
+            _remove_deleted_photo_file(cached, "cached file")
+    # Paired RAW+JPEG views keep source-specific thumbnail variants next
+    # to the legacy/default thumbnail. They are disposable derivatives
+    # and must follow the photo out of the cache on delete as well.
+    for variant in _glob.glob(os.path.join(dirs.thumb_cache_dir, f"{pid}_*.jpg")):
+        _remove_deleted_photo_file(variant, "thumbnail variant")
+    for prepared_render in _glob.glob(
+        os.path.join(dirs.originals_dir, f"{pid}_*.jpg")
+    ):
+        _remove_deleted_photo_file(prepared_render, "cached file")
+    for name in (f"{pid}.display.jpg",):
+        cached = os.path.join(dirs.originals_dir, name)
+        if os.path.isfile(cached):
+            _remove_deleted_photo_file(cached, "cached original rendition")
+    for variant in (
+        _glob.glob(os.path.join(dirs.preview_dir, f"{pid}_*.jpg"))
+        + _glob.glob(os.path.join(dirs.preview_dir, "paired", f"{pid}_*.jpg"))
+    ):
+        _remove_deleted_photo_file(variant, "preview variant")
+    for d in dirs.offline_dirs:
+        for orphan in _glob.glob(os.path.join(d, f"{pid}.*")):
+            _remove_deleted_photo_file(orphan, "offline cache file")
+    # Subject masks (``masks/{pid}.png``, ``masks/{pid}.{variant}.png``)
+    # are id-keyed like everything above. photos.mask_path goes away
+    # with the row, so a leftover file is invisible to the DB but is
+    # picked back up by any photo that later inherits the id — the
+    # pipeline would score the new photo against another photo's mask.
+    #
+    # ``edit-masks/{pid}.{ref}.png`` is deliberately NOT purged here.
+    # Those snapshots are content-addressed: the filename carries a
+    # photo id, but ``load_snapshot`` only reads one when the photo's
+    # own recipe names that ``ref``, and a ref is a hash of the mask
+    # bytes. A recycled id therefore can't surface a previous owner's
+    # snapshot — a brand-new photo has no local section at all, and a
+    # ref match would mean byte-identical masks. Deleting them by id
+    # only creates a data-loss window: ``transfer_snapshots`` swallows
+    # OSError when a rename fails (locked destination on Windows), so
+    # an id-keyed purge in the companion-merge path would destroy the
+    # sole remaining copy of a snapshot whose recipe has already been
+    # reassigned to the primary, silently disabling that local
+    # adjustment forever. ``local_masks.gc_edit_masks`` owns this
+    # directory instead and reaps by ref — the correct key — with a
+    # grace period and a re-stat guard.
+    for orphan in [path for directory in dirs.mask_dirs for pattern in (
+        os.path.join(directory, f"{pid}.png"), os.path.join(directory, f"{pid}.*.png"),
+    ) for path in _glob.glob(pattern)]:
+        _remove_deleted_photo_file(orphan, "mask file")
+    # ``external-edits/<pid>.jpg`` is the render handed to an external
+    # editor, and ``<pid>.json`` is its cache key — recipe, source path,
+    # source mtime, edit-math version. No photo id or content hash, so a
+    # recycled id re-imported at the same path with a preserved mtime and
+    # the same recipe matches the previous owner's metadata and the old
+    # render gets handed to the editor.
+    for name in (f"{pid}.jpg", f"{pid}.json"):
+        handoff = os.path.join(dirs.external_edits_dir, name)
+        if os.path.isfile(handoff):
+            _remove_deleted_photo_file(handoff, "external-edit handoff")
+    # ``inat-uploads/<pid>.jpg`` is the analogous handoff to iNaturalist,
+    # and ``<pid>.json`` caches the same {recipe, source_path,
+    # source_mtime, edit_math_version} envelope. Same failure mode:
+    # ``_inat_upload_photo_path`` never checks the file mtime, so a
+    # recycled id imported at the same path/mtime with the same recipe
+    # would ship the previous owner's pixels to iNaturalist.
+    for name in (f"{pid}.jpg", f"{pid}.json"):
+        handoff = os.path.join(dirs.inat_uploads_dir, name)
+        if os.path.isfile(handoff):
+            _remove_deleted_photo_file(handoff, "iNat upload handoff")
+    # ``external-dng/<pid>/<stem>.dng`` caches DNG conversions per
+    # photo id for the Nikon-HE-NEF external-editor path. The
+    # freshness check there is source-mtime-based, so a recycled id
+    # with the same basename and older source would silently reuse
+    # the previous owner's DNG. Wipe the whole per-id directory.
+    pid_external_dng = os.path.join(dirs.external_dng_dir, str(pid))
+    if os.path.isdir(pid_external_dng):
+        _remove_deleted_photo_file(
+            pid_external_dng, "external-dng cache directory",
+            remove=shutil.rmtree,
+        )
+
+
 def cleanup_cached_files_for_deleted_photos(
     thumb_cache_dir, files, progress_callback=None, vireo_dir=None, masks_dir=None,
 ):
@@ -84,179 +211,11 @@ def cleanup_cached_files_for_deleted_photos(
     """
     # Subject masks belong to the catalog, independently of generated image caches.
     vireo_dir = vireo_dir or os.path.dirname(thumb_cache_dir)
-    preview_dir = os.path.join(vireo_dir, "previews")
-    working_dir = os.path.join(vireo_dir, "working")
-    originals_dir = os.path.join(vireo_dir, "originals")
-    mask_dirs = _mask_directories(vireo_dir, masks_dir)
-    external_dng_dir = os.path.join(vireo_dir, "external-dng")
-    external_edits_dir = os.path.join(vireo_dir, "external-edits")
-    inat_uploads_dir = os.path.join(vireo_dir, "inat-uploads")
-    # Offline-cache layout: offline/{originals,xmp,companions}/{pid}{ext}.
-    # The FK cascade drops the offline_originals row when the photo is
-    # deleted, so we lose the exact stored paths — glob by photo id to
-    # cover any source extension and any sidecar/companion that was
-    # copied alongside it.
-    offline_dirs = [
-        os.path.join(vireo_dir, "offline", "originals"),
-        os.path.join(vireo_dir, "offline", "xmp"),
-        os.path.join(vireo_dir, "offline", "companions"),
-    ]
+    dirs = _DeletedPhotoCacheDirs(thumb_cache_dir, vireo_dir, masks_dir)
     total = len(files)
     for idx, f in enumerate(files, start=1):
         pid = f["photo_id"]
-        # {id}.jpg lives in these dirs as a legacy full preview, thumbnail,
-        # working copy, or prepared full-resolution render. {id}_{size}.jpg
-        # is used for sized preview variants.
-        for d in [thumb_cache_dir, preview_dir, working_dir, originals_dir]:
-            cached = os.path.join(d, f"{pid}.jpg")
-            if os.path.isfile(cached):
-                try:
-                    os.remove(cached)
-                except OSError as e:
-                    log.warning(
-                        "Failed to remove cached file %s after photo "
-                        "delete — will be reclaimed by Clear Cache: %s",
-                        cached, e,
-                    )
-        # Paired RAW+JPEG views keep source-specific thumbnail variants next
-        # to the legacy/default thumbnail. They are disposable derivatives
-        # and must follow the photo out of the cache on delete as well.
-        for variant in _glob.glob(os.path.join(thumb_cache_dir, f"{pid}_*.jpg")):
-            try:
-                os.remove(variant)
-            except OSError as e:
-                log.warning(
-                    "Failed to remove thumbnail variant %s after photo "
-                    "delete — will be reclaimed by Clear Cache: %s",
-                    variant, e,
-                )
-        for prepared_render in _glob.glob(
-            os.path.join(originals_dir, f"{pid}_*.jpg")
-        ):
-            try:
-                os.remove(prepared_render)
-            except OSError as e:
-                log.warning(
-                    "Failed to remove cached file %s after photo delete — "
-                    "will be reclaimed by Clear Cache: %s",
-                    prepared_render, e,
-                )
-        for name in (f"{pid}.display.jpg",):
-            cached = os.path.join(originals_dir, name)
-            if os.path.isfile(cached):
-                try:
-                    os.remove(cached)
-                except OSError as e:
-                    log.warning(
-                        "Failed to remove cached original rendition %s after "
-                        "photo delete — will be reclaimed by Clear Cache: %s",
-                        cached, e,
-                    )
-        for variant in (
-            _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg"))
-            + _glob.glob(os.path.join(preview_dir, "paired", f"{pid}_*.jpg"))
-        ):
-            try:
-                os.remove(variant)
-            except OSError as e:
-                log.warning(
-                    "Failed to remove preview variant %s after photo "
-                    "delete — will be reclaimed by Clear Cache: %s",
-                    variant, e,
-                )
-        for d in offline_dirs:
-            for orphan in _glob.glob(os.path.join(d, f"{pid}.*")):
-                try:
-                    os.remove(orphan)
-                except OSError as e:
-                    log.warning(
-                        "Failed to remove offline cache file %s after "
-                        "photo delete — will be reclaimed by Clear "
-                        "Cache: %s",
-                        orphan, e,
-                    )
-        # Subject masks (``masks/{pid}.png``, ``masks/{pid}.{variant}.png``)
-        # are id-keyed like everything above. photos.mask_path goes away
-        # with the row, so a leftover file is invisible to the DB but is
-        # picked back up by any photo that later inherits the id — the
-        # pipeline would score the new photo against another photo's mask.
-        #
-        # ``edit-masks/{pid}.{ref}.png`` is deliberately NOT purged here.
-        # Those snapshots are content-addressed: the filename carries a
-        # photo id, but ``load_snapshot`` only reads one when the photo's
-        # own recipe names that ``ref``, and a ref is a hash of the mask
-        # bytes. A recycled id therefore can't surface a previous owner's
-        # snapshot — a brand-new photo has no local section at all, and a
-        # ref match would mean byte-identical masks. Deleting them by id
-        # only creates a data-loss window: ``transfer_snapshots`` swallows
-        # OSError when a rename fails (locked destination on Windows), so
-        # an id-keyed purge in the companion-merge path would destroy the
-        # sole remaining copy of a snapshot whose recipe has already been
-        # reassigned to the primary, silently disabling that local
-        # adjustment forever. ``local_masks.gc_edit_masks`` owns this
-        # directory instead and reaps by ref — the correct key — with a
-        # grace period and a re-stat guard.
-        for orphan in [path for directory in mask_dirs for pattern in (
-            os.path.join(directory, f"{pid}.png"), os.path.join(directory, f"{pid}.*.png"),
-        ) for path in _glob.glob(pattern)]:
-            try:
-                os.remove(orphan)
-            except OSError as e:
-                log.warning(
-                    "Failed to remove mask file %s after photo delete "
-                    "— will be reclaimed by Clear Cache: %s",
-                    orphan, e,
-                )
-        # ``external-edits/<pid>.jpg`` is the render handed to an external
-        # editor, and ``<pid>.json`` is its cache key — recipe, source path,
-        # source mtime, edit-math version. No photo id or content hash, so a
-        # recycled id re-imported at the same path with a preserved mtime and
-        # the same recipe matches the previous owner's metadata and the old
-        # render gets handed to the editor.
-        for name in (f"{pid}.jpg", f"{pid}.json"):
-            handoff = os.path.join(external_edits_dir, name)
-            if os.path.isfile(handoff):
-                try:
-                    os.remove(handoff)
-                except OSError as e:
-                    log.warning(
-                        "Failed to remove external-edit handoff %s after "
-                        "photo delete — will be reclaimed by Clear Cache: %s",
-                        handoff, e,
-                    )
-        # ``inat-uploads/<pid>.jpg`` is the analogous handoff to iNaturalist,
-        # and ``<pid>.json`` caches the same {recipe, source_path,
-        # source_mtime, edit_math_version} envelope. Same failure mode:
-        # ``_inat_upload_photo_path`` never checks the file mtime, so a
-        # recycled id imported at the same path/mtime with the same recipe
-        # would ship the previous owner's pixels to iNaturalist.
-        for name in (f"{pid}.jpg", f"{pid}.json"):
-            handoff = os.path.join(inat_uploads_dir, name)
-            if os.path.isfile(handoff):
-                try:
-                    os.remove(handoff)
-                except OSError as e:
-                    log.warning(
-                        "Failed to remove iNat upload handoff %s after "
-                        "photo delete — will be reclaimed by Clear Cache: %s",
-                        handoff, e,
-                    )
-        # ``external-dng/<pid>/<stem>.dng`` caches DNG conversions per
-        # photo id for the Nikon-HE-NEF external-editor path. The
-        # freshness check there is source-mtime-based, so a recycled id
-        # with the same basename and older source would silently reuse
-        # the previous owner's DNG. Wipe the whole per-id directory.
-        pid_external_dng = os.path.join(external_dng_dir, str(pid))
-        if os.path.isdir(pid_external_dng):
-            try:
-                shutil.rmtree(pid_external_dng)
-            except OSError as e:
-                log.warning(
-                    "Failed to remove external-dng cache directory %s "
-                    "after photo delete — will be reclaimed by Clear "
-                    "Cache: %s",
-                    pid_external_dng, e,
-                )
+        _remove_cached_files_for_photo(pid, dirs)
         if progress_callback:
             progress_callback(idx, total, f.get("filename") or str(pid))
 
@@ -641,6 +600,129 @@ def _surviving_derivative_paths(thumb_cache_dir, photo_id, vireo_dir=None, masks
     return list(dict.fromkeys(files))
 
 
+def _recycled_survivor_backdate_target(file_mtime):
+    """The mtime a surviving recycled-id derivative is backdated to."""
+    # ``serve_thumbnail`` / ``_prepared_full_resolution_render`` / the
+    # external-DNG gate all treat ``cached_mtime >= source_mtime`` as
+    # fresh. Backdating to a hard-coded ``0`` fails when the new
+    # photo's source is itself at or below the Unix epoch (an archive
+    # that preserved an epoch or negative filesystem timestamp) — the
+    # survivor's mtime then still matches or exceeds ``file_mtime`` and
+    # the guard waves the previous owner's pixels through. Anchor the
+    # sentinel to the new photo's source instead so the comparison is
+    # provably false regardless of what value ``file_mtime`` takes.
+    if file_mtime is not None:
+        try:
+            return float(file_mtime) - 1.0
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _neutralize_recycled_survivor(path, photo_id, dirs, db, backdate_target):
+    """Make one undeletable derivative unservable; ``False`` when it can't be.
+
+    ``dirs`` is ``(preview_dir, external_edits_dir, inat_uploads_dir)``.
+    Backdates the file so the mtime freshness guards reject it, and marks a
+    surviving preview invalid in ``db``.
+    """
+    preview_dir, external_edits_dir, inat_uploads_dir = dirs
+    backdated = True
+    try:
+        os.utime(path, (backdate_target, backdate_target))
+    except OSError:
+        backdated = False
+
+    size = _preview_size_from_path(path, photo_id, preview_dir)
+    if size is not None:
+        # Previews are the one family where the marker, not the
+        # mtime, is what keeps the adoption branch off the file —
+        # so attempt it even when the backdate failed. Doing this
+        # only on the backdate's success path (as an earlier
+        # revision did) left a readable survivor adoptable.
+        if db is None:
+            return False
+        try:
+            mark_preview_cache_invalid(db, photo_id, size)
+        except Exception:
+            log.warning(
+                "Could not mark surviving preview %s invalid", path,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    parent = os.path.normpath(os.path.dirname(path))
+    if parent == os.path.normpath(external_edits_dir) or parent == (
+        os.path.normpath(inat_uploads_dir)
+    ):
+        # ``_external_edit_handoff_path`` and
+        # ``_inat_upload_photo_path`` compare the JSON's
+        # {recipe, source_path, source_mtime, edit_math_version}
+        # and never stat either file, so a backdate here changes
+        # nothing. Nothing short of removing them helps.
+        return False
+
+    return backdated
+
+
+def _neutralize_recycled_id_survivors(
+    thumb_cache_dir, photo_id, vireo_dir, masks_dir, db, file_mtime,
+):
+    """Backdate or invalidate derivatives the recycled-id purge left behind."""
+    # ``cleanup_cached_files_for_deleted_photos`` logs and continues when an
+    # unlink fails (locked file on Windows, a momentarily unwritable
+    # directory), so "we ran the purge" is not the same as "the stale
+    # pixels are gone". Returning True unconditionally would let the scan
+    # commit a recycled row while the previous owner's thumbnail is still
+    # servable — and the request path's mtime guard can't catch it, since
+    # a recently generated thumbnail beats an old capture's file_mtime.
+    # Re-probe, and for anything left behind, backdate its mtime so that
+    # guard *does* reject it. Timestamps are usually still writable when
+    # deletion isn't (the lock blocks unlink, not utime), so this recovers
+    # the common case; when even that fails we say so instead of leaving a
+    # silent wrong-pixels bug.
+    #
+    # Backdating is not enough for *previews*, though: ``_serve_preview``'s
+    # lazy-adoption branch tests ``os.path.exists(cache_path)`` with no
+    # mtime comparison, so a surviving ``previews/<id>_<size>.jpg`` would
+    # be adopted and re-registered verbatim. Those need the durable
+    # ``preview_cache_invalidations`` marker, which that branch does
+    # honour. Requires a ``db``; callers in the ingest path have one.
+    survivors = _surviving_derivative_paths(
+        thumb_cache_dir, photo_id, vireo_dir, masks_dir=masks_dir,
+    )
+    if survivors:
+        base_dir = vireo_dir or os.path.dirname(thumb_cache_dir)
+        dirs = (
+            os.path.join(base_dir, "previews"),
+            os.path.join(base_dir, "external-edits"),
+            os.path.join(base_dir, "inat-uploads"),
+        )
+        backdate_target = _recycled_survivor_backdate_target(file_mtime)
+        unfixable = [
+            path for path in survivors
+            if not _neutralize_recycled_survivor(
+                path, photo_id, dirs, db, backdate_target,
+            )
+        ]
+        if unfixable:
+            log.error(
+                "Photo %s reused a freed rowid but %d cached derivative(s) "
+                "could not be removed or invalidated: %s. Until they are "
+                "cleared (Settings > Storage > Clear cache), this photo may "
+                "render the previous owner's pixels.",
+                photo_id, len(unfixable), ", ".join(unfixable),
+            )
+        else:
+            log.warning(
+                "Photo %s reused a freed rowid; %d cached derivative(s) "
+                "survived deletion but were backdated so the freshness "
+                "guard regenerates them: %s",
+                photo_id, len(survivors), ", ".join(survivors),
+            )
+
+
 def purge_cached_files_for_recycled_id(
     thumb_cache_dir, photo_id, id_index=None, vireo_dir=None, db=None,
     file_mtime=None,
@@ -703,106 +785,9 @@ def purge_cached_files_for_recycled_id(
     cleanup_cached_files_for_deleted_photos(
         thumb_cache_dir, [{"photo_id": photo_id}], vireo_dir=vireo_dir, masks_dir=masks_dir,
     )
-    # ``cleanup_cached_files_for_deleted_photos`` logs and continues when an
-    # unlink fails (locked file on Windows, a momentarily unwritable
-    # directory), so "we ran the purge" is not the same as "the stale
-    # pixels are gone". Returning True unconditionally would let the scan
-    # commit a recycled row while the previous owner's thumbnail is still
-    # servable — and the request path's mtime guard can't catch it, since
-    # a recently generated thumbnail beats an old capture's file_mtime.
-    # Re-probe, and for anything left behind, backdate its mtime so that
-    # guard *does* reject it. Timestamps are usually still writable when
-    # deletion isn't (the lock blocks unlink, not utime), so this recovers
-    # the common case; when even that fails we say so instead of leaving a
-    # silent wrong-pixels bug.
-    #
-    # Backdating is not enough for *previews*, though: ``_serve_preview``'s
-    # lazy-adoption branch tests ``os.path.exists(cache_path)`` with no
-    # mtime comparison, so a surviving ``previews/<id>_<size>.jpg`` would
-    # be adopted and re-registered verbatim. Those need the durable
-    # ``preview_cache_invalidations`` marker, which that branch does
-    # honour. Requires a ``db``; callers in the ingest path have one.
-    survivors = _surviving_derivative_paths(
-        thumb_cache_dir, photo_id, vireo_dir, masks_dir=masks_dir,
+    _neutralize_recycled_id_survivors(
+        thumb_cache_dir, photo_id, vireo_dir, masks_dir, db, file_mtime,
     )
-    if survivors:
-        base_dir = vireo_dir or os.path.dirname(thumb_cache_dir)
-        preview_dir = os.path.join(base_dir, "previews")
-        external_edits_dir = os.path.join(base_dir, "external-edits")
-        inat_uploads_dir = os.path.join(base_dir, "inat-uploads")
-        # ``serve_thumbnail`` / ``_prepared_full_resolution_render`` / the
-        # external-DNG gate all treat ``cached_mtime >= source_mtime`` as
-        # fresh. Backdating to a hard-coded ``0`` fails when the new
-        # photo's source is itself at or below the Unix epoch (an archive
-        # that preserved an epoch or negative filesystem timestamp) — the
-        # survivor's mtime then still matches or exceeds ``file_mtime`` and
-        # the guard waves the previous owner's pixels through. Anchor the
-        # sentinel to the new photo's source instead so the comparison is
-        # provably false regardless of what value ``file_mtime`` takes.
-        if file_mtime is not None:
-            try:
-                backdate_target = float(file_mtime) - 1.0
-            except (TypeError, ValueError):
-                backdate_target = 0.0
-        else:
-            backdate_target = 0.0
-        unfixable = []
-        for path in survivors:
-            backdated = True
-            try:
-                os.utime(path, (backdate_target, backdate_target))
-            except OSError:
-                backdated = False
-
-            size = _preview_size_from_path(path, photo_id, preview_dir)
-            if size is not None:
-                # Previews are the one family where the marker, not the
-                # mtime, is what keeps the adoption branch off the file —
-                # so attempt it even when the backdate failed. Doing this
-                # only on the backdate's success path (as an earlier
-                # revision did) left a readable survivor adoptable.
-                if db is None:
-                    unfixable.append(path)
-                    continue
-                try:
-                    mark_preview_cache_invalid(db, photo_id, size)
-                except Exception:
-                    log.warning(
-                        "Could not mark surviving preview %s invalid", path,
-                        exc_info=True,
-                    )
-                    unfixable.append(path)
-                continue
-
-            parent = os.path.normpath(os.path.dirname(path))
-            if parent == os.path.normpath(external_edits_dir) or parent == (
-                os.path.normpath(inat_uploads_dir)
-            ):
-                # ``_external_edit_handoff_path`` and
-                # ``_inat_upload_photo_path`` compare the JSON's
-                # {recipe, source_path, source_mtime, edit_math_version}
-                # and never stat either file, so a backdate here changes
-                # nothing. Nothing short of removing them helps.
-                unfixable.append(path)
-                continue
-
-            if not backdated:
-                unfixable.append(path)
-        if unfixable:
-            log.error(
-                "Photo %s reused a freed rowid but %d cached derivative(s) "
-                "could not be removed or invalidated: %s. Until they are "
-                "cleared (Settings > Storage > Clear cache), this photo may "
-                "render the previous owner's pixels.",
-                photo_id, len(unfixable), ", ".join(unfixable),
-            )
-        else:
-            log.warning(
-                "Photo %s reused a freed rowid; %d cached derivative(s) "
-                "survived deletion but were backdated so the freshness "
-                "guard regenerates them: %s",
-                photo_id, len(survivors), ", ".join(survivors),
-            )
     return True
 
 

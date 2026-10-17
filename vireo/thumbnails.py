@@ -343,6 +343,119 @@ def get_thumb_path(photo_id, cache_dir):
     return None
 
 
+def _photos_needing_thumbnails(db, photos, cache_dir, cancel_check):
+    """Photos with no thumbnail or a stale camera-denoise one; ``None`` if cancelled."""
+    needed = []
+    for photo in photos:
+        if cancel_check and cancel_check():
+            return None
+        thumb_path = os.path.join(cache_dir, f"{photo['id']}.jpg")
+        if not os.path.exists(thumb_path):
+            needed.append(photo)
+        else:
+            recipe = db.get_photo_edit_recipe(photo["id"])
+            if ((recipe or {}).get("adjustments") or {}).get("denoise_mode") == "camera":
+                detail_photo = db.get_photo(photo["id"]) or photo
+                if not cache_matches(thumb_path, detail_photo, recipe):
+                    needed.append(photo)
+    return needed
+
+
+def _render_thumbnail_with_fallbacks(
+    db, photo, source_photo, source_path, recipe, cache_dir, thumb_size,
+    thumb_quality, vireo_dir, folders,
+):
+    """Generate one photo's thumbnail, retrying the fallback sources.
+
+    Returns the written thumbnail path, or ``None`` when every source failed.
+    """
+    # generate_thumbnail decodes the source image (slow for RAW). Run
+    # it before any UPDATE so no transaction is open while it runs;
+    # then commit per photo to release the writer lock between
+    # iterations and avoid blocking concurrent jobs (a parallel scan's
+    # add_photo INSERT) past the 30s busy_timeout.
+    recipe_kwargs = {"recipe": recipe} if recipe else {}
+    if recipe:
+        recipe_kwargs["camera_metadata"] = source_photo
+        recipe_kwargs["native_size"] = _recipe_source_dimensions(
+            source_photo
+        )
+    # Derive the decode mode from the primary photo's extension so
+    # edited RAWs that fall through to the original source path are
+    # demosaiced with highlight preservation, matching the preview /
+    # export pipeline rather than the default JPEG-first decode.
+    raw_decode_kwargs = {}
+    if recipe and os.path.splitext(
+        source_photo["filename"]
+    )[1].lower() in RAW_EXTENSIONS:
+        raw_decode_kwargs["raw_decode"] = RAW_DECODE_LINEAR
+    min_source_size = None
+    if (
+        recipe
+        and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+    ):
+        load_max_size = None if recipe.get("crop") else thumb_size
+        min_source_size = _scaled_recipe_source_dimensions(
+            source_photo, load_max_size,
+        )
+    result_path = generate_thumbnail(
+        photo["id"],
+        source_path,
+        cache_dir,
+        size=thumb_size,
+        quality=thumb_quality,
+        min_source_size=min_source_size,
+        **recipe_kwargs,
+        **raw_decode_kwargs,
+    )
+    if result_path is None and _is_working_copy_source(
+        source_photo, source_path, vireo_dir,
+    ):
+        result_path, source_path = (
+            _retry_thumbnail_after_working_copy_eviction(
+                source_photo,
+                source_path,
+                cache_dir,
+                thumb_size,
+                thumb_quality,
+                recipe,
+                folders.get(source_photo["folder_id"]),
+                vireo_dir,
+            )
+        )
+    if (
+        result_path is None
+        and recipe
+        and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+    ):
+        result_path = _retry_thumbnail_with_companion(
+            db,
+            source_photo,
+            source_path,
+            cache_dir,
+            thumb_size,
+            thumb_quality,
+            recipe,
+            folders.get(source_photo["folder_id"]),
+        )
+    if (
+        result_path is None
+        and recipe
+        and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+    ):
+        result_path = _retry_thumbnail_with_working_copy(
+            db,
+            source_photo,
+            source_path,
+            cache_dir,
+            thumb_size,
+            thumb_quality,
+            recipe,
+            vireo_dir,
+        )
+    return result_path
+
+
 def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=None,
                  cancel_check=None):
     """Generate thumbnails for photos that don't have one yet.
@@ -368,19 +481,9 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
 
     # Filter to only photos needing thumbnails
-    needed = []
-    for photo in photos:
-        if cancel_check and cancel_check():
-            return {"generated": 0, "skipped": 0, "failed": 0}
-        thumb_path = os.path.join(cache_dir, f"{photo['id']}.jpg")
-        if not os.path.exists(thumb_path):
-            needed.append(photo)
-        else:
-            recipe = db.get_photo_edit_recipe(photo["id"])
-            if ((recipe or {}).get("adjustments") or {}).get("denoise_mode") == "camera":
-                detail_photo = db.get_photo(photo["id"]) or photo
-                if not cache_matches(thumb_path, detail_photo, recipe):
-                    needed.append(photo)
+    needed = _photos_needing_thumbnails(db, photos, cache_dir, cancel_check)
+    if needed is None:
+        return {"generated": 0, "skipped": 0, "failed": 0}
 
     total = len(needed)
     skipped = len(photos) - total
@@ -411,90 +514,10 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
         if recipe and _has_current_raw_failure(source_photo, source_path):
             failed += 1
             continue
-        # generate_thumbnail decodes the source image (slow for RAW). Run
-        # it before any UPDATE so no transaction is open while it runs;
-        # then commit per photo to release the writer lock between
-        # iterations and avoid blocking concurrent jobs (a parallel scan's
-        # add_photo INSERT) past the 30s busy_timeout.
-        recipe_kwargs = {"recipe": recipe} if recipe else {}
-        if recipe:
-            recipe_kwargs["camera_metadata"] = source_photo
-            recipe_kwargs["native_size"] = _recipe_source_dimensions(
-                source_photo
-            )
-        # Derive the decode mode from the primary photo's extension so
-        # edited RAWs that fall through to the original source path are
-        # demosaiced with highlight preservation, matching the preview /
-        # export pipeline rather than the default JPEG-first decode.
-        raw_decode_kwargs = {}
-        if recipe and os.path.splitext(
-            source_photo["filename"]
-        )[1].lower() in RAW_EXTENSIONS:
-            raw_decode_kwargs["raw_decode"] = RAW_DECODE_LINEAR
-        min_source_size = None
-        if (
-            recipe
-            and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
-        ):
-            load_max_size = None if recipe.get("crop") else thumb_size
-            min_source_size = _scaled_recipe_source_dimensions(
-                source_photo, load_max_size,
-            )
-        result_path = generate_thumbnail(
-            photo["id"],
-            source_path,
-            cache_dir,
-            size=thumb_size,
-            quality=thumb_quality,
-            min_source_size=min_source_size,
-            **recipe_kwargs,
-            **raw_decode_kwargs,
+        result_path = _render_thumbnail_with_fallbacks(
+            db, photo, source_photo, source_path, recipe, cache_dir,
+            thumb_size, thumb_quality, vireo_dir, folders,
         )
-        if result_path is None and _is_working_copy_source(
-            source_photo, source_path, vireo_dir,
-        ):
-            result_path, source_path = (
-                _retry_thumbnail_after_working_copy_eviction(
-                    source_photo,
-                    source_path,
-                    cache_dir,
-                    thumb_size,
-                    thumb_quality,
-                    recipe,
-                    folders.get(source_photo["folder_id"]),
-                    vireo_dir,
-                )
-            )
-        if (
-            result_path is None
-            and recipe
-            and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
-        ):
-            result_path = _retry_thumbnail_with_companion(
-                db,
-                source_photo,
-                source_path,
-                cache_dir,
-                thumb_size,
-                thumb_quality,
-                recipe,
-                folders.get(source_photo["folder_id"]),
-            )
-        if (
-            result_path is None
-            and recipe
-            and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
-        ):
-            result_path = _retry_thumbnail_with_working_copy(
-                db,
-                source_photo,
-                source_path,
-                cache_dir,
-                thumb_size,
-                thumb_quality,
-                recipe,
-                vireo_dir,
-            )
         if result_path is not None:
             generated += 1
             # Record on-disk presence in the photos table so the dashboard's

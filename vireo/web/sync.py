@@ -311,6 +311,263 @@ def _sync_preview_merge_location_keywords(
     return merged
 
 
+def _sync_preview_keyword_merge_presentation(change, value):
+    """Before/after for a merged keyword's hierarchy."""
+    merge = json.loads(value)
+    target_path = change.get('merge_target_path')
+    return {
+        'field': 'Keyword hierarchy',
+        'action': 'updated' if target_path else 'removed',
+        'before': ' → '.join(merge['source_path']),
+        'after': ' → '.join(target_path) if target_path else 'Removed',
+        'after_detail': 'The merged keyword and its hierarchy sync together',
+    }
+
+
+def _sync_preview_paired_rename_presentation(
+    change_type, existing, hierarchy_display, paired_keyword_rename,
+    paired_add_value,
+):
+    """A removal half of a paired keyword rename, or ``None`` otherwise."""
+    if (
+        change_type == "keyword_remove"
+        and paired_keyword_rename
+        and hierarchy_display
+    ):
+        hierarchy_text = "; ".join(hierarchy_display)
+        return {
+            "field": "Keyword hierarchy",
+            "action": "unchanged",
+            "before": hierarchy_text,
+            "after": hierarchy_text,
+            "after_detail": (
+                "The matching keyword addition replaces only the "
+                "flat spelling; this hierarchy stays in XMP"
+            ),
+        }
+    # A paired flat-only rename (e.g. remove `‘apapane` + add `apapane`)
+    # is dispatched through the flat-only remove path in sync.py, and
+    # the paired write_sidecar then adds the clean spelling. Reporting
+    # the removal as `Not in XMP` hides that the keyword survives with
+    # a canonicalized flat spelling; show it as an unchanged keyword
+    # whose flat entry is being rewritten by the paired addition.
+    if (
+        change_type == "keyword_remove"
+        and paired_keyword_rename
+        and existing
+        and paired_add_value
+        and not hierarchy_display
+    ):
+        return {
+            "field": "Keyword",
+            "action": "unchanged",
+            "before": existing,
+            "after": paired_add_value,
+            "after_detail": (
+                "The matching keyword addition rewrites this flat "
+                "spelling; the keyword itself stays in XMP"
+            ),
+        }
+    return None
+
+
+def _sync_preview_keyword_add_presentation(value, metadata, xmp_value):
+    """Before/after for adding one keyword to XMP."""
+    # The writer preserves exact entries and canonicalizes every
+    # equivalent spelling before adding. Inspect all matches: an
+    # exact entry plus a variant still needs a spelling cleanup.
+    matching = sorted(
+        keyword for keyword in metadata.get("keywords", set())
+        if keyword_match_key(keyword) == keyword_match_key(value)
+    )
+    if matching:
+        unchanged = matching == [value]
+        return {
+            "field": "Keyword",
+            "action": "unchanged" if unchanged else "updated",
+            "before": "; ".join(matching),
+            "after": value,
+            "after_detail": (
+                "This keyword is already in XMP"
+                if unchanged
+                else "Sync replaces equivalent keyword spellings with this spelling"
+            ),
+        }
+    return {
+        "field": "Keyword",
+        "action": "added",
+        "before": xmp_value,
+        "after": value,
+    }
+
+
+def _sync_preview_keyword_presentation(
+    change_type, value, metadata, paired_keyword_rename, paired_add_value,
+):
+    """Before/after for a keyword add, remove or flat-only remove."""
+    existing = next(
+        (
+            keyword for keyword in metadata.get("keywords", set())
+            if keyword_match_key(keyword) == keyword_match_key(value)
+        ),
+        None,
+    )
+    # Solo keyword_remove routes through remove_keywords() with
+    # hierarchical=True in sync.py, which drops every
+    # lr:hierarchicalSubject whose segments match this key in addition
+    # to the flat dc:subject entry. Collect every hierarchy sync would
+    # touch so the review reflects the full deletion.
+    matching_hierarchies = []
+    if change_type == "keyword_remove":
+        matching_hierarchies = sorted(
+            keyword
+            for keyword in metadata.get("hierarchical_keywords", set())
+            if any(
+                keyword_match_key(segment) == keyword_match_key(value)
+                for segment in keyword.split("|")
+            )
+        )
+    hierarchy_display = [
+        keyword.replace("|", " › ") for keyword in matching_hierarchies
+    ]
+    paired = _sync_preview_paired_rename_presentation(
+        change_type, existing, hierarchy_display, paired_keyword_rename,
+        paired_add_value,
+    )
+    if paired is not None:
+        return paired
+    xmp_value = existing or _sync_preview_absent_xmp_value(
+        metadata, "Not in XMP",
+    )
+    if change_type == "keyword_add":
+        return _sync_preview_keyword_add_presentation(value, metadata, xmp_value)
+    if change_type == "keyword_remove" and not paired_keyword_rename:
+        removed_entries = []
+        if existing:
+            removed_entries.append(existing)
+        removed_entries.extend(hierarchy_display)
+        if removed_entries:
+            return {
+                "field": "Keyword",
+                "action": "removed",
+                "before": "; ".join(removed_entries),
+                "after": "Not in XMP",
+            }
+    if existing is None:
+        if metadata.get("status") == "unreadable":
+            detail = (
+                f"{value} cannot be removed because the XMP sidecar "
+                "is unreadable"
+            )
+        elif metadata.get("status") == "missing":
+            detail = f"No XMP sidecar contains {value} to remove"
+        else:
+            detail = f"{value} is not present in XMP"
+        return {
+            "field": "XMP keyword",
+            "action": "unchanged",
+            "before": xmp_value,
+            "after": xmp_value,
+            "after_detail": detail,
+        }
+    return {
+        "field": "Keyword",
+        "action": "removed",
+        "before": xmp_value,
+        "after": "Not in XMP",
+    }
+
+
+def _sync_preview_rating_presentation(value, metadata, sidecar_will_exist):
+    """Before/after for a rating change."""
+    before = _sync_preview_rating_label(metadata.get("rating"))
+    if not metadata.get("rating_writable") and not sidecar_will_exist:
+        before = _sync_preview_absent_xmp_value(metadata, before)
+        return {
+            "field": "XMP rating",
+            "action": "unchanged",
+            "before": before,
+            "after": before,
+            "after_detail": (
+                f"{_sync_preview_rating_label(value)} stays in Vireo; "
+                "rating sync only updates an existing, readable XMP sidecar"
+            ),
+        }
+    if not metadata.get("rating_writable"):
+        before = _sync_preview_absent_xmp_value(metadata, before)
+        return {
+            "field": "Rating",
+            "action": "updated",
+            "before": before,
+            "after": _sync_preview_rating_label(value),
+            "after_detail": (
+                "Another selected change creates the XMP sidecar first"
+            ),
+        }
+    return {
+        "field": "Rating",
+        "action": "updated",
+        "before": before,
+        "after": _sync_preview_rating_label(value),
+    }
+
+
+def _sync_preview_flag_presentation(value, metadata, sync_flags):
+    """Before/after for a pick/reject flag change."""
+    before = _sync_preview_flag_label(metadata.get("flag"))
+    if metadata.get("status") != "ok":
+        before = _sync_preview_absent_xmp_value(metadata, before)
+    if not sync_flags:
+        return {
+            "field": "XMP flag",
+            "action": "unchanged",
+            "before": before,
+            "after": before,
+            "after_detail": (
+                f"{_sync_preview_flag_label(value)} stays in Vireo; "
+                "flag sync to XMP is turned off"
+            ),
+        }
+    return {
+        "field": "Flag",
+        "action": "updated",
+        "before": before,
+        "after": _sync_preview_flag_label(value),
+    }
+
+
+def _sync_preview_edit_recipe_presentation(value, metadata):
+    """Before/after for the Vireo edit-recipe marker."""
+    before = (
+        "Existing Vireo edits"
+        if metadata.get("edit_recipe")
+        else _sync_preview_absent_xmp_value(metadata, "No Vireo edits")
+    )
+    if not value and not metadata.get("edit_recipe"):
+        if metadata.get("status") == "unreadable":
+            detail = (
+                "The Vireo edit marker cannot be cleared because the "
+                "XMP sidecar is unreadable"
+            )
+        elif metadata.get("status") == "missing":
+            detail = "No XMP sidecar contains Vireo edits to clear"
+        else:
+            detail = "No Vireo edit marker exists in XMP to clear"
+        return {
+            "field": "XMP photo edits",
+            "action": "unchanged",
+            "before": before,
+            "after": before,
+            "after_detail": detail,
+        }
+    return {
+        "field": "Photo edits",
+        "action": "updated" if value else "cleared",
+        "before": before,
+        "after": "Updated Vireo edits" if value else "No Vireo edits",
+    }
+
+
 def _sync_preview_presentation(
     change, metadata, *, assigned_location=None, write_locations=False,
     location_path=None, write_location_keywords=False,
@@ -325,200 +582,21 @@ def _sync_preview_presentation(
         return _sync_preview_folder_offline_presentation(change_type)
 
     if change_type == 'keyword_merge':
-        merge = json.loads(value)
-        target_path = change.get('merge_target_path')
-        return {
-            'field': 'Keyword hierarchy',
-            'action': 'updated' if target_path else 'removed',
-            'before': ' → '.join(merge['source_path']),
-            'after': ' → '.join(target_path) if target_path else 'Removed',
-            'after_detail': 'The merged keyword and its hierarchy sync together',
-        }
+        return _sync_preview_keyword_merge_presentation(change, value)
 
     if change_type in {"keyword_add", "keyword_remove", "keyword_remove_flat"}:
-        existing = next(
-            (
-                keyword for keyword in metadata.get("keywords", set())
-                if keyword_match_key(keyword) == keyword_match_key(value)
-            ),
-            None,
+        return _sync_preview_keyword_presentation(
+            change_type, value, metadata, paired_keyword_rename,
+            paired_add_value,
         )
-        # Solo keyword_remove routes through remove_keywords() with
-        # hierarchical=True in sync.py, which drops every
-        # lr:hierarchicalSubject whose segments match this key in addition
-        # to the flat dc:subject entry. Collect every hierarchy sync would
-        # touch so the review reflects the full deletion.
-        matching_hierarchies = []
-        if change_type == "keyword_remove":
-            matching_hierarchies = sorted(
-                keyword
-                for keyword in metadata.get("hierarchical_keywords", set())
-                if any(
-                    keyword_match_key(segment) == keyword_match_key(value)
-                    for segment in keyword.split("|")
-                )
-            )
-        hierarchy_display = [
-            keyword.replace("|", " › ") for keyword in matching_hierarchies
-        ]
-        if (
-            change_type == "keyword_remove"
-            and paired_keyword_rename
-            and hierarchy_display
-        ):
-            hierarchy_text = "; ".join(hierarchy_display)
-            return {
-                "field": "Keyword hierarchy",
-                "action": "unchanged",
-                "before": hierarchy_text,
-                "after": hierarchy_text,
-                "after_detail": (
-                    "The matching keyword addition replaces only the "
-                    "flat spelling; this hierarchy stays in XMP"
-                ),
-            }
-        # A paired flat-only rename (e.g. remove `‘apapane` + add `apapane`)
-        # is dispatched through the flat-only remove path in sync.py, and
-        # the paired write_sidecar then adds the clean spelling. Reporting
-        # the removal as `Not in XMP` hides that the keyword survives with
-        # a canonicalized flat spelling; show it as an unchanged keyword
-        # whose flat entry is being rewritten by the paired addition.
-        if (
-            change_type == "keyword_remove"
-            and paired_keyword_rename
-            and existing
-            and paired_add_value
-            and not hierarchy_display
-        ):
-            return {
-                "field": "Keyword",
-                "action": "unchanged",
-                "before": existing,
-                "after": paired_add_value,
-                "after_detail": (
-                    "The matching keyword addition rewrites this flat "
-                    "spelling; the keyword itself stays in XMP"
-                ),
-            }
-        xmp_value = existing or _sync_preview_absent_xmp_value(
-            metadata, "Not in XMP",
-        )
-        if change_type == "keyword_add":
-            # The writer preserves exact entries and canonicalizes every
-            # equivalent spelling before adding. Inspect all matches: an
-            # exact entry plus a variant still needs a spelling cleanup.
-            matching = sorted(
-                keyword for keyword in metadata.get("keywords", set())
-                if keyword_match_key(keyword) == keyword_match_key(value)
-            )
-            if matching:
-                unchanged = matching == [value]
-                return {
-                    "field": "Keyword",
-                    "action": "unchanged" if unchanged else "updated",
-                    "before": "; ".join(matching),
-                    "after": value,
-                    "after_detail": (
-                        "This keyword is already in XMP"
-                        if unchanged
-                        else "Sync replaces equivalent keyword spellings with this spelling"
-                    ),
-                }
-            return {
-                "field": "Keyword",
-                "action": "added",
-                "before": xmp_value,
-                "after": value,
-            }
-        if change_type == "keyword_remove" and not paired_keyword_rename:
-            removed_entries = []
-            if existing:
-                removed_entries.append(existing)
-            removed_entries.extend(hierarchy_display)
-            if removed_entries:
-                return {
-                    "field": "Keyword",
-                    "action": "removed",
-                    "before": "; ".join(removed_entries),
-                    "after": "Not in XMP",
-                }
-        if existing is None:
-            if metadata.get("status") == "unreadable":
-                detail = (
-                    f"{value} cannot be removed because the XMP sidecar "
-                    "is unreadable"
-                )
-            elif metadata.get("status") == "missing":
-                detail = f"No XMP sidecar contains {value} to remove"
-            else:
-                detail = f"{value} is not present in XMP"
-            return {
-                "field": "XMP keyword",
-                "action": "unchanged",
-                "before": xmp_value,
-                "after": xmp_value,
-                "after_detail": detail,
-            }
-        return {
-            "field": "Keyword",
-            "action": "removed",
-            "before": xmp_value,
-            "after": "Not in XMP",
-        }
 
     if change_type == "rating":
-        before = _sync_preview_rating_label(metadata.get("rating"))
-        if not metadata.get("rating_writable") and not sidecar_will_exist:
-            before = _sync_preview_absent_xmp_value(metadata, before)
-            return {
-                "field": "XMP rating",
-                "action": "unchanged",
-                "before": before,
-                "after": before,
-                "after_detail": (
-                    f"{_sync_preview_rating_label(value)} stays in Vireo; "
-                    "rating sync only updates an existing, readable XMP sidecar"
-                ),
-            }
-        if not metadata.get("rating_writable"):
-            before = _sync_preview_absent_xmp_value(metadata, before)
-            return {
-                "field": "Rating",
-                "action": "updated",
-                "before": before,
-                "after": _sync_preview_rating_label(value),
-                "after_detail": (
-                    "Another selected change creates the XMP sidecar first"
-                ),
-            }
-        return {
-            "field": "Rating",
-            "action": "updated",
-            "before": before,
-            "after": _sync_preview_rating_label(value),
-        }
+        return _sync_preview_rating_presentation(
+            value, metadata, sidecar_will_exist,
+        )
 
     if change_type == "flag":
-        before = _sync_preview_flag_label(metadata.get("flag"))
-        if metadata.get("status") != "ok":
-            before = _sync_preview_absent_xmp_value(metadata, before)
-        if not sync_flags:
-            return {
-                "field": "XMP flag",
-                "action": "unchanged",
-                "before": before,
-                "after": before,
-                "after_detail": (
-                    f"{_sync_preview_flag_label(value)} stays in Vireo; "
-                    "flag sync to XMP is turned off"
-                ),
-            }
-        return {
-            "field": "Flag",
-            "action": "updated",
-            "before": before,
-            "after": _sync_preview_flag_label(value),
-        }
+        return _sync_preview_flag_presentation(value, metadata, sync_flags)
 
     if change_type == "location":
         return _sync_preview_merge_location_keywords(
@@ -532,34 +610,7 @@ def _sync_preview_presentation(
         )
 
     if change_type == "edit_recipe":
-        before = (
-            "Existing Vireo edits"
-            if metadata.get("edit_recipe")
-            else _sync_preview_absent_xmp_value(metadata, "No Vireo edits")
-        )
-        if not value and not metadata.get("edit_recipe"):
-            if metadata.get("status") == "unreadable":
-                detail = (
-                    "The Vireo edit marker cannot be cleared because the "
-                    "XMP sidecar is unreadable"
-                )
-            elif metadata.get("status") == "missing":
-                detail = "No XMP sidecar contains Vireo edits to clear"
-            else:
-                detail = "No Vireo edit marker exists in XMP to clear"
-            return {
-                "field": "XMP photo edits",
-                "action": "unchanged",
-                "before": before,
-                "after": before,
-                "after_detail": detail,
-            }
-        return {
-            "field": "Photo edits",
-            "action": "updated" if value else "cleared",
-            "before": before,
-            "after": "Updated Vireo edits" if value else "No Vireo edits",
-        }
+        return _sync_preview_edit_recipe_presentation(value, metadata)
 
     field = change_type.replace("_", " ").strip().title() or "Metadata"
     return {

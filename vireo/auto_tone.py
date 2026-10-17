@@ -372,6 +372,193 @@ def _describe(adj):
     return notes
 
 
+def _fit_exposure(fitter, rgb, weights, *, input_linear, white_balance, expose_for_subject):
+    """Bring the (subject-weighted) median toward mid-grey.
+
+    Returns ``(ev, low_key)``: the fitted exposure in stops (before the
+    caller's final rounding) and whether the frame is mostly deep shadow.
+    """
+    has_subject = weights is not None
+    base = fitter.render({})
+    lit = base.luma > LOW_KEY_LEVEL
+    low_key = 1.0 - float(np.count_nonzero(lit)) / len(base.luma) >= LOW_KEY_SHARE
+    if low_key and np.any(lit):
+        frame_ev = _stops_to_grey(np.median(base.luma[lit]))
+    else:
+        frame_ev = _stops_to_grey(base.frame(0.5))
+    ev = frame_ev
+    if has_subject:
+        # Meter the subject on its brightest channel: a saturated blue or red
+        # bird has low luma but is not underexposed.
+        value = base.rgb.reshape(-1, 3).max(axis=1)
+        subject_level = _weighted_median(value, weights)
+        if expose_for_subject:
+            ev = _stops_to_grey(
+                subject_level, brighten_share=1.0, limit=SUBJECT_STYLE_EXPOSURE_LIMIT,
+            )
+        else:
+            subject_ev = _stops_to_grey(subject_level)
+            ev = SUBJECT_METERING_SHARE * subject_ev + (1.0 - SUBJECT_METERING_SHARE) * frame_ev
+            ev = min(frame_ev + SUBJECT_PULL_LIMIT, max(frame_ev - SUBJECT_PULL_LIMIT, ev))
+    if ev < 0:
+        ev = max(ev, -_headroom_stops(
+            rgb, input_linear=input_linear, white_balance=white_balance, weights=weights,
+        ))
+    ev = _round_toward(ev, 0.1)
+    if ev > 0:
+        if expose_for_subject:
+            def guarded(amount):
+                r = fitter.render({"exposure": amount})
+                return r.subject(SUBJECT_STYLE_GUARD_QUANTILE) <= HIGHLIGHT_GUARD
+        else:
+            def guarded(amount):
+                return fitter.render({"exposure": amount}).frame(0.99) <= HIGHLIGHT_GUARD
+        ev = _largest(ev, guarded, step=0.1)
+    return ev, low_key
+
+
+def _fit_highlights(fitter, adj, recoverable, *, has_subject, subject_mask, expose_for_subject):
+    """Give bright areas their gradation back."""
+    def highlights_ok(amount):
+        r = fitter.render({**adj, "highlights": amount})
+        # The subject style lets the background go bright on purpose.
+        if not expose_for_subject and r.share_above(
+            HIGHLIGHT_CEILING, among=recoverable,
+        ) > 0.03:
+            return False
+        if has_subject:
+            subject_recoverable = recoverable & subject_mask
+            if np.any(subject_recoverable) and r.share_above(
+                HIGHLIGHT_CEILING, among=subject_recoverable,
+            ) > 0.10:
+                return False
+        return True
+
+    return _bisect(HIGHLIGHTS_LIMIT, highlights_ok)
+
+
+def _shadow_frame_floor(has_subject, low_key, expose_for_subject):
+    """The darkest 10th-percentile level the Shadows fit must lift the frame to."""
+    frame_floor = FRAME_SHADOW_FLOOR_WITH_SUBJECT if has_subject else FRAME_SHADOW_FLOOR
+    if low_key or expose_for_subject:
+        frame_floor = 0.0
+    return frame_floor
+
+
+def _fit_shadows(fitter, adj, frame_floor, *, has_subject):
+    """Open up a dark subject or a crushed frame down to ``frame_floor``."""
+    def shadows_ok(amount):
+        r = fitter.render({**adj, "shadows": amount})
+        if r.frame(0.10) < frame_floor:
+            return False
+        return not has_subject or r.subject(0.25) >= SUBJECT_SHADOW_FLOOR
+
+    return _bisect(
+        SHADOWS_LIMIT_SUBJECT if has_subject else SHADOWS_LIMIT, shadows_ok,
+    )
+
+
+def _shadow_floor_guard(toned, frame_floor, *, has_subject):
+    """A check that a render keeps the shadow floors the Shadows fit reached."""
+    frame_floor_kept = min(frame_floor, toned.frame(0.10)) - SHADOW_FLOOR_SLACK
+    subject_floor_kept = (
+        min(SUBJECT_SHADOW_FLOOR, toned.subject(0.25)) - SHADOW_FLOOR_SLACK
+        if has_subject else None
+    )
+
+    def shadows_kept(r):
+        if r.frame(0.10) < frame_floor_kept:
+            return False
+        return not has_subject or r.subject(0.25) >= subject_floor_kept
+
+    return shadows_kept
+
+
+def _fit_contrast(fitter, adj, toned, shadows_kept):
+    """Add punch to a flat frame, never clip to get it."""
+    clipped0 = toned.share_above(CLIPPED)
+    crushed0 = toned.share_below(CRUSHED)
+
+    def contrast_needed(amount):
+        r = fitter.render({**adj, "contrast": amount})
+        return r.frame(0.75) - r.frame(0.25) >= CONTRAST_TARGET_IQR
+
+    def contrast_safe(amount):
+        r = fitter.render({**adj, "contrast": amount})
+        return (
+            r.share_above(CLIPPED) - clipped0 <= CONTRAST_CLIP_ALLOWANCE
+            and r.share_below(CRUSHED) - crushed0 <= CONTRAST_CLIP_ALLOWANCE
+            and shadows_kept(r)
+        )
+
+    return min(
+        _bisect(CONTRAST_LIMIT, contrast_needed),
+        _largest(CONTRAST_LIMIT, contrast_safe),
+    )
+
+
+def _fit_endpoints(fitter, adj, shadows_kept):
+    """Anchor the endpoints without clipping: sets ``whites`` then ``blacks``."""
+    toned = fitter.render(adj)
+    clipped0 = toned.share_above(CLIPPED)
+
+    def whites_reach(amount):
+        return fitter.render({**adj, "whites": amount}).frame(0.995) >= WHITE_POINT
+
+    def whites_safe(amount):
+        r = fitter.render({**adj, "whites": amount})
+        return r.share_above(CLIPPED) - clipped0 <= NEW_CLIP_ALLOWANCE
+
+    adj["whites"] = min(
+        _bisect(WHITES_LIMIT, whites_reach),
+        _largest(WHITES_LIMIT, whites_safe),
+    )
+
+    toned = fitter.render(adj)
+    crushed0 = toned.share_below(CRUSHED)
+
+    def blacks_reach(amount):
+        return fitter.render({**adj, "blacks": amount}).frame(0.005) <= BLACK_POINT
+
+    def blacks_safe(amount):
+        r = fitter.render({**adj, "blacks": amount})
+        return (
+            r.share_below(CRUSHED) - crushed0 <= NEW_CRUSH_ALLOWANCE
+            and shadows_kept(r)
+        )
+
+    adj["blacks"] = max(
+        _bisect(BLACKS_LIMIT, blacks_reach),
+        _largest(BLACKS_LIMIT, blacks_safe),
+    )
+
+
+def _fit_colour(fitter, adj):
+    """Enliven muted colour only: sets ``vibrance``, then ``saturation``."""
+    toned = fitter.render(adj)
+    midtones = (toned.luma > 0.08) & (toned.luma < 0.92)
+
+    def colour(r):
+        rgb = r.rgb.reshape(-1, 3)[midtones]
+        chroma = rgb.max(axis=1) - rgb.min(axis=1)
+        coloured = chroma[chroma > NEUTRAL_CHROMA]
+        return coloured, len(chroma)
+
+    coloured, mid_count = colour(toned)
+    if mid_count and len(coloured) / mid_count >= MIN_COLOURED_SHARE:
+        def vivid(extra):
+            def ok(amount):
+                values, _ = colour(fitter.render({**adj, **extra(amount)}))
+                return len(values) and float(np.median(values)) >= COLOUR_TARGET
+            return ok
+
+        adj["vibrance"] = _bisect(VIBRANCE_LIMIT, vivid(lambda a: {"vibrance": a}))
+        if adj["vibrance"] == VIBRANCE_LIMIT:
+            adj["saturation"] = _bisect(
+                SATURATION_LIMIT, vivid(lambda a: {"saturation": a}),
+            )
+
+
 def fit(
     rgb, *, input_linear=False, range_radius=0, subject=None,
     white_balance=None, presence=None, presence_scale=1.0, style="balanced",
@@ -414,41 +601,10 @@ def fit(
     adj = {}
 
     # --- exposure: bring the (subject-weighted) median toward mid-grey ---
-    base = fitter.render({})
-    lit = base.luma > LOW_KEY_LEVEL
-    low_key = 1.0 - float(np.count_nonzero(lit)) / len(base.luma) >= LOW_KEY_SHARE
-    if low_key and np.any(lit):
-        frame_ev = _stops_to_grey(np.median(base.luma[lit]))
-    else:
-        frame_ev = _stops_to_grey(base.frame(0.5))
-    ev = frame_ev
-    if has_subject:
-        # Meter the subject on its brightest channel: a saturated blue or red
-        # bird has low luma but is not underexposed.
-        value = base.rgb.reshape(-1, 3).max(axis=1)
-        subject_level = _weighted_median(value, weights)
-        if expose_for_subject:
-            ev = _stops_to_grey(
-                subject_level, brighten_share=1.0, limit=SUBJECT_STYLE_EXPOSURE_LIMIT,
-            )
-        else:
-            subject_ev = _stops_to_grey(subject_level)
-            ev = SUBJECT_METERING_SHARE * subject_ev + (1.0 - SUBJECT_METERING_SHARE) * frame_ev
-            ev = min(frame_ev + SUBJECT_PULL_LIMIT, max(frame_ev - SUBJECT_PULL_LIMIT, ev))
-    if ev < 0:
-        ev = max(ev, -_headroom_stops(
-            rgb, input_linear=input_linear, white_balance=white_balance, weights=weights,
-        ))
-    ev = _round_toward(ev, 0.1)
-    if ev > 0:
-        if expose_for_subject:
-            def guarded(amount):
-                r = fitter.render({"exposure": amount})
-                return r.subject(SUBJECT_STYLE_GUARD_QUANTILE) <= HIGHLIGHT_GUARD
-        else:
-            def guarded(amount):
-                return fitter.render({"exposure": amount}).frame(0.99) <= HIGHLIGHT_GUARD
-        ev = _largest(ev, guarded, step=0.1)
+    ev, low_key = _fit_exposure(
+        fitter, rgb, weights, input_linear=input_linear,
+        white_balance=white_balance, expose_for_subject=expose_for_subject,
+    )
     adj["exposure"] = round(ev, 1) + 0.0
 
     exposed = fitter.render(adj)
@@ -458,73 +614,23 @@ def fit(
     has_range = exposed.frame(0.995) - exposed.frame(0.005) > MIN_TONAL_RANGE
 
     # --- highlights: give bright areas their gradation back ---
-    def highlights_ok(amount):
-        r = fitter.render({**adj, "highlights": amount})
-        # The subject style lets the background go bright on purpose.
-        if not expose_for_subject and r.share_above(
-            HIGHLIGHT_CEILING, among=recoverable,
-        ) > 0.03:
-            return False
-        if has_subject:
-            subject_recoverable = recoverable & subject_mask
-            if np.any(subject_recoverable) and r.share_above(
-                HIGHLIGHT_CEILING, among=subject_recoverable,
-            ) > 0.10:
-                return False
-        return True
-
-    adj["highlights"] = _bisect(HIGHLIGHTS_LIMIT, highlights_ok)
+    adj["highlights"] = _fit_highlights(
+        fitter, adj, recoverable, has_subject=has_subject,
+        subject_mask=subject_mask, expose_for_subject=expose_for_subject,
+    )
 
     # --- shadows: open up a dark subject or a crushed frame ---
-    frame_floor = FRAME_SHADOW_FLOOR_WITH_SUBJECT if has_subject else FRAME_SHADOW_FLOOR
-    if low_key or expose_for_subject:
-        frame_floor = 0.0
-
-    def shadows_ok(amount):
-        r = fitter.render({**adj, "shadows": amount})
-        if r.frame(0.10) < frame_floor:
-            return False
-        return not has_subject or r.subject(0.25) >= SUBJECT_SHADOW_FLOOR
-
-    adj["shadows"] = _bisect(
-        SHADOWS_LIMIT_SUBJECT if has_subject else SHADOWS_LIMIT, shadows_ok,
-    )
+    frame_floor = _shadow_frame_floor(has_subject, low_key, expose_for_subject)
+    adj["shadows"] = _fit_shadows(fitter, adj, frame_floor, has_subject=has_subject)
 
     # Contrast and blacks deepen dark tones. They may not push the shadows
     # back under the floors the Shadows fit worked to reach.
     toned = fitter.render(adj)
-    frame_floor_kept = min(frame_floor, toned.frame(0.10)) - SHADOW_FLOOR_SLACK
-    subject_floor_kept = (
-        min(SUBJECT_SHADOW_FLOOR, toned.subject(0.25)) - SHADOW_FLOOR_SLACK
-        if has_subject else None
-    )
-
-    def shadows_kept(r):
-        if r.frame(0.10) < frame_floor_kept:
-            return False
-        return not has_subject or r.subject(0.25) >= subject_floor_kept
+    shadows_kept = _shadow_floor_guard(toned, frame_floor, has_subject=has_subject)
 
     # --- contrast: add punch to a flat frame, never clip to get it ---
-    clipped0 = toned.share_above(CLIPPED)
-    crushed0 = toned.share_below(CRUSHED)
-
-    def contrast_needed(amount):
-        r = fitter.render({**adj, "contrast": amount})
-        return r.frame(0.75) - r.frame(0.25) >= CONTRAST_TARGET_IQR
-
-    def contrast_safe(amount):
-        r = fitter.render({**adj, "contrast": amount})
-        return (
-            r.share_above(CLIPPED) - clipped0 <= CONTRAST_CLIP_ALLOWANCE
-            and r.share_below(CRUSHED) - crushed0 <= CONTRAST_CLIP_ALLOWANCE
-            and shadows_kept(r)
-        )
-
     if has_range:
-        adj["contrast"] = min(
-            _bisect(CONTRAST_LIMIT, contrast_needed),
-            _largest(CONTRAST_LIMIT, contrast_safe),
-        )
+        adj["contrast"] = _fit_contrast(fitter, adj, toned, shadows_kept)
     else:
         adj["contrast"] = 0.0
 
@@ -532,64 +638,12 @@ def fit(
     adj["whites"] = 0.0
     adj["blacks"] = 0.0
     if has_range:
-        toned = fitter.render(adj)
-        clipped0 = toned.share_above(CLIPPED)
-
-        def whites_reach(amount):
-            return fitter.render({**adj, "whites": amount}).frame(0.995) >= WHITE_POINT
-
-        def whites_safe(amount):
-            r = fitter.render({**adj, "whites": amount})
-            return r.share_above(CLIPPED) - clipped0 <= NEW_CLIP_ALLOWANCE
-
-        adj["whites"] = min(
-            _bisect(WHITES_LIMIT, whites_reach),
-            _largest(WHITES_LIMIT, whites_safe),
-        )
-
-        toned = fitter.render(adj)
-        crushed0 = toned.share_below(CRUSHED)
-
-        def blacks_reach(amount):
-            return fitter.render({**adj, "blacks": amount}).frame(0.005) <= BLACK_POINT
-
-        def blacks_safe(amount):
-            r = fitter.render({**adj, "blacks": amount})
-            return (
-                r.share_below(CRUSHED) - crushed0 <= NEW_CRUSH_ALLOWANCE
-                and shadows_kept(r)
-            )
-
-        adj["blacks"] = max(
-            _bisect(BLACKS_LIMIT, blacks_reach),
-            _largest(BLACKS_LIMIT, blacks_safe),
-        )
+        _fit_endpoints(fitter, adj, shadows_kept)
 
     # --- vibrance, then saturation: enliven muted colour only ---
     adj["vibrance"] = 0.0
     adj["saturation"] = 0.0
-    toned = fitter.render(adj)
-    midtones = (toned.luma > 0.08) & (toned.luma < 0.92)
-
-    def colour(r):
-        rgb = r.rgb.reshape(-1, 3)[midtones]
-        chroma = rgb.max(axis=1) - rgb.min(axis=1)
-        coloured = chroma[chroma > NEUTRAL_CHROMA]
-        return coloured, len(chroma)
-
-    coloured, mid_count = colour(toned)
-    if mid_count and len(coloured) / mid_count >= MIN_COLOURED_SHARE:
-        def vivid(extra):
-            def ok(amount):
-                values, _ = colour(fitter.render({**adj, **extra(amount)}))
-                return len(values) and float(np.median(values)) >= COLOUR_TARGET
-            return ok
-
-        adj["vibrance"] = _bisect(VIBRANCE_LIMIT, vivid(lambda a: {"vibrance": a}))
-        if adj["vibrance"] == VIBRANCE_LIMIT:
-            adj["saturation"] = _bisect(
-                SATURATION_LIMIT, vivid(lambda a: {"saturation": a}),
-            )
+    _fit_colour(fitter, adj)
 
     adjustments = {k: (float(v) + 0.0) for k, v in adj.items()}
     if style == "gentle":
