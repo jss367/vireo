@@ -63,7 +63,7 @@ function selectedImportMode() {
 // them to disagree.
 //
 // Copy mode only. The in-place path runs through do_scan(restrict_files=…),
-// which vireo/scanner.py honours only alongside restrict_dirs, and filling
+// which vireo/scanner/ honours only alongside restrict_dirs, and filling
 // restrict_dirs would change which directories get registered as workspace
 // roots — a core scanner change, deliberately deferred. The snapshot
 // (new-images) flow is a third state: it imports exactly one frozen list.

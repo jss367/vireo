@@ -404,7 +404,7 @@ def test_sidecar_reads_allow_writers_and_revalidate_database(discrepancy_catalog
 @pytest.mark.parametrize('merge_kind', ['archive_collision', 'archive_phantom', 'relocate', 'raw_jpeg'])
 def test_identity_merges_preserve_gps_review(db, tmp_path, merge_kind):
     from location_review import gps_discrepancies
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     archive = tmp_path / 'archive'
     archive.mkdir()

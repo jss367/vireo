@@ -294,7 +294,7 @@ def test_archive_merge_replacing_a_phantom_row_remaps_collections(db, tmp_path):
 
 
 def test_companion_merge_remaps_collections(db, tmp_path):
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     other_ws = db.create_workspace("Other")
     folder = db.add_folder(str(tmp_path), name="lib")

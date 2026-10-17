@@ -643,7 +643,7 @@ def test_export_photos_embeds_only_selected_metadata(export_env, monkeypatch):
     assert metadata["EXIF"]["SubSecTimeOriginal"] == "001000"
     assert metadata["EXIF"]["OffsetTimeOriginal"] == "-07:00"
     assert metadata["EXIF"]["OffsetTimeDigitized"] == "-07:00"
-    from scanner import _extract_timestamp
+    from scanner.exif_fields import _extract_timestamp
     assert _extract_timestamp(metadata["EXIF"]) == "2024-06-15T14:30:22.001000"
     assert metadata["IPTC"]["DateCreated"] == "2024:06:15"
     assert metadata["IPTC"]["TimeCreated"] == "14:30:22-07:00"

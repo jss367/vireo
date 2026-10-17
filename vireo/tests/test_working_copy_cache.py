@@ -761,7 +761,7 @@ def test_zero_quota_skips_working_copy_generation(
     db.conn.commit()
 
     monkeypatch.setattr(
-        scanner, "extract_working_copy",
+        scanner.working_copy_batch, "extract_working_copy",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("zero quota must skip decoding")
         ),

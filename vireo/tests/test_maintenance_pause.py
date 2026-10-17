@@ -556,6 +556,7 @@ def test_hash_verification_commits_before_pause(
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(scanner, "compute_file_hash", hash_file)
+    monkeypatch.setattr(scanner.hashing, "compute_file_hash", hash_file)
     job_id = client.post("/api/jobs/verify-hashes").get_json()["job_id"]
     try:
         _wait_for_boundary(entered, runner, job_id)

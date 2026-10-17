@@ -177,7 +177,8 @@ def test_settings_roundtrip_preserves_migration_markers(app_and_db):
 
 def test_paired_jpeg_remains_in_dedup_index(db, tmp_path):
     from import_dedup import CatalogIndex, DuplicateChecker
-    from scanner import _pair_raw_jpeg_companions, compute_file_hash
+    from scanner import compute_file_hash
+    from scanner.companions import _pair_raw_jpeg_companions
     fid, jpeg_id = seed(db, tmp_path / "photos")
     source = tmp_path / "photos/bird.jpg"
     jpeg_hash = compute_file_hash(str(source))
