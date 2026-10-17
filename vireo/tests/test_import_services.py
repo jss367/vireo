@@ -271,7 +271,7 @@ def test_relocated_descendant_landings_use_native_paths(monkeypatch, path_style,
     # Replace only each module's os reference, leaving pytest and the host
     # filesystem on their real platform while exercising Windows semantics.
     monkeypatch.setattr(imports, "os", SimpleNamespace(path=path))
-    monkeypatch.setattr(import_job, "os", SimpleNamespace(path=path))
+    monkeypatch.setattr(import_job.resume, "os", SimpleNamespace(path=path))
     ImportService._recover_relocated_descendant_landings(
         service, Mock(), takeover, parent_fingerprints,
     )
@@ -281,7 +281,7 @@ def test_relocated_descendant_landings_use_native_paths(monkeypatch, path_style,
         "file_hash": current_hash,
     }]
     state = SimpleNamespace(recovered_photo_ids=set())
-    import_job._recover_parent_landings(
+    import_job.resume._recover_parent_landings(
         state, SimpleNamespace(recover_landed_files=takeover["descendant_landed_files"]),
         catalog,
     )
