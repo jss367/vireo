@@ -47,18 +47,34 @@ Three rules shape every piece:
 
 ### PR 1 — evidence (this branch)
 
-**`GET /photos/<id>/focus-crop`** (media blueprint). A JPEG window at native
-pixel scale, `size` px square (default 512, 128–1024), centred on
-`(eye_x, eye_y)` when the eye stage located an eye, else on the primary
-detection box centre, else the frame centre. `basis=eye|subject|frame` forces
-one centre. `mask=1` darkens pixels outside the active SAM mask (the mask PNG
-is authored at pipeline resolution and is scaled up with nearest-neighbour)
-so the viewer sees exactly which pixels were scored. Response headers:
-`X-Vireo-Focus-Basis`, `X-Vireo-Focus-Center` (`x,y` normalised),
-`X-Vireo-Focus-Scale` (`1` = native). Source: working copy first, original
-fallback, same as `/photos/<id>/crop`, and the working copy's access time is
-stamped because an agent reading crops is a user looking at the photo.
-Workspace-gated like every other `/photos/<id>/*` route.
+**`GET /photos/<id>/focus-crop`** (media blueprint; geometry in
+`vireo/focus_crop.py`). An unresampled JPEG window, `size` px square
+(default 512, 128–1024). In `basis=auto` the centre follows the scorer: the
+located eye when the workspace has eye detection on and the frame carries an
+eye measurement, else the centre of the detection box behind the active mask
+(the rescued weak detection included), else the frame centre.
+`basis=eye|subject|frame` forces one, and `center=x,y` (normalised frame
+coordinates) puts the window where the reviewer chose, because without eye
+detection the box centre of a perched bird is its body, not its head. `mask=1`
+darkens pixels outside the active SAM mask (the mask PNG is authored at
+pipeline resolution and is scaled up with nearest-neighbour) so the viewer
+sees exactly which pixels were scored.
+
+Pixels come from the working copy unless it is downsized: working copies are
+capped at `working_copy_max_size` (4096 px in Julius's config), which on a
+45 MP body is half sensor scale, so `source=auto` decodes the original
+(JPEG-first, the embedded full-size JPEG of a RAW) when the copy's longest
+side is under 98% of the catalog dimensions and the original is on disk;
+`source=working|original` force either. Response headers:
+`X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`),
+`X-Vireo-Focus-Center` (`x,y` normalised), `X-Vireo-Focus-Window` (source
+pixels), `X-Vireo-Focus-Source` (`working_copy`, `original`),
+`X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Scale` (`1` = decoded-raster
+pixels, with `X-Vireo-Focus-Scale-Reference: decoded-raster`),
+`X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown`
+without catalog dimensions) and `X-Vireo-Focus-Mask`. The working copy's
+access time is stamped because an agent reading crops is a user looking at
+the photo. Workspace-gated like every other `/photos/<id>/*` route.
 
 **`GET /api/photos/<id>/burst-evidence`** and **`POST /api/photos/burst-evidence`**
 (`{"photo_ids": [...]}`) (photos blueprint). The Best Batch response
@@ -87,7 +103,9 @@ eye coordinates) plus:
 - per card: `crop_complete`, `subject_size`, `detection_count`,
   `reject_reasons` (raw), and URLs: `thumbnail_url`, `crop_url`,
   `focus_crop_url`, `focus_crop_mask_url`, `preview_url`, `mask_url`.
-- `scoring`: `{eye_detect_enabled, margin}` so the reader knows the basis.
+- `scoring`: `{eye_detect_enabled, close_call_margin, detector_confidence,
+  weights, rejection_thresholds}` (the scorer defaults with workspace
+  overrides applied) so the reader can audit the basis of the verdict.
 
 **`GET /api/folders/<id>/bursts`** (folders blueprint). Walks one folder
 (not its subtree; bursts never span folders) and chains frames into bursts
@@ -95,18 +113,24 @@ with the rules `best_batch_scope` already uses: same filename prefix, digit
 width and extension, sequence gap ≤ 2, capture-time gap ≤ 8 s; frames without a
 sequence number chain by capture time alone and require timestamps. Singletons
 are not bursts. Returns folder-level `coverage` and, per burst, `seed_photo_id`,
-`photo_ids`, `sequence_range`, `count`, `flags` (how many are already
-flagged/rejected), `coverage`, `best_photo_id` and `ambiguity`. Each burst is
-scored with `run_selected_batch_review` (DB rows only, no image decode).
+`scope_method`, `photo_ids`, `sequence_range`, `count`, `burst_photo_count`
+(the whole chain; `photo_ids` is the same 120-frame window around the seed
+that the per-photo endpoint scores, so the two views agree), `flags` (how many
+are already flagged/rejected), `coverage`, `best_photo_id` and `ambiguity`.
+Each burst is scored with `run_selected_batch_review` (DB rows only, no image
+decode).
 Folders over `MAX_FOLDER_BURST_PHOTOS` (5000) answer 400 with the count; the
 import staging folder is the only one near that today.
 
-The burst-chaining and scope SQL move out of `best_batch.py` into
-`PhotoRepository` (`burst_scope_rows`, `best_batch_sequence_rows`,
-`best_batch_folder_rows`) behind a new `Database.photos` accessor, lowering the
+The Best Batch scope SQL moves out of `best_batch.py` into `PhotoRepository`
+(`best_batch_sequence_rows`, `best_batch_folder_rows`, `count_folder_photos`,
+`analysis_evidence_rows`) behind a new `Database.photos` accessor, lowering the
 `best_batch.py` connection cap in `test_sql_boundary.py` to 0. The
 `get_best_batch_rows_by_ids` forwarding wrapper is deleted and its caller moved
-to the accessor, so the forwarding-wrapper count stays at its limit.
+to the accessor, so the forwarding-wrapper limit ratchets down by one.
+Numeric query arguments (`margin`, `focus_size`, `gap_seconds`, `max_photos`,
+`size`) go through `burst_evidence.numeric_query_arg`, which rejects malformed
+or out-of-range values with 400 instead of silently using the default.
 
 The three reads are aliased under `/api/v1/` for the headless API
 (`docs/headless-api.md`), because the agent is a headless client.
