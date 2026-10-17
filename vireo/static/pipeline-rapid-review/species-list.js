@@ -119,7 +119,7 @@ function encounterConfirmedList(enc) {
 
 /** @param {RapidEncounter|null|undefined} enc @param {RapidBurst|null|undefined} burst */
 function burstSpeciesList(enc, burst) {
-  var ovr = burst && burst.species_override;
+  var ovr = burst && (Array.isArray(burst) ? undefined : burst.species_override);
   if (overrideIsExplicit(ovr)) return overrideSpeciesList(ovr);
   var confirmed = encounterConfirmedList(enc);
   if (confirmed.length) return confirmed;
@@ -138,7 +138,7 @@ function burstSpecies(enc, burst) {
 
 /** @param {RapidBurst|null|undefined} burst */
 function hasBurstSpeciesOverride(burst) {
-  return overrideIsExplicit(burst && burst.species_override);
+  return overrideIsExplicit(burst && (Array.isArray(burst) ? undefined : burst.species_override));
 }
 
 // Find the burst that still holds every one of `ids` after the server

@@ -23,3 +23,21 @@ const rapidWrongResponseContract: Promise<RapidGroupResponse> = safeFetch('/api/
 void rapidResultsContract;
 void rapidStateContract;
 void rapidWrongResponseContract;
+
+// The server preserves both legacy ID-array bursts and modern object bursts.
+const rapidMixedEncounterContract: RapidEncounter = {
+  bursts: [[1, 2], {photo_ids: [3], species_override: {species: 'Mallard', confirmed: true}}],
+};
+buildSessions({encounters: [rapidMixedEncounterContract]});
+burstSpeciesList(rapidMixedEncounterContract, [1, 2]);
+burstSpeciesList(rapidMixedEncounterContract, {photo_ids: [3]});
+locateBurstByPhotoIds([rapidMixedEncounterContract], [1]);
+// @ts-expect-error Legacy burst IDs must remain numeric.
+const rapidInvalidLegacyBurstContract: RapidBurst = ['1'];
+// @ts-expect-error Object burst IDs must remain numeric too.
+const rapidInvalidObjectBurstContract: RapidBurst = {photo_ids: ['1']};
+// @ts-expect-error A burst override requires a species list, not a scalar.
+const rapidInvalidOverrideContract: RapidBurst = {photo_ids: [1], species_override: {species_list: 'Mallard'}};
+void rapidInvalidLegacyBurstContract;
+void rapidInvalidObjectBurstContract;
+void rapidInvalidOverrideContract;

@@ -1,7 +1,9 @@
 // Rapid Review's classic scripts share this page-specific program.
 interface RapidPhoto {id:number; filename?:string; flag?:string; label?:string; confirmed_species?:string|null; confirmed_species_list?:string[]; confirmed_species_identities?:{name:string;key:string}[]; quality_composite?:number|null; subject_tenengrad?:number|null;}
 interface RapidOverride {species?:string; species_list?:string[]; confirmed?:boolean;}
-interface RapidBurst {photo_ids:number[]; species_override?:RapidOverride|null;}
+interface RapidObjectBurst {photo_ids:number[]; species_override?:RapidOverride|null;}
+// load_results preserves legacy ID arrays alongside modern burst objects.
+type RapidBurst = RapidObjectBurst | number[];
 interface RapidEncounter {photo_ids?:number[]; bursts?:RapidBurst[]; species?:string[]; confirmed_species?:string|null; confirmed_species_list?:string[];}
 interface RapidSummary {keep_count?:number; review_count?:number; reject_count?:number;}
 interface RapidResults {photos?:RapidPhoto[]; encounters?:RapidEncounter[]; summary?:RapidSummary; species_identities?:Record<string,{key:string}>;}

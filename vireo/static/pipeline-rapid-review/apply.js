@@ -51,14 +51,14 @@ async function applyCurrent(openNext) {
   // NOT re-post X, because /api/encounters/species records a keyword_add
   // edit-history entry per submitted frame even when tag_photo is an
   // INSERT-OR-IGNORE no-op, and undoing that no-op add would strip the
-  // existing species keywords. Snapshot off /** @type {RapidResults} */ (rapid.results) (not live rapid.*)
+  // existing species keywords. Snapshot off rapid.results (not live rapid.*)
   // since openSession() can run during the awaits below.
   var alreadyConfirmedList = /** @type {string[]} */ ([]);
   var snapEnc = (/** @type {RapidResults} */ (rapid.results).encounters || [])[session.encIdx];
   if (snapEnc) {
     var snapBursts = (snapEnc.bursts && snapEnc.bursts.length) ? snapEnc.bursts : null;
     var snapBurst = snapBursts ? snapBursts[session.burstIdx] : null;
-    var snapOvr = snapBurst && snapBurst.species_override;
+    var snapOvr = snapBurst && (Array.isArray(snapBurst) ? undefined : snapBurst.species_override);
     if (snapOvr && Array.isArray(snapOvr.species_list)) {
       // Authoritative whatever the confirmed flag (see overrideIsExplicit):
       // a confirmed list, a mixed burst's edited baseline, or the empty

@@ -19,7 +19,7 @@ function thumbUrl(photoOrId) {
     : '/thumbnails/' + photoId + '.jpg';
 }
 
-/** @param {RapidBurst|number[]|null|undefined} burst @returns {number[]} */
+/** @param {RapidBurst|null|undefined} burst @returns {number[]} */
 function burstIds(burst) {
-  return (burst && /** @type {RapidBurst} */ (burst).photo_ids) ? /** @type {RapidBurst} */ (burst).photo_ids : /** @type {number[]} */ (burst || []);
+  return Array.isArray(burst) ? burst : (burst ? burst.photo_ids : []);
 }
