@@ -210,6 +210,9 @@ def test_remove_retains_plain_snapshot_copies_without_a_known_blob_lock(hub):
 
     hub.add("sam2-small/mask_decoder.onnx", b"m" * 400, link=False)
     snapshot = hub.root / ONNX_DIR / "snapshots" / "rev1" / "sam2-small" / "mask_decoder.onnx"
+    entry = _entries(hf_cache.inventory())["jss367/vireo-onnx-models/sam2-small"]
+    assert entry["size"] == 0 and entry["retained_size"] == 400
+    assert entry["removable"] is False and hf_cache.inventory()["unused_size"] == 0
     result = hf_cache.remove(["jss367/vireo-onnx-models/sam2-small"])
     assert result["freed"] == 0 and result["removed"] == []
     assert len(result["failed"]) == 1

@@ -62,6 +62,14 @@ def _fs():
 class DownloadInProgress(RuntimeError):
     """Cleanup refused because a model download may be writing the cache."""
 
+
+class CachePurgeIncomplete(RuntimeError):
+    """Model removal finished, but its cache purge did not fully succeed."""
+
+    def __init__(self, result):
+        super().__init__("Some Hugging Face cache entries could not be removed")
+        self.result = result
+
 # A partial download HF can still resume. Older than this it is abandoned.
 INCOMPLETE_GRACE_SECS = 24 * 3600
 
@@ -227,16 +235,26 @@ def _unreferenced_blobs(repo_dir, referenced):
     return out
 
 
+def _reclaimable_blobs(group):
+    """Only actual hub blobs have download locks cleanup can establish."""
+    blobs_dir = _fs().path.realpath(os.path.join(group["repo_dir"], "blobs"))
+    return {path: size for path, size in group["blobs"].items()
+            if os.path.dirname(path) == blobs_dir}
+
+
 def _size_groups(found):
     """Set each group's ``size`` to the bytes only it references."""
     referrers: dict[str, set[str]] = {}
     for group in found.values():
-        for blob in group["blobs"]:
+        for blob in _reclaimable_blobs(group):
             referrers.setdefault(blob, set()).add(group["key"])
     for group in found.values():
-        exclusive = [s for b, s in group["blobs"].items() if referrers[b] == {group["key"]}]
+        reclaimable = _reclaimable_blobs(group)
+        exclusive = [s for b, s in reclaimable.items() if referrers[b] == {group["key"]}]
         group["size"] = sum(exclusive)
-        group["shared_size"] = sum(group["blobs"].values()) - group["size"]
+        group["shared_size"] = sum(reclaimable.values()) - group["size"]
+        group["retained_size"] = sum(s for b, s in group["blobs"].items() if b not in reclaimable)
+        group["removable"] = bool(reclaimable)
 
 
 def _collect(cache_dir, models_dir):
@@ -283,6 +301,7 @@ def _public(group):
         "key": group["key"], "name": group["name"], "size": group["size"],
         "shared_size": group["shared_size"], "installed": group["installed"],
         "install_path": group["install_path"], "file_count": len(group["files"]),
+        "retained_size": group["retained_size"], "removable": group["removable"],
     }
 
 
@@ -298,14 +317,21 @@ def inventory(cache_dir=None, models_dir=None):
     total, found = _collect(cache_dir, _models_dir(models_dir))
     installed_blobs: dict[str, int] = {}
     unused_blobs: dict[str, int] = {}
+    retained_blobs: dict[str, int] = {}
     for group in found.values():
-        (installed_blobs if group["installed"] else unused_blobs).update(group["blobs"])
+        if group["installed"]:
+            installed_blobs.update(group["blobs"])
+        else:
+            reclaimable = _reclaimable_blobs(group)
+            unused_blobs.update(reclaimable)
+            retained_blobs.update({b: s for b, s in group["blobs"].items() if b not in reclaimable})
     ordered = sorted(found.values(), key=lambda g: (-g["size"], g["key"]))
     return {
         "path": cache_dir,
         "size": total,
         "entries": [_public(g) for g in ordered],
         "unused_size": sum(s for b, s in unused_blobs.items() if b not in installed_blobs),
+        "retained_size": sum(retained_blobs.values()),
         "installed_size": sum(installed_blobs.values()),
     }
 
@@ -487,7 +513,7 @@ def remove_unused(cache_dir=None, models_dir=None):
     """Remove every entry that backs no installed model."""
     result = _delete_selected(
         _cache_dir(cache_dir), _models_dir(models_dir),
-        lambda found: [g for g in found.values() if not g["installed"]],
+        lambda found: [g for g in found.values() if not g["installed"] and g["removable"]],
     )
     log.info("Removed %d unused HF cache entries (%d bytes, %d failures)",
              len(result["removed"]) + len(result["failed"]), result["freed"], len(result["failed"]))
@@ -507,7 +533,22 @@ def _purge_keys(keys, cache_dir, models_dir):
         lambda found: [found[k] for k in dict.fromkeys(keys)
                        if k in found and not found[k]["installed"]],
     )
+    if result["failed"]:
+        raise CachePurgeIncomplete(result)
     return result["freed"]
+
+
+def purge_outcome(operation, identifier):
+    """Preserve model-removal success and report any cache cleanup failure."""
+    try:
+        operation(identifier)
+        return {}
+    except CachePurgeIncomplete as exc:
+        result = exc.result
+    except Exception as exc:  # Report the failure to the caller below, with a warning.
+        result = {"freed": 0, "failed": [{"key": identifier, "error": str(exc)}]}
+    log.warning("Model removed but HF cache cleanup incomplete for %s: %s", identifier, result)
+    return {"ok": False, "cache_cleanup": result}
 
 
 def purge_subfolder(subfolder, cache_dir=None, models_dir=None):

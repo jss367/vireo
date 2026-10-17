@@ -97,6 +97,11 @@ def test_delete_purges_the_models_hugging_face_cache_entry(
 
     assert resp.status_code == 200
     assert not (models_root / "models" / "sam2-large").exists()
-    assert not blob.exists()
-    assert not snap.parent.exists()
+    if os.name != "posix":
+        assert blob.exists() and snap.exists()
+        assert resp.get_json()["ok"] is False
+        assert resp.get_json()["cache_cleanup"]["failed"]
+    else:
+        assert not blob.exists() and not snap.exists()
+        assert snap.parent.is_dir(), "safe cleanup retains directory anchors"
     assert other.exists()

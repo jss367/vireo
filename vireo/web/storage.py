@@ -348,8 +348,8 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
                 "models": {"size": models_size, "path": DEFAULT_MODELS_DIR},
                 "hf_cache": {
                     "size": hf_size, "path": hf_cache, "models": hf_models,
-                    "unused_size": hf_inventory["unused_size"],
-                    "installed_size": hf_inventory["installed_size"],
+                    **{key: hf_inventory.get(key, 0) for key in
+                       ("unused_size", "installed_size", "retained_size")},
                 },
                 "offline_originals": {
                     "count": offline_count,

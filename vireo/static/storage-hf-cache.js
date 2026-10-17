@@ -8,13 +8,14 @@
  */
 /** @type {HfCacheInventory | null} */ var _hfCacheInventory = null;
 
-/** @param {{size?:number;unused_size?:number} | null | undefined} hf @returns {string | null} */
+/** @param {{size?:number;unused_size?:number;retained_size?:number;installed_size?:number} | null | undefined} hf @returns {string | null} */
 function hfCacheCardNote(hf) {
   if (!hf || !hf.size) return null;
   if (hf.unused_size) {
     return storageFormatBytes(hf.unused_size) + ' backs no installed model';
   }
-  return 'All entries back installed models';
+  if (hf.retained_size) return storageFormatBytes(hf.retained_size) + ' retained snapshot copies';
+  return hf.installed_size ? 'All entries back installed models' : 'No removable payloads';
 }
 
 async function openHfCacheModal() {
@@ -68,6 +69,7 @@ function _hfCacheRow(entry) {
   var files = document.createElement('span');
   files.textContent = (entry.file_count === 1 ? '1 file' : entry.file_count + ' files') +
     ' · ' + storageFormatBytes(entry.size);
+  if (entry.retained_size) files.textContent += ' · ' + storageFormatBytes(entry.retained_size) + ' retained copies';
   meta.appendChild(files);
   var tag = document.createElement('span');
   tag.className = 'stat-kind ' + (entry.installed ? 'keep' : 'safe');
@@ -83,6 +85,9 @@ function _hfCacheRow(entry) {
     btn.disabled = true;
     btn.title = 'Remove the model in Settings → Models; its cache entry goes with it. ' +
       'The installed copy may share disk blocks with this entry, so removing it alone frees little.';
+  } else if (entry.removable === false) {
+    btn.disabled = true;
+    btn.title = 'Snapshot copies are retained because their download lock cannot be verified.';
   } else {
     btn.addEventListener('click', function() { removeHfCacheEntry(entry); });
   }
@@ -150,7 +155,7 @@ async function removeHfCacheEntry(entry) {
 async function removeUnusedHfCache() {
   var inv = _hfCacheInventory;
   if (!inv || !inv.unused_size) return;
-  var count = inv.entries.filter(function(e) { return !e.installed; }).length;
+  var count = inv.entries.filter(function(e) { return !e.installed && e.removable !== false; }).length;
   if (!confirm('Remove ' + count + (count === 1 ? ' entry' : ' entries') + ' (' +
       storageFormatBytes(inv.unused_size) + ') that no installed model uses? ' +
       'Installing those models again will download them from Hugging Face.')) return;

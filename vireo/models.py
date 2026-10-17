@@ -701,7 +701,8 @@ def remove_model(model_id):
     ``~/.vireo/models``.
 
     Returns ``None`` if the model is unknown, otherwise a dict with
-    ``files_deleted`` (bool) and ``kept_path`` (str or ``None``).
+    ``files_deleted`` (bool) and ``kept_path`` (str or ``None``). A partial
+    cache purge additionally reports ``ok=False`` and ``cache_cleanup``.
     """
     with _CONFIG_LOCK:
         config = _load_config()
@@ -720,8 +721,8 @@ def remove_model(model_id):
                 path = os.path.join(DEFAULT_MODELS_DIR, model_id)
                 if os.path.isdir(path) and _inside_models_dir(path):
                     shutil.rmtree(path)
-                    _purge_hf_cache_for_model(model_id)
-                    return {"files_deleted": True, "kept_path": None}
+                    cache = _purge_hf_cache_for_model(model_id)
+                    return {"files_deleted": True, "kept_path": None, **cache}
             return None
 
         files_deleted = False
@@ -758,8 +759,8 @@ def remove_model(model_id):
     log.info("Removed model %s (weights: %s, deleted: %s)",
              model_id, weights_path, files_deleted)
     # Outside _CONFIG_LOCK: the purge reads models.json through get_models().
-    _purge_hf_cache_for_model(model_id)
-    return {"files_deleted": files_deleted, "kept_path": kept_path}
+    cache = _purge_hf_cache_for_model(model_id)
+    return {"files_deleted": files_deleted, "kept_path": kept_path, **cache}
 
 
 def _purge_hf_cache_for_model(model_id):
@@ -769,14 +770,17 @@ def _purge_hf_cache_for_model(model_id):
     network, so once the user removes the model it is invisible dead weight
     (Settings lists installs, not the cache). Custom models downloaded
     nothing through the cache, so only known ids have anything to purge.
-    Best-effort: a cache the user has already deleted by hand is not an
-    error for the removal.
+    A missing cache is not an error; a failed cleanup is returned explicitly
+    so callers do not report the whole removal as successful.
     """
     try:
-        from services.hf_cache import purge_model
-        purge_model(model_id)
+        from services.hf_cache import purge_model, purge_outcome
+        return purge_outcome(purge_model, model_id)
     except Exception as exc:  # pragma: no cover - cleanup must not fail the removal
         log.warning("Could not purge HF cache for %s: %s", model_id, exc)
+        return {"ok": False, "cache_cleanup": {"freed": 0, "failed": [
+            {"key": model_id, "error": str(exc)},
+        ]}}
 
 
 @cache_access

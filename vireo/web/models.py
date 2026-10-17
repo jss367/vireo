@@ -832,6 +832,7 @@ def create_models_blueprint(
         )
 
     @blueprint.route("/api/models/pipeline/delete", methods=["POST"])
+    @cache_access
     def api_models_pipeline_delete():
         """Delete a pipeline model's ONNX files from ~/.vireo/models/.
 
@@ -859,10 +860,13 @@ def create_models_blueprint(
         # installed model benefits from; take it along so it does not sit
         # invisibly in Storage as "Hugging Face Cache".
         try:
-            from services.hf_cache import purge_subfolder
-            purge_subfolder(spec["subfolder"])
+            from services.hf_cache import purge_outcome, purge_subfolder
+            cache = purge_outcome(purge_subfolder, spec["subfolder"])
         except Exception as exc:  # pragma: no cover - cleanup must not fail the delete
             log.warning("Could not purge HF cache for %s: %s", model_id, exc)
+            cache = {"ok": False, "cache_cleanup": {"freed": 0, "failed": [
+                {"key": model_id, "error": str(exc)},
+            ]}}
 
         # Clear the cached session singletons so the next use reloads (or
         # reports the model as missing) instead of serving stale weights.
@@ -879,7 +883,7 @@ def create_models_blueprint(
             dinov2_mod._session = None
             dinov2_mod._variant_loaded = None
 
-        return jsonify({"deleted": removed, "count": len(removed), "model_id": model_id})
+        return jsonify({"deleted": removed, "count": len(removed), "model_id": model_id, **cache})
 
     @blueprint.route("/api/classify/readiness")
     def api_classify_readiness():

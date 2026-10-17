@@ -562,11 +562,110 @@ class SharedGuardTests(unittest.TestCase):
     def test_plain_snapshot_copy_is_retained_without_guessing_its_lock(self):
         fs, ns = service()
         fs.add(REPO + "/snapshots/rev/group/model", size=10)
-        result = cleanup(ns)
+        result = cleanup(ns, [KEY])
         self.assertEqual(result["removed"], [])
         self.assertEqual(result["freed"], 0)
         self.assertEqual(len(result["failed"]), 1)
         self.assertFalse(fs.unlinked)
+
+    def test_retained_copies_are_not_advertised_or_selected_as_reclaimable(self):
+        fs, ns = service()
+        fs.add(REPO + "/snapshots/rev/copies/model", size=99)
+        payload(fs, "group", "shared", 10)
+        payload(fs, "other", "shared", 10)
+        fs.add(REPO + "/snapshots/rev/group/copy", size=30)
+        with ns["CacheTree"](ROOT) as tree:
+            token = ns["_ACTIVE_TREE"].set(tree)
+            try:
+                inventory = ns["inventory"](ROOT, "/invented/models")
+            finally:
+                ns["_ACTIVE_TREE"].reset(token)
+        entries = {e["key"]: e for e in inventory["entries"]}
+        copies = entries["jss367/vireo-onnx-models/copies"]
+        self.assertEqual((copies["size"], copies["retained_size"], copies["removable"]), (0, 99, False))
+        self.assertEqual(entries[KEY]["size"], 0)  # Shared real blob is counted once in the union.
+        self.assertEqual(entries[KEY]["shared_size"], 10)
+        self.assertEqual(entries[KEY]["retained_size"], 30)
+        self.assertEqual(inventory["unused_size"], 10)
+        self.assertEqual(inventory["retained_size"], 129)
+        result = cleanup(ns)
+        self.assertEqual(result["freed"], 10)
+        self.assertEqual({f["key"] for f in result["failed"]}, {KEY})
+        self.assertEqual(fs._kind(REPO + "/snapshots/rev/copies/model"), "file")
+        self.assertEqual(fs._kind(REPO + "/snapshots/rev/group/copy"), "file")
+
+    def test_automatic_purge_raises_with_partial_counts_and_owner_failures(self):
+        fs, ns = service()
+        blob, _snapshot = payload(fs)
+        fs.fail_unlink.add(fs._lookup(blob))
+        with self.assertRaises(ns["CachePurgeIncomplete"]) as caught:
+            ns["_purge_keys"]([KEY], ROOT, "/invented/models")
+        self.assertEqual(caught.exception.result["freed"], 0)
+        self.assertEqual([f["key"] for f in caught.exception.result["failed"]], [KEY])
+
+    def test_plain_copy_only_bulk_cleanup_does_not_claim_removable_bytes(self):
+        fs, ns = service()
+        fs.add(REPO + "/snapshots/rev/group/model", size=99)
+        self.assertEqual(cleanup(ns), {"freed": 0, "failed": [], "removed": []})
+        self.assertFalse(fs.unlinked)
+
+    def test_both_model_removal_routes_preserve_partial_and_identity_failures(self):
+        for kind in ("partial", "identity"):
+            with self.subTest(kind=kind):
+                _fs, service_ns = service()
+                error = (service_ns["CachePurgeIncomplete"]({"freed": 7, "failed": [{"key": KEY, "error": "permission"}]})
+                         if kind == "partial" else service_ns["UnsafeCacheCleanup"]("identity changed"))
+
+                def purge(_identifier, _error=error):
+                    raise _error
+
+                service_module = S(purge_model=purge, purge_subfolder=purge, purge_outcome=service_ns["purge_outcome"])
+                removed_paths = []
+                fake_os = S(path=S(join=posixpath.join, isdir=lambda _p: True))
+                fake_shutil = S(rmtree=lambda path, _paths=removed_paths: _paths.append(path))
+                modules = {"services.hf_cache": service_module, "shutil": fake_shutil, "masking": S()}
+
+                def importer(name, *_args, _modules=modules, **_kwargs):
+                    if name not in _modules:
+                        raise AssertionError("Unexpected removal import: " + name)
+                    return _modules[name]
+
+                ns = {"__builtins__": {**vars(builtins), "__import__": importer}, "os": fake_os,
+                      "shutil": fake_shutil, "log": logging.getLogger("invented-model-removal"),
+                      "_CONFIG_LOCK": contextlib.nullcontext(), "_load_config": lambda: {"models": []},
+                      "KNOWN_MODELS": [{"id": "model"}], "DEFAULT_MODELS_DIR": "/invented/models",
+                      "_inside_models_dir": lambda _p: True, "jsonify": lambda result: result,
+                      "json_error": lambda message, status=400: (message, status),
+                      "request": S(get_json=lambda **_k: {"model_id": "sam2-tiny"}),
+                      "PIPELINE_MODELS": {"sam2-tiny": {"subfolder": "group"}},
+                      "pipeline_models_dir": lambda: "/invented/models"}
+                tree = ast.parse((VIREO / "models.py").read_text())
+                functions = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                             and n.name in {"remove_model", "_purge_hf_cache_for_model"}]
+                for function in functions:
+                    function.decorator_list = []
+                exec(compile(ast.Module(body=functions, type_ignores=[]), "<inert-model-removal>", "exec"), ns)
+                modules["models"] = S(remove_model=ns["remove_model"])
+                tree = ast.parse((VIREO / "web/models.py").read_text())
+                routes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                          and n.name in {"api_remove_model", "api_models_pipeline_delete"}]
+                for route in routes:
+                    route.decorator_list = []
+                exec(compile(ast.Module(body=routes, type_ignores=[]), "<inert-model-routes>", "exec"), ns)
+                for result in (ns["api_remove_model"]("model"), ns["api_models_pipeline_delete"]()):
+                    self.assertIs(result["ok"], False)
+                    self.assertTrue(result["cache_cleanup"]["failed"])
+                    self.assertEqual(result["cache_cleanup"]["freed"], 7 if kind == "partial" else 0)
+                self.assertEqual(len(removed_paths), 2)  # Only invented collaborators were invoked.
+                ns["_load_config"] = lambda: {"models": [{"id": "model", "weights_path": "/invented/custom"}]}
+                ns["_model_is_managed"] = lambda _m: False
+                ns["_inside_models_dir"] = lambda _p: False
+                ns["_save_config"] = lambda _config: None
+                fake_os.path.lexists = lambda _p: True
+                custom_result = ns["api_remove_model"]("model")
+                self.assertIs(custom_result["ok"], False)
+                self.assertEqual(custom_result["kept_path"], "/invented/custom")
+                self.assertEqual(len(removed_paths), 2)
 
 
 if __name__ == "__main__":
