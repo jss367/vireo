@@ -20,7 +20,9 @@ var VireoExportPresets = (function() {
   var CAPTURE_SPLIT_KEY =
     'vireo.browse.export.metadata.captureDateTime.presetFields';
   var DEFAULT_SUBFOLDER = 'exported';
+  /** @type {SavedExportPreset[]} */
   var presets = [];
+  /** @type {ExportBuiltinOption[] | null} */
   var builtinOptions = null;
   var modalEditGeneration = 0;
   var modalOpenGeneration = 0;
@@ -28,27 +30,43 @@ var VireoExportPresets = (function() {
   // Save and delete both mutate the same server-side collection. Keep a
   // per-name gate so a delayed delete cannot be overtaken by a replacement
   // save (which would recreate the preset), and vice versa.
+  /** @type {Record<string, boolean>} */
   var mutatingNames = Object.create(null);
   var presetActionsDisabled = false;
+  /** @type {{control: ExportPresetControl, disabled: boolean}[] | null} */
   var restorationControlStates = null;
   // In-page save/delete dialog state (see _export_preset_dialog.html).
+  /** @type {'save' | 'delete' | null} */
   var dialogMode = null;
   var dialogBusy = false;
+  /** @type {string | null} */
   var dialogDeleteName = null;
   // Set when the server rejects a save because the name was created
   // elsewhere after our last listing: the next submit of that same name is
   // an explicit replace.
+  /** @type {string | null} */
   var dialogReplaceName = null;
+  /** @type {((event: KeyboardEvent) => void) | null} */
   var dialogKeyHandler = null;
+  /** @type {Element | null} */
   var dialogRestoreFocus = null;
 
-  function $(id) { return document.getElementById(id); }
+  /** @template {keyof ExportPresetControls} K @param {K} id @returns {ExportPresetControls[K]} */
+  function $(id) { return /** @type {ExportPresetControls[K]} */ (document.getElementById(id)); }
+  /** @param {unknown} error */
+  function presetErrorMessage(error) {
+    return error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+      ? error.message : String(error);
+  }
+
   function overlay() { return $('exportOverlay'); }
   function presetSelect() { return $('exportPreset'); }
 
+  /** @param {string} name */
   function findPreset(name) {
     for (var i = 0; i < presets.length; i++) {
-      if (presets[i].name === name) return presets[i];
+      var preset = presets[i];
+      if (preset && preset.name === name) return preset;
     }
     return null;
   }
@@ -65,6 +83,7 @@ var VireoExportPresets = (function() {
     }
   }
 
+  /** @param {boolean} disabled */
   function setPresetActionsDisabled(disabled) {
     presetActionsDisabled = disabled;
     presetSelect().disabled = disabled;
@@ -73,14 +92,15 @@ var VireoExportPresets = (function() {
     updateButtons();
   }
 
+  /** @param {boolean} disabled */
   function setRestorationControlsDisabled(disabled) {
     if (disabled) {
       if (!restorationControlStates) {
         restorationControlStates = [];
-        overlay().querySelectorAll(
+        /** @type {NodeListOf<ExportPresetControl>} */ (overlay().querySelectorAll(
           'input, select, textarea, button:not([data-export-cancel])'
-        ).forEach(function(control) {
-          restorationControlStates.push({
+        )).forEach(function(control) {
+          if (restorationControlStates) restorationControlStates.push({
             control: control,
             disabled: control.disabled,
           });
@@ -115,7 +135,7 @@ var VireoExportPresets = (function() {
   }
 
   function captureSplitControl() {
-    return document.getElementById('exportMetadataCaptureDateTime');
+    return /** @type {HTMLInputElement | null} */ (document.getElementById('exportMetadataCaptureDateTime'));
   }
 
   function persistCaptureSplitHint() {
@@ -140,7 +160,7 @@ var VireoExportPresets = (function() {
 
   function captureBuiltins() {
     if (builtinOptions) return;
-    builtinOptions = Array.prototype.map.call(presetSelect().options, function(option) {
+    builtinOptions = Array.from(presetSelect().options, function(option) {
       return {value: option.value, label: option.textContent};
     });
   }
@@ -150,6 +170,7 @@ var VireoExportPresets = (function() {
     captureBuiltins();
     var current = sel.value;
     sel.replaceChildren();
+    /** @param {Node} parent @param {ExportBuiltinOption[]} entries */
     function appendOptions(parent, entries) {
       entries.forEach(function(entry) {
         var option = document.createElement('option');
@@ -167,10 +188,10 @@ var VireoExportPresets = (function() {
       sel.appendChild(savedGroup);
       var builtinGroup = document.createElement('optgroup');
       builtinGroup.label = 'Built-in';
-      appendOptions(builtinGroup, builtinOptions);
+      appendOptions(builtinGroup, builtinOptions || []);
       sel.appendChild(builtinGroup);
     } else {
-      appendOptions(sel, builtinOptions);
+      appendOptions(sel, builtinOptions || []);
     }
     sel.value = current;
     if (sel.value !== current) sel.value = 'custom';
@@ -180,6 +201,7 @@ var VireoExportPresets = (function() {
   async function refresh() {
     var generation = ++refreshGeneration;
     try {
+      /** @type {{presets: SavedExportPreset[]}} */
       var data = await safeFetch('/api/export/presets', undefined, {toast: false});
       if (generation !== refreshGeneration) return {current: false, ok: false};
       if (data && Array.isArray(data.presets)) presets = data.presets;
@@ -193,6 +215,7 @@ var VireoExportPresets = (function() {
     return {current: true, ok: true};
   }
 
+  /** @returns {SavedExportSettings} */
   function collectSettings() {
     var resizeValue = $('exportResize').value;
     var maxSize = null;
@@ -216,6 +239,7 @@ var VireoExportPresets = (function() {
     };
   }
 
+  /** @param {SavedExportSettings} [settings] */
   function applySettings(settings) {
     settings = settings || {};
     $('exportDest').value = settings.destination || '';
@@ -233,7 +257,7 @@ var VireoExportPresets = (function() {
       customInput.value = '';
     } else {
       var asString = String(maxSize);
-      var hasOption = Array.prototype.some.call(resizeSel.options, function(option) {
+      var hasOption = Array.from(resizeSel.options).some( function(option) {
         return option.value === asString;
       });
       resizeSel.value = hasOption ? asString : 'custom';
@@ -241,11 +265,11 @@ var VireoExportPresets = (function() {
     }
     customInput.style.display = resizeSel.value === 'custom' ? 'block' : 'none';
     var quality = settings.quality || 92;
-    $('exportQuality').value = quality;
+    $('exportQuality').value = String(quality);
     $('exportQualityVal').textContent = String(quality);
     $('exportTemplate').value = settings.naming_template || '{original}';
     var fields = Array.isArray(settings.metadata_fields) ? settings.metadata_fields : [];
-    document.querySelectorAll('#exportOverlay .export-metadata-option input').forEach(function(input) {
+    /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('#exportOverlay .export-metadata-option input')).forEach(function(input) {
       if (input.value !== 'capture_date_time') {
         input.checked = fields.indexOf(input.value) !== -1;
         return;
@@ -317,6 +341,7 @@ var VireoExportPresets = (function() {
 
   function dialogError() { return $('exportPresetDialogError'); }
 
+  /** @param {string} message */
   function showDialogError(message) {
     var error = dialogError();
     if (!error) return;
@@ -324,12 +349,13 @@ var VireoExportPresets = (function() {
     error.style.display = message ? 'block' : 'none';
   }
 
+  /** @param {boolean} busy */
   function setDialogBusy(busy) {
     dialogBusy = busy;
-    ['exportPresetDialogName', 'exportPresetDialogCancelBtn',
-     'exportPresetDialogSubmitBtn'].forEach(function(id) {
+    (/** @type {(keyof ExportPresetControls)[]} */ (['exportPresetDialogName', 'exportPresetDialogCancelBtn',
+     'exportPresetDialogSubmitBtn'])).forEach(function(id) {
       var control = $(id);
-      if (control) control.disabled = busy;
+      if (control instanceof HTMLInputElement || control instanceof HTMLButtonElement) control.disabled = busy;
     });
   }
 
@@ -353,6 +379,7 @@ var VireoExportPresets = (function() {
     submit.textContent = replaces ? 'Replace preset' : 'Save preset';
   }
 
+  /** @param {'save' | 'delete'} mode @param {string} name */
   function openDialog(mode, name) {
     // The overlay covers the export modal, but focus is not trapped, so the
     // Save… / Delete buttons behind it stay keyboard-reachable. Refuse to
@@ -404,8 +431,7 @@ var VireoExportPresets = (function() {
       // Shift+Tab out of the name field reaches its Cancel — which closes
       // #exportOverlay and leaves this dialog orphaned — or Export, which
       // would start an export mid-save. Keep Tab inside the dialog.
-      var focusable = Array.prototype.filter.call(
-        panel.querySelectorAll('input, button'),
+      var focusable = Array.from(/** @type {NodeListOf<HTMLInputElement | HTMLButtonElement>} */ (panel.querySelectorAll('input, button'))).filter(
         function(el) { return !el.disabled && el.offsetParent !== null; }
       );
       if (!focusable.length) {
@@ -420,7 +446,8 @@ var VireoExportPresets = (function() {
       if (event.shiftKey ? (!inside || active === firstControl)
                          : (!inside || active === lastControl)) {
         event.preventDefault();
-        (event.shiftKey ? lastControl : firstControl).focus();
+        var nextControl = event.shiftKey ? lastControl : firstControl;
+        if (nextControl) nextControl.focus();
       }
     };
     document.addEventListener('keydown', dialogKeyHandler);
@@ -447,7 +474,7 @@ var VireoExportPresets = (function() {
     dialogReplaceName = null;
     var restore = dialogRestoreFocus;
     dialogRestoreFocus = null;
-    if (restore && typeof restore.focus === 'function') restore.focus();
+    if (restore && 'focus' in restore && typeof restore.focus === 'function') restore.focus();
   }
 
   function saveCurrent() {
@@ -460,6 +487,7 @@ var VireoExportPresets = (function() {
     openDialog('delete', name);
   }
 
+  /** @param {Event} [event] */
   async function submitDialog(event) {
     if (event) event.preventDefault();
     if (dialogBusy || !dialogMode) return;
@@ -481,6 +509,7 @@ var VireoExportPresets = (function() {
     }
     mutatingNames[name] = true;
     setDialogBusy(true);
+    /** @type {SaveExportPresetResult} */
     var result;
     try {
       result = await saveNamedPreset(
@@ -488,7 +517,7 @@ var VireoExportPresets = (function() {
       );
     } catch (err) {
       // Never leave the dialog stuck busy: Cancel is disabled while it is.
-      result = {error: (err && err.message) || String(err)};
+      result = {error: presetErrorMessage(err)};
     } finally {
       delete mutatingNames[name];
       setDialogBusy(false);
@@ -530,13 +559,14 @@ var VireoExportPresets = (function() {
       var editGeneration = modalEditGeneration;
       var openGeneration = modalOpenGeneration;
       try {
+        /** @type {{error?: string}} */
         var data = await safeFetch(
           '/api/export/presets/' + encodeURIComponent(name),
           {method: 'DELETE'}, {toast: false}
         );
         if (data.error) throw new Error(data.error);
       } catch (err) {
-        showDialogError('Could not delete preset: ' + err.message);
+        showDialogError('Could not delete preset: ' + presetErrorMessage(err));
         return;
       }
       if (VireoViewPreferences.read(LAST_USED_KEY) === SAVED_PREFIX + name) {
@@ -555,7 +585,7 @@ var VireoExportPresets = (function() {
         showToast('Deleted export preset “' + name + '”', 'info');
       }
     } catch (err) {
-      showDialogError('Could not delete preset: ' + ((err && err.message) || err));
+      showDialogError('Could not delete preset: ' + presetErrorMessage(err));
     } finally {
       // Never leave the dialog stuck busy: Cancel is disabled while it is.
       delete mutatingNames[name];
@@ -567,6 +597,7 @@ var VireoExportPresets = (function() {
    * when the name already exists server-side, `{error}` when the save
    * failed, `{keptCurrent}` on success. The caller renders all three in the
    * in-page dialog. */
+  /** @param {string} name @param {boolean} replace @returns {Promise<SaveExportPresetResult>} */
   async function saveNamedPreset(name, replace) {
     // Snapshot the modal edit AND open generations before the network round
     // trip. If the user tweaks any control while the POST + refresh are in
@@ -577,6 +608,7 @@ var VireoExportPresets = (function() {
     var editGeneration = modalEditGeneration;
     var openGeneration = modalOpenGeneration;
     var payload = collectSettings();
+    /** @param {boolean} allowReplace */
     async function postPreset(allowReplace) {
       return safeFetch('/api/export/presets', {
         method: 'POST',
@@ -591,8 +623,8 @@ var VireoExportPresets = (function() {
     try {
       await postPreset(replace);
     } catch (err) {
-      if (err.code === 'export_preset_exists') return {conflict: true};
-      return {error: err.message};
+      if (err && typeof err === 'object' && 'code' in err && err.code === 'export_preset_exists') return {conflict: true};
+      return {error: presetErrorMessage(err)};
     }
     var refreshResult = await refresh();
     var edited = editGeneration !== modalEditGeneration;
@@ -601,7 +633,7 @@ var VireoExportPresets = (function() {
       ? findPreset(name) : null;
     var keptCurrent = edited || reopened ||
       !refreshResult.current || !refreshResult.ok || !savedPreset;
-    if (!keptCurrent) {
+    if (!keptCurrent && savedPreset) {
       // The server normalizes fields such as whitespace around templates.
       // Apply that stored snapshot before labeling the controls with its
       // name so immediate export and later restoration behave identically.
@@ -742,7 +774,7 @@ var VireoExportPresets = (function() {
     ['input', 'change'].forEach(function(type) {
       overlay().addEventListener(type, function(event) {
         var target = event.target;
-        if (!target || target.id === 'exportPreset') return;
+        if (!(target instanceof HTMLElement) || target.id === 'exportPreset') return;
         if (!target.matches || !target.matches('input, select, textarea')) return;
         // The combined "capture date & time" checkbox may carry a preset's
         // exact date/time split (see applySettings). Only drop that hint

@@ -6,6 +6,12 @@ function fn(file, name) {
   const src = [].concat(file).map(f => fs.readFileSync(f, 'utf8')).join('\n');
   const found = src.match(new RegExp('(?:async )?function ' + name + '\\([^]*?\\n\\}'));
   assert(found, name);
+  // The extracted review functions use the same state guards as the page.
+  // Evaluate those real helpers in each isolated VM as well.
+  if ([].concat(file).includes('vireo/static/pipeline-review/state.js') &&
+      !['requireReviewValue', 'currentReviewResults'].includes(name)) {
+    return fn(file, 'requireReviewValue') + '\n' + fn(file, 'currentReviewResults') + '\n' + found[0];
+  }
   return found[0];
 }
 const browse = ['vireo/static/browse/loading.js', 'vireo/static/browse/selection.js'];

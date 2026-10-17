@@ -83,7 +83,7 @@
   "vireo/static/settings/nas-setup.js:_nwRunSshCheck": 105,
   "vireo/static/settings/nas-setup.js:nwArchiveStep": 112,
   "vireo/static/settings/system-tools.js:downloadDarktable": 170,
-  "vireo/static/vireo-batch-edits.js:open": 130,
+  "vireo/static/vireo-batch-edits.js:open": 127,
   "vireo/static/vireo-browse-compare.js:create": 340,
   "vireo/static/vireo-dialog.js:create": 104,
   "vireo/static/vireo-filter.js:init": 101,
