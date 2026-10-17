@@ -2,7 +2,7 @@
 // Classic page script; load boot.js after all definitions.
 'use strict';
 
-function openPhotoPreview(photo) {
+/** @param {LocationPhoto|undefined} photo */ function openPhotoPreview(photo) {
   var group = currentGroup();
   if (!photo || !group || typeof openLightbox !== 'function') return;
   // While an assignment is in flight or a partial batch is waiting for
@@ -11,7 +11,7 @@ function openPhotoPreview(photo) {
   // nulls state.assignment and unlocks navigation, silently orphaning the
   // committed chunks. Keep the preview closed until the pending
   // assignment resolves.
-  if (hasPartialAssignmentProgress()) {
+  if (hasPartialAssignmentProgress() && state.assignment && state.selectedChoice) {
     showToast('Finish or retry the pending assignment before opening a photo — ' +
       formatNumber(state.assignment.completed) + ' of ' +
       formatNumber(state.assignment.total) + ' photos already got “' +
@@ -25,26 +25,26 @@ function openPhotoPreview(photo) {
   openLightbox(photo.id, photo.filename || '', group.photos.slice());
 }
 
-function renderThumbnails(group) {
-  var container = document.getElementById('locationReviewThumbnails');
+/** @param {LocationGroup} group */ function renderThumbnails(group) {
+  var container = /** @type {HTMLElement} */ (document.getElementById('locationReviewThumbnails'));
   if (state.mode === 'time') { renderTimeThumbnails(group); return; }
   var visible = group.photos.slice(0, 24);
-  container.innerHTML = visible.map(function(photo) {
+  container.innerHTML = visible.filter(function(photo) { return photo !== undefined; }).map(function(photo) {
     return '<button class="location-review-thumb" type="button" data-photo-id="' + photo.id + '" title="Open ' + escapeAttr(photo.filename) + '">' +
       '<img src="/thumbnails/' + photo.id + '.jpg" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">' +
       '<span>' + escapeHtml(photo.filename) + '</span></button>';
   }).join('') + (group.photos.length > visible.length
     ? '<div class="location-review-more">+' + formatNumber(group.photos.length - visible.length) + ' more</div>' : '');
-  container.querySelectorAll('[data-photo-id]').forEach(function(button) {
+  container.querySelectorAll(/** @type {'button'} */ ('[data-photo-id]')).forEach(function(button) {
     button.addEventListener('click', function() {
-      var photoId = parseInt(button.dataset.photoId, 10);
+      var photoId = parseInt(button.dataset.photoId || '', 10);
       var photo = group.photos.find(function(item) { return item.id === photoId; });
       openPhotoPreview(photo);
     });
   });
 }
 
-function renderTimeThumbnails(group) {
+/** @param {LocationGroup} group */ function renderTimeThumbnails(group) {
   var pageSize = 36;
   state.photoPage = Math.min(state.photoPage, Math.floor((group.count - 1) / pageSize));
   var visible;
@@ -56,14 +56,14 @@ function renderTimeThumbnails(group) {
       return group.photos[sampleCount === 1 ? 0 : Math.round(index * (group.count - 1) / (sampleCount - 1))];
     });
   }
-  document.getElementById('locationReviewShowAll').textContent = state.inspectAll ? 'Show examples' : 'Inspect all ' + group.count + ' photos';
-  document.getElementById('locationReviewSampleLabel').textContent = state.inspectAll
+  /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewShowAll')).textContent = state.inspectAll ? 'Show examples' : 'Inspect all ' + group.count + ' photos';
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewSampleLabel')).textContent = state.inspectAll
     ? 'Photos ' + (state.photoPage * pageSize + 1) + '–' + Math.min((state.photoPage + 1) * pageSize, group.count) + ' of ' + group.count
     : 'Examples from beginning to end · ' + visible.length + ' of ' + group.count;
-  document.getElementById('locationReviewPagePrevious').hidden = !state.inspectAll || state.photoPage === 0;
-  document.getElementById('locationReviewPageNext').hidden = !state.inspectAll || (state.photoPage + 1) * pageSize >= group.count;
-  var container = document.getElementById('locationReviewThumbnails');
-  container.innerHTML = visible.map(function(photo) {
+  /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewPagePrevious')).hidden = !state.inspectAll || state.photoPage === 0;
+  /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewPageNext')).hidden = !state.inspectAll || (state.photoPage + 1) * pageSize >= group.count;
+  var container = /** @type {HTMLElement} */ (document.getElementById('locationReviewThumbnails'));
+  container.innerHTML = visible.filter(function(photo) { return photo !== undefined; }).map(function(photo) {
     var index = group.photo_ids.indexOf(photo.id);
     return '<div class="location-review-photo-card"><button class="location-review-thumb" type="button" data-photo-id="' + photo.id + '" title="Open ' + escapeAttr(photo.filename) + '">' +
       '<img src="/thumbnails/' + photo.id + '.jpg" alt="Preview of ' + escapeAttr(photo.filename) + '" loading="lazy">' +
@@ -72,12 +72,12 @@ function renderTimeThumbnails(group) {
         (index ? '<button class="location-review-button" type="button" data-split-before="' + photo.id + '">Split before this</button>' : '') +
         '<button class="location-review-button" type="button" data-review-separately="' + photo.id + '">Review separately</button></div>' : '') + '</div>';
   }).join('');
-  container.querySelectorAll('[data-photo-id]').forEach(function(button) {
+  container.querySelectorAll(/** @type {'button'} */ ('[data-photo-id]')).forEach(function(button) {
     button.addEventListener('click', function() {
       openPhotoPreview(group.photos.find(function(photo) { return photo.id === Number(button.dataset.photoId); }));
     });
   });
-  container.querySelectorAll('[data-split-before], [data-review-separately]').forEach(function(button) {
+  container.querySelectorAll(/** @type {'button'} */ ('[data-split-before], [data-review-separately]')).forEach(function(button) {
     button.addEventListener('click', function() {
       if (state.isAssigning || hasPartialAssignmentProgress()) return;
       var split = !!button.dataset.splitBefore;
@@ -101,6 +101,6 @@ function renderTimeThumbnails(group) {
 }
 
 function lightboxIsOpen() {
-  var overlay = document.getElementById('lightboxOverlay');
+  var overlay = /** @type {HTMLElement} */ (document.getElementById('lightboxOverlay'));
   return !!(overlay && overlay.classList.contains('active'));
 }

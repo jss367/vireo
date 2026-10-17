@@ -4,23 +4,23 @@
 
 function clearMapObjects() {
   if (state.mapMode === 'google') {
-    state.photoMarkers.forEach(function(marker) { marker.setMap(null); });
-    state.candidateMarkers.forEach(function(marker) { marker.setMap(null); });
+    state.photoMarkers.forEach(function(marker) { removeLocationMarker(marker); });
+    state.candidateMarkers.forEach(function(marker) { removeLocationMarker(marker); });
   } else if (state.mapMode === 'leaflet' && state.map) {
-    state.photoMarkers.forEach(function(marker) { state.map.removeLayer(marker); });
-    state.candidateMarkers.forEach(function(marker) { state.map.removeLayer(marker); });
+    state.photoMarkers.forEach(function(marker) { removeLocationMarker(marker); });
+    state.candidateMarkers.forEach(function(marker) { removeLocationMarker(marker); });
   }
   state.photoMarkers = [];
   state.candidateMarkers = [];
 }
 
-function renderPhotoMarkers(group) {
+/** @param {LocationGroup} group */ function renderPhotoMarkers(group) {
   clearMapObjects();
   if (!state.map || !group || !group.center) return;
-  var mapPhotos = group.photos.slice();
+  /** @type {(LocationPhoto | {latitude:number;longitude:number;filename:string;assigned:true})[]} */ var mapPhotos = group.photos.slice();
   if (state.mode === 'discrepancies') {
-    mapPhotos.push({latitude: group.assigned_location.latitude, longitude: group.assigned_location.longitude,
-      filename: 'Assigned place: ' + group.assigned_location.name, assigned: true});
+    mapPhotos.push({latitude: locationAssignedPlace(group).latitude, longitude: locationAssignedPlace(group).longitude,
+      filename: 'Assigned place: ' + locationAssignedPlace(group).name, assigned: true});
   }
   if (state.mapMode === 'google') {
     var bounds = new google.maps.LatLngBounds();
@@ -28,7 +28,7 @@ function renderPhotoMarkers(group) {
       var position = {lat: photo.latitude, lng: photo.longitude};
       var marker = new google.maps.Marker({
         position: position,
-        map: state.map,
+        map: locationGoogleMap(),
         title: photo.filename,
         icon: {
           path: google.maps.SymbolPath.CIRCLE,
@@ -44,33 +44,33 @@ function renderPhotoMarkers(group) {
       state.photoMarkers.push(marker);
       bounds.extend(position);
     });
-    state.map.fitBounds(bounds, 48);
-    google.maps.event.addListenerOnce(state.map, 'idle', function() {
-      if (state.map.getZoom() > 17) state.map.setZoom(17);
+    locationGoogleMap().fitBounds(bounds, 48);
+    google.maps.event.addListenerOnce(locationGoogleMap(), 'idle', function() {
+      if (locationGoogleMap().getZoom() > 17) locationGoogleMap().setZoom(17);
     });
   } else {
-    var latLngs = [];
+    /** @type {[number,number][]} */ var latLngs = [];
     mapPhotos.forEach(function(photo) {
       var marker = L.marker([photo.latitude, photo.longitude], {
         icon: L.divIcon({className: '', html: '<div class="location-review-photo-dot"' + (photo.assigned ? ' style="background:#f5b942;width:19px;height:19px"' : '') + '></div>', iconSize: [19,19], iconAnchor: [9,9]}),
         title: photo.filename,
-      }).addTo(state.map);
+      }).addTo(locationLeafletMap());
       if (!photo.assigned) marker.on('click', function() { openPhotoPreview(photo); });
       state.photoMarkers.push(marker);
       latLngs.push([photo.latitude, photo.longitude]);
     });
-    if (latLngs.length === 1) state.map.setView(latLngs[0], 16);
-    else state.map.fitBounds(latLngs, {padding: [40, 40], maxZoom: 17});
-    setTimeout(function() { state.map.invalidateSize(); }, 0);
+    if (latLngs.length === 1) locationLeafletMap().setView(latLngs[0] || [0,0], 16);
+    else locationLeafletMap().fitBounds(latLngs, {padding: [40, 40], maxZoom: 17});
+    setTimeout(function() { locationLeafletMap().invalidateSize(); }, 0);
   }
 }
 
 function renderCandidateMarkers() {
   if (!state.map) return;
   if (state.mapMode === 'google') {
-    state.candidateMarkers.forEach(function(marker) { marker.setMap(null); });
+    state.candidateMarkers.forEach(function(marker) { removeLocationMarker(marker); });
   } else {
-    state.candidateMarkers.forEach(function(marker) { state.map.removeLayer(marker); });
+    state.candidateMarkers.forEach(function(marker) { removeLocationMarker(marker); });
   }
   state.candidateMarkers = [];
   visibleCandidates().forEach(function(choice) {
@@ -79,7 +79,7 @@ function renderCandidateMarkers() {
     if (state.mapMode === 'google') {
       var marker = new google.maps.Marker({
         position: {lat: Number(choice.latitude), lng: Number(choice.longitude)},
-        map: state.map,
+        map: locationGoogleMap(),
         title: choice.name,
         label: selected ? {text: '✓', color: '#05211d', fontWeight: '700'} : null,
         opacity: selected ? 1 : .72,
@@ -89,14 +89,14 @@ function renderCandidateMarkers() {
       state.candidateMarkers.push(marker);
     } else if (choice.kind === 'keyword') {
       var leafletMarker = L.marker([choice.latitude, choice.longitude], {title: choice.name})
-        .addTo(state.map).bindTooltip(choice.name);
+        .addTo(locationLeafletMap()).bindTooltip(choice.name);
       leafletMarker.on('click', function() { selectChoice(choice); });
       state.candidateMarkers.push(leafletMarker);
     }
   });
 }
 
-function loadGoogleMaps(apiKey, preferEnglish) {
+/** @param {string} apiKey @param {boolean} preferEnglish */ function loadGoogleMaps(apiKey, preferEnglish) {
   return new Promise(function(resolve, reject) {
     if (window.google && window.google.maps) { resolve(window.google); return; }
     window._vireoLocationReviewMapsReady = function() { resolve(window.google); };
@@ -130,7 +130,7 @@ function loadLeaflet() {
 }
 
 async function initMap() {
-  var message = document.getElementById('locationReviewMapMessage');
+  var message = /** @type {HTMLElement} */ (document.getElementById('locationReviewMapMessage'));
   if (state.config && state.config.google_maps_api_key) {
     try {
       await loadGoogleMaps(
@@ -138,7 +138,7 @@ async function initMap() {
         state.config.google_maps_prefer_english !== false
       );
       state.mapMode = 'google';
-      state.map = new google.maps.Map(document.getElementById('locationReviewMap'), {
+      state.map = new google.maps.Map(/** @type {HTMLElement} */ (document.getElementById('locationReviewMap')), {
         center: {lat: 20, lng: 0}, zoom: 2, mapTypeId: 'roadmap',
         mapTypeControl: true, mapTypeControlOptions: {
           mapTypeIds: ['roadmap', 'satellite', 'terrain'],
@@ -152,11 +152,11 @@ async function initMap() {
         if (state.mode === 'discrepancies') return;
         if (!event.placeId) return;
         if (event.stop) event.stop();
-        state.placesService.getDetails({placeId: event.placeId, fields: ['place_id','name','types','formatted_address','geometry','address_components']}, function(place, status) {
-          if (status !== google.maps.places.PlacesServiceStatus.OK) return;
+        state.placesService?.getDetails({placeId: event.placeId, fields: ['place_id','name','types','formatted_address','geometry','address_components']}, function(place, status) {
+          if (status !== google.maps.places.PlacesServiceStatus.OK || !place) return;
           var choice = googleResultToChoice(place);
           if (!choice) return;
-          choice.address_components = place.address_components || [];
+          choice.address_components = place?.address_components || [];
           state.searchedCandidate = choice;
           selectChoice(choice);
         });
@@ -188,7 +188,7 @@ async function initMap() {
   var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {attribution: '&copy; Esri', maxZoom: 19});
   var terrain = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {attribution: '&copy; OpenTopoMap', maxZoom: 17});
   state.map = L.map('locationReviewMap', {layers: [street]}).setView([20,0], 2);
-  L.control.layers({'Street': street, 'Satellite': satellite, 'Terrain': terrain}).addTo(state.map);
+  L.control.layers({'Street': street, 'Satellite': satellite, 'Terrain': terrain}).addTo(locationLeafletMap());
   if (state.googleMapsUnavailableReason === 'load_failed') {
     message.innerHTML = 'Google Maps could not be loaded. <a href="/settings#google-maps">Check Settings</a> to restore nearby suggestions.';
   } else {
@@ -197,20 +197,38 @@ async function initMap() {
 }
 
 function bindGoogleSearch() {
-  var input = document.getElementById('locationReviewSearch');
+  var input = /** @type {HTMLInputElement} */ (document.getElementById('locationReviewSearch'));
   state.autocomplete = new google.maps.places.Autocomplete(input, {
     fields: ['place_id','name','types','formatted_address','geometry','address_components'],
     types: ['geocode', 'establishment'],
   });
-  state.autocomplete.bindTo('bounds', state.map);
+  state.autocomplete.bindTo('bounds', locationGoogleMap());
   state.autocomplete.addListener('place_changed', function() {
-    var place = state.autocomplete.getPlace();
+    var place = state.autocomplete?.getPlace() || null;
     var choice = googleResultToChoice(place);
     if (!choice) return;
-    choice.address_components = place.address_components || [];
+    choice.address_components = place?.address_components || [];
     state.searchedCandidate = choice;
     selectChoice(choice);
-    if (place.geometry && place.geometry.viewport) state.map.fitBounds(place.geometry.viewport);
-    else if (choice.latitude != null) state.map.panTo({lat: choice.latitude, lng: choice.longitude});
+    if (place?.geometry?.viewport) locationGoogleMap().fitBounds(place.geometry.viewport);
+    else if (choice.latitude != null) locationGoogleMap().panTo({lat: choice.latitude, lng: choice.longitude});
   });
+}
+
+/** @returns {google.maps.Map} */
+function locationGoogleMap() {
+  if (!state.map || !('getZoom' in state.map)) throw new Error('Google map is unavailable');
+  return state.map;
+}
+
+/** @returns {L.Map} */
+function locationLeafletMap() {
+  if (!state.map || !('removeLayer' in state.map)) throw new Error('Basic map is unavailable');
+  return state.map;
+}
+
+/** @param {google.maps.Marker | L.Marker} marker */
+function removeLocationMarker(marker) {
+  if ('setMap' in marker) marker.setMap(null);
+  else if (state.map && 'removeLayer' in state.map) state.map.removeLayer(marker);
 }

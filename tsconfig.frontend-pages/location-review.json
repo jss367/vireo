@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/location-review.d.ts",
+    "../vireo/static/location-review/assignment.js",
+    "../vireo/static/location-review/boot.js",
+    "../vireo/static/location-review/candidates.js",
+    "../vireo/static/location-review/discrepancies.js",
+    "../vireo/static/location-review/format.js",
+    "../vireo/static/location-review/initialize.js",
+    "../vireo/static/location-review/map.js",
+    "../vireo/static/location-review/photos.js",
+    "../vireo/static/location-review/queue.js",
+    "../vireo/static/location-review/source.js",
+    "../vireo/static/location-review/state.js",
+    "../vireo/static/location-review/suggestions.js"
+  ]
+}

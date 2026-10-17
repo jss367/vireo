@@ -3,21 +3,21 @@
 'use strict';
 
 function resetAssignmentProgress() {
-  var progress = document.getElementById('locationReviewAssignmentProgress');
-  var status = document.getElementById('locationReviewAssignmentStatus');
-  var track = document.getElementById('locationReviewAssignmentTrack');
+  var progress = /** @type {HTMLElement} */ (document.getElementById('locationReviewAssignmentProgress'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('locationReviewAssignmentStatus'));
+  var track = /** @type {HTMLElement} */ (document.getElementById('locationReviewAssignmentTrack'));
   progress.classList.add('location-review-hidden');
   status.textContent = '';
-  document.getElementById('locationReviewAssignmentFill').style.width = '0%';
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewAssignmentFill')).style.width = '0%';
   track.setAttribute('aria-valuemax', '0');
   track.setAttribute('aria-valuenow', '0');
   track.removeAttribute('aria-valuetext');
 }
 
-function updateAssignmentProgress(completed, total, interrupted) {
-  var progress = document.getElementById('locationReviewAssignmentProgress');
-  var status = document.getElementById('locationReviewAssignmentStatus');
-  var track = document.getElementById('locationReviewAssignmentTrack');
+/** @param {number} completed @param {number} total @param {boolean=} interrupted */ function updateAssignmentProgress(completed, total, interrupted) {
+  var progress = /** @type {HTMLElement} */ (document.getElementById('locationReviewAssignmentProgress'));
+  var status = /** @type {HTMLElement} */ (document.getElementById('locationReviewAssignmentStatus'));
+  var track = /** @type {HTMLElement} */ (document.getElementById('locationReviewAssignmentTrack'));
   var pct = total ? Math.round((completed / total) * 100) : 100;
   var remaining = Math.max(0, total - completed);
   var statusText = interrupted
@@ -25,24 +25,24 @@ function updateAssignmentProgress(completed, total, interrupted) {
     : 'Assigning ' + formatNumber(completed) + ' of ' + formatNumber(total) + ' photos · ' + pct + '%';
   progress.classList.remove('location-review-hidden');
   status.textContent = statusText;
-  document.getElementById('locationReviewAssignmentFill').style.width = pct + '%';
+  /** @type {HTMLElement} */ (document.getElementById('locationReviewAssignmentFill')).style.width = pct + '%';
   track.setAttribute('aria-valuemax', String(total));
   track.setAttribute('aria-valuenow', String(completed));
   track.setAttribute('aria-valuetext', statusText);
 }
 
-function setAssignmentNavigationDisabled(disabled) {
+/** @param {boolean} disabled */ function setAssignmentNavigationDisabled(disabled) {
   ['locationReviewMode', 'locationReviewGap', 'locationReviewCollection', 'locationReviewDistance', 'locationReviewIncludeKept',
     'locationReviewShowAll', 'locationReviewPagePrevious', 'locationReviewPageNext'].forEach(function(id) {
-    document.getElementById(id).disabled = disabled;
+    var control = document.getElementById(id); if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLButtonElement) control.disabled = disabled;
   });
-  document.querySelectorAll('[data-split-before], [data-review-separately]').forEach(function(button) {
+  document.querySelectorAll(/** @type {'button'} */ ('[data-split-before], [data-review-separately]')).forEach(function(button) {
     button.disabled = disabled;
   });
-  document.getElementById('locationReviewSkip').disabled = disabled;
-  document.getElementById('locationReviewPrevious').disabled = disabled || state.groups.length < 2;
-  document.getElementById('locationReviewNext').disabled = disabled || state.groups.length < 2;
-  document.querySelectorAll('[data-suggestion-mode]').forEach(function(button) {
+  /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewSkip')).disabled = disabled;
+  /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewPrevious')).disabled = disabled || state.groups.length < 2;
+  /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewNext')).disabled = disabled || state.groups.length < 2;
+  document.querySelectorAll(/** @type {'button'} */ ('[data-suggestion-mode]')).forEach(function(button) {
     button.disabled = disabled;
   });
 }
@@ -52,16 +52,16 @@ function hasPartialAssignmentProgress() {
     && state.assignment.completed < state.assignment.total);
 }
 
-function countProcessedInPhotoIds(assignment) {
+/** @param {LocationAssignment} assignment */ function countProcessedInPhotoIds(assignment) {
   if (!assignment || !assignment.processedIds) return 0;
   var count = 0;
   for (var i = 0; i < assignment.photoIds.length; i++) {
-    if (assignment.processedIds.has(assignment.photoIds[i])) count++;
+    if (assignment.processedIds.has(assignment.photoIds[i] ?? -1)) count++;
   }
   return count;
 }
 
-function reconcileAssignmentForDeletion(photoId) {
+/** @param {number} photoId */ function reconcileAssignmentForDeletion(photoId) {
   // A deletion arriving mid-partial (or mid-batch via a pre-existing modal
   // that bypassed openPhotoPreview's guard) must not leave a stale ID in the
   // retry snapshot: the batch endpoints validate every ID up front and 404
@@ -79,7 +79,7 @@ function reconcileAssignmentForDeletion(photoId) {
   }
 }
 
-function normalizePlaceForSubmit(choice) {
+/** @param {LocationChoice} choice */ function normalizePlaceForSubmit(choice) {
   var result = choice._googleResult || {};
   var components = choice.address_components || result.address_components || [];
   return {
@@ -98,10 +98,10 @@ function normalizePlaceForSubmit(choice) {
   };
 }
 
-function hydrateGoogleChoice(choice) {
+/** @param {LocationChoice} choice @returns {Promise<LocationChoice>} */ function hydrateGoogleChoice(choice) {
   if (!state.placesService || (choice.address_components && choice.address_components.length)) return Promise.resolve(choice);
   return new Promise(function(resolve) {
-    state.placesService.getDetails({
+    state.placesService?.getDetails({
       placeId: choice.place_id,
       fields: ['place_id','name','types','formatted_address','geometry','address_components'],
     }, function(place, status) {
@@ -117,7 +117,7 @@ function hydrateGoogleChoice(choice) {
 async function assignCurrentGroup() {
   if (state.mode === 'discrepancies') { await resolveDiscrepancies('assigned'); return; }
   var group = currentGroup();
-  var choice = state.selectedChoice;
+  let choice = state.selectedChoice;
   if (!group || !choice) return;
   // A lightbox opened before the assignment starts (e.g. keyboard-tabbed to
   // the Assign button while a preview was still on screen) sits outside
@@ -127,7 +127,7 @@ async function assignCurrentGroup() {
   if (lightboxIsOpen() && typeof closeLightbox === 'function') {
     try { closeLightbox(); } catch (_) {}
   }
-  var button = document.getElementById('locationReviewAssign');
+  var button = /** @type {HTMLButtonElement} */ (document.getElementById('locationReviewAssign'));
   var choiceKey = candidateKey(choice);
   if (!state.assignment || state.assignment.group !== group || state.assignment.choiceKey !== choiceKey) {
     // Snapshot photo_ids so a mid-partial lightbox:photodeleted that
@@ -169,20 +169,20 @@ async function assignCurrentGroup() {
       if (!pending.length) break;
       var chunk = pending.slice(0, 1000);
       var endpoint = '/api/batch/location';
-      var body = {photo_ids: chunk};
+      /** @type {LocationAssignmentBody} */ var body = {photo_ids: chunk};
       if (choice.kind === 'keyword') body.keyword_id = choice.keyword_id;
       else if (choice.kind === 'custom') {
         endpoint = '/api/batch/location/text';
         body.name = choice.name;
         if (group.center) {
-          body.latitude = group.center.lat;
-          body.longitude = group.center.lng;
+          body.latitude = locationGroupCenter(group).lat;
+          body.longitude = locationGroupCenter(group).lng;
         }
       } else {
         body.place_id = choice.place_id;
         body.place = normalizePlaceForSubmit(choice);
       }
-      var result = await safeFetch(endpoint, {
+      /** @type {{location?:LocationSaved & {keyword_id:number}}} */ var result = await safeFetch(endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
       });
       chunk.forEach(function(id) { assignment.processedIds.add(id); });
