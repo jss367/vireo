@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from db import Database
 from PIL import Image
+from scanner import ScanOptions
 
 
 class FakeRunner:
@@ -89,8 +90,8 @@ def test_catalog_scan_preservation_pause_publishes_paused_without_cancelling(
 
     def fake_scan(destination, db, **kwargs):
         scan_calls["n"] += 1
-        scan_calls["cancel_check"] = kwargs.get("cancel_check")
-        scan_calls["pause_check"] = kwargs.get("pause_check")
+        scan_calls["cancel_check"] = kwargs["control"].cancel_check
+        scan_calls["pause_check"] = kwargs["control"].pause_check
 
     class ParkingRunner(FakeRunner):
         """wait_if_paused records the call AND returns True (cancel)."""
@@ -620,7 +621,7 @@ def test_duplicate_only_import_leaves_stray_for_explicit_rescan(
     assert status == "partial"
 
     # The existing explicit rescan workflow still performs the repair.
-    scanner.scan(str(archive), db, incremental=True)
+    scanner.scan(str(archive), db, options=ScanOptions(incremental=True))
     row_paths = {
         os.path.join(r["folder_path"], r["filename"]) for r in _photo_rows(db)
     }
@@ -3146,7 +3147,7 @@ def test_landed_file_failed_after_scan_is_not_double_counted(
         # Fail the restricted (per-batch) scan — the one with
         # restrict_files. The dup-link path (no restrict_files) isn't
         # exercised here; there are no duplicates.
-        if kwargs.get("restrict_files"):
+        if kwargs["options"].restrict_files:
             raise OSError("simulated per-batch scan failure")
             # (Not RuntimeError — that's cancellation.)
         return real_scan(root, db_arg, **kwargs)
@@ -3327,7 +3328,7 @@ def test_paired_companion_archive_mutation_after_scan_reclassifies(
         # loop runs, mutate the archive JPEG. If the fix works this
         # forces the JPEG entry into ``failed``; without it, the JPEG's
         # deleted-by-pair row makes the check silently pass.
-        for f in kwargs.get("restrict_files") or set():
+        for f in kwargs["options"].restrict_files or set():
             if str(f).lower().endswith("dsc_2000.jpg") and os.path.exists(f):
                 with open(f, "r+b") as fh:
                     fh.write(b"CORRUPT-MUTATION-POST-COPY")
@@ -3383,8 +3384,8 @@ def test_non_empty_null_scan_hash_reclassifies_when_rehash_disagrees(
         # Wipe file_hash for freshly cataloged photos (simulating a
         # scan-side hash-read failure that landed a NULL) AND mutate the
         # archive so a re-hash also disagrees.
-        if kwargs.get("restrict_files"):
-            for f in kwargs["restrict_files"]:
+        if kwargs["options"].restrict_files:
+            for f in kwargs["options"].restrict_files:
                 if not os.path.exists(f):
                     continue
                 with open(f, "r+b") as fh:

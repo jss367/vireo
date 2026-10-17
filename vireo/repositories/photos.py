@@ -321,6 +321,10 @@ class PhotoRepository:
             rows = self.conn.execute(
                 f"""SELECT p.id,
                            (p.mask_path IS NOT NULL) AS has_mask,
+                           (SELECT pm.variant FROM photo_masks pm
+                             WHERE pm.photo_id = p.id
+                               AND pm.variant = p.active_mask_variant
+                               AND pm.path = p.mask_path LIMIT 1) AS mask_variant,
                            (p.subject_tenengrad IS NOT NULL) AS has_quality,
                            (p.eye_tenengrad IS NOT NULL) AS has_eye,
                            p.crop_complete, p.subject_size,

@@ -683,7 +683,7 @@ def import_untracked(db, paths, vireo_dir=None, thumb_cache_dir=None):
     """
     from file_identity import catalog_folder_path
     from new_images import invalidate_new_images_after_scan
-    from scanner import scan
+    from scanner import ScanOptions, scan
 
     # Group by parent directory
     dirs = {}
@@ -706,10 +706,12 @@ def import_untracked(db, paths, vireo_dir=None, thumb_cache_dir=None):
     for d, files in dirs.items():
         before = selected_catalog_files(d, files)
         try:
-            scan(d, db, incremental=True, recursive=False,
-                 restrict_dirs=[d], restrict_files=files,
-                 vireo_dir=vireo_dir,
-                 thumb_cache_dir=thumb_cache_dir)
+            scan(d, db, options=ScanOptions(
+                incremental=True, recursive=False,
+                restrict_dirs=[d], restrict_files=files,
+                vireo_dir=vireo_dir,
+                thumb_cache_dir=thumb_cache_dir,
+            ))
             imported += len(selected_catalog_files(d, files) - before)
         finally:
             # scanner.scan commits photo rows incrementally, so even a

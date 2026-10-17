@@ -332,6 +332,10 @@ def rows_checks():
     INSERT INTO photos VALUES(1,1,'DSC_01.jpg','.jpg',NULL,'none',0,0,0,'mask',10,20,1,.1),(2,1,'DSC_02.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL),(3,2,'DSC_03.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL),(4,3,'DSC_04.jpg','.jpg',NULL,'none',0,0,0,NULL,NULL,NULL,NULL,NULL);
     INSERT INTO photo_workspace_visibility VALUES(1,1),(2,2),(3,1),(4,1);
     INSERT INTO detections VALUES(1,'animal','detector',.9),(1,'animal','detector',.1),(1,'animal','full-image',1),(1,'person','detector',.9);""")
+    c.executescript("""ALTER TABLE photos ADD COLUMN active_mask_variant;
+    CREATE TABLE photo_masks(photo_id,variant,path);
+    UPDATE photos SET active_mask_variant='invented-v1' WHERE id=1;
+    INSERT INTO photo_masks VALUES(1,'invented-v1','mask'),(1,'stale','other-mask'),(2,'invented-v1','mask');""")
     r = ns["PhotoRepository"]()
     r.conn = c
     r.workspace_id = 1
@@ -341,9 +345,13 @@ def rows_checks():
     assert [x["id"] for x in r.best_batch_sequence_rows(1, "DSC_")] == [1]
     assert r.count_folder_photos(1) == 1
     row = r.analysis_evidence_rows([1, 2, 3, 4], 0.2)[1]
+    assert row["mask_variant"] == "invented-v1"
+    c.execute("UPDATE photo_masks SET path='changed' WHERE photo_id=1 AND variant='invented-v1'")
+    assert r.analysis_evidence_rows([1], 0.2)[1]["mask_variant"] is None
+    c.execute("UPDATE photo_masks SET path='mask' WHERE photo_id=1 AND variant='invented-v1'")
     assert (row["has_mask"], row["has_quality"], row["has_eye"], row["detection_count"]) == (1, 1, 1, 1)
     c.execute(
-        "INSERT INTO photos SELECT 5,folder_id,filename,extension,timestamp,flag,rating,quality_score,sharpness,mask_path,subject_tenengrad,eye_tenengrad,crop_complete,subject_size FROM photos WHERE id=1"
+        "INSERT INTO photos SELECT 5,folder_id,filename,extension,timestamp,flag,rating,quality_score,sharpness,mask_path,subject_tenengrad,eye_tenengrad,crop_complete,subject_size,active_mask_variant FROM photos WHERE id=1"
     )
     c.execute("INSERT INTO photo_workspace_visibility VALUES(5,1)")
     assert len(r.best_batch_folder_rows(1, limit=1)) == 1
@@ -705,6 +713,20 @@ def test_all_hard_rejected_survives_rarity_promotion():
     assert "all_rejected" not in codes([dict(label="KEEP", reject_reasons=[])])
     assert "all_rejected" not in codes([])
     print("PASS hard-reject warning survives rarity promotion; clean REVIEW/KEEP and empty packs stay clear")
+
+
+
+def test_full_mask_urls_require_verified_active_variant():
+    urls = pure["card_urls"]
+    assert urls(7, has_mask=True, mask_variant="invented-v1")["mask_url"] == "/api/masks/7/invented-v1.png"
+    for variant in (None, "", "../other", "a/b", "x?y", "x%2fy"):
+        assert urls(7, has_mask=True, mask_variant=variant)["mask_url"] is None
+    assert urls(7, has_mask=False, mask_variant="invented-v1")["mask_url"] is None
+    assert pure["_attach_evidence"]({"id": 7}, None, 512)["mask_url"] is None
+    evidence = dict(has_mask=True, has_quality=False, has_eye=False, detection_count=0,
+                    crop_complete=None, subject_size=None, mask_variant="invented-v1")
+    assert pure["_attach_evidence"]({"id": 7}, evidence, 512)["mask_url"] == "/api/masks/7/invented-v1.png"
+    print("PASS active-mask URL identity, unavailable/null and variant path-component guards without mask reads")
 
 
 if __name__ == "__main__":

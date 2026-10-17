@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db import Database
 from PIL import Image
-from scanner import scan
+from scanner import ScanHooks, ScanOptions, scan
 
 
 def test_scan_calls_photo_callback_per_photo(tmp_path):
@@ -20,7 +20,7 @@ def test_scan_calls_photo_callback_per_photo(tmp_path):
     db.set_active_workspace(db._active_workspace_id)
 
     callbacks = []
-    scan(tmp_path, db, photo_callback=lambda pid, path: callbacks.append((pid, path)))
+    scan(tmp_path, db, hooks=ScanHooks(photo=lambda pid, path: callbacks.append((pid, path))))
 
     assert len(callbacks) == 3
     # Each callback should have a valid photo_id (int) and a path string
@@ -51,7 +51,7 @@ def test_scan_photo_callback_fires_for_incremental_skip(tmp_path):
     db.set_active_workspace(db._active_workspace_id)
 
     # First scan: no callback, just populate the DB
-    scan(tmp_path, db, incremental=False)
+    scan(tmp_path, db, options=ScanOptions(incremental=False))
 
     # Set timestamps so incremental scan considers metadata complete
     # (PIL-generated images lack EXIF timestamps)
@@ -60,7 +60,11 @@ def test_scan_photo_callback_fires_for_incremental_skip(tmp_path):
 
     # Second scan: incremental with callback — photos already exist, should still fire
     callbacks = []
-    scan(tmp_path, db, incremental=True, photo_callback=lambda pid, path: callbacks.append((pid, path)))
+    scan(
+        tmp_path, db,
+        options=ScanOptions(incremental=True),
+        hooks=ScanHooks(photo=lambda pid, path: callbacks.append((pid, path))),
+    )
 
     assert len(callbacks) == 2
     for pid, path in callbacks:
@@ -82,7 +86,7 @@ def test_incremental_scan_reprocesses_photos_missing_metadata(tmp_path):
     db.set_active_workspace(db._active_workspace_id)
 
     # First scan populates the photo
-    scan(tmp_path, db, incremental=False)
+    scan(tmp_path, db, options=ScanOptions(incremental=False))
     photos = db.get_photos(per_page=999)
     assert len(photos) == 1
     photo_id = photos[0]["id"]
@@ -100,7 +104,7 @@ def test_incremental_scan_reprocesses_photos_missing_metadata(tmp_path):
     assert row["exif_data"] is None
 
     # Incremental re-scan should re-process because timestamp AND exif_data are NULL
-    scan(tmp_path, db, incremental=True)
+    scan(tmp_path, db, options=ScanOptions(incremental=True))
 
     # Width should be restored by the re-scan
     row = db.conn.execute("SELECT width, height FROM photos WHERE id = ?", (photo_id,)).fetchone()
@@ -120,7 +124,7 @@ def test_incremental_scan_skips_photos_with_exif_data_but_no_timestamp(tmp_path)
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db._active_workspace_id)
 
-    scan(tmp_path, db, incremental=False)
+    scan(tmp_path, db, options=ScanOptions(incremental=False))
     photos = db.get_photos(per_page=999)
     photo_id = photos[0]["id"]
 
@@ -132,7 +136,7 @@ def test_incremental_scan_skips_photos_with_exif_data_but_no_timestamp(tmp_path)
     db.conn.commit()
 
     # Incremental scan should SKIP this file (exif_data proves ExifTool ran)
-    scan(tmp_path, db, incremental=True)
+    scan(tmp_path, db, options=ScanOptions(incremental=True))
 
     # Width should still be 999 (not overwritten by re-processing)
     row = db.conn.execute("SELECT width FROM photos WHERE id = ?", (photo_id,)).fetchone()

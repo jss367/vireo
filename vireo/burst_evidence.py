@@ -28,6 +28,7 @@ See ``docs/plans/2026-10-17-burst-evidence-adjudication-design.md``.
 
 import math
 import os
+import re
 
 from best_batch import (
     DEFAULT_BEST_BATCH_MAX_PHOTOS,
@@ -274,7 +275,7 @@ def assess_ambiguity(cards, coverage, *, eye_detect_enabled, margin=DEFAULT_CLOS
     return {"needs_review": bool(reasons), "reasons": reasons}
 
 
-def card_urls(photo_id, *, has_mask, focus_size=DEFAULT_FOCUS_CROP_SIZE):
+def card_urls(photo_id, *, has_mask, focus_size=DEFAULT_FOCUS_CROP_SIZE, mask_variant=None):
     """The image URLs a reviewer needs for one frame."""
     focus = f"/photos/{photo_id}/focus-crop?size={int(focus_size)}"
     return {
@@ -284,6 +285,11 @@ def card_urls(photo_id, *, has_mask, focus_size=DEFAULT_FOCUS_CROP_SIZE):
         "focus_crop_url": focus,
         "focus_crop_scale": {"reference": "decoded_raster", "scale": 1, "original_scale": None},
         "focus_crop_mask_url": f"{focus}&mask=1" if has_mask else None,
+        "mask_url": (
+            f"/api/masks/{photo_id}/{mask_variant}.png"
+            if has_mask and isinstance(mask_variant, str)
+            and re.fullmatch(r"[A-Za-z0-9_-]+", mask_variant) else None
+        ),
     }
 
 
@@ -298,7 +304,9 @@ def _attach_evidence(card, evidence, focus_size):
     else:
         card.setdefault("crop_complete", None)
         card.setdefault("subject_size", None)
-    card.update(card_urls(card["id"], has_mask=card["has_mask"], focus_size=focus_size))
+    # sqlite3.Row iterates values, so test its keys explicitly.
+    variant = evidence["mask_variant"] if evidence and "mask_variant" in evidence.keys() else None  # noqa: SIM118
+    card.update(card_urls(card["id"], has_mask=card["has_mask"], focus_size=focus_size, mask_variant=variant))
     return card
 
 
