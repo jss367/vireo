@@ -130,7 +130,5 @@ async function filterByKeyword(/** @type {string} */ name) {
   // The rule toggles: adding an identical keyword rule removes it. The
   // filter bar's onChange handles the reload.
   VireoFilter.addRule('keyword', 'is', name);
-  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#keywordTree .tree-item')).forEach(function(el) {
-    el.classList.toggle('active', el.dataset.keyword === activeKeyword);
-  });
+  syncSidebarHighlights();
 }
