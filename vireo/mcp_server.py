@@ -550,15 +550,7 @@ def _register_write_tools(server, client):
         else:
             raise VireoError("give a keyword name or keyword_id")
         data = client.post_json("/api/batch/keyword", body)
-        if keyword_id is None and name:
-            # The route reports only the tag count; name the keyword it
-            # resolved (or created) so a follow-up can use the id.
-            stored = name.strip().casefold()
-            for row in client.get_json("/api/keywords"):
-                if row.get("name", "").casefold() == stored:
-                    keyword_id = row["id"]
-                    break
-        return {"updated": data.get("updated"), "keyword_id": keyword_id}
+        return {"updated": data.get("updated"), "keyword_id": data.get("keyword_id")}
 
     @server.tool()
     def remove_keyword(photo_ids: list[int], keyword_id: int) -> dict:

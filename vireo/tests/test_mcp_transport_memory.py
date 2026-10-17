@@ -207,6 +207,54 @@ def test_images_and_writes_use_fixed_routes_without_runtime_or_sdk():
     assert len([c for c in client.calls if c[0] == "POST"]) == 2
 
 
+def test_keyword_write_returns_the_actual_identity_without_name_rediscovery():
+    # Compile only the existing route body, with inert request/DB collaborators.
+    tree = ast.parse((ROOT / "web/batch.py").read_text(encoding="utf-8"))
+    route = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                 and n.name == "api_batch_keyword")
+    route.decorator_list = []
+    import re
+    import unicodedata
+    normalization = ast.parse((ROOT / "keyword_normalization.py").read_text(encoding="utf-8"))
+    norm = {"re": re, "unicodedata": unicodedata}
+    exec(compile(ast.Module(body=[n for n in normalization.body if isinstance(
+        n, (ast.Assign, ast.FunctionDef))], type_ignores=[]), "<inert normalization>", "exec"), norm)
+    rows = [dict(id=21, name="Say's phoebe", parent_id=8, type="location"),
+            dict(id=35, name="Say's phoebe", parent_id=None, type="taxonomy")]
+    body, tagged, queued = {}, [], []
+    def add(name, **kw):
+        assert norm["normalize_keyword_display"](name) == rows[1]["name"]
+        return rows[1]["id"]
+    db = types.SimpleNamespace(
+        add_keyword=add, get_keyword_name=lambda kid: next(r["name"] for r in rows if r["id"] == kid),
+        get_keyword_row=lambda kid: next((r for r in rows if r["id"] == kid), None),
+        get_photo_ids_with_keyword=lambda kid, ids: [], transaction=contextlib.nullcontext,
+        tag_photo=lambda pid, kid, **kw: tagged.append((pid, kid)),
+        record_edit=lambda *a, **kw: None, _prune_edit_history=lambda: None)
+    ns = {"get_db": lambda: db, "request": types.SimpleNamespace(get_json=lambda **kw: body),
+          "parse_selection_photo_ids": lambda db, value, **kw: (value["photo_ids"], None),
+          "json_error": forbidden, "KEYWORD_TYPES": {"general", "taxonomy", "location"},
+          "jsonify": lambda value: value,
+          "queue_keyword_add": lambda db, pid, name, **kw: queued.append((pid, name))}
+    exec(compile(ast.Module(body=[route], type_ignores=[]), "<inert keyword route>", "exec"), ns)
+    class Client:
+        get_json = forbidden
+        def post_json(self, path, value):
+            assert path == "/api/batch/keyword"
+            body.clear()
+            body.update(value)
+            return ns["api_batch_keyword"]()
+    registry = namespace()["build_server"](Client())
+    assert registry.tools["add_keyword"]([7], name=" “Say’s phoebe” ") == {
+        "updated": 1, "keyword_id": 35}
+    assert registry.tools["add_keyword"]([7], name="Say's phoebe") == {
+        "updated": 1, "keyword_id": 35}
+    assert registry.tools["add_keyword"]([7], keyword_id=21) == {
+        "updated": 1, "keyword_id": 21}
+    assert tagged == [(7, 35), (7, 35), (7, 21)]
+    assert queued == [(7, "Say's phoebe")] * 3
+
+
 def test_payload_trimming_and_stdio_are_explicit_without_starting_anything():
     ns = namespace()
     photo = {"id": 7, "quality_score": 0, "token": "must-not-surface", "path": "/invented/a.raw",

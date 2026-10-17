@@ -436,7 +436,7 @@ def create_batch_blueprint(
                                str(kid), items, is_batch=True, _commit=False)
         if items:
             db._prune_edit_history()
-        return jsonify({"ok": True, "updated": len(added_ids)})
+        return jsonify({"ok": True, "updated": len(added_ids), "keyword_id": kid})
 
     @blueprint.route("/api/batch/wildlife-excluded", methods=["POST"])
     def api_batch_wildlife_excluded():
