@@ -27,14 +27,6 @@ log = logging.getLogger(__name__)
 KEEP_CLEANUP_WAIT_SECS = 5.0
 
 
-class _DuplicateRowCleanupError(RuntimeError):
-    """Files moved to Trash, but the catalog transaction must roll back."""
-
-    def __init__(self, payload):
-        super().__init__("trashed files but failed to clean up DB rows")
-        self.payload = payload
-
-
 def create_duplicates_blueprint(
     get_db,
     json_error,
@@ -56,8 +48,9 @@ def create_duplicates_blueprint(
     drops the missing-originals cache after the catalog changes.
     """
     blueprint = Blueprint("duplicates", __name__)
-    # The HTTP reservation gives keeps a bounded wait; SQLite's writer below
-    # additionally coordinates direct callers and other app instances.
+    # Held by "keep this copy instead" and by loser cleanup from classification
+    # through the row delete, so a copy cleanup already chose to trash can't
+    # be promoted to the kept one before its file and row are gone.
     loser_cleanup_lock = threading.Lock()
 
     @blueprint.route("/api/duplicates/apply", methods=["POST"])
@@ -301,50 +294,16 @@ def create_duplicates_blueprint(
             })
 
     def _drop_trashed_loser_rows(db, trashed_pids):
-        """Delete rows in the caller's decision transaction; defer cache I/O."""
-        deleted = {"files": [], "ids": [], "deleted": 0}
+        """Delete the trashed losers' rows and cached derivatives, chunked."""
+        all_files = []
+        deleted_rows = 0
         for chunk in chunked(trashed_pids):
-            result = db.delete_photos(chunk, commit=False)
-            deleted["files"].extend(result.get("files", []))
-            deleted["ids"].extend(result.get("ids", []))
-            deleted["deleted"] += result.get("deleted", 0)
-        return deleted
-
-    def _finish_trashed_loser_cleanup(db, deleted):
-        """Non-transactional derivative cleanup follows the catalog commit."""
-        if not deleted["ids"] and not deleted["files"] and not deleted["deleted"]:
-            return
-        if deleted["ids"]:
-            db.prune_pipeline_cache_for_ids(deleted["ids"])
-        cleanup_cached_files_for_deleted_photos(deleted["files"])
-        if deleted["deleted"]:
+            result = db.delete_photos(chunk)
+            all_files.extend(result.get("files", []))
+            deleted_rows += result.get("deleted", 0)
+        cleanup_cached_files_for_deleted_photos(all_files)
+        if deleted_rows:
             invalidate_missing_originals()
-
-    def _trash_duplicate_losers(db, photo_ids):
-        """The caller holds the writer from classification through row removal."""
-        trash_candidates, trashed_pids, skipped, network_roots = (
-            _classify_loser_candidates(db, photo_ids)
-        )
-        failed = []
-        already_missing_paths = set()
-        # Preserve classification's mount snapshot, including a failed query
-        # (None). Re-querying could misclassify a detached share as local.
-        trashed, successful_paths, trash_failures = trash_paths(
-            [filepath for _pid, filepath in trash_candidates],
-            already_missing_out=already_missing_paths,
-            network_roots=network_roots,
-        )
-        _record_trash_outcomes(
-            trash_candidates, successful_paths, already_missing_paths,
-            trash_failures, trashed_pids, skipped, failed,
-        )
-        payload = {"ok": True, "trashed": trashed, "skipped": skipped, "failed": failed}
-        try:
-            deleted = _drop_trashed_loser_rows(db, trashed_pids)
-        except Exception as exc:
-            # Roll back all row removals before exposing the partial outcome.
-            raise _DuplicateRowCleanupError(payload) from exc
-        return payload, deleted
 
     @blueprint.route("/api/duplicates/delete-loser-files", methods=["POST"])
     def api_duplicates_delete_loser_files():
@@ -384,19 +343,69 @@ def create_duplicates_blueprint(
             return _trash_loser_files(get_db(), photo_ids)
 
     def _trash_loser_files(db, photo_ids):
-        """Hold the catalog writer beyond the per-app HTTP reservation."""
-        try:
-            with db.duplicates.decision_transaction():
-                payload, deleted = _trash_duplicate_losers(db, photo_ids)
-        except _DuplicateRowCleanupError as exc:
-            log.exception("DB row delete failed after duplicate Trash operation")
-            return jsonify(dict(exc.payload, ok=False, error=str(exc))), 500
-        try:
-            _finish_trashed_loser_cleanup(db, deleted)
-        except Exception:
-            log.exception("Derivative cleanup failed after duplicate Trash operation")
-            return jsonify(dict(payload, ok=False, error="trashed files but failed to clean up cached files")), 500
-        return jsonify(payload)
+        """Body of ``delete-loser-files``, run under ``loser_cleanup_lock``."""
+        trash_candidates, trashed_pids, skipped, network_roots = (
+            _classify_loser_candidates(db, photo_ids)
+        )
+        failed = []
+
+        # Track paths whose end state already held (local preflight found
+        # them absent, or Finder reported them missing on a still-mounted
+        # network volume). Without this the network path would silently
+        # succeed with ``trashed: 0`` and empty ``skipped``/``failed``,
+        # leaving the UI stuck on "Moving to Trash..." — the local branch
+        # already surfaces "file already missing" and the network branch
+        # must match so cleanup is a terminal state either way.
+        already_missing_paths = set()
+        # Pass through our mount-table snapshot — including an explicit
+        # ``None`` when our own query failed — so ``_trash_paths`` does
+        # not re-query and overwrite our fail-closed classification. If
+        # its second query happened to succeed after the share detached,
+        # a custom-mount path we already flagged network (via the
+        # ``/Volumes`` fallback in ``_path_on_network_volume``) would be
+        # silently reclassified as local, reintroducing the unbounded-I/O
+        # hang this routing exists to prevent.
+        trashed, successful_paths, trash_failures = trash_paths(
+            [filepath for _pid, filepath in trash_candidates],
+            already_missing_out=already_missing_paths,
+            network_roots=network_roots,
+        )
+        _record_trash_outcomes(
+            trash_candidates, successful_paths, already_missing_paths,
+            trash_failures, trashed_pids, skipped, failed,
+        )
+
+        # Drop DB rows + cached derivatives for every photo whose file is now
+        # gone. Chunked so ``delete_photos``' five internal IN-clause queries
+        # can't trip the SQLite parameter cap on large bulk actions; without
+        # chunking, a 1000+ id request would raise OperationalError on legacy
+        # builds AFTER files were already trashed, leaving the DB inconsistent.
+        if trashed_pids:
+            try:
+                _drop_trashed_loser_rows(db, trashed_pids)
+            except Exception:
+                # Files are already in Trash; if the row delete fails we
+                # surface a 500 so the caller knows reconciliation is
+                # incomplete. Without raising, the summary count would stay
+                # inflated and the caller would have no signal that the
+                # cleanup is half-done.
+                log.exception(
+                    "DB row delete failed after trashing %d files", len(trashed_pids),
+                )
+                return jsonify({
+                    "ok": False,
+                    "error": "trashed files but failed to clean up DB rows",
+                    "trashed": trashed,
+                    "skipped": skipped,
+                    "failed": failed,
+                }), 500
+
+        return jsonify({
+            "ok": True,
+            "trashed": trashed,
+            "skipped": skipped,
+            "failed": failed,
+        })
 
     @blueprint.route("/api/duplicates/cleanup", methods=["GET"])
     def api_duplicates_cleanup():

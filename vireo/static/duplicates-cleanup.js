@@ -16,15 +16,18 @@ function updateDuplicateFileTrashCard(photoId, currentCard) {
   var state = _duplicateFileTrashState.get(photoId);
   var card = currentCard || document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
   if (!card) return;
-  var busy = _duplicateTrashActive || _duplicateKeepPending.has(photoId) || !!(state && (state.pending || state.terminal));
+  var keepPending = _duplicateKeepPending.has(photoId);
+  var fileBusy = keepPending || !!(state && (state.pending || state.terminal));
   var keep = card.querySelector(/** @type {'button'} */ ('.keep-btn'));
   if (keep) {
-    keep.disabled = busy;
-    keep.textContent = _duplicateKeepPending.has(photoId) ? 'Switching...' : 'Keep this copy instead';
+    // A bulk cleanup in flight decides which copies go, so no switching then;
+    // single-file Trash retries stay available while it runs.
+    keep.disabled = fileBusy || _duplicateTrashActive;
+    keep.textContent = keepPending ? 'Switching...' : 'Keep this copy instead';
   }
   var button = card.querySelector(/** @type {'button'} */ ('.trash-btn'));
   if (!button) return;
-  button.disabled = busy;
+  button.disabled = fileBusy;
   var status = card.querySelector(/** @type {'div'} */ ('[data-trash-status]'));
   if (status && state) status.textContent = state.message;
 }
