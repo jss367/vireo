@@ -866,10 +866,10 @@ def create_models_blueprint(
             acquired = DOWNLOAD_LOCK.acquire(blocking=False)
         except (ImportError, OSError) as exc:
             return json_error(
-                f"Cannot establish the download guard: {exc}", status=503)
+                f"Cannot establish the shared model/cache guard: {exc}", status=503)
         if not acquired:
             return json_error(
-                "A model download is in progress; try again shortly", status=409)
+                "Another model or cache operation is in progress; try again shortly", status=409)
         try:
             model_dir = os.path.join(pipeline_models_dir(), spec["subfolder"])
             removed = []

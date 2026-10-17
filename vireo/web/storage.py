@@ -591,7 +591,7 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
             )
         except hf_cache_service.DownloadInProgress as exc:
             return json_error(
-                f"A model download is in progress ({exc}); try again when it finishes", 409,
+                f"Model cache access is busy ({exc}); try again shortly", 409,
             )
         except hf_cache_service.UnsafeCacheCleanup as exc:
             return json_error(f"Cache cleanup refused: {exc}", 409)

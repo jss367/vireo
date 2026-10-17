@@ -188,16 +188,16 @@ def definitions(path, namespace):
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
 
 
-def service():
+def service(*, repositories=(NAME,), model_entries=()):
     fs = MemoryOS()
     fs.add(ROOT, "dir")
     fs.add(REPO + "/blobs", "dir")
     fs.add(REPO + "/snapshots", "dir")
-    fake_models = S(ONNX_REPO="jss367/vireo-onnx-models", KNOWN_MODELS=[], get_models=lambda: [])
+    fake_models = S(ONNX_REPO="jss367/vireo-onnx-models", KNOWN_MODELS=[], get_models=lambda: list(model_entries))
     modules = {
         "fcntl": S(flock=fs.flock, LOCK_EX=1, LOCK_NB=2, LOCK_UN=4),
         "models": fake_models,
-        "services.storage_paths": S(huggingface_repositories=lambda: {NAME}, directory_bytes=lambda _p: 0),
+        "services.storage_paths": S(huggingface_repositories=lambda: set(repositories), directory_bytes=lambda _p: 0),
     }
 
     def importer(name, *_args, **_kwargs):

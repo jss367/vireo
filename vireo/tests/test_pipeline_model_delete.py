@@ -102,7 +102,7 @@ def test_delete_refuses_while_a_download_holds_the_guard(
         app, _ = app_and_db
         resp = _post(app, {"model_id": "sam2-large"})
         assert resp.status_code == 409
-        assert "download" in resp.get_json()["error"].lower()
+        assert "model or cache operation" in resp.get_json()["error"].lower()
         # The install dir must survive: nothing was removed.
         assert (models_root / "models" / "sam2-large" / "image_encoder.onnx").exists()
     finally:

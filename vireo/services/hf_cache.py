@@ -69,7 +69,7 @@ def _fs():
 
 
 class DownloadInProgress(RuntimeError):
-    """Cleanup refused because a model download may be writing the cache."""
+    """Cleanup refused because another model or cache operation may be active."""
 
 
 class CachePurgeIncomplete(RuntimeError):
@@ -443,9 +443,9 @@ def _delete_selected(cache_dir, models_dir, select, *, extra_repos=()):
     try:
         acquired = DOWNLOAD_LOCK.acquire(blocking=False)
     except (ImportError, OSError) as exc:
-        raise UnsafeCacheCleanup(f"Cannot establish the shared download guard: {exc}") from exc
+        raise UnsafeCacheCleanup(f"Cannot establish the shared model/cache guard: {exc}") from exc
     if not acquired:
-        raise DownloadInProgress("a model download is in progress")
+        raise DownloadInProgress("another model or cache operation is in progress")
     try:
         # Resolve the cache root once, matching ``CacheTree.__init__``, so
         # a user-owned symlink in an ancestor (``~/.cache -> /mnt/data``,
