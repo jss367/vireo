@@ -37,7 +37,16 @@ class CacheTree:
     sep = os.sep
 
     def __init__(self, root):
-        self.root = os.path.abspath(root)
+        # Resolve user-owned symlinks in the cache's ancestry once, before
+        # pinning. Common configurations park ``~/.cache`` on a larger disk
+        # (``~/.cache -> /mnt/data/cache``) or point ``HF_HOME`` under
+        # ``/tmp`` on macOS, where ``/tmp -> /private/tmp``. Without this,
+        # ``O_NOFOLLOW`` would reject the first symlinked ancestor and
+        # every cleanup would return a 409. Component-by-component pinning
+        # with ``O_NOFOLLOW`` and the identity verification in ``verify()``
+        # still catch any swap of the resolved root (or an ancestor of it)
+        # after this point.
+        self.root = os.path.realpath(root)
         self.path = self
         self.nodes = {}
         self.observed = {}

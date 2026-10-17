@@ -832,7 +832,6 @@ def create_models_blueprint(
         )
 
     @blueprint.route("/api/models/pipeline/delete", methods=["POST"])
-    @cache_access
     def api_models_pipeline_delete():
         """Delete a pipeline model's ONNX files from ~/.vireo/models/.
 
@@ -840,6 +839,12 @@ def create_models_blueprint(
         removed is that entry's ``subfolder``, never a path built from the
         request. A prefix check alone let ``sam2-large/../..`` resolve to the
         parent of the models directory and rmtree the whole Vireo data dir.
+
+        No ``@cache_access`` guard: ``purge_subfolder`` acquires
+        ``DOWNLOAD_LOCK`` non-blocking inside ``_delete_selected`` and
+        reports ``DownloadInProgress`` (409) if a download is in flight.
+        The install dir removal above is unrelated to the hub cache and
+        does not need the guard either.
         """
         import shutil
 

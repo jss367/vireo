@@ -63,13 +63,16 @@ def weights_status(model_name):
     return "missing"
 
 
-@cache_access
 def ensure_keypoint_weights(model_name, progress_callback=None):
     """Ensure ONNX weights for ``model_name`` are present on disk.
 
     Returns the path to ``model.onnx`` if both that file and ``config.json``
     already exist under ``MODELS_DIR/<model_name>/``. Otherwise downloads
     both from the ``jss367/vireo-onnx-models`` HuggingFace repo.
+
+    The shared cache guard wraps the download helper, not this fast path,
+    so a pipeline whose weights are already on disk does not wait for an
+    unrelated multi-gigabyte transfer to release ``DOWNLOAD_LOCK``.
 
     Args:
         model_name: one of 'rtmpose-animal', 'superanimal-quadruped',
@@ -85,6 +88,19 @@ def ensure_keypoint_weights(model_name, progress_callback=None):
     onnx_path = os.path.join(target, "model.onnx")
     config_path = os.path.join(target, "config.json")
 
+    if os.path.isfile(onnx_path) and os.path.isfile(config_path):
+        return onnx_path
+    return _hf_download_keypoint_weights(model_name, progress_callback)
+
+
+@cache_access
+def _hf_download_keypoint_weights(model_name, progress_callback=None):
+    """Fetch and install keypoint weights for ``model_name`` under the shared guard."""
+    target = _model_dir(model_name)
+    onnx_path = os.path.join(target, "model.onnx")
+    config_path = os.path.join(target, "config.json")
+    # Re-check after taking the shared guard so another process that just
+    # finished the download hands us its result instead of starting over.
     if os.path.isfile(onnx_path) and os.path.isfile(config_path):
         return onnx_path
 

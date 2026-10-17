@@ -155,7 +155,6 @@ def _promote_dinov2_pair(
                 os.unlink(data_backup_path)
 
 
-@cache_access
 def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
     """Ensure DINOv2 ONNX weights for ``variant`` are on disk.
 
@@ -171,6 +170,10 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
     ``~/.vireo/models/dinov2-{variant}/``.  Raises RuntimeError on
     failure so callers can abort rather than silently run without
     embeddings.
+
+    The shared cache guard wraps the download helper, not this fast
+    path, so a pipeline whose weights are already on disk does not wait
+    for an unrelated multi-gigabyte transfer to release ``DOWNLOAD_LOCK``.
 
     Args:
         variant: one of vit-s14, vit-b14, vit-l14
@@ -192,6 +195,18 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
     # download) must NOT skip the sidecar fetch — otherwise ONNX Runtime
     # keeps crashing with ``model_path must not be empty`` on every
     # pipeline run and the broken state never self-heals.
+    if os.path.isfile(model_path) and os.path.isfile(data_path):
+        return model_path
+    return _hf_download_dinov2_weights(variant, progress_callback)
+
+
+@cache_access
+def _hf_download_dinov2_weights(variant, progress_callback=None):
+    """Fetch and install DINOv2 weights for ``variant`` under the shared guard."""
+    model_dir, model_path = _dinov2_model_path(variant)
+    data_path = model_path + ".data"
+    # Re-check after taking the shared guard so another process that just
+    # finished the download hands us its result instead of starting over.
     if os.path.isfile(model_path) and os.path.isfile(data_path):
         return model_path
 

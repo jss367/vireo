@@ -447,6 +447,16 @@ def _delete_selected(cache_dir, models_dir, select, *, extra_repos=()):
     if not acquired:
         raise DownloadInProgress("a model download is in progress")
     try:
+        # Resolve the cache root once, matching ``CacheTree.__init__``, so
+        # a user-owned symlink in an ancestor (``~/.cache -> /mnt/data``,
+        # ``/tmp -> /private/tmp``) is followed before any ``O_NOFOLLOW``
+        # descent, and every path collected and verified below is built
+        # from the same canonical root. ``_relative`` compares against
+        # ``tree.root`` and would otherwise reject paths derived from an
+        # unresolved cache_dir. ``realpath`` of a missing path returns it
+        # unchanged, so the lexists guard below still rejects a cache dir
+        # that never existed.
+        cache_dir = _fs().path.realpath(cache_dir)
         if not os.path.lexists(cache_dir):
             return _result(select({}), 0, [])
         try:

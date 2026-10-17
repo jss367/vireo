@@ -57,7 +57,6 @@ TILED_NMS_IOU = 0.45
 TILED_MAX_ADDITIONS_PER_CATEGORY = 20
 
 
-@cache_access
 def ensure_megadetector_weights(progress_callback=None):
     """Ensure MegaDetector V6 ONNX weights are present on disk.
 
@@ -65,10 +64,24 @@ def ensure_megadetector_weights(progress_callback=None):
     Hugging Face and copies into MEGADETECTOR_ONNX_DIR. Raises RuntimeError
     on failure so callers can abort rather than silently run without detection.
 
+    The shared cache guard wraps the download helper, not this fast path, so
+    a pipeline whose weights are already on disk does not wait for an
+    unrelated multi-gigabyte transfer to release ``DOWNLOAD_LOCK``.
+
     Args:
         progress_callback: optional callable(phase: str, current: int, total: int)
             invoked before the download starts and after it completes.
     """
+    if os.path.isfile(MEGADETECTOR_ONNX_PATH):
+        return MEGADETECTOR_ONNX_PATH
+    return _hf_download_megadetector_weights(progress_callback)
+
+
+@cache_access
+def _hf_download_megadetector_weights(progress_callback=None):
+    """Fetch and install MegaDetector weights under the shared cache guard."""
+    # Re-check after taking the shared guard so another process that just
+    # finished the download hands us its result instead of starting over.
     if os.path.isfile(MEGADETECTOR_ONNX_PATH):
         return MEGADETECTOR_ONNX_PATH
 

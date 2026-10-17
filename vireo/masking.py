@@ -73,7 +73,6 @@ def sam2_status(variant):
     }
 
 
-@cache_access
 def ensure_sam2_weights(variant="sam2-small", progress_callback=None):
     """Ensure SAM2 ONNX encoder + decoder weights for ``variant`` are on disk.
 
@@ -81,6 +80,10 @@ def ensure_sam2_weights(variant="sam2-small", progress_callback=None):
     Otherwise downloads whichever file is missing from Hugging Face and copies
     them into ``~/.vireo/models/{variant}/``. Raises RuntimeError on failure
     so callers can abort rather than silently run without masks.
+
+    The shared cache guard wraps the download helper, not this fast path,
+    so a pipeline whose weights are already on disk does not wait for an
+    unrelated multi-gigabyte transfer to release ``DOWNLOAD_LOCK``.
 
     Args:
         variant: one of sam2-tiny, sam2-small, sam2-base-plus, sam2-large
@@ -98,6 +101,19 @@ def ensure_sam2_weights(variant="sam2-small", progress_callback=None):
     encoder_path = os.path.join(model_dir, "image_encoder.onnx")
     decoder_path = os.path.join(model_dir, "mask_decoder.onnx")
 
+    if os.path.isfile(encoder_path) and os.path.isfile(decoder_path):
+        return model_dir
+    return _hf_download_sam2_weights(variant, progress_callback)
+
+
+@cache_access
+def _hf_download_sam2_weights(variant, progress_callback=None):
+    """Fetch and install SAM2 weights for ``variant`` under the shared guard."""
+    model_dir = _sam2_model_dir(variant)
+    encoder_path = os.path.join(model_dir, "image_encoder.onnx")
+    decoder_path = os.path.join(model_dir, "mask_decoder.onnx")
+    # Re-check after taking the shared guard so another process that just
+    # finished the download hands us its result instead of starting over.
     if os.path.isfile(encoder_path) and os.path.isfile(decoder_path):
         return model_dir
 

@@ -60,6 +60,18 @@ DOWNLOAD_LOCK = SharedDownloadLock()
 
 
 def cache_access[**P, R](function: Callable[P, R]) -> Callable[P, R]:
+    """Serialize a cache writer with every other download and cleanup.
+
+    Decorate only the fetch/copy branch of a cache writer, never a fast
+    path that returns installed weights without touching the cache. The
+    lock waits for the current ``DOWNLOAD_LOCK`` holder, and that holder
+    can be a multi-gigabyte download: a pipeline whose weights are
+    already on disk would otherwise block for the full transfer before
+    its first ``os.path.isfile`` check. The pattern is: perform the
+    readiness check in the public ``ensure_*`` function, call a locked
+    ``_hf_download_*`` helper on a miss, and recheck the fast path once
+    the helper has the lock.
+    """
     @functools.wraps(function)
     def locked(*args: P.args, **kwargs: P.kwargs) -> R:
         with DOWNLOAD_LOCK:

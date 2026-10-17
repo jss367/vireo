@@ -728,17 +728,22 @@ def remove_model(model_id):
         # Capture the entry's hf-hub identifier before unregistering so a
         # dynamically downloaded model (``download_hf_model``, id absent
         # from ``KNOWN_MODELS``) can still have its cache copy purged after
-        # ``get_models()`` no longer returns it.
-        hf_source = ""
-        for field in ("model_str", "source"):
-            value = found.get(field) or ""
-            if value.startswith("hf-hub:"):
-                hf_source = value
-                break
+        # ``get_models()`` no longer returns it. Only capture for managed
+        # entries: a custom-registered model whose ``model_str`` is
+        # ``hf-hub:...`` but whose weights live under a user-owned path
+        # never populated Vireo's hub cache, so purging that repo would
+        # delete another client's cache entry.
         files_deleted = False
         kept_path = None
         weights_path = found.get("weights_path") or ""
         managed = _model_is_managed(found)
+        hf_source = ""
+        if managed:
+            for field in ("model_str", "source"):
+                value = found.get(field) or ""
+                if value.startswith("hf-hub:"):
+                    hf_source = value
+                    break
         if weights_path and os.path.lexists(weights_path):
             if not managed or not _inside_models_dir(weights_path):
                 log.info(

@@ -46,6 +46,7 @@ class MemoryOS:
         self.path.isfile = lambda p: self._kind(p) == "file"
         self.path.islink = lambda p: self._kind(p) == "link"
         self.path.lexists = lambda p: self._kind(p) is not None
+        self.path.realpath = self._realpath
         self.supports_dir_fd = {self.open, self.stat, self.readlink, self.unlink, self.mkdir}
         self.supports_fd = {self.listdir}
 
@@ -68,6 +69,27 @@ class MemoryOS:
             return self.nodes[self._lookup(path)]["kind"]
         except (FileNotFoundError, NotADirectoryError):
             return None
+
+    def _realpath(self, path):
+        """Follow symlink ancestors step by step so a parked ``~/.cache``
+        resolves before any ``O_NOFOLLOW`` descent begins."""
+        assert path.startswith("/"), path
+        remaining = [p for p in path.split("/") if p]
+        current = "/"
+        for _step in range(80):
+            if not remaining:
+                return current
+            part = remaining.pop(0)
+            nxt = posixpath.normpath(posixpath.join(current, part))
+            if self._kind(nxt) == "link":
+                target = self.nodes[self._lookup(nxt)]["target"]
+                target_parts = [p for p in target.split("/") if p]
+                if target.startswith("/"):
+                    current = "/"
+                remaining = target_parts + remaining
+            else:
+                current = nxt
+        raise OSError("too many symlink levels")
 
     def add(self, path, kind="file", size=10, target=None):
         path = posixpath.normpath(path)
@@ -263,17 +285,36 @@ class DescriptorSafetyTests(unittest.TestCase):
         self.assertNotIn(replacement[0], fs.unlinked)
         self.assertFalse(fs.fds)
 
-    def test_unsupported_platform_and_symlinked_ancestor_never_delete(self):
+    def test_unsupported_platform_never_deletes(self):
         fs, ns = service()
         payload(fs)
         ns["supported"] = lambda: False
         with self.assertRaises(ns["UnsafeCacheCleanup"]):
             cleanup(ns)
         self.assertFalse(fs.unlinked)
+
+    def test_symlinked_ancestor_resolves_before_the_no_follow_walk(self):
+        # A user-owned symlink in the cache's ancestry (``~/.cache`` parked
+        # on another disk, or ``/tmp -> /private/tmp`` on macOS) is resolved
+        # once at init so the pinned, component-by-component ``O_NOFOLLOW``
+        # walk never trips on it. If the resolved target itself is missing
+        # or itself unsafe, the walk still fails closed.
+        fs, ns = service()
+        _blob, _snap = payload(fs)
+        # Link an ancestor to the real cache root. The resolved walk pins
+        # the real path and cleanup proceeds exactly as it would without
+        # the link.
+        fs.add("/alias", "link", target="/invented")
+        result = ns["remove"]([KEY], "/alias/hub", "/invented/models")
+        self.assertEqual(result["removed"], [KEY])
+        self.assertFalse(fs.fds)
+        # A symlink pointing to a path that does not exist still fails the
+        # walk — now with FileNotFoundError on the resolved target instead
+        # of ELOOP on the link itself — and never deletes anything.
         fs, ns = service()
         fs.add("/invented", "link", target="/elsewhere")
         with self.assertRaises(OSError), ns["CacheTree"](ROOT):
-            self.fail("a symlinked root ancestor must not be opened")
+            self.fail("a symlink to a nonexistent target must not open")
         self.assertFalse(fs.unlinked)
 
     def test_missing_selected_blob_lock_target_is_held_before_deletion(self):
@@ -542,18 +583,35 @@ class SharedGuardTests(unittest.TestCase):
         self.assertFalse(held)
 
     def test_all_vireo_download_and_install_writers_have_the_shared_guard(self):
+        # Each pipeline-model loader keeps its fast path OUTSIDE the guard
+        # (``cache_access`` is applied to the ``_hf_download_*`` fetch helper
+        # it calls on a miss, not the public ``ensure_*`` function), so a
+        # pipeline whose weights are already on disk does not wait for an
+        # unrelated multi-gigabyte download to release ``DOWNLOAD_LOCK``.
         targets = {
             "models.py": {"remove_model", "register_model", "_hf_download_with_retry", "download_model", "download_hf_model", "_load_upstream_timm_config", "ensure_timm_label_descriptions", "_purge_hf_cache_file"},
-            "dino_embed.py": {"ensure_dinov2_weights"},
-            "detector.py": {"ensure_megadetector_weights"},
-            "masking.py": {"ensure_sam2_weights"},
-            "keypoints.py": {"ensure_keypoint_weights"},
+            "dino_embed.py": {"_hf_download_dinov2_weights"},
+            "detector.py": {"_hf_download_megadetector_weights"},
+            "masking.py": {"_hf_download_sam2_weights"},
+            "keypoints.py": {"_hf_download_keypoint_weights"},
         }
         for path, names in targets.items():
             tree = ast.parse((VIREO / path).read_text())
             found = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)
                      and any(isinstance(d, ast.Name) and d.id == "cache_access" for d in n.decorator_list)}
             self.assertTrue(names <= found, (path, names - found))
+        # Each public pipeline-weight loader checks the installed files
+        # BEFORE calling into its fetch helper, so its own definition must
+        # not carry ``cache_access`` any more.
+        for path, name in (("dino_embed.py", "ensure_dinov2_weights"),
+                           ("detector.py", "ensure_megadetector_weights"),
+                           ("masking.py", "ensure_sam2_weights"),
+                           ("keypoints.py", "ensure_keypoint_weights")):
+            tree = ast.parse((VIREO / path).read_text())
+            unguarded = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
+            self.assertEqual(len(unguarded), 1, (path, name))
+            self.assertFalse(any(isinstance(d, ast.Name) and d.id == "cache_access"
+                                 for d in unguarded[0].decorator_list), (path, name))
         tree = ast.parse((VIREO / "web/models.py").read_text())
         guarded_workers = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "work"
                            and any(isinstance(d, ast.Name) and d.id == "cache_access" for d in n.decorator_list)]
