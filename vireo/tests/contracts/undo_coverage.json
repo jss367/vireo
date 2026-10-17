@@ -159,6 +159,7 @@
       "POST /api/move-rules/preview",
       "POST /api/photos/<int:photo_id>/edit-recipe/compose",
       "POST /api/photos/best-batch",
+      "POST /api/photos/burst-evidence",
       "POST /api/photos/by-ids",
       "POST /api/photos/companion-count",
       "POST /api/photos/edit-recipe/summary",
@@ -177,6 +178,7 @@
       "POST /api/selection/keyword-suggestions",
       "POST /api/selection/prediction-suggestions",
       "POST /api/selection/wildlife-state",
+      "POST /api/v1/photos/burst-evidence",
       "POST /api/workspaces/active/local-folders/preflight",
       "POST /api/workspaces/active/new-images/recheck"
     ]
