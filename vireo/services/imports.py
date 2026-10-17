@@ -15,9 +15,19 @@ import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
 
 from db import Database
 from keyword_normalization import keyword_match_key, normalize_keyword_display
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+
+    from jobs import JobRunner
+    from services.service_types import ErrorResponse, JobDict, JsonDict
+
+    # A tag-scope entry: ``("photo", photo_id, identity)`` or ``("file", hash_or_path)``.
+    _ScopeToken = tuple[str, int, str] | tuple[str, str]
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +42,64 @@ class ImportFailure:
 
     message: str
     status: int = 400
-    details: dict | None = None
+    details: JsonDict | None = None
+
+
+class ParentResume(TypedDict):
+    """What a retry inherits from an interrupted (or retryable) parent.
+
+    Built by ``ImportService._interrupted_parent_resume`` and read by the
+    import-photos admission and job (``services.import_photos``).
+    """
+
+    # path -> [size, mtime, file_hash] of each file landed before cataloging.
+    landed_files: dict[str, list[int | str]]
+    tags_applied: bool
+    paid_tag_photo_ids: list[int]
+    chain_already_ran: bool
+    chain_process_job_ids: list[str]
+    chain_process_job_groups: list[list[str]]
+    untagged_ids: list[int]
+
+
+if TYPE_CHECKING:
+    # ``_validate_parent_import_job``'s ``(parent_config, allowed_ids,
+    # allowed_fingerprints, parent_source_snapshots, parent_resume, error)``.
+    _ParentImportScope = tuple[
+        JsonDict | None, set[int] | None, dict[int, str] | None, JsonDict | None,
+        ParentResume | None, ImportFailure | None,
+    ]
+
+
+class _InvalidateMissingOriginals(Protocol):
+    """``MissingOriginals.invalidate`` as the service calls it."""
+
+    def __call__(self, workspace_ids: list[int] | None = None) -> None: ...
+
+
+class _EnqueueProcessJob(Protocol):
+    """``PipelineChain.enqueue_process_job``: ``(job_id, model_warning, blocker)``."""
+
+    def __call__(
+        self, thread_db: Database, runner: JobRunner, workspace_id: int, *,
+        collection_id: int, process_id: int, chained_from: str | None = None,
+        expanded: JsonDict | None = None, after_move: JsonDict | None = None,
+    ) -> tuple[str | None, str | None, str | None]: ...
+
+
+class _BulkGpsLocationPayload(Protocol):
+    """``BulkGpsLocations.payload``: ``(payload, error_response)``."""
+
+    def __call__(
+        self, db: Database, body: JsonDict,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> tuple[JsonDict | None, ErrorResponse | None]: ...
+
+
+class _CancelRequested(Protocol):
+    """The import tag pass's cancellation check (``_import_tag_cancel_check``)."""
+
+    def __call__(self, *, pause_safe: bool = True) -> bool: ...
 
 
 # strftime directives grouped by what they can render. Used by
@@ -81,7 +148,7 @@ _STRFTIME_TOKEN_RE = {
 }
 
 
-def _strftime_template_can_render(template_component, target):
+def _strftime_template_can_render(template_component: str, target: str) -> bool:
     """Return True if a strftime render of ``template_component`` could
     equal ``target`` (case-insensitively, to match case-alias filesystems).
 
@@ -127,7 +194,7 @@ def _strftime_template_can_render(template_component, target):
         return True
 
 
-def _json_dict(value):
+def _json_dict(value: object) -> JsonDict:
     if isinstance(value, str):
         try:
             value = json.loads(value)
@@ -136,7 +203,7 @@ def _json_dict(value):
     return value if isinstance(value, dict) else {}
 
 
-def _has_failed_files(result):
+def _has_failed_files(result: JsonDict) -> bool:
     failed = result.get("failed")
     return (
         isinstance(failed, (int, float)) and not isinstance(failed, bool)
@@ -144,7 +211,7 @@ def _has_failed_files(result):
     )
 
 
-def _import_failed_before_start(result):
+def _import_failed_before_start(result: JsonDict) -> bool:
     # The exact error fallback covers disk-space history rows written before
     # the pre-import failure marker existed. Mirrors importFailedBeforeStart.
     return (
@@ -156,11 +223,11 @@ def _import_failed_before_start(result):
     )
 
 
-def _has_retryable_import_failure(result):
+def _has_retryable_import_failure(result: JsonDict) -> bool:
     return _has_failed_files(result) or _import_failed_before_start(result)
 
 
-def _can_retry_import_direct_to_nas(config, result):
+def _can_retry_import_direct_to_nas(config: JsonDict, result: JsonDict) -> bool:
     return (
         _import_failed_before_start(result)
         and bool(config.get("local_processing"))
@@ -174,7 +241,10 @@ def _can_retry_import_direct_to_nas(config, result):
     )
 
 
-def _chain_process_job_ids(config, result, rows, job_id=None, *, infer_legacy=True):
+def _chain_process_job_ids(
+    config: JsonDict, result: JsonDict, rows: Sequence[JobDict] | None,
+    job_id: str | None = None, *, infer_legacy: bool = True,
+) -> list[str]:
     """Find the pipeline provenance of a recorded or inherited chain."""
     by_id = {row.get("id"): row for row in rows or [] if row.get("type") == "import"}
     # Older boolean-only rows can inherit payment from a sibling of their
@@ -224,7 +294,9 @@ def _chain_process_job_ids(config, result, rows, job_id=None, *, infer_legacy=Tr
         config, result = _json_dict(row.get("config")), _json_dict(row.get("result"))
 
 
-def _chain_process_job_groups(config, result, rows, job_id=None):
+def _chain_process_job_groups(
+    config: JsonDict, result: JsonDict, rows: Sequence[JobDict] | None, job_id: str | None = None,
+) -> list[list[str]]:
     """Each group is owed; any surviving legacy alternative pays its group."""
     recorded = _chain_process_job_ids(config, result, rows, job_id, infer_legacy=False)
     if not recorded:
@@ -251,12 +323,15 @@ def _chain_process_job_groups(config, result, rows, job_id=None):
         config, result = _json_dict(row.get("config")), _json_dict(row.get("result"))
 
 
-def _chain_invalidated(config, result, rows, job_id, never_started):
+def _chain_invalidated(
+    config: JsonDict, result: JsonDict, rows: Sequence[JobDict] | None, job_id: str | None,
+    never_started: Collection[object],
+) -> bool:
     groups = _chain_process_job_groups(config, result, rows, job_id)
     return any(all(pid in never_started for pid in group) for group in groups)
 
 
-def _pipeline_never_started(row):
+def _pipeline_never_started(row: JobDict) -> bool:
     if row.get("type") != "pipeline":
         return False
     if _json_dict(row.get("result")).get("never_started"):
@@ -267,7 +342,7 @@ def _pipeline_never_started(row):
             and row.get("duration") is None and "_start_time" not in row)
 
 
-def _takeover_descendants(parent_id, rows):
+def _takeover_descendants(parent_id: str, rows: Sequence[JobDict] | None) -> list[JsonDict]:
     """Finished import rows that continue ``parent_id``, never-started excluded."""
     children = {}
     candidates = []
@@ -301,7 +376,9 @@ def _takeover_descendants(parent_id, rows):
     return descendants
 
 
-def _mark_takeover_descendant(e, rows, never_started_processes):
+def _mark_takeover_descendant(
+    e: JsonDict, rows: Sequence[JobDict] | None, never_started_processes: Collection[object],
+) -> None:
     """Record what descendant ``e`` did: its tag, chain and Retry marks."""
     result = e["result"]
     if (
@@ -352,7 +429,9 @@ def _mark_takeover_descendant(e, rows, never_started_processes):
 
 # What a Resume of the parent replays: its own marks plus what
 # descendants paid (``_interrupted_parent_resume``).
-def _takeover_tag_scope(config, result):
+def _takeover_tag_scope(
+    config: JsonDict, result: JsonDict,
+) -> tuple[set[_ScopeToken], dict[int, tuple[str, int, str]]]:
     scope, identities = set(), {}
     fingerprints = {}
     for value in (config.get("carry_photo_fingerprints"),
@@ -377,7 +456,9 @@ def _takeover_tag_scope(config, result):
     return scope, identities
 
 
-def _takeover_paid_carried_scope(config, identities):
+def _takeover_paid_carried_scope(
+    config: JsonDict, identities: Mapping[int, tuple[str, int, str]],
+) -> set[_ScopeToken]:
     paid = set()
     carried = set(config.get("carry_photo_ids") or [])
     carried -= set(config.get("untagged_photo_ids") or [])
@@ -392,7 +473,9 @@ def _takeover_paid_carried_scope(config, identities):
     return paid
 
 
-def _takeover_tag_payment(parent_id, parent_config, parent_result, descendants):
+def _takeover_tag_payment(
+    parent_id: str, parent_config: JsonDict, parent_result: JsonDict, descendants: Sequence[JsonDict],
+) -> tuple[set[_ScopeToken], set[_ScopeToken], bool, list[int], list[int]]:
     """Which tag scope the parent and its descendants paid.
 
     Returns ``(all_scope, unpaid_scope, tags_applied, paid_tag_ids,
@@ -421,8 +504,11 @@ def _takeover_tag_payment(parent_id, parent_config, parent_result, descendants):
     return all_scope, unpaid_scope, tags_applied, paid_tag_ids, unpaid_tag_ids
 
 
-def _takeover_chain(parent_id, parent_config, parent_result, rows, descendants,
-                    never_started_processes, all_scope):
+def _takeover_chain(
+    parent_id: str, parent_config: JsonDict, parent_result: JsonDict,
+    rows: Sequence[JobDict] | None, descendants: Sequence[JsonDict],
+    never_started_processes: Collection[object], all_scope: Collection[object],
+) -> tuple[bool, list[list[str]], set[str]]:
     """Whether the chain ran, and the process-job groups that paid it.
 
     Returns ``(chained, chain_process_job_groups, chain_process_job_ids)``.
@@ -457,7 +543,9 @@ def _takeover_chain(parent_id, parent_config, parent_result, rows, descendants,
     return chained, chain_process_job_groups, chain_process_job_ids
 
 
-def _takeover_successor(descendants, tags_paid, chained):
+def _takeover_successor(
+    descendants: Sequence[JsonDict], tags_paid: bool, chained: bool,
+) -> tuple[JsonDict | None, str | None]:
     """The descendant that took over and how (``"done"``, ``"resume"``, ``"retry"``)."""
     marked = [e for e in descendants if e["tags_applied"] or e["chained"]]
     # A descendant that failed files after its tag pass offers its own
@@ -469,7 +557,7 @@ def _takeover_successor(descendants, tags_paid, chained):
         if e["resumable"] or (e["has_failed_files"] and e["tags_applied"])
     ]
 
-    def newest(entries):
+    def newest(entries: Sequence[JsonDict]) -> JsonDict:
         return max(entries, key=lambda e: e["started_at"])
 
     by, kind = None, None
@@ -481,7 +569,7 @@ def _takeover_successor(descendants, tags_paid, chained):
     return by, kind
 
 
-def _takeover_descendant_landings(descendants):
+def _takeover_descendant_landings(descendants: Sequence[JsonDict]) -> tuple[JsonDict, JsonDict]:
     """The landed files and photo fingerprints recorded by descendants."""
     descendant_landings = {}
     descendant_fingerprints = {}
@@ -498,7 +586,10 @@ def _takeover_descendant_landings(descendants):
     return descendant_landings, descendant_fingerprints
 
 
-def import_resume_takeover(parent_id, parent_result, rows, parent_config=None):
+def import_resume_takeover(
+    parent_id: str, parent_result: object, rows: Sequence[JobDict] | None,
+    parent_config: JsonDict | None = None,
+) -> JsonDict:
     """Whether a later run took over an import's Resume or Retry.
 
     Rows offer to continue an import after a Vireo restart interrupted it
@@ -590,9 +681,13 @@ class ImportService:
     """Validate and launch in-place and archive imports for one app."""
 
     def __init__(
-        self, get_runner, db_path, config, *, invalidate_missing_originals,
-        enqueue_process_job, chain_after_move, bulk_gps_location_payload,
-    ):
+        self, get_runner: Callable[[], JobRunner], db_path: str, config: Mapping[str, Any], *,
+        invalidate_missing_originals: _InvalidateMissingOriginals,
+        enqueue_process_job: _EnqueueProcessJob,
+        chain_after_move: Callable[[JobDict, JsonDict, JsonDict, int], object],
+        bulk_gps_location_payload: _BulkGpsLocationPayload,
+    ) -> None:
+        # Any: ``config`` is the Flask app config, whose values are of mixed types.
         self.get_runner = get_runner
         self.db_path = db_path
         self.config = config
@@ -602,7 +697,7 @@ class ImportService:
         self.bulk_gps_location_payload = bulk_gps_location_payload
         # Serialize workers importing the same frozen snapshot so replays
         # observe prior catalog admissions instead of claiming them again.
-        self.snapshot_import_locks = {}
+        self.snapshot_import_locks: dict[tuple[int, int], threading.Lock] = {}
         self.snapshot_import_locks_guard = threading.Lock()
         self.in_place_restart_lock = threading.Lock()
 
@@ -621,7 +716,7 @@ class ImportService:
 
         return enqueue_import_photos(self, db, body)
 
-    def recovery_options(self, db, job_id):
+    def recovery_options(self, db: Database, job_id: str) -> JsonDict | ImportFailure:
         """Current import recovery eligibility without hashes or job admission."""
         from services.import_photos import _competing_retry_failure
 
@@ -659,12 +754,14 @@ class ImportService:
                                    and isinstance(result.get("photo_ids"), list) and not competing),
         }
 
-    def _gps_location_chunks(self, values, size=800):
+    def _gps_location_chunks(self, values: Iterable[int], size: int = 800) -> Iterator[list[int]]:
         values = list(values)
         for idx in range(0, len(values), size):
             yield values[idx:idx + size]
 
-    def _validate_import_tag_options(self, body):
+    def _validate_import_tag_options(
+        self, body: JsonDict,
+    ) -> tuple[list[str] | None, bool | None, ImportFailure | None]:
         """Normalize optional tags attached to a photo import request."""
         raw_tags = body.get("tags", [])
         if not isinstance(raw_tags, list):
@@ -699,8 +796,8 @@ class ImportService:
         return tags, location_from_gps, None
 
     def _queue_import_keyword_add(
-        self,     db, photo_id, keyword_name, workspace_id, *, commit=False,
-    ):
+        self,     db: Database, photo_id: int, keyword_name: str, workspace_id: int, *, commit: bool = False,
+    ) -> None:
         """Thread-safe equivalent of queue_keyword_add for import jobs."""
         removed = db.remove_pending_changes(
             photo_id, "keyword_remove", keyword_name,
@@ -713,8 +810,8 @@ class ImportService:
             )
 
     def _queue_import_location_sync(
-        self,     db, photo_id, workspace_id, *, commit=False,
-    ):
+        self,     db: Database, photo_id: int, workspace_id: int, *, commit: bool = False,
+    ) -> None:
         """Thread-safe equivalent of queue_location_sync_if_enabled."""
         db.remove_pending_changes(
             photo_id, "location", workspace_id=workspace_id, _commit=commit,
@@ -725,19 +822,23 @@ class ImportService:
         )
 
     @staticmethod
-    def _import_tag_cancel_check(result, job, runner):
+    def _import_tag_cancel_check(
+        result: JsonDict, job: JobDict | None, runner: JobRunner | None,
+    ) -> _CancelRequested:
         """The import tag pass's cancellation check, sticky on ``result``."""
 
-        def cancel_requested(*, pause_safe=True):
+        def cancel_requested(*, pause_safe: bool = True) -> bool:
             runner_check = None
+            job_id = None
             if job is not None and runner is not None:
+                job_id = job["id"]
                 runner_check = (
                     runner.is_cancelled
                     if pause_safe
                     else runner.cancellation_requested
                 )
             cancelled = result.get("cancelled") or (
-                runner_check is not None and runner_check(job["id"])
+                runner_check is not None and runner_check(job_id)
             )
             if cancelled:
                 # The cancellation may arrive after the importer itself has
@@ -748,9 +849,9 @@ class ImportService:
         return cancel_requested
 
     def _apply_import_tags(
-        self,     workspace_id, photo_ids, tags, location_from_gps, result,
-        *, job=None, runner=None,
-    ):
+        self,     workspace_id: int, photo_ids: Sequence[int], tags: Sequence[str], location_from_gps: bool,
+        result: JsonDict, *, job: JobDict | None = None, runner: JobRunner | None = None,
+    ) -> None:
         """Apply requested common tags and per-photo GPS locations.
 
         Tagging is deliberately post-import: ``photo_ids`` is the importer's
@@ -809,8 +910,9 @@ class ImportService:
         thread_db.close()
 
     def _add_import_tag_keywords(
-        self, thread_db, workspace_id, photo_ids, tags, summary, cancel_requested,
-    ):
+        self, thread_db: Database, workspace_id: int, photo_ids: Sequence[int], tags: Sequence[str],
+        summary: JsonDict, cancel_requested: _CancelRequested,
+    ) -> None:
         """Tag every imported photo with each requested keyword."""
         tagged_photo_ids = set()
 
@@ -867,8 +969,9 @@ class ImportService:
         summary["tagged_photos"] = len(tagged_photo_ids)
 
     def _add_import_gps_locations(
-        self, thread_db, photo_ids, summary, cancel_requested,
-    ):
+        self, thread_db: Database, photo_ids: Sequence[int], summary: JsonDict,
+        cancel_requested: _CancelRequested,
+    ) -> None:
         """Assign each imported photo the location its EXIF GPS resolves to."""
         unresolved = 0
         skipped = 0
@@ -886,7 +989,8 @@ class ImportService:
                     thread_db, {"photo_ids": photo_chunk},
                     cancel_check=cancel_requested,
                 )
-                if error is not None:
+                # ``payload`` is None exactly when ``error`` is set.
+                if error is not None or payload is None:
                     raise RuntimeError("location resolution was rejected")
                 if payload.pop("cancelled", False) or cancel_requested():
                     cancelled_during_gps = True
@@ -955,7 +1059,9 @@ class ImportService:
         if cancelled_during_gps:
             summary["skipped"] = "import cancelled"
 
-    def _prepare_import_workspace(self, db, body):
+    def _prepare_import_workspace(
+        self, db: Database, body: JsonDict,
+    ) -> tuple[int | None, JsonDict | None, int | None, ImportFailure | None]:
         """Return the workspace id an import should write to.
 
         Returns ``(active_ws, created_workspace, previous_active_ws, err)``:
@@ -1020,8 +1126,9 @@ class ImportService:
             return None, None, previous_active_ws, ImportFailure(str(e))
 
     def _admit_into_import_workspace(
-        self, db, created_workspace, previous_active_ws, admit,
-    ):
+        self, db: Database, created_workspace: JsonDict | None, previous_active_ws: int | None,
+        admit: Callable[[], str | ImportFailure],
+    ) -> JsonDict | ImportFailure:
         """Run everything an import does after ``_prepare_import_workspace``.
 
         ``admit()`` holds every check between the workspace switch and the
@@ -1045,12 +1152,14 @@ class ImportService:
                 db, created_workspace, previous_active_ws,
             )
             return outcome
-        response = {"job_id": outcome}
+        response: JsonDict = {"job_id": outcome}
         if created_workspace is not None:
             response["workspace"] = created_workspace
         return response
 
-    def _rollback_import_workspace(self, db, created_workspace, previous_active_ws):
+    def _rollback_import_workspace(
+        self, db: Database, created_workspace: JsonDict | None, previous_active_ws: int | None,
+    ) -> None:
         """Undo ``_prepare_import_workspace`` when a later admission check fails.
 
         A ``new_workspace_name`` import that is rejected after the workspace
@@ -1077,7 +1186,7 @@ class ImportService:
                 "Failed to delete created import workspace after a rejected import",
             )
 
-    def _remote_target_snapshot(self, remote_archive_config):
+    def _remote_target_snapshot(self, remote_archive_config: JsonDict | None) -> JsonDict | None:
         """Freeze the parts of a resolved remote target that decide where
         files land, for retry-time comparison against the parent job.
 
@@ -1099,7 +1208,7 @@ class ImportService:
             "subpath": remote_archive_config.get("subpath", ""),
         }
 
-    def _move_target_snapshot(self, target):
+    def _move_target_snapshot(self, target: JsonDict | None) -> JsonDict | None:
         """Freeze the parts of a chained after_process_move target that
         decide where files land, for retry-time comparison.
 
@@ -1122,7 +1231,7 @@ class ImportService:
             "local_archive_root": target.get("local_archive_root", ""),
         }
 
-    def _capture_photo_fingerprints_for_ids(self, db, ids):
+    def _capture_photo_fingerprints_for_ids(self, db: Database, ids: Iterable[object] | None) -> dict[int, str]:
         """Return the current fingerprint string for each ID.
 
         Same shape as ``import_job._capture_photo_fingerprints`` (which
@@ -1204,8 +1313,10 @@ class ImportService:
                 fingerprints[row["id"]] = fp
         return fingerprints
 
-    def _validate_parent_import_job(self, parent_id, active_ws, db, *,
-                                    relocate_landings=True, snapshot_out=None):
+    def _validate_parent_import_job(
+        self, parent_id: str, active_ws: int | None, db: Database, *,
+        relocate_landings: bool = True, snapshot_out: JsonDict | None = None,
+    ) -> _ParentImportScope:
         """Resolve a retry's parent_import_job_id into the scope this
         retry is allowed to inherit.
 
@@ -1247,6 +1358,8 @@ class ImportService:
          error) = self._load_parent_import_job(parent_id, active_ws, db)
         if error is not None:
             return None, None, None, None, None, error
+        # Without an error, ``_load_parent_import_job`` returns both dicts.
+        parent_config, parent_result = cast("JsonDict", parent_config), cast("JsonDict", parent_result)
         allowed_ids, allowed_fingerprints = self._parent_carry_scope(
             parent_config, parent_result)
         parent_source_snapshots = self._parent_source_snapshots(
@@ -1299,7 +1412,9 @@ class ImportService:
             None,
         )
 
-    def _load_parent_import_job(self, parent_id, active_ws, db):
+    def _load_parent_import_job(
+        self, parent_id: str, active_ws: int | None, db: Database,
+    ) -> tuple[JsonDict | None, JsonDict | None, int | None, str | None, ImportFailure | None]:
         """Read a retry's parent import from the runner or job_history.
 
         Returns ``(parent_config, parent_result, parent_workspace,
@@ -1359,7 +1474,7 @@ class ImportService:
         return parent_config, parent_result, parent_workspace, parent_status, None
 
     @staticmethod
-    def _parent_carry_scope(parent_config, parent_result):
+    def _parent_carry_scope(parent_config: JsonDict, parent_result: JsonDict) -> tuple[set[int], dict[int, str]]:
         """The photo ids a retry may carry, and their recorded fingerprints."""
         allowed_ids = set()
         for source in (
@@ -1402,7 +1517,9 @@ class ImportService:
                 allowed_fingerprints.setdefault(pid, value)
         return allowed_ids, allowed_fingerprints
 
-    def _parent_source_snapshots(self, db, parent_config, parent_result, parent_workspace):
+    def _parent_source_snapshots(
+        self, db: Database, parent_config: JsonDict, parent_result: JsonDict, parent_workspace: int | None,
+    ) -> JsonDict | None:
         """The source snapshots a retry's sources must still match."""
         parent_source_snapshots = parent_result.get("source_snapshots")
         if not isinstance(parent_source_snapshots, dict):
@@ -1416,8 +1533,9 @@ class ImportService:
         return parent_source_snapshots
 
     def _parent_import_takeover(
-        self, db, parent_id, parent_config, parent_result, parent_workspace,
-    ):
+        self, db: Database, parent_id: str, parent_config: JsonDict, parent_result: JsonDict,
+        parent_workspace: int | None,
+    ) -> tuple[JsonDict | None, ImportFailure | None]:
         """The parent's Resume/Retry takeover; ``(takeover, error)``.
 
         The error refuses a parent a descendant has already taken over.
@@ -1446,7 +1564,7 @@ class ImportService:
                 )
         return takeover, None
 
-    def _chained_job_exists(self, db, parent_id):
+    def _chained_job_exists(self, db: Database, parent_id: str) -> bool:
         """Whether any job records ``parent_id`` as the import it was
         chained from (the after-import processing run). ``enqueue_pipeline``
         persists the queued row, so this survives a restart.
@@ -1465,8 +1583,8 @@ class ImportService:
         return db.job_history.chained_job_row(parent_id) is not None
 
     def _recover_relocated_descendant_landings(
-        self, db, takeover, allowed_fingerprints=None,
-    ):
+        self, db: Database, takeover: JsonDict, allowed_fingerprints: dict[int, str] | None = None,
+    ) -> None:
         """Keep a moved descendant's scope only when its bytes still match.
 
         Also rebases ``allowed_fingerprints`` (the parent-carried IDs'
@@ -1532,7 +1650,7 @@ class ImportService:
                     ):
                         allowed_fingerprints[pid] = fingerprint
 
-    def _read_import_recovery_row(self, db, job_id, workspace_id):
+    def _read_import_recovery_row(self, db: Database, job_id: str, workspace_id: int | None) -> JobDict | None:
         row = self.get_runner().get(job_id)
         if row is None:
             stored = db.job_history.parent_import_row(job_id)
@@ -1544,7 +1662,9 @@ class ImportService:
             return None
         return {**row, "id": job_id, "config": _json_dict(row.get("config")), "result": _json_dict(row.get("result"))}
 
-    def _import_recovery_ancestors(self, db, parent_config, workspace_id):
+    def _import_recovery_ancestors(
+        self, db: Database, parent_config: JsonDict, workspace_id: int | None,
+    ) -> list[JobDict]:
         """Read trusted ancestors for legacy snapshot and chain evidence."""
         ancestors, seen = [], set()
         parent_id = parent_config.get("parent_import_job_id")
@@ -1557,7 +1677,9 @@ class ImportService:
             parent_id = row["config"].get("parent_import_job_id")
         return ancestors
 
-    def _import_resume_rows(self, db, parent_id, parent_config, workspace_id):
+    def _import_resume_rows(
+        self, db: Database, parent_id: str, parent_config: JsonDict, workspace_id: int | None,
+    ) -> list[JobDict]:
         """Finished import rows that may descend from ``parent_id``, for
         ``import_resume_takeover``. Every descendant inherits the chain's
         root, so matching it (or a direct parent link, for retries older
@@ -1591,11 +1713,12 @@ class ImportService:
             by_id[job["id"]] = job
         # A queued child can be marked never_started by startup. Its
         # import's chain checkpoint is then unpaid, just as the parent's
-        # own _chained_job_exists guard treats that child.
-        process_ids = set(parent_config.get("chain_process_job_ids") or []) | {
+        # own _chained_job_exists guard treats that child. ``- {None}`` drops
+        # rows without a process id, which the checker cannot follow.
+        process_ids = cast("set[str]", set(parent_config.get("chain_process_job_ids") or []) | {
             _json_dict(row.get("result")).get("process_job_id")
             for row in by_id.values()
-        } - {None}
+        } - {None})
         for row in by_id.values():
             process_ids.update(_json_dict(row.get("config")).get("chain_process_job_ids") or [])
         if process_ids:
@@ -1607,7 +1730,7 @@ class ImportService:
         return list(by_id.values())
 
     @staticmethod
-    def _resume_takeover_message(takeover):
+    def _resume_takeover_message(takeover: JsonDict) -> str:
         started = (takeover.get("by_started_at") or "").replace("T", " ")[:16]
         which = (
             f"the import started {started} (job {takeover['by']})"
@@ -1646,7 +1769,9 @@ class ImportService:
         )
 
     @staticmethod
-    def _interrupted_parent_resume(parent_config, parent_result, takeover=None):
+    def _interrupted_parent_resume(
+        parent_config: JsonDict, parent_result: JsonDict, takeover: JsonDict | None = None,
+    ) -> ParentResume | None:
         """Remaining work/scope inherited from an interrupted parent or a
         retryable failed parent with inherited or descendant recovery work.
 
@@ -1688,13 +1813,13 @@ class ImportService:
         if chain_already_ran and tags_applied:
             return None
 
-        def ids(values):
+        def ids(values: Iterable[object] | None) -> list[int]:
             return [
                 pid for pid in values or []
                 if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
             ]
 
-        def files(values):
+        def files(values: object) -> dict[str, list[int | str]]:
             if not isinstance(values, dict):
                 return {}
             return {
@@ -1733,7 +1858,9 @@ class ImportService:
             ),
         }
 
-    def _validate_after_import(self, value, db, *, allow_missing=False):
+    def _validate_after_import(
+        self, value: object, db: Database, *, allow_missing: bool = False,
+    ) -> ImportFailure | None:
         """Return an admission failure for a bad after_import spec, else None.
 
         Shared by both import endpoints: null means import-only; a non-null
@@ -1757,8 +1884,9 @@ class ImportService:
         return None
 
     def _validate_after_process_move(
-        self,     value, after_import, destination, folder_template, file_types=None,
-    ):
+        self,     value: object, after_import: object, destination: str, folder_template: str,
+        file_types: str | None = None,
+    ) -> tuple[JsonDict | None, ImportFailure | None]:
         """Validate an after_process_move spec; return (target_snapshot, error).
 
         ``None`` value → (None, None). Otherwise the value must name a saved
@@ -1800,10 +1928,14 @@ class ImportService:
         target, error = self._after_process_move_target(value, after_import)
         if error is not None:
             return None, error
+        # Without an error, ``_after_process_move_target`` returns the target.
+        target = cast("JsonDict", target)
         return self._check_after_process_move_placement(
             target, destination, folder_template)
 
-    def _after_process_move_target(self, value, after_import):
+    def _after_process_move_target(
+        self, value: object, after_import: object,
+    ) -> tuple[JsonDict | None, ImportFailure | None]:
         """Resolve the remote target an after_process_move spec names.
 
         Returns ``(target, error)``; the target must have a local archive
@@ -1859,7 +1991,9 @@ class ImportService:
         return target, None
 
     @staticmethod
-    def _check_after_process_move_placement(target, destination, folder_template):
+    def _check_after_process_move_placement(
+        target: JsonDict, destination: str, folder_template: str,
+    ) -> tuple[JsonDict | None, ImportFailure | None]:
         """Check where the import lands relative to the target's root and mount.
 
         Returns ``(target_snapshot, error)``; the snapshot respells the
@@ -1929,7 +2063,7 @@ class ImportService:
         return target, None
 
     @staticmethod
-    def _template_mount_overlap_error(folder_template, dest_real, mount):
+    def _template_mount_overlap_error(folder_template: str, dest_real: str, mount: str) -> ImportFailure | None:
         """Reject a folder template whose renders overlap the NAS mount."""
         # The rendered template can still put the import folder in the same
         # tree as the mount even when ``destination`` itself is safely
@@ -2005,7 +2139,7 @@ class ImportService:
             "mount")
 
     @staticmethod
-    def _template_overlap_with_mount(template_components, dest_real, mount):
+    def _template_overlap_with_mount(template_components: Sequence[str], dest_real: str, mount: str) -> str | None:
         """The mount's path under ``dest_real`` when some render overlaps it.
 
         ``None`` when no render of ``template_components`` can land on,
@@ -2094,7 +2228,7 @@ class ImportService:
                     return mount_rel
         return None
 
-    def _validate_import_metadata_dependency(self, body):
+    def _validate_import_metadata_dependency(self, body: JsonDict) -> ImportFailure | None:
         """Require working metadata extraction unless explicitly overridden.
 
         Import can be repaired later, but proceeding silently loses capture
@@ -2123,7 +2257,7 @@ class ImportService:
             details={"code": "exiftool_required", "exiftool": status},
         )
 
-    def _create_import_collection(self, thread_db, photo_ids):
+    def _create_import_collection(self, thread_db: Database, photo_ids: list[int]) -> tuple[int, str]:
         """Create the static collection that records one completed import.
 
         Collection creation belongs to the import itself, not to optional
@@ -2138,7 +2272,9 @@ class ImportService:
         )
         return collection_id, collection_name
 
-    def _record_import_collection(self, result, workspace_id, chain_photo_ids=None):
+    def _record_import_collection(
+        self, result: JsonDict, workspace_id: int, chain_photo_ids: Iterable[int] | None = None,
+    ) -> tuple[Database | None, int | None]:
         """Attach a collection to a complete, successful import result.
 
         ``chain_photo_ids`` optionally extends the collection scope beyond
