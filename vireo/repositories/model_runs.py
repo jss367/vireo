@@ -14,6 +14,14 @@ here; ``current_prediction_detector_confidences`` and
 ``classifier_runs_for_photo`` came from ``web/pipeline.py``, each serving the
 real-detection and full-image reads its two copies made.
 
+The classify job's run lookups and cache-coverage reads came from
+``classify_job`` with their SQL unchanged: a photo's detector-source identity
+(``detector_source_identity``, the ``photos`` columns a detector run's input
+fingerprint is derived from), stored detector runtimes, the classifier_runs
+filter and coverage counts behind ``_all_photos_cache_satisfied``, the cached
+label set's fingerprint, and the release of a reserved ``'incomplete'``
+classifier run once its predictions are stored.
+
 Callers reach it as ``db.model_runs`` (a fresh repository per access, see
 ``Database.model_runs``). ``Database.detector_run_is_pinned`` is the one
 forwarding wrapper left, because the detection writes receive it as their
@@ -21,11 +29,44 @@ forwarding wrapper left, because the detection writes receive it as their
 """
 
 import sqlite3
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import Any
 
 # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
 _UNCLASSIFIABLE_CHUNK = 500
+
+# Only classifier_runs backed by at least one predictions row — or by a
+# measured ``classifier_match_scores`` summary — count as cache-satisfying.
+# See ``classify_job._all_photos_cache_satisfied``'s docstring: a
+# classifier_run without matching predictions is ordinarily a torn write from
+# a crashed local job. But a completed run that matched nothing legitimately
+# publishes a zero-candidate artifact (see
+# ``computation_cache._match_summary_row`` and the note there), and its
+# output-of-record is the ``classifier_match_scores`` row rather than any
+# predictions. Ignoring it would (a) fail cache-only classification on an
+# install without model weights and (b) needlessly re-run inference on an
+# install that has them, discarding exactly the "nothing in your list fits"
+# verdict this feature exists to preserve (Codex P2 on 22cc0ac).
+CACHE_PREDICTIONS_EXIST_SQL = (
+    "(EXISTS (SELECT 1 FROM predictions pr "
+    "WHERE pr.detection_id = cr.detection_id "
+    "AND pr.classifier_model = cr.classifier_model "
+    "AND pr.labels_fingerprint = cr.labels_fingerprint)"
+    " OR EXISTS (SELECT 1 FROM classifier_match_scores cms "
+    "WHERE cms.detection_id = cr.detection_id "
+    "AND cms.classifier_model = cr.classifier_model "
+    "AND cms.labels_fingerprint = cr.labels_fingerprint))"
+)
+CACHE_CLASSIFIABLE_DETECTION_SQL = (
+    "(d.detector_model = 'full-image' OR "
+    "(d.detector_model != 'full-image' "
+    "AND COALESCE(d.category, 'animal') = 'animal' "
+    "AND d.detector_confidence >= ?))"
+)
+
+# The classifier_runs filter ``classifier_cache_run_filter`` builds:
+# ``(filter_sql, filter_args, runtime_clause, runtime_args)``.
+CacheRunFilter = tuple[str, list[Any], str, list[Any]]
 
 
 def _fresh_has_animal_above(
@@ -735,6 +776,247 @@ class ModelRunsRepository:
              json.dumps(sources or []), label_count),
         )
         self.conn.commit()
+
+    # -- classify job: run lookups and cache coverage -------------------------
+    #
+    # The reads and writes ``classify_job`` used to run on ``db.conn``. The
+    # coverage queries back ``_all_photos_cache_satisfied`` (whether a
+    # cached-only finalize can stand in for classification) and the cached
+    # label-source description. The caller decides the inputs (the expected
+    # runtimes, whether legacy rows still count) and chunks the photo ids;
+    # these build and run the queries.
+
+    def detector_source_identity(self, photo_id: int) -> sqlite3.Row | None:
+        """A photo's ``file_hash`` and ``companion_path``, or None without a row.
+
+        What a detector run's portable input fingerprint is derived from: the
+        photo's content hash, unless a companion file stands in for it.
+        """
+        return self.conn.execute(
+            "SELECT file_hash, companion_path FROM photos WHERE id = ?",
+            (photo_id,),
+        ).fetchone()
+
+    def detector_runtime_fingerprint(
+        self, photo_id: int, detector_model: str,
+    ) -> str | None:
+        """The stored ``runtime_fingerprint`` of one detector run, or None."""
+        row = self.conn.execute(
+            """SELECT runtime_fingerprint
+               FROM detector_runs
+               WHERE photo_id = ?
+                 AND detector_model = ?""",
+            (photo_id, detector_model),
+        ).fetchone()
+        return row["runtime_fingerprint"] if row else None
+
+    def detector_runtime_fingerprints(self, photo_ids: Sequence[int]) -> list[str]:
+        """The distinct detector ``runtime_fingerprint`` values of these photos.
+
+        One query; the caller chunks ``photo_ids``.
+        """
+        placeholders = ",".join("?" for _ in photo_ids)
+        return [
+            r["runtime_fingerprint"] for r in self.conn.execute(
+                f"""SELECT DISTINCT runtime_fingerprint
+                     FROM detector_runs
+                     WHERE photo_id IN ({placeholders})""",
+                list(photo_ids),
+            )
+        ]
+
+    def classifier_cache_run_filter(
+        self,
+        classifier_model: str | None,
+        labels_fingerprint: str | None,
+        expected_runtimes: Collection[str],
+        accept_legacy: bool,
+    ) -> CacheRunFilter:
+        """The classifier_runs filters the cache-coverage queries join on.
+
+        Returns ``(filter_sql, filter_args, runtime_clause, runtime_args)``:
+        the requested model / label-set filter and the runtime filter.
+        Without ``expected_runtimes`` the runtime clause only excludes torn
+        ``'incomplete'`` rows. With them, a run counts when it carries one of
+        those runtimes, when it is ``'legacy'`` and ``accept_legacy`` is
+        true, or when a real (not auto-match) accept/reject review pins it.
+        """
+        filter_sql = " AND cr.input_recipe IS NULL"
+        filter_args: list[Any] = []
+        if classifier_model is not None:
+            filter_sql += " AND cr.classifier_model = ?"
+            filter_args.append(classifier_model)
+        if labels_fingerprint is not None:
+            filter_sql += " AND cr.labels_fingerprint = ?"
+            filter_args.append(labels_fingerprint)
+
+        runtime_clause = ""
+        runtime_args: list[Any] = []
+        if expected_runtimes:
+            legacy_clause = (
+                " OR cr.runtime_fingerprint = 'legacy'" if accept_legacy else ""
+            )
+            placeholders = ",".join("?" for _ in expected_runtimes)
+            runtime_clause = (
+                f" AND (cr.runtime_fingerprint IN ({placeholders})"
+                f"{legacy_clause}"
+                " OR EXISTS (SELECT 1 FROM predictions p"
+                " JOIN prediction_review pr ON pr.prediction_id = p.id"
+                " WHERE p.detection_id = cr.detection_id"
+                " AND p.classifier_model = cr.classifier_model"
+                " AND p.labels_fingerprint = cr.labels_fingerprint"
+                " AND pr.status IN ('accepted', 'rejected')"
+                " AND COALESCE(pr.individual, '') != ?))"
+            )
+            runtime_args = list(expected_runtimes) + [self.auto_match_review_marker]
+
+        runtime_clause += " AND cr.runtime_fingerprint != 'incomplete'"
+        return filter_sql, filter_args, runtime_clause, runtime_args
+
+    def cache_coverage_counts(
+        self,
+        photo_ids: Sequence[int],
+        run_filter: CacheRunFilter,
+        detector_confidence: float,
+    ) -> tuple[int, int, int]:
+        """Count one chunk's classifiable detections, covered ones, and photos.
+
+        ``run_filter`` is ``classifier_cache_run_filter``'s result. Returns
+        ``(total, covered, covered_photos)``.
+        """
+        filter_sql, filter_args, runtime_clause, runtime_args = run_filter
+        predictions_exists = CACHE_PREDICTIONS_EXIST_SQL
+        classifiable_detection = CACHE_CLASSIFIABLE_DETECTION_SQL
+        placeholders = ",".join("?" for _ in photo_ids)
+        row = self.conn.execute(
+            f"""SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN cr.detection_id IS NOT NULL
+                                 AND {predictions_exists}
+                                THEN 1 ELSE 0 END)
+                         AS covered
+                 FROM detections d
+                 LEFT JOIN classifier_runs cr
+                   ON cr.detection_id = d.id{filter_sql}{runtime_clause}
+                WHERE {classifiable_detection}
+                  AND d.photo_id IN ({placeholders})""",
+            filter_args + runtime_args + [detector_confidence] + list(photo_ids),
+        ).fetchone()
+        total = (row["total"] if row else 0) or 0
+        covered = (row["covered"] if row else 0) or 0
+
+        photo_row = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT photo_id) AS covered_photos
+                 FROM detections
+                WHERE (detector_model = 'full-image' OR
+                       (detector_model != 'full-image'
+                        AND COALESCE(category, 'animal') = 'animal'
+                        AND detector_confidence >= ?))
+                  AND photo_id IN ({placeholders})""",
+            [detector_confidence] + list(photo_ids),
+        ).fetchone()
+        covered_photos = (
+            (photo_row["covered_photos"] if photo_row else 0) or 0
+        )
+        return total, covered, covered_photos
+
+    def covering_classifier_identities(
+        self,
+        photo_ids: Sequence[int],
+        run_filter: CacheRunFilter,
+        detector_confidence: float,
+    ) -> sqlite3.Cursor:
+        """The distinct classifier identities covering one chunk's detections.
+
+        Rows carry ``m`` (classifier_model) and ``fp`` (labels_fingerprint),
+        under the same eligibility and predictions-must-exist filters as
+        ``cache_coverage_counts``. Returns the open cursor, so a caller that
+        stops at the second identity reads no further.
+        """
+        filter_sql, filter_args, runtime_clause, runtime_args = run_filter
+        predictions_exists = CACHE_PREDICTIONS_EXIST_SQL
+        classifiable_detection = CACHE_CLASSIFIABLE_DETECTION_SQL
+        placeholders = ",".join("?" for _ in photo_ids)
+        return self.conn.execute(
+            f"""SELECT DISTINCT cr.classifier_model AS m,
+                                cr.labels_fingerprint AS fp
+                 FROM detections d
+                 JOIN classifier_runs cr
+                   ON cr.detection_id = d.id
+                WHERE d.photo_id IN ({placeholders})
+                  AND {classifiable_detection}
+                  AND {predictions_exists}{filter_sql}{runtime_clause}""",
+            list(photo_ids) + [detector_confidence] + filter_args + runtime_args,
+        )
+
+    def cached_labels_fingerprint(
+        self,
+        photo_ids: Sequence[int],
+        classifier_model: str | None,
+        detector_confidence: float,
+    ) -> str | None:
+        """The first labels_fingerprint covering one chunk's eligible detections.
+
+        The caller chunks ``photo_ids``. Matches
+        ``cache_coverage_counts``' eligibility filters: only classifiable
+        detections at the workspace threshold, and only classifier_runs
+        backed by an actual predictions row (a torn run without predictions
+        is not a real cache hit). None when no such run carries one.
+        """
+        filter_sql = ""
+        filter_args: list[Any] = []
+        if classifier_model is not None:
+            filter_sql = " AND cr.classifier_model = ?"
+            filter_args.append(classifier_model)
+        classifiable_detection = (
+            "(d.detector_model = 'full-image' OR "
+            "(d.detector_model != 'full-image' "
+            "AND COALESCE(d.category, 'animal') = 'animal' "
+            "AND d.detector_confidence >= ?))"
+        )
+        predictions_exists = (
+            "EXISTS (SELECT 1 FROM predictions p "
+            "WHERE p.detection_id = cr.detection_id "
+            "AND p.classifier_model = cr.classifier_model "
+            "AND p.labels_fingerprint = cr.labels_fingerprint)"
+        )
+        placeholders = ",".join("?" for _ in photo_ids)
+        row = self.conn.execute(
+            f"""SELECT DISTINCT cr.labels_fingerprint AS fp
+                 FROM detections d
+                 JOIN classifier_runs cr
+                   ON cr.detection_id = d.id{filter_sql}
+                WHERE d.photo_id IN ({placeholders})
+                  AND {classifiable_detection}
+                  AND {predictions_exists}
+                  AND cr.runtime_fingerprint != 'incomplete'
+                  AND cr.labels_fingerprint IS NOT NULL
+                LIMIT 1""",
+            filter_args + list(photo_ids) + [detector_confidence],
+        ).fetchone()
+        return row["fp"] if row else None
+
+    def release_incomplete_classifier_run(
+        self, detection_id: int, classifier_model: str, labels_fingerprint: str,
+    ) -> None:
+        """Mark a reserved ``'incomplete'`` classifier run reusable, without committing.
+
+        Only once its output was stored: a predictions row or a
+        ``classifier_match_scores`` summary under the same key. The caller
+        commits.
+        """
+        self.conn.execute(
+            "UPDATE classifier_runs SET runtime_fingerprint='legacy' "
+            "WHERE detection_id=? AND classifier_model=? AND labels_fingerprint=? "
+            "AND runtime_fingerprint='incomplete' AND (EXISTS ("
+            "SELECT 1 FROM predictions p WHERE p.detection_id=classifier_runs.detection_id "
+            "AND p.classifier_model=classifier_runs.classifier_model "
+            "AND p.labels_fingerprint=classifier_runs.labels_fingerprint) OR EXISTS ("
+            "SELECT 1 FROM classifier_match_scores cms "
+            "WHERE cms.detection_id=classifier_runs.detection_id "
+            "AND cms.classifier_model=classifier_runs.classifier_model "
+            "AND cms.labels_fingerprint=classifier_runs.labels_fingerprint))",
+            (detection_id, classifier_model, labels_fingerprint),
+        )
 
 
 def _runtime_predicate(

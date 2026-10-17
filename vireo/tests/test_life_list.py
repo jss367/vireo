@@ -1439,10 +1439,12 @@ def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypa
         "WHERE id = ?",
         (taxon_id, nested),
     )
-    root = db.add_keyword("Verdin", is_species=True)
-    db.conn.execute(
-        "UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon_id, root),
-    )
+    # A top-level twin from before add_keyword reused the placed row.
+    root = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Verdin', NULL, 1, 'taxonomy', ?)",
+        (taxon_id,),
+    ).lastrowid
     db.tag_photo(pid_hier, nested)
     db.tag_photo(pid_root, root)
     db.conn.commit()

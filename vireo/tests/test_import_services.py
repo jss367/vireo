@@ -276,7 +276,7 @@ def test_relocated_descendant_landings_use_native_paths(monkeypatch, path_style,
         service, Mock(), takeover, parent_fingerprints,
     )
     catalog = Mock()
-    catalog.conn.execute.return_value.fetchall.return_value = [{
+    catalog.imports.folder_photo_identities.return_value = [{
         "id": 5, "filename": "bird.jpg", "companion_path": None,
         "file_hash": current_hash,
     }]
@@ -287,8 +287,7 @@ def test_relocated_descendant_landings_use_native_paths(monkeypatch, path_style,
     )
     assert state.recovered_photo_ids == ({5} if same_bytes else set())
     if same_bytes:
-        catalog.conn.execute.assert_called_once()
-        assert catalog.conn.execute.call_args.args[1] == (folder,)
+        catalog.imports.folder_photo_identities.assert_called_once_with(folder)
         # Persisted fingerprint strings retain their existing format.
         assert parent_fingerprints[5] == fingerprint
     else:
