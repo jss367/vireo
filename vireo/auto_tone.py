@@ -437,6 +437,14 @@ def _fit_highlights(fitter, adj, recoverable, *, has_subject, subject_mask, expo
     return _bisect(HIGHLIGHTS_LIMIT, highlights_ok)
 
 
+def _shadow_frame_floor(has_subject, low_key, expose_for_subject):
+    """The darkest 10th-percentile level the Shadows fit must lift the frame to."""
+    frame_floor = FRAME_SHADOW_FLOOR_WITH_SUBJECT if has_subject else FRAME_SHADOW_FLOOR
+    if low_key or expose_for_subject:
+        frame_floor = 0.0
+    return frame_floor
+
+
 def _fit_shadows(fitter, adj, frame_floor, *, has_subject):
     """Open up a dark subject or a crushed frame down to ``frame_floor``."""
     def shadows_ok(amount):
@@ -612,10 +620,7 @@ def fit(
     )
 
     # --- shadows: open up a dark subject or a crushed frame ---
-    frame_floor = FRAME_SHADOW_FLOOR_WITH_SUBJECT if has_subject else FRAME_SHADOW_FLOOR
-    if low_key or expose_for_subject:
-        frame_floor = 0.0
-
+    frame_floor = _shadow_frame_floor(has_subject, low_key, expose_for_subject)
     adj["shadows"] = _fit_shadows(fitter, adj, frame_floor, has_subject=has_subject)
 
     # Contrast and blacks deepen dark tones. They may not push the shadows
