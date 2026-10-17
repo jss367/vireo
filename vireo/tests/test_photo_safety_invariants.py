@@ -231,7 +231,7 @@ class PhotoSafetyMachine(RuleBasedStateMachine):
         # No ExifTool (see the module docstring). Patched per example and
         # restored in teardown, since this runs as a unittest TestCase.
         self._restore = [
-            (scanner, "extract_metadata", scanner.extract_metadata),
+            (scanner.scan_run, "extract_metadata", scanner.scan_run.extract_metadata),
             (metadata, "extract_metadata", metadata.extract_metadata),
         ]
         for module, name, _ in self._restore:

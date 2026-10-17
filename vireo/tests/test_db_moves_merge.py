@@ -1147,7 +1147,7 @@ def test_merge_moves_embedded_keyword_offered_from_phantom_target(
 @pytest.mark.parametrize("removed_on_survivor", [False, True])
 def test_merge_preserves_embedded_tags_and_survivor_removals(
         db, tmp_path, same_hash, hierarchical, removed_on_survivor):
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
     losing, survivor = ((t["staged"], t["survivor"]) if same_hash
@@ -1180,7 +1180,7 @@ def test_merge_preserves_embedded_tags_and_survivor_removals(
 
 @pytest.mark.parametrize("same_hash", [True, False])
 def test_embedded_merge_keeps_survivor_manual_provenance(db, tmp_path, same_hash):
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     t = _collision_tree(db, tmp_path, same_hash=same_hash)
     losing, survivor = ((t["staged"], t["survivor"]) if same_hash

@@ -6519,13 +6519,13 @@ def _count_feature_computations(monkeypatch):
     import scanner
 
     computed = []
-    real = scanner._compute_file_features
+    real = scanner.hashing._compute_file_features
 
     def counting(path_str):
         computed.append(os.path.basename(path_str))
         return real(path_str)
 
-    monkeypatch.setattr(scanner, "_compute_file_features", counting)
+    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", counting)
     return computed
 
 

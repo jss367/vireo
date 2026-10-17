@@ -956,7 +956,7 @@ def test_merge_into_existing_carries_source_keywords_onto_survivor(
 @pytest.mark.parametrize("hierarchical", [False, True])
 def test_folder_merge_respects_embedded_keyword_removals(
         db, tmp_path, removed_on_survivor, hierarchical):
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     target_dir = tmp_path / "target"
     target_dir.mkdir()

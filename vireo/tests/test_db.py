@@ -8980,7 +8980,7 @@ def test_pairing_recomputes_detection_ids_so_photo_id_reuse_is_safe(tmp_path):
     """
     from db import Database
     from detection_id import detection_id as compute_id
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/tmp/p")
@@ -9033,7 +9033,7 @@ def test_pairing_redirects_classifier_runs_so_cache_gate_still_hits(tmp_path):
     """
     from db import Database
     from detection_id import detection_id as compute_id
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/tmp/p")
@@ -9175,7 +9175,7 @@ def test_pairing_preserves_review_when_duplicate_prediction_collapses(tmp_path):
     review state must move to the surviving primary prediction.
     """
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/tmp/p")
