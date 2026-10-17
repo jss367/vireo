@@ -35,9 +35,10 @@ Tools: `vireo_status`, `list_workspaces`, `activate_workspace`,
 `list_folders`, `list_collections`, `search_keywords`, `search_photos`,
 `find_photos_by_text`, `get_photo`, `view_photo` (the preview, the
 thumbnail or the detected subject as an image), `burst`, `set_flag`,
-`set_rating`, `add_keyword` and `remove_keyword` (flag provenance — the
-`reason` and `source` shown next to the flag — lands with #2130; the tool
-takes those fields then). The server reads `runtime.json` on every call;
+`set_rating`, `add_keyword` and `remove_keyword`. `set_flag` accepts optional
+`source` (who decided, up to 60 characters) and `reason` (why, up to 300);
+`get_photo` returns the current `flag_note` with only flag, source, reason,
+description and timestamp fields. The server reads `runtime.json` on every call;
 `VIREO_URL` and `VIREO_TOKEN` override it for tests and second instances
 (both required, and restricted to numeric `http://127.0.0.1` or `http://[::1]`
 origins). URL names, user-info, paths, queries and fragments are refused. HTTP

@@ -232,8 +232,7 @@ def test_burst_passes_the_apps_precondition_through(mcp):
 
 
 def test_set_flag_writes_only_what_the_route_persists(mcp):
-    # Flag provenance (reason / source) is #2130's work and has no route
-    # yet; set_flag must not promise fields the backend throws away.
+    # Omitted provenance preserves the ordinary manual-write payload.
     server, db, transport = mcp
     pid = db.get_photos()[0]["id"]
     result = call(server, "set_flag", photo_ids=[pid], flag="rejected")
@@ -245,10 +244,10 @@ def test_set_flag_writes_only_what_the_route_persists(mcp):
     assert "Vireo answered 400" in call_error(server, "set_flag", photo_ids=[pid], flag="maybe")
 
 
-def test_set_flag_tool_does_not_advertise_unapplied_fields(mcp):
+def test_set_flag_tool_advertises_supported_provenance(mcp):
     server, _, _ = mcp
     tools = {tool.name: tool for tool in anyio.run(server.list_tools)}
-    assert set(tools["set_flag"].input_schema["properties"]) == {"photo_ids", "flag"}
+    assert set(tools["set_flag"].input_schema["properties"]) == {"photo_ids", "flag", "source", "reason"}
 
 
 def test_set_rating_writes_the_rating(mcp):

@@ -61,7 +61,7 @@ EXIF dump, cached paths and render keys stays behind `get_photo(include_exif=tru
 | `get_photo` | `/api/photos/<id>` | |
 | `view_photo` | `/thumbnails/<id>.jpg`, `/photos/<id>/preview`, `/photos/<id>/crop` | Returns the image itself (`thumbnail`, `preview` at 1920, or `subject`, the detection crop). |
 | `burst` | `/api/photos/<id>/best-batch` | The ranked burst around a photo; the app's own "run the pipeline first" error passes through. |
-| `set_flag` | `/api/batch/flag` | `reason` and `source` land with flag provenance (#2130); until then this tool takes only `photo_ids` and `flag`, since the backing route has nowhere to put the other fields. |
+| `set_flag` | `/api/batch/flag` | Optional `source` and `reason` are validated and persisted by the flag route; `get_photo` returns a trimmed current `flag_note`. |
 | `set_rating` | `/api/batch/rating` | |
 | `add_keyword`, `remove_keyword` | `/api/batch/keyword`, `/api/batch/keyword-remove` | |
 

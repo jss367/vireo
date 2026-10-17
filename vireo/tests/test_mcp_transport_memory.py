@@ -255,6 +255,76 @@ def test_keyword_write_returns_the_actual_identity_without_name_rediscovery():
     assert queued == [(7, "Say's phoebe")] * 3
 
 
+def flag_route_fixture():
+    """Actual selected route and validator with fake persistence only."""
+    tree = ast.parse((ROOT / "web/photo_review.py").read_text(encoding="utf-8"))
+    nodes = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+             and n.name in {"flag_provenance", "_valid_flag_photo_id", "set_flags"}]
+    for node in nodes:
+        node.decorator_list = []
+    body, persisted = {}, []
+    def write(ids, flag, **kw):
+        persisted.append((ids, flag, kw))
+        return len(ids)
+    def error(message, *a):
+        raise ValueError(message)
+    ns = {"request": types.SimpleNamespace(get_json=lambda **kw: body),
+          "VALID_FLAGS": ("none", "flagged", "rejected"), "FLAG_SOURCE_MAX_CHARS": 60,
+          "FLAG_REASON_MAX_CHARS": 300, "get_db": lambda: object(),
+          "PhotoReviewService": lambda db: types.SimpleNamespace(set_flags=write),
+          "json_error": error, "jsonify": lambda value: value}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "<inert flag route>", "exec"), ns)
+    class Client:
+        get_json = forbidden
+        def post_json(self, path, value):
+            assert path == "/api/batch/flag"
+            body.clear()
+            body.update(value)
+            return ns["set_flags"]()
+    return Client(), body, persisted
+
+
+def test_flag_provenance_reaches_the_validating_route_without_response_echoes():
+    client, body, persisted = flag_route_fixture()
+    flag = namespace()["build_server"](client).tools["set_flag"]
+    assert flag([7], "rejected", source=" invented-model ", reason=" blurred subject ") == {
+        "updated": 1, "flag": "rejected"}
+    assert body == {"photo_ids": [7], "flag": "rejected",
+                    "source": " invented-model ", "reason": " blurred subject "}
+    assert persisted[-1] == ([7], "rejected", {"source": "invented-model", "reason": "blurred subject"})
+    flag([7], "none")
+    assert body == {"photo_ids": [7], "flag": "none"}
+    assert persisted[-1] == ([7], "none", {"source": None, "reason": None})
+    flag([7], "flagged", reason="   ")
+    assert persisted[-1][2] == {"source": None, "reason": None}
+    before = list(persisted)
+    for kw in ({"source": "x" * 61}, {"reason": "x" * 301}, {"source": 7}, {"reason": []}):
+        try:
+            flag([7], "rejected", **kw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid provenance reached fake persistence")
+    assert persisted == before
+
+
+def test_photo_detail_exposes_only_current_allowlisted_flag_note_fields():
+    ns = namespace()
+    note = {"flag": "rejected", "source": "invented-model", "reason": "blurred subject",
+            "description": "invented audit", "at": "invented-time",
+            "token": "must-not-surface", "db_path": "/invented/private", "history": [{"secret": True}]}
+    class Client:
+        def get_json(self, path, params=None):
+            assert path == "/api/photos/7"
+            return {"id": 7, "flag": "rejected", "flag_note": note, "metadata": {}}
+    result = ns["build_server"](Client()).tools["get_photo"](7)
+    assert result["flag_note"] == {key: note[key] for key in ("flag", "source", "reason", "description", "at")}
+    assert "flag_note" not in ns["photo_summary"]({"flag_note": note})
+    assert ns["photo_detail"]({"flag_note": None})["flag_note"] is None
+    assert ns["photo_detail"]({"flag_note": "malformed"})["flag_note"] is None
+    assert "flag_note" not in ns["photo_detail"]({"id": 7})
+
+
 def test_payload_trimming_and_stdio_are_explicit_without_starting_anything():
     ns = namespace()
     photo = {"id": 7, "quality_score": 0, "token": "must-not-surface", "path": "/invented/a.raw",

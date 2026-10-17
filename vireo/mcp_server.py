@@ -264,6 +264,12 @@ def _exposure_from_metadata(metadata):
 def photo_detail(photo, include_exif=False):
     out = photo_summary(photo)
     out.update(_pick(photo, _PHOTO_DETAIL_KEYS))
+    if "flag_note" in photo:
+        note = photo["flag_note"]
+        out["flag_note"] = (
+            _pick(note, ("flag", "source", "reason", "description", "at"))
+            if isinstance(note, dict) else None
+        )
     out["keywords"] = [
         _pick(k, ("id", "name", "type")) for k in photo.get("keywords") or []
     ]
@@ -518,16 +524,22 @@ def _register_write_tools(server, client):
     """The catalog writes; each is one Undo step in Vireo."""
 
     @server.tool()
-    def set_flag(photo_ids: list[int], flag: str) -> dict:
+    def set_flag(
+        photo_ids: list[int], flag: str,
+        source: str | None = None, reason: str | None = None,
+    ) -> dict:
         """Flag photos: ``flagged`` (a pick), ``rejected`` or ``none``.
 
-        Flag provenance (the reason the flag was set and who set it) will
-        land with #2130; this tool will take ``reason`` and ``source``
-        parameters then. Until the backing route exists, there is nowhere
-        to put those fields and the tool does not pretend otherwise."""
-        data = client.post_json(
-            "/api/batch/flag", {"photo_ids": photo_ids, "flag": flag}
-        )
+        Optional ``source`` names who decided (up to 60 characters), and
+        ``reason`` explains why (up to 300). The app validates and records
+        them in the undoable edit and the current photo's ``flag_note``.
+        """
+        body: dict[str, object] = {"photo_ids": photo_ids, "flag": flag}
+        if source is not None:
+            body["source"] = source
+        if reason is not None:
+            body["reason"] = reason
+        data = client.post_json("/api/batch/flag", body)
         return {"updated": data.get("updated"), "flag": flag}
 
     @server.tool()
