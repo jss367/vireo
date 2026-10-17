@@ -312,6 +312,40 @@ class _ScanJobRun:
                 summary=scan_summary,
             )
 
+    def finish(self, photo_count):
+        """Close a scan that ran to the end: its step, thumbnails, rollup."""
+        self.record_scan_step(photo_count)
+        # Skip the thumbnail phase when EVERY requested root's scan
+        # raised. generate_all() walks the whole library looking
+        # for missing thumbnails — running it after a total scan
+        # failure does a long, unrelated pass and delays the
+        # failure feedback the user actually needs. When at least
+        # one root's scan succeeded we still run thumbs so those
+        # newly-indexed photos get covered. Cache-invalidation
+        # failures do NOT gate this decision: the scan for that
+        # root did produce indexed photos that need thumbnails.
+        all_roots_failed = (
+            bool(self.roots_list) and len(self.scan_failed_roots) == len(self.roots_list)
+        )
+
+        if all_roots_failed:
+            self.skip_thumbnails()
+            thumb_result = None
+        else:
+            thumb_result = self.generate_thumbnails()
+
+        # Mixed-outcome rollup: any failed root => job is "failed".
+        # JobRunner._run_job dedupes job["errors"] by exact string
+        # match. Raise the first per-root message (already recorded
+        # above) so no extra aggregate entry is appended — that
+        # would inflate error_count in job/history output. The
+        # "N of M roots failed" context is already visible via the
+        # scan step's summary and error_count set above.
+        if self.root_errors:
+            raise RuntimeError(self.root_errors[0])
+
+        return {"photos_indexed": photo_count, "thumbnails": thumb_result}
+
     def skip_thumbnails(self):
         log.info(
             "All %d scan root(s) failed; skipping thumbnail phase",
@@ -442,36 +476,6 @@ def build_scan_work(
         # dropped mid-scan), so "N photos" would read as a success
         # line for a scan that cataloged nothing.
         photo_count = run.indexed
-        run.record_scan_step(photo_count)
-        # Skip the thumbnail phase when EVERY requested root's scan
-        # raised. generate_all() walks the whole library looking
-        # for missing thumbnails — running it after a total scan
-        # failure does a long, unrelated pass and delays the
-        # failure feedback the user actually needs. When at least
-        # one root's scan succeeded we still run thumbs so those
-        # newly-indexed photos get covered. Cache-invalidation
-        # failures do NOT gate this decision: the scan for that
-        # root did produce indexed photos that need thumbnails.
-        all_roots_failed = (
-            bool(roots_list) and len(run.scan_failed_roots) == len(roots_list)
-        )
-
-        if all_roots_failed:
-            run.skip_thumbnails()
-            thumb_result = None
-        else:
-            thumb_result = run.generate_thumbnails()
-
-        # Mixed-outcome rollup: any failed root => job is "failed".
-        # JobRunner._run_job dedupes job["errors"] by exact string
-        # match. Raise the first per-root message (already recorded
-        # above) so no extra aggregate entry is appended — that
-        # would inflate error_count in job/history output. The
-        # "N of M roots failed" context is already visible via the
-        # scan step's summary and error_count set above.
-        if run.root_errors:
-            raise RuntimeError(run.root_errors[0])
-
-        return {"photos_indexed": photo_count, "thumbnails": thumb_result}
+        return run.finish(photo_count)
 
     return work
