@@ -103,7 +103,7 @@ def test_source_identity_survives_fetch_save_merge_and_classifier(tmp_path, monk
     prediction = classifier._build_custom_results(np.array([0.9]), 0.1)[0]
     assert prediction["species"] == "Red-crowned Amazon"
     assert prediction["taxonomy"]["scientific_name"] == RED["scientific_name"]
-    from classify_job import _prediction_taxonomy
+    from classify_job.store_predictions import _prediction_taxonomy
     enriched = _prediction_taxonomy(taxonomy, prediction["species"], prediction["taxonomy"])
     assert enriched["taxon_id"] == 18976
     assert enriched["class"] == "Aves"
@@ -700,8 +700,8 @@ def test_id_only_taxonomy_controls_matching_and_enrichment(db, tmp_path, taxonom
     raw = [{"photo": {"id": pid, "filename": "photo.jpg"}, "folder_path": str(tmp_path),
             "detection_id": det, "prediction": "Red-crowned Amazon", "confidence": .9,
             "alternatives": [], "taxonomy": {"taxon_id": 18997}, "timestamp": None}]
-    with patch("classify_job._categorize_detection_prediction", return_value="new") as category, \
-         patch("classify_job._can_auto_accept_detection_prediction", return_value=False) as accept:
+    with patch("classify_job.store_predictions._categorize_detection_prediction", return_value="new") as category, \
+         patch("classify_job.store_predictions._can_auto_accept_detection_prediction", return_value=False) as accept:
         _store_grouped_predictions(raw, "test-job", "BioCLIP", 10, .99, taxonomy, db, "custom")
     assert category.call_args.args[0] == BROWED["scientific_name"]
     assert accept.call_args.args[0] == BROWED["scientific_name"]
@@ -821,7 +821,7 @@ def test_cache_refresh_keeps_original_scientific_spelling_without_local_taxon(db
 
 
 def test_unknown_id_enrichment_does_not_borrow_common_name_taxonomy(db, tmp_path, taxonomy):
-    from classify_job import _prediction_taxonomy
+    from classify_job.store_predictions import _prediction_taxonomy
 
     evidence = _prediction_taxonomy(taxonomy, "Red-crowned Amazon", {"taxon_id": 900001})
     assert evidence == {"taxon_id": 900001}

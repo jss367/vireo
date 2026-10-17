@@ -570,7 +570,7 @@ def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
 # keyword (see ``vireo/catalog.py``) and the classifier already treats
 # ancestor tags as "broader labels for the same taxon" rather than
 # separate identifications (see ``_can_auto_accept_detection_prediction``
-# in ``vireo/classify_job.py``). Without a hierarchy filter, a normal
+# in ``vireo/classify_job/store_predictions.py``). Without a hierarchy filter, a normal
 # species-tagged robin would also inflate ``Turdus`` / ``Turdidae`` /
 # ``Aves`` Life List buckets on those catalogs.
 #
