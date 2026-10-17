@@ -932,6 +932,139 @@ def test_get_labels_fingerprints_tolerates_malformed_sources(db, raw, expected):
     assert db.model_runs.get_labels_fingerprints()[0]["sources"] == expected
 
 
+# -- classify job: run lookups and cache coverage ------------------------------
+
+
+def test_detector_source_identity_reads_hash_and_companion(db):
+    pid = _photo(db, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET file_hash = 'h1', companion_path = NULL WHERE id = ?",
+        (pid,),
+    )
+    db.conn.commit()
+    row = db.model_runs.detector_source_identity(pid)
+    assert (row["file_hash"], row["companion_path"]) == ("h1", None)
+    assert db.model_runs.detector_source_identity(pid + 999) is None
+
+
+def test_detector_runtime_fingerprint_is_per_photo_and_model(db):
+    pid = _photo(db, "a.jpg")
+    db.model_runs.record_detector_run(pid, "megadetector-v6", 1, runtime_fingerprint="rt-md")
+    db.model_runs.record_detector_run(pid, "full-image", 1, runtime_fingerprint="rt-full")
+    assert db.model_runs.detector_runtime_fingerprint(pid, "megadetector-v6") == "rt-md"
+    assert db.model_runs.detector_runtime_fingerprint(pid, "full-image") == "rt-full"
+    assert db.model_runs.detector_runtime_fingerprint(pid, "other") is None
+
+
+def test_detector_runtime_fingerprints_are_distinct_per_chunk(db):
+    fid = _folder(db)
+    a, b, c = (_photo(db, f"{n}.jpg", fid) for n in "abc")
+    db.model_runs.record_detector_run(a, "megadetector-v6", 1, runtime_fingerprint="rt-1")
+    db.model_runs.record_detector_run(b, "megadetector-v6", 1, runtime_fingerprint="rt-1")
+    db.model_runs.record_detector_run(b, "full-image", 1, runtime_fingerprint="rt-2")
+    db.model_runs.record_detector_run(c, "megadetector-v6", 1, runtime_fingerprint="rt-3")
+    assert sorted(db.model_runs.detector_runtime_fingerprints([a, b])) == ["rt-1", "rt-2"]
+
+
+def test_classifier_cache_run_filter_shapes():
+    repo = ModelRunsRepository(
+        None, auto_match_review_marker="AUTO", commit_with_retry=lambda conn: None,
+    )
+    filter_sql, filter_args, runtime_clause, runtime_args = (
+        repo.classifier_cache_run_filter(None, None, set(), True)
+    )
+    assert filter_sql == " AND cr.input_recipe IS NULL"
+    assert filter_args == [] and runtime_args == []
+    assert runtime_clause == " AND cr.runtime_fingerprint != 'incomplete'"
+
+    filter_sql, filter_args, runtime_clause, runtime_args = (
+        repo.classifier_cache_run_filter(MODEL, "fp", {"rt"}, True)
+    )
+    assert filter_sql.endswith(
+        " AND cr.classifier_model = ? AND cr.labels_fingerprint = ?"
+    )
+    assert filter_args == [MODEL, "fp"]
+    assert "cr.runtime_fingerprint IN (?)" in runtime_clause
+    assert "OR cr.runtime_fingerprint = 'legacy'" in runtime_clause
+    assert runtime_clause.endswith(" AND cr.runtime_fingerprint != 'incomplete'")
+    assert runtime_args == ["rt", "AUTO"]
+
+    _sql, _args, strict_clause, _rargs = repo.classifier_cache_run_filter(
+        None, None, {"rt"}, False,
+    )
+    assert "'legacy'" not in strict_clause
+
+
+def test_cache_coverage_counts_and_covering_identities(db):
+    fid = _folder(db)
+    a, b = _photo(db, "a.jpg", fid), _photo(db, "b.jpg", fid)
+    det_a = _det(db, a)
+    _det(db, b)  # classifiable, uncovered
+    _det(db, b, conf=0.05)  # below the floor: not classifiable
+    _usable(db, det_a, "fp-a")
+    run_filter = db.model_runs.classifier_cache_run_filter(None, None, set(), True)
+    assert db.model_runs.cache_coverage_counts([a, b], run_filter, 0.2) == (2, 1, 2)
+    identities = [
+        (r["m"], r["fp"]) for r in db.model_runs.covering_classifier_identities(
+            [a, b], run_filter, 0.2,
+        )
+    ]
+    assert identities == [(MODEL, "fp-a")]
+
+
+def test_cached_labels_fingerprint_needs_a_prediction_backed_run(db):
+    pid = _photo(db, "a.jpg")
+    det = _det(db, pid)
+    db.model_runs.record_classifier_run(det, MODEL, "fp-torn", 0)
+    assert db.model_runs.cached_labels_fingerprint([pid], None, 0.2) is None
+    _usable(db, det, "fp-a")
+    assert db.model_runs.cached_labels_fingerprint([pid], None, 0.2) == "fp-a"
+    assert db.model_runs.cached_labels_fingerprint([pid], MODEL, 0.2) == "fp-a"
+    assert db.model_runs.cached_labels_fingerprint([pid], "other", 0.2) is None
+    assert db.model_runs.cached_labels_fingerprint([pid], None, 0.95) is None
+
+
+def test_release_incomplete_classifier_run_needs_stored_output_and_leaves_commit(db):
+    pid = _photo(db, "a.jpg")
+    det = _det(db, pid)
+    db.model_runs.record_classifier_run(
+        det, MODEL, "fp-a", 1, runtime_fingerprint="incomplete",
+    )
+    db.model_runs.release_incomplete_classifier_run(det, MODEL, "fp-a")
+    run = "SELECT runtime_fingerprint FROM classifier_runs WHERE detection_id = ?"
+    assert db.conn.execute(run, (det,)).fetchone()[0] == "incomplete"
+
+    _pred(db, det, "fp-a")
+    db.model_runs.release_incomplete_classifier_run(det, MODEL, "fp-a")
+    assert db.conn.execute(run, (det,)).fetchone()[0] == "legacy"
+    assert db.in_transaction
+    reader = _reader(db)
+    try:
+        assert reader.execute(run, (det,)).fetchone()[0] == "incomplete"
+    finally:
+        reader.close()
+    db.commit()
+
+
+def test_classify_job_reaches_model_runs_through_the_accessor():
+    """``classify_job`` runs no SQL of its own; its run reads live here."""
+    import classify_job
+
+    source = inspect.getsource(classify_job)
+    for name in (
+        "detector_source_identity", "detector_runtime_fingerprint",
+        "detector_runtime_fingerprints", "classifier_cache_run_filter",
+        "cache_coverage_counts", "covering_classifier_identities",
+        "cached_labels_fingerprint", "release_incomplete_classifier_run",
+    ):
+        assert f"model_runs.{name}(" in source, name
+    tree = ast.parse(source)
+    assert not [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "conn"
+    ]
+
+
 # -- structure ----------------------------------------------------------------
 
 _REMOVED_MODEL_RUN_WRAPPERS = (

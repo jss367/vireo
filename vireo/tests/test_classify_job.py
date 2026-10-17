@@ -4772,6 +4772,9 @@ def test_run_classify_job_full_pipeline(tmp_path):
     ]
     mock_db_instance.get_existing_prediction_photo_ids.return_value = set()
     mock_db_instance.masks_features.get_embedding.return_value = None
+    # Nothing cached: the cache-coverage shortcut finds no classifiable
+    # detections, so the job runs real classification.
+    mock_db_instance.model_runs.cache_coverage_counts.return_value = (0, 0, 0)
     # Subject-skip gate: with no subject types configured the gate is a no-op.
     mock_db_instance.get_subject_types.return_value = set()
     mock_db_instance.filter_out_subject_tagged.side_effect = (

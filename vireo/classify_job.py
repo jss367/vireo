@@ -39,7 +39,7 @@ except ImportError:
     load_image = None
     load_working_image = None
 
-from db import AUTO_MATCH_REVIEW_MARKER, Database, commit_with_retry
+from db import AUTO_MATCH_REVIEW_MARKER, Database
 from keyword_normalization import folded_species_key as _folded_species_key
 from keyword_normalization import normalize_keyword_display
 from keyword_normalization import species_match_key as _species_match_key
@@ -426,40 +426,24 @@ def _run_classifier_on_detection(db, detection_id, classifier_model, labels,
             pred["species"] = normalized_species
         confidence = pred.get("confidence") or pred.get("score")
         tax = pred.get("taxonomy") or {}
-        db.conn.execute(
-            """INSERT OR REPLACE INTO predictions
-                (detection_id, classifier_model, labels_fingerprint, species,
-                 confidence, category, scientific_name,
-                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                 taxonomy_order, taxonomy_family, taxonomy_genus, source_taxon_id,
-                 match_score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                detection_id,
-                classifier_model,
-                labels_fingerprint,
-                species,
-                confidence,
-                pred.get("category", "new"),
-                tax.get("scientific_name"),
-                tax.get("kingdom"),
-                tax.get("phylum"),
-                tax.get("class"),
-                tax.get("order"),
-                tax.get("family"),
-                tax.get("genus"),
-                tax.get("taxon_id"),
-                # Carried through so this seam does not silently drop the one
-                # signal that distinguishes a match from the closest label in
-                # a list that had nothing right in it. The run-level summary
-                # is not written here: classify_fn returns whatever it chooses
-                # to return, so this path cannot know it saw the whole label
-                # list, and guessing would put a fabricated "best over all
-                # labels" into the table calibration reads.
-                pred.get("raw_score"),
-            ),
+        db.predictions.replace_row(
+            detection_id,
+            classifier_model,
+            labels_fingerprint,
+            species,
+            confidence,
+            pred.get("category", "new"),
+            tax,
+            # Carried through so this seam does not silently drop the one
+            # signal that distinguishes a match from the closest label in
+            # a list that had nothing right in it. The run-level summary
+            # is not written here: classify_fn returns whatever it chooses
+            # to return, so this path cannot know it saw the whole label
+            # list, and guessing would put a fabricated "best over all
+            # labels" into the table calibration reads.
+            pred.get("raw_score"),
         )
-    commit_with_retry(db.conn)
+    db.commit_with_retry()
     return predictions
 
 
@@ -575,8 +559,10 @@ def _all_photos_cache_satisfied(
     # not blow past SQLite's default SQLITE_MAX_VARIABLE_NUMBER (999)
     # and fail the whole classify job.
     for chunk in _chunks(photo_ids):
-        chunk_total, chunk_covered, chunk_photos = _chunk_cache_coverage(
-            db, chunk, run_filter, detector_confidence,
+        chunk_total, chunk_covered, chunk_photos = (
+            db.model_runs.cache_coverage_counts(
+                chunk, run_filter, detector_confidence,
+            )
         )
         total += chunk_total
         covered += chunk_covered
@@ -601,23 +587,16 @@ def _cache_run_filter(
     Returns ``(filter_sql, filter_args, runtime_clause, runtime_args)``:
     the requested model / label-set filter and the runtime filter.
     """
-    filter_sql = " AND cr.input_recipe IS NULL"
-    filter_args = []
-    if classifier_model is not None:
-        filter_sql += " AND cr.classifier_model = ?"
-        filter_args.append(classifier_model)
-    if labels_fingerprint is not None:
-        filter_sql += " AND cr.labels_fingerprint = ?"
-        filter_args.append(labels_fingerprint)
-
     expected_runtimes = _expected_classifier_runtimes(
         db, photo_ids, model_identity, labels_fingerprint_full,
         taxonomy_identity,
     )
-    runtime_clause, runtime_args = _classifier_runtime_clause(
-        expected_runtimes, model_identity,
+    accept_legacy = (
+        _accepts_legacy_runtime(model_identity) if expected_runtimes else True
     )
-    return filter_sql, filter_args, runtime_clause, runtime_args
+    return db.model_runs.classifier_cache_run_filter(
+        classifier_model, labels_fingerprint, expected_runtimes, accept_legacy,
+    )
 
 
 def _expected_classifier_runtimes(
@@ -641,15 +620,9 @@ def _expected_classifier_runtimes(
 
             detector_runtimes = set()
             for chunk in _chunks(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                for r in db.conn.execute(
-                    f"""SELECT DISTINCT runtime_fingerprint
-                         FROM detector_runs
-                         WHERE photo_id IN ({placeholders})""",
-                    list(chunk),
-                ):
-                    if r["runtime_fingerprint"]:
-                        detector_runtimes.add(r["runtime_fingerprint"])
+                for runtime in db.model_runs.detector_runtime_fingerprints(chunk):
+                    if runtime:
+                        detector_runtimes.add(runtime)
             for dr in detector_runtimes:
                 expected = classifier_runtime_fingerprint(
                     model_identity, labels_fingerprint_full, dr,
@@ -662,135 +635,41 @@ def _expected_classifier_runtimes(
     return expected_runtimes
 
 
-def _classifier_runtime_clause(expected_runtimes, model_identity):
-    """The classifier_runs runtime filter for the cache-coverage queries.
+def _accepts_legacy_runtime(model_identity):
+    """Whether ``runtime_fingerprint = 'legacy'`` rows still satisfy the cache.
 
-    Returns ``(clause, args)``. Without expected runtimes the clause only
-    excludes torn ``'incomplete'`` rows.
+    Only consulted when the coverage queries filter by expected runtimes.
     """
-    runtime_clause = ""
-    runtime_args = []
-    if expected_runtimes:
-        # Grandfather ``runtime_fingerprint = 'legacy'`` for pre-portable
-        # rows, EXCEPT when the classifier is timm and its
-        # ``label_descriptions.json`` enrichment has since transitioned
-        # from missing to present. That mapping is what turns a raw
-        # class id into the stored common name, so an unreviewed legacy
-        # timm row's species is stale relative to what a run made today
-        # would emit ("Bubulcus ibis" -> "Western Cattle-Egret"); keeping
-        # the exception would leave the scientific names indefinitely
-        # unless the user asked for a forced reclassify (Codex #1560 P2).
-        # The manual-review branch below still authorizes such rows —
-        # an explicit accept/reject is authoritative across enrichment
-        # changes, matching the runtime-change pin exception.
-        accept_legacy = True
-        if isinstance(model_identity, dict) and (
-            model_identity.get("model_type") == "timm"
+    # Grandfather ``runtime_fingerprint = 'legacy'`` for pre-portable
+    # rows, EXCEPT when the classifier is timm and its
+    # ``label_descriptions.json`` enrichment has since transitioned
+    # from missing to present. That mapping is what turns a raw
+    # class id into the stored common name, so an unreviewed legacy
+    # timm row's species is stale relative to what a run made today
+    # would emit ("Bubulcus ibis" -> "Western Cattle-Egret"); keeping
+    # the exception would leave the scientific names indefinitely
+    # unless the user asked for a forced reclassify (Codex #1560 P2).
+    # The manual-review branch of the runtime filter
+    # (``ModelRunsRepository.classifier_cache_run_filter``) still
+    # authorizes such rows — an explicit accept/reject is authoritative
+    # across enrichment changes, matching the runtime-change pin exception.
+    accept_legacy = True
+    if isinstance(model_identity, dict) and (
+        model_identity.get("model_type") == "timm"
+    ):
+        from computation_cache import (
+            LABEL_DESCRIPTIONS_IDENTITY_KEY,
+            NO_LABEL_DESCRIPTIONS,
+        )
+        current_ld_identity = model_identity.get(
+            LABEL_DESCRIPTIONS_IDENTITY_KEY,
+        )
+        if (
+            current_ld_identity
+            and current_ld_identity != NO_LABEL_DESCRIPTIONS
         ):
-            from computation_cache import (
-                LABEL_DESCRIPTIONS_IDENTITY_KEY,
-                NO_LABEL_DESCRIPTIONS,
-            )
-            current_ld_identity = model_identity.get(
-                LABEL_DESCRIPTIONS_IDENTITY_KEY,
-            )
-            if (
-                current_ld_identity
-                and current_ld_identity != NO_LABEL_DESCRIPTIONS
-            ):
-                accept_legacy = False
-        legacy_clause = (
-            " OR cr.runtime_fingerprint = 'legacy'" if accept_legacy else ""
-        )
-        placeholders = ",".join("?" for _ in expected_runtimes)
-        runtime_clause = (
-            f" AND (cr.runtime_fingerprint IN ({placeholders})"
-            f"{legacy_clause}"
-            " OR EXISTS (SELECT 1 FROM predictions p"
-            " JOIN prediction_review pr ON pr.prediction_id = p.id"
-            " WHERE p.detection_id = cr.detection_id"
-            " AND p.classifier_model = cr.classifier_model"
-            " AND p.labels_fingerprint = cr.labels_fingerprint"
-            " AND pr.status IN ('accepted', 'rejected')"
-            " AND COALESCE(pr.individual, '') != ?))"
-        )
-        runtime_args = list(expected_runtimes) + [AUTO_MATCH_REVIEW_MARKER]
-
-    runtime_clause += " AND cr.runtime_fingerprint != 'incomplete'"
-    return runtime_clause, runtime_args
-
-
-# Only classifier_runs backed by at least one predictions row — or by a
-# measured ``classifier_match_scores`` summary — count as cache-satisfying.
-# See ``_all_photos_cache_satisfied``'s docstring: a classifier_run without
-# matching predictions is ordinarily a torn write from a crashed local job.
-# But a completed run that matched nothing legitimately publishes a
-# zero-candidate artifact (see ``computation_cache._match_summary_row`` and
-# the note there), and its output-of-record is the ``classifier_match_scores``
-# row rather than any predictions. Ignoring it would (a) fail cache-only
-# classification on an install without model weights and (b) needlessly
-# re-run inference on an install that has them, discarding exactly the
-# "nothing in your list fits" verdict this feature exists to preserve (Codex
-# P2 on 22cc0ac).
-_CACHE_PREDICTIONS_EXIST_SQL = (
-    "(EXISTS (SELECT 1 FROM predictions pr "
-    "WHERE pr.detection_id = cr.detection_id "
-    "AND pr.classifier_model = cr.classifier_model "
-    "AND pr.labels_fingerprint = cr.labels_fingerprint)"
-    " OR EXISTS (SELECT 1 FROM classifier_match_scores cms "
-    "WHERE cms.detection_id = cr.detection_id "
-    "AND cms.classifier_model = cr.classifier_model "
-    "AND cms.labels_fingerprint = cr.labels_fingerprint))"
-)
-_CACHE_CLASSIFIABLE_DETECTION_SQL = (
-    "(d.detector_model = 'full-image' OR "
-    "(d.detector_model != 'full-image' "
-    "AND COALESCE(d.category, 'animal') = 'animal' "
-    "AND d.detector_confidence >= ?))"
-)
-
-
-def _chunk_cache_coverage(db, chunk, run_filter, detector_confidence):
-    """Count one chunk's classifiable detections, covered ones, and photos.
-
-    ``run_filter`` is ``(filter_sql, filter_args, runtime_clause,
-    runtime_args)`` from ``_all_photos_cache_satisfied``. Returns
-    ``(total, covered, covered_photos)``.
-    """
-    filter_sql, filter_args, runtime_clause, runtime_args = run_filter
-    predictions_exists = _CACHE_PREDICTIONS_EXIST_SQL
-    classifiable_detection = _CACHE_CLASSIFIABLE_DETECTION_SQL
-    placeholders = ",".join("?" for _ in chunk)
-    row = db.conn.execute(
-        f"""SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN cr.detection_id IS NOT NULL
-                             AND {predictions_exists}
-                            THEN 1 ELSE 0 END)
-                     AS covered
-             FROM detections d
-             LEFT JOIN classifier_runs cr
-               ON cr.detection_id = d.id{filter_sql}{runtime_clause}
-            WHERE {classifiable_detection}
-              AND d.photo_id IN ({placeholders})""",
-        filter_args + runtime_args + [detector_confidence] + list(chunk),
-    ).fetchone()
-    total = (row["total"] if row else 0) or 0
-    covered = (row["covered"] if row else 0) or 0
-
-    photo_row = db.conn.execute(
-        f"""SELECT COUNT(DISTINCT photo_id) AS covered_photos
-             FROM detections
-            WHERE (detector_model = 'full-image' OR
-                   (detector_model != 'full-image'
-                    AND COALESCE(category, 'animal') = 'animal'
-                    AND detector_confidence >= ?))
-              AND photo_id IN ({placeholders})""",
-        [detector_confidence] + list(chunk),
-    ).fetchone()
-    covered_photos = (
-        (photo_row["covered_photos"] if photo_row else 0) or 0
-    )
-    return total, covered, covered_photos
+            accept_legacy = False
+    return accept_legacy
 
 
 def _chunk_has_mixed_identities(
@@ -806,20 +685,8 @@ def _chunk_has_mixed_identities(
     that can satisfy the cache. ``distinct_identities`` accumulates
     across chunks.
     """
-    filter_sql, filter_args, runtime_clause, runtime_args = run_filter
-    predictions_exists = _CACHE_PREDICTIONS_EXIST_SQL
-    classifiable_detection = _CACHE_CLASSIFIABLE_DETECTION_SQL
-    placeholders = ",".join("?" for _ in chunk)
-    for identity_row in db.conn.execute(
-        f"""SELECT DISTINCT cr.classifier_model AS m,
-                            cr.labels_fingerprint AS fp
-             FROM detections d
-             JOIN classifier_runs cr
-               ON cr.detection_id = d.id
-            WHERE d.photo_id IN ({placeholders})
-              AND {classifiable_detection}
-              AND {predictions_exists}{filter_sql}{runtime_clause}""",
-        list(chunk) + [detector_confidence] + filter_args + runtime_args,
+    for identity_row in db.model_runs.covering_classifier_identities(
+        chunk, run_filter, detector_confidence,
     ):
         distinct_identities.add(
             (identity_row["m"], identity_row["fp"])
@@ -953,44 +820,16 @@ def _cached_labels_fingerprint(db, photo_ids, classifier_model, detector_confide
     from db import _chunks
 
     found_fp = None
-    filter_sql = ""
-    filter_args = []
-    if classifier_model is not None:
-        filter_sql = " AND cr.classifier_model = ?"
-        filter_args.append(classifier_model)
     # Match ``_all_photos_cache_satisfied``'s eligibility filters:
     # only classifiable detections at the workspace threshold, and
     # only classifier_runs backed by an actual predictions row
     # (a torn run without predictions is not a real cache hit).
-    classifiable_detection = (
-        "(d.detector_model = 'full-image' OR "
-        "(d.detector_model != 'full-image' "
-        "AND COALESCE(d.category, 'animal') = 'animal' "
-        "AND d.detector_confidence >= ?))"
-    )
-    predictions_exists = (
-        "EXISTS (SELECT 1 FROM predictions p "
-        "WHERE p.detection_id = cr.detection_id "
-        "AND p.classifier_model = cr.classifier_model "
-        "AND p.labels_fingerprint = cr.labels_fingerprint)"
-    )
     for chunk in _chunks(photo_ids):
-        placeholders = ",".join("?" for _ in chunk)
-        row = db.conn.execute(
-            f"""SELECT DISTINCT cr.labels_fingerprint AS fp
-                 FROM detections d
-                 JOIN classifier_runs cr
-                   ON cr.detection_id = d.id{filter_sql}
-                WHERE d.photo_id IN ({placeholders})
-                  AND {classifiable_detection}
-                  AND {predictions_exists}
-                  AND cr.runtime_fingerprint != 'incomplete'
-                  AND cr.labels_fingerprint IS NOT NULL
-                LIMIT 1""",
-            filter_args + list(chunk) + [detector_confidence],
-        ).fetchone()
-        if row and row["fp"]:
-            found_fp = row["fp"]
+        fp = db.model_runs.cached_labels_fingerprint(
+            chunk, classifier_model, detector_confidence,
+        )
+        if fp:
+            found_fp = fp
             break
     return found_fp
 
@@ -1141,13 +980,12 @@ class _DetectBatchRun:
         # it performs no image decoding or additional inference.
         if not self.reclassify:
             return
-        from db import commit_with_retry
         from pipeline_locks import acquire_photo_mask
         from subjects import sync_primary
         for photo in self.photos:
             with acquire_photo_mask(photo["id"]):
                 sync_primary(self.db, photo["id"], min_conf=self.det_conf_threshold)
-                commit_with_retry(self.db.conn)
+                self.db.commit_with_retry()
 
     def analyze_subjects(self, runner, vireo_dir):
         """Analyze every retained subject after the detection loop.
@@ -1326,10 +1164,9 @@ class _DetectBatchRun:
         portable_input = None
         portable_photo_hash = None
         if detector_runtime != "legacy":
-            identity_row = self.db.conn.execute(
-                "SELECT file_hash, companion_path FROM photos WHERE id = ?",
-                (photo["id"],),
-            ).fetchone()
+            identity_row = self.db.model_runs.detector_source_identity(
+                photo["id"],
+            )
             if (
                 identity_row is not None
                 and not identity_row["companion_path"]
@@ -1367,16 +1204,8 @@ class _DetectBatchRun:
         try:
             from computation_cache import publish_detection_artifact
 
-            persisted_runtime_row = db.conn.execute(
-                """SELECT runtime_fingerprint
-                   FROM detector_runs
-                   WHERE photo_id = ?
-                     AND detector_model = 'megadetector-v6'""",
-                (photo["id"],),
-            ).fetchone()
-            persisted_runtime = (
-                persisted_runtime_row["runtime_fingerprint"]
-                if persisted_runtime_row else None
+            persisted_runtime = db.model_runs.detector_runtime_fingerprint(
+                photo["id"], "megadetector-v6",
             )
             if persisted_runtime == detector_runtime:
                 normalized_detections = [{
@@ -1661,7 +1490,7 @@ def _analyze_subjects(photos, folders, db, reclassify, det_conf_threshold,
         except ResourceWaitCancelled:
             raise
         except Exception:
-            db.conn.rollback()
+            db.rollback()
             log.warning("Subject analysis unavailable for photo %s", photo["id"], exc_info=True)
 
 
@@ -2796,10 +2625,7 @@ class _ClassifyPhotosPass:
             source_input,
         )
         full_runtime = full_image_runtime_fingerprint()
-        identity = db.conn.execute(
-            "SELECT file_hash, companion_path FROM photos WHERE id = ?",
-            (photo["id"],),
-        ).fetchone()
+        identity = db.model_runs.detector_source_identity(photo["id"])
         full_input = None
         if identity is not None and not identity["companion_path"]:
             try:
@@ -3310,23 +3136,18 @@ def _reconcile_existing_pending_prediction(
     Returns True when the cached row exists (nothing further to store), False
     when the caller must still write it.
     """
-    existing_row = db.conn.execute(
-        """SELECT id FROM predictions
-           WHERE detection_id = ? AND classifier_model = ?
-             AND labels_fingerprint = ? AND species IS ?""",
-        (
-            item["detection_id"],
-            model_name,
-            labels_fingerprint,
-            item["prediction"],
-        ),
-    ).fetchone()
+    existing_id = db.predictions.id_for_key(
+        item["detection_id"],
+        model_name,
+        labels_fingerprint,
+        item["prediction"],
+    )
     db.reconcile_match_review_state(
         item["detection_id"], model_name, labels_fingerprint,
         item["prediction"], category,
         auto_accept=False,
     )
-    if existing_row is None:
+    if existing_id is None:
         return False
     if group_id is not None:
         db.update_prediction_group_info(
@@ -3555,20 +3376,10 @@ def _release_stored_classifier_runs(db, raw_results, model_name, labels_fingerpr
     for item in raw_results:
         did = item.get("detection_id")
         if did is not None and not item.get("_existing"):
-            db.conn.execute(
-                "UPDATE classifier_runs SET runtime_fingerprint='legacy' "
-                "WHERE detection_id=? AND classifier_model=? AND labels_fingerprint=? "
-                "AND runtime_fingerprint='incomplete' AND (EXISTS ("
-                "SELECT 1 FROM predictions p WHERE p.detection_id=classifier_runs.detection_id "
-                "AND p.classifier_model=classifier_runs.classifier_model "
-                "AND p.labels_fingerprint=classifier_runs.labels_fingerprint) OR EXISTS ("
-                "SELECT 1 FROM classifier_match_scores cms "
-                "WHERE cms.detection_id=classifier_runs.detection_id "
-                "AND cms.classifier_model=classifier_runs.classifier_model "
-                "AND cms.labels_fingerprint=classifier_runs.labels_fingerprint))",
-                (did, model_name, labels_fingerprint),
+            db.model_runs.release_incomplete_classifier_run(
+                did, model_name, labels_fingerprint,
             )
-    db.conn.commit()
+    db.commit()
 
 
 def _store_grouped_predictions(
@@ -5000,11 +4811,7 @@ class _ClassifyJobRun:
         # outer except Exception (which would abandon reapply).
         from computation_cache import CacheFormatError
         for photo_id in empty_scene_ids:
-            identity = thread_db.conn.execute(
-                """SELECT file_hash, companion_path
-                   FROM photos WHERE id = ?""",
-                (photo_id,),
-            ).fetchone()
+            identity = thread_db.model_runs.detector_source_identity(photo_id)
             full_input = None
             if identity is not None and not identity["companion_path"]:
                 try:
@@ -5036,25 +4843,16 @@ class _ClassifyJobRun:
                 # leave the row at ``'legacy'`` an export skips
                 # the attached classifier run and emits an empty
                 # full-image detection artifact for this photo.
-                thread_db.conn.execute(
-                    """UPDATE detections
-                          SET runtime_fingerprint = ?
-                        WHERE photo_id = ?
-                          AND detector_model = 'full-image'
-                          AND (runtime_fingerprint IS NULL
-                               OR runtime_fingerprint != ?)""",
-                    (full_runtime, photo_id, full_runtime),
+                thread_db.detections.promote_full_image_runtime(
+                    photo_id, full_runtime,
                 )
-                thread_db.conn.commit()
-            existing_run = thread_db.conn.execute(
-                """SELECT runtime_fingerprint FROM detector_runs
-                   WHERE photo_id = ?
-                     AND detector_model = 'full-image'""",
-                (photo_id,),
-            ).fetchone()
+                thread_db.commit()
+            existing_runtime = thread_db.model_runs.detector_runtime_fingerprint(
+                photo_id, "full-image",
+            )
             if (
-                existing_run is None
-                or existing_run["runtime_fingerprint"] != full_runtime
+                existing_runtime is None
+                or existing_runtime != full_runtime
             ):
                 thread_db.model_runs.record_detector_run(
                     photo_id, "full-image", box_count=1,
