@@ -374,7 +374,7 @@ def test_read_label_file_falls_back_to_cp1252_for_legacy_windows_files(
 ):
     """``read_label_file`` is the shared primitive used by every direct
     label-file reader (``load_merged_labels`` and every ``labels_file``
-    branch in ``app.py``/``classify_job.py``). A legacy Windows install
+    branch in ``app.py``/``classify_job``). A legacy Windows install
     saved label sets in cp1252 before the writer became explicit UTF-8, so
     reading such a file strictly as UTF-8 raises ``UnicodeDecodeError`` on
     the first non-ASCII byte -- 0xF6 for ``ö``, 0x92 for the curly right

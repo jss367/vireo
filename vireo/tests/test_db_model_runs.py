@@ -1104,9 +1104,14 @@ def test_release_incomplete_classifier_run_needs_stored_output_and_leaves_commit
 
 def test_classify_job_reaches_model_runs_through_the_accessor():
     """``classify_job`` runs no SQL of its own; its run reads live here."""
+    from pathlib import Path
+
     import classify_job
 
-    source = inspect.getsource(classify_job)
+    source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(Path(classify_job.__file__).parent.glob("*.py"))
+    )
     for name in (
         "detector_source_identity", "detector_runtime_fingerprint",
         "detector_runtime_fingerprints", "classifier_cache_run_filter",

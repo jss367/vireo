@@ -1069,7 +1069,7 @@ class _ClassifyPass:
             # No cached prediction rows: honor a measured
             # ``classifier_match_scores`` summary for the same triple as
             # a completed zero-candidate run, mirroring the boxed and
-            # full-image gates in ``classify_job.py``. Without this, a
+            # full-image gates in ``classify_job/classify_pass.py``. Without this, a
             # partially cached combined-pipeline run re-classifies
             # detections whose no-match verdict was already recorded and
             # can replace an authoritative "nothing in this list fits"

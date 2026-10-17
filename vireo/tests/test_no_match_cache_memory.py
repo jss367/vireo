@@ -185,8 +185,8 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
         get_predictions_for_detection=lambda did, **kw: [
             dict(r)
             for r in c.execute(
-                "SELECT * FROM predictions WHERE detection_id=? AND classifier_model=? AND labels_fingerprint=? AND confidence>=0",
-                (did, kw["classifier_model"], kw["labels_fingerprint"]),
+                "SELECT * FROM predictions WHERE detection_id=? AND classifier_model=? AND (? IS NULL OR labels_fingerprint=?) AND confidence>=0 ORDER BY confidence DESC",
+                (did, kw["classifier_model"], kw["labels_fingerprint"], kw["labels_fingerprint"]),
             )
         ],
     )
@@ -208,6 +208,30 @@ def test_cached_only_counts_no_match_without_inventing_predictions():
             assert result["already_classified"] == count
             assert result["predictions_stored"] == predictions and len(finalized[-1]) == predictions
             assert steps[-1]["summary"] == (f"{count} cached" if count else "No cached results")
+        assert c.total_changes == before
+        # A separate RAW recipe can have a stronger prediction while normal
+        # coverage comes only from the completed no-match run. Its identity
+        # must not replace the original coverage filter for the reuse count.
+        c.execute(
+            "INSERT INTO classifier_runs(detection_id,classifier_model,labels_fingerprint,input_recipe)VALUES(1,'invented-model','raw-fp','raw-recipe')"
+        )
+        c.execute(
+            "INSERT INTO predictions(detection_id,classifier_model,labels_fingerprint,species,confidence)VALUES(1,'invented-model','raw-fp','invented-raw',0.99)"
+        )
+        c.commit()
+        before = c.total_changes
+        result = ns["_finalize_cached_only"](
+            db,
+            runner,
+            {"id": "invented"},
+            object(),
+            [dict(id=1, folder_id=1, filename="invented1.jpg")],
+            classifier_model="invented-model",
+            labels_fingerprint=None,
+            detector_confidence=0.2,
+        )
+        assert result["already_classified"] == 1
+        assert steps[-1]["summary"] == "1 cached"
         assert c.total_changes == before
     finally:
         c.close()
