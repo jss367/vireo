@@ -409,9 +409,10 @@ def _working_copy(app, db, pid, size=(3000, 2000), color=(40, 90, 160)):
     working_dir = os.path.join(vireo_dir, "working")
     os.makedirs(working_dir, exist_ok=True)
     img = Image.new("RGB", size, color=color)
-    # A white square marks the eye so the crop's content can be checked.
-    for x in range(1490, 1510):
-        for y in range(990, 1010):
+    # A white square at the centre marks the eye so the crop's content can be checked.
+    cx, cy = size[0] // 2, size[1] // 2
+    for x in range(cx - 10, cx + 10):
+        for y in range(cy - 10, cy + 10):
             img.putpixel((x, y), (255, 255, 255))
     path = os.path.join(working_dir, f"{pid}.jpg")
     img.save(path, "JPEG", quality=95)
@@ -570,3 +571,63 @@ def test_v1_aliases_cover_the_burst_endpoints(app_and_db):
         "/api/v1/photos/burst-evidence", json={"photo_ids": pids}, headers=headers,
     ).get_json()
     assert body["scope_method"] == "selected_photos"
+
+
+def test_focus_crop_center_puts_the_window_where_the_reviewer_chose(app_and_db):
+    app, db = app_and_db
+    pid = db.get_photos()[0]["id"]
+    _working_copy(app, db, pid)
+    db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    client = app.test_client()
+    resp = client.get(f"/photos/{pid}/focus-crop?size=128&center=0.75,0.25")
+    assert resp.status_code == 200
+    assert resp.headers["X-Vireo-Focus-Basis"] == "point"
+    assert resp.headers["X-Vireo-Focus-Center"] == "0.7500,0.2500"
+    # 0.75*3000-64 = 2186, 0.25*2000-64 = 436.
+    assert resp.headers["X-Vireo-Focus-Window"] == "2186,436,2314,564"
+    for bad in ("abc", "0.5", "0.5,1.5", "nan,0.5", "0.1,0.2,0.3"):
+        assert client.get(f"/photos/{pid}/focus-crop?center={bad}").status_code == 400, bad
+
+
+def test_focus_crop_source_prefers_the_original_over_a_downsized_working_copy(app_and_db, tmp_path):
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+    # The catalog knows the sensor size; the working copy is half of it.
+    _working_copy(app, db, pid, size=(1500, 1000))
+    db.conn.execute("UPDATE photos SET width = 3000, height = 2000 WHERE id = ?", (pid,))
+    photo_dir = tmp_path / "originals"
+    photo_dir.mkdir()
+    db.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (str(photo_dir), photo["folder_id"]))
+    db.conn.commit()
+    client = app.test_client()
+
+    # No original on disk: auto keeps the working copy and says how small it is.
+    resp = client.get(f"/photos/{pid}/focus-crop?size=128")
+    assert resp.status_code == 200
+    assert resp.headers["X-Vireo-Focus-Source"] == "working_copy"
+    assert resp.headers["X-Vireo-Focus-Raster-Size"] == "1500,1000"
+    assert resp.headers["X-Vireo-Focus-Original-Scale"] == "0.5000"
+    assert client.get(f"/photos/{pid}/focus-crop?source=original").status_code == 404
+
+    Image.new("RGB", (3000, 2000), color=(10, 200, 10)).save(
+        os.path.join(str(photo_dir), photo["filename"]), "JPEG",
+    )
+    resp = client.get(f"/photos/{pid}/focus-crop?size=128")
+    assert resp.headers["X-Vireo-Focus-Source"] == "original"
+    assert resp.headers["X-Vireo-Focus-Raster-Size"] == "3000,2000"
+    assert resp.headers["X-Vireo-Focus-Original-Scale"] == "1.0000"
+    resp = client.get(f"/photos/{pid}/focus-crop?size=128&source=working")
+    assert resp.headers["X-Vireo-Focus-Source"] == "working_copy"
+    assert resp.headers["X-Vireo-Focus-Original-Scale"] == "0.5000"
+    resp = client.get(f"/photos/{pid}/focus-crop?size=128&source=original")
+    assert resp.headers["X-Vireo-Focus-Source"] == "original"
+    assert client.get(f"/photos/{pid}/focus-crop?source=sensor").status_code == 400
+
+    # A full-size working copy is left alone: nothing to gain from the original.
+    _working_copy(app, db, pid, size=(3000, 2000))
+    resp = client.get(f"/photos/{pid}/focus-crop?size=128")
+    assert resp.headers["X-Vireo-Focus-Source"] == "working_copy"
+    assert resp.headers["X-Vireo-Focus-Original-Scale"] == "1.0000"

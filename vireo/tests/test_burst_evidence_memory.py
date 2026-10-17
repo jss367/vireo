@@ -217,7 +217,10 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
             MAX_FOCUS_CROP_SIZE=1024,
             numeric_query_arg=pure["numeric_query_arg"],
         ),
-        "image_loader": types.SimpleNamespace(load_working_image=loader),
+        "image_loader": types.SimpleNamespace(
+            load_working_image=loader,
+            load_image=lambda path, max_size=None: events.append(("original", path)) or Image(size, events, "original"),
+        ),
         "PIL": types.SimpleNamespace(Image=pil),
         "io": io,
     }
@@ -231,7 +234,10 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
             "__import__": lambda name, *a, **kw: modules[name] if name in modules else forbidden(),
         },
         "os": types.SimpleNamespace(
-            path=types.SimpleNamespace(dirname=posixpath.dirname, join=posixpath.join, realpath=posixpath.normpath),
+            path=types.SimpleNamespace(
+                dirname=posixpath.dirname, join=posixpath.join, realpath=posixpath.normpath,
+                isfile=lambda path: False,
+            ),
             sep="/",
         ),
         "config": {"THUMB_CACHE_DIR": "/invented/cache/thumbs"},
@@ -251,7 +257,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         ),
     )
     ns["get_db"] = lambda: db
-    nested("web/media.py", ns, {"serve_focus_crop", "_focus_mask_bytes"})
+    nested("web/media.py", ns, {"serve_focus_crop", "_focus_mask_bytes", "_focus_source_image"})
     return ns["serve_focus_crop"](1), events
 
 

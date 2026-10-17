@@ -9,8 +9,33 @@ def focus_subject_detections(db, photo_id):
     return [prompt] if prompt is not None else db.get_detections(photo_id)
 
 
-def focus_point(photo, detections, basis, *, eye_enabled):
-    """Auto follows the scorer; explicit eye/subject requests remain available."""
+def parse_center(raw):
+    """``(x, y)`` from a ``center=x,y`` query value in normalized frame coordinates.
+
+    A reviewer who has located the eye on the preview asks for the 1:1
+    window there. Both values must be finite and within 0..1; anything else
+    raises ``ValueError``.
+    """
+    parts = str(raw).split(",")
+    if len(parts) != 2:
+        raise ValueError("center must be x,y in normalized frame coordinates")
+    try:
+        x, y = (float(part) for part in parts)
+    except ValueError:
+        raise ValueError("center must be x,y in normalized frame coordinates") from None
+    if not all(math.isfinite(v) and 0.0 <= v <= 1.0 for v in (x, y)):
+        raise ValueError("center coordinates must be between 0 and 1")
+    return (x, y)
+
+
+def focus_point(photo, detections, basis, *, eye_enabled, point=None):
+    """Auto follows the scorer; explicit eye/subject requests remain available.
+
+    ``point`` (a parsed ``center``) wins over every basis: the reviewer chose
+    where to look.
+    """
+    if point is not None:
+        return point, "point"
     use_eye = basis == "eye" or (basis == "auto" and eye_enabled and photo["eye_tenengrad"] is not None)
     if use_eye and photo["eye_x"] is not None and photo["eye_y"] is not None:
         center = (float(photo["eye_x"]), float(photo["eye_y"]))
@@ -49,14 +74,49 @@ def shade_focus_mask(crop, mask_bytes, image_size, window, image_api):
     return image_api.composite(crop, shaded, mask)
 
 
-def focus_headers(basis, center, window, image_size, source, mask_applied):
-    """1:1 means decoded-raster pixels; cached/embedded previews may be smaller."""
+def _catalog_long_side(photo):
+    """The photo's longest catalog dimension, or None when the catalog has none."""
+    try:
+        width, height = photo["width"], photo["height"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not width or not height:
+        return None
+    return max(width, height)
+
+
+def original_scale(image_size, photo):
+    """Decoded-raster pixels per original pixel, or None when the catalog has no dimensions.
+
+    Compared on the longest side, so a raster the loader rotated upright
+    still measures against the right catalog edge.
+    """
+    long_side = _catalog_long_side(photo)
+    if not long_side:
+        return None
+    return max(image_size) / float(long_side)
+
+
+def prefer_original(image_size, photo, *, downsized_below=0.98):
+    """Whether a working-copy raster is too small to pass for original pixels.
+
+    A raster whose longest side is under ``downsized_below`` of the catalog's
+    counts as downsized, and ``source=auto`` goes back to the original for
+    the crop. Embedded JPEGs a few pixels short of the sensor (5392 vs 5408)
+    are not downsized in any sense a reviewer cares about.
+    """
+    scale = original_scale(image_size, photo)
+    return scale is not None and scale < downsized_below
+
+
+def focus_headers(basis, center, window, image_size, source, mask_applied, scale=None):
+    """Scale 1 means decoded-raster pixels; ``scale`` says how those relate to the original."""
     return {
         "X-Vireo-Focus-Basis": basis,
         "X-Vireo-Focus-Center": f"{center[0]:.4f},{center[1]:.4f}",
         "X-Vireo-Focus-Scale": "1",
         "X-Vireo-Focus-Scale-Reference": "decoded-raster",
-        "X-Vireo-Focus-Original-Scale": "unknown",
+        "X-Vireo-Focus-Original-Scale": "unknown" if scale is None else f"{scale:.4f}",
         "X-Vireo-Focus-Source": source,
         "X-Vireo-Focus-Raster-Size": ",".join(str(v) for v in image_size),
         "X-Vireo-Focus-Mask": "1" if mask_applied else "0",

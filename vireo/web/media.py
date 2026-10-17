@@ -3401,13 +3401,51 @@ def create_media_blueprint(
         inside = abs_mask == masks_dir or abs_mask.startswith(masks_dir + os.sep)
         return _read_mask_bytes(abs_mask) if inside else None
 
+    def _focus_source_image(photo, folder, source_choice):
+        """``(image, source)`` the focus crop is cut from, or ``(None, None)``.
+
+        ``working`` and ``auto`` decode the working copy (original fallback
+        as everywhere else). A working copy is capped at
+        ``working_copy_max_size``, so on a large sensor its pixels are not
+        the original's: when the reviewer asked for ``original``, or left it
+        to ``auto`` and the copy is downsized against the catalog
+        dimensions, the original is decoded instead (JPEG-first, the
+        embedded full-size JPEG of a RAW) and used when it is larger.
+        """
+        from focus_crop import prefer_original
+        from image_loader import load_image, load_working_image
+
+        folders = {photo["folder_id"]: folder["path"]} if folder else {}
+        original_path = os.path.join(folder["path"], photo["filename"]) if folder else None
+        img, source = None, None
+        if source_choice != "original":
+            img, source = load_working_image(
+                dict(photo), os.path.dirname(config["THUMB_CACHE_DIR"]), max_size=None,
+                folders=folders, record_access=True, return_source=True,
+            )
+        wants_original = source_choice == "original" or (
+            source_choice == "auto" and img is not None and source == "working_copy"
+            and prefer_original(img.size, photo)
+        )
+        if wants_original and original_path and os.path.isfile(original_path):
+            original = load_image(original_path, max_size=None)
+            if original is not None and (img is None or max(original.size) > max(img.size)):
+                img, source = original, "original"
+        return img, source
+
     @blueprint.route("/photos/<int:photo_id>/focus-crop")
     def serve_focus_crop(photo_id):
         """An unresampled window around the scorer's focus point.
 
-        Auto follows workspace eye scoring, then the primary subject or frame.
-        Scale 1 means pixels of the decoded upright raster, which can be a
-        downsized working copy or embedded preview; original scale is unknown.
+        Auto follows workspace eye scoring, then the primary subject or frame;
+        ``center=x,y`` (normalized frame coordinates) puts the window where
+        the reviewer chose instead. ``source`` picks the pixels: ``auto``
+        (default) serves the working copy unless it is downsized against the
+        catalog dimensions and the original can be decoded, ``working`` keeps
+        the working copy, ``original`` insists on the original (404 when it
+        is not on disk). Scale 1 means pixels of the decoded upright raster;
+        ``X-Vireo-Focus-Original-Scale`` says how those relate to the
+        original when the catalog knows its dimensions.
         """
         import io
 
@@ -3423,9 +3461,10 @@ def create_media_blueprint(
             focus_point,
             focus_subject_detections,
             focus_window,
+            original_scale,
+            parse_center,
             shade_focus_mask,
         )
-        from image_loader import load_working_image
         from PIL import Image
         from scoring import _normalize_scoring_config
 
@@ -3441,20 +3480,29 @@ def create_media_blueprint(
         basis = (request.args.get("basis") or "auto").strip().lower()
         if basis not in {"auto", "eye", "subject", "frame"}:
             return json_error("basis must be auto, eye, subject or frame")
+        source_choice = (request.args.get("source") or "auto").strip().lower()
+        if source_choice not in {"auto", "working", "original"}:
+            return json_error("source must be auto, working or original")
+        point = None
+        if request.args.get("center") is not None:
+            try:
+                point = parse_center(request.args.get("center"))
+            except ValueError as exc:
+                return json_error(str(exc))
         effective = db.get_effective_config(cfg.load())
         eye_enabled = bool(_normalize_scoring_config(effective).get("eye_detect_enabled", False))
-        boxes = focus_subject_detections(db, photo_id) if basis in {"auto", "subject"} else []
+        boxes = (
+            focus_subject_detections(db, photo_id)
+            if point is None and basis in {"auto", "subject"} else []
+        )
         try:
-            center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled)
+            center, used = focus_point(photo, boxes, basis, eye_enabled=eye_enabled, point=point)
         except ValueError as exc:
             return json_error(str(exc), 404)
-        folder = db.get_folder(photo["folder_id"])
-        folders = {photo["folder_id"]: folder["path"]} if folder else {}
-        img, source = load_working_image(
-            dict(photo), os.path.dirname(config["THUMB_CACHE_DIR"]), max_size=None,
-            folders=folders, record_access=True, return_source=True,
-        )
+        img, source = _focus_source_image(photo, db.get_folder(photo["folder_id"]), source_choice)
         if img is None:
+            if source_choice == "original":
+                return json_error("The original file is not available", 404)
             return "Could not load image", 500
         window, center = focus_window(img.size, center, size)
         crop = img.crop(window).convert("RGB")
@@ -3464,7 +3512,10 @@ def create_media_blueprint(
         buf = io.BytesIO()
         crop.save(buf, format="JPEG", quality=effective.get("preview_quality", 90))
         response = Response(buf.getvalue(), mimetype="image/jpeg")
-        response.headers.update(focus_headers(used, center, window, img.size, source, mask_bytes is not None))
+        response.headers.update(focus_headers(
+            used, center, window, img.size, source, mask_bytes is not None,
+            scale=original_scale(img.size, photo),
+        ))
         response.cache_control.private = True
         response.cache_control.max_age = 0
         return response
