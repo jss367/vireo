@@ -15,7 +15,7 @@ state for its responsibility alongside the functions that use it.
 | `remote-targets.js` | Remote destination editor, folder browser, and connection checks |
 | `nas-setup.js` | Network-attached storage setup wizard |
 | `config.js` | Curated form loading/saving, secret-field tracking, and pipeline defaults |
-| `system-tools.js` | System information, platform support, metadata tools, and raw rendering tools |
+| `system-tools.js` | System information, platform support, metadata tools, raw rendering tools, and the MCP connection snippets |
 | `models.js` | Model downloads, verification, selection, and removal |
 | `labels.js` | Species lists, taxonomy, place search, and embedding precomputation |
 | `maintenance.js` | Cache management, scan roots, and keyword cleanup |

@@ -11,3 +11,4 @@ def test_help_includes_headless_flag():
     )
     assert result.returncode == 0
     assert "--headless" in result.stdout
+    assert "--mcp" in result.stdout

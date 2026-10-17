@@ -434,3 +434,40 @@ async function loadExiftoolStatus() {
     }
   } catch(e) {}
 }
+
+async function loadMcpConnectInfo() {
+  var commandEl = document.getElementById('mcpClaudeCodeCommand');
+  var jsonEl = document.getElementById('mcpClaudeDesktopJson');
+  if (!commandEl || !jsonEl) return;
+  try {
+    var data = await safeFetch('/api/system/mcp-config', {}, { toast: false });
+    commandEl.textContent = data.claude_code;
+    // Flask sorts keys; show the file the way people write it, command first.
+    var servers = data.claude_desktop.mcpServers || {};
+    /** @type {Record<string, {command: string, args: string[]}>} */ var ordered = {};
+    Object.keys(servers).forEach(function (name) {
+      ordered[name] = { command: servers[name].command, args: servers[name].args };
+    });
+    jsonEl.textContent = JSON.stringify({ mcpServers: ordered }, null, 2);
+  } catch (err) {
+    var message = err instanceof Error ? err.message : String(err);
+    commandEl.textContent = 'Could not load the connection command: ' + message;
+    jsonEl.textContent = commandEl.textContent;
+  }
+}
+
+/** @param {string} id */
+function copyMcpSnippet(id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var text = el.textContent || '';
+  if (!navigator.clipboard || !navigator.clipboard.writeText) {
+    showToast('Clipboard unavailable: select the text and copy it by hand', 'error');
+    return;
+  }
+  navigator.clipboard.writeText(text).then(function () {
+    showToast('Copied', 'success');
+  }, function () {
+    showToast('Copy failed: select the text and copy it by hand', 'error');
+  });
+}

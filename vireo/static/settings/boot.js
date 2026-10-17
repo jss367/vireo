@@ -1,6 +1,7 @@
 loadModels();
 loadTaxonomy();
 loadSystemInfo();
+loadMcpConnectInfo();
 loadConfig();
 loadWsOverrides();
 loadScanRoots();
