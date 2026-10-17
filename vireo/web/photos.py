@@ -30,6 +30,7 @@ from burst_evidence import (
     MAX_FOCUS_CROP_SIZE,
     MIN_FOCUS_CROP_SIZE,
     build_evidence_pack,
+    numeric_query_arg,
 )
 from camera_denoise import render_cache_fields as _camera_render_cache_fields
 from db import Database
@@ -1217,14 +1218,13 @@ def create_photos_blueprint(
 
     def _evidence_pack_args():
         """``(margin, focus_size, None)`` from the request, or ``(None, None, error)``."""
-        margin = request.args.get("margin", DEFAULT_CLOSE_CALL_MARGIN, type=float)
-        if margin is None or not 0 <= margin <= MAX_CLOSE_CALL_MARGIN:
-            return None, None, json_error(f"margin must be between 0 and {MAX_CLOSE_CALL_MARGIN}")
-        focus_size = request.args.get("focus_size", DEFAULT_FOCUS_CROP_SIZE, type=int)
-        if focus_size is None or not MIN_FOCUS_CROP_SIZE <= focus_size <= MAX_FOCUS_CROP_SIZE:
-            return None, None, json_error(
-                f"focus_size must be between {MIN_FOCUS_CROP_SIZE} and {MAX_FOCUS_CROP_SIZE}"
-            )
+        try:
+            margin = numeric_query_arg(request.args, "margin", DEFAULT_CLOSE_CALL_MARGIN,
+                                       float, 0, MAX_CLOSE_CALL_MARGIN)
+            focus_size = numeric_query_arg(request.args, "focus_size", DEFAULT_FOCUS_CROP_SIZE,
+                                           int, MIN_FOCUS_CROP_SIZE, MAX_FOCUS_CROP_SIZE)
+        except ValueError as exc:
+            return None, None, json_error(str(exc))
         return margin, focus_size, None
 
     @blueprint.route("/api/photos/<int:photo_id>/burst-evidence")
@@ -1244,10 +1244,11 @@ def create_photos_blueprint(
         margin, focus_size, err = _evidence_pack_args()
         if err is not None:
             return err
-        max_gap = request.args.get("gap_seconds", 8.0, type=float)
-        max_photos = request.args.get("max_photos", 120, type=int)
-        max_gap = max(0.0, min(max_gap, 120.0))
-        max_photos = max(2, min(max_photos, 500))
+        try:
+            max_gap = numeric_query_arg(request.args, "gap_seconds", 8.0, float, 0, 120)
+            max_photos = numeric_query_arg(request.args, "max_photos", 120, int, 2, 500)
+        except ValueError as exc:
+            return json_error(str(exc))
         rows, method_or_error = best_batch_scope(
             db, photo_id, max_gap_seconds=max_gap, max_photos=max_photos,
         )

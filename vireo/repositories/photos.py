@@ -275,23 +275,25 @@ class PhotoRepository:
             (self.workspace_id, folder_id, f"{filename_prefix}%"),
         ).fetchall()
 
-    def best_batch_folder_rows(self, folder_id):
+    def best_batch_folder_rows(self, folder_id, *, limit=None):
         """Best Batch rows of one folder in capture-time order (untimed last).
 
         Same columns and scope as ``best_batch_rows_by_ids``. Serves the
         capture-time fallback of ``best_batch_scope`` and the folder burst
         listing, which re-sorts by filename sequence itself.
         """
-        return self.conn.execute(
-            """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
-                      p.flag, p.rating, p.quality_score, p.sharpness
-               FROM photos p
-               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-               WHERE wf.workspace_id = ? AND p.folder_id = ?
-               ORDER BY p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC""",
-            (self.workspace_id, folder_id),
-        ).fetchall()
+        sql = """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
+                        p.flag, p.rating, p.quality_score, p.sharpness
+                 FROM photos p
+                 JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+                 JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+                 WHERE wf.workspace_id = ? AND p.folder_id = ?
+                 ORDER BY p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC"""
+        params = [self.workspace_id, folder_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return self.conn.execute(sql, params).fetchall()
 
     def count_folder_photos(self, folder_id):
         """How many photos of one folder the workspace sees in an online folder."""

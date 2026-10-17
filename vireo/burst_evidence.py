@@ -26,9 +26,12 @@ database access is through ``db.photos`` and ``build_best_batch_response``.
 See ``docs/plans/2026-10-17-burst-evidence-adjudication-design.md``.
 """
 
+import math
 import os
 
 from best_batch import _filename_sequence_key, _time_gap_seconds, build_best_batch_response
+from scoring import DEFAULTS as SCORING_DEFAULTS
+from scoring import _normalize_scoring_config
 
 #: Folders with more workspace-visible photos than this are refused by the
 #: bursts listing: every burst is scored from its feature rows, and a listing
@@ -72,24 +75,13 @@ def _time_ok(left, right, max_gap_seconds, *, require_timestamps):
     return gap <= max_gap_seconds
 
 
-def group_folder_bursts(rows, max_gap_seconds=8.0, max_sequence_gap=2):
-    """Chain one folder's frames into bursts; returns lists of rows, two or more each.
-
-    The rules are ``best_batch_scope``'s: frames sharing a filename prefix,
-    digit width and extension chain while their sequence numbers are at most
-    ``max_sequence_gap`` apart and their capture times (when both are known)
-    at most ``max_gap_seconds`` apart. Frames whose names carry no sequence
-    number chain by capture time alone and must have timestamps. Singletons
-    are not bursts. Bursts come back in filename order of their first frame.
-    """
+def _sequence_bursts(rows, max_gap_seconds, max_sequence_gap):
+    """Filename runs that qualify before Best Batch's capture-time fallback."""
     keyed = []
-    unkeyed = []
     for row in rows:
         key = _filename_sequence_key(row["filename"])
         if key:
             keyed.append(((key[0], _row_extension(row), key[2]), key[1], row))
-        else:
-            unkeyed.append(row)
     keyed.sort(key=lambda item: (item[0], item[1], item[2]["filename"], item[2]["id"]))
 
     bursts = []
@@ -111,11 +103,16 @@ def group_folder_bursts(rows, max_gap_seconds=8.0, max_sequence_gap=2):
     if len(current) >= 2:
         bursts.append(current)
 
-    unkeyed.sort(
-        key=lambda r: (r["timestamp"] is None, r["timestamp"] or "", r["filename"], r["id"])
-    )
+    return bursts
+
+
+def _capture_time_bursts(rows, max_gap_seconds):
+    ordered = sorted(rows, key=lambda r: (
+        r["timestamp"] is None, r["timestamp"] or "", r["filename"], r["id"],
+    ))
+    bursts = []
     current = []
-    for row in unkeyed:
+    for row in ordered:
         if current and _time_ok(current[-1], row, max_gap_seconds, require_timestamps=True):
             current.append(row)
         else:
@@ -124,9 +121,47 @@ def group_folder_bursts(rows, max_gap_seconds=8.0, max_sequence_gap=2):
             current = [row]
     if len(current) >= 2:
         bursts.append(current)
-
-    bursts.sort(key=lambda burst: (burst[0]["filename"], burst[0]["id"]))
     return bursts
+
+
+def folder_burst_scopes(rows, max_gap_seconds=8.0, max_sequence_gap=2):
+    """Distinct seed scopes, including capture-time fallbacks for numbered singletons.
+
+    Best Batch may give a fallback seed a scope overlapping a filename run.
+    Preserve both rather than omit that seed's neighbors or change its ranking.
+    """
+    rows = list(rows)
+    runs = _sequence_bursts(rows, max_gap_seconds, max_sequence_gap)
+    sequenced_ids = {r["id"] for run in runs for r in run}
+    scopes = [{"seed_photo_id": run[0]["id"], "rows": run,
+               "scope_method": "filename_sequence"} for run in runs]
+    for run in _capture_time_bursts(rows, max_gap_seconds):
+        seed = next((r for r in run if r["id"] not in sequenced_ids), None)
+        if seed is not None:
+            scopes.append({"seed_photo_id": seed["id"], "rows": run,
+                           "scope_method": "capture_time"})
+    return sorted(scopes, key=lambda scope: (
+        scope["rows"][0]["filename"], scope["seed_photo_id"],
+    ))
+
+
+def group_folder_bursts(rows, max_gap_seconds=8.0, max_sequence_gap=2):
+    """The distinct row groups reachable through Best Batch's seed scope rules."""
+    return [scope["rows"] for scope in folder_burst_scopes(rows, max_gap_seconds, max_sequence_gap)]
+
+
+def numeric_query_arg(args, name, default, convert, minimum, maximum):
+    """Parse a finite bounded query value without silently replacing bad input."""
+    if name not in args:
+        return default
+    try:
+        value = convert(args.get(name))
+        valid = math.isfinite(value) and minimum <= value <= maximum
+    except (TypeError, ValueError, OverflowError):
+        valid = False
+    if not valid:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
 
 
 def coverage_counts(evidence_rows):
@@ -239,6 +274,7 @@ def card_urls(photo_id, *, has_mask, focus_size=DEFAULT_FOCUS_CROP_SIZE):
         "preview_url": f"/photos/{photo_id}/preview?size=1920",
         "crop_url": f"/photos/{photo_id}/crop",
         "focus_crop_url": focus,
+        "focus_crop_scale": {"reference": "decoded_raster", "scale": 1, "original_scale": None},
         "focus_crop_mask_url": f"{focus}&mask=1" if has_mask else None,
     }
 
@@ -259,15 +295,17 @@ def _attach_evidence(card, evidence, focus_size):
 
 
 def _scoring_settings(effective_cfg, margin):
-    pipeline_cfg = effective_cfg.get("pipeline") or {}
+    settings = {**SCORING_DEFAULTS, **_normalize_scoring_config(effective_cfg)}
     try:
         min_conf = float(effective_cfg.get("detector_confidence", 0.2))
     except (TypeError, ValueError):
         min_conf = 0.2
     return {
-        "eye_detect_enabled": bool(pipeline_cfg.get("eye_detect_enabled", False)),
+        "eye_detect_enabled": bool(settings.get("eye_detect_enabled", False)),
         "close_call_margin": margin,
         "detector_confidence": min_conf,
+        "weights": {k: settings[k] for k in SCORING_DEFAULTS if k.startswith("w_")},
+        "rejection_thresholds": {k: settings[k] for k in SCORING_DEFAULTS if k.startswith("reject_")},
     }
 
 
@@ -368,10 +406,10 @@ def build_folder_bursts(
     Raises ``ValueError`` when the folder holds more than
     ``MAX_FOLDER_BURST_PHOTOS`` workspace-visible photos.
     """
-    rows = db.photos.best_batch_folder_rows(folder_id)
+    rows = db.photos.best_batch_folder_rows(folder_id, limit=MAX_FOLDER_BURST_PHOTOS + 1)
     if len(rows) > MAX_FOLDER_BURST_PHOTOS:
         raise ValueError(
-            f"folder has {len(rows)} photos; the bursts listing covers folders "
+            f"folder has more than {MAX_FOLDER_BURST_PHOTOS} photos; the bursts listing covers folders "
             f"of up to {MAX_FOLDER_BURST_PHOTOS}"
         )
     scoring = _scoring_settings(effective_cfg, margin)
@@ -382,15 +420,17 @@ def build_folder_bursts(
     folder_coverage["photos"] = len(rows)
 
     bursts = []
-    photos_in_bursts = 0
-    for burst_rows in group_folder_bursts(rows, max_gap_seconds, max_sequence_gap):
+    photos_in_bursts = set()
+    for scope in folder_burst_scopes(rows, max_gap_seconds, max_sequence_gap):
+        burst_rows = scope["rows"]
         pack = build_evidence_pack(
-            db, burst_rows[0]["id"], burst_rows,
+            db, scope["seed_photo_id"], burst_rows,
             effective_cfg=effective_cfg, margin=margin, evidence_rows=evidence_rows,
         )
-        photos_in_bursts += len(burst_rows)
+        photos_in_bursts.update(r["id"] for r in burst_rows)
         bursts.append({
-            "seed_photo_id": burst_rows[0]["id"],
+            "seed_photo_id": scope["seed_photo_id"],
+            "scope_method": scope["scope_method"],
             "photo_ids": pack["photo_ids"],
             "count": pack["count"],
             "filenames": [burst_rows[0]["filename"], burst_rows[-1]["filename"]],
@@ -406,7 +446,7 @@ def build_folder_bursts(
         "photo_count": len(rows),
         "coverage": folder_coverage,
         "burst_count": len(bursts),
-        "photos_in_bursts": photos_in_bursts,
+        "photos_in_bursts": len(photos_in_bursts),
         "ambiguous_burst_count": sum(1 for b in bursts if b["ambiguity"]["needs_review"]),
         "bursts": bursts,
         "scoring": scoring,

@@ -257,7 +257,7 @@ def test_burst_evidence_get_wraps_best_batch_with_coverage_and_urls(app_and_db):
     assert pack["coverage"] == {
         "photos": 3, "with_detection": 1, "with_mask": 3, "with_quality": 3, "with_eye": 0,
     }
-    assert pack["scoring"] == {
+    assert {key: pack["scoring"][key] for key in ("eye_detect_enabled", "close_call_margin", "detector_confidence")} == {
         "eye_detect_enabled": False, "close_call_margin": 0.10, "detector_confidence": 0.2,
     }
     # The best frame carries two animal boxes, so the scorer may have scored
@@ -434,7 +434,7 @@ def test_focus_crop_centres_on_the_eye_at_native_scale(app_and_db):
     db.conn.commit()
 
     client = app.test_client()
-    resp = client.get(f"/photos/{pid}/focus-crop?size=256")
+    resp = client.get(f"/photos/{pid}/focus-crop?size=256&basis=eye")
     assert resp.status_code == 200
     assert resp.content_type == "image/jpeg"
     assert resp.headers["X-Vireo-Focus-Basis"] == "eye"

@@ -15,6 +15,7 @@ from burst_evidence import (
     DEFAULT_CLOSE_CALL_MARGIN,
     MAX_CLOSE_CALL_MARGIN,
     build_folder_bursts,
+    numeric_query_arg,
 )
 from db import Database
 from flask import Blueprint, jsonify, request
@@ -168,9 +169,11 @@ def create_folders_blueprint(
         folder = db.get_folder(folder_id)
         if not folder or folder_id not in db.get_workspace_visible_folder_ids([folder_id]):
             return json_error("folder not found", 404)
-        margin = request.args.get("margin", DEFAULT_CLOSE_CALL_MARGIN, type=float)
-        if margin is None or not 0 <= margin <= MAX_CLOSE_CALL_MARGIN:
-            return json_error(f"margin must be between 0 and {MAX_CLOSE_CALL_MARGIN}")
+        try:
+            margin = numeric_query_arg(request.args, "margin", DEFAULT_CLOSE_CALL_MARGIN,
+                                       float, 0, MAX_CLOSE_CALL_MARGIN)
+        except ValueError as exc:
+            return json_error(str(exc))
         import config as cfg
         effective_cfg = db.get_effective_config(cfg.load())
         try:
