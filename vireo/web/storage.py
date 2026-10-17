@@ -168,10 +168,6 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         from services.storage_paths import (
             directory_bytes as _dir_size_recursive,
         )
-        from services.storage_paths import (
-            huggingface_cache_dir,
-            huggingface_repositories,
-        )
 
         db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
         thumb = _dir_stats(config["THUMB_CACHE_DIR"])
@@ -194,25 +190,14 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         masks_size = masks["total_bytes"]
         storage_root = os.path.dirname(config["THUMB_CACHE_DIR"])
 
-        # HuggingFace cache — only count Vireo-relevant models
-        hf_cache = huggingface_cache_dir()
-        hf_size = 0
-        hf_models = []
-        hf_repositories = huggingface_repositories()
-        if os.path.isdir(hf_cache):
-            for d in os.listdir(hf_cache):
-                if d in hf_repositories or d.startswith((
-                    "models--imageomics--", "models--bioclip--",
-                )):
-                    dp = os.path.join(hf_cache, d)
-                    size = _dir_size_recursive(dp)
-                    hf_size += size
-                    hf_models.append(
-                        {
-                            "name": d.replace("models--", "").replace("--", "/"),
-                            "size": size,
-                        }
-                    )
+        # HuggingFace cache — only the Vireo-relevant repos, split per model
+        # with whether an install still uses each entry (services.hf_cache).
+        from services import hf_cache as hf_cache_service
+
+        hf_inventory = hf_cache_service.inventory()
+        hf_cache = hf_inventory["path"]
+        hf_size = hf_inventory["size"]
+        hf_models = hf_inventory["entries"]
 
         def _is_within(path, root):
             try:
@@ -361,7 +346,11 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
                 },
                 "embeddings": emb,
                 "models": {"size": models_size, "path": DEFAULT_MODELS_DIR},
-                "hf_cache": {"size": hf_size, "path": hf_cache, "models": hf_models},
+                "hf_cache": {
+                    "size": hf_size, "path": hf_cache, "models": hf_models,
+                    **{key: hf_inventory.get(key, 0) for key in
+                       ("unused_size", "installed_size", "retained_size")},
+                },
                 "offline_originals": {
                     "count": offline_count,
                     "size": offline_size,
@@ -561,6 +550,55 @@ def create_storage_blueprint(get_db, json_error, db_path, config, *, get_runner)
         return jsonify({
             "ok": True,
             "cleared": ["thumbnails", "previews", "embeddings"],
+        })
+
+    @blueprint.route("/api/storage/hf-cache")
+    def api_storage_hf_cache():
+        """Per-model Hugging Face cache entries, each marked installed or unused."""
+        from services import hf_cache as hf_cache_service
+
+        return jsonify(hf_cache_service.inventory())
+
+    @blueprint.route("/api/storage/hf-cache/remove", methods=["POST"])
+    def api_storage_hf_cache_remove():
+        """Remove Hugging Face cache entries: ``{"unused": true}`` or ``{"keys": [...]}``.
+
+        Keys are the ones the inventory handed out; anything else is a 404,
+        so the request cannot name a path of its own.
+        """
+        from services import hf_cache as hf_cache_service
+
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return json_error("Expected a JSON object")
+        keys = body.get("keys")
+        if not body.get("unused") and (
+            not isinstance(keys, list) or not keys
+            or not all(isinstance(k, str) for k in keys)
+        ):
+            return json_error("keys (a list of entry keys) or unused: true required")
+        try:
+            if body.get("unused"):
+                result = hf_cache_service.remove_unused()
+            else:
+                result = hf_cache_service.remove(keys)
+        except KeyError as exc:
+            return json_error(f"Unknown cache entry: {exc.args[0]}", 404)
+        except ValueError as exc:
+            return json_error(
+                f"{exc.args[0]} backs an installed model; remove the model in "
+                "Settings → Models to free it", 409,
+            )
+        except hf_cache_service.DownloadInProgress as exc:
+            return json_error(
+                f"Model cache access is busy ({exc}); try again shortly", 409,
+            )
+        except hf_cache_service.UnsafeCacheCleanup as exc:
+            return json_error(f"Cache cleanup refused: {exc}", 409)
+        # ``ok`` is the deletion's own verdict: a failed path stays listed in the
+        # fresh inventory, and the page must not toast success over it.
+        return jsonify({
+            "ok": not result["failed"], **result, **hf_cache_service.inventory(),
         })
 
     @blueprint.route("/api/storage/open-folder", methods=["POST"])

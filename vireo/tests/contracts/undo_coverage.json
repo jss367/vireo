@@ -252,6 +252,7 @@
       "POST /api/storage/clear",
       "POST /api/storage/clear-safe",
       "POST /api/storage/delete-files",
+      "POST /api/storage/hf-cache/remove",
       "POST /api/storage/masks/delete-inactive",
       "POST /api/storage/masks/delete-stale",
       "POST /api/storage/masks/delete-variant",

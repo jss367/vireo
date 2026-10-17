@@ -799,7 +799,11 @@ def test_split_layout_accounts_for_owned_paths_and_configured_huggingface_cache(
     after = client.get('/api/storage').get_json()
     assert after["total"] - before["total"] == owned_bytes
     assert after["hf_cache"]["size"] == len(b"weights")
-    assert {m["name"] for m in after["hf_cache"]["models"]} == {"jss367/vireo-onnx-models"}
+    # A blob no snapshot points at is listed as an unreferenced, removable entry.
+    assert [(m["key"], m["installed"]) for m in after["hf_cache"]["models"]] == [
+        ("jss367/vireo-onnx-models#unreferenced", False),
+    ]
+    assert after["hf_cache"]["unused_size"] == len(b"weights")
     assert any(location["path"] == str(hub) for location in after["locations"])
 
 

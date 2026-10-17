@@ -73,3 +73,13 @@ def db(tmp_path):
     d = Database(str(tmp_path / "test.db"))
     yield d
     d.close()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_huggingface_cache(tmp_path, monkeypatch):
+    """Keep every test away from the developer's real Hugging Face cache.
+
+    ``services.hf_cache`` deletes under ``huggingface_cache_dir()`` when a
+    model is removed; see the same fixture in ``vireo/tests/conftest.py``.
+    """
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hf-hub-cache"))

@@ -140,6 +140,7 @@ GET          /api/species/search
 GET          /api/stats
 GET          /api/storage
 GET          /api/storage/files
+GET          /api/storage/hf-cache
 GET          /api/storage/masks
 GET          /api/storage/retained
 GET          /api/sync/location-writes
@@ -411,6 +412,7 @@ POST         /api/species-highlights
 POST         /api/storage/clear
 POST         /api/storage/clear-safe
 POST         /api/storage/delete-files
+POST         /api/storage/hf-cache/remove
 POST         /api/storage/masks/delete-inactive
 POST         /api/storage/masks/delete-stale
 POST         /api/storage/masks/delete-variant

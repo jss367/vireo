@@ -1,0 +1,166 @@
+/* Hugging Face cache card and modal on the Storage page.
+ *
+ * The cache is where every model download lands before Vireo clones it into
+ * its models folder; Settings only ever shows that folder. This modal lists
+ * the cache per model, says which entries still back an installed model, and
+ * removes the rest. Depends on storageFormatBytes / storageEscapeHtml and
+ * safeFetch (navbar), and on loadStoragePanel to refresh the cards.
+ */
+/** @type {HfCacheInventory | null} */ var _hfCacheInventory = null;
+
+/** @param {{size?:number;unused_size?:number;retained_size?:number;installed_size?:number} | null | undefined} hf @returns {string | null} */
+function hfCacheCardNote(hf) {
+  if (!hf || !hf.size) return null;
+  if (hf.unused_size) {
+    return storageFormatBytes(hf.unused_size) + ' backs no installed model';
+  }
+  if (hf.retained_size) return storageFormatBytes(hf.retained_size) + ' retained cache payloads';
+  return hf.installed_size ? 'All entries back installed models' : 'No removable payloads';
+}
+
+async function openHfCacheModal() {
+  var modal = /** @type {HTMLElement} */ (document.getElementById('hfCacheModal'));
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheError')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheLoading')).style.display = 'block';
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheRows')).textContent = '';
+  /** @type {HTMLButtonElement} */ (document.getElementById('hfCacheRemoveUnused')).disabled = true;
+  modal.classList.add('open');
+  await loadHfCacheRows();
+}
+
+function closeHfCacheModal() {
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheModal')).classList.remove('open');
+}
+
+async function loadHfCacheRows() {
+  try {
+    _hfCacheInventory = await safeFetch('/api/storage/hf-cache', {}, { toast: false });
+  } catch (e) {
+    /** @type {HTMLElement} */ (document.getElementById('hfCacheLoading')).style.display = 'none';
+    _showHfCacheError('Failed to load the Hugging Face cache.');
+    return;
+  }
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheLoading')).style.display = 'none';
+  renderHfCacheRows();
+}
+
+/** @param {string} msg */
+function _showHfCacheError(msg) {
+  var el = /** @type {HTMLElement} */ (document.getElementById('hfCacheError'));
+  el.textContent = msg;
+  el.style.display = '';
+}
+
+/** @param {HfCacheEntry} entry @returns {HTMLLIElement} */
+function _hfCacheRow(entry) {
+  var li = document.createElement('li');
+  li.className = 'file-item';
+  li.style.padding = '8px 0';
+  var label = document.createElement('div');
+  label.style.flex = '1';
+  label.style.minWidth = '0';
+  var strong = document.createElement('div');
+  strong.style.color = 'var(--text-primary)';
+  strong.style.fontWeight = '600';
+  strong.textContent = entry.name;
+  label.appendChild(strong);
+  var meta = document.createElement('div');
+  meta.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:3px;color:var(--text-dim);';
+  var files = document.createElement('span');
+  files.textContent = (entry.file_count === 1 ? '1 file' : entry.file_count + ' files') +
+    ' · ' + storageFormatBytes(entry.size);
+  if (entry.retained_size) files.textContent += ' · ' + storageFormatBytes(entry.retained_size) + ' retained';
+  meta.appendChild(files);
+  var tag = document.createElement('span');
+  tag.className = 'stat-kind ' + (entry.installed || entry.removable === false ? 'keep' : 'safe');
+  tag.textContent = entry.installed ? 'Backs installed model' : 'No installed model uses this';
+  if (entry.installed && entry.install_path) tag.title = entry.install_path;
+  meta.appendChild(tag);
+  label.appendChild(meta);
+  li.appendChild(label);
+  var btn = document.createElement('button');
+  btn.className = 'btn-danger';
+  btn.textContent = 'Remove';
+  if (entry.retained_reason) {
+    btn.disabled = true;
+    btn.title = entry.retained_reason;
+  } else if (entry.installed) {
+    btn.disabled = true;
+    btn.title = 'Remove the model in Settings → Models; its cache entry goes with it. ' +
+      'The installed copy may share disk blocks with this entry, so removing it alone frees little.';
+  } else if (entry.removable === false) {
+    btn.disabled = true;
+    btn.title = 'Snapshot copies are retained because their download lock cannot be verified.';
+  } else {
+    btn.addEventListener('click', function() { removeHfCacheEntry(entry); });
+  }
+  li.appendChild(btn);
+  return li;
+}
+
+function renderHfCacheRows() {
+  var rows = /** @type {HTMLElement} */ (document.getElementById('hfCacheRows'));
+  rows.textContent = '';
+  /** @type {HfCacheInventory} */ var inv = _hfCacheInventory || {entries: [], unused_size: 0};
+  if (!inv.entries.length) {
+    var empty = document.createElement('li');
+    empty.style.color = 'var(--text-ghost)';
+    empty.style.fontSize = '13px';
+    empty.style.padding = '12px 0';
+    empty.textContent = 'No Vireo models in the Hugging Face cache.';
+    rows.appendChild(empty);
+  }
+  inv.entries.forEach(function(entry) { rows.appendChild(_hfCacheRow(entry)); });
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('hfCacheRemoveUnused'));
+  btn.disabled = !inv.unused_size;
+  btn.textContent = inv.unused_size
+    ? 'Remove unused entries · ' + storageFormatBytes(inv.unused_size)
+    : 'No unused entries';
+}
+
+/** @param {{keys?:string[];unused?:boolean}} body @param {string} failure */
+async function _postHfCacheRemove(body, failure) {
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheError')).style.display = 'none';
+  try {
+    /** @type {HfCacheInventory} */ var result = await safeFetch('/api/storage/hf-cache/remove', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    }, { toast: false });
+    _hfCacheInventory = result;
+    var first = result.failed && result.failed[0];
+    if (first) {
+      // Some paths could not be deleted; they stay in the refreshed list.
+      var failed = result.failed || [];
+      _showHfCacheError(failure + ': ' + failed.length +
+        (failed.length === 1 ? ' file' : ' files') + ' could not be deleted (' +
+        first.path + ': ' + first.error + '). Freed ' + storageFormatBytes(result.freed || 0) + '.');
+    } else {
+      showToast('Freed ' + storageFormatBytes(result.freed || 0) + ' from the Hugging Face cache', 'success');
+    }
+  } catch (e) {
+    var message = e instanceof Error ? e.message : '';
+    _showHfCacheError(failure + (message ? ': ' + message : '.'));
+    await loadHfCacheRows();
+    return;
+  }
+  renderHfCacheRows();
+  loadStoragePanel();
+}
+
+/** @param {HfCacheEntry} entry */
+async function removeHfCacheEntry(entry) {
+  if (!confirm('Remove "' + entry.name + '" (' + storageFormatBytes(entry.size) +
+      ') from the Hugging Face cache? Installing that model again will download it from Hugging Face.')) return;
+  await _postHfCacheRemove({keys: [entry.key]}, 'Failed to remove the cache entry');
+}
+
+async function removeUnusedHfCache() {
+  var inv = _hfCacheInventory;
+  if (!inv || !inv.unused_size) return;
+  var count = inv.entries.filter(function(e) { return !e.installed && e.removable !== false; }).length;
+  if (!confirm('Remove ' + count + (count === 1 ? ' entry' : ' entries') + ' (' +
+      storageFormatBytes(inv.unused_size) + ') that no installed model uses? ' +
+      'Installing those models again will download them from Hugging Face.')) return;
+  await _postHfCacheRemove({unused: true}, 'Failed to remove unused cache entries');
+}

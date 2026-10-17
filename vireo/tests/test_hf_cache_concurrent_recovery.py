@@ -1,0 +1,472 @@
+"""Reconciled cache changes, exercised only via selected AST and invented I/O.
+
+Run directly; no app/conftest imports or actual cache/model/pipeline operations.
+The harness reads source only and uses the descriptor test's in-memory nodes.
+"""
+
+import ast
+import builtins
+import contextlib
+import functools
+import logging
+import posixpath
+import runpy
+import unittest
+from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace as S
+
+VIREO = Path(__file__).resolve().parents[1]
+HARNESS = runpy.run_path(str(Path(__file__).with_name("test_hf_cache_descriptor_safety.py")))
+service, payload = HARNESS["service"], HARNESS["payload"]
+ROOT, REPO, KEY = (HARNESS[key] for key in ("ROOT", "REPO", "KEY"))
+
+
+def selected(path, names, namespace, *, keep_decorators=False):
+    nodes = [n for n in ast.walk(ast.parse((VIREO / path).read_text()))
+             if isinstance(n, ast.FunctionDef) and n.name in names]
+    assert {n.name for n in nodes} == set(names)
+    if not keep_decorators:
+        for node in nodes:
+            node.decorator_list = []
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "<invented-recovery>", "exec"), namespace)
+
+
+def forbidden(*_args, **_kwargs):
+    raise AssertionError("Unexpected system/product operation")
+
+
+def provenance_scope(registrations, *, known_models=()):
+    """Use actual ownership/scope definitions with no registry or filesystem I/O."""
+    ns = {"__builtins__": {**vars(builtins), "__import__": forbidden},
+          "_load_config": lambda: {"models": list(registrations)},
+          "DEFAULT_MODELS_DIR": "/invented/models",
+          "os": S(path=S(realpath=posixpath.normpath, join=posixpath.join))}
+    selected(Path("models.py"), {"_model_is_managed", "get_managed_model_registrations"}, ns)
+    # The existing display contract does not carry the raw managed flag.
+    projected = [{key: value for key, value in entry.items() if key != "managed"}
+                 for entry in registrations]
+    fake_models = S(ONNX_REPO="jss367/vireo-onnx-models", KNOWN_MODELS=list(known_models),
+                    get_models=lambda: projected,
+                    get_managed_model_registrations=ns["get_managed_model_registrations"])
+    scope = {"__builtins__": {**vars(builtins), "__import__": lambda *_a, **_k: fake_models}}
+    selected(Path("services/storage_paths.py"), {"huggingface_repositories"}, scope)
+    return scope["huggingface_repositories"], projected, ns
+
+
+def invented_repo_payload(fs, repo="outside/client"):
+    path = ROOT + "/models--" + repo.replace("/", "--")
+    inode = fs.add(path + "/blobs/owned-by-another-client", size=23)
+    fs.add(path + "/snapshots/rev/file", "link", target="../../blobs/owned-by-another-client")
+    return inode
+
+
+def pinned_inventory(ns):
+    with ns["CacheTree"](ROOT) as tree:
+        token = ns["_ACTIVE_TREE"].set(tree)
+        try:
+            return ns["inventory"](ROOT, "/invented/models")
+        finally:
+            ns["_ACTIVE_TREE"].reset(token)
+
+
+def storage_inventory_routes(fs, service_ns):
+    """Compile both complete Storage callers with invented, read-only adapters."""
+    def directory_bytes(path):
+        def size(inode):
+            node = fs.nodes[inode]
+            return sum(size(child) for child in node["children"].values()) if node["kind"] == "dir" else node["size"]
+        return size(fs._lookup(path)) if fs._kind(path) is not None else 0
+
+    def inventory():
+        # Keep the read-only branch active (including its byte counter), while
+        # directory traversal is supplied by the already-tested fake descriptors.
+        old_fs = service_ns["_fs"]
+        module = service_ns["__builtins__"]["__import__"]("services.storage_paths")
+        old_size = module.directory_bytes
+        try:
+            with service_ns["CacheTree"](ROOT) as tree:
+                service_ns["_fs"] = lambda: tree
+                module.directory_bytes = directory_bytes
+                return service_ns["inventory"](ROOT, "/invented/models")
+        finally:
+            service_ns["_fs"] = old_fs
+            module.directory_bytes = old_size
+
+    storage_paths = S(auxiliary_paths=lambda *_a: [], directory_bytes=directory_bytes, location_id=forbidden)
+    modules = {"classifier": S(CACHE_DIR="/invented/embeddings"),
+               "models": S(DEFAULT_MODELS_DIR="/invented/models"),
+               "storage_breakdown": S(group_auxiliary_storage=lambda *_a: []),
+               "services": S(hf_cache=S(inventory=inventory)), "services.storage_paths": storage_paths}
+    fake_path = S(**{name: getattr(posixpath, name) for name in (
+        "join", "dirname", "basename", "abspath", "commonpath", "sep")})
+    fake_path.isdir = fake_path.isfile = fake_path.islink = lambda _p: False
+    fake_path.exists = fake_path.ismount = lambda _p: True
+    fake_path.getsize = lambda _p: 0
+    ns = {"__builtins__": {**vars(builtins), "__import__": lambda name, *_a, **_k: modules[name]},
+          "os": S(path=fake_path, listdir=forbidden), "jsonify": lambda value: value,
+          "config": {"THUMB_CACHE_DIR": "/invented/generated/thumbs"}, "db_path": "/invented/catalog/db",
+          "get_db": lambda: S(caches=S(offline_original_total_bytes=lambda: 0, offline_original_cached_count=lambda: 0)),
+          "working_copy_stats": lambda _p: {"count": 0, "size": 0, "path": "/invented/generated/working"},
+          "_storage_masks_data": lambda _db: {"total_bytes": 0, "path": "/invented/catalog/masks"},
+          "shutil": S(disk_usage=lambda _p: S(free=100, total=200)), "sys": S(platform="invented")}
+    selected(Path("web/storage.py"), {"api_storage", "api_storage_hf_cache"}, ns)
+    return ns
+
+
+class ReconciledSafetyTests(unittest.TestCase):
+    def test_repository_allowlist_includes_only_manifest_registered_and_exact_legacy_ids(self):
+        fake_models = S(ONNX_REPO="invented/onnx", KNOWN_MODELS=[{"model_str": "hf-hub:manifest/one"}],
+                        get_models=lambda: [{"source": "hf-hub:registered/two"}],
+                        get_managed_model_registrations=lambda: [])
+        ns = {"__builtins__": {**vars(builtins), "__import__": lambda *_a, **_k: fake_models}}
+        selected(Path("services/storage_paths.py"), {"huggingface_repositories"}, ns)
+        self.assertEqual(ns["huggingface_repositories"](), {
+            "models--invented--onnx", "models--manifest--one", "models--registered--two",
+            "models--imageomics--bioclip", "models--imageomics--bioclip-2", "models--imageomics--bioclip-2.5",
+        })
+        self.assertEqual(ns["huggingface_repositories"](managed_only=True), {
+            "models--invented--onnx", "models--manifest--one", "models--imageomics--bioclip",
+            "models--imageomics--bioclip-2", "models--imageomics--bioclip-2.5",
+        })
+
+    def test_managed_scope_uses_raw_provenance_and_preserves_default_reporting(self):
+        entries = [
+            {"id": "custom-outside", "model_str": "hf-hub:outside/custom", "weights_path": "/invented/external"},
+            {"id": "explicit-no", "managed": False, "source": "hf-hub:outside/explicit-no", "weights_path": "/invented/models/explicit-no"},
+            {"id": "external-no-prefix", "model_str": "hf-hub:outside/external", "weights_path": "/invented/external"},
+            {"id": "dynamic", "managed": True, "model_str": "hf-hub:outside/dynamic", "weights_path": "/invented/models/dynamic"},
+            {"id": "legacy", "model_str": "hf-hub:outside/legacy", "weights_path": "/invented/models/legacy"},
+        ]
+        scope, _projected, ownership = provenance_scope(entries)
+        managed = ownership["get_managed_model_registrations"]()
+        self.assertEqual([m["id"] for m in managed], ["dynamic", "legacy"])
+        self.assertEqual(scope() - scope(managed_only=True), {
+            "models--outside--custom", "models--outside--explicit-no", "models--outside--external",
+        })
+        self.assertIn("models--outside--dynamic", scope(managed_only=True))
+        self.assertIn("models--outside--legacy", scope(managed_only=True))
+        self.assertNotIn("managed", entries[0])  # Selection does not mutate registrations.
+
+    def test_unmanaged_external_weights_report_retained_without_authorizing_cleanup(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                scope, projected, _ns = provenance_scope([{
+                    "id": "custom-client", "managed": False, "model_str": "hf-hub:outside/client",
+                    "weights_path": "/invented/external",
+                }])
+                fs, ns = service(repositories=scope, model_entries=projected)
+                payload(fs)
+                outsider = invented_repo_payload(fs)
+                if existing:
+                    fs.add("/invented/external", "dir")
+                inventory = pinned_inventory(ns)
+                self.assertEqual({entry["key"] for entry in inventory["entries"]}, {KEY, "outside/client"})
+                outsider_row = next(entry for entry in inventory["entries"] if entry["key"] == "outside/client")
+                self.assertFalse(outsider_row["removable"])
+                self.assertEqual(outsider_row["retained_size"], 23)
+                self.assertEqual(outsider_row["size"], 0)
+                self.assertIn("unmanaged", outsider_row["retained_reason"])
+                self.assertEqual(inventory["retained_size"], 0 if existing else 23)
+                self.assertEqual(inventory["unused_size"], 10)
+                self.assertEqual(ns["_purge_keys"](["outside/client"], ROOT, "/invented/models"), 0)
+                self.assertEqual(ns["purge_model"]("custom-client", ROOT, "/invented/models"), 0)
+                with self.assertRaises(KeyError):
+                    ns["remove"](["outside/client"], ROOT, "/invented/models")
+                result = ns["remove_unused"](ROOT, "/invented/models")
+                self.assertEqual(result, {"removed": [KEY], "failed": [], "freed": 10})
+                self.assertNotIn(outsider, fs.unlinked)
+                self.assertFalse(fs.fds)
+
+    def test_both_storage_callers_report_unmanaged_bytes_without_reclaimable_scope(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                scope, projected, _ownership = provenance_scope([{
+                    "id": "custom-client", "managed": False, "model_str": "hf-hub:outside/client",
+                    "weights_path": "/invented/external",
+                }])
+                fs, ns = service(repositories=scope, model_entries=projected)
+                payload(fs)
+                inode = invented_repo_payload(fs)
+                if existing:
+                    fs.add("/invented/external", "dir")
+                routes = storage_inventory_routes(fs, ns)
+                modal = routes["api_storage_hf_cache"]()
+                overview = routes["api_storage"]()["hf_cache"]
+                self.assertEqual(modal["size"], 53)  # Fake blob + symlink bytes, both repositories.
+                self.assertEqual(overview["size"], modal["size"])
+                self.assertEqual(overview["models"], modal["entries"])
+                for result in (modal, overview):
+                    self.assertEqual(result["unused_size"], 10)
+                    self.assertEqual(result["retained_size"], 0 if existing else 23)
+                    self.assertEqual(result["installed_size"], 23 if existing else 0)
+                outsider = next(row for row in modal["entries"] if row["key"] == "outside/client")
+                self.assertEqual((outsider["size"], outsider["shared_size"], outsider["retained_size"]), (0, 0, 23))
+                self.assertFalse(outsider["removable"])
+                self.assertEqual(outsider["installed"], existing)
+                self.assertFalse(fs.unlinked)
+                self.assertNotIn(inode, fs.unlinked)
+                self.assertFalse(fs.fds)
+
+    def test_shared_known_or_managed_scope_stays_removable_unless_an_install_exists(self):
+        for authorization in ("known", "managed"):
+            for existing in (False, True):
+                with self.subTest(authorization=authorization, existing=existing):
+                    entries = [{"id": "custom-client", "managed": False, "model_str": "hf-hub:outside/client",
+                                "weights_path": "/invented/external"}]
+                    known = [{"id": "manifest", "model_str": "hf-hub:outside/client"}] if authorization == "known" else []
+                    if authorization == "managed":
+                        entries.append({"id": "dynamic", "managed": True, "model_str": "hf-hub:outside/client",
+                                        "weights_path": "/invented/models/dynamic"})
+                    scope, projected, _ownership = provenance_scope(entries, known_models=known)
+                    fs, ns = service(repositories=scope, model_entries=projected)
+                    inode = invented_repo_payload(fs)
+                    if existing:
+                        fs.add("/invented/external", "dir")
+                    routes = storage_inventory_routes(fs, ns)
+                    modal = routes["api_storage_hf_cache"]()
+                    self.assertEqual(routes["api_storage"]()["hf_cache"]["size"], 33)
+                    self.assertEqual(len(modal["entries"]), 1)  # Same repo is counted once.
+                    row = modal["entries"][0]
+                    self.assertTrue(row["removable"])
+                    self.assertIsNone(row["retained_reason"])
+                    self.assertEqual(row["retained_size"], 0)
+                    self.assertEqual(modal["unused_size"], 0 if existing else 23)
+                    result = ns["remove_unused"](ROOT, "/invented/models")
+                    self.assertEqual(result["freed"], 0 if existing else 23)
+                    self.assertEqual(inode in fs.unlinked, not existing)
+                    self.assertFalse(fs.fds)
+
+    def test_managed_dynamic_scope_retains_installed_and_cleans_missing_payload(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                scope, projected, _ns = provenance_scope([{
+                    "id": "dynamic", "managed": True, "model_str": "hf-hub:outside/client",
+                    "weights_path": "/invented/models/dynamic",
+                }])
+                fs, ns = service(repositories=scope, model_entries=projected)
+                inode = invented_repo_payload(fs)
+                if existing:
+                    fs.add("/invented/models/dynamic", "dir")
+                inventory = pinned_inventory(ns)
+                self.assertEqual([entry["key"] for entry in inventory["entries"]], ["outside/client"])
+                self.assertEqual(inventory["entries"][0]["installed"], existing)
+                self.assertEqual(inventory["unused_size"], 0 if existing else 23)
+                result = ns["remove_unused"](ROOT, "/invented/models")
+                self.assertEqual(result["freed"], 0 if existing else 23)
+                self.assertEqual(inode in fs.unlinked, not existing)
+                self.assertFalse(fs.fds)
+
+    def test_unmanaged_live_install_still_protects_a_shared_managed_repository(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                scope, projected, _ns = provenance_scope([
+                    {"id": "dynamic", "managed": True, "model_str": "hf-hub:outside/client", "weights_path": "/invented/models/dynamic"},
+                    {"id": "custom-client", "managed": False, "model_str": "hf-hub:outside/client", "weights_path": "/invented/external"},
+                ])
+                fs, ns = service(repositories=scope, model_entries=projected)
+                inode = invented_repo_payload(fs)
+                if existing:
+                    fs.add("/invented/external", "dir")
+                self.assertEqual(pinned_inventory(ns)["unused_size"], 0 if existing else 23)
+                result = ns["remove_unused"](ROOT, "/invented/models")
+                self.assertEqual(result["freed"], 0 if existing else 23)
+                self.assertEqual(inode in fs.unlinked, not existing)
+                self.assertFalse(fs.fds)
+
+    def test_explicit_scope_retains_other_repositories_in_the_same_organization(self):
+        scope, _projected, _ownership = provenance_scope([])
+        fs, ns = service(repositories=scope)
+        payload(fs)
+        outsiders = []
+        for org in ("imageomics", "bioclip", "jss367"):
+            repo = ROOT + "/models--" + org + "--other-client"
+            outsiders.append(fs.add(repo + "/blobs/foreign"))
+            fs.add(repo + "/snapshots/rev/file", "link", target="../../blobs/foreign")
+        self.assertEqual(ns["remove_unused"](ROOT, "/invented/models")["freed"], 10)
+        self.assertTrue(set(outsiders).isdisjoint(fs.unlinked))
+        self.assertFalse(fs.fds)
+
+    def test_dynamic_purge_adds_only_the_captured_repository_and_rechecks_installs(self):
+        for installed in (False, True):
+            with self.subTest(installed=installed):
+                repo = "external/dynamic"
+                install = "/invented/models/dynamic"
+                fs, ns = service(model_entries=[{"id": "dynamic", "model_str": "hf-hub:" + repo,
+                                                  "weights_path": install}] if installed else [])
+                target = ROOT + "/models--external--dynamic"
+                inode = fs.add(target + "/blobs/dynamic", size=23)
+                fs.add(target + "/snapshots/rev/file", "link", target="../../blobs/dynamic")
+                unrelated = fs.add(ROOT + "/models--external--other/blobs/foreign")
+                if installed:
+                    fs.add(install, "dir")
+                self.assertEqual(ns["purge_model"]("dynamic", ROOT, "/invented/models"), 0)
+                freed = ns["purge_model"]("dynamic", ROOT, "/invented/models", hf_source="hf-hub:" + repo)
+                self.assertEqual(freed, 0 if installed else 23)
+                self.assertEqual(inode in fs.unlinked, not installed)
+                self.assertNotIn(unrelated, fs.unlinked)
+                self.assertFalse(fs.fds)
+
+    def test_captured_repo_is_only_forwarded_from_managed_registration_before_removal(self):
+        for managed in (False, True):
+            for field in ("model_str", "source"):
+                with self.subTest(managed=managed, field=field):
+                    calls = []
+                    entry = {"id": "dynamic", "weights_path": "/invented/weights", field: "hf-hub:external/dynamic"}
+                    config = {"models": [entry], "active_model": "dynamic"}
+                    def purge(model_id, *, hf_source, _calls=calls, _config=config):
+                        self.assertEqual(_config["models"], [])
+                        _calls.append((model_id, hf_source))
+                        return {}
+                    ns = {"__builtins__": {**vars(builtins), "__import__": forbidden},
+                          "_CONFIG_LOCK": contextlib.nullcontext(), "_load_config": lambda _c=config: _c,
+                          "_save_config": lambda _c: None, "KNOWN_MODELS": [],
+                          "_model_is_managed": lambda _m, _managed=managed: _managed,
+                          "os": S(path=S(lexists=lambda _p: False)), "log": logging.getLogger("invented"),
+                          "_purge_hf_cache_for_model": purge}
+                    selected(Path("models.py"), {"remove_model"}, ns)
+                    self.assertEqual(ns["remove_model"]("dynamic"), {"files_deleted": False, "kept_path": None})
+                    self.assertEqual(calls, [("dynamic", "hf-hub:external/dynamic" if managed else "")])
+
+    def test_installed_weight_fast_paths_and_guarded_rechecks_do_no_download_io(self):
+        cases = [
+            ("detector.py", "ensure_megadetector_weights", "_hf_download_megadetector_weights", (), "/invented/md/model.onnx"),
+            ("dino_embed.py", "ensure_dinov2_weights", "_hf_download_dinov2_weights", ("vit-b14",), "/invented/dino/model.onnx"),
+            ("masking.py", "ensure_sam2_weights", "_hf_download_sam2_weights", ("sam2-small",), "/invented/sam"),
+            ("keypoints.py", "ensure_keypoint_weights", "_hf_download_keypoint_weights", ("animal",), "/invented/kp/model.onnx"),
+        ]
+        for file, public, helper, args, expected in cases:
+            with self.subTest(file=file):
+                present = [True]
+                enters = []
+                @contextlib.contextmanager
+                def guard(_enters=enters, _present=present):
+                    _enters.append(True)
+                    _present[0] = True  # Another writer finished before our acquisition.
+                    yield
+                ns = {"__builtins__": {**vars(builtins), "__import__": forbidden},
+                      "functools": functools, "Callable": Callable, "DOWNLOAD_LOCK": guard(),
+                      "os": S(path=S(isfile=lambda _p, _present=present: _present[0], join=posixpath.join)),
+                      "MEGADETECTOR_ONNX_PATH": "/invented/md/model.onnx",
+                      "DINOV2_VARIANTS": {"vit-b14": {}}, "SAM2_VARIANTS": {"sam2-small": {}},
+                      "_dinov2_model_path": lambda _v: ("/invented/dino", "/invented/dino/model.onnx"),
+                      "_sam2_model_dir": lambda _v: "/invented/sam", "_model_dir": lambda _v: "/invented/kp"}
+                selected(Path("services/hf_cache_lock.py"), {"cache_access"}, ns)
+                selected(Path(file), {public, helper}, ns, keep_decorators=True)
+                self.assertEqual(ns[public](*args), expected)
+                self.assertFalse(enters)
+                present[0] = False
+                self.assertEqual(ns[public](*args), expected)
+                self.assertEqual(enters, [True])
+
+    def test_canonical_alias_cannot_redirect_cleanup_after_target_is_pinned(self):
+        for changed in ("/invented", ROOT, REPO):
+            with self.subTest(changed=changed):
+                fs, ns = service()
+                payload(fs)
+                fs.add("/alias", "link", target="/invented")
+                original = ns["_collect"]
+                swapped = [False]
+                def collect(*args, _original=original, _fs=fs, _changed=changed, _swapped=swapped):
+                    result = _original(*args)
+                    if not _swapped[0]:
+                        _fs.add(_changed, "dir")
+                        _swapped[0] = True
+                    return result
+                ns["_collect"] = collect
+                with self.assertRaises(ns["UnsafeCacheCleanup"]):
+                    ns["remove"]([KEY], "/alias/hub", "/invented/models")
+                self.assertFalse(fs.unlinked)
+                self.assertFalse(fs.fds)
+
+    def test_pipeline_conflict_and_guard_failure_do_not_touch_install_or_sessions(self):
+        for outcome, status in ((False, 409), (OSError("invented lock failure"), 503)):
+            with self.subTest(status=status):
+                attempts = []
+                def acquire(*, blocking, _attempts=attempts, _outcome=outcome):
+                    _attempts.append(blocking)
+                    if isinstance(_outcome, Exception):
+                        raise _outcome
+                    return _outcome
+                modules = {"shutil": S(rmtree=forbidden), "services.hf_cache_lock": S(
+                    DOWNLOAD_LOCK=S(acquire=acquire, release=forbidden))}
+                ns = {"__builtins__": {**vars(builtins), "__import__": lambda name, *_a, _m=modules, **_k: _m[name]},
+                      "request": S(get_json=lambda **_k: {"model_id": "sam2-tiny"}),
+                      "PIPELINE_MODELS": {"sam2-tiny": {"subfolder": "group"}},
+                      "json_error": lambda message, status=400: (message, status),
+                      "os": S(path=S(join=forbidden, isdir=forbidden)), "pipeline_models_dir": forbidden}
+                selected(Path("web/models.py"), {"api_models_pipeline_delete"}, ns)
+                message, actual = ns["api_models_pipeline_delete"]()
+                self.assertEqual(actual, status)
+                self.assertEqual(attempts, [False])
+                self.assertIn("model/cache" if status == 503 else "model or cache operation", message)
+                self.assertNotIn("download", message.lower())
+
+    def test_pipeline_guard_covers_fake_install_removal_purge_and_session_reset(self):
+        events = []
+        active = [False]
+        def acquire(*, blocking):
+            self.assertFalse(blocking)
+            active[0] = True
+            events.append("acquire")
+            return True
+        def release():
+            self.assertTrue(active[0])
+            self.assertIsNone(masking._encoder_session)
+            events.append("release")
+            active[0] = False
+        def operation(name):
+            self.assertTrue(active[0])
+            events.append(name)
+        masking = S(_encoder_session="before", _decoder_session="before", _sam2_variant_loaded="before")
+        def purge_outcome(_op, _identifier):
+            operation("purge")
+            return {"ok": False, "cache_cleanup": {"freed": 0, "failed": [{"error": "invented partial"}]}}
+        modules = {"shutil": S(rmtree=lambda _p: operation("remove")), "masking": masking,
+                   "services.hf_cache_lock": S(DOWNLOAD_LOCK=S(acquire=acquire, release=release)),
+                   "services.hf_cache": S(purge_outcome=purge_outcome, purge_subfolder=forbidden)}
+        ns = {"__builtins__": {**vars(builtins), "__import__": lambda name, *_a, **_k: modules[name]},
+              "request": S(get_json=lambda **_k: {"model_id": "sam2-tiny"}),
+              "PIPELINE_MODELS": {"sam2-tiny": {"subfolder": "group"}},
+              "json_error": forbidden, "jsonify": lambda value: value,
+              "os": S(path=S(join=posixpath.join, isdir=lambda _p: True)),
+              "pipeline_models_dir": lambda: "/invented/models"}
+        selected(Path("web/models.py"), {"api_models_pipeline_delete"}, ns)
+        result = ns["api_models_pipeline_delete"]()
+        self.assertEqual(events, ["acquire", "remove", "purge", "release"])
+        self.assertIs(result["ok"], False)
+        self.assertFalse(active[0])
+        def failed_removal(_path):
+            operation("failed remove")
+            raise OSError("invented install failure")
+        modules["shutil"].rmtree = failed_removal
+        events.clear()
+        with self.assertRaisesRegex(OSError, "invented install failure"):
+            ns["api_models_pipeline_delete"]()
+        self.assertEqual(events, ["acquire", "failed remove", "release"])
+        self.assertFalse(active[0])
+
+    def test_storage_contention_message_remains_truthful_for_non_download_holder(self):
+        _fs, service_ns = service()
+        service_ns["DOWNLOAD_LOCK"] = S(acquire=lambda **_k: False, release=forbidden)
+        def remove(_keys):
+            return service_ns["remove"](_keys, ROOT, "/invented/models")
+        ns = {"__builtins__": {**vars(builtins), "__import__": forbidden},
+              "request": S(get_json=lambda **_k: {"keys": [KEY]}),
+              "hf_cache_service": S(remove=remove, DownloadInProgress=service_ns["DownloadInProgress"],
+                                    UnsafeCacheCleanup=service_ns["UnsafeCacheCleanup"]),
+              "json_error": lambda message, status=400: (message, status), "jsonify": forbidden}
+        tree = ast.parse((VIREO / "web/storage.py").read_text())
+        route = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "api_storage_hf_cache_remove")
+        # The function's own service import is redirected to the selected AST service.
+        ns["__builtins__"]["__import__"] = lambda *_a, **_k: S(hf_cache=ns["hf_cache_service"])
+        route.decorator_list = []
+        exec(compile(ast.Module(body=[route], type_ignores=[]), "<invented-storage>", "exec"), ns)
+        message, status = ns[route.name]()
+        self.assertEqual(status, 409)
+        self.assertIn("model or cache operation", message)
+        self.assertNotIn("download", message.lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

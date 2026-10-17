@@ -15,6 +15,7 @@ import threading
 
 import model_verify
 from file_replace import replace_file
+from services.hf_cache_lock import cache_access
 
 log = logging.getLogger(__name__)
 
@@ -454,6 +455,15 @@ def _model_is_managed(entry):
     return False
 
 
+def get_managed_model_registrations():
+    """Raw registrations whose weights Vireo owns, including missing installs.
+
+    Display entries from ``get_models`` omit explicit ownership provenance;
+    cleanup must use the registered entry and the same policy as removal.
+    """
+    return [entry for entry in _load_config().get("models", []) if _model_is_managed(entry)]
+
+
 def _check_onnx_downloaded(model_dir, files):
     """Check if all required model files exist and look usable.
 
@@ -688,6 +698,7 @@ def set_active_model(model_id):
         _save_config(config)
 
 
+@cache_access
 def remove_model(model_id):
     """Remove a model's weights from disk and unregister it.
 
@@ -699,7 +710,8 @@ def remove_model(model_id):
     ``~/.vireo/models``.
 
     Returns ``None`` if the model is unknown, otherwise a dict with
-    ``files_deleted`` (bool) and ``kept_path`` (str or ``None``).
+    ``files_deleted`` (bool) and ``kept_path`` (str or ``None``). A partial
+    cache purge additionally reports ``ok=False`` and ``cache_cleanup``.
     """
     with _CONFIG_LOCK:
         config = _load_config()
@@ -718,13 +730,29 @@ def remove_model(model_id):
                 path = os.path.join(DEFAULT_MODELS_DIR, model_id)
                 if os.path.isdir(path) and _inside_models_dir(path):
                     shutil.rmtree(path)
-                    return {"files_deleted": True, "kept_path": None}
+                    cache = _purge_hf_cache_for_model(model_id)
+                    return {"files_deleted": True, "kept_path": None, **cache}
             return None
 
+        # Capture the entry's hf-hub identifier before unregistering so a
+        # dynamically downloaded model (``download_hf_model``, id absent
+        # from ``KNOWN_MODELS``) can still have its cache copy purged after
+        # ``get_models()`` no longer returns it. Only capture for managed
+        # entries: a custom-registered model whose ``model_str`` is
+        # ``hf-hub:...`` but whose weights live under a user-owned path
+        # never populated Vireo's hub cache, so purging that repo would
+        # delete another client's cache entry.
         files_deleted = False
         kept_path = None
         weights_path = found.get("weights_path") or ""
         managed = _model_is_managed(found)
+        hf_source = ""
+        if managed:
+            for field in ("model_str", "source"):
+                value = found.get(field) or ""
+                if value.startswith("hf-hub:"):
+                    hf_source = value
+                    break
         if weights_path and os.path.lexists(weights_path):
             if not managed or not _inside_models_dir(weights_path):
                 log.info(
@@ -754,9 +782,34 @@ def remove_model(model_id):
 
     log.info("Removed model %s (weights: %s, deleted: %s)",
              model_id, weights_path, files_deleted)
-    return {"files_deleted": files_deleted, "kept_path": kept_path}
+    # Outside _CONFIG_LOCK: the purge reads models.json through get_models().
+    cache = _purge_hf_cache_for_model(model_id, hf_source=hf_source)
+    return {"files_deleted": files_deleted, "kept_path": kept_path, **cache}
 
 
+def _purge_hf_cache_for_model(model_id, hf_source=""):
+    """Drop the Hugging Face cache copy a removed model's download left behind.
+
+    The cache copy exists only to let Repair and re-downloads skip the
+    network, so once the user removes the model it is invisible dead weight
+    (Settings lists installs, not the cache). ``hf_source`` is the
+    ``hf-hub:<owner>/<repo>`` identifier captured from the entry before
+    unregistration, required for dynamically downloaded models whose id is
+    absent from ``KNOWN_MODELS``. A missing cache is not an error; a failed
+    cleanup is returned explicitly so callers do not report the whole
+    removal as successful.
+    """
+    try:
+        from services.hf_cache import purge_model, purge_outcome
+        return purge_outcome(lambda mid: purge_model(mid, hf_source=hf_source), model_id)
+    except Exception as exc:  # pragma: no cover - cleanup must not fail the removal
+        log.warning("Could not purge HF cache for %s: %s", model_id, exc)
+        return {"ok": False, "cache_cleanup": {"freed": 0, "failed": [
+            {"key": model_id, "error": str(exc)},
+        ]}}
+
+
+@cache_access
 def register_model(model_id, name, model_str, weights_path, description="",
                    managed=False):
     """Register a model (custom or after download).
@@ -864,6 +917,7 @@ def _staged_sibling(dest_path):
             os.unlink(tmp_path)
 
 
+@cache_access
 def _hf_download_with_retry(repo_id, filename, local_dir,
                             subfolder=None, progress_callback=None,
                             revision=None):
@@ -952,53 +1006,14 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
                     repo_id, label_path, attempt,
                 )
 
-            cached_path = hf_hub_download(**kwargs)
+            # Hold the cache lock across fetch and copy so a Storage-page
+            # cleanup cannot remove the cached blob between the two (it
+            # answers "a download is in progress" instead).
+            from services.hf_cache_lock import DOWNLOAD_LOCK
 
-            # Copy from cache to our models directory.  On APFS shutil.copy2
-            # uses clonefile() (copy-on-write metadata-only), so cloning a
-            # 1+ GB blob takes milliseconds and shares disk pages with the
-            # cache until either side is modified.
-            dest_path = os.path.join(local_dir, filename)
-            # filename can be repo-relative (e.g. "onnx/model.onnx" for
-            # custom HF repos with the standard onnx/ layout) — create the
-            # full destination directory, not just local_dir, or copy2
-            # raises FileNotFoundError that the retry loop misclassifies
-            # as a connection failure.
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            if cached_path != dest_path:
-                if _needs_atomic_publish(filename):
-                    # Publish atomically. copy2 straight onto dest_path
-                    # makes the destination visible while it is still
-                    # being written, so a concurrent reader (e.g. the
-                    # background label_descriptions heal racing a
-                    # TimmClassifier init) can json.load a torn file, and
-                    # a process exit mid-copy leaves a truncated file
-                    # whose mere existence suppresses future repairs.
-                    # Copy beside it, then os.replace (atomic on POSIX
-                    # and Windows) so readers only ever see the whole
-                    # file or no file. Cheap here: these are small
-                    # metadata files — see _needs_atomic_publish for why
-                    # the multi-GB weight artifacts must not do this.
-                    # The staging name is unique per invocation (see
-                    # _staged_sibling) so two concurrent publishers of the
-                    # same file never share one staging inode.
-                    with _staged_sibling(dest_path) as tmp_path:
-                        shutil.copy2(cached_path, tmp_path)
-                        replace_file(tmp_path, dest_path)
-                else:
-                    # Weights: copy straight into place so a download
-                    # never needs 2x the model size on disk. A failed
-                    # copy still leaves nothing behind — copy2 has
-                    # already truncated any previous copy, so the
-                    # half-written remains are worthless and would only
-                    # look like a healthy artifact to the next
-                    # completeness check.
-                    try:
-                        shutil.copy2(cached_path, dest_path)
-                    except BaseException:
-                        with contextlib.suppress(OSError):
-                            os.unlink(dest_path)
-                        raise
+            with DOWNLOAD_LOCK:
+                dest_path = _copy_from_hub_cache(
+                    hf_hub_download(**kwargs), local_dir, filename)
 
             if from_cache:
                 size_mb = os.path.getsize(dest_path) / 1024 / 1024
@@ -1029,6 +1044,58 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
             _time.sleep(wait)
 
 
+def _copy_from_hub_cache(cached_path, local_dir, filename):
+    """Clone a hub-cache file into the models directory; return the destination.
+
+    On APFS shutil.copy2 uses clonefile() (copy-on-write, metadata-only), so
+    cloning a 1+ GB blob takes milliseconds and shares disk pages with the
+    cache until either side is modified.
+    """
+    dest_path = os.path.join(local_dir, filename)
+    # filename can be repo-relative (e.g. "onnx/model.onnx" for
+    # custom HF repos with the standard onnx/ layout) — create the
+    # full destination directory, not just local_dir, or copy2
+    # raises FileNotFoundError that the retry loop misclassifies
+    # as a connection failure.
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    if cached_path != dest_path:
+        if _needs_atomic_publish(filename):
+            # Publish atomically. copy2 straight onto dest_path
+            # makes the destination visible while it is still
+            # being written, so a concurrent reader (e.g. the
+            # background label_descriptions heal racing a
+            # TimmClassifier init) can json.load a torn file, and
+            # a process exit mid-copy leaves a truncated file
+            # whose mere existence suppresses future repairs.
+            # Copy beside it, then os.replace (atomic on POSIX
+            # and Windows) so readers only ever see the whole
+            # file or no file. Cheap here: these are small
+            # metadata files — see _needs_atomic_publish for why
+            # the multi-GB weight artifacts must not do this.
+            # The staging name is unique per invocation (see
+            # _staged_sibling) so two concurrent publishers of the
+            # same file never share one staging inode.
+            with _staged_sibling(dest_path) as tmp_path:
+                shutil.copy2(cached_path, tmp_path)
+                replace_file(tmp_path, dest_path)
+        else:
+            # Weights: copy straight into place so a download
+            # never needs 2x the model size on disk. A failed
+            # copy still leaves nothing behind — copy2 has
+            # already truncated any previous copy, so the
+            # half-written remains are worthless and would only
+            # look like a healthy artifact to the next
+            # completeness check.
+            try:
+                shutil.copy2(cached_path, dest_path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(dest_path)
+                raise
+    return dest_path
+
+
+@cache_access
 def download_model(model_id, progress_callback=None):
     """Download a known model from jss367/vireo-onnx-models.
 
@@ -1498,6 +1565,7 @@ def _path_signature(path):
     return (st.st_size, int(st.st_mtime_ns), st.st_ino)
 
 
+@cache_access
 def _load_upstream_timm_config(model_str):
     """Fetch the upstream timm repo's config.json for a hf-hub model_str.
 
@@ -1594,6 +1662,7 @@ def label_descriptions_usable(path):
     return load_label_descriptions(path) is not None
 
 
+@cache_access
 def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None):
     """Self-heal a missing label_descriptions.json for a timm model.
 
@@ -1755,6 +1824,7 @@ def ensure_timm_label_descriptions(model_dir, model_str, progress_callback=None)
     return True
 
 
+@cache_access
 def _purge_hf_cache_file(filename, hf_subdir, revision=None):
     """Delete a cached file from the HuggingFace cache so the next
     hf_hub_download call fetches fresh bytes instead of returning the
@@ -1817,6 +1887,7 @@ def _purge_hf_cache_file(filename, hf_subdir, revision=None):
             log.info("Purged HF cache blob target: %s", blob_target)
 
 
+@cache_access
 def download_hf_model(repo_id, progress_callback=None):
     """Download a model from any HuggingFace repo.
 

@@ -25,10 +25,17 @@ function renderStorageCards(categories) {
         (c.count != null ? ' (' + c.count.toLocaleString() + ')' : '') +
       '</div>' +
       '<span class="stat-kind ' + c.kind + '">' + c.kindLabel + '</span>';
+    if (c.note) {
+      html += '<div class="stat-note">' + storageEscapeHtml(c.note) + '</div>';
+    }
     if (c.type) {
       html += '<button class="btn-manage" onclick="openStorageModal(\'' + c.type + '\')">Manage</button>';
-    } else {
-      html += c.release ? VireoReleaseOriginals.storageButton() : c.settings ? '<button class="btn-manage" onclick="window.location.href=\'/settings\'">Manage in Settings</button>' : '';
+    } else if (c.release) {
+      html += VireoReleaseOriginals.storageButton();
+    } else if (c.hfCache) {
+      html += '<button class="btn-manage" onclick="openHfCacheModal()">Manage</button>';
+    } else if (c.settings) {
+      html += '<button class="btn-manage" onclick="window.location.href=\'/settings\'">Manage in Settings</button>';
     }
     html += '</div>';
   });

@@ -100,3 +100,5 @@ interface SettingsEmbeddingPrecompute {job_id?:string;queued?:boolean;status?:st
 interface SettingsJobResult {error?:string;removed?:number;downloaded?:number;species_count?:number;embedding_precompute?:SettingsEmbeddingPrecompute;ok?:string[];failed?:string[];verified?:boolean;config_written?:boolean;bin_path?:string;downloaded_to?:string;quarantined?:boolean}
 interface SettingsPlatformReadiness {platform?:string;support_tier?:string;windows_release?:string;architecture?:string;webview2_version?:string;long_paths?:{enabled:boolean};dependencies?:Record<string,{state:string;required?:boolean;path?:string;hint?:string;install_commands?:string[]}>}
 interface SettingsDarktableAsset {platform?:string;version?:string;name?:string;size?:number;digest?:string;url?:string}
+
+interface ModelRemovalResponse {ok?:boolean;kept_path?:string|null;cache_cleanup?:{freed:number;failed:Array<{error:string}>};}

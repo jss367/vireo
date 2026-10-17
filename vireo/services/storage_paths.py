@@ -18,11 +18,23 @@ def huggingface_cache_dir():
     ))
 
 
-def huggingface_repositories():
+def huggingface_repositories(*, managed_only=False):
+    """Exact repositories for reporting, or managed-provenance cleanup scope.
+
+    The default preserves non-destructive reporting of all registrations.
+    Cleanup includes registrations only when Vireo owns their lifecycle.
+    Known and exact legacy repositories remain explicitly included.
+    """
     from models import KNOWN_MODELS, ONNX_REPO, get_models
 
+    if managed_only:
+        from models import get_managed_model_registrations
+
+        registered = get_managed_model_registrations()
+    else:
+        registered = get_models()
     repos = {ONNX_REPO}
-    for model in [*KNOWN_MODELS, *get_models()]:
+    for model in [*KNOWN_MODELS, *registered]:
         for field in ("model_str", "source"):
             value = model.get(field, "")
             if value.startswith("hf-hub:"):

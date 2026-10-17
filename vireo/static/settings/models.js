@@ -71,11 +71,12 @@ async function loadPipelineModels() {
 /** @param {string} modelId @param {string} modelName */ async function deletePipelineModel(modelId, modelName) {
   if (!confirm('Delete ' + modelName + ' weights?')) return;
   try {
-    await safeFetch('/api/models/pipeline/delete', {
+    /** @type {ModelRemovalResponse} */ var result = await safeFetch('/api/models/pipeline/delete', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({model_id: modelId}),
     });
+    showModelCacheCleanupWarning(result);
     loadPipelineModels();
   } catch(e) {}
 }
@@ -293,16 +294,25 @@ async function verifyAllModels() {
 }
 
 /** @param {string} modelId */ async function removeModel(modelId) {
-  if (!confirm('Remove this model? Weights Vireo downloaded are deleted from disk; weights in your own folders are left in place.')) return;
+  if (!confirm('Remove this model? Weights Vireo downloaded are deleted from disk, including its copy in the Hugging Face cache; weights in your own folders are left in place.')) return;
   try {
-    var result = await safeFetch('/api/models/' + encodeURIComponent(modelId), {
+    /** @type {ModelRemovalResponse} */ var result = await safeFetch('/api/models/' + encodeURIComponent(modelId), {
       method: 'DELETE',
     });
-    if (result && result.kept_path) {
+    if (!showModelCacheCleanupWarning(result) && result && result.kept_path) {
       showToast('Model removed from Vireo. Its weights were left in place at ' + result.kept_path, 'success');
     }
   } catch(e) {}
   loadModels();
+}
+
+/** @param {ModelRemovalResponse | null | undefined} result @returns {boolean} */
+function showModelCacheCleanupWarning(result) {
+  var failures = result && result.cache_cleanup && result.cache_cleanup.failed;
+  if (!failures || !failures.length) return false;
+  showToast('Model removal finished, but Hugging Face cache cleanup was incomplete: ' +
+    failures.map(function(failure) { return failure.error; }).join('; '), 'error');
+  return true;
 }
 
 /** @param {string} modelId */ async function setActiveModel(modelId) {
