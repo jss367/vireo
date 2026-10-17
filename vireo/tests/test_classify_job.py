@@ -86,7 +86,7 @@ def test_taxonomy_loads_when_file_exists(tmp_path):
     tax_path = tmp_path / "taxonomy.json"
     tax_path.write_text(json.dumps(tax_data))
 
-    from classify_job import _load_taxonomy
+    from classify_job.common import _load_taxonomy
 
     tax = _load_taxonomy(str(tax_path))
     assert tax is not None
@@ -95,7 +95,7 @@ def test_taxonomy_loads_when_file_exists(tmp_path):
 
 def test_taxonomy_returns_none_when_missing(tmp_path):
     """Phase 1: returns None when taxonomy.json doesn't exist."""
-    from classify_job import _load_taxonomy
+    from classify_job.common import _load_taxonomy
 
     tax = _load_taxonomy(str(tmp_path / "nonexistent.json"))
     assert tax is None
@@ -143,7 +143,7 @@ def test_load_labels_tol_fallback(tmp_path):
     (tmp_path / "tol_classes.json").write_bytes(b"[]")
 
     # Mock get_active_labels to return empty so we fall through to ToL
-    with patch("classify_job.get_active_labels", return_value=[]):
+    with patch("classify_job.label_loading.get_active_labels", return_value=[]):
         labels, use_tol, label_metas = _load_labels(
             model_type="bioclip",
             model_str="hf-hub:imageomics/bioclip",
@@ -168,7 +168,7 @@ def test_load_labels_raises_when_tol_artifacts_missing(tmp_path):
     from classify_job import _load_labels
 
     # tmp_path exists but has neither tol_embeddings.npy nor tol_classes.json.
-    with patch("classify_job.get_active_labels", return_value=[]):
+    with patch("classify_job.label_loading.get_active_labels", return_value=[]):
         with pytest.raises(RuntimeError, match="Tree of Life files"):
             _load_labels(
                 model_type="bioclip",
@@ -202,7 +202,7 @@ def test_load_labels_refuses_a_set_whose_every_name_is_ambiguous(tmp_path):
     (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
     (tmp_path / "tol_classes.json").write_bytes(b"[]")
 
-    with patch("classify_job.get_saved_labels", return_value=[]):
+    with patch("classify_job.label_loading.get_saved_labels", return_value=[]):
         with pytest.raises(RuntimeError, match="shared by more than one"):
             _load_labels(
                 model_type="bioclip",
@@ -227,7 +227,7 @@ def test_load_labels_refuses_an_empty_selected_file(tmp_path):
     (tmp_path / "tol_embeddings.npy").write_bytes(b"stub")
     (tmp_path / "tol_classes.json").write_bytes(b"[]")
 
-    with patch("classify_job.get_saved_labels", return_value=[]):
+    with patch("classify_job.label_loading.get_saved_labels", return_value=[]):
         with pytest.raises(UnusableLabelsError, match="contains no species"):
             _load_labels(
                 model_type="bioclip",
@@ -253,7 +253,7 @@ def test_a_deleted_label_selection_falls_back_instead_of_blocking(tmp_path):
         def get_workspace_active_labels(self):
             return [str(tmp_path / "deleted.txt")]
 
-    with patch("classify_job.get_saved_labels", return_value=[]):
+    with patch("classify_job.label_loading.get_saved_labels", return_value=[]):
         labels, use_tol, label_metas = _load_labels(
             model_type="bioclip",
             model_str="hf-hub:imageomics/bioclip",
@@ -289,7 +289,7 @@ def test_load_labels_raises_when_no_labels_unsupported_model():
     from classify_job import _load_labels
 
     # Mock get_active_labels to return empty
-    with patch("classify_job.get_active_labels", return_value=[]):
+    with patch("classify_job.label_loading.get_active_labels", return_value=[]):
         with pytest.raises(RuntimeError, match="No labels available"):
             _load_labels(
                 model_type="bioclip",
@@ -336,7 +336,7 @@ def test_describe_label_source_names_workspace_sets():
         {"labels_file": "/l/wa.txt", "name": "Washington, US Birds"},
     ]
     db = _StubDB(["/l/ca.txt", "/l/wa.txt"])
-    with patch("classify_job.get_saved_labels", return_value=saved):
+    with patch("classify_job.label_source.get_saved_labels", return_value=saved):
         text = describe_label_source(
             _params(), db,
             labels=["a"] * 1327, use_tol=False, model_type="bioclip",
@@ -354,7 +354,7 @@ def test_describe_label_source_single_set(tmp_path):
     labels_file = tmp_path / "ca.txt"
     labels_file.write_text("Robin\n")
     saved = [{"labels_file": str(labels_file), "name": "California, US Birds"}]
-    with patch("classify_job.get_saved_labels", return_value=saved):
+    with patch("classify_job.label_source.get_saved_labels", return_value=saved):
         text = describe_label_source(
             _params(labels_file=str(labels_file)), _StubDB(),
             labels=["a"] * 812, use_tol=False, model_type="bioclip",
@@ -374,7 +374,7 @@ def test_describe_label_source_truncates_many_sets(tmp_path):
         p.write_text("Robin\n")
         paths.append(str(p))
     saved = [{"labels_file": p, "name": f"List {i}"} for i, p in enumerate(paths)]
-    with patch("classify_job.get_saved_labels", return_value=saved):
+    with patch("classify_job.label_source.get_saved_labels", return_value=saved):
         text = describe_label_source(
             _params(labels_files=paths), _StubDB(),
             labels=["a"] * 40, use_tol=False, model_type="bioclip",
@@ -390,7 +390,7 @@ def test_describe_label_source_falls_back_to_filename(tmp_path):
 
     labels_file = tmp_path / "my_species.txt"
     labels_file.write_text("Robin\n")
-    with patch("classify_job.get_saved_labels", return_value=[]):
+    with patch("classify_job.label_source.get_saved_labels", return_value=[]):
         text = describe_label_source(
             _params(labels_file=str(labels_file)), _StubDB(),
             labels=["a", "b"], use_tol=False, model_type="bioclip",
@@ -430,7 +430,7 @@ def test_resolve_label_sources_keeps_lookup_order(tmp_path):
     """Regression: the shared resolver still yields the same source paths."""
     from unittest.mock import patch
 
-    from classify_job import _resolve_label_sources
+    from classify_job.label_source import _resolve_label_sources
 
     # ``labels_file`` (singular) and ``labels_files`` (plural) both require
     # the paths to exist on disk — ``_resolve_label_set_metas`` mirrors
@@ -443,7 +443,7 @@ def test_resolve_label_sources_keeps_lookup_order(tmp_path):
     plural_a.write_text("Cardinal\n")
     plural_b = tmp_path / "pb.txt"
     plural_b.write_text("Blue Jay\n")
-    with patch("classify_job.get_saved_labels", return_value=[]):
+    with patch("classify_job.label_source.get_saved_labels", return_value=[]):
         assert _resolve_label_sources(
             _params(labels_files=[str(plural_a), str(plural_b)]),
             _StubDB(["/ws.txt"]),
@@ -455,7 +455,7 @@ def test_resolve_label_sources_keeps_lookup_order(tmp_path):
             _params(), _StubDB(["/ws.txt"]),
         ) == ["/ws.txt"]
         with patch(
-            "classify_job.get_active_labels",
+            "classify_job.label_source.get_active_labels",
             return_value=[{"labels_file": "/g.txt"}, {"name": "no file"}],
         ):
             assert _resolve_label_sources(_params(), _StubDB()) == ["/g.txt"]
@@ -471,12 +471,12 @@ def test_resolve_label_set_metas_falls_back_when_labels_file_missing(tmp_path):
     """
     from unittest.mock import patch
 
-    from classify_job import _resolve_label_set_metas, _resolve_label_sources
+    from classify_job.label_source import _resolve_label_set_metas, _resolve_label_sources
 
     deleted = str(tmp_path / "gone.txt")  # never created
     saved = [{"labels_file": "/l/ws.txt", "name": "Workspace list"}]
     db = _StubDB(["/l/ws.txt"])
-    with patch("classify_job.get_saved_labels", return_value=saved):
+    with patch("classify_job.label_source.get_saved_labels", return_value=saved):
         metas = _resolve_label_set_metas(_params(labels_file=deleted), db)
         # Not the stale path — the workspace fallback.
         assert metas == [{"labels_file": "/l/ws.txt", "name": "Workspace list"}]
@@ -495,7 +495,7 @@ def test_resolve_label_set_metas_filters_missing_in_labels_files(tmp_path):
     """
     from unittest.mock import patch
 
-    from classify_job import _resolve_label_set_metas
+    from classify_job.label_source import _resolve_label_set_metas
 
     existing = tmp_path / "birds.txt"
     existing.write_text("Robin\n")
@@ -504,7 +504,7 @@ def test_resolve_label_set_metas_filters_missing_in_labels_files(tmp_path):
         {"labels_file": str(existing), "name": "Birds"},
         {"labels_file": missing, "name": "Deleted"},
     ]
-    with patch("classify_job.get_saved_labels", return_value=saved):
+    with patch("classify_job.label_source.get_saved_labels", return_value=saved):
         metas = _resolve_label_set_metas(
             _params(labels_files=[str(existing), missing]), _StubDB(),
         )
@@ -525,7 +525,7 @@ def test_load_labels_returns_metas_used_for_display(tmp_path):
     labels_file = tmp_path / "cardinals.txt"
     labels_file.write_text("Northern Cardinal\n")
     saved = [{"labels_file": str(labels_file), "name": "My Cardinals"}]
-    with patch("classify_job.get_saved_labels", return_value=saved):
+    with patch("classify_job.label_loading.get_saved_labels", return_value=saved):
         labels, use_tol, label_metas = _load_labels(
             model_type="bioclip",
             model_str="hf-hub:imageomics/bioclip",
@@ -556,7 +556,7 @@ def test_describe_label_source_prefers_supplied_metas():
         {"labels_file": "/l/other.txt", "name": "Not Loaded"},
     ]
     db = _StubDB(["/l/other.txt"])
-    with patch("classify_job.get_saved_labels", return_value=saved):
+    with patch("classify_job.label_source.get_saved_labels", return_value=saved):
         text = describe_label_source(
             _params(), db,
             labels=["a", "b"], use_tol=False, model_type="bioclip",
@@ -587,7 +587,7 @@ def test_load_labels_drops_missing_files_from_returned_metas(tmp_path):
         {"labels_file": str(present), "name": "Backyard Birds"},
         {"labels_file": str(gone), "name": "Removed Set"},
     ]
-    with patch("classify_job.get_saved_labels", return_value=saved):
+    with patch("classify_job.label_loading.get_saved_labels", return_value=saved):
         labels, use_tol, label_metas = _load_labels(
             model_type="bioclip",
             model_str="hf-hub:imageomics/bioclip",
@@ -618,7 +618,7 @@ def test_load_labels_workspace_fallback_drops_missing_files(tmp_path):
         {"labels_file": str(present), "name": "Workspace Set"},
         {"labels_file": str(gone), "name": "Deleted"},
     ]
-    with patch("classify_job.get_saved_labels", return_value=saved):
+    with patch("classify_job.label_loading.get_saved_labels", return_value=saved):
         labels, use_tol, label_metas = _load_labels(
             model_type="bioclip",
             model_str="hf-hub:imageomics/bioclip",
@@ -638,7 +638,7 @@ def test_detect_subjects_returns_detection_map(tmp_path):
     """Phase 5: returns detection map for photos with detectable subjects."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     runner = FakeRunner()
     job = _make_job()
@@ -664,9 +664,9 @@ def test_detect_subjects_returns_detection_map(tmp_path):
     mock_db.get_existing_detection_photo_ids.return_value = set()
     mock_db.write_detection_batch.return_value = [101]
 
-    with patch("classify_job.detect_animals", return_value=[fake_detection]), \
-         patch("classify_job.get_primary_detection", return_value=fake_detection), \
-         patch("classify_job.compute_sharpness", return_value=50.0):
+    with patch("classify_job.detection.detect_animals", return_value=[fake_detection]), \
+         patch("classify_job.detection.get_primary_detection", return_value=fake_detection), \
+         patch("classify_job.detection.compute_sharpness", return_value=50.0):
         detection_map, detected = _detect_subjects(
             photos=photos,
             folders=folders,
@@ -689,7 +689,7 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
     """Phase 5: skips photos that already have detections in the DB (unless reclassify)."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     runner = FakeRunner()
     job = _make_job()
@@ -709,7 +709,7 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
     ]
 
     # detect_animals should NOT be called since photo already has detections
-    with patch("classify_job.detect_animals") as mock_detect:
+    with patch("classify_job.detection.detect_animals") as mock_detect:
         detection_map, detected = _detect_subjects(
             photos=photos,
             folders=folders,
@@ -732,7 +732,7 @@ def test_detect_subjects_skips_weight_download_when_all_cached(tmp_path):
     Prevents offline reruns from aborting on missing weights."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     runner = FakeRunner()
     job = _make_job()
@@ -766,7 +766,7 @@ def test_detect_subjects_skips_weight_download_for_empty_reclassify(tmp_path):
     Regression for Codex P2 review on #535."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     runner = FakeRunner()
     job = _make_job()
@@ -787,7 +787,7 @@ def test_detect_subjects_graceful_on_import_error():
     """Phase 5: returns empty map if PytorchWildlife not installed."""
     from unittest.mock import MagicMock
 
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     runner = FakeRunner()
     job = _make_job()
@@ -847,9 +847,9 @@ def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
     def raising_sharpness(*args, **kwargs):
         raise RuntimeError("simulated sharpness failure")
 
-    with patch("classify_job.detect_animals", return_value=fake_detections), \
-         patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
-         patch("classify_job.compute_sharpness", side_effect=raising_sharpness):
+    with patch("classify_job.detection.detect_animals", return_value=fake_detections), \
+         patch("classify_job.detection.get_primary_detection", return_value=fake_detections[0]), \
+         patch("classify_job.detection.compute_sharpness", side_effect=raising_sharpness):
         detection_map, detected, processed_ids = _detect_batch(
             photos=photos,
             folders=folders,
@@ -907,8 +907,8 @@ def test_detect_batch_propagates_resource_wait_cancelled(tmp_path):
     mock_db = MagicMock()
 
     with (
-        patch("classify_job.detect_animals", side_effect=raising_detect),
-        patch("classify_job.get_primary_detection", return_value=None),
+        patch("classify_job.detection.detect_animals", side_effect=raising_detect),
+        patch("classify_job.detection.get_primary_detection", return_value=None),
         pytest.raises(ResourceWaitCancelled),
     ):
         _detect_batch(
@@ -964,9 +964,9 @@ def test_detect_batch_does_not_pass_threshold_to_detector(tmp_path, monkeypatch)
     runner = FakeRunner()
     job = _make_job()
 
-    with patch("classify_job.detect_animals", side_effect=fake_detect), \
-         patch("classify_job.get_primary_detection", return_value=None), \
-         patch("classify_job.compute_sharpness", return_value=50.0):
+    with patch("classify_job.detection.detect_animals", side_effect=fake_detect), \
+         patch("classify_job.detection.get_primary_detection", return_value=None), \
+         patch("classify_job.detection.compute_sharpness", return_value=50.0):
         _detect_batch(
             photos=photos,
             folders=folders,
@@ -1033,9 +1033,9 @@ def test_detect_batch_returns_all_detections(tmp_path):
     mock_db = MagicMock()
     mock_db.write_detection_batch.return_value = [101, 102]
 
-    with patch("classify_job.detect_animals", return_value=fake_detections), \
-         patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
-         patch("classify_job.compute_sharpness", return_value=50.0):
+    with patch("classify_job.detection.detect_animals", return_value=fake_detections), \
+         patch("classify_job.detection.get_primary_detection", return_value=fake_detections[0]), \
+         patch("classify_job.detection.compute_sharpness", return_value=50.0):
         detection_map, detected, _processed = _detect_batch(
             photos=photos,
             folders=folders,
@@ -1097,9 +1097,9 @@ def test_detect_batch_handles_same_batch_detection_id_collapse(tmp_path):
         "detector_model": "megadetector-v6",
     }]
 
-    with patch("classify_job.detect_animals", return_value=fake_detections), \
-         patch("classify_job.get_primary_detection", return_value=fake_detections[1]), \
-         patch("classify_job.compute_sharpness", return_value=50.0), \
+    with patch("classify_job.detection.detect_animals", return_value=fake_detections), \
+         patch("classify_job.detection.get_primary_detection", return_value=fake_detections[1]), \
+         patch("classify_job.detection.compute_sharpness", return_value=50.0), \
          patch("subjects.analyze_photo", return_value=0):
         detection_map, detected, _processed = _detect_batch(
             photos=photos,
@@ -1144,8 +1144,8 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
         call_count["n"] += 1
         return []  # no animals
 
-    monkeypatch.setattr("classify_job.detect_animals", fake_detect)
-    monkeypatch.setattr("classify_job.get_primary_detection", lambda dets: None)
+    monkeypatch.setattr("classify_job.detection.detect_animals", fake_detect)
+    monkeypatch.setattr("classify_job.detection.get_primary_detection", lambda dets: None)
 
     import classify_job
     photos = [{"id": photo_id, "folder_id": folder_id, "filename": "empty.jpg"}]
@@ -1191,8 +1191,8 @@ def test_detect_batch_does_not_cache_failed_detector_runs(tmp_path, monkeypatch)
         call_count["n"] += 1
         return None  # simulate detector failure
 
-    monkeypatch.setattr("classify_job.detect_animals", failing_detect)
-    monkeypatch.setattr("classify_job.get_primary_detection", lambda dets: None)
+    monkeypatch.setattr("classify_job.detection.detect_animals", failing_detect)
+    monkeypatch.setattr("classify_job.detection.get_primary_detection", lambda dets: None)
 
     import classify_job
     photos = [{"id": photo_id, "folder_id": folder_id, "filename": "broken.jpg"}]
@@ -1268,9 +1268,9 @@ def test_detect_batch_skips_quality_score_when_primary_below_threshold(
     photos = [{"id": photo_id, "folder_id": folder_id, "filename": "noise.jpg"}]
     folders = {folder_id: str(tmp_path)}
 
-    with patch("classify_job.detect_animals", return_value=fake_detections), \
-         patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
-         patch("classify_job.compute_sharpness", return_value=2900.0):
+    with patch("classify_job.detection.detect_animals", return_value=fake_detections), \
+         patch("classify_job.detection.get_primary_detection", return_value=fake_detections[0]), \
+         patch("classify_job.detection.compute_sharpness", return_value=2900.0):
         _detect_batch(
             photos=photos, folders=folders, runner=None, job={"id": 0},
             reclassify=True, db=db,
@@ -1328,9 +1328,9 @@ def test_detect_batch_scores_normally_when_primary_at_threshold(
     photos = [{"id": photo_id, "folder_id": folder_id, "filename": "bird.jpg"}]
     folders = {folder_id: str(tmp_path)}
 
-    with patch("classify_job.detect_animals", return_value=fake_detections), \
-         patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
-         patch("classify_job.compute_sharpness", return_value=1500.0):
+    with patch("classify_job.detection.detect_animals", return_value=fake_detections), \
+         patch("classify_job.detection.get_primary_detection", return_value=fake_detections[0]), \
+         patch("classify_job.detection.compute_sharpness", return_value=1500.0):
         _detect_batch(
             photos=photos, folders=folders, runner=None, job={"id": 0},
             reclassify=True, db=db,
@@ -1432,7 +1432,7 @@ def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
     """
     from unittest.mock import MagicMock
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -1503,7 +1503,7 @@ def test_classify_photos_honors_measured_zero_candidate_run(tmp_path):
     """
     from unittest.mock import MagicMock
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -1670,8 +1670,8 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
         def __init__(self, *a, cancel_check=None, **kw):
             runner.cancelled = True
             if cancel_check and cancel_check():
-                raise cj.ClassificationCancelled("classification cancelled")
-    monkeypatch.setattr(cj, "Classifier", CancellingClassifier)
+                raise cj.common.ClassificationCancelled("classification cancelled")
+    monkeypatch.setattr(cj.job_run, "Classifier", CancellingClassifier)
 
     # Bypass the on-disk model registry — the test doesn't need real
     # weights since CancellingClassifier ignores its args. Seed a
@@ -1682,7 +1682,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
     fake_weights.mkdir()
     (fake_weights / "tol_embeddings.npy").write_bytes(b"stub")
     (fake_weights / "tol_classes.json").write_bytes(b"[]")
-    monkeypatch.setattr(cj, "get_active_model", lambda: {
+    monkeypatch.setattr(cj.job_run, "get_active_model", lambda: {
         "id": "BioCLIP",
         "name": "BioCLIP",
         "model_str": "hf-hub:imageomics/bioclip",
@@ -1791,7 +1791,7 @@ def test_reclassify_finalizes_steps_on_resource_wait_cancel_during_load(
     (fake_weights / "tol_embeddings.npy").write_bytes(b"stub")
     (fake_weights / "tol_classes.json").write_bytes(b"[]")
     import classify_job as cj
-    monkeypatch.setattr(cj, "get_active_model", lambda: {
+    monkeypatch.setattr(cj.job_run, "get_active_model", lambda: {
         "id": "BioCLIP",
         "name": "BioCLIP",
         "model_str": "hf-hub:imageomics/bioclip",
@@ -1915,7 +1915,7 @@ def test_classify_factory_cancel_check_uses_pure_cancel_probe(
     (fake_weights / "tol_embeddings.npy").write_bytes(b"stub")
     (fake_weights / "tol_classes.json").write_bytes(b"[]")
     import classify_job as cj
-    monkeypatch.setattr(cj, "get_active_model", lambda: {
+    monkeypatch.setattr(cj.job_run, "get_active_model", lambda: {
         "id": "BioCLIP",
         "name": "BioCLIP",
         "model_str": "hf-hub:imageomics/bioclip",
@@ -1944,7 +1944,7 @@ def test_classify_factory_cancel_check_uses_pure_cancel_probe(
                 "abort factory after probing cancel_check",
             )
 
-    monkeypatch.setattr(cj, "Classifier", _StubClassifier)
+    monkeypatch.setattr(cj.job_run, "Classifier", _StubClassifier)
 
     import classifier_cache
     original_acquire = classifier_cache.acquire_cached_classifier
@@ -2006,7 +2006,7 @@ def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
     """
     from unittest.mock import MagicMock
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -2064,7 +2064,7 @@ def test_classify_photos_honors_measured_zero_candidate_full_image_run(tmp_path)
     """
     from unittest.mock import MagicMock
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -3479,7 +3479,7 @@ def test_stored_prediction_species_folds_curly_apostrophe(tmp_path):
     U+2019, so storing the raw label left an accepted ASCII keyword unable
     to match its own prediction. Fold on write so the variant cannot come
     back after the one-shot migration."""
-    import classify_job
+    import classify_job.gating
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -3499,7 +3499,7 @@ def test_stored_prediction_species_folds_curly_apostrophe(tmp_path):
             detector_model="megadetector-v6",
         )[0]
 
-        stored = classify_job._run_classifier_on_detection(
+        stored = classify_job.gating._run_classifier_on_detection(
             db=db, detection_id=det_id, classifier_model="bioclip-2",
             labels=["Geoffroy’s Tamarin"], labels_fingerprint="fp1",
             classify_fn=lambda: [
@@ -3523,7 +3523,7 @@ def test_stored_prediction_species_preserves_okina(tmp_path):
     """U+02BB is a letter in `ʻApapane`, not a stray quote — the fold on the
     prediction write path must not touch it, or the Hawaii label set would
     store species that no longer match their keywords."""
-    import classify_job
+    import classify_job.gating
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -3543,7 +3543,7 @@ def test_stored_prediction_species_preserves_okina(tmp_path):
             detector_model="megadetector-v6",
         )[0]
 
-        classify_job._run_classifier_on_detection(
+        classify_job.gating._run_classifier_on_detection(
             db=db, detection_id=det_id, classifier_model="bioclip-2",
             labels=["Hawaiʻi ʻamakihi"], labels_fingerprint="fp1",
             classify_fn=lambda: [
@@ -3585,10 +3585,10 @@ def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     def fake_classify(*a, **kw):
         calls["n"] += 1
         return []
-    monkeypatch.setattr("classify_job._run_classifier_on_detection", fake_classify)
+    monkeypatch.setattr("classify_job.gating._run_classifier_on_detection", fake_classify)
 
-    import classify_job
-    classify_job._classify_detection_gated(
+    import classify_job.gating
+    classify_job.gating._classify_detection_gated(
         db=db, detection_id=det_id,
         classifier_model="bioclip-2",
         labels_fingerprint="abc123",
@@ -3623,10 +3623,10 @@ def test_classify_detection_gated_does_not_cache_zero_count(tmp_path, monkeypatc
     )
     det_id = det_ids[0]
 
-    import classify_job
+    import classify_job.gating
     # classify_fn=None returns [] with no side effects (see
     # _run_classifier_on_detection). The gate must NOT write a run row.
-    classify_job._classify_detection_gated(
+    classify_job.gating._classify_detection_gated(
         db=db, detection_id=det_id,
         classifier_model="bioclip-2",
         labels_fingerprint="abc123",
@@ -3851,7 +3851,7 @@ def test_all_photos_cache_satisfied_requires_matching_predictions_row(tmp_path):
     ``_finalize_cached_only``, which skips the missing prediction rows
     entirely and reports success without repairing them.
     """
-    from classify_job import _all_photos_cache_satisfied
+    from classify_job.cache_coverage import _all_photos_cache_satisfied
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -3930,7 +3930,7 @@ def test_classify_photos_iterates_over_detections(tmp_path):
     from unittest.mock import MagicMock, patch
 
     import numpy as np
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -3971,7 +3971,7 @@ def test_classify_photos_iterates_over_detections(tmp_path):
 
     # Use side_effect to return a fresh Image each call, since _prepare_image
     # closes the original image after cropping (resource leak fix).
-    with patch("classify_job.load_image", side_effect=lambda *a, **kw: Image.new("RGB", (200, 200))):
+    with patch("classify_job.classify_pass.load_image", side_effect=lambda *a, **kw: Image.new("RGB", (200, 200))):
         raw_results, failed, skipped = _classify_photos(
             photos=photos,
             folders=folders,
@@ -4002,7 +4002,7 @@ def test_classify_photos_new_photo(tmp_path):
     from unittest.mock import MagicMock, patch
 
     import numpy as np
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -4032,7 +4032,7 @@ def test_classify_photos_new_photo(tmp_path):
 
     # Use side_effect to return a fresh Image each call, since _flush_batch
     # closes images after classification (resource leak fix).
-    with patch("classify_job.load_image", side_effect=lambda *a, **kw: Image.new("RGB", (200, 200))):
+    with patch("classify_job.classify_pass.load_image", side_effect=lambda *a, **kw: Image.new("RGB", (200, 200))):
         raw_results, failed, skipped = _classify_photos(
             photos=photos,
             folders=folders,
@@ -4072,7 +4072,7 @@ def test_classify_photos_skips_existing(tmp_path):
     """
     from unittest.mock import MagicMock
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -4727,8 +4727,8 @@ def test_classify_cleanup_reports_closed_and_releases_owned_handle(tmp_path, mon
         load_photos=lambda: phase("load"),
         finish_without_photos=lambda: phase("finish"),
     )
-    monkeypatch.setattr(classify_job, "Database", lambda _path: owned)
-    monkeypatch.setattr(classify_job, "_ClassifyJobRun", lambda *_args: phases)
+    monkeypatch.setattr(classify_job.run, "Database", lambda _path: owned)
+    monkeypatch.setattr(classify_job.run, "_ClassifyJobRun", lambda *_args: phases)
     params = ClassifyParams("empty", None, None, None, None, 10, 0.85, False)
     try:
         if outcome == "success":
@@ -4808,13 +4808,13 @@ def test_run_classify_job_full_pipeline(tmp_path):
         reclassify=False,
     )
 
-    with patch("classify_job.Database", return_value=mock_db_instance), \
-         patch("classify_job.get_active_model", return_value=fake_model), \
-         patch("classify_job.get_models", return_value=[fake_model]), \
-         patch("classify_job._load_taxonomy", return_value=None), \
-         patch("classify_job._load_labels", return_value=(["Northern Cardinal"], False, [])), \
-         patch("classify_job.Classifier", return_value=mock_clf), \
-         patch("classify_job._detect_subjects", return_value=({}, 0)):
+    with patch("classify_job.run.Database", return_value=mock_db_instance), \
+         patch("classify_job.job_run.get_active_model", return_value=fake_model), \
+         patch("classify_job.job_run.get_models", return_value=[fake_model]), \
+         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_labels", return_value=(["Northern Cardinal"], False, [])), \
+         patch("classify_job.job_run.Classifier", return_value=mock_clf), \
+         patch("classify_job.job_run._detect_subjects", return_value=({}, 0)):
         result = run_classify_job(job, runner, str(tmp_path / "test.db"), 1, params)
 
     assert result["total"] == 1
@@ -5068,14 +5068,14 @@ def _run_classify_capturing_photos(db_path, ws, col_id, reclassify):
         reclassify=reclassify,
     )
 
-    with patch("classify_job.get_active_model", return_value=fake_model), \
-         patch("classify_job.get_models", return_value=[fake_model]), \
-         patch("classify_job._load_taxonomy", return_value=None), \
+    with patch("classify_job.job_run.get_active_model", return_value=fake_model), \
+         patch("classify_job.job_run.get_models", return_value=[fake_model]), \
+         patch("classify_job.common._load_taxonomy", return_value=None), \
          patch(
-            "classify_job._load_labels", return_value=(["Northern Cardinal"], False, []),
+            "classify_job.job_run._load_labels", return_value=(["Northern Cardinal"], False, []),
          ), \
-         patch("classify_job.Classifier"), \
-         patch("classify_job._detect_subjects", side_effect=_fake_detect_subjects):
+         patch("classify_job.job_run.Classifier"), \
+         patch("classify_job.job_run._detect_subjects", side_effect=_fake_detect_subjects):
         result = run_classify_job(job, runner, db_path, ws, params)
 
     return captured_photos, runner.events, result
@@ -5103,13 +5103,13 @@ def test_cache_shortcut_does_not_swallow_an_unusable_label_set(tmp_path):
     )
     # Every photo looks cached, so without the re-raise the job would
     # finish "successfully" without ever loading the real labels.
-    with patch("classify_job.get_active_model", return_value=fake_model), \
-         patch("classify_job.get_models", return_value=[fake_model]), \
-         patch("classify_job._load_taxonomy", return_value=None), \
-         patch("classify_job._all_photos_cache_satisfied", return_value=True), \
-         patch("classify_job._finalize_cached_only",
+    with patch("classify_job.job_run.get_active_model", return_value=fake_model), \
+         patch("classify_job.job_run.get_models", return_value=[fake_model]), \
+         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._all_photos_cache_satisfied", return_value=True), \
+         patch("classify_job.job_run._finalize_cached_only",
                return_value={"classified": 2, "cached": True}) as finalize, \
-         patch("classify_job._load_labels",
+         patch("classify_job.job_run._load_labels",
                side_effect=UnusableLabelsError("all names are shared")):
         with pytest.raises(UnusableLabelsError):
             run_classify_job(_make_job(), FakeRunner(), db_path, ws, params)
@@ -5181,17 +5181,18 @@ def test_classify_job_publishes_label_source_on_classify_step(tmp_path):
     ]
 
     runner = FakeRunner()
-    with patch("classify_job.get_active_model", return_value=fake_model), \
-         patch("classify_job.get_models", return_value=[fake_model]), \
-         patch("classify_job._load_taxonomy", return_value=None), \
-         patch("classify_job.get_saved_labels", return_value=saved), \
+    with patch("classify_job.job_run.get_active_model", return_value=fake_model), \
+         patch("classify_job.job_run.get_models", return_value=[fake_model]), \
+         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.label_loading.get_saved_labels", return_value=saved), \
+         patch("classify_job.label_source.get_saved_labels", return_value=saved), \
          patch(
-            "classify_job._load_labels",
+            "classify_job.job_run._load_labels",
             return_value=(["Northern Cardinal", "Blue Jay"], False, saved),
          ), \
-         patch("classify_job.Classifier"), \
+         patch("classify_job.job_run.Classifier"), \
          patch(
-            "classify_job._detect_subjects",
+            "classify_job.job_run._detect_subjects",
             side_effect=lambda *a, **k: ({}, 0),
          ):
         run_classify_job(_make_job(), runner, db_path, ws, params)
@@ -5310,13 +5311,13 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
         reclassify=False,
     )
 
-    with patch("classify_job.get_active_model", return_value=fake_model), \
-         patch("classify_job.get_models", return_value=[fake_model]), \
-         patch("classify_job._load_taxonomy", return_value=None), \
+    with patch("classify_job.job_run.get_active_model", return_value=fake_model), \
+         patch("classify_job.job_run.get_models", return_value=[fake_model]), \
+         patch("classify_job.common._load_taxonomy", return_value=None), \
          patch(
-            "classify_job._load_labels", return_value=(["Northern Cardinal"], False, []),
+            "classify_job.job_run._load_labels", return_value=(["Northern Cardinal"], False, []),
          ), \
-         patch("classify_job.Classifier", side_effect=_record_classifier_init):
+         patch("classify_job.job_run.Classifier", side_effect=_record_classifier_init):
         result = run_classify_job(job, runner, db_path, ws, params)
 
     assert classifier_init_calls == [], (
@@ -5372,8 +5373,8 @@ def test_classify_job_zero_photos_skips_model_resolution(tmp_path):
     # Simulate the "no model downloaded" environment: get_active_model
     # returns None (which would normally raise RuntimeError downstream).
     # The short-circuit must execute first and avoid touching the model.
-    with patch("classify_job.get_active_model", return_value=None), \
-         patch("classify_job.get_models", return_value=[]):
+    with patch("classify_job.job_run.get_active_model", return_value=None), \
+         patch("classify_job.job_run.get_models", return_value=[]):
         result = run_classify_job(job, runner, db_path, ws, params)
 
     assert result["total"] == 0
@@ -5390,7 +5391,7 @@ def test_run_classifier_retries_on_database_is_locked(tmp_path):
     """
     import sqlite3
 
-    import classify_job
+    import classify_job.gating
     from db import Database
     from tests.test_scanner import _FlakyConn
 
@@ -5413,7 +5414,7 @@ def test_run_classifier_retries_on_database_is_locked(tmp_path):
     locked = sqlite3.OperationalError("database is locked")
     db.conn = _FlakyConn(db.conn, fail_on_calls={1: locked, 2: locked})
 
-    classify_job._run_classifier_on_detection(
+    classify_job.gating._run_classifier_on_detection(
         db=db, detection_id=det_id,
         classifier_model="bioclip-2",
         labels=["Robin"],
@@ -5435,7 +5436,7 @@ def test_detect_subjects_stops_when_cancelled(tmp_path):
     """A cancelled job exits the detection loop without processing photos."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     runner = FakeRunner()
     runner.cancelled = True
@@ -5450,8 +5451,8 @@ def test_detect_subjects_stops_when_cancelled(tmp_path):
     mock_db.model_runs.get_detector_run_photo_ids.return_value = {1, 2}
 
     detect = MagicMock()
-    with patch("classify_job.detect_animals", detect), \
-         patch("classify_job.get_primary_detection", MagicMock()):
+    with patch("classify_job.detection.detect_animals", detect), \
+         patch("classify_job.detection.get_primary_detection", MagicMock()):
         detection_map, detected = _detect_subjects(
             photos=photos,
             folders={10: str(tmp_path)},
@@ -5473,7 +5474,7 @@ def test_detect_subjects_skips_weight_download_when_cancelled(tmp_path):
     once started, so the gate has to live before the download call."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     runner = FakeRunner()
     runner.cancelled = True
@@ -5490,8 +5491,8 @@ def test_detect_subjects_skips_weight_download_when_cancelled(tmp_path):
 
     detect = MagicMock()
     weights = MagicMock()
-    with patch("classify_job.detect_animals", detect), \
-         patch("classify_job.get_primary_detection", MagicMock()), \
+    with patch("classify_job.detection.detect_animals", detect), \
+         patch("classify_job.detection.get_primary_detection", MagicMock()), \
          patch("detector.ensure_megadetector_weights", weights):
         detection_map, detected = _detect_subjects(
             photos=photos,
@@ -5524,7 +5525,7 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
     from unittest.mock import patch
 
     import config as cfg
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
     from db import Database
 
     # Hermetic global config (per repo testing conventions).
@@ -5582,13 +5583,13 @@ def test_detect_subjects_reclassify_preserves_unprocessed_photos_on_cancel(tmp_p
     # is patched to a real callable (rather than ``None``) so that a stray
     # invocation would surface as an assertion failure on the real
     # behavior, not a ``TypeError`` from calling ``None``.
-    with patch("classify_job.detect_animals",
+    with patch("classify_job.detection.detect_animals",
                return_value=[{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
                               "confidence": 0.8, "category": "animal"}]), \
-         patch("classify_job.get_primary_detection",
+         patch("classify_job.detection.get_primary_detection",
                return_value={"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
                              "confidence": 0.8}), \
-         patch("classify_job.compute_sharpness", return_value=0.0):
+         patch("classify_job.detection.compute_sharpness", return_value=0.0):
         detection_map, detected = _detect_subjects(
             photos=photos,
             folders={folder_id: str(tmp_path)},
@@ -5635,7 +5636,7 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
     from unittest.mock import patch
 
     import config as cfg
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
     from db import Database
 
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
@@ -5663,9 +5664,9 @@ def test_detect_subjects_reclassify_keeps_state_when_detect_returns_none(tmp_pat
 
     # detect_animals returns None → _detect_batch hits its early-continue
     # and the id never lands in batch_processed.
-    with patch("classify_job.detect_animals", return_value=None), \
-         patch("classify_job.get_primary_detection", return_value=None), \
-         patch("classify_job.compute_sharpness", return_value=0.0):
+    with patch("classify_job.detection.detect_animals", return_value=None), \
+         patch("classify_job.detection.get_primary_detection", return_value=None), \
+         patch("classify_job.detection.compute_sharpness", return_value=0.0):
         _detect_subjects(
             photos=photos,
             folders={folder_id: str(tmp_path)},
@@ -5686,14 +5687,14 @@ def test_classify_photos_stops_when_cancelled(tmp_path):
     """A cancelled job exits the classification loop without inference."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     runner.cancelled = True
     job = _make_job()
     clf = MagicMock()
 
-    with patch("classify_job.load_image", MagicMock()):
+    with patch("classify_job.classify_pass.load_image", MagicMock()):
         raw_results, failed, skipped = _classify_photos(
             photos=[{"id": 1, "filename": "a.jpg", "folder_id": 10,
                      "timestamp": None}],
@@ -5722,7 +5723,7 @@ def test_classify_photos_drops_pending_batch_on_mid_loop_cancel(tmp_path):
     cancelled."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     # Flip cancelled to True after the first photo has been processed
     # (queued into batch, but batch < _BATCH_SIZE so not yet flushed).
@@ -5758,7 +5759,7 @@ def test_classify_photos_drops_pending_batch_on_mid_loop_cancel(tmp_path):
 
     # Make _prepare_image succeed without touching disk.
     fake_img = MagicMock()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         raw_results, failed, skipped = _classify_photos(
             photos=photos,
@@ -5789,7 +5790,7 @@ def test_weights_download_failure_degrades_to_full_image(tmp_path):
     already happened by then."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _detect_subjects
+    from classify_job.detection import _detect_subjects
 
     runner = FakeRunner()
     job = _make_job()
@@ -5798,8 +5799,8 @@ def test_weights_download_failure_degrades_to_full_image(tmp_path):
     mock_db = MagicMock()
     mock_db.model_runs.get_detector_run_photo_ids.return_value = set()  # needs download
 
-    with patch("classify_job.detect_animals", MagicMock()), \
-         patch("classify_job.get_primary_detection", MagicMock()), \
+    with patch("classify_job.detection.detect_animals", MagicMock()), \
+         patch("classify_job.detection.get_primary_detection", MagicMock()), \
          patch("detector.ensure_megadetector_weights",
                side_effect=RuntimeError("network down")):
         detection_map, detected = _detect_subjects(
@@ -5829,7 +5830,7 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
     """
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -5852,7 +5853,7 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
         ([{"species": "Robin", "score": 0.88, "taxonomy": None}], None),
     ]
     fake_img = MagicMock()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         _classify_photos(
             photos=photos,
@@ -5907,7 +5908,7 @@ def test_classify_photos_no_reclassify_skips_predictions_clear(tmp_path):
     every normal pass."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -5926,7 +5927,7 @@ def test_classify_photos_no_reclassify_skips_predictions_clear(tmp_path):
         ([{"species": "Sparrow", "score": 0.92, "taxonomy": None}], None),
     ]
     fake_img = MagicMock()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         _classify_photos(
             photos=photos,
@@ -5961,7 +5962,7 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
     from unittest.mock import patch
 
     import config as cfg
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
     from db import Database
 
     # Hermetic global config (per repo testing conventions).
@@ -6031,7 +6032,7 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
     # _prepare_image returns a dummy so we never touch real image files;
     # the test is about the clear-call boundary, not classification accuracy.
     fake_img = MagicMock()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         _classify_photos(
             photos=photos,
@@ -6077,7 +6078,7 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
     from unittest.mock import patch
 
     import config as cfg
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
     from db import Database
 
     # Hermetic global config (per repo testing conventions).
@@ -6115,7 +6116,7 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
     # detection_map is empty (the simulated setup failure produced
     # nothing) → the function takes the full-image synthetic branch.
     fake_img = MagicMock()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         raw_results, _, _ = _classify_photos(
             photos=[{"id": pid, "filename": "a.jpg", "folder_id": folder_id,
@@ -6174,7 +6175,7 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
     from unittest.mock import MagicMock, patch
 
     import config as cfg
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
     from db import Database
 
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
@@ -6210,7 +6211,7 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
 
     # Empty detection_map (setup failure) + new fingerprint = the bug case.
     fake_img = MagicMock()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         raw_results, _, _ = _classify_photos(
             photos=[{"id": pid, "filename": "a.jpg", "folder_id": folder_id,
@@ -6267,7 +6268,7 @@ def test_classify_photos_reclassify_flushes_pending_batch_on_cancel(tmp_path):
     """
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
     from db import Database
 
     db_path = str(tmp_path / "test.db")
@@ -6336,7 +6337,7 @@ def test_classify_photos_reclassify_flushes_pending_batch_on_cancel(tmp_path):
     ]
 
     fake_img = MagicMock()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         raw_results, _, _ = _classify_photos(
             photos=photos,
@@ -6376,7 +6377,7 @@ def test_classify_photos_no_reclassify_drops_pending_batch_on_cancel(tmp_path):
     """
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     class FlipRunner(FakeRunner):
         def __init__(self):
@@ -6404,7 +6405,7 @@ def test_classify_photos_no_reclassify_drops_pending_batch_on_cancel(tmp_path):
     folders = {10: str(tmp_path)}
 
     fake_img = MagicMock()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         raw_results, _, _ = _classify_photos(
             photos=photos,
@@ -6440,7 +6441,7 @@ def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
     """
     from unittest.mock import MagicMock, patch
 
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     runner = FakeRunner()
     runner.cancelled = True  # post-detect cancel signal already set
@@ -6465,7 +6466,7 @@ def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
     folders = {10: str(tmp_path)}
 
     fake_img = MagicMock()
-    with patch("classify_job._prepare_image",
+    with patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         raw_results, _, _ = _classify_photos(
             photos=photos,
@@ -6589,16 +6590,16 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     )
 
     fake_img = MagicMock()
-    with patch("classify_job.Database", return_value=mock_db_instance), \
-         patch("classify_job.get_active_model", return_value=fake_model), \
-         patch("classify_job.get_models", return_value=[fake_model]), \
-         patch("classify_job._load_taxonomy", return_value=None), \
-         patch("classify_job._load_labels",
+    with patch("classify_job.run.Database", return_value=mock_db_instance), \
+         patch("classify_job.job_run.get_active_model", return_value=fake_model), \
+         patch("classify_job.job_run.get_models", return_value=[fake_model]), \
+         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_labels",
                return_value=(["NewProcessed"], False, [])), \
-         patch("classify_job.Classifier", return_value=mock_clf), \
-         patch("classify_job._detect_subjects",
+         patch("classify_job.job_run.Classifier", return_value=mock_clf), \
+         patch("classify_job.job_run._detect_subjects",
                side_effect=fake_detect_subjects), \
-         patch("classify_job._prepare_image",
+         patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         result = run_classify_job(job, runner, str(tmp_path / "test.db"),
                                   1, params)
@@ -6736,16 +6737,16 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
     from resource_ledger import bind_resource_cancel_check
     with (
         bind_resource_cancel_check(lambda: True),
-        patch("classify_job.Database", return_value=mock_db_instance),
-        patch("classify_job.get_active_model", return_value=fake_model),
-        patch("classify_job.get_models", return_value=[fake_model]),
-        patch("classify_job._load_taxonomy", return_value=None),
-        patch("classify_job._load_labels",
+        patch("classify_job.run.Database", return_value=mock_db_instance),
+        patch("classify_job.job_run.get_active_model", return_value=fake_model),
+        patch("classify_job.job_run.get_models", return_value=[fake_model]),
+        patch("classify_job.common._load_taxonomy", return_value=None),
+        patch("classify_job.job_run._load_labels",
               return_value=(["Restored"], False, [])),
-        patch("classify_job.Classifier", return_value=mock_clf),
-        patch("classify_job._detect_subjects",
+        patch("classify_job.job_run.Classifier", return_value=mock_clf),
+        patch("classify_job.job_run._detect_subjects",
               side_effect=fake_detect_subjects),
-        patch("classify_job._prepare_image",
+        patch("classify_job.classify_pass._prepare_image",
               return_value=(fake_img, str(tmp_path), "p")),
     ):
         run_classify_job(job, runner, str(tmp_path / "test.db"), 1, params)
@@ -6772,7 +6773,7 @@ def test_classify_photos_reclassify_cancel_flushes_pending_batch(tmp_path):
     from unittest.mock import MagicMock, patch
 
     import numpy as np
-    from classify_job import _classify_photos
+    from classify_job.classify_pass import _classify_photos
 
     class MidClassifyCancelRunner(FakeRunner):
         def __init__(self):
@@ -6848,7 +6849,7 @@ def test_classify_photos_reclassify_cancel_flushes_pending_batch(tmp_path):
     from resource_ledger import bind_resource_cancel_check
     with (
         bind_resource_cancel_check(lambda: True),
-        patch("classify_job._prepare_image",
+        patch("classify_job.classify_pass._prepare_image",
               return_value=(fake_img, str(tmp_path), "p")),
     ):
         raw_results, failed, _skipped = _classify_photos(
@@ -6898,7 +6899,8 @@ def test_classify_photos_reclassify_cancel_mid_batch_flush_preserves_cleared(tmp
     from unittest.mock import MagicMock, patch
 
     import numpy as np
-    from classify_job import _BATCH_SIZE, _classify_photos
+    from classify_job import _BATCH_SIZE
+    from classify_job.classify_pass import _classify_photos
 
     class NeverCancelRunner(FakeRunner):
         def is_cancelled(self, job_id):
@@ -6966,7 +6968,7 @@ def test_classify_photos_reclassify_cancel_mid_batch_flush_preserves_cleared(tmp
     from resource_ledger import bind_resource_cancel_check
     with (
         bind_resource_cancel_check(lambda: True),
-        patch("classify_job._prepare_image",
+        patch("classify_job.classify_pass._prepare_image",
               return_value=(fake_img, str(tmp_path), "p")),
     ):
         raw_results, failed, _skipped = _classify_photos(
@@ -7113,16 +7115,16 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     )
 
     fake_img = MagicMock()
-    with patch("classify_job.Database", return_value=mock_db_instance), \
-         patch("classify_job.get_active_model", return_value=fake_model), \
-         patch("classify_job.get_models", return_value=[fake_model]), \
-         patch("classify_job._load_taxonomy", return_value=None), \
-         patch("classify_job._load_labels",
+    with patch("classify_job.run.Database", return_value=mock_db_instance), \
+         patch("classify_job.job_run.get_active_model", return_value=fake_model), \
+         patch("classify_job.job_run.get_models", return_value=[fake_model]), \
+         patch("classify_job.common._load_taxonomy", return_value=None), \
+         patch("classify_job.job_run._load_labels",
                return_value=(["NewEmpty"], False, [])), \
-         patch("classify_job.Classifier", return_value=mock_clf), \
-         patch("classify_job._detect_subjects",
+         patch("classify_job.job_run.Classifier", return_value=mock_clf), \
+         patch("classify_job.job_run._detect_subjects",
                side_effect=fake_detect_subjects), \
-         patch("classify_job._prepare_image",
+         patch("classify_job.classify_pass._prepare_image",
                return_value=(fake_img, str(tmp_path), "p")):
         result = run_classify_job(job, runner, str(tmp_path / "test.db"),
                                   1, params)
@@ -7330,7 +7332,7 @@ def test_store_match_alt_that_folds_to_primary_preserves_auto_accept(tmp_path):
     alternative folds to it. Without the dedupe, the alternative's
     ``status='alternative'`` upsert would overwrite the auto-accept and
     the previously-labeled match would silently reappear in review."""
-    from classify_job import _store_match_prediction
+    from classify_job.store_predictions import _store_match_prediction
     from db import AUTO_MATCH_REVIEW_MARKER, Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -7384,7 +7386,7 @@ def test_store_match_alt_that_only_differs_in_case_preserves_auto_accept(
     The alternatives-dedupe must therefore match case-insensitively too,
     otherwise the auto-accepted match silently reappears in review.
     """
-    from classify_job import _store_match_prediction
+    from classify_job.store_predictions import _store_match_prediction
     from db import AUTO_MATCH_REVIEW_MARKER, Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -7433,7 +7435,7 @@ def test_store_match_alt_non_ascii_case_preserves_both_predictions(tmp_path):
     alternative; the ASCII-only fold used by ``_species_match_key`` must
     preserve both predictions so the alternative reaches the UI.
     """
-    from classify_job import _store_match_prediction
+    from classify_job.store_predictions import _store_match_prediction
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -7538,7 +7540,7 @@ def test_burst_consensus_non_ascii_case_variants_stay_split(tmp_path):
 
 
 def test_all_photos_cache_satisfied_requires_every_photo_covered(tmp_path):
-    from classify_job import _all_photos_cache_satisfied
+    from classify_job.cache_coverage import _all_photos_cache_satisfied
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -7584,7 +7586,7 @@ def test_all_photos_cache_satisfied_requires_common_identity_when_either_unresol
     check must refuse to short-circuit unless every covered row agrees
     on that component too.
     """
-    from classify_job import _all_photos_cache_satisfied
+    from classify_job.cache_coverage import _all_photos_cache_satisfied
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -7671,7 +7673,7 @@ def test_all_photos_cache_satisfied_rejects_stale_classifier_runtime(tmp_path):
     A manually-reviewed row must still count so the pin exception
     survives runtime changes until an explicit reclassify.
     """
-    from classify_job import _all_photos_cache_satisfied
+    from classify_job.cache_coverage import _all_photos_cache_satisfied
     from computation_cache import (
         classifier_model_identity,
         classifier_runtime_fingerprint,
@@ -7804,7 +7806,7 @@ def test_all_photos_cache_satisfied_rejects_pre_synonym_classifier_runtime(
     (Codex #1560 P2).
     """
     import taxonomy as tax_mod
-    from classify_job import _all_photos_cache_satisfied
+    from classify_job.cache_coverage import _all_photos_cache_satisfied
     from computation_cache import (
         classifier_model_identity,
         classifier_runtime_fingerprint,
@@ -7951,9 +7953,9 @@ def test_finalize_cached_only_respects_workspace_detector_threshold(
     )
 
     import classify_job as classify_job_mod
-    monkeypatch.setattr(classify_job_mod, "get_active_labels", lambda: [])
-    monkeypatch.setattr(classify_job_mod, "get_active_model", lambda: None)
-    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [])
+    monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
+    monkeypatch.setattr(classify_job_mod.job_run, "get_models", lambda: [])
 
     runner = FakeRunner()
     job = _make_job()
@@ -8034,11 +8036,12 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
         "source": "custom",
     }
     monkeypatch.setattr(
-        classify_job_mod, "get_models", lambda: [fake_timm_model],
+        classify_job_mod.job_run, "get_models", lambda: [fake_timm_model],
     )
-    monkeypatch.setattr(classify_job_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod.label_source, "get_active_labels", lambda: [])
     monkeypatch.setattr(
-        classify_job_mod, "get_active_model", lambda: fake_timm_model,
+        classify_job_mod.job_run, "get_active_model", lambda: fake_timm_model,
     )
 
     calls = []
@@ -8069,11 +8072,11 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
         return {"already_classified": 1, "failed": 0, "classified": 0}
 
     monkeypatch.setattr(
-        classify_job_mod, "_all_photos_cache_satisfied",
+        classify_job_mod.job_run, "_all_photos_cache_satisfied",
         _fake_all_cache_satisfied,
     )
     monkeypatch.setattr(
-        classify_job_mod, "_finalize_cached_only", _fake_finalize,
+        classify_job_mod.job_run, "_finalize_cached_only", _fake_finalize,
     )
 
     params = ClassifyParams(
@@ -8132,9 +8135,9 @@ def test_finalize_cached_only_includes_zero_confidence_full_image_anchor(
         "empty", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
-    monkeypatch.setattr(classify_job_mod, "get_active_labels", lambda: [])
-    monkeypatch.setattr(classify_job_mod, "get_active_model", lambda: None)
-    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [])
+    monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
+    monkeypatch.setattr(classify_job_mod.job_run, "get_models", lambda: [])
     result = run_classify_job(
         _make_job(), FakeRunner(), db_path, ws,
         ClassifyParams(
@@ -8189,9 +8192,9 @@ def test_finalize_cached_only_treats_null_category_as_animal(
         "legacy", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
 
-    monkeypatch.setattr(classify_job_mod, "get_active_labels", lambda: [])
-    monkeypatch.setattr(classify_job_mod, "get_active_model", lambda: None)
-    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [])
+    monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
+    monkeypatch.setattr(classify_job_mod.job_run, "get_models", lambda: [])
     result = run_classify_job(
         _make_job(), FakeRunner(), db_path, workspace_id,
         ClassifyParams(
@@ -8271,24 +8274,25 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
         "weights_path": str(model_dir),
         "downloaded": True,
     }
-    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [fake_model])
+    monkeypatch.setattr(classify_job_mod.job_run, "get_models", lambda: [fake_model])
     monkeypatch.setattr(
-        classify_job_mod, "get_active_model", lambda: fake_model,
+        classify_job_mod.job_run, "get_active_model", lambda: fake_model,
     )
     monkeypatch.setattr(
-        classify_job_mod, "get_saved_labels",
+        classify_job_mod.label_loading, "get_saved_labels",
         lambda: [{"labels_file": str(labels_file), "name": "Backyard Birds"}],
     )
-    monkeypatch.setattr(
-        classify_job_mod, "get_active_labels",
-        lambda: [{"labels_file": str(labels_file), "name": "Backyard Birds"}],
-    )
+    for module in (classify_job_mod.label_loading, classify_job_mod.label_source):
+        monkeypatch.setattr(
+            module, "get_active_labels",
+            lambda: [{"labels_file": str(labels_file), "name": "Backyard Birds"}],
+        )
 
     # Force the cache-only shortcut regardless of whether the identity
     # fingerprints happen to align — this test is about label_source, not
     # the fingerprint match logic (which is exercised by other tests).
     monkeypatch.setattr(
-        classify_job_mod, "_all_photos_cache_satisfied",
+        classify_job_mod.job_run, "_all_photos_cache_satisfied",
         lambda *a, **kw: True,
     )
 
@@ -8375,10 +8379,11 @@ def test_cached_only_path_publishes_source_when_peek_fails(
 
     # No models are installed anywhere, and no label list is active — the
     # label peek raises RuntimeError, so ``peek_succeeded`` stays False.
-    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [])
-    monkeypatch.setattr(classify_job_mod, "get_active_model", lambda: None)
-    monkeypatch.setattr(classify_job_mod, "get_saved_labels", lambda: [])
-    monkeypatch.setattr(classify_job_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod.job_run, "get_models", lambda: [])
+    monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
+    for module in (classify_job_mod.label_loading, classify_job_mod.label_source):
+        monkeypatch.setattr(module, "get_saved_labels", lambda: [])
+        monkeypatch.setattr(module, "get_active_labels", lambda: [])
 
     runner = FakeRunner()
     run_classify_job(
@@ -8416,7 +8421,7 @@ def test_describe_cached_label_source_falls_back_when_no_sidecar(
     line rather than inventing a description — an honest unknown beats a
     misleading name.
     """
-    from classify_job import _describe_cached_label_source
+    from classify_job.label_source import _describe_cached_label_source
     from db import Database
 
     db_path = str(tmp_path / "test.db")
@@ -8461,7 +8466,7 @@ def test_describe_cached_label_source_skips_ineligible_runs(
     because the ``DISTINCT ... LIMIT 1`` query might pick the excluded
     row first.
     """
-    from classify_job import _describe_cached_label_source
+    from classify_job.label_source import _describe_cached_label_source
     from db import Database
 
     db_path = str(tmp_path / "test.db")
@@ -8582,9 +8587,9 @@ def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
     # Model resolution WOULD fail here — no active model exists. The
     # short-circuit must run before this raises.
     import classify_job as classify_job_mod
-    monkeypatch.setattr(classify_job_mod, "get_active_labels", lambda: [])
-    monkeypatch.setattr(classify_job_mod, "get_active_model", lambda: None)
-    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [])
+    monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
+    monkeypatch.setattr(classify_job_mod.job_run, "get_models", lambda: [])
 
     runner = FakeRunner()
     job = _make_job()
@@ -8652,10 +8657,10 @@ def test_run_classify_job_rejects_unknown_model_id_before_cache_shortcut(
     )
 
     import classify_job as classify_job_mod
-    monkeypatch.setattr(classify_job_mod, "get_active_model", lambda: None)
+    monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
     # get_models returns models but NONE match the requested id.
     monkeypatch.setattr(
-        classify_job_mod, "get_models",
+        classify_job_mod.job_run, "get_models",
         lambda: [{"id": "other-id", "name": "SomeOtherModel",
                   "downloaded": True, "model_type": "bioclip",
                   "model_str": "", "weights_path": ""}],
@@ -8727,9 +8732,9 @@ def test_run_classify_job_reconciles_group_metadata_on_reuse(
     )
 
     import classify_job as classify_job_mod
-    monkeypatch.setattr(classify_job_mod, "get_active_labels", lambda: [])
-    monkeypatch.setattr(classify_job_mod, "get_active_model", lambda: None)
-    monkeypatch.setattr(classify_job_mod, "get_models", lambda: [])
+    monkeypatch.setattr(classify_job_mod.label_loading, "get_active_labels", lambda: [])
+    monkeypatch.setattr(classify_job_mod.job_run, "get_active_model", lambda: None)
+    monkeypatch.setattr(classify_job_mod.job_run, "get_models", lambda: [])
 
     runner = FakeRunner()
     job = _make_job()
@@ -8778,7 +8783,7 @@ def test_pre_heal_classifier_run_does_not_satisfy_cache(tmp_path):
     reported the collection as already classified and the reclassify
     that replaces the scientific names never ran (Codex #1560 P2).
     """
-    from classify_job import _all_photos_cache_satisfied
+    from classify_job.cache_coverage import _all_photos_cache_satisfied
     from computation_cache import (
         classifier_model_identity,
         classifier_runtime_fingerprint,
@@ -8900,7 +8905,7 @@ def test_all_photos_cache_satisfied_excludes_unreviewed_legacy_timm_after_heal(
     such rows across the enrichment change, matching the runtime-change
     pin exception (Codex #1560 P2).
     """
-    from classify_job import _all_photos_cache_satisfied
+    from classify_job.cache_coverage import _all_photos_cache_satisfied
     from computation_cache import (
         classifier_model_identity,
         runtime_fingerprint,
@@ -9026,7 +9031,7 @@ def test_all_photos_cache_satisfied_still_grandfathers_legacy_bioclip(tmp_path):
     the missing-to-present enrichment transition. Their legacy rows
     must keep being grandfathered as before.
     """
-    from classify_job import _all_photos_cache_satisfied
+    from classify_job.cache_coverage import _all_photos_cache_satisfied
     from computation_cache import (
         classifier_model_identity,
         runtime_fingerprint,
@@ -9206,7 +9211,7 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
     (fake_weights / "tol_embeddings.npy").write_bytes(b"stub")
     (fake_weights / "tol_classes.json").write_bytes(b"[]")
     import classify_job as cj
-    monkeypatch.setattr(cj, "get_active_model", lambda: {
+    monkeypatch.setattr(cj.job_run, "get_active_model", lambda: {
         "id": "BioCLIP",
         "name": "BioCLIP",
         "model_str": "hf-hub:imageomics/bioclip",
@@ -9232,7 +9237,7 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
                 raise ClassifierLoadPaused("classifier load paused")
             raise _StopAfterRetry("stop after the post-resume construction")
 
-    monkeypatch.setattr(cj, "Classifier", _StubClassifier)
+    monkeypatch.setattr(cj.job_run, "Classifier", _StubClassifier)
 
     import classifier_cache
 

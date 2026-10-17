@@ -2,7 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
-from classify_job import _detect_batch, _match_stats
+from classify_job import _detect_batch
+from classify_job.classify_pass import _match_stats
 
 
 def test_detect_batch_returns_detection_map():
@@ -21,7 +22,7 @@ def test_detect_batch_returns_detection_map():
     mock_runner.is_cancelled.return_value = False
     mock_job = {"id": "test-1", "progress": {}, "errors": [], "_start_time": 1.0}
 
-    with patch("classify_job.detect_animals", return_value=[]):
+    with patch("classify_job.detection.detect_animals", return_value=[]):
         detection_map, detected, processed_ids = _detect_batch(
             photos, folders, mock_runner, mock_job, reclassify=False, db=mock_db,
         )

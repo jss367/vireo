@@ -878,7 +878,7 @@ def _seed_robin_with_ancestor_keywords(db, folder_id):
     catalog imported with ``includeParents`` (see ``vireo/catalog.py``)
     and by the classifier auto-accept path that treats ancestor tags as
     "broader labels for the same taxon" (see
-    ``_can_auto_accept_detection_prediction`` in ``vireo/classify_job.py``).
+    ``_can_auto_accept_detection_prediction`` in ``vireo/classify_job/store_predictions.py``).
     """
     aves = db.conn.execute(
         "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
