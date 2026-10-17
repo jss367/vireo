@@ -2,21 +2,21 @@
  * Creation is inert. The host supplies render policy and its live navigation list;
  * viewport, editing and DOM presentation remain with their existing owners.
  */
-(function(root) {
+(function(/** @type {Window & typeof globalThis} */ root) {
   'use strict';
-  function create(options) {
+  function create(/** @type {LightboxSessionOptions} */ options) {
     var window = options.window || root;
     var document = window.document;
-    var currentId = null;
-    var displayedId = null;
+    /** @type {number | null} */ var currentId = null;
+    /** @type {number | null} */ var displayedId = null;
     var generation = 0;
     var preloadSerial = 0;
-    var swapTimer = null;
-    var initialLoad = null;
-    var cleanups = new Set();
+    /** @type {number | null} */ var swapTimer = null;
+    /** @type {{token: LightboxSessionToken, commit: () => void, abandon: () => void} | null} */ var initialLoad = null;
+    /** @type {Set<() => void>} */ var cleanups = new Set();
 
     function capture() { return Object.freeze({photoId: currentId, generation: generation}); }
-    function isCurrent(token) {
+    function isCurrent(/** @type {LightboxSessionToken} */ token) {
       return currentId != null && token.photoId === currentId && token.generation === generation;
     }
     function cancelSwap() {
@@ -32,13 +32,13 @@
       _lbCancelOriginalPreload();
       _lbCancelAdjacentPreloadTimer();
     }
-    function begin(photoId) {
+    function begin(/** @type {number} */ photoId) {
       if (currentId == null) _lbLastNavDelta = 1;
       retire();
       currentId = photoId;
       return capture();
     }
-    function commit(token) {
+    function commit(/** @type {LightboxSessionToken} */ token) {
       if (!isCurrent(token)) return false;
       displayedId = token.photoId;
       return true;
@@ -51,7 +51,7 @@
       _lbClearAdjacentPreloads();
       return closedId;
     }
-    function scheduleSwap(callback, delay) {
+    function scheduleSwap(/** @type {() => void} */ callback, /** @type {number} */ delay) {
       cancelSwap();
       var token = capture();
       var timer = window.setTimeout(function() {
@@ -63,7 +63,7 @@
     }
     // Both property handlers and event listeners are detached on navigation or
     // close. A queued callback also checks its token before touching the host.
-    function watchImage(img, onload, onerror, properties, persistent) {
+    function watchImage(/** @type {HTMLImageElement} */ img, /** @type {() => void} */ onload, /** @type {(() => void) | null} */ onerror, /** @type {boolean} */ properties, /** @type {boolean | undefined} */ persistent) {
       var token = capture();
       function cleanup() {
         if (properties) {
@@ -88,25 +88,25 @@
       cleanups.add(cleanup);
       return cleanup;
     }
-    function loadSource(url, onload, onerror) {
+    function loadSource(/** @type {string} */ url, /** @type {() => void} */ onload, /** @type {(() => void) | null} */ onerror) {
       var img = new window.Image();
-      watchImage(img, onload, onerror, true);
+      watchImage(img, onload, onerror, true, false);
       img.src = url;
     }
-    function setInitialLoad(commitLoad, abandonLoad) {
+    function setInitialLoad(/** @type {() => void} */ commitLoad, /** @type {() => void} */ abandonLoad) {
       initialLoad = {token: capture(), commit: commitLoad, abandon: abandonLoad};
     }
-    function clearInitialLoad(commitLoad) {
+    function clearInitialLoad(/** @type {(() => void) | undefined} */ commitLoad) {
       if (!commitLoad || (initialLoad && initialLoad.commit === commitLoad)) initialLoad = null;
     }
-    function finishInitialLoad(abandon) {
+    /** @param {boolean} abandon */ function finishInitialLoad(abandon) {
       var pending = initialLoad;
       initialLoad = null;
       if (!pending || !isCurrent(pending.token)) return false;
       (abandon ? pending.abandon : pending.commit)();
       return true;
     }
-    function snapshotEntry(entry) {
+    function snapshotEntry(/** @type {LightboxPreloadEntry | null | undefined} */ entry) {
       if (!entry) return null;
       return Object.freeze({requestId: entry.requestId, photoId: entry.photoId, sourceKey: entry.sourceKey,
         url: entry.url, status: entry.status, bytes: entry.bytes});
@@ -126,7 +126,7 @@
         originalWaiting: _lbOriginalPreloadWaiting !== null
       });
     }
-    function hasDecodedSource(photoId, key, url) {
+    function hasDecodedSource(/** @type {number} */ photoId, /** @type {string} */ key, /** @type {string} */ url) {
       var entries = Object.values(_lbAdjacentPreloads);
       if (_lbOriginalPreload) entries.push(_lbOriginalPreload);
       return entries.some(function(entry) {
@@ -135,19 +135,19 @@
       });
     }
 
-    var _lbAdjacentPreloads = {}; // bounded navigation window, keyed by photo id + source URL
-    var _lbAdjacentPreloadTimer = null;
-    var _lbAdjacentPreloadRetry = {};
+    /** @type {Record<string, LightboxPreloadEntry>} */ var _lbAdjacentPreloads = {}; // bounded navigation window, keyed by photo id + source URL
+    /** @type {number | null} */ var _lbAdjacentPreloadTimer = null;
+    /** @type {Record<string, {openSeq: number, count: number, at?: number}>} */ var _lbAdjacentPreloadRetry = {};
     var _lbLastNavDelta = 1;
-    var _lbOriginalPreloadTimer = null; // short dwell before warming the current photo's 100% source
-    var _lbOriginalPreload = null; // retained decoded original for an instant first 100% click
-    var _lbOriginalPreloadWaiting = null; // dwell completed; waiting for the shared slot
-    var _lbSpeculativeInFlight = null; // oldest outstanding request (including pruned entries)
-    var _lbSpeculativeLoads = new Set();
+    /** @type {number | null} */ var _lbOriginalPreloadTimer = null; // short dwell before warming the current photo's 100% source
+    /** @type {LightboxPreloadEntry | null} */ var _lbOriginalPreload = null; // retained decoded original for an instant first 100% click
+    /** @type {{photoId: number, retryCount: number} | null} */ var _lbOriginalPreloadWaiting = null; // dwell completed; waiting for the shared slot
+    /** @type {LightboxPreloadEntry | null} */ var _lbSpeculativeInFlight = null; // oldest outstanding request (including pruned entries)
+    /** @type {Set<LightboxPreloadEntry>} */ var _lbSpeculativeLoads = new Set();
     var _lbPreloadConcurrency = options.preloadConcurrency || 3;
     var _lbPreloadBudgetBytes = options.preloadBudgetBytes || 128 * 1024 * 1024;
 
-    function _lbDecodedInitialPreview(photoId, desired) {
+    function _lbDecodedInitialPreview(/** @type {number} */ photoId, /** @type {string} */ desired) {
       var entries = Object.values(_lbAdjacentPreloads);
       if (_lbOriginalPreload) entries.push(_lbOriginalPreload);
       var ready = entries.filter(function(entry) {
@@ -190,7 +190,7 @@
       _lbOriginalPreloadWaiting = null;
     }
 
-    function _lbShouldPreloadOriginal(photoId) {
+    /** @param {null} photoId */ function _lbShouldPreloadOriginal(/** @type {number | null} */ photoId) {
       if (
         photoId == null ||
         currentId !== photoId ||
@@ -200,13 +200,13 @@
         options.view().zoom > 1.001 ||
         (options.view().desiredSrcKey && options.view().desiredSrcKey !== 'full') ||
         !options.view().nativeZoom ||
-        options.pickSourceKey(options.view().nativeZoom) !== 'original'
+        options.pickSourceKey(options.view().nativeZoom || 1) !== 'original'
       ) return false;
-      var img = document.getElementById('lightboxImg');
+      var img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
       return !!(img && img.complete && img.naturalWidth && img.naturalHeight);
     }
 
-    function _lbReleasePreloadImage(entry) {
+    function _lbReleasePreloadImage(/** @type {LightboxPreloadEntry | null | undefined} */ entry) {
       // Clearing src does not cancel synchronous server-side generation. Keep the
       // outstanding requests observable even if their decoded-cache entries go.
       if (!entry || !entry.img || _lbSpeculativeLoads.has(entry)) return;
@@ -221,7 +221,7 @@
       return options.fullPreviewLimit() > 1920 ? '1920' : 'full';
     }
 
-    function _lbEstimatePreloadBytes(photo, key) {
+    function _lbEstimatePreloadBytes(/** @type {LightboxPhoto} */ photo, /** @type {string} */ key) {
       var cached = options.photoData(photo.id) || photo;
       var w = Number(cached.width || photo.width) || options.view().photoW || 6000;
       var h = Number(cached.height || photo.height) || options.view().photoH || 4000;
@@ -253,14 +253,14 @@
         return item[1].status === 'decoded';
       });
       entries.sort(function(a, b) {
-        function distance(entry) {
+        function distance(/** @type {LightboxPreloadEntry} */ entry) {
           return Math.abs(options.photos().findIndex(function(p) { return p.id === entry.photoId; }) - currentIdx);
         }
         return Number(b[1].bytes > _lbPreloadBudgetBytes) - Number(a[1].bytes > _lbPreloadBudgetBytes) ||
           distance(b[1]) - distance(a[1]) || b[1].bytes - a[1].bytes;
       });
       while (_lbPreloadBytes() > _lbPreloadBudgetBytes && entries.length) {
-        var item = entries.shift();
+        var item = entries.shift(); if (!item) break;
         _lbReleasePreloadImage(item[1]);
         delete _lbAdjacentPreloads[item[0]];
         // Do not immediately re-request an underestimated image we just evicted.
@@ -268,13 +268,13 @@
       }
     }
 
-    function _lbRunSpeculativePreload(entry, onSettled) {
+    function _lbRunSpeculativePreload(/** @type {LightboxPreloadEntry} */ entry, /** @type {(decoded: boolean) => void} */ onSettled) {
       entry.requestId = ++preloadSerial;
       _lbSpeculativeLoads.add(entry);
       _lbSpeculativeInFlight = _lbSpeculativeLoads.values().next().value || null;
       var preload = entry.img;
       preload.fetchPriority = 'low';
-      function settle(decoded) {
+      /** @param {boolean} decoded */ function settle(decoded) {
         if (entry.status !== 'loading') return;
         entry.status = decoded ? 'decoded' : 'failed';
         _lbSpeculativeLoads.delete(entry);
@@ -288,7 +288,7 @@
         }
         var overlay = document.getElementById('lightboxOverlay');
         if (currentId != null && overlay && overlay.classList.contains('active')) {
-          _lbScheduleAdjacentPhoto(options.view().currentSrcKey);
+          _lbScheduleAdjacentPhoto(options.view().currentSrcKey, undefined);
         }
       }
       var supportsDecode = typeof preload.decode === 'function';
@@ -303,7 +303,7 @@
       }
     }
 
-    function _lbScheduleOriginalPreload(photoId, retryCount) {
+    function _lbScheduleOriginalPreload(/** @type {number} */ photoId, /** @type {number | undefined} */ retryCount) {
       _lbCancelOriginalPreload();
       if (!_lbShouldPreloadOriginal(photoId)) return;
       // Dwell prevents fast arrowing from preparing every full-resolution RAW.
@@ -315,7 +315,7 @@
         _lbOriginalPreloadTimer = null;
         if (!isCurrent(token) || !_lbShouldPreloadOriginal(photoId)) return;
         _lbOriginalPreloadWaiting = { photoId: photoId, retryCount: retryCount || 0 };
-        _lbScheduleAdjacentPhoto(options.view().currentSrcKey);
+        _lbScheduleAdjacentPhoto(options.view().currentSrcKey, undefined);
       }, 1400);
       _lbOriginalPreloadTimer = timer;
     }
@@ -347,9 +347,9 @@
       });
     }
 
-    function _lbPrimeAdjacentPhotos(sourceKey) {
+    /** @param {string} sourceKey */ function _lbPrimeAdjacentPhotos(sourceKey) {
       var overlay = document.getElementById('lightboxOverlay');
-      var visibleImg = document.getElementById('lightboxImg');
+      var visibleImg = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
       if (currentId == null || !overlay || !overlay.classList.contains('active') ||
           options.view().visualTransitionPending || !visibleImg ||
           !visibleImg.complete || !visibleImg.naturalWidth) return;
@@ -374,9 +374,9 @@
       var key = sourceKey || 'full';
       var baseKey = _lbSmallPreviewKey();
       var direction = _lbLastNavDelta < 0 ? -1 : 1;
-      var candidates = [];
-      var keep = {};
-      function addCandidate(offset, tier) {
+      /** @type {{photoId: number, sourceKey: string, url: string, cacheKey: string, bytes: number}[]} */ var candidates = [];
+      /** @type {Record<string, boolean>} */ var keep = {};
+      /** @param {number} offset @param {string} tier */ function addCandidate(offset, tier) {
         var photo = options.photos()[currentIdx + offset];
         if (!photo) return;
         if (Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')) {
@@ -405,7 +405,7 @@
         addCandidate(-direction, key);
       }
       Object.keys(_lbAdjacentPreloads).forEach(function(cacheKey) {
-        var entry = _lbAdjacentPreloads[cacheKey];
+        var entry = _lbAdjacentPreloads[cacheKey]; if (!entry) return;
         // Retaining the just-displayed warmup makes an immediate reversal cheap.
         if (keep[cacheKey] || (entry.photoId === currentId && entry.status === 'decoded')) return;
         _lbReleasePreloadImage(entry);
@@ -421,7 +421,7 @@
       // Count retired in-flight requests too: dropping an Image does not cancel
       // synchronous server generation or immediately reclaim its decode memory.
       var now = Date.now();
-      var retryAt = null;
+      /** @type {number | null} */ var retryAt = null;
       candidates.forEach(function(candidate) {
         if (_lbSpeculativeLoads.size >= _lbPreloadConcurrency) return;
         if (_lbAdjacentPreloads[candidate.cacheKey]) return;
@@ -432,7 +432,7 @@
         if (retry && retry.openSeq === generation) {
           if (retry.count > 1) return;
           if (_lbSpeculativeLoads.size) return;
-          if (retry.at > now) {
+          if (retry.at != null && retry.at > now) {
             retryAt = retryAt == null ? retry.at : Math.min(retryAt, retry.at);
             return;
           }
@@ -459,14 +459,14 @@
       else if (!_lbSpeculativeLoads.size) _lbStartPendingOriginalPreload();
     }
 
-    function _lbScheduleAdjacentPhoto(sourceKey, delay) {
+    function _lbScheduleAdjacentPhoto(/** @type {string | null} */ sourceKey, /** @type {number | undefined} */ delay) {
       _lbCancelAdjacentPreloadTimer();
       var openSeq = generation;
       var timer = window.setTimeout(function() {
         if (_lbAdjacentPreloadTimer !== timer) return;
         _lbAdjacentPreloadTimer = null;
         if (generation !== openSeq || options.view().visualTransitionPending) return;
-        _lbPrimeAdjacentPhotos(sourceKey);
+        _lbPrimeAdjacentPhotos(sourceKey || 'full');
       }, delay || 0);
       _lbAdjacentPreloadTimer = timer;
     }
@@ -475,11 +475,11 @@
       begin: begin, commit: commit, close: close, capture: capture, isCurrent: isCurrent,
       requestedPhotoId: function() { return currentId; },
       displayedPhotoId: function() { return displayedId; },
-      noteDirection: function(delta) { _lbLastNavDelta = delta < 0 ? -1 : 1; },
+      noteDirection: function(/** @type {number} */ delta) { _lbLastNavDelta = delta < 0 ? -1 : 1; },
       cancelSwap: cancelSwap, scheduleSwap: scheduleSwap,
       hasScheduledSwap: function() { return swapTimer !== null; },
       watchImage: watchImage, loadSource: loadSource,
-      watchInitialImage: function(img, onload, onerror) { return watchImage(img, onload, onerror, true, true); },
+      watchInitialImage: function(/** @type {HTMLImageElement} */ img, /** @type {() => void} */ onload, /** @type {() => void} */ onerror) { return watchImage(img, onload, onerror, true, true); },
       setInitialLoad: setInitialLoad, clearInitialLoad: clearInitialLoad,
       hasInitialLoad: function() { return initialLoad !== null; },
       finishInitialLoad: function() { return finishInitialLoad(false); },

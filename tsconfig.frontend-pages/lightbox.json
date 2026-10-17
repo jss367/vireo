@@ -1,0 +1,8 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/lightbox.d.ts",
+    "../vireo/static/lightbox/session.js",
+    "../vireo/static/lightbox/viewport.js"
+  ]
+}
