@@ -93,7 +93,7 @@ def test_api_new_images_reports_unscanned_files(app_and_db, monkeypatch):
     resp = client.get("/api/workspaces/active/new-images")
     assert resp.status_code == 200
     data = resp.get_json()
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + synchronization_timeout(5.0)
     while data.get("pending") and time.monotonic() < deadline:
         time.sleep(0.05)
         resp = client.get("/api/workspaces/active/new-images")
@@ -122,7 +122,7 @@ def test_api_new_images_zero_when_fully_ingested(app_and_db):
     # ``pending``. On loaded CI runners the walk can slip past that window,
     # so tolerate the pending state and re-poll until the cache populates.
     if data.get("pending"):
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + synchronization_timeout(2.0)
         while time.monotonic() < deadline:
             time.sleep(0.05)
             data = client.get("/api/workspaces/active/new-images").get_json()
@@ -217,7 +217,7 @@ def test_api_new_images_defers_walk_during_folder_move(app_and_db, query):
     finally:
         release.set()
 
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + synchronization_timeout(2)
     while time.monotonic() < deadline:
         if app._job_runner.get(move_id)["status"] != "running":
             break
@@ -244,7 +244,7 @@ def test_api_new_images_returns_cached_after_background_compute_finishes(app_and
     assert resp1.status_code == 200
 
     cache = get_shared_cache()
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + synchronization_timeout(2.0)
     while time.monotonic() < deadline:
         if cache.get(db._db_path, ws_id) is not None:
             break
@@ -278,7 +278,7 @@ def test_api_new_images_response_trims_sample_but_caches_full_list(app_and_db):
     assert resp.status_code == 200
 
     cache = get_shared_cache()
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + synchronization_timeout(2.0)
     cached = None
     while time.monotonic() < deadline:
         cached = cache.get(db._db_path, ws_id)
@@ -363,7 +363,7 @@ def test_api_new_images_returns_error_when_compute_fails(app_and_db, monkeypatch
     # error — the 500ms grace inside the endpoint may have already caught it,
     # but in case it didn't, repoll once.
     if data.get("pending"):
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + synchronization_timeout(2.0)
         while time.monotonic() < deadline:
             time.sleep(0.05)
             data = client.get("/api/workspaces/active/new-images").get_json()
@@ -410,7 +410,7 @@ def test_api_new_images_records_job_and_history_on_cache_cold(app_and_db, monkey
         resp = client.get("/api/workspaces/active/new-images")
         assert resp.status_code == 200
         # While the walk is blocked, /api/jobs must show our discovery job.
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + synchronization_timeout(2.0)
         walk_jobs = []
         while time.monotonic() < deadline:
             jobs_resp = client.get("/api/jobs")
@@ -485,7 +485,7 @@ def test_api_new_images_job_marked_failed_when_walk_raises(app_and_db, monkeypat
     client = app.test_client()
     client.get("/api/workspaces/active/new-images")
 
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + synchronization_timeout(2.0)
     walk_job = None
     while time.monotonic() < deadline:
         active = client.get("/api/jobs").get_json()["active"]
@@ -526,7 +526,7 @@ def test_api_new_images_no_extra_job_on_cache_hit(app_and_db):
     # Prime the cache.
     client.get("/api/workspaces/active/new-images")
     cache = get_shared_cache()
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + synchronization_timeout(2.0)
     while time.monotonic() < deadline:
         if cache.get(db._db_path, ws_id) is not None:
             break
@@ -534,7 +534,7 @@ def test_api_new_images_no_extra_job_on_cache_hit(app_and_db):
     assert cache.get(db._db_path, ws_id) is not None
 
     # Wait for any prior job to leave the running state, then count.
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + synchronization_timeout(2.0)
     while time.monotonic() < deadline:
         active = client.get("/api/jobs").get_json()["active"]
         if not any(j["type"] == "new_images_walk" and j["status"] == "running"
@@ -584,7 +584,7 @@ def test_api_new_images_does_not_hot_loop_on_persistent_failure(app_and_db, monk
     client = app.test_client()
     # Fire one request; wait for compute to finish and the error to land.
     client.get("/api/workspaces/active/new-images")
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + synchronization_timeout(2.0)
     while time.monotonic() < deadline:
         if call_count["n"] >= 1:
             break
@@ -858,7 +858,7 @@ def test_post_snapshot_surfaces_async_error_without_retry_loop(
             assert call_count["n"] == 1
 
             release.set()
-            deadline = time.monotonic() + 2.0
+            deadline = time.monotonic() + synchronization_timeout(2.0)
             error_resp = None
             while time.monotonic() < deadline:
                 error_resp = client.post(
@@ -1010,7 +1010,7 @@ def test_post_snapshot_202_reports_live_walk_progress(app_and_db, monkeypatch):
 
     try:
         with app.test_client() as client:
-            deadline = time.monotonic() + 2.0
+            deadline = time.monotonic() + synchronization_timeout(2.0)
             body = None
             while time.monotonic() < deadline:
                 resp = client.post("/api/workspaces/active/new-images/snapshot")
@@ -1059,7 +1059,7 @@ def test_post_snapshot_registers_job_when_walk_needed(
             resp = client.post("/api/workspaces/active/new-images/snapshot")
             assert resp.status_code == 202
             assert started.wait(timeout=synchronization_timeout(2.0))
-            deadline = time.monotonic() + 2.0
+            deadline = time.monotonic() + synchronization_timeout(2.0)
             walk_jobs = []
             while time.monotonic() < deadline:
                 active = client.get("/api/jobs").get_json()["active"]
@@ -1400,7 +1400,7 @@ def test_api_new_images_polls_do_not_wait_on_an_inflight_walk(app_and_db, monkey
     finally:
         release.set()
 
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + synchronization_timeout(3)
     data = client.get("/api/workspaces/active/new-images").get_json()
     while data.get("pending") and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -1438,7 +1438,7 @@ def test_api_new_images_payload_names_unreachable_roots(app_and_db, monkeypatch)
     )
     client = app.test_client()
     data = client.get("/api/workspaces/active/new-images").get_json()
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + synchronization_timeout(3)
     while data.get("pending") and time.monotonic() < deadline:
         time.sleep(0.05)
         data = client.get("/api/workspaces/active/new-images").get_json()
@@ -1473,7 +1473,7 @@ def test_new_images_walk_job_completes_with_offline_caveat(app_and_db, monkeypat
     client.get("/api/workspaces/active/new-images")
 
     runner = app._job_runner
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + synchronization_timeout(3)
     job = None
     while time.monotonic() < deadline:
         jobs = [j for j in runner.list_jobs() if j.get("type") == "new_images_walk"]
@@ -1654,7 +1654,7 @@ def test_automatic_discovery_defers_to_processing_then_recovers(app_and_db, job_
         assert not any(j["type"] == "new_images_walk" for j in app._job_runner.list_jobs())
     finally:
         release.set()
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + synchronization_timeout(3)
     while app._job_runner.get(job_id)["status"] == "running" and time.monotonic() < deadline:
         time.sleep(0.01)
     response = client.get("/api/workspaces/active/new-images").get_json()
@@ -1689,7 +1689,7 @@ def test_manual_recheck_bypasses_foreground_job_deferral(app_and_db, snapshot):
                else "/api/workspaces/active/new-images?manual_recheck=1")
         request_check = client.post if snapshot else client.get
         response = request_check(url).get_json()
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + synchronization_timeout(3)
         while response.get("pending") and time.monotonic() < deadline:
             time.sleep(0.05)
             response = request_check(url).get_json()
@@ -1697,7 +1697,7 @@ def test_manual_recheck_bypasses_foreground_job_deferral(app_and_db, snapshot):
         assert response.get("file_count" if snapshot else "new_count") == 1
     finally:
         release.set()
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + synchronization_timeout(3)
         while (app._job_runner.get(job_id)["status"] == "running"
                and time.monotonic() < deadline):
             time.sleep(0.01)
