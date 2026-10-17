@@ -86,7 +86,7 @@ Current stable set:
 | GET  | `/api/v1/workspaces` | All workspaces. |
 | POST | `/api/v1/workspaces/<id>/activate` | Switch the active workspace. |
 | GET  | `/api/v1/keywords` | Keyword tree. |
-| POST | `/api/v1/photos/<id>/flag` | Set one photo's flag: `{"flag": "none"\|"flagged"\|"rejected", "source"?: str, "reason"?: str}`. `source` (≤ 60 chars) is who decided, `reason` (≤ 300) why; both land in edit history and a durable current note. The Undo panel retains the audit text; `flag_note` describes only the current attributed write. Any later flag write, including Undo/Redo, conservatively clears the current note. |
+| POST | `/api/v1/photos/<id>/flag` | Set one photo's flag (requires a JSON object and an explicit `flag`; malformed input returns 400): `{"flag": "none"\|"flagged"\|"rejected", "source"?: str, "reason"?: str}`. `source` (≤ 60 chars) is who decided, `reason` (≤ 300) why; both land in edit history and a durable current note. The Undo panel retains the audit text; `flag_note` describes only the current attributed write. Any later flag write, including Undo/Redo, conservatively clears the current note. |
 | POST | `/api/v1/batch/flag` | The same for `{"photo_ids": [...], "flag": ..., "source"?, "reason"?}`; one undoable edit. IDs must be positive integers below `2**63`. |
 | GET  | `/api/v1/photos/<id>/burst-evidence` | The burst around a photo as an evidence pack: ranked frames, feature coverage, ambiguity reasons, 1:1 crop URLs. `margin`, `focus_size`, `gap_seconds`, `max_photos`. |
 | POST | `/api/v1/photos/burst-evidence` | The same pack for an explicit `{"photo_ids": [...]}` selection (2–500 ids). |

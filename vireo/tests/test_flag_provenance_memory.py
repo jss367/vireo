@@ -270,6 +270,75 @@ def test_note_publication_failure_and_photo_replacement_cannot_leave_false_attri
     conn.close()
 
 
+
+
+def test_global_hook_leaves_malformed_and_object_validation_to_flag_routes():
+    ns = load("web/app_hooks.py", {"_reject_non_object_json_body"})
+    for body in (None, {}):
+        ns["request"] = types.SimpleNamespace(path="/api/v1/photos/7/flag", method="POST", is_json=True,
+            get_json=lambda body=body, **kw: body)
+        assert ns["_reject_non_object_json_body"]() is None
+
+
+def test_v1_flag_routes_require_an_object_and_explicit_flag_before_any_write():
+    conn, _, db, service, note = durable_fixture()
+    service.set_flag(7, "flagged", source="invented-agent")
+    ns = load("web/photo_review.py", {"flag_provenance", "create_photo_review_blueprint", "_valid_flag_photo_id"})
+    routes, accesses = {}, []
+    class Blueprint:
+        def __init__(self, *a):
+            pass
+        def post(self, path):
+            def register(fn):
+                routes[fn.__name__] = fn
+                return fn
+            return register
+    ns.update(Blueprint=Blueprint, VALID_FLAGS=("none", "flagged", "rejected"),
+        FLAG_SOURCE_MAX_CHARS=60, FLAG_REASON_MAX_CHARS=300, jsonify=lambda x: x,
+        PhotoReviewService=lambda ignored: service)
+    ns["create_photo_review_blueprint"](lambda: accesses.append("db") or db,
+                                         lambda msg, status=400: (msg, status))
+    tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
+    aliases = ast.literal_eval(next(n.value for n in tree.body if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_V1_ALIASES" for t in n.targets)))
+    views = {endpoint: routes.get(endpoint.split(".")[-1], object()) for _, endpoint, _ in aliases}
+    registered = {}
+    app = types.SimpleNamespace(view_functions=views,
+        add_url_rule=lambda path, **kw: registered.__setitem__(path, kw["view_func"]))
+    aliases_ns = load("app.py", {"_register_v1_aliases"})
+    aliases_ns["_V1_ALIASES"] = aliases
+    aliases_ns["_register_v1_aliases"](app, set())
+    single = registered["/api/v1/photos/<int:photo_id>/flag"]
+    batch = registered["/api/v1/batch/flag"]
+    assert single is routes["set_flag"] and batch is routes["set_flags"]
+    raw_inputs = ("", "{", '{"flag":"none"', "null", "false", "7", '"x"', "[]",
+                  "{}", '{"photo_ids":[7]}', '{"flag":null}', '{"flag":false}', '{"flag":"invalid"}')
+    before = tuple(conn.execute("SELECT (SELECT flag FROM photos WHERE id=7),"
+        "(SELECT COUNT(*) FROM edit_history),(SELECT COUNT(*) FROM invented_queue)").fetchone())
+    def decode(raw, kwargs):
+        assert kwargs == {"silent": True}
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return None
+    for raw in raw_inputs:
+        ns["request"] = types.SimpleNamespace(get_json=lambda raw=raw, **kw: decode(raw, kw))
+        for fn, args in ((single, (7,)), (batch, ())):
+            assert fn(*args)[1] == 400
+            assert tuple(conn.execute("SELECT (SELECT flag FROM photos WHERE id=7),"
+                "(SELECT COUNT(*) FROM edit_history),(SELECT COUNT(*) FROM invented_queue)").fetchone()) == before
+            assert note(db, 7, "flagged")["source"] == "invented-agent"
+    assert accesses == []
+    ns["request"] = types.SimpleNamespace(get_json=lambda **kw: {"flag": "none"})
+    assert single(7) == {"ok": True}
+    assert conn.execute("SELECT flag FROM photos WHERE id=7").fetchone()[0] == "none"
+    assert note(db, 7, "none") is None
+    ns["request"] = types.SimpleNamespace(get_json=lambda **kw: {"photo_ids": [7], "flag": "none"})
+    assert batch() == {"ok": True, "updated": 1}
+    assert conn.execute("SELECT COUNT(*) FROM edit_history").fetchone()[0] == before[1] + 2
+    conn.close()
+
+
 if __name__ == "__main__":
     failed = []
     for name, check in list(globals().items()):

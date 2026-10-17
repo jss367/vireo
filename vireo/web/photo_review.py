@@ -69,7 +69,9 @@ def create_photo_review_blueprint(get_db, json_error):
     def set_flag(photo_id):
         if not _valid_flag_photo_id(photo_id):
             return json_error("photo_id must be a positive signed 64-bit integer")
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         # An explicit flag is required: a missing key must not default to
         # "none" and silently clear the photo's flag (with an undo entry)
         # because a client sent a truncated or unparsable body.
@@ -108,7 +110,9 @@ def create_photo_review_blueprint(get_db, json_error):
 
     @blueprint.post("/api/batch/flag")
     def set_flags():
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
         photo_ids = body.get("photo_ids", [])
         # Explicit flag required, as on the single-photo route.
         flag = body.get("flag")
