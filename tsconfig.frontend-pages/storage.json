@@ -3,6 +3,7 @@
   "files": [
     "../types/pages/storage.d.ts",
     "../vireo/static/storage-overview.js",
-    "../vireo/static/storage-retained.js"
+    "../vireo/static/storage-retained.js",
+    "../vireo/static/storage-hf-cache.js"
   ]
 }

@@ -6,8 +6,9 @@
  * removes the rest. Depends on storageFormatBytes / storageEscapeHtml and
  * safeFetch (navbar), and on loadStoragePanel to refresh the cards.
  */
-var _hfCacheInventory = null;
+/** @type {HfCacheInventory | null} */ var _hfCacheInventory = null;
 
+/** @param {{size?:number;unused_size?:number} | null | undefined} hf @returns {string | null} */
 function hfCacheCardNote(hf) {
   if (!hf || !hf.size) return null;
   if (hf.unused_size) {
@@ -17,37 +18,39 @@ function hfCacheCardNote(hf) {
 }
 
 async function openHfCacheModal() {
-  var modal = document.getElementById('hfCacheModal');
-  document.getElementById('hfCacheError').style.display = 'none';
-  document.getElementById('hfCacheLoading').style.display = 'block';
-  document.getElementById('hfCacheRows').textContent = '';
-  document.getElementById('hfCacheRemoveUnused').disabled = true;
+  var modal = /** @type {HTMLElement} */ (document.getElementById('hfCacheModal'));
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheError')).style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheLoading')).style.display = 'block';
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheRows')).textContent = '';
+  /** @type {HTMLButtonElement} */ (document.getElementById('hfCacheRemoveUnused')).disabled = true;
   modal.classList.add('open');
   await loadHfCacheRows();
 }
 
 function closeHfCacheModal() {
-  document.getElementById('hfCacheModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheModal')).classList.remove('open');
 }
 
 async function loadHfCacheRows() {
   try {
     _hfCacheInventory = await safeFetch('/api/storage/hf-cache', {}, { toast: false });
   } catch (e) {
-    document.getElementById('hfCacheLoading').style.display = 'none';
+    /** @type {HTMLElement} */ (document.getElementById('hfCacheLoading')).style.display = 'none';
     _showHfCacheError('Failed to load the Hugging Face cache.');
     return;
   }
-  document.getElementById('hfCacheLoading').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheLoading')).style.display = 'none';
   renderHfCacheRows();
 }
 
+/** @param {string} msg */
 function _showHfCacheError(msg) {
-  var el = document.getElementById('hfCacheError');
+  var el = /** @type {HTMLElement} */ (document.getElementById('hfCacheError'));
   el.textContent = msg;
   el.style.display = '';
 }
 
+/** @param {HfCacheEntry} entry @returns {HTMLLIElement} */
 function _hfCacheRow(entry) {
   var li = document.createElement('li');
   li.className = 'file-item';
@@ -88,9 +91,9 @@ function _hfCacheRow(entry) {
 }
 
 function renderHfCacheRows() {
-  var rows = document.getElementById('hfCacheRows');
+  var rows = /** @type {HTMLElement} */ (document.getElementById('hfCacheRows'));
   rows.textContent = '';
-  var inv = _hfCacheInventory || {entries: [], unused_size: 0};
+  /** @type {HfCacheInventory} */ var inv = _hfCacheInventory || {entries: [], unused_size: 0};
   if (!inv.entries.length) {
     var empty = document.createElement('li');
     empty.style.color = 'var(--text-ghost)';
@@ -100,33 +103,36 @@ function renderHfCacheRows() {
     rows.appendChild(empty);
   }
   inv.entries.forEach(function(entry) { rows.appendChild(_hfCacheRow(entry)); });
-  var btn = document.getElementById('hfCacheRemoveUnused');
+  var btn = /** @type {HTMLButtonElement} */ (document.getElementById('hfCacheRemoveUnused'));
   btn.disabled = !inv.unused_size;
   btn.textContent = inv.unused_size
     ? 'Remove unused entries · ' + storageFormatBytes(inv.unused_size)
     : 'No unused entries';
 }
 
+/** @param {{keys?:string[];unused?:boolean}} body @param {string} failure */
 async function _postHfCacheRemove(body, failure) {
-  document.getElementById('hfCacheError').style.display = 'none';
+  /** @type {HTMLElement} */ (document.getElementById('hfCacheError')).style.display = 'none';
   try {
-    var result = await safeFetch('/api/storage/hf-cache/remove', {
+    /** @type {HfCacheInventory} */ var result = await safeFetch('/api/storage/hf-cache/remove', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     }, { toast: false });
     _hfCacheInventory = result;
-    if (result.failed && result.failed.length) {
+    var first = result.failed && result.failed[0];
+    if (first) {
       // Some paths could not be deleted; they stay in the refreshed list.
-      var first = result.failed[0];
-      _showHfCacheError(failure + ': ' + result.failed.length +
-        (result.failed.length === 1 ? ' file' : ' files') + ' could not be deleted (' +
+      var failed = result.failed || [];
+      _showHfCacheError(failure + ': ' + failed.length +
+        (failed.length === 1 ? ' file' : ' files') + ' could not be deleted (' +
         first.path + ': ' + first.error + '). Freed ' + storageFormatBytes(result.freed || 0) + '.');
     } else {
       showToast('Freed ' + storageFormatBytes(result.freed || 0) + ' from the Hugging Face cache', 'success');
     }
   } catch (e) {
-    _showHfCacheError(failure + (e && e.message ? ': ' + e.message : '.'));
+    var message = e instanceof Error ? e.message : '';
+    _showHfCacheError(failure + (message ? ': ' + message : '.'));
     await loadHfCacheRows();
     return;
   }
@@ -134,6 +140,7 @@ async function _postHfCacheRemove(body, failure) {
   loadStoragePanel();
 }
 
+/** @param {HfCacheEntry} entry */
 async function removeHfCacheEntry(entry) {
   if (!confirm('Remove "' + entry.name + '" (' + storageFormatBytes(entry.size) +
       ') from the Hugging Face cache? Installing that model again will download it from Hugging Face.')) return;
