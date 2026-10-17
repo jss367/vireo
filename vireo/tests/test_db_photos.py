@@ -738,11 +738,11 @@ def test_get_browse_summary(db, lib, isolated_config):
             {"folder_id": lib["root"], "name": "lib", "count": 2},
             {"folder_id": lib["child"], "name": "c", "count": 1},
         ],
-        # Every visible photo has an animal box above the floor; no quality,
-        # eye or misses pass has run.
+        # Every visible photo has an animal box above the floor; no completed
+        # detection run, quality, eye or misses pass has been recorded.
         "analysis": {
-            "with_detection": 3, "with_quality": 0, "with_eye": 0,
-            "with_misses": 0,
+            "with_detection": 3, "with_detection_run": 0,
+            "with_quality": 0, "with_eye": 0, "with_misses": 0,
         },
     }
     by_folder = db.get_browse_summary(folder_id=lib["child"])
