@@ -18,6 +18,7 @@ Not to be confused with the top-level ``duplicates`` module, the pure
 resolver this repository feeds.
 """
 
+import contextlib
 import os
 import sqlite3
 from collections.abc import Iterable
@@ -70,6 +71,22 @@ class DuplicatesRepository:
     def transaction(self) -> sqlite3.Connection:
         """The connection as a context manager: commit on success, roll back on error."""
         return self.conn
+
+    @contextlib.contextmanager
+    def decision_transaction(self):
+        """Hold the catalog writer across duplicate planning and cleanup I/O.
+
+        Every connection/process writing this catalog observes the same lock.
+        An existing transaction must acquire the writer too, before any path
+        check or Trash callback. The empty update upgrades it without changing
+        flags or firing row triggers. Callers must defer nested commits.
+        """
+        with self.conn:
+            if self.conn.in_transaction:
+                self.conn.execute("UPDATE photos SET flag = flag WHERE 0")
+            else:
+                self.conn.execute("BEGIN IMMEDIATE")
+            yield
 
     # -- groups -------------------------------------------------------------
 
@@ -433,8 +450,9 @@ class DuplicatesRepository:
         Reasons: ``"not found"``, ``"not a duplicate"``, ``"volume offline"``
         or ``"missing on disk"``. Promoting a copy whose file is gone (or
         unknowable) would reject the copy that still exists. Does the disk
-        checks, so callers run it before taking the writer lock; the folder
-        and filename it checks don't change when flags do. Writes nothing.
+        checks; keep callers may preflight before taking the writer, but must
+        repeat this check under it because cleanup can remove the copy.
+        Writes nothing.
         """
         row = self.conn.execute(
             """SELECT p.file_hash, p.filename, f.path AS folder_path

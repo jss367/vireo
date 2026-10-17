@@ -1,7 +1,7 @@
 {
   "vireo/static/browse/batch-actions.js:batchDelete": 115,
-  "vireo/static/browse/boot.js:_runPhotoDeepLink": 231,
-  "vireo/static/browse/boot.js:bootstrapBrowse": 329,
+  "vireo/static/browse/boot.js:_runPhotoDeepLink": 223,
+  "vireo/static/browse/boot.js:bootstrapBrowse": 307,
   "vireo/static/browse/boot.js:bootstrapBrowse.@call:[[\"member\",[\"identifier\",\"browseFilterInitPromise\"],[\"property\",\"Identifier\",\"then\"],false],null]": 104,
   "vireo/static/browse/collection-editor.js:renderRuleValueInput": 110,
   "vireo/static/browse/collection-editor.js:saveCollection": 119,
@@ -13,7 +13,7 @@
   "vireo/static/browse/lightbox.js:@call:[[\"member\",[\"identifier\",\"document\"],[\"property\",\"Identifier\",\"addEventListener\"],false],\"lightbox:photodeleted\"]": 131,
   "vireo/static/browse/loading.js:loadPhotos": 150,
   "vireo/static/browse/loading.js:refreshBrowseWindowInPlace": 218,
-  "vireo/static/browse/loading.js:resetAndLoad": 300,
+  "vireo/static/browse/loading.js:resetAndLoad": 295,
   "vireo/static/browse/prediction-panels.js:renderDetailPredictions": 220,
   "vireo/static/browse/prediction-panels.js:renderSelectionPredictions": 145,
   "vireo/static/browse/prediction-panels.js:renderSelectionPredictions.@call:[[\"member\",[\"identifier\",\"shown\"],[\"property\",\"Identifier\",\"forEach\"],false],null]": 101,

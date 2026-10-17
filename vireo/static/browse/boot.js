@@ -183,29 +183,7 @@ async function bootstrapBrowse() {
       page: 'browse',
       root: document.getElementById('vireoFilterBar'),
       scopeLabel: 'Workspace \u00b7 All available photos',
-      onChange: function(info) {
-        if (timelineMode) loadCalendarData();
-        if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
-        // Any user-driven change to the filter chips means the bar no
-        // longer represents the saved collection verbatim — drop the
-        // handle so a later membership refresh doesn't silently revert
-        // the user's edits back to the collection's saved expression.
-        // Our own filterByCollection() → loadExpression() fires onChange
-        // with reason 'expressionLoaded' (opening) or 'expressionRefreshed'
-        // (membership-change refresh); both paths set openedCollectionId
-        // above, so leave it alone.
-        if (openedCollectionId && info &&
-            info.reason !== 'expressionLoaded' &&
-            info.reason !== 'expressionRefreshed') {
-          openedCollectionId = null;
-          clearOfflineCollectionState();
-        }
-        resetAndLoad(browseFilterReloadOptions(info));
-        // Summary panel (photo count, classified, top species) is a separate
-        // endpoint from the grid; without this the filter changes the grid
-        // but leaves the summary showing pre-filter numbers.
-        loadSummary();
-      },
+      onChange: onBrowseFilterChange,
       // Typeahead counts otherwise ignore the folder/collection restriction
       // the grid uses via /api/photos/query, so picking a suggestion inside
       // a folder or dashboard-scoped collection can yield fewer visible
@@ -542,10 +520,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
     if (!isDeepLinkHealthCurrent()) { wasSuperseded = true; return wasSuperseded; }
     if (!datasetIsCurrent()) return wasSuperseded;
 
-    // Update folder tree active state
-    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item')).forEach(function(el) {
-      el.classList.toggle('active', parseInt(el.dataset.folderId || '') === activeFolderId);
-    });
+    syncSidebarHighlights();
 
     // Scroll to and highlight the target photo
     if (el) { const highlighted = el;
@@ -570,12 +545,7 @@ async function _runPhotoDeepLink(/** @type {number} */ photoId) {
         page: 'browse',
         root: document.getElementById('vireoFilterBar'),
         scopeLabel: 'Workspace · All available photos',
-        onChange: function(info) {
-          if (timelineMode) loadCalendarData();
-          if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
-          resetAndLoad(browseFilterReloadOptions(info));
-          loadSummary();
-        },
+        onChange: onBrowseFilterChange,
         getScope: function() {
           return {
             folder_id: activeFolderId,

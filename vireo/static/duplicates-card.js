@@ -56,7 +56,7 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   if (isResolvedLoser && photo.id != null && !missing && !winnerMissingProtect) {
     var trashState = _duplicateFileTrashState.get(photo.id);
     html += '<button type="button" class="trash-btn" onclick="trashOneLoserFile(' +
-            photo.id + ')"' + (trashState && trashState.pending ? ' disabled' : '') + '>Move file to Trash</button>';
+            photo.id + ')"' + ((trashState && trashState.pending) || _duplicateKeepPending.has(photo.id) ? ' disabled' : '') + '>Move file to Trash</button>';
     html += '<div class="trash-status" data-trash-status>' + escapeHtml(trashState ? trashState.message : '') + '</div>';
   } else if (isResolvedLoser && !missing && winnerMissingProtect) {
     // The kept-file is gone (or its volume is unreachable and we can't

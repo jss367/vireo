@@ -15,19 +15,23 @@ function duplicateFileTrashIsPending(photoId) {
 function updateDuplicateFileTrashCard(photoId, currentCard) {
   var state = _duplicateFileTrashState.get(photoId);
   var card = currentCard || document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
-  if (!state || !card) return;
+  if (!card) return;
+  var busy = _duplicateTrashActive || _duplicateKeepPending.has(photoId) || !!(state && (state.pending || state.terminal));
   var keep = card.querySelector(/** @type {'button'} */ ('.keep-btn'));
-  if (keep) keep.disabled = state.pending || state.terminal;
+  if (keep) {
+    keep.disabled = busy;
+    keep.textContent = _duplicateKeepPending.has(photoId) ? 'Switching...' : 'Keep this copy instead';
+  }
   var button = card.querySelector(/** @type {'button'} */ ('.trash-btn'));
   if (!button) return;
-  button.disabled = state.pending || state.terminal;
+  button.disabled = busy;
   var status = card.querySelector(/** @type {'div'} */ ('[data-trash-status]'));
-  if (status) status.textContent = state.message;
+  if (status && state) status.textContent = state.message;
 }
 
 /** @param {number[]} photoIds @param {object} owner */
 function prepareDuplicateTrashBatch(photoIds, owner) {
-  if (photoIds.some(duplicateFileTrashIsPending)) {
+  if (photoIds.some(function(id) { return duplicateFileTrashIsPending(id) || _duplicateKeepPending.has(id); })) {
     throw new Error('Some files are already being cleaned up. Wait for that cleanup to finish.');
   }
   photoIds.forEach(function(id) {
@@ -120,8 +124,6 @@ async function trashOneLoserFile(photoId) {
 var KEPT_ANOTHER_COPY_REASON = 'kept another copy instead';
 /** @type {Set<number>} */ var _duplicateKeepPending = new Set();
 
-// A switch in flight decides which copy is the extra one, so no cleanup may
-// start until it lands (the server also serializes the two).
 function duplicateKeepBlocksTrash() {
   if (!_duplicateKeepPending.size) return false;
   showToast('Wait for the switch to finish before moving files to Trash.', 'info');
@@ -160,11 +162,12 @@ async function keepDuplicateCopy(photoId) {
     return p.status === 'resolved' && (p.losers || []).some(function(l) { return l.id === photoId; });
   });
   if (!proposal) return;
-  _duplicateKeepPending.add(photoId);
+  var pendingIds = [proposal.winner].concat(proposal.other_kept || [], proposal.losers || []).map(function(member) { return member.id; });
+  if (pendingIds.some(function(id) { return _duplicateKeepPending.has(id) || duplicateFileTrashIsPending(id); })) return;
+  pendingIds.forEach(function(id) { _duplicateKeepPending.add(id); updateDuplicateFileTrashCard(id); });
   var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
   var button = card && card.querySelector(/** @type {'button'} */ ('.keep-btn'));
   if (button) { button.disabled = true; button.textContent = 'Switching...'; }
-  // The group re-renders when the switch lands, restoring these.
   var pendingGroup = card && card.closest(/** @type {'div'} */ ('.dup-group'));
   if (pendingGroup) {
     pendingGroup.querySelectorAll(/** @type {'button'} */ ('.trash-btn, .keep-btn')).forEach(function(b) { b.disabled = true; });
@@ -174,6 +177,7 @@ async function keepDuplicateCopy(photoId) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_id: photoId}),
     });
+    if (!_lastScanResult || _scanInProgress || _proposals.indexOf(proposal) === -1) return;
     if (!applyKeptDuplicateCopy(proposal, data)) return;
     var kept = proposal.winner.filename || 'this copy';
     var rejected = data.loser_ids.length;
@@ -182,7 +186,7 @@ async function keepDuplicateCopy(photoId) {
   } catch (_caught) {
     // safeFetch already showed the server's reason.
   } finally {
-    _duplicateKeepPending.delete(photoId);
+    pendingIds.forEach(function(id) { _duplicateKeepPending.delete(id); updateDuplicateFileTrashCard(id); });
     // A rescan or restore that replaced the results meanwhile owns the page.
     if (_lastScanResult && !_scanInProgress && _proposals.indexOf(proposal) !== -1) {
       var group = document.querySelector('.dup-group[data-hash="' + proposal.file_hash + '"]');

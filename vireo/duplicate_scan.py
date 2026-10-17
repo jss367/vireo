@@ -74,7 +74,7 @@ def revalidate_scan_result(db, result):
     })
     rows = _fetch_photo_rows(
         db, photo_ids,
-        columns="p.id, p.filename, p.file_hash, p.flag, p.rating, f.path AS folder_path",
+        columns="p.id, p.filename, p.file_hash, p.flag, p.rating, p.file_size, f.path AS folder_path",
     )
     live = {
         r["id"]: (
@@ -84,7 +84,8 @@ def revalidate_scan_result(db, result):
         for r in rows
     }
     rejected_ids = {r["id"] for r in rows if r["flag"] == "rejected"}
-    ratings = {r["id"]: r["rating"] for r in rows}
+    metadata = {r["id"]: {"filename": r["filename"], "rating": r["rating"] or 0,
+                           "file_size": r["file_size"]} for r in rows}
 
     def current(entry, file_hash):
         return live.get(entry.get("id")) == (entry.get("path"), file_hash)
@@ -99,9 +100,13 @@ def revalidate_scan_result(db, result):
         ]
         if not current(winner, file_hash) or not losers:
             continue
-        p = dict(p, losers=losers)
+        # Flags can promote a cached loser after its rating/keywords merged.
+        # Overlay current catalog fields before reorientation; never probe paths.
+        winner = dict(winner, **metadata[winner["id"]])
+        losers = [dict(loser, **metadata[loser["id"]]) for loser in losers]
+        p = dict(p, winner=winner, losers=losers)
         if p.get("status") == "resolved":
-            p = _reorient_resolved_proposal(p, rejected_ids, ratings)
+            p = _reorient_resolved_proposal(p, rejected_ids, {pid: values["rating"] for pid, values in metadata.items()})
         kept.append(p)
 
     new_group_count, changed_group_count = _changes_since_scan(
