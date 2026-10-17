@@ -9,7 +9,7 @@ const compiler = path.join(repository, 'node_modules/typescript/bin/tsc');
 const requiredOptions = ['allowJs', 'checkJs', 'strict', 'noUncheckedIndexedAccess', 'noEmit'];
 const strictOptions = ['noImplicitAny', 'strictNullChecks', 'strictFunctionTypes',
   'strictBindCallApply', 'strictPropertyInitialization', 'noImplicitThis',
-  'useUnknownInCatchVariables', 'alwaysStrict'];
+  'useUnknownInCatchVariables', 'alwaysStrict', 'strictBuiltinIteratorReturn'];
 
 function walk(directory) {
   return readdirSync(directory, {withFileTypes: true}).flatMap(entry => {

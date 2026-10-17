@@ -39,11 +39,19 @@ test('coverage gate fails for real implementation errors', t => {
 });
 
 for (const options of [{checkJs: false}, {strict: false}, {noUncheckedIndexedAccess: false},
-  {noEmit: false}, {noImplicitAny: false}, {strictNullChecks: false}]) {
+  {noEmit: false}, {noImplicitAny: false}, {strictNullChecks: false}, {strictBuiltinIteratorReturn: false}]) {
   test(`coverage gate rejects weakened options ${JSON.stringify(options)}`, t => {
     assert.throws(() => checkFrontendTypes(fixture(t, {options})), /must be true|cannot be disabled/);
   });
 }
+
+test('iterator results retain their value and completion types', t => {
+  const source = '/** @type {string} */ const value = [123].values().next().value;';
+  assert.throws(() => checkFrontendTypes(fixture(t, {source})), /Command failed/);
+  assert.throws(() => checkFrontendTypes(fixture(t, {
+    source, options: {strictBuiltinIteratorReturn: false},
+  })), /cannot be disabled/);
+});
 
 test('coverage gate rejects skipping semantic checking', t => {
   assert.throws(() => checkFrontendTypes(fixture(t, {options: {noCheck: true}})), /cannot be enabled/);

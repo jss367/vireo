@@ -55,7 +55,7 @@
     try {
       response = await browserFetch(input, init);
     } catch (cause) {
-      if (cause instanceof Error && 'code' in cause && cause.code === 'history_busy') throw cause;
+      if (cause && typeof cause === 'object' && 'code' in cause && cause.code === 'history_busy') throw cause;
       var networkMessage = (
         'Couldn’t reach Vireo. Check that the app is still running, then try again.'
       );
