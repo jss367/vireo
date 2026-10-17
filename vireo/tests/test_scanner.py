@@ -11,6 +11,7 @@ from testing.waits import synchronization_timeout
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
+from scanner import ScanControl, ScanHooks, ScanOptions
 
 requires_exiftool = pytest.mark.skipif(
     shutil.which("exiftool") is None,
@@ -71,11 +72,12 @@ def test_scan_uses_frozen_discovered_files_manifest(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     result = scan(
-        root,
-        db,
-        discovered_files=[selected],
-        progress_callback=lambda current, total: progress.append(
-            (current, total)
+        root, db,
+        options=ScanOptions(discovered_files=[selected]),
+        hooks=ScanHooks(
+            progress=lambda current, total: progress.append(
+                (current, total)
+            ),
         ),
     )
 
@@ -109,7 +111,7 @@ def test_scan_raises_when_frozen_manifest_source_vanishes(tmp_path):
     db = Database(str(tmp_path / "test.db"))
 
     with pytest.raises(FileNotFoundError) as excinfo:
-        scan(missing_root, db, discovered_files=frozen)
+        scan(missing_root, db, options=ScanOptions(discovered_files=frozen))
 
     assert os.path.normcase(excinfo.value.filename) == os.path.normcase(
         missing_root
@@ -142,9 +144,8 @@ def test_scan_with_empty_frozen_manifest_tolerates_missing_root(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     result = scan(
-        str(tmp_path / "vanished_card"),
-        db,
-        discovered_files=[],
+        str(tmp_path / "vanished_card"), db,
+        options=ScanOptions(discovered_files=[]),
     )
     assert result["discovered"] == 0
     assert result["indexed"] == 0
@@ -157,9 +158,8 @@ def test_scan_with_empty_frozen_manifest_iterator_tolerates_missing_root(tmp_pat
 
     db = Database(str(tmp_path / "test.db"))
     result = scan(
-        str(tmp_path / "vanished_card"),
-        db,
-        discovered_files=iter(()),
+        str(tmp_path / "vanished_card"), db,
+        options=ScanOptions(discovered_files=iter(())),
     )
     assert result["discovered"] == 0
     assert result["indexed"] == 0
@@ -198,11 +198,12 @@ def test_scan_frozen_manifest_rejects_paths_in_excluded_bundle(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     progress = []
     result = scan(
-        root,
-        db,
-        discovered_files=[os.path.join(root, "real.jpg"), bundle_file],
-        progress_callback=lambda current, total: progress.append(
-            (current, total)
+        root, db,
+        options=ScanOptions(discovered_files=[os.path.join(root, "real.jpg"), bundle_file]),
+        hooks=ScanHooks(
+            progress=lambda current, total: progress.append(
+                (current, total)
+            ),
         ),
     )
 
@@ -254,7 +255,7 @@ def test_scan_frozen_manifest_rejects_paths_under_symlinked_bundle(tmp_path):
         str(root / "Ordinary" / "real.jpg"),
         str(root / "Camera" / "IMG_0001.jpg"),
     ]
-    result = scan(str(root), db, discovered_files=frozen)
+    result = scan(str(root), db, options=ScanOptions(discovered_files=frozen))
 
     assert result["discovered"] == 2
     assert result["vanished"] == 1
@@ -371,7 +372,7 @@ def test_scan_skips_restrict_dirs_inside_excluded_bundle(tmp_path):
     # Both the real top-level folder and a bundle-internal "originals"
     # subfolder are passed as restrict_dirs (the shape pipeline_job would
     # produce from a workspace that had previously linked the bundle).
-    scan(root, db, restrict_dirs=[root, bundle_sub])
+    scan(root, db, options=ScanOptions(restrict_dirs=[root, bundle_sub]))
 
     photos = db.get_photos(per_page=100)
     assert {p['filename'] for p in photos} == {'real.jpg'}
@@ -420,8 +421,10 @@ def test_scan_filters_excluded_restrict_dirs_from_working_copy_scope(
     db = Database(str(tmp_path / "test.db"))
     scanner.scan(
         root, db,
-        restrict_dirs=[root, bundle_sub],
-        vireo_dir=str(tmp_path / "vireo_dir"),
+        options=ScanOptions(
+            restrict_dirs=[root, bundle_sub],
+            vireo_dir=str(tmp_path / "vireo_dir"),
+        ),
     )
 
     assert "scope" in captured, "expected _extract_working_copies to be called"
@@ -560,7 +563,7 @@ def test_scan_zero_byte_images_are_not_duplicate_photos(tmp_path):
     )
     db.conn.commit()
 
-    scan(str(root), db, incremental=True)
+    scan(str(root), db, options=ScanOptions(incremental=True))
 
     repaired = db.conn.execute(
         "SELECT file_hash, flag FROM photos ORDER BY filename"
@@ -579,7 +582,7 @@ def test_scan_cancel_check_aborts_before_discovery(tmp_path):
     db = Database(str(tmp_path / "test.db"))
 
     with pytest.raises(RuntimeError, match="scan cancelled"):
-        scan(root, db, cancel_check=lambda: True)
+        scan(root, db, control=ScanControl(cancel_check=lambda: True))
 
     assert db.get_photos(per_page=100) == []
 
@@ -605,10 +608,9 @@ def test_scan_cancel_check_aborts_before_metadata_extraction(tmp_path, monkeypat
 
     with pytest.raises(RuntimeError, match="scan cancelled"):
         scanner.scan(
-            root,
-            db,
-            progress_callback=progress_cb,
-            cancel_check=lambda: cancelled["value"],
+            root, db,
+            hooks=ScanHooks(progress=progress_cb),
+            control=ScanControl(cancel_check=lambda: cancelled["value"]),
         )
 
     assert db.get_photos(per_page=100) == []
@@ -639,7 +641,7 @@ def test_scan_reports_metadata_phase_progress(tmp_path, monkeypatch):
 
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract_metadata)
 
-    scanner.scan(root, db, status_callback=status_cb)
+    scanner.scan(root, db, hooks=ScanHooks(status=status_cb))
 
     metadata_events = [
         event for event in status_events
@@ -664,7 +666,7 @@ def test_scan_non_recursive_only_finds_root_photos(tmp_path):
     })
 
     db = Database(str(tmp_path / "test.db"))
-    scan(root, db, recursive=False)
+    scan(root, db, options=ScanOptions(recursive=False))
 
     photos = db.get_photos(per_page=100)
     filenames = {p['filename'] for p in photos}
@@ -697,7 +699,7 @@ def test_scan_non_recursive_skips_bundle_children_before_stat(tmp_path):
     os.symlink(str(bundle), os.path.join(root, "LibraryAlias"))
 
     db = Database(str(tmp_path / "test.db"))
-    scan(root, db, recursive=False)
+    scan(root, db, options=ScanOptions(recursive=False))
 
     photos = db.get_photos(per_page=100)
     filenames = {p['filename'] for p in photos}
@@ -746,7 +748,7 @@ def test_scan_non_recursive_does_not_stat_bundle_children(tmp_path, monkeypatch)
     os.symlink(str(bundle), os.path.join(root, "LibraryAlias"))
 
     db = Database(str(tmp_path / "test.db"))
-    scan(root, db, recursive=False)
+    scan(root, db, options=ScanOptions(recursive=False))
 
     photos = db.get_photos(per_page=100)
     filenames = {p['filename'] for p in photos}
@@ -799,7 +801,7 @@ def test_scan_progress_callback(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     progress = []
-    scan(root, db, progress_callback=lambda cur, tot: progress.append((cur, tot)))
+    scan(root, db, hooks=ScanHooks(progress=lambda cur, tot: progress.append((cur, tot))))
 
     assert len(progress) == 4
     assert progress[0] == (0, 3)   # initial discovery report
@@ -976,7 +978,7 @@ def test_incremental_scan_imports_keywords_written_into_jpeg_later(tmp_path):
         path, flat=["2Birds", "Magnolia warbler"],
         hierarchical=["2Birds|Magnolia warbler"],
     )
-    scan(root, db, incremental=True)
+    scan(root, db, options=ScanOptions(incremental=True))
 
     assert {k["name"] for k in db.get_photo_keywords(photo["id"])} == {
         "2Birds", "Magnolia warbler",
@@ -1313,8 +1315,11 @@ def test_incremental_scan_skips_unchanged(tmp_path):
 
     # Track what gets processed
     processed = []
-    scan(root, db, incremental=True,
-         progress_callback=lambda cur, tot: processed.append(cur))
+    scan(
+        root, db,
+        options=ScanOptions(incremental=True),
+        hooks=ScanHooks(progress=lambda cur, tot: processed.append(cur)),
+    )
 
     photos = db.get_photos(per_page=100)
     filenames = {p['filename'] for p in photos}
@@ -1387,7 +1392,7 @@ def test_incremental_scan_converges_after_file_change(tmp_path):
     time.sleep(0.05)
     Image.new('RGB', (150, 150)).save(path)
 
-    scan(root, db, incremental=True)
+    scan(root, db, options=ScanOptions(incremental=True))
     photo = db.get_photos()[0]
     assert photo['width'] == 150  # re-processed
     assert photo['file_mtime'] == os.stat(path).st_mtime  # fresh mtime stored
@@ -1402,7 +1407,7 @@ def test_incremental_scan_converges_after_file_change(tmp_path):
     # extraction / hashing phases only announce themselves when there is
     # at least one file to process.
     statuses = []
-    scan(root, db, incremental=True, status_callback=statuses.append)
+    scan(root, db, options=ScanOptions(incremental=True), hooks=ScanHooks(status=statuses.append))
     assert not any(
         s.startswith('Extracting metadata') or s.startswith('Hashing')
         for s in statuses
@@ -1449,7 +1454,7 @@ def test_incremental_scan_retries_after_hash_failure(tmp_path, monkeypatch):
 
     # Scan with feature computation failing (simulated unreadable file)
     monkeypatch.setattr(scanner, '_compute_file_features', lambda p: (None, None))
-    scan(root, db, incremental=True)
+    scan(root, db, options=ScanOptions(incremental=True))
     photo = _row()
     assert photo['file_hash'] == old_row['file_hash']  # hash untouched
     # Stored mtime must remain stale so the file is retried next scan
@@ -1458,7 +1463,7 @@ def test_incremental_scan_retries_after_hash_failure(tmp_path, monkeypatch):
 
     # With hashing working again, the next incremental scan picks it up
     monkeypatch.undo()
-    scan(root, db, incremental=True)
+    scan(root, db, options=ScanOptions(incremental=True))
     photo = _row()
     assert photo['file_hash'] != old_row['file_hash']
     assert photo['file_mtime'] == os.stat(path).st_mtime
@@ -1490,11 +1495,11 @@ def test_incremental_scan_forgets_deleted_xmp(tmp_path):
     db.conn.commit()
 
     os.remove(os.path.join(root, 'bird.xmp'))
-    scan(root, db, incremental=True)
+    scan(root, db, options=ScanOptions(incremental=True))
     assert db.get_photos()[0]['xmp_mtime'] is None
 
     statuses = []
-    scan(root, db, incremental=True, status_callback=statuses.append)
+    scan(root, db, options=ScanOptions(incremental=True), hooks=ScanHooks(status=statuses.append))
     assert not any(
         s.startswith('Extracting metadata') or s.startswith('Hashing')
         for s in statuses
@@ -1524,7 +1529,7 @@ def test_scan_survives_file_vanishing_mid_scan(tmp_path):
         os.remove(os.path.join(root, other))
         deleted.append(other)
 
-    scan(root, db, photo_callback=cb)
+    scan(root, db, hooks=ScanHooks(photo=cb))
 
     photos = db.get_photos(per_page=100)
     assert len(photos) == 1  # only the survivor was ingested
@@ -1565,7 +1570,7 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
         hierarchical_keywords=set(),
     )
 
-    scan(root, db, incremental=True)
+    scan(root, db, options=ScanOptions(incremental=True))
 
     # Should now have both keywords (merge from XMP)
     kws = db.get_photo_keywords(photos[0]['id'])
@@ -1949,8 +1954,8 @@ def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
     thumb_dir.mkdir(parents=True)
     db = Database(str(vireo_dir / "test.db"))
     scan(
-        str(img_dir), db, vireo_dir=str(vireo_dir),
-        thumb_cache_dir=str(thumb_dir),
+        str(img_dir), db,
+        options=ScanOptions(vireo_dir=str(vireo_dir), thumb_cache_dir=str(thumb_dir)),
     )
     primary = db.conn.execute(
         "SELECT id FROM photos WHERE filename='IMG_001.cr3'",
@@ -1962,8 +1967,8 @@ def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
     Image.new("RGB", (200, 100), color="blue").save(jpeg_path)
     os.utime(jpeg_path, (original_mtime, original_mtime))
     scan(
-        str(img_dir), db, vireo_dir=str(vireo_dir),
-        thumb_cache_dir=str(thumb_dir),
+        str(img_dir), db,
+        options=ScanOptions(vireo_dir=str(vireo_dir), thumb_cache_dir=str(thumb_dir)),
     )
 
     assert not variant.exists()
@@ -2104,9 +2109,13 @@ class _PairedCatalog:
         self.callbacks.clear()
         self.max_rows = 0
         return self.scanner.scan(
-            str(self.img_dir), self.db, incremental=incremental,
-            vireo_dir=str(self.vireo_dir), thumb_cache_dir=str(self.thumb_dir),
-            photo_callback=self._callback,
+            str(self.img_dir), self.db,
+            options=ScanOptions(
+                incremental=incremental,
+                vireo_dir=str(self.vireo_dir),
+                thumb_cache_dir=str(self.thumb_dir),
+            ),
+            hooks=ScanHooks(photo=self._callback),
         )
 
     def seed_raw_caches(self):
@@ -2877,10 +2886,14 @@ def test_companion_imports_shared_sidecar_when_raw_is_not_scanned(
         cat.merges.clear()
         cat.extracted.clear()
         cat.scanner.scan(
-            str(cat.img_dir), cat.db, incremental=incremental,
-            vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
-            photo_callback=cat._callback,
-            discovered_files=None if owner_missing else [str(cat.jpeg)],
+            str(cat.img_dir), cat.db,
+            options=ScanOptions(
+                incremental=incremental,
+                vireo_dir=str(cat.vireo_dir),
+                thumb_cache_dir=str(cat.thumb_dir),
+                discovered_files=None if owner_missing else [str(cat.jpeg)],
+            ),
+            hooks=ScanHooks(photo=cat._callback),
         )
         assert cat.merges == []
         assert cat.rows() == {"IMG_001.cr3": "IMG_001.jpg"}
@@ -2936,10 +2949,13 @@ def test_companion_imports_shared_sidecar_when_raw_vanishes_mid_scan(
     cat.extracted.clear()
     cat.callbacks.clear()
     result = cat.scanner.scan(
-        str(cat.img_dir), cat.db, incremental=incremental,
-        vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
-        photo_callback=cat._callback,
-        progress_callback=vanish_raw_after_discovery,
+        str(cat.img_dir), cat.db,
+        options=ScanOptions(
+            incremental=incremental,
+            vireo_dir=str(cat.vireo_dir),
+            thumb_cache_dir=str(cat.thumb_dir),
+        ),
+        hooks=ScanHooks(photo=cat._callback, progress=vanish_raw_after_discovery),
     )
 
     assert result["vanished"] == 1
@@ -2963,9 +2979,13 @@ def test_companion_imports_shared_sidecar_when_raw_vanishes_mid_scan(
     cat.extracted.clear()
     cat.callbacks.clear()
     cat.scanner.scan(
-        str(cat.img_dir), cat.db, incremental=incremental,
-        vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
-        photo_callback=cat._callback,
+        str(cat.img_dir), cat.db,
+        options=ScanOptions(
+            incremental=incremental,
+            vireo_dir=str(cat.vireo_dir),
+            thumb_cache_dir=str(cat.thumb_dir),
+        ),
+        hooks=ScanHooks(photo=cat._callback),
     )
     assert cat.merges == []
     assert {"Vanished RAW keyword", "Later keyword"} <= {
@@ -3052,9 +3072,13 @@ def test_stat_unchanged_companion_settle_discards_stale_credit_after_owner_mutat
     cat.extracted.clear()
     cat.callbacks.clear()
     cat.scanner.scan(
-        str(cat.img_dir), cat.db, incremental=True,
-        vireo_dir=str(cat.vireo_dir), thumb_cache_dir=str(cat.thumb_dir),
-        photo_callback=cat._callback,
+        str(cat.img_dir), cat.db,
+        options=ScanOptions(
+            incremental=True,
+            vireo_dir=str(cat.vireo_dir),
+            thumb_cache_dir=str(cat.thumb_dir),
+        ),
+        hooks=ScanHooks(photo=cat._callback),
     )
     assert races["ran"]
 
@@ -4038,7 +4062,7 @@ def test_scan_extracts_working_copy_for_raw(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
-    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+    scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     photos = db.get_photos(per_page=999999)
     assert len(photos) == 1
@@ -4073,8 +4097,9 @@ def test_scan_reports_working_copy_as_counted_subphase(tmp_path, monkeypatch):
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(
-        str(photo_dir), db, vireo_dir=str(vireo_dir),
-        status_callback=status_cb,
+        str(photo_dir), db,
+        options=ScanOptions(vireo_dir=str(vireo_dir)),
+        hooks=ScanHooks(status=status_cb),
     )
 
     working_copy_events = [
@@ -4263,7 +4288,7 @@ def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
-    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+    scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     photos = db.get_photos(per_page=999999)
     assert len(photos) == 1
@@ -4308,7 +4333,7 @@ def test_scan_uses_raw_primary_for_raw_working_copy(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
-    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+    scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     # After companion pairing, the RAW should have a working copy
     photos = db.get_photos(per_page=999999)
@@ -4368,7 +4393,7 @@ def test_scan_falls_back_to_companion_when_raw_extraction_fails(
     monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
-    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+    scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     photos = db.get_photos(per_page=999999)
     raw_photos = [p for p in photos if p["extension"] == ".nef"]
@@ -4438,7 +4463,7 @@ def test_scan_falls_back_when_raw_working_copy_short_edge_is_smaller(
     monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
-    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+    scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     assert len(sources_used) == 2
     assert sources_used[0].endswith("IMG_004.nef")
@@ -4489,7 +4514,7 @@ def test_scan_accepts_near_full_raw_working_copy(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
-    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+    scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     assert len(sources_used) == 1
     assert sources_used[0].endswith("IMG_006.nef")
@@ -4566,7 +4591,7 @@ def test_scan_accepts_portrait_raw_working_copy_with_exif_orientation(
     monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
-    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+    scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     # Only the RAW should have been extracted — no companion fallback.
     assert len(sources_used) == 1, sources_used
@@ -4622,7 +4647,7 @@ def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
     monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
-    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+    scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     raw_row = db.conn.execute(
         "SELECT working_copy_path, working_copy_failed_source"
@@ -4737,7 +4762,7 @@ def test_incremental_rescan_reextracts_when_timestamp_null(tmp_path, monkeypatch
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
 
-    scanner.scan(root, db, incremental=True)
+    scanner.scan(root, db, options=ScanOptions(incremental=True))
 
     row = db.conn.execute(
         "SELECT width, height, exif_data FROM photos WHERE id=?", (pid,)
@@ -4770,7 +4795,7 @@ def test_incremental_rescan_reextracts_when_raw_dims_suspect(tmp_path, monkeypat
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
 
-    scanner.scan(root, db, incremental=True)
+    scanner.scan(root, db, options=ScanOptions(incremental=True))
 
     row = db.conn.execute(
         "SELECT width, height, exif_data FROM photos WHERE id=?", (pid,)
@@ -4809,7 +4834,7 @@ def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch)
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
 
-    scanner.scan(root, db, incremental=True)
+    scanner.scan(root, db, options=ScanOptions(incremental=True))
 
     # width stays at the synthetic broken value because we didn't reprocess.
     row = db.conn.execute(
@@ -4866,9 +4891,8 @@ def test_restricted_scan_reports_discovery_progress(tmp_path, monkeypatch):
     statuses = []  # list of (msg, yields_when_emitted)
     scanner.scan(
         str(root), db,
-        restrict_dirs=[str(day)],
-        restrict_files={str(real)},
-        status_callback=lambda msg, **kw: statuses.append((msg, yields[0])),
+        options=ScanOptions(restrict_dirs=[str(day)], restrict_files={str(real)}),
+        hooks=ScanHooks(status=lambda msg, **kw: statuses.append((msg, yields[0]))),
     )
 
     total_yielded = yields[0]
@@ -4935,9 +4959,7 @@ def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):
     # Second scan with restrict_files constrained to the existing file only.
     scanner.scan(
         root, db,
-        incremental=True,
-        restrict_dirs=[root],
-        restrict_files={existing_file},
+        options=ScanOptions(incremental=True, restrict_dirs=[root], restrict_files={existing_file}),
     )
 
     # new_untracked.jpg should NOT have been ingested.
@@ -4963,12 +4985,13 @@ def test_update_only_scan_cannot_admit_restricted_file(tmp_path, monkeypatch):
         checkpoint=None: {},
     )
     scanner.scan(
-        root,
-        db,
-        restrict_dirs=[root],
-        restrict_files={path},
-        allow_photo_inserts=False,
-        register_restrict_dirs_as_roots=False,
+        root, db,
+        options=ScanOptions(
+            restrict_dirs=[root],
+            restrict_files={path},
+            allow_photo_inserts=False,
+            register_restrict_dirs_as_roots=False,
+        ),
     )
 
     assert db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 0
@@ -5005,11 +5028,12 @@ def test_restricted_scan_links_only_exact_target_folder(tmp_path, monkeypatch):
         checkpoint=None: {},
     )
     scanner.scan(
-        str(root),
-        db,
-        restrict_dirs=[str(target)],
-        restrict_files={str(captured)},
-        register_restrict_dirs_as_roots=False,
+        str(root), db,
+        options=ScanOptions(
+            restrict_dirs=[str(target)],
+            restrict_files={str(captured)},
+            register_restrict_dirs_as_roots=False,
+        ),
     )
 
     target_id = db.conn.execute(
@@ -5054,7 +5078,7 @@ def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch)
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
 
-    scanner.scan(root, db, incremental=True)
+    scanner.scan(root, db, options=ScanOptions(incremental=True))
 
     row = db.conn.execute(
         "SELECT width, height FROM photos WHERE id=?", (pid,)
@@ -5380,11 +5404,9 @@ def test_scan_releases_cpu_permits_while_paused(tmp_path, monkeypatch):
 
     try:
         scanner.scan(
-            root,
-            db,
-            cancel_check=cancel_check,
-            pause_check=pause_check,
-            status_callback=status_callback,
+            root, db,
+            hooks=ScanHooks(status=status_callback),
+            control=ScanControl(cancel_check=cancel_check, pause_check=pause_check),
         )
     finally:
         resource_ledger._set_resource_ledger_for_tests(previous)
@@ -5459,10 +5481,8 @@ def test_scan_does_not_construct_worker_pool_while_pause_remains_pending(
     resume_thread.start()
     try:
         scanner.scan(
-            root,
-            db,
-            cancel_check=lambda: False,
-            pause_check=pause_active.is_set,
+            root, db,
+            control=ScanControl(cancel_check=lambda: False, pause_check=pause_active.is_set),
         )
     finally:
         resume_thread.join(timeout=synchronization_timeout(2.0))
@@ -5544,11 +5564,12 @@ def test_scan_cancel_only_check_prevents_parking_inside_lease(tmp_path):
 
     try:
         scanner.scan(
-            root,
-            db,
-            cancel_check=cancel_check,
-            pause_check=pause_check,
-            cancel_only_check=cancel_only_check,
+            root, db,
+            control=ScanControl(
+                cancel_check=cancel_check,
+                pause_check=pause_check,
+                cancel_only_check=cancel_only_check,
+            ),
         )
     finally:
         resource_ledger._set_resource_ledger_for_tests(previous)
@@ -5666,10 +5687,8 @@ def test_scan_pause_while_waiting_for_permits_suspends_wait_timing(
         ).start()
         with resource_ledger.bind_resource_owner(scanner_owner):
             scanner.scan(
-                root,
-                db,
-                cancel_check=cancel_check,
-                pause_check=pause_check,
+                root, db,
+                control=ScanControl(cancel_check=cancel_check, pause_check=pause_check),
             )
         timing = ledger.owner_timing(scanner_owner)
     finally:
@@ -5741,10 +5760,11 @@ def test_scan_pause_requeues_worker_result(
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     try:
         scanner.scan(
-            root,
-            db,
-            cancel_check=cancel_check,
-            pause_check=lambda: pause_state["active"],
+            root, db,
+            control=ScanControl(
+                cancel_check=cancel_check,
+                pause_check=lambda: pause_state["active"],
+            ),
         )
     finally:
         resource_ledger._set_resource_ledger_for_tests(previous)
@@ -5787,10 +5807,11 @@ def test_sequential_scan_pause_after_compute_releases_lease(tmp_path, monkeypatc
     monkeypatch.setattr(scanner, "_compute_file_features", compute_then_pause)
     try:
         scanner.scan(
-            root,
-            db,
-            cancel_check=cancel_check,
-            pause_check=lambda: pause_state["active"],
+            root, db,
+            control=ScanControl(
+                cancel_check=cancel_check,
+                pause_check=lambda: pause_state["active"],
+            ),
         )
     finally:
         resource_ledger._set_resource_ledger_for_tests(previous)
@@ -5849,11 +5870,12 @@ def test_scan_consumer_pause_resumes_generator_before_parking(
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     try:
         scanner.scan(
-            root,
-            db,
-            progress_callback=progress_callback,
-            cancel_check=cancel_check,
-            pause_check=lambda: pause_state["active"],
+            root, db,
+            hooks=ScanHooks(progress=progress_callback),
+            control=ScanControl(
+                cancel_check=cancel_check,
+                pause_check=lambda: pause_state["active"],
+            ),
         )
     finally:
         resource_ledger._set_resource_ledger_for_tests(previous)
@@ -6137,7 +6159,7 @@ def test_successful_noop_incremental_scan_clears_partial(tmp_path):
 
     # Incremental rescan — no files changed, so the main loop touches zero
     # folders. The scan scope fallback should still clear 'partial'.
-    scanner_mod.scan(root, db, incremental=True)
+    scanner_mod.scan(root, db, options=ScanOptions(incremental=True))
 
     row = db.conn.execute(
         "SELECT status FROM folders WHERE path = ?", (root,)
@@ -6183,7 +6205,7 @@ def test_pre_pass_failure_marks_folder_partial(tmp_path):
     )
 
     with pytest.raises(sqlite3.OperationalError):
-        scanner_mod.scan(root, db, incremental=True)
+        scanner_mod.scan(root, db, options=ScanOptions(incremental=True))
 
     real_conn = db.conn._real
     row = real_conn.execute(
@@ -6220,7 +6242,7 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
     cache_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     photos = db.get_photos(per_page=100)
     assert len(photos) == 1
@@ -6249,7 +6271,7 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
     assert new_mtime != db_mtime
 
     # Re-scan: scanner must detect the content change and drop the stale thumbnail.
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(incremental=True, vireo_dir=str(vireo_dir)))
 
     updated_hash = db.conn.execute(
         "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
@@ -6288,7 +6310,7 @@ def test_rescan_clears_thumb_path_column_when_content_changes(tmp_path):
     cache_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
     photo_id = db.get_photos(per_page=100)[0]["id"]
 
     # Generate a thumbnail and stamp the column the way thumbnail_stage does.
@@ -6302,7 +6324,7 @@ def test_rescan_clears_thumb_path_column_when_content_changes(tmp_path):
     # Replace the source so the next incremental scan invalidates derived caches.
     time.sleep(0.05)
     Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(incremental=True, vireo_dir=str(vireo_dir)))
 
     row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (photo_id,),
@@ -6334,7 +6356,7 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     preview_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     photo_id = db.get_photos(per_page=100)[0]["id"]
 
@@ -6352,7 +6374,7 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     # Replace source pixels → new file_hash → invalidation should fire.
     time.sleep(0.05)
     Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(incremental=True, vireo_dir=str(vireo_dir)))
 
     assert not preview_file.exists(), "preview file should be deleted"
     assert not display_file.exists(), "RAW display cache should be deleted"
@@ -6385,7 +6407,7 @@ def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeyp
     preview_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
     photo_id = db.get_photos(per_page=100)[0]["id"]
 
     preview_file = preview_dir / f"{photo_id}_1920.jpg"
@@ -6407,7 +6429,7 @@ def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeyp
     # Force a content-change rescan so invalidation fires.
     time.sleep(0.05)
     Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(incremental=True, vireo_dir=str(vireo_dir)))
 
     assert preview_file.exists(), "sanity: stuck preview file should remain"
     assert db.caches.preview_get(photo_id, 1920) is not None, (
@@ -6438,7 +6460,7 @@ def test_rescan_sweeps_untracked_preview_files(tmp_path):
     preview_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
     photo_id = db.get_photos(per_page=100)[0]["id"]
 
     # Seed an *untracked* preview (file exists, no preview_cache row).
@@ -6448,7 +6470,7 @@ def test_rescan_sweeps_untracked_preview_files(tmp_path):
 
     time.sleep(0.05)
     Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(incremental=True, vireo_dir=str(vireo_dir)))
 
     assert not untracked.exists(), (
         "Untracked preview files for invalidated photos must be swept "
@@ -6478,7 +6500,7 @@ def test_rescan_preview_sweep_is_batched_not_per_photo(tmp_path, monkeypatch):
     preview_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     # Replace all three files' contents so each invalidation fires.
     time.sleep(0.05)
@@ -6495,7 +6517,7 @@ def test_rescan_preview_sweep_is_batched_not_per_photo(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "listdir", counting_listdir)
 
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(incremental=True, vireo_dir=str(vireo_dir)))
 
     assert len(preview_listings) <= 1, (
         f"previews/ must be enumerated at most once per scan regardless "
@@ -6533,7 +6555,7 @@ def test_audit_import_untracked_invalidates_using_caller_vireo_dir(tmp_path):
     Image.new("RGB", (800, 600), color=(255, 0, 0)).save(str(img), "JPEG")
 
     db = Database(str(db_dir / "vireo.db"))
-    scan(str(root), db, vireo_dir=str(vireo_dir))
+    scan(str(root), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     photo_id = db.get_photos(per_page=100)[0]["id"]
     thumb_path = vireo_dir / "thumbnails" / f"{photo_id}.jpg"
@@ -6626,9 +6648,10 @@ def test_invalidation_honors_custom_thumb_cache_dir(tmp_path):
     Image.new("RGB", (400, 300), color=(255, 0, 0)).save(str(img), "JPEG")
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(str(root), db,
-         vireo_dir=str(vireo_dir),
-         thumb_cache_dir=str(thumb_dir))
+    scan(
+        str(root), db,
+        options=ScanOptions(vireo_dir=str(vireo_dir), thumb_cache_dir=str(thumb_dir)),
+    )
     photo_id = db.get_photos(per_page=100)[0]["id"]
 
     thumb = thumb_dir / f"{photo_id}.jpg"
@@ -6638,9 +6661,14 @@ def test_invalidation_honors_custom_thumb_cache_dir(tmp_path):
     time.sleep(0.05)
     Image.new("RGB", (400, 300), color=(0, 0, 255)).save(str(img), "JPEG")
 
-    scan(str(root), db, incremental=True,
-         vireo_dir=str(vireo_dir),
-         thumb_cache_dir=str(thumb_dir))
+    scan(
+        str(root), db,
+        options=ScanOptions(
+            incremental=True,
+            vireo_dir=str(vireo_dir),
+            thumb_cache_dir=str(thumb_dir),
+        ),
+    )
 
     assert not thumb.exists(), (
         "Invalidation must target the configured thumb_cache_dir, not "
@@ -6680,7 +6708,7 @@ def test_initial_scan_does_not_invoke_invalidation_for_new_photos(tmp_path, monk
     monkeypatch.setattr(scanner, "_invalidate_derived_caches", counting_invalidate)
 
     db = Database(str(vireo_dir / "test.db"))
-    scanner.scan(root, db, vireo_dir=str(vireo_dir))
+    scanner.scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     assert calls == [], (
         f"Invalidation fired {len(calls)} times for brand-new rows with "
@@ -6711,7 +6739,7 @@ def test_rescan_invalidates_when_prev_file_hash_was_null(tmp_path):
     cache_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
     photo_id = db.get_photos(per_page=100)[0]["id"]
 
     thumb_path = str(cache_dir / f"{photo_id}.jpg")
@@ -6725,7 +6753,7 @@ def test_rescan_invalidates_when_prev_file_hash_was_null(tmp_path):
     db.conn.execute("UPDATE photos SET file_mtime = 0 WHERE id = ?", (photo_id,))
     db.conn.commit()
 
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(incremental=True, vireo_dir=str(vireo_dir)))
 
     new_hash = db.conn.execute(
         "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
@@ -6762,7 +6790,7 @@ def test_rescan_invalidates_caches_when_file_truncated_to_zero(tmp_path):
     cache_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
     photo_id = db.get_photos(per_page=100)[0]["id"]
 
     thumb_path = str(cache_dir / f"{photo_id}.jpg")
@@ -6778,8 +6806,14 @@ def test_rescan_invalidates_caches_when_file_truncated_to_zero(tmp_path):
     )
     db.conn.commit()
 
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir),
-         thumb_cache_dir=str(cache_dir))
+    scan(
+        root, db,
+        options=ScanOptions(
+            incremental=True,
+            vireo_dir=str(vireo_dir),
+            thumb_cache_dir=str(cache_dir),
+        ),
+    )
 
     new_hash = db.conn.execute(
         "SELECT file_hash, file_size FROM photos WHERE id = ?", (photo_id,)
@@ -6821,7 +6855,7 @@ def test_rescan_invalidates_caches_on_null_to_empty_transition(tmp_path):
     cache_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
     photo_id = db.get_photos(per_page=100)[0]["id"]
 
     thumb_path = str(cache_dir / f"{photo_id}.jpg")
@@ -6844,8 +6878,14 @@ def test_rescan_invalidates_caches_on_null_to_empty_transition(tmp_path):
     )
     db.conn.commit()
 
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir),
-         thumb_cache_dir=str(cache_dir))
+    scan(
+        root, db,
+        options=ScanOptions(
+            incremental=True,
+            vireo_dir=str(vireo_dir),
+            thumb_cache_dir=str(cache_dir),
+        ),
+    )
 
     row = db.conn.execute(
         "SELECT file_hash, file_size FROM photos WHERE id = ?", (photo_id,)
@@ -6878,7 +6918,7 @@ def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     vireo_dir.mkdir()
 
     db = Database(str(vireo_dir / "test.db"))
-    scan(root, db, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     photos = db.get_photos(per_page=100)
     assert len(photos) == 1
@@ -6895,7 +6935,7 @@ def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     time.sleep(0.05)
     Image.new("RGB", (5000, 3000), color=(0, 0, 255)).save(img_path, "JPEG")
 
-    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+    scan(root, db, options=ScanOptions(incremental=True, vireo_dir=str(vireo_dir)))
 
     # Working copy should point to a regenerated file whose pixels match the new source.
     photos = db.get_photos(per_page=100)
@@ -6953,7 +6993,7 @@ def test_scan_links_root_when_all_files_skipped(tmp_path):
     ws_id = db._active_workspace_id
 
     skip = {os.path.join(root, 'a.jpg'), os.path.join(root, 'b.jpg')}
-    scan(root, db, skip_paths=skip)
+    scan(root, db, options=ScanOptions(skip_paths=skip))
 
     linked = {f["path"] for f in db.get_workspace_folders(ws_id)}
     assert root in linked, (
@@ -6986,7 +7026,7 @@ def test_scan_links_restrict_dirs_when_all_files_skipped(tmp_path):
     sub1 = os.path.join(root, 'sub1')
     sub2 = os.path.join(root, 'sub2')
     skip = {os.path.join(sub1, 'a.jpg'), os.path.join(sub2, 'b.jpg')}
-    scan(root, db, skip_paths=skip, restrict_dirs=[sub1, sub2])
+    scan(root, db, options=ScanOptions(skip_paths=skip, restrict_dirs=[sub1, sub2]))
 
     linked = {f["path"] for f in db.get_workspace_folders(ws_id)}
     assert sub1 in linked and sub2 in linked, (
@@ -7063,7 +7103,7 @@ def test_restricted_scan_roots_subfolders_not_destination_base(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db._active_workspace_id
 
-    scan(base, db, restrict_dirs=[imported])
+    scan(base, db, options=ScanOptions(restrict_dirs=[imported]))
 
     root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
     linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
@@ -7104,11 +7144,12 @@ def test_restricted_scan_below_registered_root_does_not_promote_leaf(tmp_path):
     db.add_folder(root, name="registered")
 
     scan(
-        root,
-        db,
-        restrict_dirs=[leaf],
-        restrict_files={os.path.join(leaf, "bird.jpg")},
-        register_restrict_dirs_as_roots=False,
+        root, db,
+        options=ScanOptions(
+            restrict_dirs=[leaf],
+            restrict_files={os.path.join(leaf, "bird.jpg")},
+            register_restrict_dirs_as_roots=False,
+        ),
     )
 
     root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
@@ -7142,7 +7183,7 @@ def test_scan_surfaces_permission_denied_subdirs(tmp_path):
     try:
         db = Database(str(tmp_path / "test.db"))
         denied = []
-        scan(root, db, permission_error_callback=denied.append)
+        scan(root, db, hooks=ScanHooks(permission_error=denied.append))
 
         photos = {p['filename'] for p in db.get_photos(per_page=100)}
         assert 'ok.jpg' in photos, "accessible files must still be scanned"
@@ -7174,7 +7215,7 @@ def test_scan_continues_after_permission_denied(tmp_path):
     try:
         db = Database(str(tmp_path / "test.db"))
         denied = []
-        scan(root, db, permission_error_callback=denied.append)
+        scan(root, db, hooks=ScanHooks(permission_error=denied.append))
 
         photos = {p['filename'] for p in db.get_photos(per_page=100)}
         assert photos == {'a.jpg', 'c.jpg'}
@@ -7260,8 +7301,8 @@ def test_scan_restrict_dirs_surfaces_permission_denied(tmp_path, monkeypatch):
     # Must not raise; must surface the denied dir via the callback.
     scan(
         root, db,
-        restrict_dirs=[allowed, forbidden],
-        permission_error_callback=denied.append,
+        options=ScanOptions(restrict_dirs=[allowed, forbidden]),
+        hooks=ScanHooks(permission_error=denied.append),
     )
 
     photos = {p['filename'] for p in db.get_photos(per_page=100)}
@@ -7317,7 +7358,7 @@ def test_scan_restrict_dirs_raises_permission_error_without_callback(
 
     db = Database(str(tmp_path / "test.db"))
     with pytest.raises(PermissionError):
-        scan(root, db, restrict_dirs=[forbidden])
+        scan(root, db, options=ScanOptions(restrict_dirs=[forbidden]))
 
 
 def test_scan_recursive_raises_permission_error_without_callback(
@@ -7443,8 +7484,14 @@ def test_scan_purges_derived_caches_when_new_photo_reuses_a_freed_rowid(
 
     seeded = _seed_derivative_files(vireo_dir, thumb_dir, doomed_id)
 
-    scan(root, db, vireo_dir=vireo_dir, thumb_cache_dir=thumb_dir,
-         skip_working_copies=True)
+    scan(
+        root, db,
+        options=ScanOptions(
+            vireo_dir=vireo_dir,
+            thumb_cache_dir=thumb_dir,
+            skip_working_copies=True,
+        ),
+    )
 
     new_id = db.conn.execute(
         "SELECT id FROM photos WHERE filename = 'gull.jpg'"
@@ -7478,16 +7525,28 @@ def test_scan_leaves_derived_caches_alone_for_rows_it_did_not_create(
     thumb_dir = os.path.join(vireo_dir, "thumbnails")
 
     db = Database(str(tmp_path / "test.db"))
-    scan(root, db, vireo_dir=vireo_dir, thumb_cache_dir=thumb_dir,
-         skip_working_copies=True)
+    scan(
+        root, db,
+        options=ScanOptions(
+            vireo_dir=vireo_dir,
+            thumb_cache_dir=thumb_dir,
+            skip_working_copies=True,
+        ),
+    )
     pid = db.conn.execute(
         "SELECT id FROM photos WHERE filename = 'gull.jpg'"
     ).fetchone()["id"]
 
     seeded = _seed_derivative_files(vireo_dir, thumb_dir, pid, b"legit-cache")
 
-    scan(root, db, vireo_dir=vireo_dir, thumb_cache_dir=thumb_dir,
-         skip_working_copies=True)
+    scan(
+        root, db,
+        options=ScanOptions(
+            vireo_dir=vireo_dir,
+            thumb_cache_dir=thumb_dir,
+            skip_working_copies=True,
+        ),
+    )
 
     for name, path in seeded.items():
         assert os.path.exists(path), (
@@ -7593,8 +7652,14 @@ def test_scan_purges_variant_only_caches_when_new_photo_reuses_a_freed_rowid(
         with open(path, "wb") as fh:
             fh.write(b"previous-tenant")
 
-    scan(root, db, vireo_dir=vireo_dir, thumb_cache_dir=thumb_dir,
-         skip_working_copies=True)
+    scan(
+        root, db,
+        options=ScanOptions(
+            vireo_dir=vireo_dir,
+            thumb_cache_dir=thumb_dir,
+            skip_working_copies=True,
+        ),
+    )
 
     new_id = db.conn.execute(
         "SELECT id FROM photos WHERE filename = 'gull.jpg'"
@@ -7722,8 +7787,14 @@ def test_scan_probes_recycled_ids_without_walking_dirs_per_photo(
     monkeypatch.setattr(preview_cache.os, "scandir", counting_scandir)
 
     db = Database(str(tmp_path / "test.db"))
-    scan(root, db, vireo_dir=vireo_dir, thumb_cache_dir=thumb_dir,
-         skip_working_copies=True)
+    scan(
+        root, db,
+        options=ScanOptions(
+            vireo_dir=vireo_dir,
+            thumb_cache_dir=thumb_dir,
+            skip_working_copies=True,
+        ),
+    )
 
     assert db.conn.execute(
         "SELECT COUNT(*) AS n FROM photos"
@@ -8596,7 +8667,7 @@ def test_scan_reports_photos_actually_indexed_not_files_discovered(
     db = Database(str(tmp_path / "test.db"))
     with caplog.at_level(logging.INFO, logger='scanner'):
         caplog.clear()
-        result = scan(root, db, progress_callback=vanish_after_discovery)
+        result = scan(root, db, hooks=ScanHooks(progress=vanish_after_discovery))
 
     assert result["discovered"] == 4, result
     assert result["indexed"] == 2, result
@@ -8651,9 +8722,9 @@ def test_scan_counts_are_readable_even_when_the_scan_raises(tmp_path):
     with pytest.raises(ScanCancelled):
         scan(
             root, db,
+            hooks=ScanHooks(photo=photo_cb),
+            control=ScanControl(cancel_check=lambda: state["committed"] >= 2),
             counts=counts,
-            photo_callback=photo_cb,
-            cancel_check=lambda: state["committed"] >= 2,
         )
 
     assert counts["discovered"] == 6, counts
@@ -8705,7 +8776,7 @@ def test_scan_counts_photos_committed_before_a_post_insert_hook_raised(
     counts = {}
     db = Database(str(tmp_path / "test.db"))
     with pytest.raises(RuntimeError):
-        scan(root, db, counts=counts, photo_callback=exploding_callback)
+        scan(root, db, hooks=ScanHooks(photo=exploding_callback), counts=counts)
 
     committed = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
     assert committed == 3, committed

@@ -13,10 +13,12 @@ import sqlite3
 import sys
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, TimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import imagehash
 from db import (
@@ -3725,125 +3727,185 @@ def _companion_bytes_unchanged(known, file_size, file_hash):
     return file_hash is not None and file_hash == known["file_hash"]
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, pause_check=None, cancel_only_check=None, skip_working_copies=False, repair_missing_metadata=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True, counts=None, discovered_files=None, photo_merged_callback=None, reported_photo_identities=None):
+@dataclass(frozen=True)
+class ScanOptions:
+    """What one ``scan()`` call covers and how it treats what it finds.
+
+    Plain values only: scope (which files), catalog policy (what may be
+    written) and the data directories the post-catalog passes use.
+    """
+
+    incremental: bool = False
+    """If True, reuse complete records with matching file size and mtime.
+    This does not verify byte identity; use a full scan to detect
+    replacements that preserve both signals."""
+
+    repair_missing_metadata: bool = False
+    """In incremental mode, force rows whose ExifTool payload is NULL
+    through metadata extraction even when a fallback timestamp was
+    available during the original scan."""
+
+    extract_full_metadata: bool = True
+    """If True, store full ExifTool JSON in exif_data column."""
+
+    skip_paths: Iterable | None = None
+    """Optional set of absolute path strings to exclude from scanning."""
+
+    recursive: bool = True
+    """If True (default), scan subfolders; if False, only scan root
+    directory."""
+
+    restrict_dirs: Iterable | None = None
+    """Optional list of directory paths to scan instead of the full tree.
+    When provided, only files in these directories are discovered
+    (non-recursively), but ``root`` is still used as the folder hierarchy
+    root so parent links are preserved correctly."""
+
+    restrict_files: Iterable | None = None
+    """Optional iterable of absolute file paths. When provided alongside
+    ``restrict_dirs``, only files whose path is in this set are discovered
+    — untracked files in the same directory are ignored."""
+
+    discovered_files: Iterable | None = None
+    """Optional frozen iterable of paths from a preceding discovery pass.
+    When supplied, scan skips its filesystem walk and processes exactly
+    this manifest. Import-in-place uses this to establish a stable
+    all-source progress denominator before work."""
+
+    register_restrict_dirs_as_roots: bool = True
+    """Restricted scans traditionally treat each explicit directory as a
+    newly adopted workspace root. Set False when the restricted files
+    already live below registered roots (for example a new-images snapshot
+    or metadata repair): discovered descendants are linked to the
+    workspace but are not promoted to additional roots."""
+
+    allow_photo_inserts: bool = True
+    """When False, update existing photo rows only. Files without an
+    existing ``photos`` row are skipped. This gives Process metadata
+    repair a mechanically enforced no-admission contract while retaining
+    the shared metadata refresh code."""
+
+    vireo_dir: str | os.PathLike | None = None
+    """Optional path to the vireo data directory (e.g. ``~/.vireo``). When
+    provided, working copies are extracted for RAW photos after companion
+    pairing, and derived-cache invalidation fires on content-changed
+    photos."""
+
+    thumb_cache_dir: str | os.PathLike | None = None
+    """Optional override for the thumbnail cache directory.
+    ``--thumb-dir`` is independently configurable and can point anywhere —
+    defaulting to ``vireo_dir/thumbnails`` silently misses the real cache
+    when those diverge. Callers with the configured value (Flask routes,
+    audit entry points) should pass it. When omitted, falls back to
+    ``vireo_dir/thumbnails``."""
+
+    skip_working_copies: bool = False
+    """If True, suppress the end-of-scan ``_extract_working_copies`` pass
+    while still running ``_pair_raw_jpeg_companions`` (with cache context)
+    and ``_invalidate_derived_caches`` on content changes. Used by the
+    per-batch import scan: the import job runs one deferred end-of-run
+    extraction pass over all touched folders (a per-batch pass would race
+    RAW+JPEG pairing across batch boundaries), but pairing itself still
+    needs ``vireo_dir`` / ``thumb_cache_dir`` to move local-mask snapshots
+    when a newly imported RAW pairs with an already-cataloged JPEG that
+    has an edit recipe. Passing ``vireo_dir=None`` to suppress extraction
+    would also silently drop those masks. See PR #1107 review."""
+
+
+@dataclass(frozen=True)
+class ScanHooks:
+    """Callbacks ``scan()`` invokes to report what it is doing."""
+
+    progress: Callable[..., Any] | None = None
+    """Optional callable(current, total) for progress reporting."""
+
+    status: Callable[..., Any] | None = None
+    """Optional callable(message) for phase status updates. Callers may
+    also accept keyword-only ``phase_current``, ``phase_total``, and
+    ``phase_label`` for sub-phase progress."""
+
+    photo: Callable[..., Any] | None = None
+    """Optional callable(photo_id, path_str) called after each photo is
+    committed. A JPEG the scan pairs with its RAW is reported under the
+    RAW's id; it is never inserted as a photo first."""
+
+    photo_merged: Callable[..., Any] | None = None
+    """Optional callable(old_id, new_id, path_str) called after the
+    end-of-scan pairing pass merges an existing JPEG photo into the RAW
+    row ``new_id`` at ``path_str``. Called for every merge that pass
+    commits, which can include pairs elsewhere in the catalog; a caller
+    holding ``old_id`` (from ``photo``, this scan or an earlier one) must
+    replace it, because the id no longer names a photo and SQLite can give
+    it to the next insert. If the surviving RAW was deleted or replaced
+    before publication, new_id and path_str are None: discard old_id
+    without adopting a missing or unrelated replacement row."""
+
+    permission_error: Callable[..., Any] | None = None
+    """Optional callable(path_str) invoked once per directory the kernel
+    refuses to enumerate (EPERM from macOS TCC, EACCES from POSIX mode
+    bits). The scan continues; accessible siblings are still discovered.
+    Without this hook, a denied subdir would silently produce zero hits —
+    a "Found 0 images" black box from the user's perspective."""
+
+
+@dataclass(frozen=True)
+class ScanControl:
+    """The caller's cancel and pause probes.
+
+    Kept apart from ``ScanHooks`` because the scanner polls these to
+    decide whether to stop, and the three must be wired as a set: which
+    probe may park, and which may be called while CPU permits are held,
+    is the contract described on each field.
+    """
+
+    cancel_check: Callable[[], Any] | None = None
+    """Optional callable returning truthy when the caller wants scanning
+    to stop promptly. When set, scan raises ScanCancelled at cancellation
+    checkpoints. This probe MAY park (pipeline callers wire it to
+    ``_pause_checkpoint`` which blocks on Pause); it is only called
+    between leases, never inside ``_claim_worker_count``."""
+
+    pause_check: Callable[[], Any] | None = None
+    """Optional NON-parking probe returning truthy when a pause is
+    pending. Checked at every inside-lease boundary so the scanner can
+    raise ``_ScanPauseRequested`` and unwind the lease before the caller's
+    parking ``cancel_check`` runs."""
+
+    cancel_only_check: Callable[[], Any] | None = None
+    """Optional NON-parking probe returning truthy when the job is
+    cancelled (but NOT for pause — that is ``pause_check``'s job). Used
+    inside the lease to detect cancellation without triggering the parking
+    cancel path. Without this, the pause_check/cancel_check ordering has a
+    race window: pause set between the pause probe and the (parking)
+    cancel probe would park the job while still holding CPU permits and
+    the process pool. Callers should pass ``runner.cancellation_requested``
+    when they have a runner. When omitted, the inside-lease boundaries
+    still call the parking ``cancel_check`` — the race window described in
+    that Codex finding remains open in that fallback path, but nothing
+    regresses vs. the pre-fix behavior."""
+
+
+def scan(root, db, *, options=None, hooks=None, control=None, counts=None,
+         reported_photo_identities=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
         root: path to the root folder to scan
         db: Database instance
-        progress_callback: optional callable(current, total) for progress reporting
-        incremental: if True, reuse complete records with matching file size
-            and mtime. This does not verify byte identity; use a full scan
-            to detect replacements that preserve both signals.
-        repair_missing_metadata: in incremental mode, force rows whose
-            ExifTool payload is NULL through metadata extraction even when a
-            fallback timestamp was available during the original scan
-        extract_full_metadata: if True, store full ExifTool JSON in exif_data column
-        photo_callback: optional callable(photo_id, path_str) called after each photo is committed.
-            A JPEG the scan pairs with its RAW is reported under the RAW's
-            id; it is never inserted as a photo first.
-        photo_merged_callback: optional callable(old_id, new_id, path_str)
-            If the surviving RAW was deleted or replaced before publication,
-            new_id and path_str are None: discard old_id without adopting
-            a missing or unrelated replacement row.
-            called after the end-of-scan pairing pass merges an existing
-            JPEG photo into the RAW row ``new_id`` at ``path_str``. Called
-            for every merge that pass commits, which can include pairs
-            elsewhere in the catalog; a caller holding ``old_id`` (from
-            ``photo_callback``, this scan or an earlier one) must replace
-            it, because the id no longer names a photo and SQLite can give
-            it to the next insert.
-        reported_photo_identities: optional dict shared across all scanner
-            calls feeding one receiver. Stores the catalog identity reported
-            for each id, so a later root cannot substitute an unrelated pair
-            for a deleted photo reported by an earlier root.
-        skip_paths: optional set of absolute path strings to exclude from scanning
-        status_callback: optional callable(message) for phase status updates.
-            Callers may also accept keyword-only ``phase_current``,
-            ``phase_total``, and ``phase_label`` for sub-phase progress.
-        recursive: if True (default), scan subfolders; if False, only scan root directory
-        restrict_dirs: optional list of directory paths to scan instead of the
-            full tree. When provided, only files in these directories are
-            discovered (non-recursively), but ``root`` is still used as the
-            folder hierarchy root so parent links are preserved correctly.
-        restrict_files: optional iterable of absolute file paths. When
-            provided alongside ``restrict_dirs``, only files whose path
-            is in this set are discovered — untracked files in the same
-            directory are ignored.
-        vireo_dir: optional path to the vireo data directory (e.g. ``~/.vireo``).
-            When provided, working copies are extracted for RAW photos after
-            companion pairing, and derived-cache invalidation fires on
-            content-changed photos.
-        thumb_cache_dir: optional override for the thumbnail cache
-            directory. ``--thumb-dir`` is independently configurable and
-            can point anywhere — defaulting to ``vireo_dir/thumbnails``
-            silently misses the real cache when those diverge. Callers
-            with the configured value (Flask routes, audit entry points)
-            should pass it. When omitted, falls back to
-            ``vireo_dir/thumbnails``.
-        permission_error_callback: optional callable(path_str) invoked
-            once per directory the kernel refuses to enumerate (EPERM
-            from macOS TCC, EACCES from POSIX mode bits). The scan
-            continues; accessible siblings are still discovered. Without
-            this hook, a denied subdir would silently produce zero hits
-            — a "Found 0 images" black box from the user's perspective.
-        cancel_check: optional callable returning truthy when the caller
-            wants scanning to stop promptly. When set, scan raises
-            ScanCancelled at cancellation checkpoints. This probe MAY
-            park (pipeline callers wire it to ``_pause_checkpoint``
-            which blocks on Pause); it is only called between leases,
-            never inside ``_claim_worker_count``.
-        pause_check: optional NON-parking probe returning truthy when a
-            pause is pending. Checked at every inside-lease boundary so
-            the scanner can raise ``_ScanPauseRequested`` and unwind
-            the lease before the caller's parking ``cancel_check`` runs.
-        cancel_only_check: optional NON-parking probe returning truthy
-            when the job is cancelled (but NOT for pause — that is
-            ``pause_check``'s job). Used inside the lease to detect
-            cancellation without triggering the parking cancel path.
-            Without this, the pause_check/cancel_check ordering has a
-            race window: pause set between the pause probe and the
-            (parking) cancel probe would park the job while still
-            holding CPU permits and the process pool. Callers should
-            pass ``runner.cancellation_requested`` when they have a
-            runner. When omitted, the inside-lease boundaries still
-            call the parking ``cancel_check`` — the race window
-            described in that Codex finding remains open in that
-            fallback path, but nothing regresses vs. the pre-fix
-            behavior.
-        skip_working_copies: if True, suppress the end-of-scan
-            ``_extract_working_copies`` pass while still running
-            ``_pair_raw_jpeg_companions`` (with cache context) and
-            ``_invalidate_derived_caches`` on content changes. Used by
-            the per-batch import scan: the import job runs one deferred
-            end-of-run extraction pass over all touched folders (a
-            per-batch pass would race RAW+JPEG pairing across batch
-            boundaries), but pairing itself still needs ``vireo_dir`` /
-            ``thumb_cache_dir`` to move local-mask snapshots when a
-            newly imported RAW pairs with an already-cataloged JPEG that
-            has an edit recipe. Passing ``vireo_dir=None`` to suppress
-            extraction would also silently drop those masks. See PR
-            #1107 review.
-        register_restrict_dirs_as_roots: restricted scans traditionally treat
-            each explicit directory as a newly adopted workspace root. Set
-            False when the restricted files already live below registered
-            roots (for example a new-images snapshot or metadata repair):
-            discovered descendants are linked to the workspace but are not
-            promoted to additional roots.
-        allow_photo_inserts: when False, update existing photo rows only.
-            Files without an existing ``photos`` row are skipped. This gives
-            Process metadata repair a mechanically enforced no-admission
-            contract while retaining the shared metadata refresh code.
+        options: ``ScanOptions`` — scope and catalog policy (defaults when
+            omitted).
+        hooks: ``ScanHooks`` — progress, status and per-photo callbacks.
+        control: ``ScanControl`` — the cancel and pause probes.
         counts: optional dict the scan fills in as it runs, with the same
             keys it returns. Because scan() commits incrementally and can
             raise after many photos have landed (cancellation, a post-loop
             pass, a DB error), the return value alone would force callers
             to report zero for a run that really did catalog thousands.
             Pass a dict here to read accurate counts on any exit path.
-        discovered_files: optional frozen iterable of paths from a preceding
-            discovery pass. When supplied, scan skips its filesystem walk and
-            processes exactly this manifest. Import-in-place uses this to
-            establish a stable all-source progress denominator before work.
+        reported_photo_identities: optional dict shared across all scanner
+            calls feeding one receiver. Stores the catalog identity reported
+            for each id, so a later root cannot substitute an unrelated pair
+            for a deleted photo reported by an earlier root.
 
     Returns:
         dict with ``discovered`` (files the walk turned up), ``indexed``
@@ -3861,13 +3923,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         Build user-facing counts from ``indexed``, never from the progress
         counter — progress advances for skipped files too.
     """
+    options = ScanOptions() if options is None else options
+    hooks = ScanHooks() if hooks is None else hooks
+    control = ScanControl() if control is None else control
     # Same object the caller passed (so it can read counts after an
     # exception) or a fresh one; either way start from a known shape.
     counts = {} if counts is None else counts
     counts.update(_EMPTY_SCAN_COUNTS)
-    status_supports_phase = _status_callback_supports_phase(status_callback)
+    status_supports_phase = _status_callback_supports_phase(hooks.status)
     resolved = _resolve_scan_root(
-        root, db, restrict_dirs, restrict_files, skip_paths, discovered_files,
+        root, db, options.restrict_dirs, options.restrict_files,
+        options.skip_paths, options.discovered_files,
     )
     if resolved is None:
         return counts
@@ -3878,27 +3944,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         root, root_path, db, counts, frozen_files,
         catalog_folder_path=catalog_folder_path,
         catalog_folder_aliases=catalog_folder_aliases,
-        progress_callback=progress_callback,
-        incremental=incremental,
-        extract_full_metadata=extract_full_metadata,
-        photo_callback=photo_callback,
-        skip_paths=skip_paths,
-        status_callback=status_callback,
+        options=options,
+        hooks=hooks,
+        control=control,
         status_supports_phase=status_supports_phase,
-        recursive=recursive,
+        skip_paths=skip_paths,
         restrict_dirs=restrict_dirs,
         restrict_files=restrict_files,
-        vireo_dir=vireo_dir,
-        thumb_cache_dir=thumb_cache_dir,
-        permission_error_callback=permission_error_callback,
-        cancel_check=cancel_check,
-        pause_check=pause_check,
-        cancel_only_check=cancel_only_check,
-        skip_working_copies=skip_working_copies,
-        repair_missing_metadata=repair_missing_metadata,
-        register_restrict_dirs_as_roots=register_restrict_dirs_as_roots,
-        allow_photo_inserts=allow_photo_inserts,
-        photo_merged_callback=photo_merged_callback,
         reported_photo_identities=reported_photo_identities,
     ).run()
     return counts
@@ -4042,13 +4094,8 @@ class _ScanRun:
     def __init__(
         self, root, root_path, db, counts, frozen_files, *,
         catalog_folder_path, catalog_folder_aliases,
-        progress_callback, incremental, extract_full_metadata,
-        photo_callback, skip_paths, status_callback, status_supports_phase,
-        recursive, restrict_dirs, restrict_files, vireo_dir, thumb_cache_dir,
-        permission_error_callback, cancel_check, pause_check,
-        cancel_only_check, skip_working_copies, repair_missing_metadata,
-        register_restrict_dirs_as_roots, allow_photo_inserts,
-        photo_merged_callback=None,
+        options, hooks, control, status_supports_phase,
+        skip_paths, restrict_dirs, restrict_files,
         reported_photo_identities=None,
     ):
         self.root = root
@@ -4058,30 +4105,32 @@ class _ScanRun:
         self.frozen_files = frozen_files
         self.catalog_folder_path = catalog_folder_path
         self.catalog_folder_aliases = catalog_folder_aliases
-        self.progress_callback = progress_callback
-        self.incremental = incremental
-        self.extract_full_metadata = extract_full_metadata
-        self.photo_callback = photo_callback
-        self.photo_merged_callback = photo_merged_callback
+        self.progress_callback = hooks.progress
+        self.incremental = options.incremental
+        self.extract_full_metadata = options.extract_full_metadata
+        self.photo_callback = hooks.photo
+        self.photo_merged_callback = hooks.photo_merged
         self._reported_identities = (
             reported_photo_identities if reported_photo_identities is not None else {}
         )
+        # The rebased spellings ``_resolve_scan_root`` returned, not the
+        # caller's ``options`` values.
         self.skip_paths = skip_paths
-        self.status_callback = status_callback
+        self.status_callback = hooks.status
         self.status_supports_phase = status_supports_phase
-        self.recursive = recursive
+        self.recursive = options.recursive
         self.restrict_dirs = restrict_dirs
         self.restrict_files = restrict_files
-        self.vireo_dir = vireo_dir
-        self.thumb_cache_dir = thumb_cache_dir
-        self.permission_error_callback = permission_error_callback
-        self.cancel_check = cancel_check
-        self.pause_check = pause_check
-        self.cancel_only_check = cancel_only_check
-        self.skip_working_copies = skip_working_copies
-        self.repair_missing_metadata = repair_missing_metadata
-        self.register_restrict_dirs_as_roots = register_restrict_dirs_as_roots
-        self.allow_photo_inserts = allow_photo_inserts
+        self.vireo_dir = options.vireo_dir
+        self.thumb_cache_dir = options.thumb_cache_dir
+        self.permission_error_callback = hooks.permission_error
+        self.cancel_check = control.cancel_check
+        self.pause_check = control.pause_check
+        self.cancel_only_check = control.cancel_only_check
+        self.skip_working_copies = options.skip_working_copies
+        self.repair_missing_metadata = options.repair_missing_metadata
+        self.register_restrict_dirs_as_roots = options.register_restrict_dirs_as_roots
+        self.allow_photo_inserts = options.allow_photo_inserts
 
     def run(self):
         self._discover_files()

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 from db import Database
 from PIL import Image
+from scanner import ScanOptions
 
 
 def _touch_image(path):
@@ -339,7 +340,7 @@ def test_import_into_archive_base_does_not_surface_siblings_as_new(db_with_works
 
     # Mirror a templated copy-import: scan the base but restrict ingestion to
     # the one subfolder the import wrote into.
-    scan(str(base), db, restrict_dirs=[str(imported)])
+    scan(str(base), db, options=ScanOptions(restrict_dirs=[str(imported)]))
 
     # Nothing on disk is unaccounted for within the imported root.
     result = count_new_images_for_workspace(db, ws_id)

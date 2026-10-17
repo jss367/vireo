@@ -59,9 +59,9 @@ def test_job_scan_passes_pause_probe_to_scanner(
         observed_job_ids.append(job_id)
         return False
 
-    def fake_scan(*_args, pause_check=None, counts=None, **_kwargs):
-        assert pause_check is not None
-        assert pause_check() is False
+    def fake_scan(*_args, control=None, counts=None, **_kwargs):
+        assert control is not None and control.pause_check is not None
+        assert control.pause_check() is False
         if counts is not None:
             counts["indexed"] = 0
 
@@ -9513,8 +9513,8 @@ def test_import_in_place_metadata_phase_does_not_override_step_progress(
     source = tmp_path / "card"
     source.mkdir()
 
-    def fake_scan(_root, _db, *, status_callback=None, **_kwargs):
-        status_callback(
+    def fake_scan(_root, _db, *, hooks=None, **_kwargs):
+        hooks.status(
             "Extracting metadata: 1 of 1",
             phase_current=1,
             phase_total=1,

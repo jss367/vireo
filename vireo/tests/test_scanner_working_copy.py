@@ -3,6 +3,7 @@ import contextlib
 import os
 
 from PIL import Image
+from scanner import ScanHooks, ScanOptions
 from testing.waits import synchronization_timeout
 
 
@@ -338,7 +339,7 @@ def test_scan_non_recursive_scopes_working_copies_to_root_only(tmp_path, monkeyp
     sub.mkdir()
     sub_id = _seed_large_jpeg(db, sub, "in_sub.jpg")
 
-    scan(str(root), db, recursive=False, vireo_dir=str(vireo_dir))
+    scan(str(root), db, options=ScanOptions(recursive=False, vireo_dir=str(vireo_dir)))
 
     top_row = db.conn.execute(
         "SELECT id, working_copy_path FROM photos WHERE filename='top.jpg'"
@@ -382,7 +383,7 @@ def test_scan_scopes_working_copies_to_scan_root(tmp_path, monkeypatch):
     new_file = scan_root / "new.jpg"
     _make_jpeg(str(new_file), 2000, 1500)
 
-    scan(str(scan_root), db, vireo_dir=str(vireo_dir))
+    scan(str(scan_root), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     # The photo inside the scan root gets a working copy.
     inside_row = db.conn.execute(
@@ -937,7 +938,7 @@ def test_scan_records_failure_marker_for_unreadable_file(tmp_path, monkeypatch):
     import scanner as _scanner_mod
     monkeypatch.setattr(_scanner_mod, "extract_working_copy", lambda *a, **k: False)
 
-    scan(str(root), db, vireo_dir=str(vireo_dir))
+    scan(str(root), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     row = db.conn.execute(
         "SELECT working_copy_path, working_copy_failed_at,"
@@ -985,7 +986,11 @@ def test_scan_progress_callback_not_clobbered_by_working_copy_phase(tmp_path, mo
     def progress_cb(current, total):
         events.append((current, total))
 
-    scan(str(root), db, progress_callback=progress_cb, vireo_dir=str(vireo_dir))
+    scan(
+        str(root), db,
+        options=ScanOptions(vireo_dir=str(vireo_dir)),
+        hooks=ScanHooks(progress=progress_cb),
+    )
 
     assert events, "scan should report progress for the scan loop"
     # The last reported total must be the SCAN total (2 files), not the

@@ -869,6 +869,8 @@ class _ImportFullRun:
 
     def _scan(self, do_scan):
         """Phase 2: Scan to index into DB."""
+        from scanner import ScanControl, ScanHooks, ScanOptions
+
         ctx, job, thread_db = self.ctx, self.job, self.thread_db
         scan_target = self.scan_target
         ctx.checkpoint(job)
@@ -922,14 +924,18 @@ class _ImportFullRun:
             #   inside scanner.scan.
             do_scan(
                 scan_target, thread_db,
-                progress_callback=scan_cb,
-                skip_paths=self.params.exclude_paths or None,
-                vireo_dir=self.vireo_dir,
-                thumb_cache_dir=self.config["THUMB_CACHE_DIR"],
-                restrict_dirs=self.restrict_dirs,
-                cancel_check=scan_cancel_check,
-                pause_check=scan_pause_check,
-                cancel_only_check=scan_cancel_only_check,
+                options=ScanOptions(
+                    skip_paths=self.params.exclude_paths or None,
+                    vireo_dir=self.vireo_dir,
+                    thumb_cache_dir=self.config["THUMB_CACHE_DIR"],
+                    restrict_dirs=self.restrict_dirs,
+                ),
+                hooks=ScanHooks(progress=scan_cb),
+                control=ScanControl(
+                    cancel_check=scan_cancel_check,
+                    pause_check=scan_pause_check,
+                    cancel_only_check=scan_cancel_only_check,
+                ),
             )
         finally:
             # scanner.scan commits photo rows incrementally, so even a mid-scan

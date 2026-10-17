@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 from db import Database
 from repositories.workspace_folders import WorkspaceFolderRepository
+from scanner import ScanOptions
 
 
 @pytest.fixture
@@ -58,7 +59,7 @@ def test_scanning_parent_does_not_restore_removed_missing_descendants(shared_tre
     db, workspace, other, parent, missing, child = shared_tree
     db.delete_folder(missing)
 
-    scan(db.get_folder(parent)["path"], db, extract_full_metadata=False)
+    scan(db.get_folder(parent)["path"], db, options=ScanOptions(extract_full_metadata=False))
     assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
     assert db.get_missing_folders() == []
 

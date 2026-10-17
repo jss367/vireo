@@ -1208,6 +1208,8 @@ class _InPlaceImportRun:
             )
 
     def _scan_manifest(self, source, scope):
+        from scanner import ScanControl, ScanHooks, ScanOptions
+
         plan = self.plan
         # scan() commits rows incrementally and can raise after
         # thousands have landed, so read counts from a sink dict
@@ -1220,36 +1222,42 @@ class _InPlaceImportRun:
         source_scan_counts = {}
         self.do_scan(
             source, self.thread_db,
-            # Photos are cataloged globally. Reuse unchanged
-            # records when linking them into another workspace
-            # instead of rereading metadata and hashes over NAS.
-            incremental=True,
-            repair_missing_metadata=True,
-            progress_callback=self._progress_cb,
-            extract_full_metadata=self.pipeline_cfg.get(
-                "extract_full_metadata", True,
+            options=ScanOptions(
+                # Photos are cataloged globally. Reuse unchanged
+                # records when linking them into another workspace
+                # instead of rereading metadata and hashes over NAS.
+                incremental=True,
+                repair_missing_metadata=True,
+                extract_full_metadata=self.pipeline_cfg.get(
+                    "extract_full_metadata", True,
+                ),
+                recursive=plan.recursive,
+                restrict_dirs=scope.dirs,
+                restrict_files=scope.files,
+                vireo_dir=plan.vireo_dir,
+                thumb_cache_dir=plan.thumb_cache_dir,
+                # Pair companions during each scan, but defer RAW
+                # working-copy generation until every source has been
+                # cataloged. One combined pass gives the UI a truthful
+                # total instead of restarting a 0..N phase per source.
+                skip_working_copies=True,
+                register_restrict_dirs_as_roots=(
+                    self.snapshot_paths_by_root is None
+                ),
+                discovered_files=self.source_manifests[source],
             ),
-            photo_callback=self._photo_cb,
-            photo_merged_callback=self._photo_merged_cb,
+            hooks=ScanHooks(
+                progress=self._progress_cb,
+                photo=self._photo_cb,
+                photo_merged=self._photo_merged_cb,
+                status=self._status_cb,
+            ),
+            control=ScanControl(
+                cancel_check=self._cancel_check,
+                pause_check=self._pause_check,
+                cancel_only_check=self._cancel_only_check,
+            ),
             reported_photo_identities=self.reported_photo_identities,
-            status_callback=self._status_cb,
-            recursive=plan.recursive,
-            restrict_dirs=scope.dirs,
-            restrict_files=scope.files,
-            vireo_dir=plan.vireo_dir,
-            thumb_cache_dir=plan.thumb_cache_dir,
-            cancel_check=self._cancel_check,
-            pause_check=self._pause_check,
-            cancel_only_check=self._cancel_only_check,
-            # Pair companions during each scan, but defer RAW
-            # working-copy generation until every source has been
-            # cataloged. One combined pass gives the UI a truthful
-            # total instead of restarting a 0..N phase per source.
-            skip_working_copies=True,
-            register_restrict_dirs_as_roots=(
-                self.snapshot_paths_by_root is None
-            ),
-            discovered_files=self.source_manifests[source],
             counts=source_scan_counts,
         )
         vanished_count = source_scan_counts.get("vanished", 0)

@@ -102,7 +102,7 @@ from job_contract import progress_event
 # same way everywhere the UI states a count. pipeline_plan imports only
 # stdlib at module level, so this does not cycle back through import_job.
 from pipeline_plan import _plural
-from scanner import EMPTY_FILE_SHA256
+from scanner import EMPTY_FILE_SHA256, ScanControl, ScanOptions
 
 log = logging.getLogger(__name__)
 
@@ -1836,23 +1836,27 @@ def _run_preservation_scan(scan, destination, db, batch_st, landed_paths,
     with bind_resource_cancel_check(None):
         scan(
             destination, db,
-            restrict_dirs=[batch_st.dest_folder],
-            restrict_files=landed_paths,
-            vireo_dir=params.vireo_dir,
-            thumb_cache_dir=params.thumb_cache_dir,
-            skip_working_copies=True,
-            cancel_check=scan_park_only_check,
-            pause_check=scan_pause_check,
-            # Preservation contract: this scan runs to completion
-            # regardless of cancel. Passing an always-False pure
-            # cancel probe lets the scanner use ``_check_cancelled_no_park``
-            # inside ``_claim_worker_count`` — without it a Pause
-            # arriving in the race window between the pause probe
-            # and the parking ``scan_park_only_check`` would park
-            # ``wait_if_paused`` while the hashing pool and CPU
-            # permits are still held, blocking unrelated work
-            # until Resume.
-            cancel_only_check=lambda: False,
+            options=ScanOptions(
+                restrict_dirs=[batch_st.dest_folder],
+                restrict_files=landed_paths,
+                vireo_dir=params.vireo_dir,
+                thumb_cache_dir=params.thumb_cache_dir,
+                skip_working_copies=True,
+            ),
+            control=ScanControl(
+                cancel_check=scan_park_only_check,
+                pause_check=scan_pause_check,
+                # Preservation contract: this scan runs to completion
+                # regardless of cancel. Passing an always-False pure
+                # cancel probe lets the scanner use ``_check_cancelled_no_park``
+                # inside ``_claim_worker_count`` — without it a Pause
+                # arriving in the race window between the pause probe
+                # and the parking ``scan_park_only_check`` would park
+                # ``wait_if_paused`` while the hashing pool and CPU
+                # permits are still held, blocking unrelated work
+                # until Resume.
+                cancel_only_check=lambda: False,
+            ),
         )
 
 

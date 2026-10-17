@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 from PIL import Image
+from scanner import ScanOptions
 
 
 def seed(db, path, name="bird.jpg"):
@@ -57,7 +58,7 @@ def test_alias_move_and_cleanup_protect_winner_file(app_and_db, tmp_path, monkey
     result = move_photos(db, [pid], str(dst) + "/")
     assert result["moved"] == 1
     assert db.get_photo(pid)["folder_id"] == canonical_fid
-    scan(str(dst), db, incremental=True, skip_working_copies=True)
+    scan(str(dst), db, options=ScanOptions(incremental=True, skip_working_copies=True))
     rows = db.conn.execute("SELECT p.id, f.path FROM photos p JOIN folders f ON p.folder_id=f.id WHERE filename='bird.jpg'").fetchall()
     assert len(rows) == 1
     # Also protect catalogs that already contain an alias from older versions.
@@ -250,14 +251,14 @@ def test_real_capture_time_edit_refreshes_hash(db, tmp_path, monkeypatch):
     exif[36868] = "2026:01:02 12:00:00"
     exif[306] = "2026:01:02 12:00:00"
     Image.new("RGB", (32, 24)).save(path, exif=exif)
-    scan(str(root), db, skip_working_copies=True)
+    scan(str(root), db, options=ScanOptions(skip_working_copies=True))
     row = db.conn.execute("SELECT * FROM photos WHERE filename='dated.jpg'").fetchone()
     old_hash = row["file_hash"]
     assert old_hash == compute_file_hash(str(path))
     result = adjust_capture_time(db, [row["id"]], mode="manual", shift_minutes=60, keep_backups=False)
     assert result["updated"] == 1, result
     assert compute_file_hash(str(path)) != old_hash
-    scan(str(root), db, incremental=True, skip_working_copies=True)
+    scan(str(root), db, options=ScanOptions(incremental=True, skip_working_copies=True))
     assert db.conn.execute("SELECT file_hash FROM photos WHERE id=?", (row["id"],)).fetchone()[0] == compute_file_hash(str(path))
 
 
@@ -477,7 +478,7 @@ def test_scans_reuse_catalog_folder_for_path_aliases(db, tmp_path, alias_kind):
     root = tmp_path / "photos"
     root.mkdir()
     Image.new("RGB", (24, 16)).save(root / "bird.jpg")
-    scan(str(root), db, skip_working_copies=True)
+    scan(str(root), db, options=ScanOptions(skip_working_copies=True))
     if alias_kind == "slash":
         alias = str(root) + "/"
     elif alias_kind == "dot":
@@ -486,7 +487,7 @@ def test_scans_reuse_catalog_folder_for_path_aliases(db, tmp_path, alias_kind):
         link = tmp_path / "alias"
         link.symlink_to(root, target_is_directory=True)
         alias = str(link)
-    scan(alias, db, incremental=True, skip_working_copies=True)
+    scan(alias, db, options=ScanOptions(incremental=True, skip_working_copies=True))
     assert db.conn.execute("SELECT COUNT(*) FROM photos WHERE filename='bird.jpg'").fetchone()[0] == 1
 
 
