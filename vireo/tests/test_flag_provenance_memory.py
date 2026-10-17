@@ -35,41 +35,6 @@ def history():
     return conn, ws, repo
 
 
-def record(repo, flag, action="flag", payload=None):
-    return repo.record(action, "invented", payload or flag,
-                       [dict(photo_id=7, old_value="none", new_value=flag)],
-                       source="invented-agent", reason="invented-reason")
-
-
-def test_cross_workspace_cycles_do_not_revive_provenance():
-    conn, ws, repo = history()
-    first = record(repo, "flagged")
-    ws[0] = 2
-    record(repo, "rejected")
-    last = record(repo, "flagged")
-    ws[0] = 1
-    assert repo.latest_flag_note(7) is None
-    conn.execute("UPDATE edit_history SET undone=1 WHERE id > ?", (first,))
-    assert repo.latest_flag_note(7)["edit_id"] == first
-    ws[0] = 2
-    conn.execute("UPDATE edit_history SET undone=0 WHERE id=?", (last,))
-    assert repo.latest_flag_note(7)["edit_id"] == last
-    conn.close()
-
-
-def test_pipeline_flag_history_blocks_old_note_but_rating_does_not():
-    conn, _, repo = history()
-    first = record(repo, "flagged")
-    record(repo, "4", action="rating")
-    assert repo.latest_flag_note(7)["edit_id"] == first
-    payload = json.dumps({"photo_edit": {"action_type": "flag", "new_value": "pipeline_group_apply"}})
-    barrier = record(repo, "flagged", action="pipeline_grouping", payload=payload)
-    assert repo.latest_flag_note(7) is None
-    conn.execute("UPDATE edit_history SET undone=1 WHERE id=?", (barrier,))
-    assert repo.latest_flag_note(7)["edit_id"] == first
-    conn.close()
-
-
 def test_no_matching_batch_ids_preserves_redo_and_avoids_writes():
     ns = load("services/photo_review.py", {"flag_description"}, {"PhotoReviewService"})
     writes = []

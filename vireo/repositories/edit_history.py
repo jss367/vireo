@@ -159,36 +159,6 @@ class EditHistoryRepository:
                 entry['new_value'] = None
         return entries
 
-    def latest_flag_note(self, photo_id: int) -> dict[str, Any] | None:
-        """Historical inspection only; current attribution uses ``photo_review.current_flag_note``.
-
-        Flags belong to the photo globally. A newer write in another workspace
-        or a pipeline grouping flag edit supersedes this workspace's provenance,
-        even if the flag has cycled back to the same value. Undone writes do not
-        supersede the restored edit. Unrelated rating/recipe history is ignored.
-        """
-        workspace_id = self.workspace_id
-        row = self.conn.execute(
-            """SELECT eh.id AS edit_id, eh.description, eh.created_at,
-                      eh.source, eh.reason, ehi.new_value,
-                      eh.workspace_id, eh.action_type
-               FROM edit_history eh
-               JOIN edit_history_items ehi ON ehi.edit_id = eh.id
-               WHERE eh.undone = 0 AND ehi.photo_id = ?
-                 AND (eh.action_type = 'flag' OR (
-                     eh.action_type = 'pipeline_grouping' AND
-                     CASE WHEN json_valid(eh.new_value)
-                          THEN json_extract(eh.new_value, '$.photo_edit.action_type')
-                     END = 'flag'))
-               ORDER BY eh.id DESC LIMIT 1""",
-            (photo_id,),
-        ).fetchone()
-        if row is None or row["workspace_id"] != workspace_id or row["action_type"] != "flag":
-            return None
-        return {key: row[key] for key in (
-            "edit_id", "description", "created_at", "source", "reason", "new_value",
-        )}
-
     def recipe_history_for_photo(self, photo_id: int, limit: int) -> list[sqlite3.Row]:
         """The active workspace's ``edit_recipe`` items for one photo, newest first.
 

@@ -46,20 +46,16 @@ def test_flag_description_reads_naturally_with_and_without_provenance():
 # -- repository -----------------------------------------------------------------
 
 
-def test_record_edit_persists_provenance_and_latest_flag_note_reads_it(db):
+def test_record_edit_persists_provenance_and_list_recent_carries_it(db):
     fid = db.add_folder("/photos", name="photos")
     a = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
     b = db.add_photo(fid, "b.jpg", ".jpg", 100, 2.0)
-    assert db.edit_history.latest_flag_note(a) is None
 
     first = db.record_edit(
         "flag", "Set flag to flagged", "flagged",
         [{"photo_id": a, "old_value": "none", "new_value": "flagged"}],
     )
     assert tuple(_history_row(db, first))[3:5] == (None, None)
-    note = db.edit_history.latest_flag_note(a)
-    assert note["edit_id"] == first and note["new_value"] == "flagged"
-    assert note["source"] is None and note["reason"] is None
 
     second = db.record_edit(
         "flag", "Set flag to rejected on 2 photos — agent: soft", "rejected",
@@ -70,30 +66,10 @@ def test_record_edit_persists_provenance_and_latest_flag_note_reads_it(db):
         is_batch=True, source="agent", reason="soft",
     )
     assert tuple(_history_row(db, second))[3:5] == ("agent", "soft")
-    for pid in (a, b):
-        note = db.edit_history.latest_flag_note(pid)
-        assert (note["edit_id"], note["source"], note["reason"], note["new_value"]) == (
-            second, "agent", "soft", "rejected",
-        )
-    # Other action types never qualify, and ``list_recent`` carries the columns.
-    db.record_edit("rating", "Set rating to 4", "4", [{"photo_id": a, "old_value": "0", "new_value": "4"}])
-    assert db.edit_history.latest_flag_note(a)["edit_id"] == second
     recent = db.edit_history.list_recent()
-    assert recent[1]["source"] == "agent" and recent[1]["reason"] == "soft"
-    assert recent[0]["source"] is None
-
-    # An undone edit drops out; the previous live one shows through.
-    db.edit_history.mark_undone(second)
-    assert db.edit_history.latest_flag_note(a)["edit_id"] == first
-    assert db.edit_history.latest_flag_note(b) is None
-
-    # Scoped to the active workspace.
-    other = db.create_workspace("Other")
-    db.set_active_workspace(other)
-    assert db.edit_history.latest_flag_note(a) is None
-    db.set_active_workspace(None)
-    with pytest.raises(RuntimeError):
-        db.edit_history.latest_flag_note(a)
+    assert [(e["id"], e["source"], e["reason"]) for e in recent] == [
+        (second, "agent", "soft"), (first, None, None),
+    ]
 
 
 def test_flag_note_requires_a_live_edit_matching_the_current_flag_with_provenance(db):
@@ -299,3 +275,54 @@ def test_v1_flag_aliases_take_the_token_and_share_the_views(app_and_db):
     )
     assert resp.status_code == 200 and resp.get_json()["updated"] == 2
     assert db.edit_history.list_recent()[0]["description"] == "Set flag to flagged on 2 photos — by agent"
+
+
+@pytest.mark.parametrize("photo_ids", [[True], [False], [1, True], "1", [1.0], [0], [-1], [2**63], [2**64]])
+def test_batch_flag_rejects_ids_that_are_not_photo_keys(app_and_db, photo_ids):
+    """Booleans, floats, strings and ints outside SQLite's range are 400s, not writes."""
+    app, db = app_and_db
+    client = app.test_client()
+    before = db.edit_history.list_recent()
+    resp = client.post("/api/batch/flag", json={"photo_ids": photo_ids, "flag": "rejected"})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "photo_ids must be a list of positive signed 64-bit integer IDs"
+    assert all(p["flag"] == "none" for p in db.get_photos())
+    assert db.edit_history.list_recent() == before
+
+
+def test_single_flag_rejects_photo_id_beyond_sqlite_range(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.post(f"/api/photos/{2**63}/flag", json={"flag": "rejected"})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "photo_id must be a positive signed 64-bit integer"
+
+
+def test_batch_flag_matching_no_photos_leaves_undo_and_redo_alone(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    pid = _photo(db)["id"]
+    assert client.post(f"/api/photos/{pid}/flag", json={"flag": "rejected"}).status_code == 200
+    assert client.post("/api/undo").status_code == 200
+    assert client.get("/api/redo/status").get_json()["available"] is True
+
+    resp = client.post("/api/batch/flag", json={"photo_ids": [999_999], "flag": "rejected"})
+    assert resp.status_code == 200 and resp.get_json()["updated"] == 0
+    assert client.get("/api/redo/status").get_json()["available"] is True
+    assert client.get("/api/undo/status").get_json()["available"] is False
+    assert client.post("/api/redo").status_code == 200
+    assert db.get_photo(pid)["flag"] == "rejected"
+
+
+@pytest.mark.parametrize("body", ["1", "true", '"bad"', "[1]"])
+def test_v1_flag_aliases_reject_non_object_json_bodies(app_and_db, body):
+    """The app-wide hook answers 400 before a view reaches ``body.get``."""
+    app, db = app_and_db
+    client = app.test_client()
+    pid = _photo(db)["id"]
+    headers = {"X-Vireo-Token": app.config["API_TOKEN"], "Content-Type": "application/json"}
+    for path in (f"/api/v1/photos/{pid}/flag", "/api/v1/batch/flag"):
+        resp = client.post(path, data=body, headers=headers)
+        assert resp.status_code == 400, (path, resp.get_json())
+        assert resp.get_json()["code"] == "json_body_not_object"
+    assert db.get_photo(pid)["flag"] == "none"
