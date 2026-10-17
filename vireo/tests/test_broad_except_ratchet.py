@@ -150,7 +150,7 @@ def is_accounted_for(kind, node, lines) -> bool:
             return True
     # The except line through the line before the body's first statement:
     # the clause itself (possibly a multi-line tuple) and comments under it.
-    return _has_reason_comment(lines, node.lineno, node.body[0].lineno - 1)
+    return _has_reason_comment(lines, node.lineno, max(node.lineno, node.body[0].lineno - 1))
 
 
 def _modules():
@@ -267,6 +267,7 @@ def test_broad_handler_detection(source, count):
     ("try:\n    f()\nexcept Exception:\n    log.warning('x', exc_info=False)\n", False),
     ("try:\n    f()\nexcept Exception:\n    print('x', exc_info=True)\n", False),
     ("try:\n    f()\nexcept Exception:  # broad: label is cosmetic\n    pass\n", True),
+    ("try:\n    f()\nexcept Exception: pass  # broad: optional probe\n", True),
     ("try:\n    f()\nexcept Exception:\n    # broad: label is cosmetic\n    pass\n", True),
     ("try:\n    f()\nexcept Exception:\n    # why\n    # broad: cosmetic\n    pass\n", True),
     ("try:\n    f()\nexcept Exception:  # broad:\n    pass\n", False),
