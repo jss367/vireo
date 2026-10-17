@@ -185,5 +185,5 @@ def test_remove_answers_409_while_a_download_is_in_progress(seeded):
         release.set()
         t.join(10)
     assert resp.status_code == 409
-    assert "download is in progress" in resp.get_json()["error"]
+    assert "model or cache operation is in progress" in resp.get_json()["error"]
     assert blobs["orphan"].exists()
