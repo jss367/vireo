@@ -99,17 +99,14 @@ def test_tools_are_the_documented_set(mcp):
 
 def test_status_reports_version_workspace_and_count(mcp, monkeypatch):
     server, db, _ = mcp
-    # No override: db_path is read from the local runtime.json.
+    # Status never names the catalog path, override or not.
     monkeypatch.delenv("VIREO_URL", raising=False)
-    monkeypatch.setattr(
-        mcp_server, "read_runtime_json", lambda: {"db_path": "/home/u/.vireo/vireo.db"}
-    )
     status = call(server, "vireo_status")
     assert status["running"] is True
     assert status["version"]
     assert status["active_workspace"]["id"] == db.active_workspace_id
     assert status["photo_count"] == 3
-    assert status["db_path"] == "/home/u/.vireo/vireo.db"
+    assert "db_path" not in status
 
 
 def test_status_omits_db_path_when_an_override_targets_another_instance(mcp, monkeypatch):
