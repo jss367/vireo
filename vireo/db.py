@@ -1091,6 +1091,73 @@ def _prediction_leaf_row_match(rule, row, leaf_photo_sets):
     return row["photo_id"] in pset
 
 
+def _check_keyword_type_kwarg(kwargs):
+    """Reject an ``update_keyword`` ``type`` that is not a keyword type."""
+    if 'type' in kwargs:
+        kt = kwargs['type']
+        # Guard the membership test against non-hashable JSON values —
+        # api_update_keyword passes the request body through, and
+        # `x in frozenset` raises TypeError on unhashable input. Treat
+        # any non-string as invalid (raise ValueError so the route's
+        # existing catch yields the documented 400).
+        if not isinstance(kt, str) or kt not in KEYWORD_TYPES:
+            raise ValueError(f"Invalid keyword type: {kt!r}")
+
+
+def _keyword_update_effective_type(updates, cur_type, taxon_id):
+    """``(effective_type, type_changed)`` for an ``update_keyword`` call.
+
+    Reconciles ``updates['is_species']`` on an explicit type change.
+    """
+    # Peer lookup must use the EFFECTIVE type, not the pre-update
+    # row type: an explicit retype kwarg or the general→taxonomy
+    # auto-promotion below can move this row into a slot where a
+    # peer already lives.
+    effective_type = updates.get('type', cur_type)
+    if 'type' not in updates and cur_type == 'general' and taxon_id:
+        effective_type = 'taxonomy'
+    type_changed = effective_type != cur_type
+    # The type dropdown sends only {type: ...}. Keep the legacy
+    # is_species flag coherent on an actual type transition:
+    # otherwise demoting a taxonomy homonym to a deliberate type
+    # such as 'location' leaves is_species=1, and downstream
+    # queries that accept ``type='taxonomy' OR is_species=1`` still
+    # treat it as a species. Do not touch no-op type submissions:
+    # legacy general rows can legitimately retain is_species=1
+    # until taxonomy marking normalizes them.
+    if 'type' in updates and type_changed:
+        updates['is_species'] = int(effective_type == 'taxonomy')
+    return effective_type, type_changed
+
+
+def _apply_rename_retype(updates, cur_type, taxon_id):
+    """Auto-retype a renamed keyword, the same way add_keyword types an insert."""
+    if cur_type == 'general':
+        # Only promote to taxonomy if a match exists;
+        # otherwise leave type/taxon_id alone.
+        if taxon_id:
+            updates.setdefault('type', 'taxonomy')
+            # Gate taxon_id on the EFFECTIVE type so an
+            # explicit non-taxonomy type kwarg (e.g.
+            # type='location') doesn't end up with a
+            # taxonomy link. Mirror add_keyword's invariant
+            # for the auto-promoted case: type='taxonomy'
+            # backed by a matched taxon implies is_species=1.
+            if updates.get('type') == 'taxonomy':
+                updates.setdefault('taxon_id', taxon_id)
+                updates['is_species'] = 1
+    elif (cur_type == 'taxonomy' and taxon_id
+          and updates.get('type', 'taxonomy') == 'taxonomy'):
+        # Already taxonomy: refresh taxon_id only if the new
+        # name matches a (possibly different) taxon AND the
+        # effective type stays 'taxonomy' (caller may demote
+        # to 'location' etc.). If no match, leave the
+        # existing link in place.
+        updates.setdefault('taxon_id', taxon_id)
+    # Other manual types ('location', 'people', etc.) are
+    # preserved — user intent wins.
+
+
 class Database:
     """Local SQLite database that caches photo metadata from XMP sidecars.
 
@@ -6954,6 +7021,27 @@ class Database:
         """
         return self._folder_repository().with_quality_data()
 
+    def _refuse_cross_type_rename(self, new_name, parent_id, keyword_id):
+        """Raise ValueError when a different-type keyword holds the target slot."""
+        # No same-type peer, but a DIFFERENT-type peer at the
+        # same (name, parent_id) would hit the table-level
+        # UNIQUE(name, parent_id) constraint at UPDATE time for
+        # a non-NULL parent and surface as an uncaught
+        # IntegrityError/500. Detect it here and raise
+        # ValueError so api_update_keyword returns a documented
+        # 400. For NULL parents a cross-type peer is allowed to
+        # coexist (mirrors add_keyword).
+        if parent_id is not None:
+            cross = self._keyword_repository().cross_type_peer(
+                new_name, parent_id, keyword_id,
+            )
+            if cross is not None:
+                raise ValueError(
+                    f"cannot rename to {new_name!r}: a "
+                    f"{cross['type']!r} keyword with that name "
+                    f"already exists under this parent"
+                )
+
     def update_keyword(self, keyword_id, **kwargs):
         """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name.
 
@@ -6967,15 +7055,7 @@ class Database:
         kwargs always win over auto-detection, and an explicit type change
         reconciles the legacy ``is_species`` flag with the requested type.
         """
-        if 'type' in kwargs:
-            kt = kwargs['type']
-            # Guard the membership test against non-hashable JSON values —
-            # api_update_keyword passes the request body through, and
-            # `x in frozenset` raises TypeError on unhashable input. Treat
-            # any non-string as invalid (raise ValueError so the route's
-            # existing catch yields the documented 400).
-            if not isinstance(kt, str) or kt not in KEYWORD_TYPES:
-                raise ValueError(f"Invalid keyword type: {kt!r}")
+        _check_keyword_type_kwarg(kwargs)
         allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -7018,24 +7098,11 @@ class Database:
                     )
                     if name_changed else None
                 )
-                # Peer lookup must use the EFFECTIVE type, not the pre-update
-                # row type: an explicit retype kwarg or the general→taxonomy
-                # auto-promotion below can move this row into a slot where a
-                # peer already lives.
-                effective_type = updates.get('type', cur_type)
-                if 'type' not in updates and cur_type == 'general' and taxon_id:
-                    effective_type = 'taxonomy'
-                type_changed = effective_type != cur_type
-                # The type dropdown sends only {type: ...}. Keep the legacy
-                # is_species flag coherent on an actual type transition:
-                # otherwise demoting a taxonomy homonym to a deliberate type
-                # such as 'location' leaves is_species=1, and downstream
-                # queries that accept ``type='taxonomy' OR is_species=1`` still
-                # treat it as a species. Do not touch no-op type submissions:
-                # legacy general rows can legitimately retain is_species=1
-                # until taxonomy marking normalizes them.
-                if 'type' in updates and type_changed:
-                    updates['is_species'] = int(effective_type == 'taxonomy')
+                # Peer lookup must use the EFFECTIVE type (see
+                # ``_keyword_update_effective_type``).
+                effective_type, type_changed = _keyword_update_effective_type(
+                    updates, cur_type, taxon_id,
+                )
                 if name_changed or type_changed:
                     # Merge into a same-slot same-type peer instead of
                     # writing a duplicate. Without this, top-level renames
@@ -7062,24 +7129,7 @@ class Database:
                         )
                         self._keyword_repository().commit()
                         return peer["id"]
-                    # No same-type peer, but a DIFFERENT-type peer at the
-                    # same (name, parent_id) would hit the table-level
-                    # UNIQUE(name, parent_id) constraint at UPDATE time for
-                    # a non-NULL parent and surface as an uncaught
-                    # IntegrityError/500. Detect it here and raise
-                    # ValueError so api_update_keyword returns a documented
-                    # 400. For NULL parents a cross-type peer is allowed to
-                    # coexist (mirrors add_keyword).
-                    if parent_id is not None:
-                        cross = self._keyword_repository().cross_type_peer(
-                            new_name, parent_id, keyword_id,
-                        )
-                        if cross is not None:
-                            raise ValueError(
-                                f"cannot rename to {new_name!r}: a "
-                                f"{cross['type']!r} keyword with that name "
-                                f"already exists under this parent"
-                            )
+                    self._refuse_cross_type_rename(new_name, parent_id, keyword_id)
 
                 # Auto-retype on rename: same logic as add_keyword. Only
                 # fires on an actual name change so idempotent PUT-style
@@ -7087,30 +7137,7 @@ class Database:
                 # unexpectedly reclassify a 'general' keyword once the taxa
                 # table is populated.
                 if name_changed:
-                    if cur_type == 'general':
-                        # Only promote to taxonomy if a match exists;
-                        # otherwise leave type/taxon_id alone.
-                        if taxon_id:
-                            updates.setdefault('type', 'taxonomy')
-                            # Gate taxon_id on the EFFECTIVE type so an
-                            # explicit non-taxonomy type kwarg (e.g.
-                            # type='location') doesn't end up with a
-                            # taxonomy link. Mirror add_keyword's invariant
-                            # for the auto-promoted case: type='taxonomy'
-                            # backed by a matched taxon implies is_species=1.
-                            if updates.get('type') == 'taxonomy':
-                                updates.setdefault('taxon_id', taxon_id)
-                                updates['is_species'] = 1
-                    elif (cur_type == 'taxonomy' and taxon_id
-                          and updates.get('type', 'taxonomy') == 'taxonomy'):
-                        # Already taxonomy: refresh taxon_id only if the new
-                        # name matches a (possibly different) taxon AND the
-                        # effective type stays 'taxonomy' (caller may demote
-                        # to 'location' etc.). If no match, leave the
-                        # existing link in place.
-                        updates.setdefault('taxon_id', taxon_id)
-                    # Other manual types ('location', 'people', etc.) are
-                    # preserved — user intent wins.
+                    _apply_rename_retype(updates, cur_type, taxon_id)
 
         self._keyword_repository().apply_update(keyword_id, updates)
         return keyword_id

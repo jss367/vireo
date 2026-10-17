@@ -30,7 +30,6 @@
   "config.py:_coerce_remote_target": 102,
   "culling.py:analyze_for_culling": 261,
   "db.py:Database.merge_staged_tree_into_archive": 124,
-  "db.py:Database.update_keyword": 160,
   "detector.py:_postprocess": 123,
   "develop.py:_extract_appimage_once": 107,
   "develop.py:develop_photo": 154,
