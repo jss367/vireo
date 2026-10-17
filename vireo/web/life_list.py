@@ -21,38 +21,20 @@ _EXPLORER_CHILD_RANK = {"class": "order", "order": "family",
                         "family": "genus", "genus": "species"}
 
 
-def _build_explorer_payload(db, root_id=None):
-    """Completeness tree (down to genus) for one class. Species leaves load
-    separately via _build_explorer_species. Honest about the two failure
-    states: taxonomy-not-downloaded and unmatched species."""
-    root = (db.get_explorer_root() if root_id is None
-            else db.get_taxon_by_id(root_id))
-    if root is None:
-        # Taxonomy absent (default lookup found no Aves class) -> not ready.
-        return {"taxonomy_ready": False, "valid_root": False, "root": None,
-                "summary": {}, "nodes": [],
-                "unmatched_species": {"count": 0, "names": []},
-                "uncounted_identifications": {
-                    "count": 0, "scoped_count": 0, "workspace_count": 0,
-                    "scoped": [], "workspace": [],
-                },
-                "classes": []}
-    if root["rank"] != "class":
-        # Explorer roots must be class-rank; an order/family/etc. root produces a
-        # semantically confusing summary (e.g. an order counting itself). The
-        # taxonomy exists, but this root is not valid.
-        return {"taxonomy_ready": True, "valid_root": False, "root": None,
-                "summary": {}, "nodes": [],
-                "unmatched_species": {"count": 0, "names": []},
-                "uncounted_identifications": {
-                    "count": 0, "scoped_count": 0, "workspace_count": 0,
-                    "scoped": [], "workspace": [],
-                },
-                "classes": []}
+def _explorer_unavailable(taxonomy_ready):
+    """The explorer payload when there is no valid class root to show."""
+    return {"taxonomy_ready": taxonomy_ready, "valid_root": False, "root": None,
+            "summary": {}, "nodes": [],
+            "unmatched_species": {"count": 0, "names": []},
+            "uncounted_identifications": {
+                "count": 0, "scoped_count": 0, "workspace_count": 0,
+                "scoped": [], "workspace": [],
+            },
+            "classes": []}
 
-    rows = db.get_taxon_subtree(root["id"])
-    found = db.get_life_list_taxon_ids()
 
+def _explorer_tree(rows, class_id, found):
+    """``(summary, top)``: per-rank counts and the class's order nodes."""
     # Build node index + children lists.
     nodes = {r["id"]: {**r, "children": [], "found_species": 0,
                        "total_species": 0} for r in rows}
@@ -71,7 +53,7 @@ def _build_explorer_payload(db, root_id=None):
                 rollup(c)
                 node["total_species"] += c["total_species"]
                 node["found_species"] += c["found_species"]
-    rollup(nodes[root["id"]])
+    rollup(nodes[class_id])
 
     # Per-rank summary across the whole class.
     summary = {r: {"found": 0, "total": 0} for r in _EXPLORER_RANKS}
@@ -104,24 +86,14 @@ def _build_explorer_payload(db, root_id=None):
         return out
 
     top = [to_out(c) for c in sorted(
-        nodes[root["id"]]["children"],
+        nodes[class_id]["children"],
         key=lambda c: (c["found_species"] == 0,
                        (c["common_name"] or c["name"]).lower()))]
+    return summary, top
 
-    uncounted = db.get_life_list_uncounted_identifications()
-    scoped_uncounted = [
-        entry for entry in uncounted
-        if entry["class"] is not None and entry["class"]["id"] == root["id"]
-    ]
-    # An unlinked label (or a taxon broader than class, such as the plant
-    # phylum behind "Trees") cannot honestly be assigned to the selected
-    # class. Surface it separately as workspace-wide taxonomy cleanup instead
-    # of making mammals/reptiles/plants look like missing Birds entries.
-    workspace_uncounted = [
-        entry for entry in uncounted if entry["class"] is None
-    ]
-    visible_uncounted = scoped_uncounted + workspace_uncounted
 
+def _explorer_classes(db, root, root_id, found, uncounted):
+    """The class selector's options for the explorer."""
     # A class represented only by a broad identification still belongs in the
     # selector. Otherwise (for example) a workspace containing only the genus
     # "Sheep" would have no Mammals option in which to review that label.
@@ -143,6 +115,43 @@ def _build_explorer_payload(db, root_id=None):
         classes.insert(0, {"id": default_root["id"],
                            "name": default_root["name"],
                            "common_name": default_root.get("common_name")})
+    return classes
+
+
+def _build_explorer_payload(db, root_id=None):
+    """Completeness tree (down to genus) for one class. Species leaves load
+    separately via _build_explorer_species. Honest about the two failure
+    states: taxonomy-not-downloaded and unmatched species."""
+    root = (db.get_explorer_root() if root_id is None
+            else db.get_taxon_by_id(root_id))
+    if root is None:
+        # Taxonomy absent (default lookup found no Aves class) -> not ready.
+        return _explorer_unavailable(taxonomy_ready=False)
+    if root["rank"] != "class":
+        # Explorer roots must be class-rank; an order/family/etc. root produces a
+        # semantically confusing summary (e.g. an order counting itself). The
+        # taxonomy exists, but this root is not valid.
+        return _explorer_unavailable(taxonomy_ready=True)
+
+    rows = db.get_taxon_subtree(root["id"])
+    found = db.get_life_list_taxon_ids()
+    summary, top = _explorer_tree(rows, root["id"], found)
+
+    uncounted = db.get_life_list_uncounted_identifications()
+    scoped_uncounted = [
+        entry for entry in uncounted
+        if entry["class"] is not None and entry["class"]["id"] == root["id"]
+    ]
+    # An unlinked label (or a taxon broader than class, such as the plant
+    # phylum behind "Trees") cannot honestly be assigned to the selected
+    # class. Surface it separately as workspace-wide taxonomy cleanup instead
+    # of making mammals/reptiles/plants look like missing Birds entries.
+    workspace_uncounted = [
+        entry for entry in uncounted if entry["class"] is None
+    ]
+    visible_uncounted = scoped_uncounted + workspace_uncounted
+
+    classes = _explorer_classes(db, root, root_id, found, uncounted)
     return {
         "taxonomy_ready": True,
         "valid_root": True,

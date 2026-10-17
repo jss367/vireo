@@ -468,6 +468,48 @@ def get_editors():
     return editors
 
 
+def _checked_local_archive_root(local_archive_root, mount_path, check_filesystem):
+    """``local_archive_root``, or "" when it is relative or inside the mount."""
+    if local_archive_root:
+        if not os.path.isabs(local_archive_root):
+            local_archive_root = ""
+        elif mount_path and os.path.isabs(mount_path):
+            # A relative mount_path would realpath against the server's
+            # CWD here, making this containment check depend on where the
+            # server happened to be launched — it could blank a perfectly
+            # valid archive root. Relative mounts are unusable for
+            # transfers anyway, so skip the check instead of resolving.
+            #
+            # Containment goes through move._path_equal_or_descends so
+            # case-only aliases on case-insensitive volumes (default macOS
+            # APFS, Windows NTFS: "/Volumes/Photos" vs "/volumes/photos")
+            # are recognized as the same directory. A byte-wise
+            # commonpath would miss this and leave a target eligible for
+            # chained moves whose archive root is really the mount, and
+            # the accepted chain would later fail as a source/destination
+            # overlap. The same helper the move guards use is authoritative.
+            try:
+                if check_filesystem:
+                    from move import _path_equal_or_descends
+                    overlaps = _path_equal_or_descends(local_archive_root, mount_path)
+                else:
+                    # Reading saved settings must never stat an offline share.
+                    # Save/transfer validation still resolves filesystem aliases.
+                    archive = os.path.normcase(os.path.normpath(local_archive_root))
+                    mount = os.path.normcase(os.path.normpath(mount_path))
+                    overlaps = os.path.commonpath((archive, mount)) == mount
+                if overlaps:
+                    local_archive_root = ""
+            except (OSError, ValueError):
+                # Different drives on Windows / unreadable realpath: cannot
+                # be inside. Blanking the archive root here would drop a
+                # perfectly valid config on a transient FS hiccup, so leave
+                # it as saved and let the runtime move guards catch a real
+                # overlap.
+                pass
+    return local_archive_root
+
+
 def _coerce_remote_target(entry, *, check_filesystem=True):
     """Validate/normalize one remote-target dict, or return None if unusable.
 
@@ -520,44 +562,11 @@ def _coerce_remote_target(entry, *, check_filesystem=True):
     # staging side — pointing it at the mount would "move" files onto
     # themselves). Invalid values are blanked rather than dropping the
     # whole target.
-    local_archive_root = (entry.get("local_archive_root") or "").strip()
-    if local_archive_root:
-        if not os.path.isabs(local_archive_root):
-            local_archive_root = ""
-        elif mount_path and os.path.isabs(mount_path):
-            # A relative mount_path would realpath against the server's
-            # CWD here, making this containment check depend on where the
-            # server happened to be launched — it could blank a perfectly
-            # valid archive root. Relative mounts are unusable for
-            # transfers anyway, so skip the check instead of resolving.
-            #
-            # Containment goes through move._path_equal_or_descends so
-            # case-only aliases on case-insensitive volumes (default macOS
-            # APFS, Windows NTFS: "/Volumes/Photos" vs "/volumes/photos")
-            # are recognized as the same directory. A byte-wise
-            # commonpath would miss this and leave a target eligible for
-            # chained moves whose archive root is really the mount, and
-            # the accepted chain would later fail as a source/destination
-            # overlap. The same helper the move guards use is authoritative.
-            try:
-                if check_filesystem:
-                    from move import _path_equal_or_descends
-                    overlaps = _path_equal_or_descends(local_archive_root, mount_path)
-                else:
-                    # Reading saved settings must never stat an offline share.
-                    # Save/transfer validation still resolves filesystem aliases.
-                    archive = os.path.normcase(os.path.normpath(local_archive_root))
-                    mount = os.path.normcase(os.path.normpath(mount_path))
-                    overlaps = os.path.commonpath((archive, mount)) == mount
-                if overlaps:
-                    local_archive_root = ""
-            except (OSError, ValueError):
-                # Different drives on Windows / unreadable realpath: cannot
-                # be inside. Blanking the archive root here would drop a
-                # perfectly valid config on a transient FS hiccup, so leave
-                # it as saved and let the runtime move guards catch a real
-                # overlap.
-                pass
+    local_archive_root = _checked_local_archive_root(
+        (entry.get("local_archive_root") or "").strip(),
+        mount_path,
+        check_filesystem,
+    )
     return {
         "id": tid,
         "name": name,
