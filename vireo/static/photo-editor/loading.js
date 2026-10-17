@@ -2,21 +2,21 @@
 // Classic page script; load boot.js after all definitions.
 
 function editorEmptyState() {
-  document.getElementById('editorFilename').textContent = 'No photo to edit';
-  document.getElementById('editorSubhead').textContent = 'Open a photo from Browse, then choose Edit.';
+  /** @type {HTMLElement} */ (document.getElementById('editorFilename')).textContent = 'No photo to edit';
+  /** @type {HTMLElement} */ (document.getElementById('editorSubhead')).textContent = 'Open a photo from Browse, then choose Edit.';
   setStatus('');
-  var img = document.getElementById('editorImg');
+  var img = /** @type {HTMLImageElement} */ (document.getElementById('editorImg'));
   if (img) img.removeAttribute('src');
-  var box = document.getElementById('editorCropBox');
+  var box = /** @type {HTMLElement} */ (document.getElementById('editorCropBox'));
   if (box) box.style.display = 'none';
   ['prevBtn', 'nextBtn', 'copySettingsBtn', 'beforeBtn', 'fitBtn', 'actualBtn',
    'editorZoomOut', 'editorZoomIn', 'editorZoomSlider', 'saveBtn', 'exportBtn'].forEach(function(id) {
-    var b = document.getElementById(id);
-    if (b) b.disabled = true;
+    var b = /** @type {HTMLElement} */ (document.getElementById(id));
+    if (b instanceof HTMLButtonElement || b instanceof HTMLInputElement) b.disabled = true;
   });
 }
 
-function applyLoadedLocalStaleness(photoId, loadSeq, savedRecipeSeq, data) {
+/** @param {number} photoId @param {number} loadSeq @param {number} savedRecipeSeq @param {{local_mask_stale?:boolean}} data */ function applyLoadedLocalStaleness(photoId, loadSeq, savedRecipeSeq, data) {
   if (editorState.photoId !== photoId || editorState.loadSeq !== loadSeq ||
       editorState.savedRecipeSeq !== savedRecipeSeq) return false;
   editorState.savedLocalStale = !!data.local_mask_stale;
@@ -25,7 +25,7 @@ function applyLoadedLocalStaleness(photoId, loadSeq, savedRecipeSeq, data) {
   return true;
 }
 
-async function loadPhoto(photoId, opts) {
+/** @param {number} photoId @param {{skipUrl?:boolean}=} opts */ async function loadPhoto(photoId, opts) {
   cancelPointColorPicker();
   cancelMaskBrush();
   cancelEditorPreview({abortActive: true});
@@ -46,12 +46,12 @@ async function loadPhoto(photoId, opts) {
   editorState.savedRecipeSeq++;
   editorState.recipe = {};
   resetEditorHistory();
-  var saveBtn = document.getElementById('saveBtn');
+  var saveBtn = /** @type {HTMLButtonElement} */ (document.getElementById('saveBtn'));
   if (saveBtn) saveBtn.disabled = true;
   ['copySettingsBtn', 'beforeBtn', 'fitBtn', 'actualBtn', 'editorZoomOut',
    'editorZoomIn', 'editorZoomSlider', 'exportBtn'].forEach(function(id) {
-    var b = document.getElementById(id);
-    if (b) b.disabled = false;
+    var b = /** @type {HTMLElement} */ (document.getElementById(id));
+    if (b instanceof HTMLButtonElement || b instanceof HTMLInputElement) b.disabled = false;
   });
   editorState.showBefore = false;
   editorState.cropEditing = true;
@@ -71,11 +71,11 @@ async function loadPhoto(photoId, opts) {
     window.vireoRefreshNavigationHrefs();
   }
   setStatus('Loading...');
-  document.getElementById('editorFilename').textContent = 'Loading photo...';
+  /** @type {HTMLElement} */ (document.getElementById('editorFilename')).textContent = 'Loading photo...';
   updateNavControls();
   setEditorLoading(true);
   try {
-    var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
+    /** @type {EditorPhoto} */ var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
     if (seq !== editorState.loadSeq) return;
     editorState.photo = photo;
     editorState.savedRecipe = cloneRecipe(photo.edit_recipe || {});
@@ -93,7 +93,7 @@ async function loadPhoto(photoId, opts) {
     setButtonActive('maskOverlayBtn', false);
     refreshMaskOverlay();
     safeFetch('/api/photos/' + photoId + '/masks', {}, {toast: false})
-      .then(function(d) {
+      .then(/** @param {{active?:unknown;local_mask_stale?:boolean}} d */ function(d) {
         if (editorState.photoId !== photoId) return;
         var becameAvailable = !editorState.localAvailable && !!d.active;
         editorState.localAvailable = !!d.active;
@@ -108,15 +108,15 @@ async function loadPhoto(photoId, opts) {
     if (photo.edit_recipe && photo.edit_recipe.local) {
       var localStaleSavedRecipeSeq = editorState.savedRecipeSeq;
       safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false})
-        .then(function(d) {
+        .then(/** @param {{active?:unknown;local_mask_stale?:boolean}} d */ function(d) {
           applyLoadedLocalStaleness(
             photoId, seq, localStaleSavedRecipeSeq, d
           );
         }).catch(function() {});
     }
-    document.getElementById('editorFilename').textContent = photo.filename || ('Photo ' + photoId);
+    /** @type {HTMLElement} */ (document.getElementById('editorFilename')).textContent = photo.filename || ('Photo ' + photoId);
     var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + photoId;
-    document.getElementById('editorSubhead').textContent = dim;
+    /** @type {HTMLElement} */ (document.getElementById('editorSubhead')).textContent = dim;
     updateFeedbackControls();
     setEditorLoading(false);
     syncControls();
@@ -130,8 +130,8 @@ async function loadPhoto(photoId, opts) {
     // panels would let a slider tweak build a recipe from scratch and save it
     // over this photo's real saved recipe. Prev/Next/Back in the topbar stay
     // usable to retry or leave.
-    document.getElementById('editorFilename').textContent = 'Photo unavailable';
-    setStatus(e.message || 'Could not load photo', true);
+    /** @type {HTMLElement} */ (document.getElementById('editorFilename')).textContent = 'Photo unavailable';
+    setStatus(editorErrorMessage(e) || 'Could not load photo', true);
   }
 }
 
@@ -140,7 +140,7 @@ async function initEditor() {
   var pending = pendingCropRatioPreference();
   if (pending) cropRatioPreference = pending;
   try {
-    var saved = await safeFetch('/api/editor/crop-ratio', {}, {toast: false});
+    /** @type {EditorPendingCropRatio} */ var saved = await safeFetch('/api/editor/crop-ratio', {}, {toast: false});
     // Another tab can acknowledge and clear the shared pending slot while
     // this GET is in flight. Keep the newer evidence captured before it.
     var latestPending = pendingCropRatioPreference();

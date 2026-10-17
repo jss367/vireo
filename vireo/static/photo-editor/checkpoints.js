@@ -11,7 +11,7 @@ window.beforeHistoryChange = function() {
 
 // Undo/redo of saved edits (navbar history controls) announces when its request
 // is in flight so the editor freezes until the reload it triggers takes over.
-var editorHistoryLoadSeq = null;
+/** @type {number|null} */ var editorHistoryLoadSeq = null;
 function bindEditHistoryBusyEvents() {
   document.addEventListener('vireo:edit-history-busy', function(event) {
     if (event.detail.busy) {
@@ -30,7 +30,7 @@ window.afterHistoryChange = async function() {
   if (editorState.photoId) await loadPhoto(editorState.photoId, {skipUrl: true});
 };
 
-async function restoreRecipe(recipe) {
+/** @param {EditorRecipe|null} recipe */ async function restoreRecipe(recipe) {
   // The history panel is also pointer-events: none while loading, but guard
   // here too so a programmatic restore (or any escape from the CSS gate) can't
   // copy a previous photo's checkpoint onto the photoId currently loading.
@@ -46,7 +46,7 @@ async function restoreRecipe(recipe) {
   await saveRecipe('Restored photo edit checkpoint');
 }
 
-function timeLabel(value) {
+/** @param {string|undefined} value */ function timeLabel(value) {
   if (!value) return '';
   var d = new Date(value + 'Z');
   if (Number.isNaN(d.getTime())) return value;
@@ -55,7 +55,7 @@ function timeLabel(value) {
   });
 }
 
-function checkpointName(recipe) {
+/** @param {EditorRecipe|null} recipe */ function checkpointName(recipe) {
   var key = recipeKey(recipe || {});
   if (key === '{}') return 'Original';
   var r = recipeForSave(recipe || {});
@@ -66,7 +66,7 @@ function checkpointName(recipe) {
   return names.length ? names.join(', ') : 'Edit recipe';
 }
 
-function historyRow(title, subtitle, recipe, current, disabled) {
+/** @param {string} title @param {string} subtitle @param {EditorRecipe|null} recipe @param {boolean} current @param {boolean} disabled */ function historyRow(title, subtitle, recipe, current, disabled) {
   var row = document.createElement('div');
   row.className = 'history-row' + (current ? ' current' : '');
   var text = document.createElement('div');
@@ -87,15 +87,15 @@ function historyRow(title, subtitle, recipe, current, disabled) {
   return row;
 }
 
-async function loadHistory(photoId) {
+/** @param {number|null=} photoId */ async function loadHistory(photoId) {
   // Rapid Next/Prev can leave multiple /edit-history requests in flight; bail
   // out if the editor has moved on so an earlier response can't paint Restore
   // rows pointing at another photo's recipes.
   if (photoId == null) photoId = editorState.photoId;
-  var list = document.getElementById('historyList');
+  var list = /** @type {HTMLElement} */ (document.getElementById('historyList'));
   list.innerHTML = '<div class="history-empty">Loading history...</div>';
   try {
-    var data = await safeFetch('/api/photos/' + photoId + '/edit-history?limit=100', {}, {toast: false});
+    /** @type {{history?:{new_recipe?:EditorRecipe;created_at?:string;description?:string;undone?:boolean}[]}} */ var data = await safeFetch('/api/photos/' + photoId + '/edit-history?limit=100', {}, {toast: false});
     if (editorState.photoId !== photoId) return;
     list.innerHTML = '';
     var currentKey = recipeKey(editorState.savedRecipe);
