@@ -1,7 +1,8 @@
 // Duplicates page: one copy's card in a duplicate group. Classic script
 // sharing the page's globals (escapeHtml, formatBytes, _filterMatchedIds,
-// trashOneLoserFile), which duplicates.html defines after loading this; they
-// are only read when a card renders.
+// trashOneLoserFile, keepDuplicateCopy), which duplicates.html and the later
+// duplicates-*.js scripts define after loading this; they are only read when
+// a card renders.
 
 /** @param {DuplicatePhoto} photo @param {boolean} isWinner @param {string} [reason] @param {boolean} [isResolvedLoser] @param {boolean} [winnerMissingProtect] @param {boolean} [winnerOfflineProtect] */
 function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProtect, winnerOfflineProtect) {
@@ -45,6 +46,13 @@ function renderCard(photo, isWinner, reason, isResolvedLoser, winnerMissingProte
   if (photo.file_size != null) meta.push(formatBytes(photo.file_size));
   if (meta.length) html += '<div class="meta">' + meta.join(' \u00b7 ') + '</div>';
   if (reason) html += '<div class="reason">' + escapeHtml(reason) + '</div>';
+  // Overrides the decision: this copy becomes the kept one. Not offered for a
+  // copy that is missing or unreachable, which the server refuses anyway.
+  if (isResolvedLoser && photo.id != null && !missing && !photo.volume_offline) {
+    var busy = _duplicateTrashActive || duplicateFileTrashIsPending(photo.id) || _duplicateKeepPending.has(photo.id);
+    html += '<button type="button" class="keep-btn" onclick="keepDuplicateCopy(' + photo.id + ')"' +
+            (busy ? ' disabled' : '') + '>Keep this copy instead</button>';
+  }
   if (isResolvedLoser && photo.id != null && !missing && !winnerMissingProtect) {
     var trashState = _duplicateFileTrashState.get(photo.id);
     html += '<button type="button" class="trash-btn" onclick="trashOneLoserFile(' +

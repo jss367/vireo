@@ -427,6 +427,59 @@ class DuplicatesRepository:
         loser_ids = [r["id"] for r in rows if r["id"] != winner_id]
         return winner_id, loser_ids, None
 
+    def keep_copy_plan(self, photo_id):
+        """Plan making ``photo_id`` the one kept copy of its ``file_hash``.
+
+        Unlike the resolver plans this may promote a rejected copy: it backs
+        the user's explicit "keep this copy instead" choice. Every other
+        non-rejected copy of the hash becomes a loser; copies already
+        rejected stay as they are. Returns ``(plan, None)`` with ``plan`` a
+        dict of ``file_hash``, ``loser_ids`` and ``winner_flag`` (the flag
+        the kept copy ends with), or ``(None, reason)`` where ``reason`` is
+        ``"not found"``, ``"not a duplicate"``, ``"volume offline"`` or
+        ``"missing on disk"``. Promoting a copy whose file is gone (or
+        unknowable) would reject the copy that still exists. Writes nothing.
+        """
+        row = self.conn.execute(
+            """SELECT p.file_hash, p.filename, p.flag, f.path AS folder_path
+               FROM photos p LEFT JOIN folders f ON f.id = p.folder_id
+               WHERE p.id = ?""",
+            (photo_id,),
+        ).fetchone()
+        if row is None:
+            return None, "not found"
+        if not row["file_hash"]:
+            return None, "not a duplicate"
+        siblings = self.conn.execute(
+            "SELECT id, flag FROM photos WHERE file_hash = ? AND id != ?",
+            (row["file_hash"], photo_id),
+        ).fetchall()
+        if not siblings:
+            return None, "not a duplicate"
+        if row["folder_path"] is None:
+            return None, "missing on disk"
+        path = os.path.join(row["folder_path"], row["filename"] or "")
+        # Reachability first: a stat on a stale network mount can block.
+        if _volume_offline(path):
+            return None, "volume offline"
+        if not os.path.exists(path):
+            return None, "missing on disk"
+        losers = [s for s in siblings if s["flag"] != "rejected"]
+        # The copies are the same file, so a pick on the copy being replaced
+        # belongs to the one that stays; a rejected copy comes back unflagged.
+        flags = {row["flag"]} | {s["flag"] for s in losers}
+        if "flagged" in flags:
+            winner_flag = "flagged"
+        elif row["flag"] == "rejected":
+            winner_flag = "none"
+        else:
+            winner_flag = row["flag"]
+        return {
+            "file_hash": row["file_hash"],
+            "loser_ids": [s["id"] for s in losers],
+            "winner_flag": winner_flag,
+        }, None
+
     # -- winner/loser merge ---------------------------------------------------
 
     def photo_metadata(self, photo_id):
@@ -492,6 +545,12 @@ class DuplicatesRepository:
                     WHERE photo_id IN ({placeholders})""",
                 (winner_id, *chunk),
             )
+
+    def set_flag(self, photo_id, flag):
+        """Set a photo's flag. Does not commit (runs in the merge transaction)."""
+        self.conn.execute(
+            "UPDATE photos SET flag = ? WHERE id = ?", (flag, photo_id),
+        )
 
     def reject(self, loser_ids):
         """Flag ``loser_ids`` rejected. Does not commit (runs in the merge transaction)."""

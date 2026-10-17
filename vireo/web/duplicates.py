@@ -1,10 +1,11 @@
-"""Duplicate-file resolution: apply, bulk-resolve, trash losers, summaries.
+"""Duplicate-file resolution: apply, keep, bulk-resolve, trash losers, summaries.
 
 The ``/api/duplicates/*`` routes back the Duplicates page and the navbar
-cleanup banner: applying resolver decisions to hash groups, force-resolving
-groups by folder, moving loser files to the OS Trash (and dropping their
-catalog rows), restoring the last completed scan, and summarizing how much
-loser data may still be on disk. The scan itself is a job launcher in
+cleanup banner: applying resolver decisions to hash groups, keeping a chosen
+copy instead of the current one, force-resolving groups by folder, moving
+loser files to the OS Trash (and dropping their catalog rows), restoring the
+last completed scan, and summarizing how much loser data may still be on
+disk. The scan itself is a job launcher in
 ``web/jobs.py``.
 """
 
@@ -83,6 +84,40 @@ def create_duplicates_blueprint(
             "rejected_count": total_rejected,
             "deferred_hashes": deferred_hashes,
         })
+
+    # Why a copy can't become the kept one, as the Duplicates page says it.
+    keep_refusals = {
+        "not found": (404, "That photo is no longer in the catalog."),
+        "not a duplicate": (409, "That photo no longer has a duplicate copy."),
+        "missing on disk": (
+            409, "This copy's file is missing on disk, so it can't be the one you keep.",
+        ),
+        "volume offline": (
+            409, "This copy is on a volume that isn't connected. Reconnect it first.",
+        ),
+    }
+
+    @blueprint.route("/api/duplicates/keep", methods=["POST"])
+    def api_duplicates_keep():
+        """Keep this copy of a duplicate group instead of the current one.
+
+        Body: ``{"photo_id": int}``. The copy is un-rejected if needed and
+        every other kept copy of the same file is rejected, with rating and
+        keywords merged onto it (``Database.keep_duplicate_copy``). Returns
+        ``{"ok": True, "file_hash", "winner_id", "loser_ids", "rating",
+        "flag"}``; a copy missing on disk or on an offline volume is refused
+        with 409 so it can never displace the copy that exists.
+        """
+        body = request.get_json(silent=True)
+        photo_id = body.get("photo_id") if isinstance(body, dict) else None
+        if not isinstance(photo_id, int) or isinstance(photo_id, bool):
+            return json_error("photo_id required")
+        result = get_db().keep_duplicate_copy(photo_id)
+        reason = result.get("error")
+        if reason is not None:
+            status, message = keep_refusals[reason]
+            return json_error(reason, status, message=message)
+        return jsonify(dict(result, ok=True))
 
     @blueprint.route("/api/duplicates/bulk-resolve", methods=["POST"])
     def api_duplicates_bulk_resolve():

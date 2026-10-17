@@ -210,6 +210,15 @@
   .dup-card .trash-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .dup-card.trashed { opacity: 0.4; }
   .dup-card.trashed .trash-btn { display: none; }
+  .dup-card .keep-btn {
+    margin-top: 6px; padding: 4px 8px;
+    background: var(--bg-primary); color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 3px;
+    font-size: 11px; cursor: pointer;
+  }
+  .dup-card .keep-btn:hover { background: var(--accent); color: var(--bg-primary); }
+  .dup-card .keep-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .dup-card.trashed .keep-btn { display: none; }
   .dup-card .trash-status {
     margin-top: 4px; font-size: 10px; color: var(--text-dim);
     font-style: italic;

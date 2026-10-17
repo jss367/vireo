@@ -16,6 +16,8 @@ function updateDuplicateFileTrashCard(photoId, currentCard) {
   var state = _duplicateFileTrashState.get(photoId);
   var card = currentCard || document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
   if (!state || !card) return;
+  var keep = card.querySelector(/** @type {'button'} */ ('.keep-btn'));
+  if (keep) keep.disabled = state.pending || state.terminal;
   var button = card.querySelector(/** @type {'button'} */ ('.trash-btn'));
   if (!button) return;
   button.disabled = state.pending || state.terminal;
@@ -111,6 +113,73 @@ async function trashOneLoserFile(photoId) {
     updateDuplicateFileTrashCard(photoId);
     refreshTrashAllButton(/** @type {HTMLButtonElement} */ (document.getElementById('trashAllBtn')));
     if (state.terminal) _duplicateFileTrashState.delete(photoId);
+  }
+}
+
+// Same words as ``KEPT_ANOTHER_COPY_REASON`` in duplicate_scan.py.
+var KEPT_ANOTHER_COPY_REASON = 'kept another copy instead';
+/** @type {Set<number>} */ var _duplicateKeepPending = new Set();
+
+// Re-point a resolved group at the copy the server now keeps: every other
+// copy shown is rejected, the ones it just rejected saying why.
+/** @param {DuplicateProposal} proposal @param {DuplicateKeepResponse} data */
+function applyKeptDuplicateCopy(proposal, data) {
+  var members = [proposal.winner].concat(proposal.other_kept || [], proposal.losers || []);
+  var chosen = members.find(function(m) { return m.id === data.winner_id; });
+  if (!chosen) return false;
+  var replaced = new Set(data.loser_ids);
+  /** @type {DuplicatePhoto} */ var winner = Object.assign({}, chosen, {
+    rating: data.rating, exists: true, volume_offline: false,
+  });
+  delete winner.rejected;
+  delete winner.reason;
+  proposal.winner = winner;
+  proposal.other_kept = [];
+  proposal.losers = members.filter(function(m) { return m !== chosen; }).map(function(m) {
+    return replaced.has(m.id) ? Object.assign({}, m, {rejected: true, reason: KEPT_ANOTHER_COPY_REASON}) : m;
+  });
+  return true;
+}
+
+/** @param {number} photoId */
+async function keepDuplicateCopy(photoId) {
+  if (_duplicateKeepPending.has(photoId) || duplicateFileTrashIsPending(photoId)) return;
+  if (_duplicateTrashActive) {
+    showToast('Wait for the cleanup to finish before choosing another copy to keep.', 'info');
+    return;
+  }
+  var proposal = (_proposals || []).find(function(p) {
+    return p.status === 'resolved' && (p.losers || []).some(function(l) { return l.id === photoId; });
+  });
+  if (!proposal) return;
+  _duplicateKeepPending.add(photoId);
+  var card = document.querySelector('.dup-card[data-photo-id="' + photoId + '"]');
+  var button = card && card.querySelector(/** @type {'button'} */ ('.keep-btn'));
+  if (button) { button.disabled = true; button.textContent = 'Switching...'; }
+  try {
+    /** @type {DuplicateKeepResponse} */ var data = await safeFetch('/api/duplicates/keep', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_id: photoId}),
+    });
+    if (!applyKeptDuplicateCopy(proposal, data)) return;
+    var kept = proposal.winner.filename || 'this copy';
+    var rejected = data.loser_ids.length;
+    showToast('Now keeping ' + kept + (rejected
+      ? '; rejected ' + rejected + ' other ' + (rejected === 1 ? 'copy' : 'copies') : '') + '.', 'success');
+  } catch (_caught) {
+    // safeFetch already showed the server's reason.
+  } finally {
+    _duplicateKeepPending.delete(photoId);
+    // A rescan or restore that replaced the results meanwhile owns the page.
+    if (_lastScanResult && !_scanInProgress && _proposals.indexOf(proposal) !== -1) {
+      var group = document.querySelector('.dup-group[data-hash="' + proposal.file_hash + '"]');
+      if (group && groupMatchesFilter(proposal)) {
+        group.outerHTML = renderResolvedGroup(proposal);
+        refreshDuplicateSummaries();
+      } else {
+        renderResults(_lastScanResult);
+      }
+    }
   }
 }
 
