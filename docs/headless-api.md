@@ -34,11 +34,13 @@ and the Claude Desktop JSON for the running install.
 Tools: `vireo_status`, `list_workspaces`, `activate_workspace`,
 `list_folders`, `list_collections`, `search_keywords`, `search_photos`,
 `find_photos_by_text`, `get_photo`, `view_photo` (the preview, the
-thumbnail or the detected subject as an image), `burst`, `set_flag` (with a
-`reason` and a `source` shown next to the flag), `set_rating`,
-`add_keyword` and `remove_keyword`. The server reads `runtime.json` on every
-call; `VIREO_URL` and `VIREO_TOKEN` override it for tests and second
-instances. Design: `docs/plans/2026-10-17-mcp-server-design.md`.
+thumbnail or the detected subject as an image), `burst`, `set_flag`,
+`set_rating`, `add_keyword` and `remove_keyword` (flag provenance — the
+`reason` and `source` shown next to the flag — lands with #2130; the tool
+takes those fields then). The server reads `runtime.json` on every call;
+`VIREO_URL` and `VIREO_TOKEN` override it for tests and second instances
+(paired, and loopback-only, so the local token never reaches an arbitrary
+URL). Design: `docs/plans/2026-10-17-mcp-server-design.md`.
 
 ## Discovering a running instance
 

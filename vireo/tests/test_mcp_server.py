@@ -97,13 +97,31 @@ def test_tools_are_the_documented_set(mcp):
         assert "ctx" not in tool.input_schema["properties"], tool.name
 
 
-def test_status_reports_version_workspace_and_count(mcp):
+def test_status_reports_version_workspace_and_count(mcp, monkeypatch):
     server, db, _ = mcp
+    # No override: db_path is read from the local runtime.json.
+    monkeypatch.delenv("VIREO_URL", raising=False)
+    monkeypatch.setattr(
+        mcp_server, "read_runtime_json", lambda: {"db_path": "/home/u/.vireo/vireo.db"}
+    )
     status = call(server, "vireo_status")
     assert status["running"] is True
     assert status["version"]
     assert status["active_workspace"]["id"] == db.active_workspace_id
     assert status["photo_count"] == 3
+    assert status["db_path"] == "/home/u/.vireo/vireo.db"
+
+
+def test_status_omits_db_path_when_an_override_targets_another_instance(mcp, monkeypatch):
+    # With VIREO_URL in play the local runtime.json names a different
+    # instance's catalog; mixing it into the status misnames the target.
+    server, _, _ = mcp
+    monkeypatch.setenv("VIREO_URL", "http://127.0.0.1:9999/")
+    monkeypatch.setattr(
+        mcp_server, "read_runtime_json", lambda: {"db_path": "/wrong/catalog.db"}
+    )
+    status = call(server, "vireo_status")
+    assert "db_path" not in status
 
 
 def test_workspaces_mark_the_active_one(mcp):
@@ -216,29 +234,24 @@ def test_burst_passes_the_apps_precondition_through(mcp):
     assert "Vireo answered 404: No neighboring batch photos found" in message
 
 
-def test_set_flag_sends_reason_and_source_and_writes_the_flag(mcp):
+def test_set_flag_writes_only_what_the_route_persists(mcp):
+    # Flag provenance (reason / source) is #2130's work and has no route
+    # yet; set_flag must not promise fields the backend throws away.
     server, db, transport = mcp
     pid = db.get_photos()[0]["id"]
-    result = call(
-        server, "set_flag", photo_ids=[pid], flag="rejected",
-        reason="eye soft at 1:1", source="claude-fable-5-1",
-    )
-    assert result == {"updated": 1, "flag": "rejected",
-                      "source": "claude-fable-5-1", "reason": "eye soft at 1:1"}
+    result = call(server, "set_flag", photo_ids=[pid], flag="rejected")
+    assert result == {"updated": 1, "flag": "rejected"}
     method, path, _, body = transport.calls[-1]
     assert (method, path) == ("POST", "/api/batch/flag")
-    assert body == {"photo_ids": [pid], "flag": "rejected",
-                    "source": "claude-fable-5-1", "reason": "eye soft at 1:1"}
+    assert body == {"photo_ids": [pid], "flag": "rejected"}
     assert db.get_photo(pid)["flag"] == "rejected"
     assert "Vireo answered 400" in call_error(server, "set_flag", photo_ids=[pid], flag="maybe")
 
 
-def test_set_flag_without_a_session_sends_no_source(mcp):
-    server, db, transport = mcp
-    pid = db.get_photos()[0]["id"]
-    result = call(server, "set_flag", photo_ids=[pid], flag="flagged")
-    assert result["source"] is None and result["reason"] is None
-    assert transport.calls[-1][3] == {"photo_ids": [pid], "flag": "flagged"}
+def test_set_flag_tool_does_not_advertise_unapplied_fields(mcp):
+    server, _, _ = mcp
+    tools = {tool.name: tool for tool in anyio.run(server.list_tools)}
+    assert set(tools["set_flag"].input_schema["properties"]) == {"photo_ids", "flag"}
 
 
 def test_set_rating_writes_the_rating(mcp):
@@ -330,6 +343,45 @@ def test_client_resolves_runtime_json_per_request(monkeypatch):
     assert VireoClient()._resolve() == ("http://127.0.0.1:9", "env")
 
 
+def test_vireo_url_without_token_never_borrows_the_local_token(monkeypatch):
+    # VIREO_URL alone used to fall back to the runtime.json token, which
+    # would send the live catalog credential to whatever URL a typo named.
+    monkeypatch.setenv("VIREO_URL", "http://evil.example.com/")
+    monkeypatch.delenv("VIREO_TOKEN", raising=False)
+    monkeypatch.setattr(
+        mcp_server, "read_runtime_json",
+        lambda: {"port": 4321, "token": "live-secret"},
+    )
+    with pytest.raises(mcp_server.VireoError) as excinfo:
+        VireoClient()._resolve()
+    assert mcp_server.UNPAIRED_URL_MESSAGE in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad_url", [
+    "http://evil.example.com/",
+    "http://192.0.2.1/",
+    "https://127.0.0.1:9/",
+    "file:///etc/hosts",
+])
+def test_vireo_url_must_be_loopback_http(monkeypatch, bad_url):
+    monkeypatch.setenv("VIREO_URL", bad_url)
+    monkeypatch.setenv("VIREO_TOKEN", "paired")
+    with pytest.raises(mcp_server.VireoError) as excinfo:
+        VireoClient()._resolve()
+    assert mcp_server.NON_LOOPBACK_URL_MESSAGE in str(excinfo.value)
+
+
+@pytest.mark.parametrize("good_url,expected", [
+    ("http://127.0.0.1:9/", "http://127.0.0.1:9"),
+    ("http://localhost:9000", "http://localhost:9000"),
+    ("http://[::1]:9000/", "http://[::1]:9000"),
+])
+def test_vireo_url_accepts_each_loopback_form(monkeypatch, good_url, expected):
+    monkeypatch.setenv("VIREO_URL", good_url)
+    monkeypatch.setenv("VIREO_TOKEN", "paired")
+    assert VireoClient()._resolve() == (expected, "paired")
+
+
 def test_server_command_for_checkout_and_frozen_build(monkeypatch):
     assert server_command() == [sys.executable, str(APP), "--mcp"]
     monkeypatch.setattr(sys, "frozen", True, raising=False)
@@ -378,7 +430,7 @@ def test_stdio_session_against_a_served_app(app_and_db, tmp_path):
                 tools = await session.list_tools()
                 status = await session.call_tool("vireo_status", {})
                 flagged = await session.call_tool(
-                    "set_flag", {"photo_ids": [pid], "flag": "rejected", "reason": "test"},
+                    "set_flag", {"photo_ids": [pid], "flag": "rejected"},
                 )
                 return init, tools, status, flagged
 
@@ -394,7 +446,7 @@ def test_stdio_session_against_a_served_app(app_and_db, tmp_path):
     assert json.loads(status.content[0].text)["photo_count"] == 3
     assert not flagged.is_error
     written = json.loads(flagged.content[0].text)
-    assert written["source"] == "vireo-test-client" and written["reason"] == "test"
+    assert written == {"updated": 1, "flag": "rejected"}
     assert db.get_photo(pid)["flag"] == "rejected"
 
 

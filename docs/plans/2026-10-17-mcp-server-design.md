@@ -23,7 +23,10 @@ database access of its own and cannot race the app for the catalog.
 - **Discovery.** Each tool call reads `~/.vireo/runtime.json` for the port
   and token (the file is tiny; reading it per call means Vireo may be started
   or restarted after Claude connected). `VIREO_URL` and `VIREO_TOKEN`
-  override it, which tests and HOME-override instances use.
+  override it, which tests and HOME-override instances use. The override is
+  paired: `VIREO_URL` requires `VIREO_TOKEN` so the local runtime token is
+  never shipped to a URL this server did not pick, and the URL must be
+  loopback HTTP so a typo cannot leave the machine.
 - **Not running.** When nothing answers, every tool returns the same plain
   error: open Vireo (or run the sidecar headless) and try again. The server
   never spawns an instance: a chat client spawning the catalog's single
@@ -56,7 +59,7 @@ EXIF dump, cached paths and render keys stays behind `get_photo(include_exif=tru
 | `get_photo` | `/api/photos/<id>` | |
 | `view_photo` | `/thumbnails/<id>.jpg`, `/photos/<id>/preview`, `/photos/<id>/crop` | Returns the image itself (`thumbnail`, `preview` at 1920, or `subject`, the detection crop). |
 | `burst` | `/api/photos/<id>/best-batch` | The ranked burst around a photo; the app's own "run the pipeline first" error passes through. |
-| `set_flag` | `/api/batch/flag` | Carries `reason` and `source` (default: the MCP client's name) so the Undo panel says who decided and why once flag provenance lands. |
+| `set_flag` | `/api/batch/flag` | `reason` and `source` land with flag provenance (#2130); until then this tool takes only `photo_ids` and `flag`, since the backing route has nowhere to put the other fields. |
 | `set_rating` | `/api/batch/rating` | |
 | `add_keyword`, `remove_keyword` | `/api/batch/keyword`, `/api/batch/keyword-remove` | |
 

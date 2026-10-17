@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from mcp.server.mcpserver import Context, Image, MCPServer
+from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from runtime import read_runtime_json
 
@@ -41,6 +41,17 @@ BAD_TOKEN_MESSAGE = (
     "the token in ~/.vireo/runtime.json; otherwise restart Vireo so a fresh "
     "runtime.json is written."
 )
+UNPAIRED_URL_MESSAGE = (
+    "VIREO_URL is set but VIREO_TOKEN is not. Overrides must supply their "
+    "own token; the local runtime.json token is never sent to a URL this "
+    "server did not pick."
+)
+NON_LOOPBACK_URL_MESSAGE = (
+    "VIREO_URL must point at a loopback address (http://127.0.0.1:..., "
+    "http://localhost:... or http://[::1]:...). Remote targets are not "
+    "supported; the override exists for tests and local second instances."
+)
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 INSTRUCTIONS = """\
 Vireo is the user's wildlife photo catalog. Tools act on the active
@@ -55,8 +66,7 @@ means Vireo's Process step has run on the photo.
 
 Writing: set_flag, set_rating, add_keyword and remove_keyword change the
 catalog through the same routes the UI uses, so each call is one Undo step
-in Vireo. Give set_flag a reason a photographer would recognize; it is shown
-next to the flag. Do not flag photos the user already flagged unless asked.
+in Vireo. Do not flag photos the user already flagged unless asked.
 """
 
 _PHOTO_SUMMARY_KEYS = (
@@ -96,6 +106,18 @@ class VireoError(ToolError):
     """
 
 
+def _is_loopback_http(url):
+    """Whether ``url`` is an ``http://`` URL on a loopback host."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "http":
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in _LOOPBACK_HOSTS
+
+
 class VireoClient:
     """HTTP access to the running Vireo.
 
@@ -112,13 +134,20 @@ class VireoClient:
     def _resolve(self):
         base_url = self._base_url or os.environ.get("VIREO_URL")
         token = self._token or os.environ.get("VIREO_TOKEN")
-        if base_url and token:
+        if base_url:
+            # The override's URL is arbitrary; never ship it the local
+            # runtime.json token. Require an explicit paired token, and
+            # keep the target on loopback so a typo cannot reach the net.
+            if not token:
+                raise VireoError(UNPAIRED_URL_MESSAGE)
+            if not _is_loopback_http(base_url):
+                raise VireoError(NON_LOOPBACK_URL_MESSAGE)
             return base_url.rstrip("/"), token
         runtime = read_runtime_json()
         if not runtime or not runtime.get("port"):
             raise VireoError(NOT_RUNNING_MESSAGE)
         return (
-            base_url.rstrip("/") if base_url else f"http://127.0.0.1:{runtime['port']}",
+            f"http://127.0.0.1:{runtime['port']}",
             token or runtime.get("token") or "",
         )
 
@@ -247,14 +276,6 @@ def keyword_paths(rows):
 
 # -- the server -----------------------------------------------------------------
 
-def _client_name(ctx):
-    """The MCP client's declared name, or ``None`` outside a session."""
-    try:
-        return ctx.session.client_params.client_info.name
-    except Exception:
-        return None
-
-
 def build_server(client: VireoClient):
     """Build the MCP server whose tools call Vireo through ``client``."""
     server = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS)
@@ -275,14 +296,18 @@ def _register_catalog_tools(server, client):
         version = client.get_json("/api/v1/version")
         workspace = client.get_json("/api/workspaces/active", {"include_folders": "0"})
         photos = client.get_json("/api/v1/photos", {"per_page": 1})
-        runtime = read_runtime_json() or {}
-        return {
+        out = {
             "running": True,
             "version": version.get("version"),
-            "db_path": runtime.get("db_path"),
             "active_workspace": _pick(workspace, ("id", "name")),
             "photo_count": photos.get("total"),
         }
+        # ``db_path`` lives in the local runtime.json, written by whichever
+        # instance owns this user; with VIREO_URL in play the target may be
+        # a different instance and the local path would misname its catalog.
+        if not os.environ.get("VIREO_URL"):
+            out["db_path"] = (read_runtime_json() or {}).get("db_path")
+        return out
 
     @server.tool()
     def list_workspaces() -> dict:
@@ -474,26 +499,17 @@ def _register_write_tools(server, client):
     """The catalog writes; each is one Undo step in Vireo."""
 
     @server.tool()
-    def set_flag(
-        ctx: Context,
-        photo_ids: list[int],
-        flag: str,
-        reason: str | None = None,
-        source: str | None = None,
-    ) -> dict:
+    def set_flag(photo_ids: list[int], flag: str) -> dict:
         """Flag photos: ``flagged`` (a pick), ``rejected`` or ``none``.
-        ``reason`` is one short clause shown next to the flag in Vireo
-        ("eye soft at 1:1; DSC_1744 sharper"). ``source`` names who decided
-        and defaults to the connected client's name."""
-        body = {"photo_ids": photo_ids, "flag": flag}
-        source = source or _client_name(ctx)
-        if source:
-            body["source"] = source
-        if reason:
-            body["reason"] = reason
-        data = client.post_json("/api/batch/flag", body)
-        return {"updated": data.get("updated"), "flag": flag,
-                "source": body.get("source"), "reason": body.get("reason")}
+
+        Flag provenance (the reason the flag was set and who set it) will
+        land with #2130; this tool will take ``reason`` and ``source``
+        parameters then. Until the backing route exists, there is nowhere
+        to put those fields and the tool does not pretend otherwise."""
+        data = client.post_json(
+            "/api/batch/flag", {"photo_ids": photo_ids, "flag": flag}
+        )
+        return {"updated": data.get("updated"), "flag": flag}
 
     @server.tool()
     def set_rating(photo_ids: list[int], rating: int) -> dict:
