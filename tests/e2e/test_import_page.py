@@ -5527,7 +5527,7 @@ def test_in_place_mode_hides_selection_and_explains_why(live_server, page):
     """Hiding the controls is only half the requirement.
 
     In-place import runs through do_scan(restrict_files=...), which
-    vireo/scanner.py only honours alongside restrict_dirs, so per-file
+    vireo/scanner/ only honours alongside restrict_dirs, so per-file
     selection is out of scope for this mode. Omitting the checkboxes
     silently would leave the user unable to tell whether selection is
     missing, broken, or gated behind a setting they haven't found -- the

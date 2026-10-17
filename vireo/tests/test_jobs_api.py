@@ -2315,7 +2315,7 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
     col_id = db.add_collection(
         "broken", json.dumps([{"field": "photo_ids", "value": [pid]}])
@@ -2389,7 +2389,7 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
     col_id = db.add_collection(
         "broken_tracked",
@@ -2514,7 +2514,7 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
     # Count generate_thumbnail invocations per photo_id. If the P2 bug
     # existed the repaired photo would be generated twice (once from the
@@ -2594,7 +2594,7 @@ def test_pipeline_repair_respects_excluded_photo_ids(
         raise AssertionError(
             f"extract_metadata must not run for excluded photos: {paths}"
         )
-    monkeypatch.setattr(scanner, "extract_metadata", fail_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fail_extract)
 
     col_id = db.add_collection(
         "with_excluded",
@@ -4828,7 +4828,7 @@ def test_import_readiness_surfaces_and_starts_metadata_repair(
         "error": None,
         "hint": "",
     })
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **kwargs: {
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **kwargs: {
         path: {"EXIF": {"Make": "Repair Camera"}, "File": {"FileType": "JPEG"}}
         for path in paths
     })
@@ -8578,8 +8578,8 @@ def test_import_in_place_reuses_catalog_across_workspaces(
 
     feature_reads = []
     metadata_reads = []
-    real_features = scanner._compute_file_features
-    real_metadata = scanner.extract_metadata
+    real_features = scanner.hashing._compute_file_features
+    real_metadata = scanner.scan_run.extract_metadata
 
     def compute_features(path):
         feature_reads.append(path)
@@ -8589,8 +8589,8 @@ def test_import_in_place_reuses_catalog_across_workspaces(
         metadata_reads.extend(paths)
         return real_metadata(paths, **kwargs)
 
-    monkeypatch.setattr(scanner, "_compute_file_features", compute_features)
-    monkeypatch.setattr(scanner, "extract_metadata", extract_metadata)
+    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", compute_features)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", extract_metadata)
     resp = client.post("/api/jobs/import-in-place", json={
         "sources": [str(source)],
         "after_import": None,
@@ -8901,14 +8901,14 @@ def test_import_in_place_reports_working_copy_phase(app_and_db, tmp_path, monkey
     source.mkdir()
     (source / "IMG_0001.nef").write_bytes(b"fake raw data")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **kwargs: {})
 
     def fake_extract(_source, output, **_kwargs):
         os.makedirs(os.path.dirname(output), exist_ok=True)
         Image.new("RGB", (64, 48), "green").save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     client = app.test_client()
     resp = client.post("/api/jobs/import-in-place", json={
@@ -8942,14 +8942,14 @@ def test_import_in_place_aggregates_working_copy_phase_across_sources(
         (source / f"IMG_{index:04d}.nef").write_bytes(b"fake raw data")
         sources.append(str(source))
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **kwargs: {})
 
     def fake_extract(_source, output, **_kwargs):
         os.makedirs(os.path.dirname(output), exist_ok=True)
         Image.new("RGB", (64, 48), "green").save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     client = app.test_client()
     resp = client.post("/api/jobs/import-in-place", json={
@@ -8985,6 +8985,16 @@ def test_import_in_place_omits_source_that_vanishes_during_scan(
     monkeypatch.setattr(scanner, "scan", fake_scan)
     monkeypatch.setattr(
         scanner,
+        "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.scan_run,
+        "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.working_copies,
         "_extract_working_copies",
         lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
     )
@@ -9038,6 +9048,8 @@ def test_import_in_place_revalidates_scope_after_all_scans(
 
     monkeypatch.setattr(scanner, "scan", fake_scan)
     monkeypatch.setattr(scanner, "_extract_working_copies", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "_extract_working_copies", fake_extract)
+    monkeypatch.setattr(scanner.working_copies, "_extract_working_copies", fake_extract)
 
     client = app.test_client()
     resp = client.post("/api/jobs/import-in-place", json={
@@ -9098,6 +9110,14 @@ def test_import_in_place_rejects_detached_persistent_mount_stub(
     )
     monkeypatch.setattr(
         scanner, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.scan_run, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.working_copies, "_extract_working_copies",
         lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
     )
 
@@ -9166,6 +9186,14 @@ def test_import_in_place_rejects_detached_then_remounted_source(
         scanner, "_extract_working_copies",
         lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
     )
+    monkeypatch.setattr(
+        scanner.scan_run, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.working_copies, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
 
     client = app.test_client()
     resp = client.post("/api/jobs/import-in-place", json={
@@ -9219,6 +9247,14 @@ def test_import_in_place_rejects_replaced_local_source(
     )
     monkeypatch.setattr(
         scanner, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.scan_run, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.working_copies, "_extract_working_copies",
         lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
     )
 
@@ -9286,6 +9322,14 @@ def test_import_in_place_rejects_replaced_source_before_scan(
     monkeypatch.setattr(scanner, "scan", fake_scan)
     monkeypatch.setattr(
         scanner, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.scan_run, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.working_copies, "_extract_working_copies",
         lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
     )
 
@@ -9378,6 +9422,14 @@ def test_import_in_place_rejects_replaced_nested_directory_before_scan(
         scanner, "_extract_working_copies",
         lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
     )
+    monkeypatch.setattr(
+        scanner.scan_run, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        scanner.working_copies, "_extract_working_copies",
+        lambda *args, **kwargs: extractor_calls.append((args, kwargs)),
+    )
 
     client = app.test_client()
     resp = client.post("/api/jobs/import-in-place", json={
@@ -9450,6 +9502,18 @@ def test_import_in_place_snapshot_rejects_replaced_restricted_directory(
             captured_scopes.append(list(scope))
         ),
     )
+    monkeypatch.setattr(
+        scanner.scan_run, "_extract_working_copies",
+        lambda _db, _vireo_dir, *, scope=None, **_kwargs: (
+            captured_scopes.append(list(scope))
+        ),
+    )
+    monkeypatch.setattr(
+        scanner.working_copies, "_extract_working_copies",
+        lambda _db, _vireo_dir, *, scope=None, **_kwargs: (
+            captured_scopes.append(list(scope))
+        ),
+    )
 
     client = app.test_client()
     resp = client.post("/api/jobs/import-in-place", json={
@@ -9487,6 +9551,14 @@ def test_import_in_place_normalizes_deferred_scope_spelling(
     )
     monkeypatch.setattr(
         scanner, "_extract_working_copies",
+        lambda *_args, **kwargs: captured_scopes.append(kwargs["scope"]),
+    )
+    monkeypatch.setattr(
+        scanner.scan_run, "_extract_working_copies",
+        lambda *_args, **kwargs: captured_scopes.append(kwargs["scope"]),
+    )
+    monkeypatch.setattr(
+        scanner.working_copies, "_extract_working_copies",
         lambda *_args, **kwargs: captured_scopes.append(kwargs["scope"]),
     )
 
@@ -11545,6 +11617,14 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
             scanner, "_extract_working_copies",
             lambda db_, vireo_dir, **kw: wc_scopes.append(kw.get("scope")),
         )
+        monkeypatch.setattr(
+            scanner.scan_run, "_extract_working_copies",
+            lambda db_, vireo_dir, **kw: wc_scopes.append(kw.get("scope")),
+        )
+        monkeypatch.setattr(
+            scanner.working_copies, "_extract_working_copies",
+            lambda db_, vireo_dir, **kw: wc_scopes.append(kw.get("scope")),
+        )
         # The body the Jobs page's importRetryBody builds for this row.
         cfg = row["config"]
         resp = client.post("/api/jobs/import-photos", json={
@@ -11683,6 +11763,14 @@ def test_interrupted_import_resume_tags_the_carried_photos(
         # Skip the working-copy pass — it isn't what this test covers.
         monkeypatch.setattr(
             scanner, "_extract_working_copies",
+            lambda db_, vireo_dir, **kw: None,
+        )
+        monkeypatch.setattr(
+            scanner.scan_run, "_extract_working_copies",
+            lambda db_, vireo_dir, **kw: None,
+        )
+        monkeypatch.setattr(
+            scanner.working_copies, "_extract_working_copies",
             lambda db_, vireo_dir, **kw: None,
         )
         cfg = row["config"]

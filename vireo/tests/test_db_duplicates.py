@@ -433,7 +433,7 @@ def test_merge_raises_rating_rejects_losers_and_commits(db, folder):
 @pytest.mark.parametrize("removed", [False, True])
 def test_merge_preserves_embedded_suppression_and_survivor_removals(
         db, folder, hierarchical, removed):
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     fid, _ = folder
     winner = _photo(db, fid, "winner.jpg", "H")
@@ -467,7 +467,7 @@ def test_merge_preserves_embedded_suppression_and_survivor_removals(
 
 def test_merge_carries_manually_readded_loser_tag_through_survivor_removal(
         db, folder):
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     fid, _ = folder
     winner = _photo(db, fid, "winner.jpg", "H")
@@ -496,7 +496,7 @@ def test_merge_carries_manually_readded_loser_tag_through_survivor_removal(
 
 
 def test_merge_embedded_suppression_from_one_loser_does_not_block_another(db, folder):
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     fid, _ = folder
     winner, detached, attached = (

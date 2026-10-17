@@ -248,7 +248,7 @@ def test_reconciliation_does_not_override_a_different_assigned_place(catalog):
 def test_rescanning_and_syncing_renamed_place_keep_confirmed_import_alias(catalog, nested, flat_present):
     from pathlib import Path
 
-    from scanner import _import_keywords_for_photo
+    from scanner.keywords import _import_keywords_for_photo
     from sync import sync_from_xmp
     from xmp import write_sidecar
 
@@ -355,7 +355,7 @@ def test_import_rejects_conflicting_confirmed_locations_before_changing_tags(cat
     from pathlib import Path
 
     from importer import execute_import
-    from scanner import _import_embedded_keywords_for_photo, _import_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo, _import_keywords_for_photo
     from sync import sync_from_xmp
     from xmp import write_sidecar
 
@@ -1831,7 +1831,7 @@ def test_manual_merge_sidecar_sync_keeps_unrelated_tags(catalog, tmp_path):
 @pytest.mark.parametrize('keyword_type', ['general', 'taxonomy', 'location', 'individual', 'genre'])
 def test_manual_merge_same_name_hierarchy_survives_sync_and_rescan(catalog, tmp_path, keyword_type):
     from PIL import Image
-    from scanner import _import_keywords_for_photo
+    from scanner.keywords import _import_keywords_for_photo
     from sync import sync_from_xmp, sync_to_xmp
     from xmp import write_sidecar
 
@@ -1982,7 +1982,7 @@ def test_manual_merge_preserves_source_removal_on_target_only_photo(catalog, tmp
 @pytest.mark.parametrize('remove_before_sync', [False, True])
 def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog, tmp_path, remove_before_sync):
     from PIL import Image
-    from scanner import _import_keywords_for_photo
+    from scanner.keywords import _import_keywords_for_photo
     from sync import sync_from_xmp, sync_to_xmp
     from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
 
@@ -2030,7 +2030,7 @@ def test_manual_merge_rewrites_exact_hierarchy_and_allows_later_removal(catalog,
 @pytest.mark.parametrize('target_present', [False, True])
 def test_merge_flat_cleanup_survives_api_cancellation_and_partial_sync(app_and_db, tmp_path, cancel_add, same_name, target_present):
     from PIL import Image
-    from scanner import _import_keywords_for_photo
+    from scanner.keywords import _import_keywords_for_photo
     from sync import sync_from_xmp, sync_to_xmp
     from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
 
@@ -2145,7 +2145,7 @@ def test_chained_merges_sync_together_when_only_latest_add_is_selected(catalog, 
 @pytest.mark.parametrize('reader', ['scan', 'sync', 'catalog'])
 def test_flat_only_import_resolves_unambiguous_merged_nested_leaf(catalog, tmp_path, monkeypatch, reader):
     from importer import execute_import
-    from scanner import _import_keywords_for_photo
+    from scanner.keywords import _import_keywords_for_photo
     from sync import sync_from_xmp
     from xmp import write_sidecar
 

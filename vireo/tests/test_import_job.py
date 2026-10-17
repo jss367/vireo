@@ -465,13 +465,13 @@ def _count_feature_computations(monkeypatch):
     import scanner
 
     read_paths = []
-    real = scanner._compute_file_features
+    real = scanner.hashing._compute_file_features
 
     def _counting(path_str):
         read_paths.append(path_str)
         return real(path_str)
 
-    monkeypatch.setattr(scanner, "_compute_file_features", _counting)
+    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", _counting)
     return read_paths
 
 
@@ -1374,7 +1374,7 @@ def _stub_extractor(monkeypatch, outcome):
                 f.write(b"jpeg-bytes")
         return ok
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
     return calls
 
 
@@ -1399,6 +1399,8 @@ def test_deferred_working_copy_progress_preserves_import_total(
         )
 
     monkeypatch.setattr(scanner, "_extract_working_copies", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "_extract_working_copies", fake_extract)
+    monkeypatch.setattr(scanner.working_copies, "_extract_working_copies", fake_extract)
     state = _ImportRunState(
         "local",
         folder_counts={"card": {"copied": 5}},
@@ -1977,6 +1979,8 @@ def test_deferred_extraction_skipped_when_already_cancelled(
         calls.append((args, kwargs))
 
     monkeypatch.setattr(scanner, "_extract_working_copies", spy_extract)
+    monkeypatch.setattr(scanner.scan_run, "_extract_working_copies", spy_extract)
+    monkeypatch.setattr(scanner.working_copies, "_extract_working_copies", spy_extract)
 
     card = _make_card(tmp_path, [
         ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
@@ -2023,6 +2027,8 @@ def test_deferred_extraction_threads_cancel_check(tmp_path, monkeypatch):
         captured["source_paths"] = kwargs.get("source_paths")
 
     monkeypatch.setattr(scanner, "_extract_working_copies", spy_extract)
+    monkeypatch.setattr(scanner.scan_run, "_extract_working_copies", spy_extract)
+    monkeypatch.setattr(scanner.working_copies, "_extract_working_copies", spy_extract)
 
     card = _make_card(tmp_path, [
         ("DSC_0001.jpg", datetime(2026, 7, 3, 10, 0, 0), "red"),
@@ -2084,7 +2090,7 @@ def test_wc_extraction_deferred_to_after_last_batch(tmp_path, monkeypatch):
                 f.write(b"jpeg-bytes")
         return ok
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     card = tmp_path / "card"
     card.mkdir()
@@ -2233,6 +2239,8 @@ def test_remote_import_wc_identity_captured_before_transfer(
         return None
 
     monkeypatch.setattr(_scanner, "_extract_working_copies", spy_extract)
+    monkeypatch.setattr(_scanner.scan_run, "_extract_working_copies", spy_extract)
+    monkeypatch.setattr(_scanner.working_copies, "_extract_working_copies", spy_extract)
 
     from import_job import ImportParams, run_import_job
     db_path = str(tmp_path / "test.db")
@@ -2476,7 +2484,7 @@ def test_wc_extraction_falls_back_to_archive_when_card_vanishes(
             f.write(b"jpeg-bytes")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     vireo_dir = tmp_path / "vireo"
     (vireo_dir / "working").mkdir(parents=True)
@@ -2495,6 +2503,12 @@ def test_wc_extraction_falls_back_to_archive_when_card_vanishes(
 
     monkeypatch.setattr(
         "scanner._extract_working_copies", unmount_then_extract,
+    )
+    monkeypatch.setattr(
+        "scanner.scan_run._extract_working_copies", unmount_then_extract,
+    )
+    monkeypatch.setattr(
+        "scanner.working_copies._extract_working_copies", unmount_then_extract,
     )
 
     _db, _ws_id, result = _run_import(tmp_path, import_job.ImportParams(
@@ -2556,7 +2570,7 @@ def test_wc_extraction_ignores_card_override_when_size_no_longer_matches(
             f.write(b"jpeg-bytes")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     vireo_dir = tmp_path / "vireo"
     (vireo_dir / "working").mkdir(parents=True)
@@ -2577,6 +2591,12 @@ def test_wc_extraction_ignores_card_override_when_size_no_longer_matches(
 
     monkeypatch.setattr(
         "scanner._extract_working_copies", rewrite_then_extract,
+    )
+    monkeypatch.setattr(
+        "scanner.scan_run._extract_working_copies", rewrite_then_extract,
+    )
+    monkeypatch.setattr(
+        "scanner.working_copies._extract_working_copies", rewrite_then_extract,
     )
 
     _db, _ws_id, result = _run_import(tmp_path, import_job.ImportParams(
@@ -2639,7 +2659,7 @@ def test_wc_extraction_ignores_card_override_when_mtime_no_longer_matches(
             f.write(b"jpeg-bytes")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     vireo_dir = tmp_path / "vireo"
     (vireo_dir / "working").mkdir(parents=True)
@@ -2664,6 +2684,12 @@ def test_wc_extraction_ignores_card_override_when_mtime_no_longer_matches(
 
     monkeypatch.setattr(
         "scanner._extract_working_copies", rewrite_same_size_diff_mtime,
+    )
+    monkeypatch.setattr(
+        "scanner.scan_run._extract_working_copies", rewrite_same_size_diff_mtime,
+    )
+    monkeypatch.setattr(
+        "scanner.working_copies._extract_working_copies", rewrite_same_size_diff_mtime,
     )
 
     _db, _ws_id, result = _run_import(tmp_path, import_job.ImportParams(
@@ -2728,7 +2754,7 @@ def test_wc_extraction_ignores_companion_override_when_mtime_changes(
             f.write(b"jpeg-bytes")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     vireo_dir = tmp_path / "vireo"
     (vireo_dir / "working").mkdir(parents=True)
@@ -2752,6 +2778,12 @@ def test_wc_extraction_ignores_companion_override_when_mtime_changes(
 
     monkeypatch.setattr(
         "scanner._extract_working_copies", rewrite_companion_same_size,
+    )
+    monkeypatch.setattr(
+        "scanner.scan_run._extract_working_copies", rewrite_companion_same_size,
+    )
+    monkeypatch.setattr(
+        "scanner.working_copies._extract_working_copies", rewrite_companion_same_size,
     )
 
     _db, _ws_id, result = _run_import(tmp_path, import_job.ImportParams(
@@ -2823,7 +2855,7 @@ def test_wc_extraction_retries_from_archive_when_card_read_fails(
             f.write(b"jpeg-bytes")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     vireo_dir = tmp_path / "vireo"
     (vireo_dir / "working").mkdir(parents=True)
@@ -2905,7 +2937,7 @@ def test_reclassified_landed_entry_skips_card_source_override(
             f.write(b"jpeg-bytes")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     # Wrap ``scanner.scan`` so DSC_9101's archive bytes are mutated
     # after ``copy_and_hash_verify`` succeeded but BEFORE scan reads
@@ -4173,6 +4205,8 @@ def test_remote_zero_byte_reimport_invalidates_derived_caches(
 
     monkeypatch.setattr(_scanner, "scan", tracking_scan)
     monkeypatch.setattr(_scanner, "_invalidate_derived_caches", spy_inval)
+    monkeypatch.setattr(_scanner.companions, "_invalidate_derived_caches", spy_inval)
+    monkeypatch.setattr(_scanner.scan_run, "_invalidate_derived_caches", spy_inval)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,
@@ -4263,6 +4297,8 @@ def test_local_zero_byte_reimport_invalidates_derived_caches(
 
     monkeypatch.setattr(_scanner, "scan", tracking_scan)
     monkeypatch.setattr(_scanner, "_invalidate_derived_caches", spy_inval)
+    monkeypatch.setattr(_scanner.companions, "_invalidate_derived_caches", spy_inval)
+    monkeypatch.setattr(_scanner.scan_run, "_invalidate_derived_caches", spy_inval)
 
     result = run_import_job(
         _make_job(), FakeRunner(), db_path, ws_id,
@@ -10405,6 +10441,8 @@ def test_remote_adoption_gets_card_side_wc_override(tmp_path, monkeypatch):
         return None
 
     monkeypatch.setattr(_scanner, "_extract_working_copies", spy_extract)
+    monkeypatch.setattr(_scanner.scan_run, "_extract_working_copies", spy_extract)
+    monkeypatch.setattr(_scanner.working_copies, "_extract_working_copies", spy_extract)
 
     _name, specs, seed, pkw = next(
         s for s in _BEHAVIOR_PARITY_SCENARIOS

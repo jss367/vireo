@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 
 # Stored failure markers expire after this long so transient I/O / environment
 # failures recover even when the source file itself is unchanged. Must match
-# scanner.py's ``_FAILURE_RETRY_AFTER`` window.
+# the ``scanner.working_copy_batch._FAILURE_RETRY_AFTER`` window.
 WORKING_COPY_FAILURE_RETRY_SECONDS = 24 * 60 * 60
 
 # PIL's numeric tag id for EXIF ``Orientation``.

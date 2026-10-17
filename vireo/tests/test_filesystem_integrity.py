@@ -598,7 +598,7 @@ def test_move_photos_carries_uppercase_xmp_sidecar(tmp_path):
 
 
 def _paired_db(tmp_path, raw_meta, jpeg_meta):
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path / "day"))

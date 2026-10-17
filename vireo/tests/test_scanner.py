@@ -417,6 +417,10 @@ def test_scan_filters_excluded_restrict_dirs_from_working_copy_scope(
 
     monkeypatch.setattr(scanner, "_extract_working_copies",
                         fake_extract_working_copies)
+    monkeypatch.setattr(scanner.scan_run, "_extract_working_copies",
+                        fake_extract_working_copies)
+    monkeypatch.setattr(scanner.working_copies, "_extract_working_copies",
+                        fake_extract_working_copies)
 
     db = Database(str(tmp_path / "test.db"))
     scanner.scan(
@@ -604,7 +608,7 @@ def test_scan_cancel_check_aborts_before_metadata_extraction(tmp_path, monkeypat
     def fail_extract_metadata(_paths):
         raise AssertionError("extract_metadata should not run after cancellation")
 
-    monkeypatch.setattr(scanner, "extract_metadata", fail_extract_metadata)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fail_extract_metadata)
 
     with pytest.raises(RuntimeError, match="scan cancelled"):
         scanner.scan(
@@ -639,7 +643,7 @@ def test_scan_reports_metadata_phase_progress(tmp_path, monkeypatch):
     def status_cb(message, **kwargs):
         status_events.append((message, kwargs))
 
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract_metadata)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract_metadata)
 
     scanner.scan(root, db, hooks=ScanHooks(status=status_cb))
 
@@ -1001,7 +1005,7 @@ def test_scan_merges_embedded_keywords_with_sidecar(tmp_path, monkeypatch):
         hierarchical_keywords={"Dyke Marsh"},
     )
     monkeypatch.setattr(
-        scanner, "extract_metadata",
+        scanner.scan_run, "extract_metadata",
         lambda paths, **_kw: {p: {"XMP": {
             "Subject": ["8Landscape", "Sunrise"],
             "HierarchicalSubject": ["8Landscape|Sunrise"],
@@ -1073,21 +1077,21 @@ def test_backfill_embedded_keywords_retries_conflicts_without_restoring_removals
         db.conn.execute("UPDATE photos SET exif_data = ? WHERE id = ?",
                         (json.dumps({"XMP": {"Subject": [name]}}), pid))
     db.conn.commit()
-    original = scanner._import_keyword_lists
+    original = scanner.keywords._import_keyword_lists
 
     def conflict(db, pid, *args):
         if pid == blocked:
             raise ValueError("different linked places")
         return original(db, pid, *args)
 
-    monkeypatch.setattr(scanner, "_import_keyword_lists", conflict)
+    monkeypatch.setattr(scanner.keywords, "_import_keyword_lists", conflict)
     assert scanner.backfill_embedded_keywords(db) == 1
     assert db.get_meta(scanner.EMBEDDED_KEYWORDS_BACKFILL_KEY) != "1"
     assert db.get_photo_keywords(blocked) == []
     db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (handled,))
     db.conn.commit()
 
-    monkeypatch.setattr(scanner, "_import_keyword_lists", original)
+    monkeypatch.setattr(scanner.keywords, "_import_keyword_lists", original)
     assert scanner.backfill_embedded_keywords(db) == 1
     assert {k["name"] for k in db.get_photo_keywords(blocked)} == {"Egret"}
     assert db.get_photo_keywords(handled) == []
@@ -1104,7 +1108,7 @@ def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
     durable record that keeps the next scan from silently re-tagging.
     """
     from db import Database
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
@@ -1140,7 +1144,7 @@ def test_embedded_import_does_not_undo_a_user_removal_on_reimport(tmp_path):
 def test_embedded_import_still_picks_up_newly_added_values(tmp_path):
     """A truly new embedded value lands even when older ones are suppressed."""
     from db import Database
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
@@ -1171,7 +1175,7 @@ def test_embedded_import_distinct_hierarchies_sharing_a_leaf_each_import(tmp_pat
     tag could never be imported.
     """
     from db import Database
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
@@ -1212,7 +1216,7 @@ def test_embedded_import_skips_malformed_hierarchy_without_recording_leaf(tmp_pa
     silently drop a keyword that was never actually imported.
     """
     from db import Database
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
@@ -1242,7 +1246,7 @@ def test_embedded_import_valueerror_does_not_record_offered_keys(tmp_path, monke
     """
     import scanner
     from db import Database
-    from scanner import _import_embedded_keywords_for_photo
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
     folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
@@ -1252,7 +1256,7 @@ def test_embedded_import_valueerror_does_not_record_offered_keys(tmp_path, monke
     def _raise(*args, **kwargs):
         raise ValueError("different linked places")
 
-    monkeypatch.setattr(scanner, "_import_keyword_lists", _raise)
+    monkeypatch.setattr(scanner.keywords, "_import_keyword_lists", _raise)
 
     file_meta = {"XMP": {"Subject": ["Springfield"]}}
     assert _import_embedded_keywords_for_photo(db, pid, file_meta) is False
@@ -1331,7 +1335,7 @@ def test_incremental_scan_skips_unchanged(tmp_path):
 def test_incremental_index_reads_only_requested_photos(tmp_path, requested_count):
     """Lookup cost follows the manifest, including across query batches."""
     from db import Database
-    from scanner import _incremental_photo_index
+    from scanner.scan_run import _incremental_photo_index
 
     with Database(str(tmp_path / "test.db")) as db:
         folder = tmp_path / "archive_%"
@@ -1453,7 +1457,7 @@ def test_incremental_scan_retries_after_hash_failure(tmp_path, monkeypatch):
     Image.new('RGB', (150, 150)).save(path)
 
     # Scan with feature computation failing (simulated unreadable file)
-    monkeypatch.setattr(scanner, '_compute_file_features', lambda p: (None, None))
+    monkeypatch.setattr(scanner.scan_run, '_compute_file_features', lambda p: (None, None))
     scan(root, db, options=ScanOptions(incremental=True))
     photo = _row()
     assert photo['file_hash'] == old_row['file_hash']  # hash untouched
@@ -1625,7 +1629,7 @@ def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
         return fake
 
     # First scan: file reports full EXIF summary.
-    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", make_extract({
         "EXIF": {
             "Make": "Sony", "Model": "ILCE-1", "LensModel": "FE 200-600",
             "FocalLength": 450.0,
@@ -1651,7 +1655,7 @@ def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
     # must go to NULL — not stay at their prior values.
     future = time.time() + 3600
     os.utime(str(photo), (future, future))
-    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", make_extract({
         "EXIF": {},
         "Composite": {},
         "File": {"ImageWidth": 100, "ImageHeight": 100},
@@ -1693,7 +1697,7 @@ def test_incremental_rescan_populates_phase1_summary_for_missing_exif_data(tmp_p
 
     # Seed the row as if a pre-Phase-1 scan with extract_full_metadata=False
     # had run: exif_data='{}', promoted cols NULL, timestamp populated.
-    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", make_extract({
         "EXIF": {
             "DateTimeOriginal": "2024:01:15 10:30:00",
             "Make": "Sony", "Model": "ILCE-1",
@@ -1712,7 +1716,7 @@ def test_incremental_rescan_populates_phase1_summary_for_missing_exif_data(tmp_p
     # Without the summary_needs_extract trigger, the pre-pass would skip
     # this row because timestamp is populated. With it, the row is re-
     # extracted and camera_make gets filled from the re-run metadata.
-    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", make_extract({
         "EXIF": {
             "DateTimeOriginal": "2024:01:15 10:30:00",
             "Make": "Sony", "Model": "ILCE-1",
@@ -1910,7 +1914,7 @@ def test_wildcard_raw_does_not_steal_the_only_jpeg_a_constrained_raw_can_use():
     leave CR3 with no compatible JPEG; the matching must give CR3 the
     constrained match and ARW the other JPEG.
     """
-    from scanner import _pick_compatible_raw_jpeg_pairs
+    from scanner.companions import _pick_compatible_raw_jpeg_pairs
 
     def row(filename, extension, camera_make=None):
         return {
@@ -1985,7 +1989,7 @@ def test_companion_metadata_fills_each_missing_coordinate_and_dimension(
     tmp_path, primary_values, expected,
 ):
     from db import Database
-    from scanner import _fill_primary_metadata_gaps, _read_metadata_transfer_rows
+    from scanner.companions import _fill_primary_metadata_gaps, _read_metadata_transfer_rows
 
     with Database(str(tmp_path / "catalog.db")) as db:
         folder_id = db.add_folder(str(tmp_path), name="photos")
@@ -2040,8 +2044,8 @@ class _PairedCatalog:
         # companion file without a row of its own must never take.
         self.merges = []
         self.row_merges = []
-        real_merge = scanner._merge_companion_into_primary
-        real_attach = scanner._ScanRun._attach_companion
+        real_merge = scanner.companions._merge_companion_into_primary
+        real_attach = scanner.scan_run._ScanRun._attach_companion
 
         def merge(db, primary, companion, *args, **kwargs):
             self.merges.append(companion["filename"])
@@ -2054,10 +2058,10 @@ class _PairedCatalog:
                 self.merges.append(item.image_path.name)
             return attached
 
-        monkeypatch.setattr(scanner, "_merge_companion_into_primary", merge)
-        monkeypatch.setattr(scanner._ScanRun, "_attach_companion", attach)
+        monkeypatch.setattr(scanner.companions, "_merge_companion_into_primary", merge)
+        monkeypatch.setattr(scanner.scan_run._ScanRun, "_attach_companion", attach)
         self.extracted = []
-        real_extract = scanner.extract_metadata
+        real_extract = scanner.scan_run.extract_metadata
         # The dummy RAW is 200 null bytes and the JPEG has no EXIF, so a
         # real exiftool run returns only File-group tags. On runners that
         # ship no exiftool at all (Windows CI), the result is empty: the
@@ -2085,7 +2089,7 @@ class _PairedCatalog:
                 result.setdefault(path, default_payload)
             return result
 
-        monkeypatch.setattr(scanner, "extract_metadata", extract)
+        monkeypatch.setattr(scanner.scan_run, "extract_metadata", extract)
         self.callbacks = []
         self.max_rows = 0
         self.scan()
@@ -2264,7 +2268,7 @@ def test_recovered_changed_companion_synchronizes_before_no_churn(
                 result[path]["XMP"] = {"Subject": ["Recovered keyword"]}
         return result
 
-    monkeypatch.setattr(scanner, "extract_metadata", metadata)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", metadata)
     cat = _PairedCatalog(tmp_path, monkeypatch)
     cat.seed_raw_caches()
     Image.new("RGB", (240, 120), color="blue").save(cat.jpeg)
@@ -2300,7 +2304,7 @@ def test_deferred_companion_fill_does_not_follow_a_reused_photo_id(
     import scanner
 
     cat = _PairedCatalog(tmp_path, monkeypatch)
-    real_refill = scanner._ScanRun._refill_owners_from_companions
+    real_refill = scanner.scan_run._ScanRun._refill_owners_from_companions
 
     def replace_owner_then_refill(run):
         assert cat.raw_id in run._pending_companion_fills
@@ -2328,7 +2332,7 @@ def test_deferred_companion_fill_does_not_follow_a_reused_photo_id(
         real_refill(run)
 
     monkeypatch.setattr(
-        scanner._ScanRun, "_refill_owners_from_companions",
+        scanner.scan_run._ScanRun, "_refill_owners_from_companions",
         replace_owner_then_refill,
     )
     cat.scan(incremental=False)
@@ -2354,7 +2358,7 @@ def test_pending_companion_fill_is_revalidated_before_owner_metadata_write(
             result[path] = {"EXIF": exif}
         return result
 
-    monkeypatch.setattr(scanner, "extract_metadata", metadata)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", metadata)
     cat = _PairedCatalog(tmp_path, monkeypatch)
     # JPEG precedes NEF, so the pending fill is consumed by the RAW write.
     cat.raw.rename(cat.img_dir / "IMG_001.nef")
@@ -2363,7 +2367,7 @@ def test_pending_companion_fill_is_revalidated_before_owner_metadata_write(
         (cat.raw_id,),
     )
     cat.db.conn.commit()
-    real_write = scanner._ScanRun._write_photo_columns
+    real_write = scanner.scan_run._ScanRun._write_photo_columns
     replaced = []
 
     def replace_owner_then_write(run, photo_id, item):
@@ -2379,7 +2383,7 @@ def test_pending_companion_fill_is_revalidated_before_owner_metadata_write(
             replaced.append(photo_id)
         real_write(run, photo_id, item)
 
-    monkeypatch.setattr(scanner._ScanRun, "_write_photo_columns", replace_owner_then_write)
+    monkeypatch.setattr(scanner.scan_run._ScanRun, "_write_photo_columns", replace_owner_then_write)
     cat.scan(incremental=False)
     assert replaced == [cat.raw_id]
     assert cat.db.conn.execute(
@@ -2399,14 +2403,14 @@ def test_recovered_companion_waits_for_a_readable_scan_before_synchronizing(
     cat.db.conn.commit()
     list(import_dedup.recover_companion_identities(cat.db))
     recovered = [tuple(row) for row in cat.identity()]
-    real_features = scanner._compute_file_features
+    real_features = scanner.hashing._compute_file_features
 
     def unreadable_jpeg(path):
         phash, file_hash = real_features(path)
         return (phash, None) if path.endswith(".jpg") else (phash, file_hash)
 
     with monkeypatch.context() as patch:
-        patch.setattr(scanner, "_compute_file_features", unreadable_jpeg)
+        patch.setattr(scanner.scan_run, "_compute_file_features", unreadable_jpeg)
         cat.scan()
     assert cat.merges == []
     assert [tuple(row) for row in cat.identity()] == recovered
@@ -2428,13 +2432,13 @@ def test_unreadable_companion_keeps_its_stored_identity(tmp_path, monkeypatch):
     before = [tuple(r) for r in cat.identity()]
     future = time.time() + 60
     os.utime(cat.jpeg, (future, future))
-    real_features = scanner._compute_file_features
+    real_features = scanner.hashing._compute_file_features
 
     def unreadable_jpeg(path_str):
         phash, file_hash = real_features(path_str)
         return (phash, None) if path_str.endswith(".jpg") else (phash, file_hash)
 
-    monkeypatch.setattr(scanner, "_compute_file_features", unreadable_jpeg)
+    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", unreadable_jpeg)
     counts = cat.scan()
 
     assert cat.merges == []
@@ -2545,7 +2549,7 @@ def test_raw_reread_keeps_metadata_only_its_companion_carries(
                        "File": {"ImageWidth": 200, "ImageHeight": 100}}
         return meta
 
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
     cat = _PairedCatalog(tmp_path, monkeypatch)
     lens = "SELECT lens FROM photos WHERE id = ?"
     assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
@@ -2580,7 +2584,7 @@ def test_raw_reread_companion_refill_survives_interrupted_scan(
                        "File": {"ImageWidth": 200, "ImageHeight": 100}}
         return meta
 
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
     cat = _PairedCatalog(tmp_path, monkeypatch)
     lens = "SELECT lens FROM photos WHERE id = ?"
     assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
@@ -2594,13 +2598,13 @@ def test_raw_reread_companion_refill_survives_interrupted_scan(
     class _Boom(RuntimeError):
         pass
 
-    original_refill = scanner._ScanRun._refill_owners_from_companions
+    original_refill = scanner.scan_run._ScanRun._refill_owners_from_companions
 
     def _boom(self):
         raise _Boom("simulated interruption after RAW's columns were cleared")
 
     monkeypatch.setattr(
-        scanner._ScanRun, "_refill_owners_from_companions", _boom,
+        scanner.scan_run._ScanRun, "_refill_owners_from_companions", _boom,
     )
     with pytest.raises(_Boom):
         cat.scan(incremental=incremental)
@@ -2610,7 +2614,7 @@ def test_raw_reread_companion_refill_survives_interrupted_scan(
     # interrupted scan) or will be filled by the companion re-read the
     # file_mtime=NULL marker forces here.
     monkeypatch.setattr(
-        scanner._ScanRun, "_refill_owners_from_companions", original_refill,
+        scanner.scan_run._ScanRun, "_refill_owners_from_companions", original_refill,
     )
     cat.scan(incremental=incremental)
     assert cat.merges == []
@@ -2637,7 +2641,7 @@ def test_rescan_keeps_retry_marker_when_companion_metadata_is_missing(
                        "File": {"ImageWidth": 200, "ImageHeight": 100}}
         return meta
 
-    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", jpeg_populated)
     cat = _PairedCatalog(tmp_path, monkeypatch)
     lens = "SELECT lens FROM photos WHERE id = ?"
     assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
@@ -2655,7 +2659,7 @@ def test_rescan_keeps_retry_marker_when_companion_metadata_is_missing(
             for p in paths if not p.endswith(".jpg")
         }
 
-    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", jpeg_omitted)
     cat.scan(incremental=True)
     assert cat.merges == []
     # The companion's file_mtime must stay NULL so the next incremental
@@ -2664,7 +2668,7 @@ def test_rescan_keeps_retry_marker_when_companion_metadata_is_missing(
 
     # Restore the companion's metadata and rescan. The retry marker drove
     # a re-read, so the gap fill now runs and ``lens`` is back.
-    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", jpeg_populated)
     cat.scan(incremental=True)
     assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
 
@@ -2690,7 +2694,7 @@ def test_rescan_records_companion_mtime_when_owner_is_unchanged(
             for p in paths if not p.endswith(".jpg")
         }
 
-    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", jpeg_omitted)
     cat.scan(incremental=True)
     assert cat.merges == []
     assert cat.identity()[0]["file_mtime"] == cat.jpeg.stat().st_mtime
@@ -2719,7 +2723,7 @@ def test_consecutive_rescans_preserve_retry_marker_when_metadata_missing(
                        "File": {"ImageWidth": 200, "ImageHeight": 100}}
         return meta
 
-    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", jpeg_populated)
     cat = _PairedCatalog(tmp_path, monkeypatch)
     lens = "SELECT lens FROM photos WHERE id = ?"
     assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
@@ -2737,7 +2741,7 @@ def test_consecutive_rescans_preserve_retry_marker_when_metadata_missing(
             for p in paths if not p.endswith(".jpg")
         }
 
-    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", jpeg_omitted)
     cat.scan(incremental=True)
     assert cat.identity()[0]["file_mtime"] is None  # marker set
 
@@ -2750,7 +2754,7 @@ def test_consecutive_rescans_preserve_retry_marker_when_metadata_missing(
 
     # Scan 3: metadata restored. The NULL marker drove a re-read and the
     # gap fill now runs; ``lens`` recovers without a full rescan.
-    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", jpeg_populated)
     cat.scan(incremental=True)
     assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
     assert cat.identity()[0]["file_mtime"] == cat.jpeg.stat().st_mtime
@@ -2777,7 +2781,7 @@ def test_full_rescan_preserves_retry_marker_when_metadata_missing(
                        "File": {"ImageWidth": 200, "ImageHeight": 100}}
         return meta
 
-    monkeypatch.setattr(scanner, "extract_metadata", jpeg_populated)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", jpeg_populated)
     cat = _PairedCatalog(tmp_path, monkeypatch)
     lens = "SELECT lens FROM photos WHERE id = ?"
     assert cat.db.conn.execute(lens, (cat.raw_id,)).fetchone()[0] == "RF 100-500mm"
@@ -2792,7 +2796,7 @@ def test_full_rescan_preserves_retry_marker_when_metadata_missing(
             for p in paths if not p.endswith(".jpg")
         }
 
-    monkeypatch.setattr(scanner, "extract_metadata", jpeg_omitted)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", jpeg_omitted)
     cat.scan(incremental=False)
     assert cat.merges == []
     assert cat.identity()[0]["file_mtime"] is None  # marker set, no stat-skip
@@ -3038,7 +3042,7 @@ def test_stat_unchanged_companion_settle_discards_stale_credit_after_owner_mutat
         hierarchical_keywords=set(),
     )
 
-    real_settle = scanner._ScanRun._settle_stat_unchanged_companions
+    real_settle = scanner.scan_run._ScanRun._settle_stat_unchanged_companions
     races = {"ran": False}
 
     def race_overlay(self, files_to_process):
@@ -3065,7 +3069,7 @@ def test_stat_unchanged_companion_settle_discards_stale_credit_after_owner_mutat
         return real_settle(self, files_to_process)
 
     monkeypatch.setattr(
-        scanner._ScanRun, "_settle_stat_unchanged_companions",
+        scanner.scan_run._ScanRun, "_settle_stat_unchanged_companions",
         race_overlay,
     )
     cat.merges.clear()
@@ -3143,16 +3147,16 @@ def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
                 evidence["blocked"] = True
 
         if boundary == "stat-settle":
-            original = scanner._ScanRun._settle_stat_unchanged_companions
+            original = scanner.scan_run._ScanRun._settle_stat_unchanged_companions
 
             def settle(run, files):
                 assert run.stat_unchanged_companions
                 replace_owner()
                 return original(run, files)
 
-            monkeypatch.setattr(scanner._ScanRun, "_settle_stat_unchanged_companions", settle)
+            monkeypatch.setattr(scanner.scan_run._ScanRun, "_settle_stat_unchanged_companions", settle)
         elif boundary in {"before-sidecar", "after-sidecar"}:
-            original = scanner._ScanRun._import_companion_sidecar
+            original = scanner.scan_run._ScanRun._import_companion_sidecar
 
             def sidecar(run, path, known):
                 if boundary == "before-sidecar":
@@ -3162,7 +3166,7 @@ def test_companion_keywords_and_credit_keep_the_same_owner_through_commits(
                     replace_owner()
                 return result
 
-            monkeypatch.setattr(scanner._ScanRun, "_import_companion_sidecar", sidecar)
+            monkeypatch.setattr(scanner.scan_run._ScanRun, "_import_companion_sidecar", sidecar)
         else:
             original = cat.db.add_keyword
 
@@ -3214,8 +3218,8 @@ def test_jpeg_first_shared_sidecar_survives_later_raw_disappearance(
     cat.db.conn.commit()
     future = time.time() + 60
     os.utime(raw, (future, future))
-    original_triage = scanner._ScanRun._triage_files
-    original_index = scanner._ScanRun._index_file
+    original_triage = scanner.scan_run._ScanRun._triage_files
+    original_index = scanner.scan_run._ScanRun._index_file
 
     def sidecar_after_triage(run):
         files = original_triage(run)
@@ -3232,8 +3236,8 @@ def test_jpeg_first_shared_sidecar_survives_later_raw_disappearance(
             raw.unlink()
         return original_index(run, path, *args)
 
-    monkeypatch.setattr(scanner._ScanRun, "_triage_files", sidecar_after_triage)
-    monkeypatch.setattr(scanner._ScanRun, "_index_file", vanish_when_raw_indexes)
+    monkeypatch.setattr(scanner.scan_run._ScanRun, "_triage_files", sidecar_after_triage)
+    monkeypatch.setattr(scanner.scan_run._ScanRun, "_index_file", vanish_when_raw_indexes)
     counts = cat.scan(incremental=incremental)
 
     assert counts["vanished"] == 1
@@ -3305,7 +3309,7 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     """Pairing raw+JPEG preserves a recipe stored on the deleted companion."""
     from db import Database
     from image_edits import recipe_to_json
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -3366,7 +3370,8 @@ def test_pairing_moves_embedded_keyword_offered_onto_the_survivor(tmp_path):
     re-tag what the user had removed.
     """
     from db import Database
-    from scanner import _import_embedded_keywords_for_photo, _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -3405,7 +3410,8 @@ def test_pairing_moves_embedded_keyword_offered_onto_the_survivor(tmp_path):
 @pytest.mark.parametrize("hierarchical", [False, True])
 def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_raw, hierarchical):
     from db import Database
-    from scanner import _import_embedded_keywords_for_photo, _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
+    from scanner.keywords import _import_embedded_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path / "photos"))
@@ -3432,7 +3438,7 @@ def test_pairing_preserves_embedded_tags_and_raw_removals(tmp_path, removed_on_r
 def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
     """A newly paired camera JPEG must replace a pre-pairing RAW rendition."""
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -3468,7 +3474,7 @@ def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
     """
     from db import Database
     from local_masks import edit_masks_dir, snapshot_path
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -3615,7 +3621,7 @@ def test_pairing_collapses_duplicate_detections_across_raw_jpeg(tmp_path):
         f.write(b"\x00" * 200)
 
     db = Database(str(tmp_path / "test.db"))
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     fid = db.add_folder(str(img_dir), name="photos")
     jpeg_id = db.add_photo(folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
@@ -3663,7 +3669,7 @@ def test_pairing_collapses_duplicate_detections_across_raw_jpeg(tmp_path):
 def test_pairing_transfers_inat_submissions(tmp_path):
     """Pairing raw+JPEG transfers iNat submissions from companion to primary."""
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -3700,7 +3706,7 @@ def test_pairing_transfers_inat_submissions(tmp_path):
 def test_pairing_deduplicates_inat_submissions(tmp_path):
     """When both raw and JPEG have iNat submissions for the same observation, pairing doesn't crash."""
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -3763,7 +3769,7 @@ def test_extract_dimensions_raw_skips_exif_thumbnail_size():
     """For RAW files, ExifImageWidth/Height is the embedded JPEG thumbnail (e.g. 160x120),
     not the actual image. _extract_dimensions should return the real dimensions from
     File:ImageWidth/Height instead."""
-    from scanner import _extract_dimensions
+    from scanner.exif_fields import _extract_dimensions
 
     # Simulate ExifTool output for a Nikon NEF file:
     # EXIF:ExifImageWidth/Height = 160x120 (embedded thumbnail)
@@ -3787,7 +3793,7 @@ def test_extract_dimensions_raw_skips_exif_thumbnail_size():
 
 def test_extract_dimensions_jpeg_still_uses_exif():
     """For JPEG files, ExifImageWidth/Height should still be the first priority."""
-    from scanner import _extract_dimensions
+    from scanner.exif_fields import _extract_dimensions
 
     exif_group = {
         "ExifImageWidth": 6000,
@@ -3806,7 +3812,7 @@ def test_extract_dimensions_jpeg_still_uses_exif():
 
 def test_extract_dimensions_raw_falls_back_to_exif_imagewidth():
     """For RAW files without File dimensions, EXIF:ImageWidth (non-ExifImageWidth) is used."""
-    from scanner import _extract_dimensions
+    from scanner.exif_fields import _extract_dimensions
 
     exif_group = {
         "ExifImageWidth": 160,
@@ -3825,7 +3831,7 @@ def test_extract_dimensions_raw_falls_back_to_exif_imagewidth():
 
 def test_extract_dimensions_all_raw_extensions():
     """All supported RAW extensions should skip ExifImageWidth/Height."""
-    from scanner import _extract_dimensions
+    from scanner.exif_fields import _extract_dimensions
 
     raw_exts = [".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"]
 
@@ -3843,7 +3849,7 @@ def test_pair_raw_jpeg_transfers_gps_and_metadata(tmp_path):
     import json
 
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -3879,7 +3885,7 @@ def test_pair_raw_jpeg_transfers_promoted_exif_summary_columns(tmp_path):
     ``shutter_speed``/``iso`` from the JPEG companion so the RAW row still
     populates the universal-filter fields after the JPEG row is deleted."""
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -3915,7 +3921,7 @@ def test_pair_raw_jpeg_preserves_primary_exif_summary_columns(tmp_path):
     """A RAW with its own EXIF summary values (e.g. from its own ExifTool
     extract) must not be overwritten by a JPEG companion's values."""
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -3951,7 +3957,7 @@ def test_pair_raw_jpeg_preserves_primary_exif_summary_columns(tmp_path):
 def test_pair_raw_jpeg_keeps_primary_gps_when_present(tmp_path):
     """If RAW already has GPS, companion GPS is not overwritten."""
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -3978,7 +3984,7 @@ def test_pair_raw_jpeg_keeps_primary_gps_when_present(tmp_path):
 def test_pair_raw_jpeg_transfers_zero_gps_from_companion(tmp_path):
     """A companion with latitude=0.0 (equator) should be transferred to a RAW that has no GPS."""
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -4004,7 +4010,7 @@ def test_pair_raw_jpeg_transfers_zero_gps_from_companion(tmp_path):
 def test_pair_raw_jpeg_does_not_overwrite_zero_primary_gps(tmp_path):
     """A RAW with latitude=0.0 (equator) should NOT be overwritten by companion GPS."""
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -4051,7 +4057,7 @@ def test_scan_extracts_working_copy_for_raw(tmp_path, monkeypatch):
     nef_file.write_bytes(b"fake raw data")
 
     # Mock ExifTool to return empty metadata
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **_kwargs: {})
 
     # Mock extract_working_copy to actually create a file (simulates success)
     def fake_extract(source, output, max_size=4096, quality=92, **_kwargs):
@@ -4059,7 +4065,7 @@ def test_scan_extracts_working_copy_for_raw(tmp_path, monkeypatch):
         Image.new("RGB", (4096, 2731)).save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -4082,14 +4088,14 @@ def test_scan_reports_working_copy_as_counted_subphase(tmp_path, monkeypatch):
     photo_dir = tmp_path / "photos"
     photo_dir.mkdir()
     (photo_dir / "IMG_001.nef").write_bytes(b"fake raw data")
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **_kwargs: {})
 
     def fake_extract(_source, output, **_kwargs):
         os.makedirs(os.path.dirname(output), exist_ok=True)
         Image.new("RGB", (4096, 2731)).save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
     statuses = []
 
     def status_cb(message, **phase):
@@ -4143,7 +4149,7 @@ def test_working_copy_scope_supports_more_than_sqlite_expression_limit(
         Image.new("RGB", (64, 48)).save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
     scope = [
         (str(tmp_path / f"unused-{index}"), "exact")
         for index in range(1_100)
@@ -4199,7 +4205,16 @@ def test_working_copy_extractor_rechecks_excluded_path_before_read(
         scanner, "is_excluded_scan_path", source_becomes_excluded,
     )
     monkeypatch.setattr(
-        scanner, "extract_working_copy",
+        scanner.scan_run, "is_excluded_scan_path", source_becomes_excluded,
+    )
+    monkeypatch.setattr(
+        scanner.working_copies, "is_excluded_scan_path", source_becomes_excluded,
+    )
+    monkeypatch.setattr(
+        scanner.working_copy_batch, "is_excluded_scan_path", source_becomes_excluded,
+    )
+    monkeypatch.setattr(
+        scanner.working_copy_batch, "extract_working_copy",
         lambda *args, **kwargs: extract_calls.append(args) or True,
     )
 
@@ -4226,7 +4241,7 @@ def test_phase_status_callback_internal_typeerror_is_not_retried():
         raise TypeError("callback implementation failed")
 
     with pytest.raises(TypeError, match="callback implementation failed"):
-        scanner._call_status_callback(
+        scanner.status._call_status_callback(
             failing_callback,
             "Generating",
             phase_current=0,
@@ -4245,8 +4260,8 @@ def test_phase_status_callback_detects_legacy_one_argument_shape():
     def legacy_callback(message):
         calls.append(message)
 
-    assert scanner._status_callback_supports_phase(legacy_callback) is False
-    scanner._call_status_callback(
+    assert scanner.status._status_callback_supports_phase(legacy_callback) is False
+    scanner.status._call_status_callback(
         legacy_callback,
         "Generating",
         phase_current=0,
@@ -4276,7 +4291,7 @@ def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
     jpg_file = photo_dir / "IMG_001.jpg"
     Image.new("RGB", (3000, 2000)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **_kwargs: {})
 
     # Mock extract_working_copy -- should never be called for JPEGs
     calls = []
@@ -4285,7 +4300,7 @@ def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
         calls.append(source)
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -4319,7 +4334,7 @@ def test_scan_uses_raw_primary_for_raw_working_copy(tmp_path, monkeypatch):
     Image.new("RGB", (6000, 4000), color=(255, 0, 0)).save(str(jpg_file), "JPEG")
 
     # Mock ExifTool
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **_kwargs: {})
 
     # Track which source file extract_working_copy is called with
     sources_used = []
@@ -4330,7 +4345,7 @@ def test_scan_uses_raw_primary_for_raw_working_copy(tmp_path, monkeypatch):
         Image.new("RGB", (4096, 2731)).save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -4376,7 +4391,7 @@ def test_scan_falls_back_to_companion_when_raw_extraction_fails(
     jpg_file = photo_dir / "IMG_002.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **_kwargs: {})
 
     sources_used = []
 
@@ -4390,7 +4405,7 @@ def test_scan_falls_back_to_companion_when_raw_extraction_fails(
         Image.new("RGB", (4096, 2731)).save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -4445,7 +4460,7 @@ def test_scan_falls_back_when_raw_working_copy_short_edge_is_smaller(
     jpg_file = photo_dir / "IMG_004.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **_kwargs: {})
 
     sources_used = []
 
@@ -4460,7 +4475,7 @@ def test_scan_falls_back_when_raw_working_copy_short_edge_is_smaller(
             Image.new("RGB", (4096, 2731)).save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -4499,7 +4514,7 @@ def test_scan_accepts_near_full_raw_working_copy(tmp_path, monkeypatch):
     jpg_file = photo_dir / "IMG_006.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **_kwargs: {})
 
     sources_used = []
 
@@ -4511,7 +4526,7 @@ def test_scan_accepts_near_full_raw_working_copy(tmp_path, monkeypatch):
         Image.new("RGB", (4096, 2705)).save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -4575,7 +4590,7 @@ def test_scan_accepts_portrait_raw_working_copy_with_exif_orientation(
                       checkpoint=None):
         return {str(p): portrait_meta for p in paths}
 
-    monkeypatch.setattr(scanner, "extract_metadata", fake_metadata)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_metadata)
 
     sources_used = []
 
@@ -4588,7 +4603,7 @@ def test_scan_accepts_portrait_raw_working_copy_with_exif_orientation(
         Image.new("RGB", (2731, 4096)).save(output, "JPEG")
         return True
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -4637,14 +4652,14 @@ def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
     jpg_file = photo_dir / "IMG_003.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 0, 255)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", lambda paths, **_kwargs: {})
 
     def fake_extract(source, output, max_size=4096, quality=92, **_kwargs):
         # Both RAW and companion fail (e.g. RAW unsupported + companion
         # write-locked or corrupt).
         return False
 
-    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", fake_extract)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -4666,7 +4681,7 @@ def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
 
 def test_extract_timestamp_subsec():
     """_extract_timestamp includes sub-second precision from SubSecTimeOriginal."""
-    from scanner import _extract_timestamp
+    from scanner.exif_fields import _extract_timestamp
     exif = {"DateTimeOriginal": "2024:06:15 14:30:00", "SubSecTimeOriginal": "123"}
     ts = _extract_timestamp(exif)
     assert ts == "2024-06-15T14:30:00.123000"
@@ -4674,7 +4689,7 @@ def test_extract_timestamp_subsec():
 
 def test_extract_timestamp_no_subsec():
     """_extract_timestamp works without SubSecTimeOriginal."""
-    from scanner import _extract_timestamp
+    from scanner.exif_fields import _extract_timestamp
     exif = {"DateTimeOriginal": "2024:06:15 14:30:00"}
     ts = _extract_timestamp(exif)
     assert ts == "2024-06-15T14:30:00"
@@ -4682,7 +4697,7 @@ def test_extract_timestamp_no_subsec():
 
 def test_extract_timestamp_garbage_subsec():
     """_extract_timestamp ignores non-numeric SubSecTimeOriginal."""
-    from scanner import _extract_timestamp
+    from scanner.exif_fields import _extract_timestamp
     exif = {"DateTimeOriginal": "2024:06:15 14:30:00", "SubSecTimeOriginal": "abc"}
     ts = _extract_timestamp(exif)
     assert ts == "2024-06-15T14:30:00"
@@ -4690,7 +4705,7 @@ def test_extract_timestamp_garbage_subsec():
 
 def test_extract_timestamp_subsec_fallback():
     """_extract_timestamp falls back to SubSecTime when SubSecTimeOriginal is absent."""
-    from scanner import _extract_timestamp
+    from scanner.exif_fields import _extract_timestamp
     exif = {"DateTimeOriginal": "2024:06:15 14:30:00", "SubSecTime": "50"}
     ts = _extract_timestamp(exif)
     assert ts == "2024-06-15T14:30:00.500000"
@@ -4698,7 +4713,7 @@ def test_extract_timestamp_subsec_fallback():
 
 def test_extract_timestamp_subsec_long():
     """_extract_timestamp truncates sub-second values longer than 6 digits."""
-    from scanner import _extract_timestamp
+    from scanner.exif_fields import _extract_timestamp
     exif = {"DateTimeOriginal": "2024:06:15 14:30:00", "SubSecTimeOriginal": "12345678"}
     ts = _extract_timestamp(exif)
     assert ts == "2024-06-15T14:30:00.123456"
@@ -4729,12 +4744,12 @@ def _setup_scanned_photo(tmp_path, pil_size=(640, 480)):
     import metadata
     original = metadata.extract_metadata
     metadata.extract_metadata = fake_extract
-    scanner.extract_metadata = fake_extract
+    scanner.scan_run.extract_metadata = fake_extract
     try:
         scanner.scan(root, db)
     finally:
         metadata.extract_metadata = original
-        scanner.extract_metadata = original
+        scanner.scan_run.extract_metadata = original
 
     row = db.conn.execute(
         "SELECT id FROM photos WHERE filename='photo.jpg'"
@@ -4760,7 +4775,7 @@ def test_incremental_rescan_reextracts_when_timestamp_null(tmp_path, monkeypatch
                      checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
     scanner.scan(root, db, options=ScanOptions(incremental=True))
 
@@ -4793,7 +4808,7 @@ def test_incremental_rescan_reextracts_when_raw_dims_suspect(tmp_path, monkeypat
                      checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
     scanner.scan(root, db, options=ScanOptions(incremental=True))
 
@@ -4832,7 +4847,7 @@ def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch)
         called_with.append(list(paths))
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
     scanner.scan(root, db, options=ScanOptions(incremental=True))
 
@@ -4885,7 +4900,7 @@ def test_restricted_scan_reports_discovery_progress(tmp_path, monkeypatch):
             yields[0] += 1
             yield entry
 
-    monkeypatch.setattr(scanner, "safe_iter_dir", spy_iter_dir)
+    monkeypatch.setattr(scanner.scan_run, "safe_iter_dir", spy_iter_dir)
 
     db = Database(str(tmp_path / "test.db"))
     statuses = []  # list of (msg, yields_when_emitted)
@@ -4940,7 +4955,7 @@ def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):
                      checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
     # Seed the DB with only the existing file, then force broken state.
     scanner.scan(root, db)
@@ -4979,7 +4994,7 @@ def test_update_only_scan_cannot_admit_restricted_file(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "test.db"))
 
     monkeypatch.setattr(
-        scanner,
+        scanner.scan_run,
         "extract_metadata",
         lambda paths, restricted_tags=None, progress_callback=None,
         checkpoint=None: {},
@@ -5022,7 +5037,7 @@ def test_restricted_scan_links_only_exact_target_folder(tmp_path, monkeypatch):
     db.set_active_workspace(active_ws)
 
     monkeypatch.setattr(
-        scanner,
+        scanner.scan_run,
         "extract_metadata",
         lambda paths, restricted_tags=None, progress_callback=None,
         checkpoint=None: {},
@@ -5076,7 +5091,7 @@ def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch)
         called_with.append(list(paths))
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
     scanner.scan(root, db, options=ScanOptions(incremental=True))
 
@@ -5090,7 +5105,7 @@ def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch)
 
 def test_resolve_worker_count_tiny_batch_is_sequential():
     """Batches below 8 files always use 1 worker."""
-    from scanner import _resolve_worker_count
+    from scanner.hashing import _resolve_worker_count
     assert _resolve_worker_count(list(range(7))) == 1
 
 
@@ -5100,9 +5115,9 @@ def test_resolve_worker_count_capped_by_batch_size(monkeypatch):
     import scanner
 
     monkeypatch.setattr(cfg, "get", lambda _k: 0)
-    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 32)
+    monkeypatch.setattr(scanner.hashing.os, "cpu_count", lambda: 32)
     # 10 files on a 32-core box should top out at 10 workers.
-    assert scanner._resolve_worker_count(list(range(10))) == 10
+    assert scanner.hashing._resolve_worker_count(list(range(10))) == 10
 
 
 def test_resolve_worker_count_clamps_to_windows_limit(monkeypatch):
@@ -5111,11 +5126,11 @@ def test_resolve_worker_count_clamps_to_windows_limit(monkeypatch):
     import scanner
 
     monkeypatch.setattr(cfg, "get", lambda _k: 0)
-    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 128)
-    monkeypatch.setattr(scanner.sys, "platform", "win32")
+    monkeypatch.setattr(scanner.hashing.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(scanner.hashing.sys, "platform", "win32")
     # Batch is large enough that it wouldn't otherwise clamp the count.
-    workers = scanner._resolve_worker_count(list(range(200)))
-    assert workers == scanner._WINDOWS_MAX_WORKERS == 61
+    workers = scanner.hashing._resolve_worker_count(list(range(200)))
+    assert workers == scanner.hashing._WINDOWS_MAX_WORKERS == 61
 
 
 def test_resolve_worker_count_clamps_configured_value_on_windows(monkeypatch):
@@ -5124,9 +5139,9 @@ def test_resolve_worker_count_clamps_configured_value_on_windows(monkeypatch):
     import scanner
 
     monkeypatch.setattr(cfg, "get", lambda _k: 96)
-    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 128)
-    monkeypatch.setattr(scanner.sys, "platform", "win32")
-    assert scanner._resolve_worker_count(list(range(200))) == 61
+    monkeypatch.setattr(scanner.hashing.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(scanner.hashing.sys, "platform", "win32")
+    assert scanner.hashing._resolve_worker_count(list(range(200))) == 61
 
 
 def test_resolve_worker_count_no_windows_cap_on_posix(monkeypatch):
@@ -5135,9 +5150,9 @@ def test_resolve_worker_count_no_windows_cap_on_posix(monkeypatch):
     import scanner
 
     monkeypatch.setattr(cfg, "get", lambda _k: 0)
-    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 128)
-    monkeypatch.setattr(scanner.sys, "platform", "linux")
-    assert scanner._resolve_worker_count(list(range(200))) == 128
+    monkeypatch.setattr(scanner.hashing.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(scanner.hashing.sys, "platform", "linux")
+    assert scanner.hashing._resolve_worker_count(list(range(200))) == 128
 
 
 def test_scanner_worker_count_obeys_process_cpu_grant(monkeypatch):
@@ -5147,11 +5162,11 @@ def test_scanner_worker_count_obeys_process_cpu_grant(monkeypatch):
     import scanner
 
     monkeypatch.setattr(cfg, "get", lambda _k: 16)
-    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(scanner.hashing.os, "cpu_count", lambda: 16)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=3)
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     try:
-        with scanner._claim_worker_count(list(range(100))) as workers:
+        with scanner.hashing._claim_worker_count(list(range(100))) as workers:
             assert workers == 3
             assert ledger.snapshot()["cpu"]["allocated"] == 3
         assert ledger.snapshot()["cpu"]["allocated"] == 0
@@ -5166,14 +5181,14 @@ def test_scanner_reserves_capacity_for_exact_inference_claim(monkeypatch):
     import scanner
 
     monkeypatch.setattr(cfg, "get", lambda _k: 16)
-    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(scanner.hashing.os, "cpu_count", lambda: 16)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=12)
     inference_threads = resource_ledger.cpu_inference_request(
         ledger.cpu_capacity,
     ).preferred
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     try:
-        with scanner._claim_worker_count(list(range(100))) as workers:
+        with scanner.hashing._claim_worker_count(list(range(100))) as workers:
             assert workers == ledger.cpu_capacity - inference_threads
             with ledger.acquire(resource_ledger.ResourceRequest(
                 cpu=resource_ledger.cpu_inference_request(ledger.cpu_capacity),
@@ -5256,7 +5271,7 @@ def test_concurrent_scanners_preserve_inference_reserve(monkeypatch):
     import scanner
 
     monkeypatch.setattr(cfg, "get", lambda _k: 16)
-    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(scanner.hashing.os, "cpu_count", lambda: 16)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=12)
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     try:
@@ -5267,7 +5282,7 @@ def test_concurrent_scanners_preserve_inference_reserve(monkeypatch):
 
         def first_scanner():
             try:
-                with scanner._claim_worker_count(list(range(100))):
+                with scanner.hashing._claim_worker_count(list(range(100))):
                     first_ready.set()
                     assert release_first.wait(timeout=synchronization_timeout(5.0))
             except BaseException as exc:  # pragma: no cover - diagnostic
@@ -5280,7 +5295,7 @@ def test_concurrent_scanners_preserve_inference_reserve(monkeypatch):
                 # Would block until the first scanner releases; we don't
                 # care about the eventual grant, only that it doesn't
                 # steal from the reserve while the first still holds it.
-                with scanner._claim_worker_count(list(range(100))):
+                with scanner.hashing._claim_worker_count(list(range(100))):
                     pass
             except BaseException as exc:  # pragma: no cover - diagnostic
                 errors.append(exc)
@@ -5474,7 +5489,7 @@ def test_scan_does_not_construct_worker_pool_while_pause_remains_pending(
         time.sleep(0.12)
         pause_active.clear()
 
-    monkeypatch.setattr(scanner, "ProcessPoolExecutor", FakeProcessPool)
+    monkeypatch.setattr(scanner.scan_run, "ProcessPoolExecutor", FakeProcessPool)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=2)
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     resume_thread = threading.Thread(target=clear_pause)
@@ -5736,7 +5751,7 @@ def test_scan_pause_requeues_worker_result(
                 pause_state["active"] = True
                 if pause_after_result:
                     return self.function(self.path)
-                raise scanner.TimeoutError()
+                raise scanner.scan_run.TimeoutError()
             return self.function(self.path)
 
     class FakeProcessPool:
@@ -5755,7 +5770,7 @@ def test_scan_pause_requeues_worker_result(
         pause_state["active"] = False
         return False
 
-    monkeypatch.setattr(scanner, "ProcessPoolExecutor", FakeProcessPool)
+    monkeypatch.setattr(scanner.scan_run, "ProcessPoolExecutor", FakeProcessPool)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=2)
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     try:
@@ -5787,7 +5802,7 @@ def test_sequential_scan_pause_after_compute_releases_lease(tmp_path, monkeypatc
     db = Database(str(tmp_path / "test.db"))
     ledger = resource_ledger.ResourceLedger(cpu_capacity=2)
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
-    original_compute = scanner._compute_file_features
+    original_compute = scanner.hashing._compute_file_features
     pause_state = {"active": False, "triggered": False}
     parking_alloc = []
 
@@ -5804,7 +5819,7 @@ def test_sequential_scan_pause_after_compute_releases_lease(tmp_path, monkeypatc
         pause_state["active"] = False
         return False
 
-    monkeypatch.setattr(scanner, "_compute_file_features", compute_then_pause)
+    monkeypatch.setattr(scanner.scan_run, "_compute_file_features", compute_then_pause)
     try:
         scanner.scan(
             root, db,
@@ -5865,7 +5880,7 @@ def test_scan_consumer_pause_resumes_generator_before_parking(
         pause_state["active"] = False
         return False
 
-    monkeypatch.setattr(scanner, "ProcessPoolExecutor", FakeProcessPool)
+    monkeypatch.setattr(scanner.scan_run, "ProcessPoolExecutor", FakeProcessPool)
     ledger = resource_ledger.ResourceLedger(cpu_capacity=2)
     previous = resource_ledger._set_resource_ledger_for_tests(ledger)
     try:
@@ -6706,6 +6721,8 @@ def test_initial_scan_does_not_invoke_invalidation_for_new_photos(tmp_path, monk
         return real_invalidate(db, vireo_dir_arg, photo_id, thumb_cache_dir=thumb_cache_dir)
 
     monkeypatch.setattr(scanner, "_invalidate_derived_caches", counting_invalidate)
+    monkeypatch.setattr(scanner.companions, "_invalidate_derived_caches", counting_invalidate)
+    monkeypatch.setattr(scanner.scan_run, "_invalidate_derived_caches", counting_invalidate)
 
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
@@ -6959,19 +6976,22 @@ def test_scan_mp_method_is_spawn_when_frozen(monkeypatch):
     call crashes the child and the parent sees EOFError on the handshake.
     spawn does fork+exec for a clean worker process.
     """
-    import importlib
+    import importlib.util
 
-    import scanner
+    import scanner.hashing
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    reloaded = importlib.reload(scanner)
-    try:
-        assert reloaded._SCAN_MP_METHOD == "spawn"
-    finally:
-        # Restore the unfrozen module-level constant so other tests in
-        # the same process see the dev-mode value.
-        monkeypatch.delattr(sys, "frozen", raising=False)
-        importlib.reload(scanner)
+    # Execute a separate copy of the module rather than reloading
+    # ``scanner.hashing`` in place: the other scanner modules hold the
+    # functions they imported from it, and a reload would leave those
+    # objects no longer reachable by name, which breaks pickling
+    # ``_compute_file_features`` for the hashing pool in later tests.
+    spec = importlib.util.spec_from_file_location(
+        "_frozen_scanner_hashing", scanner.hashing.__file__,
+    )
+    frozen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(frozen)
+    assert frozen._SCAN_MP_METHOD == "spawn"
 
 
 def test_scan_links_root_when_all_files_skipped(tmp_path):
@@ -7562,7 +7582,7 @@ def test_pairing_purges_the_merged_companion_derived_caches(tmp_path):
     id adopts the companion's thumbnail.
     """
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -7690,7 +7710,7 @@ def test_pairing_defers_companion_file_cleanup_until_commit_succeeds(
     AND its cached derivatives are all still on disk.
     """
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -8058,7 +8078,7 @@ def test_pairing_recovers_snapshot_when_rename_fails(tmp_path, monkeypatch):
     import local_masks
     from db import Database
     from local_masks import snapshot_path
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -8864,7 +8884,9 @@ def _leave_unpaired_pair(db, monkeypatch, folder, basename="OLD_001"):
     # Refuse every pairing, both the scan's own decision before inserting
     # the JPEG and the end-of-scan pass, so both files stay photos.
     monkeypatch.setattr(
-        _sc, "_pick_compatible_raw_jpeg_pairs", lambda *a, **k: [])
+        _sc.companions, "_pick_compatible_raw_jpeg_pairs", lambda *a, **k: [])
+    monkeypatch.setattr(
+        _sc.scan_run, "_pick_compatible_raw_jpeg_pairs", lambda *a, **k: [])
     scan(str(folder), db)
     monkeypatch.undo()
 
@@ -8945,7 +8967,7 @@ def _sidecar_with_vireo_location(tmp_path, db, chain):
 def test_xmp_import_reuses_the_location_keyword_vireo_wrote(tmp_path):
     """Re-importing Vireo's own location keywords must not fork the vocabulary."""
     from db import Database
-    from scanner import _import_keywords_for_photo
+    from scanner.keywords import _import_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.ensure_default_workspace())
@@ -8971,7 +8993,7 @@ def test_xmp_import_reuses_the_location_keyword_vireo_wrote(tmp_path):
 def test_xmp_import_skips_a_location_keyword_the_user_already_changed(tmp_path):
     """A queued location change means the sidecar's place is out of date."""
     from db import Database
-    from scanner import _import_keywords_for_photo
+    from scanner.keywords import _import_keywords_for_photo
 
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.ensure_default_workspace())
@@ -9013,7 +9035,7 @@ def test_pair_raw_jpeg_batches_collection_remap(tmp_path, monkeypatch):
     """
     import repositories.photo_row_deletion as photo_row_deletion
     from db import Database
-    from scanner import _pair_raw_jpeg_companions
+    from scanner.companions import _pair_raw_jpeg_companions
 
     img_dir = tmp_path / "photos"
     img_dir.mkdir()
@@ -9117,7 +9139,7 @@ def test_unchanged_companion_recovers_embedded_keywords_without_churn(
     cat.seed_raw_caches()
     assert cat.db.get_photo_keywords(cat.raw_id) == []
     original_identity = dict(cat.identity()[0])
-    extract = scanner.extract_metadata
+    extract = scanner.scan_run.extract_metadata
 
     def complete_extract(paths, *args, **kwargs):
         result = dict(extract(paths, *args, **kwargs))
@@ -9131,7 +9153,7 @@ def test_unchanged_companion_recovers_embedded_keywords_without_churn(
                 result[path] = payload
         return result
 
-    monkeypatch.setattr(scanner, "extract_metadata", complete_extract)
+    monkeypatch.setattr(scanner.scan_run, "extract_metadata", complete_extract)
     if mode == "incremental-touched":
         stat = cat.jpeg.stat()
         os.utime(cat.jpeg, (stat.st_atime, stat.st_mtime + 3))

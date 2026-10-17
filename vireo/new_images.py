@@ -847,7 +847,7 @@ def _walk_root_for_new_images(walk, known, seen_new_paths, root_new_paths,
             dirnames[:] = kept
         for name in filenames:
             is_new = False
-            # Mirror ``vireo/scanner.py``: skip dotfiles (e.g. macOS
+            # Mirror ``vireo/scanner/scan_run.py``: skip dotfiles (e.g. macOS
             # AppleDouble sidecars ``._IMG_0001.JPG``) so we don't count
             # files the scanner will never ingest, which would otherwise
             # produce a stuck "new images" banner.
@@ -855,7 +855,7 @@ def _walk_root_for_new_images(walk, known, seen_new_paths, root_new_paths,
                 ext = Path(name).suffix.lower()
                 if ext in SUPPORTED_EXTENSIONS:
                     full = os.path.join(dirpath, name)
-                    # Mirror ``vireo/scanner.py``: os.walk lists broken
+                    # Mirror ``vireo/scanner/scan_run.py``: os.walk lists broken
                     # symlinks in `filenames`, but scanner refuses to ingest
                     # them (os.path.isfile == False). Counting them as "new"
                     # would leave the banner stuck on files no scan can clear.

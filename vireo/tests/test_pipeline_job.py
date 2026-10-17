@@ -12588,7 +12588,7 @@ def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
         return thumb_path
 
     monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
-    monkeypatch.setattr(scanner, "extract_working_copy", lambda *args, **kwargs: False)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", lambda *args, **kwargs: False)
 
     original_load_image = image_loader.load_image
     raw_loads = []
@@ -12673,7 +12673,7 @@ def test_pipeline_previews_warm_unedited_raw_from_camera_rendered_source(
         return thumb_path
 
     monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
-    monkeypatch.setattr(scanner, "extract_working_copy", lambda *args, **kwargs: False)
+    monkeypatch.setattr(scanner.working_copy_batch, "extract_working_copy", lambda *args, **kwargs: False)
 
     loaded = []
 

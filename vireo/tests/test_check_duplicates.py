@@ -1036,6 +1036,7 @@ def test_check_duplicates_recovery_skips_hashing_when_no_collision(
         return real_hash(path, *a, **kw)
 
     monkeypatch.setattr(scanner, "compute_file_hash", _counting_hash)
+    monkeypatch.setattr(scanner.hashing, "compute_file_hash", _counting_hash)
 
     client = app.test_client()
     resp = client.post("/api/import/check-duplicates", json={
