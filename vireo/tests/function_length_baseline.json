@@ -133,7 +133,6 @@
   "web/collections.py:create_collections_blueprint.api_collection_photos": 117,
   "web/collections.py:create_collections_blueprint.api_collections": 103,
   "web/duplicates.py:create_duplicates_blueprint.api_duplicates_delete_loser_files": 192,
-  "web/export.py:create_export_blueprint.api_job_export": 131,
   "web/job_launchers.py:create_job_launchers_blueprint.api_job_develop": 136,
   "web/job_launchers.py:create_job_launchers_blueprint.api_job_develop.work": 102,
   "web/job_launchers.py:create_job_launchers_blueprint.api_job_fetch_labels": 110,
