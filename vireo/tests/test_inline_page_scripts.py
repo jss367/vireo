@@ -27,7 +27,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "duplicates.html": 820,
     "highlights.html": 1151,
     "id_conflicts.html": 968,
-    "keywords.html": 1204,
     "lightroom.html": 135,
     "logs.html": 64,
     "map.html": 389,
@@ -92,6 +91,7 @@ SPLIT_PAGES = {
     "/review": "review",
     "/misses": "misses",
     "/move": "move",
+    "/keywords": "keywords",
 }
 
 
