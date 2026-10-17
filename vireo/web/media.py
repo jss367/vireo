@@ -641,7 +641,7 @@ class _OriginalPhotoRequest:
                     _paired_original_dir(self.vireo_dir),
                 )
                 atomic_write_bytes(data, paired_original_cache)
-        except Exception:
+        except Exception:  # broad: cache publication is best-effort; the bytes are served from memory
             log.warning(
                 "Failed to publish paired original cache %s",
                 paired_original_cache, exc_info=True,
@@ -733,7 +733,7 @@ class _OriginalPhotoRequest:
         try:
             with _PILImage.open(wc_path) as _wc_img:
                 wc_w, wc_h = _image_size_after_exif_orientation(_wc_img)
-        except Exception:
+        except Exception:  # broad: Pillow decode errors are undocumented; unreadable means no size
             log.debug("Could not read working copy size of %s", wc_path, exc_info=True)
             wc_w = wc_h = 0
         # Compare in display-orientation space: ``extract_working_copy``
@@ -799,7 +799,7 @@ class _OriginalPhotoRequest:
         try:
             with _PILImage.open(companion_abs) as _cimg:
                 c_w, c_h = _cimg.size
-        except Exception:
+        except Exception:  # broad: Pillow decode errors are undocumented; unreadable means no size
             log.debug("Could not read companion JPEG size of %s", companion_abs, exc_info=True)
             return None
         # Camera JPEGs commonly omit a narrow sensor border. Match the
@@ -1644,7 +1644,7 @@ class _OriginalPhotoRequest:
             try:
                 evict_working_copy_cache_if_over_quota(self.db, self.vireo_dir)
             except Exception:
-                # Serving the successfully generated image is more useful
+                # broad: serving the successfully generated image is more useful
                 # than turning a transient maintenance error into a 500;
                 # startup and later writes will retry enforcement.
                 log.exception(
@@ -2299,7 +2299,7 @@ class _ThumbnailRequest:
             return
         try:
             self.db.set_photo_thumb_path(self.photo_id, f"{self.photo_id}.jpg")
-        except Exception:
+        except sqlite3.Error:
             # Coverage column drift is recoverable via the backfill job;
             # don't fail the request if the UPDATE racks up a transient
             # SQLite error.
@@ -2536,7 +2536,7 @@ class _EditPreviewRequest:
                     if all(candidate_dims):
                         selected_dims = candidate_dims
             except Exception:
-                # Some RAW formats cannot be opened by Pillow. Their
+                # broad: some RAW formats cannot be opened by Pillow. Their
                 # stored native dimensions remain the best available
                 # decode bound.
                 log.debug("Could not read dimensions of %s", canonical, exc_info=True)
@@ -2908,7 +2908,7 @@ def create_media_blueprint(
         def _offline_path(column):
             try:
                 row = get_db().caches.offline_original_get(photo["id"])
-            except Exception:
+            except sqlite3.Error:
                 log.warning("Could not read offline original for photo %s", photo["id"], exc_info=True)
                 return None
             if not row or not row[column]:
@@ -3064,7 +3064,7 @@ def create_media_blueprint(
                 )
                 return "", 404
             result = thumb.generate()
-        except Exception:
+        except Exception:  # broad: self-heal runs any decoder; a failure is logged and answers 404
             log.exception(
                 "Thumbnail self-heal failed for photo %s (source=%s)",
                 photo_id, photo["filename"],
@@ -3675,7 +3675,7 @@ def create_media_blueprint(
                 db.caches.preview_insert(photo_id, size, len(data))
                 evict_preview_cache_if_over_quota(db, vireo_dir)
             except Exception:
-                # The bytes are already in memory; bookkeeping must not
+                # broad: the bytes are already in memory; bookkeeping must not
                 # turn a cache hit into a 500.
                 log.warning("Could not adopt untracked preview for photo %s", photo_id, exc_info=True)
             return Response(data, mimetype="image/jpeg")
@@ -3781,7 +3781,7 @@ def create_media_blueprint(
             clear_preview_cache_invalid(db, photo_id, size)
             try:
                 evict_preview_cache_if_over_quota(db, vireo_dir)
-            except Exception:
+            except Exception:  # broad: eviction is maintenance; the render is already in memory
                 log.warning("Preview cache eviction failed after render", exc_info=True)
         # Publish the paired-render bytes so an equal-key follower still
         # inside preview_artifact_flights.run() finds a ready artifact when
@@ -3799,7 +3799,7 @@ def create_media_blueprint(
                         photo_id, os.path.basename(paired_cache_path), len(rendered.data),
                     )
                 evict_preview_cache_if_over_quota(db, vireo_dir)
-            except Exception:
+            except Exception:  # broad: paired-cache publication is best-effort; the render is served from memory
                 log.warning(
                     "Failed to publish paired preview cache %s",
                     paired_cache_path, exc_info=True,

@@ -115,7 +115,7 @@ def create_history_blueprint(
                 cache_dir, db.active_workspace_id, species_by_photo,
                 photos_only=True,
             )
-        except Exception:
+        except Exception:  # broad: the undo already committed; a stale pipeline cache must not fail it
             log.exception(
                 "Failed to refresh pipeline cache species after undo/redo of %s",
                 action,
