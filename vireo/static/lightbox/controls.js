@@ -1,12 +1,12 @@
-function toggleLightboxZoomPopover(value) { return vireoLightboxViewport.togglePopover(value); }
-function setLightboxZoomFromSlider(value) { return vireoLightboxViewport.setFromSlider(value); }
-function stepLightboxZoom(value) { return vireoLightboxViewport.stepZoom(value); }
-function setLightboxZoomToFit(value) { return vireoLightboxViewport.fit(value); }
-function setLightboxZoomToOneToOne(value) { return vireoLightboxViewport.oneToOne(value); }
-function toggleLightboxZoom(value) { return vireoLightboxViewport.toggleZoom(value); }
+function toggleLightboxZoomPopover(/** @type {unknown} */ value) { return vireoLightboxViewport.togglePopover(); }
+function setLightboxZoomFromSlider(/** @type {number | string} */ value) { return vireoLightboxViewport.setFromSlider(value); }
+function stepLightboxZoom(/** @type {number} */ value) { return vireoLightboxViewport.stepZoom(value); }
+function setLightboxZoomToFit(/** @type {unknown} */ value) { return vireoLightboxViewport.fit(); }
+function setLightboxZoomToOneToOne(/** @type {Pick<MouseEvent, "clientX" | "clientY"> | undefined} */ value) { return vireoLightboxViewport.oneToOne(value); }
+function toggleLightboxZoom(/** @type {Pick<MouseEvent, "clientX" | "clientY">} */ value) { return vireoLightboxViewport.toggleZoom(value); }
 
-function closeLightbox(e) {
-  if (e && e.target && e.target.tagName === 'IMG') return;
+function closeLightbox(/** @type {Event | undefined} */ e = undefined) {
+  if (e && e.target instanceof Element && e.target.tagName === 'IMG') return;
   _lbFlushPendingAdjustmentSave();
   if (vireoLightboxSession.requestedPhotoId() != null) vireoLightboxViewport.save(vireoLightboxSession.requestedPhotoId());
   var wasOpen = !!window._lbEscToken;
@@ -25,12 +25,11 @@ function closeLightbox(e) {
   if (adjustBtn) adjustBtn.setAttribute('aria-expanded', 'false');
   toggleLightboxViewMenu(false);
   vireoLightboxViewport.applyTransform();
-  document.getElementById('lightboxOverlay').classList.remove('active');
+  document.getElementById('lightboxOverlay')?.classList.remove('active');
   // The session returns the bitmap's identity, even if navigation was pending.
   var closedPhotoId = vireoLightboxSession.close();
-  document.getElementById('lightboxImg').src = '';
-  document.getElementById('lightboxImg').onload = null;
-  document.getElementById('lightboxImg').onerror = null;
+  var image = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
+  if (image) { image.src = ''; image.onload = null; image.onerror = null; }
   _lbReadOnly = false;
   _lbReadOnlyMessage = 'This lightbox is read-only';
   _lbApplyReadOnlyState();
@@ -61,11 +60,11 @@ function closeLightbox(e) {
  * review workflow, so the color row is omitted when `setColorLabelFor` is
  * absent.
  */
-function buildLightboxContextMenu(pid) {
-  var has = function(name) { return typeof window[name] === 'function'; };
+function buildLightboxContextMenu(/** @type {number} */ pid) {
+  var has = function(/** @type {keyof Window} */ name) { return typeof window[name] === 'function'; };
   var readOnlyHint = _lbReadOnly ? _lbReadOnlyMessage : null;
 
-  var rateChip = function(n) {
+  var rateChip = function(/** @type {number} */ n) {
     return {
       label: n === 0 ? '\u2606' : String(n),
       title: n === 0 ? 'No rating' : 'Rate ' + n,
@@ -77,7 +76,7 @@ function buildLightboxContextMenu(pid) {
       },
     };
   };
-  var colorChip = function(c, icon, title) {
+  var colorChip = function(/** @type {string | null} */ c, /** @type {string} */ icon, /** @type {string} */ title) {
     return {
       label: icon,
       title: c && window.VireoColorLabels
@@ -90,7 +89,7 @@ function buildLightboxContextMenu(pid) {
       onClick: function() { if (has('setColorLabelFor')) window.setColorLabelFor(pid, c); },
     };
   };
-  var flagChip = function(f, icon, title) {
+  var flagChip = function(/** @type {LightboxFlag} */ f, /** @type {string} */ icon, /** @type {string} */ title) {
     return {
       label: icon, title: title,
       disabled: !!readOnlyHint,
@@ -100,7 +99,7 @@ function buildLightboxContextMenu(pid) {
       },
     };
   };
-  var toggleItem = function(label, visible, onClick, disabledHint) {
+  var toggleItem = function(/** @type {string} */ label, /** @type {boolean} */ visible, /** @type {() => unknown} */ onClick, /** @type {string | null | undefined} */ disabledHint = undefined) {
     return {
       label: label + ': ' + (visible ? 'On' : 'Off'),
       disabled: !!disabledHint,
@@ -109,7 +108,7 @@ function buildLightboxContextMenu(pid) {
     };
   };
 
-  var items = [
+  /** @type {LightboxMenuItem[]} */ var items = [
     { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
   ];
   if (has('setColorLabelFor')) {
@@ -137,7 +136,7 @@ function buildLightboxContextMenu(pid) {
   items.push(toggleItem('Wildlife classification', !_lbCurrentWildlifeExcluded,
     lightboxToggleWildlifeExcluded, readOnlyHint));
   items.push({ separator: true });
-  var editButton = document.getElementById('lightboxEditPhoto');
+  const editButton = /** @type {HTMLButtonElement | null} */ (document.getElementById('lightboxEditPhoto'));
   if (editButton) {
     items.push({ label: 'Edit Photo', disabled: editButton.disabled,
       disabledHint: editButton.disabled ? editButton.title : undefined,
@@ -196,7 +195,7 @@ function buildLightboxContextMenu(pid) {
   return items;
 }
 
-function revealLightboxPhoto(pid) {
+function revealLightboxPhoto(/** @type {number} */ pid) {
   // Browse and Review each expose their own reveal helpers. Other pages can
   // also open the shared lightbox, so keep a direct API fallback here rather
   // than hiding the action based on which page happened to launch it.

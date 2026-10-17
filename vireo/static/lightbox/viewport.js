@@ -1,4 +1,4 @@
-function _lbDisplayDimsForRecipe(/** @type {number | null | undefined} */ width, /** @type {number | null | undefined} */ height, /** @type {LightboxRecipe | null} */ recipe) {
+function _lbDisplayDimsForRecipe(/** @type {number | null | undefined} */ width, /** @type {number | null | undefined} */ height, /** @type {LightboxRecipe | null | undefined} */ recipe) {
   var w = Number(width) || 0;
   var h = Number(height) || 0;
   if (!w || !h) return { w: null, h: null };

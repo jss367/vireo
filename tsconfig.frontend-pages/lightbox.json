@@ -2,7 +2,19 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/lightbox.d.ts",
+    "../vireo/static/lightbox/controls.js",
+    "../vireo/static/lightbox/crop.js",
+    "../vireo/static/lightbox/curation.js",
+    "../vireo/static/lightbox/delete.js",
+    "../vireo/static/lightbox/edits.js",
+    "../vireo/static/lightbox/flags.js",
+    "../vireo/static/lightbox/inat.js",
+    "../vireo/static/lightbox/keyboard.js",
+    "../vireo/static/lightbox/navigation.js",
+    "../vireo/static/lightbox/overlays.js",
     "../vireo/static/lightbox/session.js",
+    "../vireo/static/lightbox/source-loading.js",
+    "../vireo/static/lightbox/state.js",
     "../vireo/static/lightbox/viewport.js"
   ]
 }

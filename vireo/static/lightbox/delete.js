@@ -1,28 +1,28 @@
 
 /* ---------- Delete Confirmation ---------- */
-var _deletePhotoIds = [];
-var _deleteCallback = null;
-var _deleteJobSource = null;
-var _deleteProgressStageOrder = [];
+/** @type {number[]} */ var _deletePhotoIds = [];
+/** @type {((data: LightboxDeleteResult) => void) | null} */ var _deleteCallback = null;
+/** @type {EventSource | null} */ var _deleteJobSource = null;
+/** @type {string[]} */ var _deleteProgressStageOrder = [];
 
-function showDeleteDialog(photoIds, companionCount, callback) {
+function showDeleteDialog(/** @type {number[]} */ photoIds, /** @type {number} */ companionCount, /** @type {((data: LightboxDeleteResult) => void) | null} */ callback) {
   _deletePhotoIds = photoIds;
   _deleteCallback = callback;
   var count = photoIds.length;
-  document.getElementById('deleteModalTitle').textContent =
+  /** @type {HTMLElement} */ (document.getElementById('deleteModalTitle')).textContent =
     count === 1 ? 'Delete photo?' : 'Delete ' + count + ' photos?';
-  var compRow = document.getElementById('deleteCompanionRow');
+  var compRow = /** @type {HTMLElement} */ (document.getElementById('deleteCompanionRow'));
   if (companionCount > 0) {
     compRow.style.display = '';
-    document.getElementById('deleteCompanionLabel').textContent =
+    /** @type {HTMLElement} */ (document.getElementById('deleteCompanionLabel')).textContent =
       'Also delete ' + companionCount + ' companion file' + (companionCount === 1 ? '' : 's');
-    document.getElementById('deleteCompanionCheck').checked = true;
+    /** @type {HTMLInputElement} */ (document.getElementById('deleteCompanionCheck')).checked = true;
   } else {
     compRow.style.display = 'none';
   }
-  document.querySelector('input[name="deleteMode"][value="vireo"]').checked = true;
+  /** @type {HTMLInputElement} */ (document.querySelector('input[name="deleteMode"][value="vireo"]')).checked = true;
   resetDeleteProgress();
-  document.getElementById('deleteModal').classList.add('open');
+  /** @type {HTMLElement} */ (document.getElementById('deleteModal')).classList.add('open');
 }
 
 function hideDeleteModal() {
@@ -32,20 +32,20 @@ function hideDeleteModal() {
   }
   setDeleteModalBusy(false);
   resetDeleteProgress();
-  document.getElementById('deleteModal').classList.remove('open');
+  /** @type {HTMLElement} */ (document.getElementById('deleteModal')).classList.remove('open');
   _deletePhotoIds = [];
   _deleteCallback = null;
 }
 
 function resetDeleteProgress() {
-  var box = document.getElementById('deleteProgress');
-  var detail = document.getElementById('deleteProgressDetail');
+  var box = /** @type {HTMLElement} */ (document.getElementById('deleteProgress'));
+  var detail = /** @type {HTMLElement} */ (document.getElementById('deleteProgressDetail'));
   if (box) box.style.display = 'none';
   if (detail) detail.textContent = '';
   _deleteProgressStageOrder = [];
   ['Files', 'Catalog', 'Cache'].forEach(function(name) {
-    var row = document.getElementById('deleteProgress' + name + 'Stage');
-    var status = document.getElementById('deleteProgress' + name + 'Status');
+    var row = /** @type {HTMLElement} */ (document.getElementById('deleteProgress' + name + 'Stage'));
+    var status = /** @type {HTMLElement} */ (document.getElementById('deleteProgress' + name + 'Status'));
     if (!row) return;
     row.hidden = false;
     row.classList.add('waiting');
@@ -53,7 +53,7 @@ function resetDeleteProgress() {
     delete row.dataset.failed;
     if (status) status.textContent = 'Waiting';
     var bar = row.querySelector('[role="progressbar"]');
-    var fill = row.querySelector('.inat-progress-fill');
+    var fill = /** @type {HTMLElement | null} */ (row.querySelector('.inat-progress-fill'));
     if (bar) {
       bar.setAttribute('aria-valuemax', '1');
       bar.setAttribute('aria-valuenow', '0');
@@ -63,9 +63,9 @@ function resetDeleteProgress() {
   });
 }
 
-function setDeleteProgressStage(stage, state, current, total, statusText) {
+function setDeleteProgressStage(/** @type {string} */ stage, /** @type {string} */ state, /** @type {string | number | undefined} */ current = undefined, /** @type {string | number | undefined} */ total = undefined, /** @type {string | undefined} */ statusText = undefined) {
   var name = stage.charAt(0).toUpperCase() + stage.slice(1);
-  var row = document.getElementById('deleteProgress' + name + 'Stage');
+  var row = /** @type {HTMLElement} */ (document.getElementById('deleteProgress' + name + 'Stage'));
   if (!row) return;
   // A stage that has already recorded failures must not be silently
   // "completed" by a later phase transition \u2014 that would let the UI report
@@ -74,9 +74,9 @@ function setDeleteProgressStage(stage, state, current, total, statusText) {
   if (state === 'complete' && row.dataset.failed) {
     return;
   }
-  var status = document.getElementById('deleteProgress' + name + 'Status');
+  var status = /** @type {HTMLElement} */ (document.getElementById('deleteProgress' + name + 'Status'));
   var bar = row.querySelector('[role="progressbar"]');
-  var fill = row.querySelector('.inat-progress-fill');
+  var fill = /** @type {HTMLElement | null} */ (row.querySelector('.inat-progress-fill'));
   current = Math.max(0, Number(current || 0));
   total = Math.max(0, Number(total || 0));
   var pct = (state === 'complete' || state === 'partial')
@@ -108,9 +108,9 @@ function setDeleteProgressStage(stage, state, current, total, statusText) {
   if (bar) bar.setAttribute('aria-valuetext', displayStatus);
 }
 
-function startDeleteProgress(mode, count) {
-  var filesRow = document.getElementById('deleteProgressFilesStage');
-  var filesLabel = document.getElementById('deleteProgressFilesLabel');
+function startDeleteProgress(/** @type {string} */ mode, /** @type {number} */ count) {
+  var filesRow = /** @type {HTMLElement} */ (document.getElementById('deleteProgressFilesStage'));
+  var filesLabel = /** @type {HTMLElement} */ (document.getElementById('deleteProgressFilesLabel'));
   var diskMode = mode !== 'vireo';
   _deleteProgressStageOrder = diskMode
     ? ['files', 'catalog', 'cache']
@@ -124,11 +124,11 @@ function startDeleteProgress(mode, count) {
   _deleteProgressStageOrder.forEach(function(stage) {
     setDeleteProgressStage(stage, 'waiting', 0, count);
   });
-  var box = document.getElementById('deleteProgress');
+  var box = /** @type {HTMLElement} */ (document.getElementById('deleteProgress'));
   if (box) box.style.display = '';
 }
 
-function deleteProgressStageForPhase(phase) {
+function deleteProgressStageForPhase(/** @type {string} */ phase) {
   if (phase === 'Moving files to Trash' || phase === 'Deleting files permanently') {
     return 'files';
   }
@@ -142,9 +142,9 @@ function deleteProgressStageForPhase(phase) {
   return null;
 }
 
-function markDeleteStageFailed(stage, failed, current, total) {
+function markDeleteStageFailed(/** @type {string} */ stage, /** @type {number} */ failed, /** @type {number} */ current, /** @type {number} */ total) {
   var name = stage.charAt(0).toUpperCase() + stage.slice(1);
-  var row = document.getElementById('deleteProgress' + name + 'Stage');
+  var row = /** @type {HTMLElement} */ (document.getElementById('deleteProgress' + name + 'Stage'));
   if (!row) return;
   row.dataset.failed = String(failed);
   // ``failed`` is a per-photo count (len(failed_ids)) rather than a
@@ -158,10 +158,10 @@ function markDeleteStageFailed(stage, failed, current, total) {
   setDeleteProgressStage(stage, 'partial', current, total, statusText);
 }
 
-function updateDeleteProgress(data) {
+function updateDeleteProgress(/** @type {LightboxDeleteProgress} */ data) {
   data = data || {};
-  var box = document.getElementById('deleteProgress');
-  var detail = document.getElementById('deleteProgressDetail');
+  var box = /** @type {HTMLElement} */ (document.getElementById('deleteProgress'));
+  var detail = /** @type {HTMLElement} */ (document.getElementById('deleteProgressDetail'));
   if (box) box.style.display = '';
   var phase = data.phase || 'Working';
   var total = Number(data.total || 0);
@@ -188,8 +188,8 @@ function updateDeleteProgress(data) {
   }
 
   var stage = deleteProgressStageForPhase(phase);
-  var stageIndex = _deleteProgressStageOrder.indexOf(stage);
-  if (stageIndex >= 0) {
+  var stageIndex = stage ? _deleteProgressStageOrder.indexOf(stage) : -1;
+  if (stage && stageIndex >= 0) {
     _deleteProgressStageOrder.slice(0, stageIndex).forEach(function(previous) {
       setDeleteProgressStage(previous, 'complete');
     });
@@ -228,7 +228,7 @@ function updateDeleteProgress(data) {
   if (detail) detail.textContent = parts.join(' · ');
 }
 
-async function handleDeleteJobComplete(evt, savedCallback, mode, includeCompanions) {
+async function handleDeleteJobComplete(/** @type {LightboxDeleteCompletion} */ evt, /** @type {((data: LightboxDeleteResult) => void) | null} */ savedCallback, /** @type {string} */ mode, /** @type {boolean} */ includeCompanions) {
   var data = evt && evt.result;
   // A delete that retained some photos after file errors ends "failed" but
   // still carries its result: handle it like a completed one so the
@@ -258,7 +258,7 @@ async function handleDeleteJobComplete(evt, savedCallback, mode, includeCompanio
         // retry by photo id and let it remove each row only after its
         // permanent file deletion succeeds. There is no retry by raw path:
         // the catalog row is what vouches for a file.
-        var retry = await safeFetch('/api/batch/delete', {
+        var retry = await /** @type {Promise<LightboxDeleteResult>} */ (safeFetch('/api/batch/delete', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
@@ -266,7 +266,7 @@ async function handleDeleteJobComplete(evt, savedCallback, mode, includeCompanio
             mode: 'disk_permanent',
             include_companions: !!includeCompanions,
           }),
-        });
+        }));
         data.deleted += Number(retry.deleted || 0);
         data.trashed += Number(retry.trashed || 0);
         data.trash_failed = retry.trash_failed || [];
@@ -293,15 +293,15 @@ async function handleDeleteJobComplete(evt, savedCallback, mode, includeCompanio
 // registered and work is underway — deleting a large batch can take many
 // seconds of synchronous backend work with no other feedback.
 var _deleteBusy = false;
-function setDeleteModalBusy(busy, count, mode) {
+function setDeleteModalBusy(/** @type {boolean} */ busy, /** @type {number | undefined} */ count = undefined, /** @type {string | undefined} */ mode = undefined) {
   _deleteBusy = busy;
-  var confirmBtn = document.getElementById('deleteConfirmBtn');
-  var cancelBtn = document.querySelector('#deleteModal .modal-btn-cancel');
+  var confirmBtn = /** @type {HTMLButtonElement} */ (document.getElementById('deleteConfirmBtn'));
+  var cancelBtn = /** @type {HTMLButtonElement | null} */ (document.querySelector('#deleteModal .modal-btn-cancel'));
   // The mode radios and companion checkbox were already read into the request
   // when the delete started, so changing them mid-flight does nothing — lock
   // them too so the UI stays honest about what's in progress.
-  var inputs = document.querySelectorAll(
-    '#deleteModal input[name="deleteMode"], #deleteCompanionCheck');
+  var inputs = /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll(
+    '#deleteModal input[name="deleteMode"], #deleteCompanionCheck'));
   if (busy) {
     var verb = mode === 'vireo' ? 'Removing' : 'Deleting';
     var noun = count === 1 ? 'photo' : count + ' photos';
@@ -327,9 +327,9 @@ function setDeleteModalBusy(busy, count, mode) {
 
 async function confirmDelete() {
   if (_deleteBusy) return;  // guard against double-submit
-  var mode = document.querySelector('input[name="deleteMode"]:checked').value;
-  var includeCompanions = document.getElementById('deleteCompanionCheck').checked &&
-    document.getElementById('deleteCompanionRow').style.display !== 'none';
+  var mode = /** @type {HTMLInputElement} */ (document.querySelector('input[name="deleteMode"]:checked')).value;
+  var includeCompanions = /** @type {HTMLInputElement} */ (document.getElementById('deleteCompanionCheck')).checked &&
+    /** @type {HTMLElement} */ (document.getElementById('deleteCompanionRow')).style.display !== 'none';
   var savedIds = _deletePhotoIds.slice();
   var savedCallback = _deleteCallback;
   setDeleteModalBusy(true, savedIds.length, mode);
@@ -340,7 +340,7 @@ async function confirmDelete() {
     total: savedIds.length,
   });
   try {
-    var start = await safeFetch('/api/jobs/batch-delete', {
+    var start = await /** @type {Promise<{job_id: number}>} */ (safeFetch('/api/jobs/batch-delete', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -348,11 +348,11 @@ async function confirmDelete() {
         mode: mode,
         include_companions: includeCompanions,
       }),
-    });
+    }));
   } catch(e) { hideDeleteModal(); return; }
   _deleteJobSource = safeEventSource('/api/jobs/' + start.job_id + '/stream', {
     onProgress: updateDeleteProgress,
-    onComplete: function(evt) {
+    onComplete: function(/** @type {LightboxDeleteCompletion} */ evt) {
       _deleteJobSource = null;
       handleDeleteJobComplete(evt, savedCallback, mode, includeCompanions);
     },
@@ -366,7 +366,7 @@ async function confirmDelete() {
 async function lightboxToggleWildlifeExcluded() {
   if (!vireoLightboxSession.requestedPhotoId()) return;
   if (_lbGuardReadOnly()) return false;
-  var currentId = vireoLightboxSession.requestedPhotoId();
+  const currentId = vireoLightboxSession.requestedPhotoId(); if (currentId == null) return;
   var excluded = !_lbCurrentWildlifeExcluded;
   try {
     if (typeof window.setWildlifeExcludedFor === 'function') {
@@ -387,7 +387,7 @@ async function lightboxToggleWildlifeExcluded() {
       );
     }
   } catch (e) {
-    if (window.toast) window.toast('Update failed: ' + (e && e.message ? e.message : 'unknown'), 'error');
+    if (window.toast) window.toast('Update failed: ' + (e instanceof Error ? e.message : 'unknown'), 'error');
   }
 }
 
@@ -400,7 +400,7 @@ function lightboxDelete() {
     !overlay ||
     !overlay.classList.contains('active')
   ) return;
-  var currentId = vireoLightboxSession.requestedPhotoId();
+  const currentId = vireoLightboxSession.requestedPhotoId(); if (currentId == null) return;
   var p = _lightboxPhotoList.find(function(x) { return x.id === currentId; });
   var companionCount = (p && p.companion_path) ? 1 : 0;
 
@@ -445,16 +445,16 @@ function lightboxDelete() {
     }
 
     if (_lightboxPhotoList.length === 0) {
-      closeLightbox(null);
+      closeLightbox();
     } else {
       var nextIdx = Math.min(idx, _lightboxPhotoList.length - 1);
-      var next = _lightboxPhotoList[nextIdx];
+      var next = _lightboxPhotoList[nextIdx]; if (!next) return;
       // Re-evaluate the owning page's read-only decision for the next photo,
       // mirroring lightboxNav. The deleted photo was editable (_lbReadOnly ===
       // false), so without this hook openLightbox would inherit that and leave
       // Delete, Adjust, and Crop enabled when the next photo is out of scope
       // (Find Similar lists mix in-scope and out-of-scope results).
-      var navOptions = {};
+      /** @type {LightboxOpenOptions} */ var navOptions = {};
       if (typeof window.getLightboxOpenOptions === 'function') {
         var opened = window.getLightboxOpenOptions(next.id);
         if (opened && Object.prototype.hasOwnProperty.call(opened, 'readOnly')) {

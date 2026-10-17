@@ -63,7 +63,7 @@
     }
     // Both property handlers and event listeners are detached on navigation or
     // close. A queued callback also checks its token before touching the host.
-    function watchImage(/** @type {HTMLImageElement} */ img, /** @type {() => void} */ onload, /** @type {(() => void) | null} */ onerror, /** @type {boolean} */ properties, /** @type {boolean | undefined} */ persistent) {
+    function watchImage(/** @type {HTMLImageElement} */ img, /** @type {() => void} */ onload, /** @type {(() => void) | null} */ onerror = null, /** @type {boolean} */ properties = false, /** @type {boolean | undefined} */ persistent = false) {
       var token = capture();
       function cleanup() {
         if (properties) {
