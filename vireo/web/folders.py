@@ -11,6 +11,11 @@ import os
 import subprocess
 import sys
 
+from burst_evidence import (
+    DEFAULT_CLOSE_CALL_MARGIN,
+    MAX_CLOSE_CALL_MARGIN,
+    build_folder_bursts,
+)
 from db import Database
 from flask import Blueprint, jsonify, request
 from proc import no_window_kwargs
@@ -143,6 +148,43 @@ def create_folders_blueprint(
             "name": folder["name"],
             "path": folder["path"],
         })
+
+    @blueprint.route("/api/folders/<int:folder_id>/bursts", methods=["GET"])
+    def api_folder_bursts(folder_id):
+        """Every burst in one folder, scored and assessed, with feature coverage.
+
+        The folder listing behind burst adjudication (see
+        ``docs/plans/2026-10-17-burst-evidence-adjudication-design.md``):
+        frames chain into bursts with ``best_batch_scope``'s rules, each
+        burst is ranked from its pipeline features, and ``ambiguity`` says
+        which ones the scorer should not decide alone. ``coverage`` states
+        how many photos have analysis features at all, for the folder and
+        per burst, so a half-analyzed folder cannot pass for a clean one.
+        ``margin`` (default 0.10) is the relative gap in raw sharpness below
+        which the top two frames count as a close call. One folder, not its
+        subtree; bursts never span folders.
+        """
+        db = get_db()
+        folder = db.get_folder(folder_id)
+        if not folder or folder_id not in db.get_workspace_visible_folder_ids([folder_id]):
+            return json_error("folder not found", 404)
+        margin = request.args.get("margin", DEFAULT_CLOSE_CALL_MARGIN, type=float)
+        if margin is None or not 0 <= margin <= MAX_CLOSE_CALL_MARGIN:
+            return json_error(f"margin must be between 0 and {MAX_CLOSE_CALL_MARGIN}")
+        import config as cfg
+        effective_cfg = db.get_effective_config(cfg.load())
+        try:
+            payload = build_folder_bursts(
+                db, folder_id, effective_cfg=effective_cfg, margin=margin,
+            )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        payload["folder"] = {
+            "id": folder["id"],
+            "name": folder["name"],
+            "path": folder["path"],
+        }
+        return jsonify(payload)
 
     @blueprint.route("/api/folders/<int:folder_id>/workspaces", methods=["GET"])
     def api_folder_workspaces(folder_id):

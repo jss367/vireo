@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from repositories.photo_labels import PhotoLabelRepository
     from repositories.photo_review import PhotoReviewRepository
     from repositories.photo_visibility import PhotoVisibilityRepository
+    from repositories.photos import PhotoRepository
     from repositories.processes import ProcessesRepository
     from repositories.stats import StatsRepository
     from repositories.sync import SyncRepository
@@ -3217,6 +3218,23 @@ class Database:
 
     # -- Photos --
 
+    @property
+    def photos(self) -> PhotoRepository:
+        """Workspace-scoped photo rows: ``db.photos.best_batch_rows_by_ids(ids)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a
+        fresh repository through ``_photos_repository`` for the active
+        workspace (raising when none is active), so never hold one across
+        ``set_active_workspace``. Serves the simple reads that need no
+        coordination: the Best Batch scope rows (``best_batch_rows_by_ids``,
+        ``best_batch_sequence_rows``, ``best_batch_folder_rows``,
+        ``count_folder_photos``) and ``analysis_evidence_rows``. The older
+        photo methods still reach the repository through forwarding
+        wrappers (``get_photo``, ``get_photos`` ...); composition such as
+        ``add_photo`` stays on ``Database``.
+        """
+        return self._photos_repository()
+
     def _photos_repository(self, *, scoped=True):
         """Build the core photo-row repository on this connection.
 
@@ -3556,13 +3574,6 @@ class Database:
         nothing instead of raising.
         """
         return self._photos_repository(scoped=False).file_in_workspace(photo_id, workspace_id)
-
-    def get_best_batch_rows_by_ids(self, photo_ids):
-        """Best Batch rows for the named workspace photos in online folders, unordered.
-
-        One unchunked statement, so the caller bounds ``photo_ids``.
-        """
-        return self._photos_repository().best_batch_rows_by_ids(photo_ids)
 
     def get_photo_flags_ratings_and_eyes(self, photo_ids):
         """``{photo_id: Row}`` with ``id``, ``flag``, ``rating``, ``eye_x``, ``eye_y``, ``eye_conf``, ``eye_tenengrad``."""

@@ -3391,6 +3391,125 @@ def create_media_blueprint(
             response.make_conditional(request)
         return response
 
+    @blueprint.route("/photos/<int:photo_id>/focus-crop")
+    def serve_focus_crop(photo_id):
+        """A native-resolution window around the point the scorer judged focus on.
+
+        The crop a reviewer (human or agent) judges sharpness from: ``size``
+        pixels square (default 512, 128-1024) at 1:1 from the working copy
+        (original as fallback), centred on the eye the eye stage located,
+        else the primary detection box, else the frame. ``basis`` forces
+        ``eye``, ``subject`` or ``frame`` (404 when the photo has no such
+        point); ``mask=1`` darkens pixels outside the active SAM mask so the
+        viewer sees exactly what was scored. Headers report the centre
+        (``X-Vireo-Focus-Center``, normalized ``x,y``), the basis used
+        (``X-Vireo-Focus-Basis``), whether the mask was applied
+        (``X-Vireo-Focus-Mask``) and the scale (``X-Vireo-Focus-Scale``,
+        ``1`` = native pixels). Workspace-gated like every ``/photos/<id>/*``
+        route. See ``docs/plans/2026-10-17-burst-evidence-adjudication-design.md``.
+        """
+        import config as cfg
+        from burst_evidence import (
+            DEFAULT_FOCUS_CROP_SIZE,
+            MAX_FOCUS_CROP_SIZE,
+            MIN_FOCUS_CROP_SIZE,
+        )
+        from image_loader import load_working_image
+        from PIL import Image
+
+        db = get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return "Not found", 404
+        size = request.args.get("size", DEFAULT_FOCUS_CROP_SIZE, type=int)
+        if size is None or not MIN_FOCUS_CROP_SIZE <= size <= MAX_FOCUS_CROP_SIZE:
+            return json_error(
+                f"size must be between {MIN_FOCUS_CROP_SIZE} and {MAX_FOCUS_CROP_SIZE}"
+            )
+        basis = (request.args.get("basis") or "auto").strip().lower()
+        if basis not in {"auto", "eye", "subject", "frame"}:
+            return json_error("basis must be auto, eye, subject or frame")
+        want_mask = request.args.get("mask") == "1"
+
+        center = None
+        used = None
+        if basis in {"auto", "eye"} and photo["eye_x"] is not None and photo["eye_y"] is not None:
+            center = (float(photo["eye_x"]), float(photo["eye_y"]))
+            used = "eye"
+        if used is None and basis in {"auto", "subject"}:
+            boxes = [
+                d for d in db.get_detections(photo_id)
+                if d["category"] == "animal" and d["detector_model"] != "full-image"
+            ]
+            if boxes:
+                box = boxes[0]
+                center = (box["box_x"] + box["box_w"] / 2.0, box["box_y"] + box["box_h"] / 2.0)
+                used = "subject"
+        if used is None:
+            if basis in {"eye", "subject"}:
+                return json_error(f"No {basis} location recorded for this photo", 404)
+            center = (0.5, 0.5)
+            used = "frame"
+
+        vireo_dir = os.path.dirname(config["THUMB_CACHE_DIR"])
+        folder = db.get_folder(photo["folder_id"])
+        folders = {photo["folder_id"]: folder["path"]} if folder else {}
+        # Full resolution: the point of this crop is native pixels. An agent
+        # reading crops is a user looking at the photo, so the working copy's
+        # recency is stamped like /photos/<id>/crop does.
+        img = load_working_image(
+            dict(photo), vireo_dir, max_size=None, folders=folders, record_access=True,
+        )
+        if img is None:
+            return "Could not load image", 500
+        iw, ih = img.size
+        cx = min(max(center[0], 0.0), 1.0)
+        cy = min(max(center[1], 0.0), 1.0)
+        half = size // 2
+        x1 = min(max(int(round(cx * iw)) - half, 0), max(0, iw - size))
+        y1 = min(max(int(round(cy * ih)) - half, 0), max(0, ih - size))
+        x2 = min(iw, x1 + size)
+        y2 = min(ih, y1 + size)
+        crop = img.crop((x1, y1, x2, y2))
+        if crop.mode != "RGB":
+            crop = crop.convert("RGB")
+
+        mask_applied = False
+        if want_mask:
+            mask_path = db.masks_features.photo_mask_path(photo_id)
+            masks_dir = os.path.realpath(os.path.join(os.path.dirname(db_path), "masks"))
+            if mask_path:
+                abs_mask = os.path.realpath(mask_path)
+                inside = abs_mask == masks_dir or abs_mask.startswith(masks_dir + os.sep)
+                mask_bytes = _read_mask_bytes(abs_mask) if inside else None
+                if mask_bytes is not None:
+                    import io
+
+                    # The mask was authored at pipeline resolution; scale it to
+                    # the source with nearest-neighbour so its edges stay crisp
+                    # at 1:1, then shade everything the scorer did not measure.
+                    mask_img = Image.open(io.BytesIO(mask_bytes)).convert("L")
+                    mask_img = mask_img.resize((iw, ih), Image.NEAREST).crop((x1, y1, x2, y2))
+                    mask_img = mask_img.point(lambda v: 255 if v > 127 else 0)
+                    shaded = crop.point(lambda v: int(v * 0.35))
+                    crop = Image.composite(crop, shaded, mask_img)
+                    mask_applied = True
+
+        import io
+
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=cfg.load().get("preview_quality", 90))
+        buf.seek(0)
+        response = Response(buf.read(), mimetype="image/jpeg")
+        response.headers["X-Vireo-Focus-Basis"] = used
+        response.headers["X-Vireo-Focus-Center"] = f"{cx:.4f},{cy:.4f}"
+        response.headers["X-Vireo-Focus-Scale"] = "1"
+        response.headers["X-Vireo-Focus-Mask"] = "1" if mask_applied else "0"
+        response.headers["X-Vireo-Focus-Window"] = f"{x1},{y1},{x2},{y2}"
+        response.cache_control.private = True
+        response.cache_control.max_age = 0
+        return response
+
     def allowed_preview_sizes():
         """Allowlist for /photos/<id>/preview?size=N.
 

@@ -86,10 +86,30 @@ Current stable set:
 | GET  | `/api/v1/workspaces` | All workspaces. |
 | POST | `/api/v1/workspaces/<id>/activate` | Switch the active workspace. |
 | GET  | `/api/v1/keywords` | Keyword tree. |
+| GET  | `/api/v1/photos/<id>/burst-evidence` | The burst around a photo as an evidence pack: ranked frames, feature coverage, ambiguity reasons, 1:1 crop URLs. `margin`, `focus_size`, `gap_seconds`, `max_photos`. |
+| POST | `/api/v1/photos/burst-evidence` | The same pack for an explicit `{"photo_ids": [...]}` selection (2–500 ids). |
+| GET  | `/api/v1/photos/<id>/focus-crop` | JPEG window at native pixel scale around the scored focus point. `size` (128–1024, default 512), `basis` (`auto`, `eye`, `subject`, `frame`), `mask=1` shades pixels outside the SAM mask. Headers: `X-Vireo-Focus-Basis`, `X-Vireo-Focus-Center`, `X-Vireo-Focus-Mask`, `X-Vireo-Focus-Window`. |
+| GET  | `/api/v1/folders/<id>/bursts` | Every burst in one folder with coverage, the scorer's pick and ambiguity; folder-level coverage too. `margin` (relative sharpness gap for a close call, default 0.10). Folders over 5000 photos answer 400. |
 
 Request/response shapes mirror the internal `/api/*` endpoints — see source
 or open `/api/v1/<path>` with the token in your browser's dev tools for
 concrete examples.
+
+### Burst adjudication
+
+The burst endpoints exist so a reviewer that is not Vireo's UI (a script, an
+agent) can second-guess the cull scorer without re-implementing it. Walk a
+folder with `/api/v1/folders/<id>/bursts`; every burst carries `coverage`
+(how many frames have detection, mask, quality and eye features) and
+`ambiguity` (`needs_review` plus reasons: `unanalyzed_frames`, `close_call`,
+`no_eye_located`, `subject_touches_edge`, `multiple_subjects`,
+`all_rejected`). A burst with `unanalyzed_frames` has not been fully
+processed; run Process on the folder before judging it, because the ranking
+is the evidence and it is missing. For an ambiguous burst, fetch its pack and
+look at each card's `focus_crop_url` (and `focus_crop_mask_url`) at 1:1
+before deciding. Record decisions through the normal flag endpoints so they
+show up in, and can be reversed from, the Undo panel. Design:
+`docs/plans/2026-10-17-burst-evidence-adjudication-design.md`.
 
 ## Worked example
 

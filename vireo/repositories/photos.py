@@ -257,6 +257,82 @@ class PhotoRepository:
             (self.workspace_id, *photo_ids),
         ).fetchall()
 
+    def best_batch_sequence_rows(self, folder_id, filename_prefix):
+        """Best Batch rows of one folder whose filename starts with ``filename_prefix``.
+
+        Same columns and workspace/online-folder scope as
+        ``best_batch_rows_by_ids``, ordered by filename then id. The caller
+        narrows to the frames that share the seed's digit width and extension.
+        """
+        return self.conn.execute(
+            """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
+                      p.flag, p.rating, p.quality_score, p.sharpness
+               FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ? AND p.folder_id = ? AND p.filename LIKE ?
+               ORDER BY p.filename ASC, p.id ASC""",
+            (self.workspace_id, folder_id, f"{filename_prefix}%"),
+        ).fetchall()
+
+    def best_batch_folder_rows(self, folder_id):
+        """Best Batch rows of one folder in capture-time order (untimed last).
+
+        Same columns and scope as ``best_batch_rows_by_ids``. Serves the
+        capture-time fallback of ``best_batch_scope`` and the folder burst
+        listing, which re-sorts by filename sequence itself.
+        """
+        return self.conn.execute(
+            """SELECT p.id, p.folder_id, p.filename, p.extension, p.timestamp,
+                      p.flag, p.rating, p.quality_score, p.sharpness
+               FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ? AND p.folder_id = ?
+               ORDER BY p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC""",
+            (self.workspace_id, folder_id),
+        ).fetchall()
+
+    def count_folder_photos(self, folder_id):
+        """How many photos of one folder the workspace sees in an online folder."""
+        return self.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE wf.workspace_id = ? AND p.folder_id = ?""",
+            (self.workspace_id, folder_id),
+        ).fetchone()[0]
+
+    def analysis_evidence_rows(self, photo_ids, min_conf):
+        """``{photo_id: Row}`` of the analysis state the burst evidence pack reports.
+
+        Each row carries ``id``, ``has_mask``, ``has_quality``, ``has_eye``
+        (0/1 for ``mask_path``, ``subject_tenengrad`` and ``eye_tenengrad``
+        being set), ``crop_complete``, ``subject_size`` and
+        ``detection_count``: the photo's animal boxes from a real detector
+        (not the ``full-image`` fallback) at or above ``min_conf``. Not
+        workspace-scoped; callers pass ids they have already resolved.
+        """
+        result = {}
+        for chunk in self._chunks(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""SELECT p.id,
+                           (p.mask_path IS NOT NULL) AS has_mask,
+                           (p.subject_tenengrad IS NOT NULL) AS has_quality,
+                           (p.eye_tenengrad IS NOT NULL) AS has_eye,
+                           p.crop_complete, p.subject_size,
+                           (SELECT COUNT(*) FROM detections d
+                             WHERE d.photo_id = p.id
+                               AND d.category = 'animal'
+                               AND d.detector_model != 'full-image'
+                               AND d.detector_confidence >= ?) AS detection_count
+                      FROM photos p WHERE p.id IN ({placeholders})""",
+                (min_conf, *chunk),
+            ).fetchall()
+            result.update({r["id"]: r for r in rows})
+        return result
+
     def flags_ratings_and_eyes(self, photo_ids):
         """``{photo_id: Row}`` with ``id``, ``flag``, ``rating`` and the eye fields.
 
