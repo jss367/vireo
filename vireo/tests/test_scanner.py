@@ -7684,11 +7684,11 @@ def test_pairing_defers_companion_file_cleanup_until_commit_succeeds(
     rows pointing at gone-from-disk thumbnails / working copies / masks
     / offline originals.
 
-    Simulate the failure by monkeypatching ``commit_with_retry`` inside
-    scanner to raise, then assert that the companion row is still present
+    Simulate the failure by monkeypatching the database's
+    ``commit_with_retry`` (which the scanner commits through) to raise,
+    then assert that the companion row is still present
     AND its cached derivatives are all still on disk.
     """
-    import scanner
     from db import Database
     from scanner import _pair_raw_jpeg_companions
 
@@ -7711,10 +7711,10 @@ def test_pairing_defers_companion_file_cleanup_until_commit_succeeds(
 
     seeded = _seed_derivative_files(vireo_dir, thumb_dir, jpeg_id)
 
-    def _boom(_conn):
+    def _boom():
         raise RuntimeError("simulated commit failure")
 
-    monkeypatch.setattr(scanner, "commit_with_retry", _boom)
+    monkeypatch.setattr(db, "commit_with_retry", _boom)
 
     with pytest.raises(RuntimeError, match="simulated commit failure"):
         _pair_raw_jpeg_companions(

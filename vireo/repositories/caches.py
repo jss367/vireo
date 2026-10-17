@@ -313,3 +313,18 @@ class CachesRepository:
             "SELECT size FROM preview_cache WHERE photo_id = ?",
             (pid,),
         ).fetchall()
+
+    def preview_keys_for_photos(self, photo_ids: Sequence[int]) -> list[sqlite3.Row]:
+        """``(photo_id, size)`` of every preview entry for ``photo_ids`` (caller chunks)."""
+        ph = ",".join("?" * len(photo_ids))
+        return self.conn.execute(
+            f"SELECT photo_id, size FROM preview_cache WHERE photo_id IN ({ph})",
+            photo_ids,
+        ).fetchall()
+
+    def delete_photo_previews(self, pid: int) -> None:
+        """Forget every preview entry of one photo, in the caller's transaction."""
+        self.conn.execute(
+            "DELETE FROM preview_cache WHERE photo_id = ?",
+            (pid,),
+        )
