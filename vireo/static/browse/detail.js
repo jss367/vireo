@@ -435,6 +435,41 @@ async function loadSummary() {
   }
 }
 
+// Recorded completed runs and qualifying results are distinct: no animal
+// box does not imply the detector never ran. Missing run coverage on an
+// older response is unknown, rather than zero.
+// Empty when the scope has no photos or the server sent no coverage.
+function analysisCoverageText(/** @type {BrowseSummary} */ summary) {
+  var total = Number(summary && summary.filtered_total) || 0;
+  var analysis = summary && summary.analysis;
+  if (total <= 0 || !analysis) return '';
+  var totalText = total.toLocaleString();
+  function count(/** @type {number | undefined} */ value) {
+    return Math.min(Math.max(Number(value) || 0, 0), total);
+  }
+  function dataSegment(/** @type {string} */ noun, /** @type {string} */ preposition, /** @type {number | undefined} */ value) {
+    var n = count(value);
+    if (n === 0) return noun + ' never computed';
+    return noun + ' ' + preposition + ' ' + n.toLocaleString() + ' of ' + totalText;
+  }
+  var misses = count(analysis.with_misses);
+  var missesSegment = misses === 0 ? 'misses never computed'
+    : misses === total ? 'misses checked on ' + totalText
+    : 'misses checked on ' + misses.toLocaleString() + ' of ' + totalText;
+  var detected = count(analysis.with_detection);
+  var text = [
+    analysis.with_detection_run == null ? '' : count(analysis.with_detection_run) === 0
+      ? 'no completed detection runs recorded'
+      : 'detection checked on ' + count(analysis.with_detection_run).toLocaleString() + ' of ' + totalText,
+    detected === 0 ? 'no qualifying animal detections recorded'
+      : 'animal detections recorded on ' + detected.toLocaleString() + ' of ' + totalText,
+    dataSegment('quality data', 'for', analysis.with_quality),
+    dataSegment('eye focus', 'for', analysis.with_eye),
+    missesSegment,
+  ].filter(Boolean).join(' · ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function renderSummary(/** @type {BrowseSummary} */ data) {
   var isFiltered = data.filtered_total !== data.total;
 
@@ -444,6 +479,7 @@ function renderSummary(/** @type {BrowseSummary} */ data) {
 
   /** @type {HTMLElement} */ (document.getElementById('summaryClassified')).textContent = data.classified.toLocaleString() + ' classified';
   /** @type {HTMLElement} */ (document.getElementById('summaryUnclassified')).textContent = data.unclassified.toLocaleString() + ' unclassified';
+  /** @type {HTMLElement} */ (document.getElementById('summaryAnalysis')).textContent = analysisCoverageText(data);
 
   // Top species
   var speciesSection = /** @type {HTMLElement} */ (document.getElementById('summarySpeciesSection'));
