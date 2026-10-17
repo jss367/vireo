@@ -657,6 +657,25 @@ def test_evidence_pack_states():
 
 
 
+
+def test_forced_working_source_cannot_decode_original():
+    events = []
+    ns = {"os": types.SimpleNamespace(path=types.SimpleNamespace(join=posixpath.join, exists=lambda path: False)),
+          "load_image": forbidden, "_load_working_copy_image": forbidden}
+    load("image_loader.py", ns, {"load_working_image"})
+    assert ns["load_working_image"]({"working_copy_path": "invented-missing", "folder_id": 1, "filename": "invented.raw"},
+                                     "/invented", folders=None, return_source=True) == (None, "original")
+    helper_ns = {"os": types.SimpleNamespace(path=posixpath), "config": {"THUMB_CACHE_DIR": "/invented/thumbs"}}
+    modules = {"focus_crop": types.SimpleNamespace(prefer_original=forbidden),
+               "image_loader": types.SimpleNamespace(load_image=forbidden,
+                   load_working_image=lambda *a, **kw: events.append(kw) or (None, "original"))}
+    helper_ns["__builtins__"] = {**vars(builtins), "__import__": lambda name, *a, **kw: modules[name]}
+    nested("web/media.py", helper_ns, {"_focus_source_image"})
+    assert helper_ns["_focus_source_image"]({"folder_id": 1, "filename": "invented.raw"}, {"path": "/invented"}, "working") == (None, "original")
+    assert events[0]["folders"] is None
+    print("PASS forced working copy never resolves or decodes original on missing-copy fallback")
+
+
 def test_focus_center_and_original_source_with_fake_images():
     for center in ("nan,0.5", "0.5,inf", "-0.1,0.5", "0.5", "0.5,0.5,0.5"):
         result, events = focus(args={"center": center})

@@ -88,7 +88,7 @@ Current stable set:
 | GET  | `/api/v1/keywords` | Keyword tree. |
 | GET  | `/api/v1/photos/<id>/burst-evidence` | The burst around a photo as an evidence pack: ranked frames, feature coverage, ambiguity reasons, 1:1 crop URLs. `margin`, `focus_size`, `gap_seconds`, `max_photos`. |
 | POST | `/api/v1/photos/burst-evidence` | The same pack for an explicit `{"photo_ids": [...]}` selection (2–500 ids). |
-| GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` (normalized frame coordinates) puts the window where the reviewer chose, e.g. on the eye located in the preview; `source` (`auto` default, `working`, `original`): auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
+| GET  | `/api/v1/photos/<id>/focus-crop` | Unresampled JPEG window around the scored focus point. `size` (128–1024, default 512); `basis` (`auto`, `eye`, `subject`, `frame`); `center=x,y` uses normalized coordinates in the unedited upright source raster, before any crop/rotation recipe; `source` (`auto` default, `working`, `original`): working requires a usable working copy and returns 404 without decoding an original when absent; auto serves the working copy unless it is downsized against the catalog dimensions and the original can be decoded; `mask=1` shades pixels outside the SAM mask. Headers: `X-Vireo-Focus-Basis` (`eye`, `subject`, `frame`, `point`), `X-Vireo-Focus-Center`, `X-Vireo-Focus-Window`, `X-Vireo-Focus-Source` (`working_copy`, `original`), `X-Vireo-Focus-Raster-Size`, `X-Vireo-Focus-Original-Scale` (decoded pixels per original pixel, `unknown` without catalog dimensions), `X-Vireo-Focus-Mask`. |
 | GET  | `/api/v1/folders/<id>/bursts` | Every burst in one folder with coverage, the scorer's pick and ambiguity; folder-level coverage too. `margin` (relative sharpness gap for a close call, default 0.10). Folders over 5000 photos answer 400. |
 
 Request/response shapes mirror the internal `/api/*` endpoints — see source
@@ -106,8 +106,11 @@ Each card's `focus_crop_scale` describes decoded-raster pixels; the response's
 decoded. Auto crops use an eye only when eye scoring is enabled
 and an eye measurement exists; `basis=eye` explicitly requests a recorded eye.
 Without eye detection the subject crop is centred on the detection box, which
-on a perched bird is usually the body; locate the eye on `preview_url` and ask
-for `focus-crop?center=x,y` there instead.
+on a perched bird is usually the body. `center=x,y` refers explicitly to the
+unedited upright source raster (the returned `X-Vireo-Focus-Raster-Size`),
+not the recipe-rendered `preview_url`. Locate the point on an unedited upright
+reference of that source; preview coordinates require undoing its crop/rotation
+recipe first. The endpoint does not perform that coordinate mapping.
 Subject crops first use the exact detection prompt of the current active mask,
 including a validated weak detection below the normal threshold; other weak
 boxes do not lower the workspace threshold.

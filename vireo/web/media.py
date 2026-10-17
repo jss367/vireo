@@ -3404,8 +3404,8 @@ def create_media_blueprint(
     def _focus_source_image(photo, folder, source_choice):
         """``(image, source)`` the focus crop is cut from, or ``(None, None)``.
 
-        ``working`` and ``auto`` decode the working copy (original fallback
-        as everywhere else). A working copy is capped at
+        ``working`` requires the working copy, with no original fallback.
+        ``auto`` permits original fallback. A working copy is capped at
         ``working_copy_max_size``, so on a large sensor its pixels are not
         the original's: when the reviewer asked for ``original``, or left it
         to ``auto`` and the copy is downsized against the catalog
@@ -3421,7 +3421,8 @@ def create_media_blueprint(
         if source_choice != "original":
             img, source = load_working_image(
                 dict(photo), os.path.dirname(config["THUMB_CACHE_DIR"]), max_size=None,
-                folders=folders, record_access=True, return_source=True,
+                folders=None if source_choice == "working" else folders,
+                record_access=True, return_source=True,
             )
         wants_original = source_choice == "original" or (
             source_choice == "auto" and img is not None and source == "working_copy"
@@ -3438,8 +3439,8 @@ def create_media_blueprint(
         """An unresampled window around the scorer's focus point.
 
         Auto follows workspace eye scoring, then the primary subject or frame;
-        ``center=x,y`` (normalized frame coordinates) puts the window where
-        the reviewer chose instead. ``source`` picks the pixels: ``auto``
+        ``center=x,y`` uses normalized coordinates in the unedited upright
+        source raster, before any crop/rotation recipe. ``source`` picks the pixels: ``auto``
         (default) serves the working copy unless it is downsized against the
         catalog dimensions and the original can be decoded, ``working`` keeps
         the working copy, ``original`` insists on the original (404 when it
@@ -3501,8 +3502,8 @@ def create_media_blueprint(
             return json_error(str(exc), 404)
         img, source = _focus_source_image(photo, db.get_folder(photo["folder_id"]), source_choice)
         if img is None:
-            if source_choice == "original":
-                return json_error("The original file is not available", 404)
+            if source_choice in {"working", "original"}:
+                return json_error(f"The {source_choice} image is not available", 404)
             return "Could not load image", 500
         window, center = focus_window(img.size, center, size)
         crop = img.crop(window).convert("RGB")
