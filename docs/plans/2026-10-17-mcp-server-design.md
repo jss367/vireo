@@ -26,7 +26,9 @@ database access of its own and cannot race the app for the catalog.
   override it, which tests and HOME-override instances use. The override is
   paired: `VIREO_URL` requires `VIREO_TOKEN` so the local runtime token is
   never shipped to a URL this server did not pick, and the URL must be
-  loopback HTTP so a typo cannot leave the machine.
+  numeric loopback HTTP (`127.0.0.1` or `::1`) so no DNS interpretation can
+  redirect a capability. Redirect following and environment proxies are disabled;
+  status never reads a separate default-instance catalog path.
 - **Not running.** When nothing answers, every tool returns the same plain
   error: open Vireo (or run the sidecar headless) and try again. The server
   never spawns an instance: a chat client spawning the catalog's single

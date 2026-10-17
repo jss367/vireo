@@ -17,6 +17,7 @@ Design: ``docs/plans/2026-10-17-mcp-server-design.md``.
 """
 
 import contextlib
+import ipaddress
 import json
 import os
 import shlex
@@ -42,16 +43,15 @@ BAD_TOKEN_MESSAGE = (
     "runtime.json is written."
 )
 UNPAIRED_URL_MESSAGE = (
-    "VIREO_URL is set but VIREO_TOKEN is not. Overrides must supply their "
-    "own token; the local runtime.json token is never sent to a URL this "
-    "server did not pick."
+    "VIREO_URL and VIREO_TOKEN overrides must be supplied together; "
+    "runtime credentials are never borrowed by an override."
 )
 NON_LOOPBACK_URL_MESSAGE = (
-    "VIREO_URL must point at a loopback address (http://127.0.0.1:..., "
-    "http://localhost:... or http://[::1]:...). Remote targets are not "
-    "supported; the override exists for tests and local second instances."
+    "VIREO_URL must be a numeric loopback HTTP origin "
+    "(http://127.0.0.1:... or http://[::1]:...). "
+    "Names, remote targets, credentials and URL paths are not supported."
 )
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 
 INSTRUCTIONS = """\
 Vireo is the user's wildlife photo catalog. Tools act on the active
@@ -106,16 +106,41 @@ class VireoError(ToolError):
     """
 
 
-def _is_loopback_http(url):
-    """Whether ``url`` is an ``http://`` URL on a loopback host."""
+def _loopback_base_url(value):
+    """Canonical numeric-loopback origin only; never trust parser normalization."""
+    if not isinstance(value, str) or not value or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
+        raise VireoError(NON_LOOPBACK_URL_MESSAGE)
     try:
-        parsed = urllib.parse.urlparse(url)
-    except ValueError:
+        parts = urllib.parse.urlsplit(value)
+        address = ipaddress.ip_address(parts.hostname or "")
+        port = parts.port
+    except ValueError as exc:
+        raise VireoError(NON_LOOPBACK_URL_MESSAGE) from exc
+    if (
+        parts.scheme != "http" or address.compressed not in _LOOPBACK_HOSTS
+        or parts.username is not None or parts.password is not None
+        or parts.path not in {"", "/"} or "?" in value or "#" in value
+        or "%" in (parts.hostname or "") or parts.netloc.endswith(":")
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise VireoError(NON_LOOPBACK_URL_MESSAGE)
+    host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+    return f"{parts.scheme}://{host}" + (f":{port}" if port is not None else "")
+
+
+def _is_loopback_http(url):
+    """Whether the exact origin satisfies the capability destination boundary."""
+    try:
+        _loopback_base_url(url)
+        return True
+    except VireoError:
         return False
-    if parsed.scheme != "http":
-        return False
-    host = (parsed.hostname or "").lower()
-    return host in _LOOPBACK_HOSTS
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Never forward the runtime capability to another origin or port."""
+        return None
 
 
 class VireoClient:
@@ -132,24 +157,22 @@ class VireoClient:
         self.timeout = timeout
 
     def _resolve(self):
-        base_url = self._base_url or os.environ.get("VIREO_URL")
-        token = self._token or os.environ.get("VIREO_TOKEN")
-        if base_url:
-            # The override's URL is arbitrary; never ship it the local
-            # runtime.json token. Require an explicit paired token, and
-            # keep the target on loopback so a typo cannot reach the net.
-            if not token:
+        base_url = self._base_url if self._base_url is not None else os.environ.get("VIREO_URL")
+        token = self._token if self._token is not None else os.environ.get("VIREO_TOKEN")
+        if base_url is not None or token is not None:
+            if not isinstance(base_url, str) or not base_url or not isinstance(token, str) or not token:
                 raise VireoError(UNPAIRED_URL_MESSAGE)
-            if not _is_loopback_http(base_url):
-                raise VireoError(NON_LOOPBACK_URL_MESSAGE)
-            return base_url.rstrip("/"), token
+            return _loopback_base_url(base_url), token
         runtime = read_runtime_json()
-        if not runtime or not runtime.get("port"):
+        if not runtime:
             raise VireoError(NOT_RUNNING_MESSAGE)
-        return (
-            f"http://127.0.0.1:{runtime['port']}",
-            token or runtime.get("token") or "",
-        )
+        port = runtime.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise VireoError(NOT_RUNNING_MESSAGE)
+        token = runtime.get("token")
+        if not isinstance(token, str) or not token:
+            raise VireoError(BAD_TOKEN_MESSAGE)
+        return f"http://127.0.0.1:{port}", token
 
     def request(self, method, path, params=None, json_body=None):
         """Return ``(status, content_type, body_bytes)`` for one request."""
@@ -166,7 +189,8 @@ class VireoClient:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+            with opener.open(req, timeout=self.timeout) as resp:
                 return resp.status, resp.headers.get("Content-Type", ""), resp.read()
         except urllib.error.HTTPError as err:
             return err.code, err.headers.get("Content-Type", ""), err.read()
@@ -302,11 +326,6 @@ def _register_catalog_tools(server, client):
             "active_workspace": _pick(workspace, ("id", "name")),
             "photo_count": photos.get("total"),
         }
-        # ``db_path`` lives in the local runtime.json, written by whichever
-        # instance owns this user; with VIREO_URL in play the target may be
-        # a different instance and the local path would misname its catalog.
-        if not os.environ.get("VIREO_URL"):
-            out["db_path"] = (read_runtime_json() or {}).get("db_path")
         return out
 
     @server.tool()

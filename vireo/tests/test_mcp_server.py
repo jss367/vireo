@@ -360,6 +360,9 @@ def test_vireo_url_without_token_never_borrows_the_local_token(monkeypatch):
 @pytest.mark.parametrize("bad_url", [
     "http://evil.example.com/",
     "http://192.0.2.1/",
+    "http://localhost:9000",
+    "http://user@127.0.0.1:9000/",
+    "http://127.0.0.1:9000/path",
     "https://127.0.0.1:9/",
     "file:///etc/hosts",
 ])
@@ -373,7 +376,6 @@ def test_vireo_url_must_be_loopback_http(monkeypatch, bad_url):
 
 @pytest.mark.parametrize("good_url,expected", [
     ("http://127.0.0.1:9/", "http://127.0.0.1:9"),
-    ("http://localhost:9000", "http://localhost:9000"),
     ("http://[::1]:9000/", "http://[::1]:9000"),
 ])
 def test_vireo_url_accepts_each_loopback_form(monkeypatch, good_url, expected):

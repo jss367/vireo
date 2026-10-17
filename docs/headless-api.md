@@ -39,8 +39,10 @@ thumbnail or the detected subject as an image), `burst`, `set_flag`,
 `reason` and `source` shown next to the flag — lands with #2130; the tool
 takes those fields then). The server reads `runtime.json` on every call;
 `VIREO_URL` and `VIREO_TOKEN` override it for tests and second instances
-(paired, and loopback-only, so the local token never reaches an arbitrary
-URL). Design: `docs/plans/2026-10-17-mcp-server-design.md`.
+(both required, and restricted to numeric `http://127.0.0.1` or `http://[::1]`
+origins). URL names, user-info, paths, queries and fragments are refused. HTTP
+redirects and environment proxies are disabled. Status does not read or report
+a default-instance catalog path. Design: `docs/plans/2026-10-17-mcp-server-design.md`.
 
 ## Discovering a running instance
 
