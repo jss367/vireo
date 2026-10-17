@@ -222,12 +222,18 @@ def test_remove_unreferenced_entry_deletes_only_dangling_blobs(hub):
     assert live.exists()
 
 
-def test_purge_subfolder_removes_an_installed_entry_too(hub, tmp_path):
+def test_purge_subfolder_skips_an_entry_whose_model_directory_is_back(hub, tmp_path):
+    """Settings deletes the directory first; one that exists again is a reinstall."""
+    import shutil
+
     from services import hf_cache
 
     blob = hub.add("dinov2-vit-b14/model.onnx", b"d" * 300)
-    _install(tmp_path, "dinov2-vit-b14")
+    install = _install(tmp_path, "dinov2-vit-b14")
 
+    assert hf_cache.purge_subfolder("dinov2-vit-b14") == 0
+    assert blob.exists()
+    shutil.rmtree(install)
     assert hf_cache.purge_subfolder("dinov2-vit-b14") == 300
     assert not blob.exists()
     assert hf_cache.purge_subfolder("dinov2-vit-b14") == 0

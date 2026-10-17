@@ -613,19 +613,30 @@ def remove_unused(cache_dir=None, models_dir=None):
     return result
 
 
+def _purge_keys(keys, cache_dir, models_dir):
+    """Delete the entries for ``keys`` that exist and back no model directory.
+
+    Collected under the download locks like a Storage-page removal: the
+    Settings delete that calls this has just removed the install directory,
+    so an entry that is installed again means a reinstall began in between,
+    and its cache copy is exactly what that reinstall needs.
+    """
+    result = _delete_selected(
+        cache_dir, models_dir,
+        lambda found: [found[k] for k in keys if k in found and not found[k]["installed"]],
+    )
+    return result["freed"]
+
+
 def purge_subfolder(subfolder, cache_dir=None, models_dir=None):
-    """Drop the ONNX repo's cache entry for ``subfolder`` whether installed or not.
+    """Drop the ONNX repo's cache entry for ``subfolder`` after its install went.
 
     Called after a Settings delete, so the cache copy leaves with the install
     instead of lingering invisibly. Returns the bytes freed.
     """
     from models import ONNX_REPO
 
-    _total, found = _collect(_cache_dir(cache_dir), _models_dir(models_dir))
-    group = found.get(f"{ONNX_REPO}/{subfolder}")
-    if group is None:
-        return 0
-    freed, _failures = _delete_groups([group])
+    freed = _purge_keys([f"{ONNX_REPO}/{subfolder}"], _cache_dir(cache_dir), _models_dir(models_dir))
     log.info("Purged HF cache entry for %s (%d bytes)", subfolder, freed)
     return freed
 
@@ -633,17 +644,14 @@ def purge_subfolder(subfolder, cache_dir=None, models_dir=None):
 def purge_model(model_id, cache_dir=None, models_dir=None):
     """Drop every cache entry a known model's download produced."""
     import models as models_mod
+    from models import ONNX_REPO
 
     km = next((m for m in models_mod.KNOWN_MODELS if m["id"] == model_id), None)
     if km is None:
         return 0
-    cache_dir = _cache_dir(cache_dir)
-    models_dir = _models_dir(models_dir)
-    freed = purge_subfolder(km.get("hf_subdir", model_id), cache_dir, models_dir)
-    _total, found = _collect(cache_dir, models_dir)
+    keys = [f"{ONNX_REPO}/{km.get('hf_subdir', model_id)}"]
     for field in ("model_str", "source"):
         value = km.get(field, "")
-        group = found.get(value.removeprefix("hf-hub:")) if value.startswith("hf-hub:") else None
-        if group is not None and not group["installed"]:
-            freed += _delete_groups([group])[0]
-    return freed
+        if value.startswith("hf-hub:"):
+            keys.append(value.removeprefix("hf-hub:"))
+    return _purge_keys(keys, _cache_dir(cache_dir), _models_dir(models_dir))
