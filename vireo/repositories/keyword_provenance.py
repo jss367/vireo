@@ -1127,20 +1127,8 @@ class KeywordProvenanceRepository:
         self.conn.execute("DELETE FROM keywords WHERE id = ?", (src_id,))
         return merged
 
-    def link_keyword_to_place(self, keyword_id, details):
-        """Attach Google place data to an existing keyword.
-
-        ``details`` has the same shape as :meth:`upsert_place_chain`'s input.
-        Builds the parent chain, then tries to UPDATE the target keyword with
-        ``place_id``, coords, name, and the deepest parent's id. If another
-        keyword already has the target ``place_id`` (UNIQUE collision on the
-        partial index), the existing canonical row absorbs all
-        ``photo_keywords`` rows from the target, and the now-empty target
-        row is deleted.
-
-        Returns ``{"keyword_id": <final id>, "merged": <bool>}``. ``merged``
-        is True when an existing place-bearing row absorbed the target.
-        """
+    def _check_place_link_target(self, keyword_id, details):
+        """Reject a place link to a missing or non-location keyword."""
         if not details.get("place_id"):
             raise ValueError("link_keyword_to_place requires details['place_id']")
 
@@ -1158,6 +1146,107 @@ class KeywordProvenanceRepository:
             raise ValueError(
                 f"keyword id {keyword_id} is type '{row['type']}', not 'location'"
             )
+
+    def _absorb_into_canonical_place(self, keyword_id, canonical_id):
+        """Fold ``keyword_id`` into the row that already owns its place.
+
+        Moves its children, photo associations and import aliases onto
+        ``canonical_id``, then deletes the emptied row.
+        """
+        # FK on keywords.parent_id is enforced (foreign_keys=ON),
+        # so any descendants of the old keyword would block the
+        # final DELETE FROM keywords. Reparent them onto the
+        # canonical row first — the canonical row represents the
+        # same place, so its descendants inherit cleanly.
+        # Per-child reparent so a UNIQUE(name, parent_id) clash
+        # in the canonical's existing subtree (a child with the
+        # same name) doesn't blow up the bulk UPDATE. On clash,
+        # disambiguate the migrating child's name with a short
+        # id suffix — preserves both rows' photo links rather
+        # than losing data.
+        children = self.conn.execute(
+            "SELECT id, name FROM keywords WHERE parent_id = ?",
+            (keyword_id,),
+        ).fetchall()
+        for child in children:
+            try:
+                self.conn.execute(
+                    "UPDATE keywords SET parent_id = ? WHERE id = ?",
+                    (canonical_id, child["id"]),
+                )
+            except sqlite3.IntegrityError:
+                disambiguated = f"{child['name']} (id-{child['id']})"
+                try:
+                    self.conn.execute(
+                        "UPDATE keywords SET parent_id = ?, name = ? "
+                        "WHERE id = ?",
+                        (canonical_id, disambiguated, child["id"]),
+                    )
+                except sqlite3.IntegrityError as inner_err:
+                    raise RuntimeError(
+                        f"child keyword '{child['name']}' "
+                        f"(id={child['id']}) collides with the "
+                        f"canonical row's subtree even after "
+                        f"disambiguation"
+                    ) from inner_err
+        # Re-point photo_keywords from old → canonical, carrying
+        # each association's durable provenance with it. On a
+        # conflict the canonical row keeps the stronger of the two
+        # claims rather than silently dropping a stamp.
+        self.conn.execute(
+            f"""INSERT INTO photo_keywords (photo_id, keyword_id, source)
+                           SELECT photo_id, ?, source
+                           FROM photo_keywords WHERE keyword_id = ?
+                           {self.KEYWORD_SOURCE_CONFLICT_SQL}""",
+            (canonical_id, keyword_id),
+        )
+        self.conn.execute(
+            "DELETE FROM photo_keywords WHERE keyword_id = ?",
+            (keyword_id,),
+        )
+        # Preserve remembered import paths before the foreign-key
+        # cascade deletes aliases of the absorbed place.
+        self.conn.execute(
+            'UPDATE keyword_import_aliases SET keyword_id = ? WHERE keyword_id = ?',
+            (canonical_id, keyword_id),
+        )
+        # Delete the now-empty old keyword row.
+        self.conn.execute(
+            "DELETE FROM keywords WHERE id = ?", (keyword_id,),
+        )
+        return {"keyword_id": canonical_id, "merged": True}
+
+    def _place_link_name_clash(self, new_name, parent_id, keyword_id):
+        """Another keyword holding the ``(new_name, parent_id)`` slot, if any."""
+        if parent_id is None:
+            name_clash = self.conn.execute(
+                "SELECT id FROM keywords "
+                "WHERE name = ? AND parent_id IS NULL AND id != ?",
+                (new_name, keyword_id),
+            ).fetchone()
+        else:
+            name_clash = self.conn.execute(
+                "SELECT id FROM keywords "
+                "WHERE name = ? AND parent_id = ? AND id != ?",
+                (new_name, parent_id, keyword_id),
+            ).fetchone()
+        return name_clash
+
+    def link_keyword_to_place(self, keyword_id, details):
+        """Attach Google place data to an existing keyword.
+
+        ``details`` has the same shape as :meth:`upsert_place_chain`'s input.
+        Builds the parent chain, then tries to UPDATE the target keyword with
+        ``place_id``, coords, name, and the deepest parent's id. If another
+        keyword already has the target ``place_id`` (UNIQUE collision on the
+        partial index), the existing canonical row absorbs all
+        ``photo_keywords`` rows from the target, and the now-empty target
+        row is deleted.
+
+        Returns ``{"keyword_id": <final id>, "merged": <bool>}``. ``merged``
+        is True when an existing place-bearing row absorbed the target.
+        """
+        self._check_place_link_target(keyword_id, details)
 
         place_id = details["place_id"]
         new_name = details.get("name", "")
@@ -1213,86 +1302,17 @@ class KeywordProvenanceRepository:
                 ).fetchone()
                 if canonical is not None and canonical["id"] != keyword_id:
                     # Case (a): merge.
-                    canonical_id = canonical["id"]
-                    # FK on keywords.parent_id is enforced (foreign_keys=ON),
-                    # so any descendants of the old keyword would block the
-                    # final DELETE FROM keywords. Reparent them onto the
-                    # canonical row first — the canonical row represents the
-                    # same place, so its descendants inherit cleanly.
-                    # Per-child reparent so a UNIQUE(name, parent_id) clash
-                    # in the canonical's existing subtree (a child with the
-                    # same name) doesn't blow up the bulk UPDATE. On clash,
-                    # disambiguate the migrating child's name with a short
-                    # id suffix — preserves both rows' photo links rather
-                    # than losing data.
-                    children = self.conn.execute(
-                        "SELECT id, name FROM keywords WHERE parent_id = ?",
-                        (keyword_id,),
-                    ).fetchall()
-                    for child in children:
-                        try:
-                            self.conn.execute(
-                                "UPDATE keywords SET parent_id = ? WHERE id = ?",
-                                (canonical_id, child["id"]),
-                            )
-                        except sqlite3.IntegrityError:
-                            disambiguated = f"{child['name']} (id-{child['id']})"
-                            try:
-                                self.conn.execute(
-                                    "UPDATE keywords SET parent_id = ?, name = ? "
-                                    "WHERE id = ?",
-                                    (canonical_id, disambiguated, child["id"]),
-                                )
-                            except sqlite3.IntegrityError as inner_err:
-                                raise RuntimeError(
-                                    f"child keyword '{child['name']}' "
-                                    f"(id={child['id']}) collides with the "
-                                    f"canonical row's subtree even after "
-                                    f"disambiguation"
-                                ) from inner_err
-                    # Re-point photo_keywords from old → canonical, carrying
-                    # each association's durable provenance with it. On a
-                    # conflict the canonical row keeps the stronger of the two
-                    # claims rather than silently dropping a stamp.
-                    self.conn.execute(
-                        f"""INSERT INTO photo_keywords (photo_id, keyword_id, source)
-                           SELECT photo_id, ?, source
-                           FROM photo_keywords WHERE keyword_id = ?
-                           {self.KEYWORD_SOURCE_CONFLICT_SQL}""",
-                        (canonical_id, keyword_id),
+                    return self._absorb_into_canonical_place(
+                        keyword_id, canonical["id"],
                     )
-                    self.conn.execute(
-                        "DELETE FROM photo_keywords WHERE keyword_id = ?",
-                        (keyword_id,),
-                    )
-                    # Preserve remembered import paths before the foreign-key
-                    # cascade deletes aliases of the absorbed place.
-                    self.conn.execute(
-                        'UPDATE keyword_import_aliases SET keyword_id = ? WHERE keyword_id = ?',
-                        (canonical_id, keyword_id),
-                    )
-                    # Delete the now-empty old keyword row.
-                    self.conn.execute(
-                        "DELETE FROM keywords WHERE id = ?", (keyword_id,),
-                    )
-                    return {"keyword_id": canonical_id, "merged": True}
 
                 # Case (b): name collision — a *different* keyword already
                 # holds the (new_name, parent_id) slot. Disambiguate the
                 # name by appending a short place_id suffix and retry.
                 # Same approach as _upsert_one_keyword's leaf-collision path.
-                if parent_id is None:
-                    name_clash = self.conn.execute(
-                        "SELECT id FROM keywords "
-                        "WHERE name = ? AND parent_id IS NULL AND id != ?",
-                        (new_name, keyword_id),
-                    ).fetchone()
-                else:
-                    name_clash = self.conn.execute(
-                        "SELECT id FROM keywords "
-                        "WHERE name = ? AND parent_id = ? AND id != ?",
-                        (new_name, parent_id, keyword_id),
-                    ).fetchone()
+                name_clash = self._place_link_name_clash(
+                    new_name, parent_id, keyword_id,
+                )
                 if name_clash is None:
                     # Neither place_id nor name conflict — shouldn't happen
                     # but re-raise rather than swallow.
@@ -1311,183 +1331,185 @@ class KeywordProvenanceRepository:
                         f"collides with an existing row even after disambiguation"
                     ) from inner_err
 
-    def upsert_one_keyword(
-        self, name, parent_id, place_id=None, latitude=None, longitude=None,
-        reuse_location_component=False,
+    def _claim_location_component_for_place(
+        self, name, parent_id, place_id, latitude, longitude,
     ):
-        """Insert-or-fetch a single ``type='location'`` keyword row.
+        """Give an administrative place to its matching hierarchy row.
 
-        Two dedupe modes:
-
-        * ``place_id`` is given: dedupe on the partial unique index over
-          ``place_id``. If a row with that ``place_id`` already exists, update
-          its name/parent/coords (the user just re-picked the same Google
-          place) and return its id.
-        * ``place_id`` is ``None``: dedupe on ``(name, parent_id)`` among rows
-          whose ``place_id`` is also NULL. SELECT-then-INSERT (rather than
-          ``INSERT OR IGNORE``) so we never collide a coordless parent row
-          with a place_id-bearing leaf that happens to share a name+parent.
-        * ``reuse_location_component`` is true only for administrative address
-          components. In that case, a matching location hierarchy row can be
-          reused even if it already carries a place id. A coordless matching
-          row can also absorb the selected administrative place's id and
-          coordinates instead of creating a suffixed duplicate.
-
-        Cross-type collision handling: the table-level ``UNIQUE(name,
-        parent_id)`` constraint doesn't filter by ``type``, so a pre-existing
-        keyword of a *different* type with the same ``(name, parent_id)`` can
-        cause our INSERT to raise ``sqlite3.IntegrityError``. Rather than
-        silently merging into an unrelated keyword (which would corrupt the
-        user's existing tags), we catch that error, re-SELECT to confirm
-        what's actually there, and raise a descriptive ``RuntimeError``. If
-        the existing row turns out to be a coordless ``type='location'``
-        row that our narrow SELECT somehow missed, we defensively return its
-        id.
+        Returns the reused row's id, or ``None`` when no matching coordless
+        location row can take the place.
         """
-        name = normalize_keyword_display(name)
-        if not name:
-            raise ValueError("keyword name is empty after normalization")
-        if place_id is not None:
-            if reuse_location_component:
-                existing_place = self.conn.execute(
-                    "SELECT id FROM keywords WHERE place_id = ?",
-                    (place_id,),
-                ).fetchone()
-                if parent_id is None:
-                    existing_component = self.conn.execute(
-                        "SELECT id, type FROM keywords "
-                        "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
-                        "  AND place_id IS NULL "
-                        "ORDER BY CASE WHEN type = 'location' THEN 0 "
-                        "  WHEN type = 'taxonomy' THEN 1 ELSE 2 END, "
-                        "  (name = ?) DESC, id "
-                        "LIMIT 1",
-                        (name, name),
-                    ).fetchone()
-                else:
-                    existing_component = self.conn.execute(
-                        "SELECT id, type FROM keywords "
-                        "WHERE name = ? COLLATE NOCASE AND parent_id = ? "
-                        "  AND place_id IS NULL "
-                        "ORDER BY (name = ?) DESC, id "
-                        "LIMIT 1",
-                        (name, parent_id, name),
-                    ).fetchone()
-                if (
-                    existing_component is not None
-                    and (
-                        existing_component["type"] == "location"
-                        or self._restore_misclassified_location_ancestor(
-                            existing_component["id"],
-                            allow_leaf=True,
-                        )
-                    )
-                ):
-                    if (
-                        existing_place is not None
-                        and existing_place["id"] != existing_component["id"]
-                    ):
-                        # Legacy admin disambiguation could leave a suffixed
-                        # place-bearing row (e.g. "California (suffix)")
-                        # alongside the matching coordless hierarchy row.
-                        # Re-selecting the same Google place would otherwise
-                        # fail the ON CONFLICT(place_id) DO UPDATE with
-                        # UNIQUE(name, parent_id) and re-suffix instead of
-                        # reusing the hierarchy row. Merge the suffixed row
-                        # into the hierarchy row and let it own the place
-                        # metadata so future assignments settle on one row.
-                        self._merge_keyword_into(
-                            existing_place["id"], existing_component["id"],
-                        )
-                    self.conn.execute(
-                        "UPDATE keywords SET place_id = ?, type = 'location', "
-                        "is_species = 0, taxon_id = NULL, latitude = ?, "
-                        "longitude = ? WHERE id = ?",
-                        (
-                            place_id,
-                            latitude,
-                            longitude,
-                            existing_component["id"],
-                        ),
-                    )
-                    return existing_component["id"]
-            insert_sql = (
-                "INSERT INTO keywords "
-                "(name, parent_id, type, place_id, latitude, longitude) "
-                "VALUES (?, ?, 'location', ?, ?, ?) "
-                "ON CONFLICT(place_id) WHERE place_id IS NOT NULL DO UPDATE SET "
-                "  name = excluded.name, "
-                "  parent_id = excluded.parent_id, "
-                "  type = 'location', "
-                "  is_species = 0, "
-                "  taxon_id = NULL, "
-                "  latitude = excluded.latitude, "
-                "  longitude = excluded.longitude "
-                "RETURNING id"
+        existing_place = self.conn.execute(
+            "SELECT id FROM keywords WHERE place_id = ?",
+            (place_id,),
+        ).fetchone()
+        if parent_id is None:
+            existing_component = self.conn.execute(
+                "SELECT id, type FROM keywords "
+                "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
+                "  AND place_id IS NULL "
+                "ORDER BY CASE WHEN type = 'location' THEN 0 "
+                "  WHEN type = 'taxonomy' THEN 1 ELSE 2 END, "
+                "  (name = ?) DESC, id "
+                "LIMIT 1",
+                (name, name),
+            ).fetchone()
+        else:
+            existing_component = self.conn.execute(
+                "SELECT id, type FROM keywords "
+                "WHERE name = ? COLLATE NOCASE AND parent_id = ? "
+                "  AND place_id IS NULL "
+                "ORDER BY (name = ?) DESC, id "
+                "LIMIT 1",
+                (name, parent_id, name),
+            ).fetchone()
+        if (
+            existing_component is not None
+            and (
+                existing_component["type"] == "location"
+                or self._restore_misclassified_location_ancestor(
+                    existing_component["id"],
+                    allow_leaf=True,
+                )
             )
+        ):
+            if (
+                existing_place is not None
+                and existing_place["id"] != existing_component["id"]
+            ):
+                # Legacy admin disambiguation could leave a suffixed
+                # place-bearing row (e.g. "California (suffix)")
+                # alongside the matching coordless hierarchy row.
+                # Re-selecting the same Google place would otherwise
+                # fail the ON CONFLICT(place_id) DO UPDATE with
+                # UNIQUE(name, parent_id) and re-suffix instead of
+                # reusing the hierarchy row. Merge the suffixed row
+                # into the hierarchy row and let it own the place
+                # metadata so future assignments settle on one row.
+                self._merge_keyword_into(
+                    existing_place["id"], existing_component["id"],
+                )
+            self.conn.execute(
+                "UPDATE keywords SET place_id = ?, type = 'location', "
+                "is_species = 0, taxon_id = NULL, latitude = ?, "
+                "longitude = ? WHERE id = ?",
+                (
+                    place_id,
+                    latitude,
+                    longitude,
+                    existing_component["id"],
+                ),
+            )
+            return existing_component["id"]
+        return None
+
+    def _claim_coordless_clash_for_place(
+        self, name, parent_id, place_id, latitude, longitude,
+    ):
+        """Give a place to the coordless location row its insert clashed with.
+
+        Returns the reused row's id, or ``None`` when the place is already
+        stored or the clashing row cannot take it.
+        """
+        place_row = self.conn.execute(
+            "SELECT id FROM keywords WHERE place_id = ?",
+            (place_id,),
+        ).fetchone()
+        if place_row is None:
+            if parent_id is None:
+                clash = self.conn.execute(
+                    "SELECT id, type, place_id FROM keywords "
+                    "WHERE name = ? AND parent_id IS NULL",
+                    (name,),
+                ).fetchone()
+            else:
+                clash = self.conn.execute(
+                    "SELECT id, type, place_id FROM keywords "
+                    "WHERE name = ? AND parent_id = ?",
+                    (name, parent_id),
+                ).fetchone()
+            if (
+                clash is not None
+                and clash["place_id"] is None
+                and (
+                    clash["type"] == "location"
+                    or self._restore_misclassified_location_ancestor(
+                        clash["id"],
+                        allow_leaf=True,
+                    )
+                )
+            ):
+                self.conn.execute(
+                    "UPDATE keywords SET place_id = ?, latitude = ?, "
+                    "longitude = ? WHERE id = ?",
+                    (place_id, latitude, longitude, clash["id"]),
+                )
+                return clash["id"]
+        return None
+
+    def _upsert_place_keyword(
+        self, name, parent_id, place_id, latitude, longitude,
+        reuse_location_component,
+    ):
+        """The ``place_id`` dedupe mode of ``upsert_one_keyword``."""
+        if reuse_location_component:
+            component_id = self._claim_location_component_for_place(
+                name, parent_id, place_id, latitude, longitude,
+            )
+            if component_id is not None:
+                return component_id
+        insert_sql = (
+            "INSERT INTO keywords "
+            "(name, parent_id, type, place_id, latitude, longitude) "
+            "VALUES (?, ?, 'location', ?, ?, ?) "
+            "ON CONFLICT(place_id) WHERE place_id IS NOT NULL DO UPDATE SET "
+            "  name = excluded.name, "
+            "  parent_id = excluded.parent_id, "
+            "  type = 'location', "
+            "  is_species = 0, "
+            "  taxon_id = NULL, "
+            "  latitude = excluded.latitude, "
+            "  longitude = excluded.longitude "
+            "RETURNING id"
+        )
+        try:
+            cur = self.conn.execute(
+                insert_sql, (name, parent_id, place_id, latitude, longitude),
+            )
+            return cur.fetchone()["id"]
+        except sqlite3.IntegrityError:
+            if reuse_location_component:
+                clash_id = self._claim_coordless_clash_for_place(
+                    name, parent_id, place_id, latitude, longitude,
+                )
+                if clash_id is not None:
+                    return clash_id
+            # ON CONFLICT(place_id) handles same-place-id re-picks. The
+            # remaining failure mode is the table-level UNIQUE(name,
+            # parent_id): a *different* keyword (different place_id, or
+            # NULL place_id) already occupies this slot. Disambiguate the
+            # new row's name by appending a short place_id suffix and
+            # retry. Realistic case: two distinct Google places with the
+            # same name under the same parent (e.g. two parks named
+            # "Riverside Park" in the same state).
+            suffix = place_id[-8:]
+            disambiguated = f"{name} ({suffix})"
             try:
                 cur = self.conn.execute(
-                    insert_sql, (name, parent_id, place_id, latitude, longitude),
+                    insert_sql,
+                    (disambiguated, parent_id, place_id, latitude, longitude),
                 )
                 return cur.fetchone()["id"]
-            except sqlite3.IntegrityError:
-                if reuse_location_component:
-                    place_row = self.conn.execute(
-                        "SELECT id FROM keywords WHERE place_id = ?",
-                        (place_id,),
-                    ).fetchone()
-                    if place_row is None:
-                        if parent_id is None:
-                            clash = self.conn.execute(
-                                "SELECT id, type, place_id FROM keywords "
-                                "WHERE name = ? AND parent_id IS NULL",
-                                (name,),
-                            ).fetchone()
-                        else:
-                            clash = self.conn.execute(
-                                "SELECT id, type, place_id FROM keywords "
-                                "WHERE name = ? AND parent_id = ?",
-                                (name, parent_id),
-                            ).fetchone()
-                        if (
-                            clash is not None
-                            and clash["place_id"] is None
-                            and (
-                                clash["type"] == "location"
-                                or self._restore_misclassified_location_ancestor(
-                                    clash["id"],
-                                    allow_leaf=True,
-                                )
-                            )
-                        ):
-                            self.conn.execute(
-                                "UPDATE keywords SET place_id = ?, latitude = ?, "
-                                "longitude = ? WHERE id = ?",
-                                (place_id, latitude, longitude, clash["id"]),
-                            )
-                            return clash["id"]
-                # ON CONFLICT(place_id) handles same-place-id re-picks. The
-                # remaining failure mode is the table-level UNIQUE(name,
-                # parent_id): a *different* keyword (different place_id, or
-                # NULL place_id) already occupies this slot. Disambiguate the
-                # new row's name by appending a short place_id suffix and
-                # retry. Realistic case: two distinct Google places with the
-                # same name under the same parent (e.g. two parks named
-                # "Riverside Park" in the same state).
-                suffix = place_id[-8:]
-                disambiguated = f"{name} ({suffix})"
-                try:
-                    cur = self.conn.execute(
-                        insert_sql,
-                        (disambiguated, parent_id, place_id, latitude, longitude),
-                    )
-                    return cur.fetchone()["id"]
-                except sqlite3.IntegrityError as inner_err:
-                    raise RuntimeError(
-                        f"keyword '{name}' (parent_id={parent_id}) collides "
-                        f"with an existing row even after disambiguation"
-                    ) from inner_err
+            except sqlite3.IntegrityError as inner_err:
+                raise RuntimeError(
+                    f"keyword '{name}' (parent_id={parent_id}) collides "
+                    f"with an existing row even after disambiguation"
+                ) from inner_err
 
+    def _find_coordless_location(
+        self, name, parent_id, reuse_location_component,
+    ):
+        """The existing row ``upsert_one_keyword`` may reuse without a place id."""
         if parent_id is None:
             if reuse_location_component:
                 # Google's address_components carry no per-component
@@ -1535,15 +1557,12 @@ class KeywordProvenanceRepository:
                 + "ORDER BY (name = ?) DESC, id LIMIT 1",
                 (name, parent_id, name),
             ).fetchone()
-        if existing:
-            if existing["type"] == "location":
-                return existing["id"]
-            if self._restore_misclassified_location_ancestor(
-                existing["id"],
-                allow_leaf=reuse_location_component,
-            ):
-                return existing["id"]
+        return existing
 
+    def _insert_coordless_location(
+        self, name, parent_id, latitude, longitude, reuse_location_component,
+    ):
+        """Insert a location row with no place id, reusing a safe clash."""
         try:
             cur = self.conn.execute(
                 "INSERT INTO keywords "
@@ -1596,6 +1615,102 @@ class KeywordProvenanceRepository:
                 f"type={clash['type']!r}, can't reuse for location chain"
             ) from integrity_err
 
+    def upsert_one_keyword(
+        self, name, parent_id, place_id=None, latitude=None, longitude=None,
+        reuse_location_component=False,
+    ):
+        """Insert-or-fetch a single ``type='location'`` keyword row.
+
+        Two dedupe modes:
+
+        * ``place_id`` is given: dedupe on the partial unique index over
+          ``place_id``. If a row with that ``place_id`` already exists, update
+          its name/parent/coords (the user just re-picked the same Google
+          place) and return its id.
+        * ``place_id`` is ``None``: dedupe on ``(name, parent_id)`` among rows
+          whose ``place_id`` is also NULL. SELECT-then-INSERT (rather than
+          ``INSERT OR IGNORE``) so we never collide a coordless parent row
+          with a place_id-bearing leaf that happens to share a name+parent.
+        * ``reuse_location_component`` is true only for administrative address
+          components. In that case, a matching location hierarchy row can be
+          reused even if it already carries a place id. A coordless matching
+          row can also absorb the selected administrative place's id and
+          coordinates instead of creating a suffixed duplicate.
+
+        Cross-type collision handling: the table-level ``UNIQUE(name,
+        parent_id)`` constraint doesn't filter by ``type``, so a pre-existing
+        keyword of a *different* type with the same ``(name, parent_id)`` can
+        cause our INSERT to raise ``sqlite3.IntegrityError``. Rather than
+        silently merging into an unrelated keyword (which would corrupt the
+        user's existing tags), we catch that error, re-SELECT to confirm
+        what's actually there, and raise a descriptive ``RuntimeError``. If
+        the existing row turns out to be a coordless ``type='location'``
+        row that our narrow SELECT somehow missed, we defensively return its
+        id.
+        """
+        name = normalize_keyword_display(name)
+        if not name:
+            raise ValueError("keyword name is empty after normalization")
+        if place_id is not None:
+            return self._upsert_place_keyword(
+                name, parent_id, place_id, latitude, longitude,
+                reuse_location_component,
+            )
+
+        existing = self._find_coordless_location(
+            name, parent_id, reuse_location_component,
+        )
+        if existing:
+            if existing["type"] == "location":
+                return existing["id"]
+            if self._restore_misclassified_location_ancestor(
+                existing["id"],
+                allow_leaf=reuse_location_component,
+            ):
+                return existing["id"]
+
+        return self._insert_coordless_location(
+            name, parent_id, latitude, longitude, reuse_location_component,
+        )
+
+    def _accept_target_row(
+        self, ws, photo_id, this_pred_id, kid, species, replace_species,
+        replace_taxonomy,
+    ):
+        """Accept one target row and tag its photo; return its
+        ``affected`` entry, or ``None`` when there is nothing to
+        record (see ``_affected_entry``)."""
+        # Every accepted row resolves its own detection's losers,
+        # including the entry row. Doing it here rather than up front
+        # is what keeps an out-of-scope entry row untouched.
+        _reject_detection_alternatives(self.conn, ws, this_pred_id)
+        self.update_prediction_status(this_pred_id, "accepted", _commit=False)
+        old_species = []
+        already_has_species = photo_id in self.get_photos_with_equivalent_species(
+            [photo_id], kid
+        )
+        if replace_species:
+            old_species = _strip_replaced_species(
+                self.conn, ws, photo_id, this_pred_id, kid, species,
+                replace_taxonomy,
+                get_effective_config=self.get_effective_config,
+                remove_pending_changes=self.remove_pending_changes,
+                queue_change=self.queue_change,
+                species_root_name_for_taxon=self._species_root_name_for_taxon,
+                rename_species_highlights_species=self.rename_species_highlights_species,
+                rename_photo_preferences_species=self.rename_photo_preferences_species,
+            )
+        changed_tag = not already_has_species
+        if changed_tag:
+            self.tag_photo(
+                photo_id, kid, source="manual", _commit=False,
+            )
+            self.queue_change(photo_id, "keyword_add", species, _commit=False)
+        return _affected_entry(
+            photo_id, this_pred_id, old_species, changed_tag,
+            replace_species,
+        )
+
     def accept_prediction(
         self,
         prediction_id,
@@ -1640,12 +1755,8 @@ class KeywordProvenanceRepository:
         unless ``_commit`` is False and the caller owns the transaction.
         """
         ws = self.workspace_id
-        limited_photo_ids = None
-        if photo_ids is not None:
-            limited_photo_ids = {int(pid) for pid in photo_ids}
-        limited_pred_ids = None
-        if prediction_ids is not None:
-            limited_pred_ids = {int(pid) for pid in prediction_ids}
+        limited_photo_ids = _int_id_set(photo_ids)
+        limited_pred_ids = _int_id_set(prediction_ids)
         replace_taxonomy = (None, None)
         if replace_species:
             replace_taxonomy = _taxonomy_for_species_replacement()
@@ -1681,59 +1792,20 @@ class KeywordProvenanceRepository:
             # it to avoid re-entering rows a grouped accept already covered.
             accepted_pred_ids = []
 
-            def _accept_for_photo(photo_id, this_pred_id):
-                """Accept one target row and tag its photo; return its
-                ``affected`` entry, or ``None`` when there is nothing to
-                record (see ``_affected_entry``)."""
-                # Every accepted row resolves its own detection's losers,
-                # including the entry row. Doing it here rather than up front
-                # is what keeps an out-of-scope entry row untouched.
-                _reject_detection_alternatives(self.conn, ws, this_pred_id)
-                self.update_prediction_status(this_pred_id, "accepted", _commit=False)
-                old_species = []
-                already_has_species = photo_id in self.get_photos_with_equivalent_species(
-                    [photo_id], kid
-                )
-                if replace_species:
-                    old_species = _strip_replaced_species(
-                        self.conn, ws, photo_id, this_pred_id, kid, species,
-                        replace_taxonomy,
-                        get_effective_config=self.get_effective_config,
-                        remove_pending_changes=self.remove_pending_changes,
-                        queue_change=self.queue_change,
-                        species_root_name_for_taxon=self._species_root_name_for_taxon,
-                        rename_species_highlights_species=self.rename_species_highlights_species,
-                        rename_photo_preferences_species=self.rename_photo_preferences_species,
-                    )
-                changed_tag = not already_has_species
-                if changed_tag:
-                    self.tag_photo(
-                        photo_id, kid, source="manual", _commit=False,
-                    )
-                    self.queue_change(photo_id, "keyword_add", species, _commit=False)
-                return _affected_entry(
-                    photo_id, this_pred_id, old_species, changed_tag,
-                    replace_species,
-                )
-
             for target_photo_id, target_pred_id in targets:
                 accepted_pred_ids.append(target_pred_id)
-                entry = _accept_for_photo(target_photo_id, target_pred_id)
+                entry = self._accept_target_row(
+                    ws, target_photo_id, target_pred_id, kid, species,
+                    replace_species, replace_taxonomy,
+                )
                 if entry is not None:
                     affected.append(entry)
 
             if _commit:
                 self.conn.commit()
-            return {
-                "species": species,
-                "species_key": identity.key,
-                "keyword_id": kid,
-                "affected": affected,
-                "accepted_prediction_ids": accepted_pred_ids,
-                "photo_ids": list(dict.fromkeys(
-                    photo_id for photo_id, _pred_id in targets
-                )),
-            }
+            return _accepted_result(
+                species, identity, kid, affected, accepted_pred_ids, targets,
+            )
         except Exception:
             if _commit:
                 self.conn.rollback()
@@ -1745,6 +1817,27 @@ class KeywordProvenanceRepository:
 # through ``self`` would work too; what the structural tests forbid is a
 # ``self.<name>`` call to a method ``Database`` delegates to, and handing the
 # repository's bare ``self`` to a helper.)
+
+
+def _accepted_result(species, identity, kid, affected, accepted_pred_ids, targets):
+    """``accept_prediction``'s return value once its writes are done."""
+    return {
+        "species": species,
+        "species_key": identity.key,
+        "keyword_id": kid,
+        "affected": affected,
+        "accepted_prediction_ids": accepted_pred_ids,
+        "photo_ids": list(dict.fromkeys(
+            photo_id for photo_id, _pred_id in targets
+        )),
+    }
+
+
+def _int_id_set(ids):
+    """``ids`` as a set of ints, or ``None`` when no limit was given."""
+    if ids is None:
+        return None
+    return {int(pid) for pid in ids}
 
 
 def _taxonomy_for_species_replacement():

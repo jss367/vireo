@@ -423,6 +423,126 @@ class EditHistoryRepository:
 
     # -- relabel curation -----------------------------------------------------
 
+    def _restore_relabel_highlight(
+        self, workspace_id: int, photo_id: int, new_species: str, hl: Any,
+    ) -> None:
+        """Move one relabeled highlight back to its old species bucket."""
+        # Newer relabels record {species, rank, dst_existed}; entries
+        # from older relabels (before PR #1161 landed rank capture)
+        # are plain species-name strings and fall back to
+        # append-at-end with dst_existed=False.
+        if isinstance(hl, dict):
+            old_species = hl.get("species")
+            target_rank = hl.get("rank")
+            dst_existed = bool(hl.get("dst_existed", False))
+        else:
+            old_species = hl
+            target_rank = None
+            dst_existed = False
+        if not old_species or old_species == new_species:
+            return
+        if not dst_existed:
+            # Only delete the destination row when the relabel
+            # actually created it. If the photo was already
+            # highlighted at `new_species` before the relabel,
+            # rename_species_highlights_species skipped inserting a
+            # duplicate — undo must not remove the pre-existing row.
+            self.conn.execute(
+                """DELETE FROM species_highlights
+                       WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+                (workspace_id, new_species, photo_id),
+            )
+        existing = self.conn.execute(
+            """SELECT 1 FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+            (workspace_id, old_species, photo_id),
+        ).fetchone()
+        if existing:
+            return
+        if target_rank is None:
+            rank = int(self.conn.execute(
+                """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                       FROM species_highlights
+                       WHERE workspace_id = ? AND species = ?""",
+                (workspace_id, old_species),
+            ).fetchone()["max_rank"] or 0) + 1
+        else:
+            try:
+                rank = int(target_rank)
+            except (TypeError, ValueError):
+                rank = int(self.conn.execute(
+                    """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                           FROM species_highlights
+                           WHERE workspace_id = ? AND species = ?""",
+                    (workspace_id, old_species),
+                ).fetchone()["max_rank"] or 0) + 1
+        self.conn.execute(
+            """INSERT INTO species_highlights
+                       (workspace_id, species, photo_id, rank,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+            (workspace_id, old_species, photo_id, rank),
+        )
+
+    def _restore_relabel_preference(
+        self, workspace_id: int, photo_id: int, new_species: str, pref: Any,
+        restore_species_representative: Callable[..., Any],
+    ) -> None:
+        """Move one relabeled preference and representative back."""
+        if not isinstance(pref, dict):
+            return
+        purpose = pref.get("purpose")
+        old_species = pref.get("species")
+        dst_existed = bool(pref.get("dst_existed", False))
+        rep_dst_existed = bool(pref.get("rep_dst_existed", False))
+        rep_selected_order = pref.get("rep_selected_order")
+        if not purpose or not old_species or old_species == new_species:
+            return
+        # Only delete the (new_species, purpose) row when the relabel
+        # created it. When the destination slot was already taken
+        # before the relabel — either by this photo or a different
+        # one — rename_photo_preferences_species's INSERT OR IGNORE
+        # was ignored and no new row was written for this photo, so
+        # undo must leave the destination alone.
+        if not dst_existed:
+            self.conn.execute(
+                """DELETE FROM photo_preferences
+                       WHERE workspace_id = ? AND purpose = ?
+                         AND species = ? AND photo_id = ?""",
+                (workspace_id, purpose, new_species, photo_id),
+            )
+        # Only delete the (new_species, photo_id) rep row when the
+        # relabel created it. If the photo was already a global
+        # representative for new_species before the retag — e.g. a
+        # multi-species photo picked as rep for both A and B before
+        # relabeling A→B — rename_species_representatives_species's
+        # INSERT OR IGNORE skipped a duplicate and the destination
+        # rep row is pre-existing; undo must leave it alone.
+        # rep_dst_existed defaults to False for edit-history rows
+        # written before this field was added, preserving the older
+        # (over-eager) behavior for legacy undos.
+        if not rep_dst_existed:
+            self.conn.execute(
+                """DELETE FROM species_representatives
+                       WHERE species = ? AND photo_id = ?""",
+                (new_species, photo_id),
+            )
+        # Restore the old-species preference unconditionally. The
+        # previous gate on finding a `(new_species, purpose,
+        # photo_id)` row skipped restore when the relabel collided
+        # with a different photo holding the destination slot,
+        # stranding the old species' representative.
+        self.conn.execute(
+            """INSERT OR IGNORE INTO photo_preferences
+                       (workspace_id, purpose, species, photo_id,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+            (workspace_id, purpose, old_species, photo_id),
+        )
+        restore_species_representative(
+            old_species, photo_id, selected_order=rep_selected_order,
+        )
+
     def restore_relabel_curation(
         self, workspace_id: int, photo_id: int, new_species: str, curation: Mapping[str, Any] | None,
     ) -> None:
@@ -449,115 +569,11 @@ class EditHistoryRepository:
         pref_prev = curation.get("pref_prev") or []
         rep_prev = curation.get("rep_prev") or []
         for hl in hl_prev:
-            # Newer relabels record {species, rank, dst_existed}; entries
-            # from older relabels (before PR #1161 landed rank capture)
-            # are plain species-name strings and fall back to
-            # append-at-end with dst_existed=False.
-            if isinstance(hl, dict):
-                old_species = hl.get("species")
-                target_rank = hl.get("rank")
-                dst_existed = bool(hl.get("dst_existed", False))
-            else:
-                old_species = hl
-                target_rank = None
-                dst_existed = False
-            if not old_species or old_species == new_species:
-                continue
-            if not dst_existed:
-                # Only delete the destination row when the relabel
-                # actually created it. If the photo was already
-                # highlighted at `new_species` before the relabel,
-                # rename_species_highlights_species skipped inserting a
-                # duplicate — undo must not remove the pre-existing row.
-                self.conn.execute(
-                    """DELETE FROM species_highlights
-                       WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                    (workspace_id, new_species, photo_id),
-                )
-            existing = self.conn.execute(
-                """SELECT 1 FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (workspace_id, old_species, photo_id),
-            ).fetchone()
-            if existing:
-                continue
-            if target_rank is None:
-                rank = int(self.conn.execute(
-                    """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                       FROM species_highlights
-                       WHERE workspace_id = ? AND species = ?""",
-                    (workspace_id, old_species),
-                ).fetchone()["max_rank"] or 0) + 1
-            else:
-                try:
-                    rank = int(target_rank)
-                except (TypeError, ValueError):
-                    rank = int(self.conn.execute(
-                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                           FROM species_highlights
-                           WHERE workspace_id = ? AND species = ?""",
-                        (workspace_id, old_species),
-                    ).fetchone()["max_rank"] or 0) + 1
-            self.conn.execute(
-                """INSERT INTO species_highlights
-                       (workspace_id, species, photo_id, rank,
-                        created_at, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-                (workspace_id, old_species, photo_id, rank),
-            )
+            self._restore_relabel_highlight(workspace_id, photo_id, new_species, hl)
         for pref in pref_prev:
-            if not isinstance(pref, dict):
-                continue
-            purpose = pref.get("purpose")
-            old_species = pref.get("species")
-            dst_existed = bool(pref.get("dst_existed", False))
-            rep_dst_existed = bool(pref.get("rep_dst_existed", False))
-            rep_selected_order = pref.get("rep_selected_order")
-            if not purpose or not old_species or old_species == new_species:
-                continue
-            # Only delete the (new_species, purpose) row when the relabel
-            # created it. When the destination slot was already taken
-            # before the relabel — either by this photo or a different
-            # one — rename_photo_preferences_species's INSERT OR IGNORE
-            # was ignored and no new row was written for this photo, so
-            # undo must leave the destination alone.
-            if not dst_existed:
-                self.conn.execute(
-                    """DELETE FROM photo_preferences
-                       WHERE workspace_id = ? AND purpose = ?
-                         AND species = ? AND photo_id = ?""",
-                    (workspace_id, purpose, new_species, photo_id),
-                )
-            # Only delete the (new_species, photo_id) rep row when the
-            # relabel created it. If the photo was already a global
-            # representative for new_species before the retag — e.g. a
-            # multi-species photo picked as rep for both A and B before
-            # relabeling A→B — rename_species_representatives_species's
-            # INSERT OR IGNORE skipped a duplicate and the destination
-            # rep row is pre-existing; undo must leave it alone.
-            # rep_dst_existed defaults to False for edit-history rows
-            # written before this field was added, preserving the older
-            # (over-eager) behavior for legacy undos.
-            if not rep_dst_existed:
-                self.conn.execute(
-                    """DELETE FROM species_representatives
-                       WHERE species = ? AND photo_id = ?""",
-                    (new_species, photo_id),
-                )
-            # Restore the old-species preference unconditionally. The
-            # previous gate on finding a `(new_species, purpose,
-            # photo_id)` row skipped restore when the relabel collided
-            # with a different photo holding the destination slot,
-            # stranding the old species' representative.
-            self.conn.execute(
-                """INSERT OR IGNORE INTO photo_preferences
-                       (workspace_id, purpose, species, photo_id,
-                        created_at, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-                (workspace_id, purpose, old_species, photo_id),
-            )
-            restore_species_representative(
-                old_species, photo_id, selected_order=rep_selected_order,
+            self._restore_relabel_preference(
+                workspace_id, photo_id, new_species, pref,
+                restore_species_representative,
             )
         for rep in rep_prev:
             if not isinstance(rep, dict):
@@ -583,6 +599,99 @@ class EditHistoryRepository:
                 old_species, photo_id, selected_order=rep_selected_order,
             )
 
+    def _reapply_relabel_highlight(
+        self, workspace_id: int, photo_id: int, new_species: str, hl: Any,
+    ) -> None:
+        """Move one highlight from its old species bucket to ``new_species``."""
+        # Accept both new dict form ({species, rank}) and legacy
+        # string form for compatibility with older edit-history rows.
+        if isinstance(hl, dict):
+            old_species = hl.get("species")
+        else:
+            old_species = hl
+        if not old_species or old_species == new_species:
+            return
+        src = self.conn.execute(
+            """SELECT 1 FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+            (workspace_id, old_species, photo_id),
+        ).fetchone()
+        if not src:
+            return
+        self.conn.execute(
+            """DELETE FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+            (workspace_id, old_species, photo_id),
+        )
+        existing = self.conn.execute(
+            """SELECT 1 FROM species_highlights
+                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+            (workspace_id, new_species, photo_id),
+        ).fetchone()
+        if existing:
+            return
+        next_rank = int(self.conn.execute(
+            """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                   FROM species_highlights
+                   WHERE workspace_id = ? AND species = ?""",
+            (workspace_id, new_species),
+        ).fetchone()["max_rank"] or 0) + 1
+        self.conn.execute(
+            """INSERT INTO species_highlights
+                       (workspace_id, species, photo_id, rank,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+            (workspace_id, new_species, photo_id, next_rank),
+        )
+
+    def _reapply_relabel_preference(
+        self, workspace_id: int, photo_id: int, new_species: str, pref: Any,
+        restore_species_representative: Callable[..., Any],
+    ) -> None:
+        """Move one preference and representative onto ``new_species``."""
+        if not isinstance(pref, dict):
+            return
+        purpose = pref.get("purpose")
+        old_species = pref.get("species")
+        if not purpose or not old_species or old_species == new_species:
+            return
+        rep_selected_order = pref.get("rep_selected_order")
+        row = self.conn.execute(
+            """SELECT 1 FROM photo_preferences
+                   WHERE workspace_id = ? AND purpose = ?
+                     AND species = ? AND photo_id = ?""",
+            (workspace_id, purpose, old_species, photo_id),
+        ).fetchone()
+        if not row:
+            return
+        self.conn.execute(
+            """DELETE FROM photo_preferences
+                   WHERE workspace_id = ? AND purpose = ?
+                     AND species = ? AND photo_id = ?""",
+            (workspace_id, purpose, old_species, photo_id),
+        )
+        self.conn.execute(
+            """DELETE FROM species_representatives
+                   WHERE species = ? AND photo_id = ?""",
+            (old_species, photo_id),
+        )
+        self.conn.execute(
+            """INSERT OR IGNORE INTO photo_preferences
+                       (workspace_id, purpose, species, photo_id,
+                        created_at, updated_at)
+                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
+            (workspace_id, purpose, new_species, photo_id),
+        )
+        # Reuse the captured pre-relabel selected_order rather than
+        # allocating a fresh MAX+1. The original relabel preserved the
+        # source row's order via rename_species_representatives_species,
+        # so redoing must restore that same order — otherwise an
+        # undo/redo round trip can promote a secondary representative
+        # above a pre-existing primary for new_species.
+        restore_species_representative(
+            new_species, photo_id, selected_order=rep_selected_order,
+        )
+
     def reapply_relabel_curation(
         self, workspace_id: int, photo_id: int, new_species: str, curation: Mapping[str, Any] | None,
     ) -> None:
@@ -597,88 +706,11 @@ class EditHistoryRepository:
         pref_prev = curation.get("pref_prev") or []
         rep_prev = curation.get("rep_prev") or []
         for hl in hl_prev:
-            # Accept both new dict form ({species, rank}) and legacy
-            # string form for compatibility with older edit-history rows.
-            if isinstance(hl, dict):
-                old_species = hl.get("species")
-            else:
-                old_species = hl
-            if not old_species or old_species == new_species:
-                continue
-            src = self.conn.execute(
-                """SELECT 1 FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (workspace_id, old_species, photo_id),
-            ).fetchone()
-            if not src:
-                continue
-            self.conn.execute(
-                """DELETE FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (workspace_id, old_species, photo_id),
-            )
-            existing = self.conn.execute(
-                """SELECT 1 FROM species_highlights
-                   WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
-                (workspace_id, new_species, photo_id),
-            ).fetchone()
-            if existing:
-                continue
-            next_rank = int(self.conn.execute(
-                """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                   FROM species_highlights
-                   WHERE workspace_id = ? AND species = ?""",
-                (workspace_id, new_species),
-            ).fetchone()["max_rank"] or 0) + 1
-            self.conn.execute(
-                """INSERT INTO species_highlights
-                       (workspace_id, species, photo_id, rank,
-                        created_at, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-                (workspace_id, new_species, photo_id, next_rank),
-            )
+            self._reapply_relabel_highlight(workspace_id, photo_id, new_species, hl)
         for pref in pref_prev:
-            if not isinstance(pref, dict):
-                continue
-            purpose = pref.get("purpose")
-            old_species = pref.get("species")
-            if not purpose or not old_species or old_species == new_species:
-                continue
-            rep_selected_order = pref.get("rep_selected_order")
-            row = self.conn.execute(
-                """SELECT 1 FROM photo_preferences
-                   WHERE workspace_id = ? AND purpose = ?
-                     AND species = ? AND photo_id = ?""",
-                (workspace_id, purpose, old_species, photo_id),
-            ).fetchone()
-            if not row:
-                continue
-            self.conn.execute(
-                """DELETE FROM photo_preferences
-                   WHERE workspace_id = ? AND purpose = ?
-                     AND species = ? AND photo_id = ?""",
-                (workspace_id, purpose, old_species, photo_id),
-            )
-            self.conn.execute(
-                """DELETE FROM species_representatives
-                   WHERE species = ? AND photo_id = ?""",
-                (old_species, photo_id),
-            )
-            self.conn.execute(
-                """INSERT OR IGNORE INTO photo_preferences
-                       (workspace_id, purpose, species, photo_id,
-                        created_at, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))""",
-                (workspace_id, purpose, new_species, photo_id),
-            )
-            # Reuse the captured pre-relabel selected_order rather than
-            # allocating a fresh MAX+1. The original relabel preserved the
-            # source row's order via rename_species_representatives_species,
-            # so redoing must restore that same order — otherwise an
-            # undo/redo round trip can promote a secondary representative
-            # above a pre-existing primary for new_species.
-            restore_species_representative(
-                new_species, photo_id, selected_order=rep_selected_order,
+            self._reapply_relabel_preference(
+                workspace_id, photo_id, new_species, pref,
+                restore_species_representative,
             )
         for rep in rep_prev:
             if not isinstance(rep, dict):

@@ -581,45 +581,43 @@ class WorkspaceFolderRepository:
 
     # -- moving folders between workspaces ---------------------------------------
 
-    def move_folders(
-        self, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
+    def _move_pending_changes(
+        self, source_ws_id: int, target_ws_id: int,
         moved_folder_ids: Sequence[int],
-    ) -> tuple[int, int, int]:
-        """Move ``moved_folder_ids`` and their workspace-scoped rows, then commit.
-
-        ``folder_ids`` are the user-selected folders (they become roots in
-        the target); ``moved_folder_ids`` are those plus their linked
-        descendants. Rolls back and re-raises on any failure. Returns
-        ``(pending_changes_moved, photo_preferences_moved,
-        species_highlights_moved)``.
-        """
-        try:
-            # Move pending_changes
-            pending_changes_moved = 0
-            for chunk in self._chunks(moved_folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                cur = self.conn.execute(
-                    f"""UPDATE pending_changes SET workspace_id = ?
+    ) -> int:
+        """Retarget the moved photos' pending sidecar changes."""
+        # Move pending_changes
+        pending_changes_moved = 0
+        for chunk in self._chunks(moved_folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            cur = self.conn.execute(
+                f"""UPDATE pending_changes SET workspace_id = ?
                         WHERE workspace_id = ?
                         AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
-                    [target_ws_id, source_ws_id] + chunk,
-                )
-                pending_changes_moved += cur.rowcount
+                [target_ws_id, source_ws_id] + chunk,
+            )
+            pending_changes_moved += cur.rowcount
+        return pending_changes_moved
 
-            # Move prediction_review rows for predictions whose photo is in
-            # the moved folders. Without this the accepted/rejected/group
-            # metadata stays attached to the source workspace_id and the
-            # target reads all predictions as 'pending' — silently dropping
-            # the user's review decisions during a folder move.
-            #
-            # INSERT OR IGNORE into the target first, then DELETE from the
-            # source. That way if the target already has a review row for
-            # the same (prediction_id), we keep the target's value rather
-            # than overwriting it.
-            for chunk in self._chunks(moved_folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"""INSERT OR IGNORE INTO prediction_review
+    def _move_prediction_reviews(
+        self, source_ws_id: int, target_ws_id: int,
+        moved_folder_ids: Sequence[int],
+    ) -> None:
+        """Carry the moved photos' review decisions to the target."""
+        # Move prediction_review rows for predictions whose photo is in
+        # the moved folders. Without this the accepted/rejected/group
+        # metadata stays attached to the source workspace_id and the
+        # target reads all predictions as 'pending' — silently dropping
+        # the user's review decisions during a folder move.
+        #
+        # INSERT OR IGNORE into the target first, then DELETE from the
+        # source. That way if the target already has a review row for
+        # the same (prediction_id), we keep the target's value rather
+        # than overwriting it.
+        for chunk in self._chunks(moved_folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""INSERT OR IGNORE INTO prediction_review
                           (prediction_id, workspace_id, status, reviewed_at,
                            individual, group_id, vote_count, total_votes)
                         SELECT pr_rev.prediction_id, ?, pr_rev.status,
@@ -633,10 +631,10 @@ class WorkspaceFolderRepository:
                           AND d.photo_id IN (
                               SELECT id FROM photos WHERE folder_id IN ({placeholders})
                           )""",
-                    [target_ws_id, source_ws_id] + chunk,
-                )
-                self.conn.execute(
-                    f"""DELETE FROM prediction_review
+                [target_ws_id, source_ws_id] + chunk,
+            )
+            self.conn.execute(
+                f"""DELETE FROM prediction_review
                         WHERE workspace_id = ?
                           AND prediction_id IN (
                               SELECT pr_rev.prediction_id
@@ -648,17 +646,22 @@ class WorkspaceFolderRepository:
                                     SELECT id FROM photos WHERE folder_id IN ({placeholders})
                                 )
                           )""",
-                    [source_ws_id, source_ws_id] + chunk,
-                )
+                [source_ws_id, source_ws_id] + chunk,
+            )
 
-            # Move color labels, which are per (photo, workspace) like the
-            # review rows above. A label the target already holds for the
-            # photo wins; the source row is dropped either way, since the
-            # source can no longer see the photo.
-            for chunk in self._chunks(moved_folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"""INSERT OR IGNORE INTO photo_color_labels
+    def _move_color_labels(
+        self, source_ws_id: int, target_ws_id: int,
+        moved_folder_ids: Sequence[int],
+    ) -> None:
+        """Carry the moved photos' color labels to the target."""
+        # Move color labels, which are per (photo, workspace) like the
+        # review rows above. A label the target already holds for the
+        # photo wins; the source row is dropped either way, since the
+        # source can no longer see the photo.
+        for chunk in self._chunks(moved_folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""INSERT OR IGNORE INTO photo_color_labels
                           (photo_id, workspace_id, color)
                         SELECT photo_id, ?, color
                         FROM photo_color_labels
@@ -666,27 +669,83 @@ class WorkspaceFolderRepository:
                           AND photo_id IN (
                               SELECT id FROM photos WHERE folder_id IN ({placeholders})
                           )""",
-                    [target_ws_id, source_ws_id] + chunk,
-                )
-                self.conn.execute(
-                    f"""DELETE FROM photo_color_labels
+                [target_ws_id, source_ws_id] + chunk,
+            )
+            self.conn.execute(
+                f"""DELETE FROM photo_color_labels
                         WHERE workspace_id = ?
                           AND photo_id IN (
                               SELECT id FROM photos WHERE folder_id IN ({placeholders})
                           )""",
-                    [source_ws_id] + chunk,
-                )
+                [source_ws_id] + chunk,
+            )
 
-            # Move manually selected Life List / Highlights representative
-            # photos with the folder. If the target already has a preference
-            # for the same (purpose, species), keep the target value and drop
-            # the now-stale source row.
-            photo_preferences_moved = 0
-            species_highlights_moved = 0
-            for chunk in self._chunks(moved_folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
+    def _append_moved_highlights(
+        self, source_ws_id: int, target_ws_id: int, placeholders: str,
+        chunk: list[int],
+    ) -> int:
+        """Append one chunk's source highlights to the target buckets."""
+        moved = 0
+        # Append moved highlights after the target workspace's
+        # existing rows per species. Preserving the source `rank`
+        # verbatim would collide with the target's ranks (rank is
+        # not part of the PK), corrupting the curated order the
+        # target uses in `ORDER BY rank, created_at, photo_id`.
+        src_highlights = self.conn.execute(
+            f"""SELECT species, photo_id, rank, created_at, updated_at
+                        FROM species_highlights
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )
+                        ORDER BY species, rank, created_at, photo_id""",
+            [source_ws_id] + chunk,
+        ).fetchall()
+        by_species = {}
+        for src_row in src_highlights:
+            by_species.setdefault(src_row["species"], []).append(src_row)
+        for sp, sp_rows in by_species.items():
+            next_rank = int(self.conn.execute(
+                """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                           FROM species_highlights
+                           WHERE workspace_id = ? AND species = ?""",
+                (target_ws_id, sp),
+            ).fetchone()["max_rank"] or 0) + 1
+            for src_row in sp_rows:
                 cur = self.conn.execute(
-                    f"""INSERT OR IGNORE INTO photo_preferences
+                    """INSERT OR IGNORE INTO species_highlights
+                                   (workspace_id, species, photo_id, rank,
+                                    created_at, updated_at)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        target_ws_id,
+                        sp,
+                        src_row["photo_id"],
+                        next_rank,
+                        src_row["created_at"],
+                        src_row["updated_at"],
+                    ),
+                )
+                if cur.rowcount:
+                    moved += 1
+                    next_rank += 1
+        return moved
+
+    def _move_preferences_and_highlights(
+        self, source_ws_id: int, target_ws_id: int,
+        moved_folder_ids: Sequence[int],
+    ) -> tuple[int, int]:
+        """Carry representative preferences and highlights to the target."""
+        # Move manually selected Life List / Highlights representative
+        # photos with the folder. If the target already has a preference
+        # for the same (purpose, species), keep the target value and drop
+        # the now-stale source row.
+        photo_preferences_moved = 0
+        species_highlights_moved = 0
+        for chunk in self._chunks(moved_folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            cur = self.conn.execute(
+                f"""INSERT OR IGNORE INTO photo_preferences
                           (workspace_id, purpose, species, photo_id,
                            created_at, updated_at)
                         SELECT ?, purpose, species, photo_id,
@@ -696,99 +755,90 @@ class WorkspaceFolderRepository:
                           AND photo_id IN (
                               SELECT id FROM photos WHERE folder_id IN ({placeholders})
                           )""",
-                    [target_ws_id, source_ws_id] + chunk,
-                )
-                photo_preferences_moved += cur.rowcount
-                self.conn.execute(
-                    f"""DELETE FROM photo_preferences
-                        WHERE workspace_id = ?
-                          AND photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )""",
-                    [source_ws_id] + chunk,
-                )
-
-                # Append moved highlights after the target workspace's
-                # existing rows per species. Preserving the source `rank`
-                # verbatim would collide with the target's ranks (rank is
-                # not part of the PK), corrupting the curated order the
-                # target uses in `ORDER BY rank, created_at, photo_id`.
-                src_highlights = self.conn.execute(
-                    f"""SELECT species, photo_id, rank, created_at, updated_at
-                        FROM species_highlights
-                        WHERE workspace_id = ?
-                          AND photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )
-                        ORDER BY species, rank, created_at, photo_id""",
-                    [source_ws_id] + chunk,
-                ).fetchall()
-                by_species = {}
-                for src_row in src_highlights:
-                    by_species.setdefault(src_row["species"], []).append(src_row)
-                for sp, sp_rows in by_species.items():
-                    next_rank = int(self.conn.execute(
-                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
-                           FROM species_highlights
-                           WHERE workspace_id = ? AND species = ?""",
-                        (target_ws_id, sp),
-                    ).fetchone()["max_rank"] or 0) + 1
-                    for src_row in sp_rows:
-                        cur = self.conn.execute(
-                            """INSERT OR IGNORE INTO species_highlights
-                                   (workspace_id, species, photo_id, rank,
-                                    created_at, updated_at)
-                               VALUES (?, ?, ?, ?, ?, ?)""",
-                            (
-                                target_ws_id,
-                                sp,
-                                src_row["photo_id"],
-                                next_rank,
-                                src_row["created_at"],
-                                src_row["updated_at"],
-                            ),
-                        )
-                        if cur.rowcount:
-                            species_highlights_moved += 1
-                            next_rank += 1
-                self.conn.execute(
-                    f"""DELETE FROM species_highlights
-                        WHERE workspace_id = ?
-                          AND photo_id IN (
-                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
-                          )""",
-                    [source_ws_id] + chunk,
-                )
-
-            # Move workspace_folders: remove from source, add to target
-            for chunk in self._chunks(moved_folder_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                # Moving ownership removes both kinds of source membership.
-                # Other workspaces' grants and all target sharing stay intact.
-                self.conn.execute(
-                    f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
-                    f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))",
-                    [source_ws_id] + chunk,
-                )
-                self.conn.execute(
-                    f"""DELETE FROM workspace_folders
-                        WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
-                    [source_ws_id] + chunk,
-                )
-            self.conn.executemany(
-                """INSERT OR IGNORE INTO workspace_folders
-                   (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
-                [(target_ws_id, fid) for fid in moved_folder_ids],
+                [target_ws_id, source_ws_id] + chunk,
             )
-            for chunk in self._chunks(folder_ids):
-                selected_placeholders = ",".join("?" for _ in chunk)
-                self.conn.execute(
-                    f"""UPDATE workspace_folders
+            photo_preferences_moved += cur.rowcount
+            self.conn.execute(
+                f"""DELETE FROM photo_preferences
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                [source_ws_id] + chunk,
+            )
+
+            species_highlights_moved += self._append_moved_highlights(
+                source_ws_id, target_ws_id, placeholders, chunk,
+            )
+            self.conn.execute(
+                f"""DELETE FROM species_highlights
+                        WHERE workspace_id = ?
+                          AND photo_id IN (
+                              SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                          )""",
+                [source_ws_id] + chunk,
+            )
+        return photo_preferences_moved, species_highlights_moved
+
+    def _move_folder_membership(
+        self, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
+        moved_folder_ids: Sequence[int],
+    ) -> None:
+        """Unlink the folders from the source and link them in the target."""
+        # Move workspace_folders: remove from source, add to target
+        for chunk in self._chunks(moved_folder_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            # Moving ownership removes both kinds of source membership.
+            # Other workspaces' grants and all target sharing stay intact.
+            self.conn.execute(
+                f"DELETE FROM workspace_photos WHERE workspace_id = ? AND photo_id IN "
+                f"(SELECT id FROM photos WHERE folder_id IN ({placeholders}))",
+                [source_ws_id] + chunk,
+            )
+            self.conn.execute(
+                f"""DELETE FROM workspace_folders
+                        WHERE workspace_id = ? AND folder_id IN ({placeholders})""",
+                [source_ws_id] + chunk,
+            )
+        self.conn.executemany(
+            """INSERT OR IGNORE INTO workspace_folders
+                   (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
+            [(target_ws_id, fid) for fid in moved_folder_ids],
+        )
+        for chunk in self._chunks(folder_ids):
+            selected_placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"""UPDATE workspace_folders
                         SET is_root = 1
                         WHERE workspace_id = ?
                           AND folder_id IN ({selected_placeholders})""",
-                    [target_ws_id] + chunk,
-                )
+                [target_ws_id] + chunk,
+            )
+
+    def move_folders(
+        self, source_ws_id: int, target_ws_id: int, folder_ids: Iterable[int],
+        moved_folder_ids: Sequence[int],
+    ) -> tuple[int, int, int]:
+        """Move ``moved_folder_ids`` and their workspace-scoped rows, then commit.
+
+        ``folder_ids`` are the user-selected folders (they become roots in
+        the target); ``moved_folder_ids`` are those plus their linked
+        descendants. Rolls back and re-raises on any failure. Returns
+        ``(pending_changes_moved, photo_preferences_moved,
+        species_highlights_moved)``.
+        """
+        try:
+            pending_changes_moved = self._move_pending_changes(
+                source_ws_id, target_ws_id, moved_folder_ids,
+            )
+            self._move_prediction_reviews(source_ws_id, target_ws_id, moved_folder_ids)
+            self._move_color_labels(source_ws_id, target_ws_id, moved_folder_ids)
+            photo_preferences_moved, species_highlights_moved = (
+                self._move_preferences_and_highlights(source_ws_id, target_ws_id, moved_folder_ids)
+            )
+            self._move_folder_membership(
+                source_ws_id, target_ws_id, folder_ids, moved_folder_ids,
+            )
 
             self.conn.commit()
         except Exception:

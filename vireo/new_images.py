@@ -201,6 +201,192 @@ class _RootOffline(Exception):
         self.exc = exc
 
 
+class _NewImagesTally:
+    """Running totals of one :func:`count_new_images_for_workspace` pass."""
+
+    def __init__(self):
+        self.per_root = []
+        self.sample = []
+        self.unreachable_roots = []
+        self.total = 0
+        self.files_checked = 0
+        self.last_emitted = 0
+        self.seen_new_paths = set()
+        self.live_mount_roots = set()
+        self.folders_read = 0
+        self.folders_unchanged = 0
+        self.local_copy_excluded = []
+
+    def unreachable(self, root, mount_root):
+        log.warning(
+            "new-images: skipping %s — volume %s is offline",
+            root["path"], mount_root or root["path"],
+        )
+        self.unreachable_roots.append(root["path"])
+        self.per_root.append({
+            "folder_id": root["id"], "path": root["path"],
+            "new_count": 0, "unreachable": True,
+        })
+
+    def result(self, sample_limit):
+        return {
+            "new_count": self.total,
+            "per_root": self.per_root,
+            "sample": self.sample,
+            "sample_complete": sample_limit is None or len(self.sample) >= self.total,
+            "unreachable_roots": self.unreachable_roots,
+            # Folders left out because their originals are staged as a local
+            # copy. ``new_count`` and ``sample`` exclude them, so an import of
+            # this answer never names a path the import would refuse.
+            "local_copy_excluded": sorted(set(self.local_copy_excluded)),
+            "folders_read": self.folders_read,
+            "folders_unchanged": self.folders_unchanged,
+            # Wall-clock stamp of when this answer was produced. The banner shows
+            # it whenever a root was skipped: a user who clicks "Check again" on a
+            # volume that is *still* offline gets the same sentence back, and the
+            # time is the only thing that tells them the recheck really ran.
+            "checked_at": time.time(),
+        }
+
+
+def _staged_source_resolutions(db):
+    """Staged local-copy sources with their path keys, and each one's
+    alias resolution (probed once per snapshot)."""
+    staged_sources = [
+        (source, {
+            _path_key(source),
+            _path_key(volume_reachability.resolve_alias_lexically(source)),
+        })
+        for source in staged_source_paths(db)
+    ]
+    # Source identity is invariant during this snapshot. Probe each source
+    # once, rather than repeating NAS metadata lookups for every root.
+    source_resolutions = {}
+    for source, _forms in staged_sources:
+        resolved = volume_reachability.resolve_alias_bounded(source)
+        mounts = (set(volume_reachability.mount_root_candidates(source))
+                  if resolved is None else None)
+        source_resolutions[source] = (resolved, mounts)
+    return staged_sources, source_resolutions
+
+
+def _root_excluded_before_walk(root_path, mount_root):
+    """Whether a reachable root is reported with no new images unwalked:
+    it is, or sits inside, an excluded bundle, or a local root is not a
+    directory."""
+    if mount_root is not None:
+        # Mount-shaped root: the gate's verdict may be up to 30s old and
+        # the share can have dropped since, so no unbounded lookup may
+        # run here. The bundle exclusion is decided lexically from the
+        # path's component names (the same name test the walker applies
+        # to children), and there is no ``isdir`` — a root that vanished
+        # surfaces as an ``OSError`` from the walk's first ``scandir``
+        # and is handled by ``_on_walk_error`` below.
+        # The literal path *and* its alias-resolved form are both
+        # checked, so ``~/PhotoLib -> /Volumes/NAS/Photos Library.photoslibrary``
+        # is still excluded; resolution follows local symlinks only and
+        # never looks below the mount root.
+        lexical_forms = {
+            root_path,
+            volume_reachability.resolve_alias_lexically(root_path),
+        }
+        return any(
+            is_excluded_scan_dir(part)
+            for form in lexical_forms
+            for part in form.replace("\\", "/").split("/")
+        )
+    if is_excluded_scan_path(root_path):
+        return True
+    return not os.path.isdir(root_path)
+
+
+def _count_root_new_images(tally, root, known, reachability, staged_sources,
+                           source_resolutions, reachability_generation,
+                           sample_limit, progress_callback, progress_every,
+                           stall_timeout, listing_cache):
+    """Walk one mapped root and add what it holds to ``tally``."""
+    root_path = root["path"]
+    # prune_scan_dirs filters only children; if the root is, or sits
+    # inside, an excluded bundle (e.g. user added
+    # ``~/Pictures/Photos Library.photoslibrary`` directly, or a stale
+    # folder row points at ``.../Photos Library.photoslibrary/originals``),
+    # os.walk would still open it and inflate the banner with managed
+    # images the scanner never ingests. This must run BEFORE
+    # ``os.path.isdir`` — isdir follows symlinks and stat's the target,
+    # so for a directly selected bundle (or a symlink to one) the
+    # existence test alone is enough to trip the macOS TCC prompt.
+    #
+    # The reachability gate runs *first*, before even that exclusion
+    # check: ``is_excluded_scan_path`` walks the path's components with
+    # ``os.path.islink``, which on a dead SMB mount is an unbounded
+    # lookup. The gate itself never touches a mount-shaped path — its
+    # bounded probe is the only filesystem access — so ordering it ahead
+    # keeps every lookup on this root behind the timeout. The exclusion
+    # check still precedes ``isdir`` (the TCC concern above) because a
+    # bundle root is local and the gate passes it through untouched.
+    mount_root, reachable = reachability.check(root_path)
+    if not reachable:
+        tally.unreachable(root, mount_root)
+        return
+    if (
+        mount_root is not None
+        and volume_reachability.was_observed_mounted(mount_root)
+    ):
+        tally.live_mount_roots.add(mount_root)
+    if _root_excluded_before_walk(root_path, mount_root):
+        tally.per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
+        return
+
+    try:
+        covering_source, excluded_dirs = _staged_exclusions_for_root(
+            root_path, staged_sources, source_resolutions,
+        )
+    except _RootOffline:
+        tally.unreachable(root, mount_root)
+        return
+    if covering_source is not None:
+        tally.local_copy_excluded.append(root_path)
+        tally.per_root.append({
+            "folder_id": root["id"], "path": root_path, "new_count": 0,
+            "local_copy_excluded": [root_path],
+        })
+        return
+
+    listing_pass = dir_listing_cache.ListingPass(listing_cache)
+    excluded_hits = []
+    outcome = _walk_root_bounded(
+        root, root_path, mount_root, known, tally.seen_new_paths, reachability,
+        tally.files_checked, tally.total, progress_callback, progress_every,
+        tally.last_emitted, stall_timeout,
+        reachability_generation=reachability_generation,
+        listing_pass=listing_pass,
+        excluded_dirs=excluded_dirs,
+        excluded_hits=excluded_hits,
+    )
+    if outcome is None:
+        # Offline (error or stall): nothing from this root is kept.
+        tally.unreachable(root, mount_root)
+        return
+    root_new_paths, checked, tally.last_emitted = outcome
+    tally.files_checked += checked
+    tally.folders_read += listing_pass.read
+    tally.folders_unchanged += listing_pass.unchanged
+    tally.total += len(root_new_paths)
+    tally.seen_new_paths.update(root_new_paths)
+    for path in root_new_paths:
+        if sample_limit is None or len(tally.sample) < sample_limit:
+            tally.sample.append(path)
+
+    entry = {
+        "folder_id": root["id"], "path": root_path,
+        "new_count": len(root_new_paths),
+    }
+    if excluded_hits:
+        entry["local_copy_excluded"] = list(excluded_hits)
+        tally.local_copy_excluded.extend(excluded_hits)
+    tally.per_root.append(entry)
+
+
 def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                                    progress_callback=None,
                                    progress_every=250,
@@ -258,21 +444,7 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
         stall_timeout = WALK_STALL_TIMEOUT_SECONDS
     known = _known_paths_for_workspace(db, workspace_id)
     roots = mapped_roots(db, workspace_id)
-    staged_sources = [
-        (source, {
-            _path_key(source),
-            _path_key(volume_reachability.resolve_alias_lexically(source)),
-        })
-        for source in staged_source_paths(db)
-    ]
-    # Source identity is invariant during this snapshot. Probe each source
-    # once, rather than repeating NAS metadata lookups for every root.
-    source_resolutions = {}
-    for source, _forms in staged_sources:
-        resolved = volume_reachability.resolve_alias_bounded(source)
-        mounts = (set(volume_reachability.mount_root_candidates(source))
-                  if resolved is None else None)
-        source_resolutions[source] = (resolved, mounts)
+    staged_sources, source_resolutions = _staged_source_resolutions(db)
     # Snapshot now, before any root is touched: an outage this walk observes
     # later belongs to the world as it is here. If a manual recheck clears
     # the gate mid-walk, the stale report is dropped rather than undoing it.
@@ -281,162 +453,21 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
         volume_reachability.load_known_mount_roots(db)
     )
 
-    per_root = []
-    sample = []
-    unreachable_roots = []
-    total = 0
-    files_checked = 0
-    last_emitted = 0
-    seen_new_paths = set()
-    live_mount_roots = set()
-    folders_read = 0
-    folders_unchanged = 0
-    local_copy_excluded = []
-
-    def _unreachable(root, mount_root):
-        log.warning(
-            "new-images: skipping %s — volume %s is offline",
-            root["path"], mount_root or root["path"],
-        )
-        unreachable_roots.append(root["path"])
-        per_root.append({
-            "folder_id": root["id"], "path": root["path"],
-            "new_count": 0, "unreachable": True,
-        })
-
+    tally = _NewImagesTally()
     for root in roots:
-        root_path = root["path"]
-        # prune_scan_dirs filters only children; if the root is, or sits
-        # inside, an excluded bundle (e.g. user added
-        # ``~/Pictures/Photos Library.photoslibrary`` directly, or a stale
-        # folder row points at ``.../Photos Library.photoslibrary/originals``),
-        # os.walk would still open it and inflate the banner with managed
-        # images the scanner never ingests. This must run BEFORE
-        # ``os.path.isdir`` — isdir follows symlinks and stat's the target,
-        # so for a directly selected bundle (or a symlink to one) the
-        # existence test alone is enough to trip the macOS TCC prompt.
-        #
-        # The reachability gate runs *first*, before even that exclusion
-        # check: ``is_excluded_scan_path`` walks the path's components with
-        # ``os.path.islink``, which on a dead SMB mount is an unbounded
-        # lookup. The gate itself never touches a mount-shaped path — its
-        # bounded probe is the only filesystem access — so ordering it ahead
-        # keeps every lookup on this root behind the timeout. The exclusion
-        # check still precedes ``isdir`` (the TCC concern above) because a
-        # bundle root is local and the gate passes it through untouched.
-        mount_root, reachable = reachability.check(root_path)
-        if not reachable:
-            _unreachable(root, mount_root)
-            continue
-        if (
-            mount_root is not None
-            and volume_reachability.was_observed_mounted(mount_root)
-        ):
-            live_mount_roots.add(mount_root)
-        if mount_root is not None:
-            # Mount-shaped root: the gate's verdict may be up to 30s old and
-            # the share can have dropped since, so no unbounded lookup may
-            # run here. The bundle exclusion is decided lexically from the
-            # path's component names (the same name test the walker applies
-            # to children), and there is no ``isdir`` — a root that vanished
-            # surfaces as an ``OSError`` from the walk's first ``scandir``
-            # and is handled by ``_on_walk_error`` below.
-            # The literal path *and* its alias-resolved form are both
-            # checked, so ``~/PhotoLib -> /Volumes/NAS/Photos Library.photoslibrary``
-            # is still excluded; resolution follows local symlinks only and
-            # never looks below the mount root.
-            lexical_forms = {
-                root_path,
-                volume_reachability.resolve_alias_lexically(root_path),
-            }
-            if any(
-                is_excluded_scan_dir(part)
-                for form in lexical_forms
-                for part in form.replace("\\", "/").split("/")
-            ):
-                per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
-                continue
-        else:
-            if is_excluded_scan_path(root_path):
-                per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
-                continue
-            if not os.path.isdir(root_path):
-                per_root.append({"folder_id": root["id"], "path": root_path, "new_count": 0})
-                continue
-
-        try:
-            covering_source, excluded_dirs = _staged_exclusions_for_root(
-                root_path, staged_sources, source_resolutions,
-            )
-        except _RootOffline:
-            _unreachable(root, mount_root)
-            continue
-        if covering_source is not None:
-            local_copy_excluded.append(root_path)
-            per_root.append({
-                "folder_id": root["id"], "path": root_path, "new_count": 0,
-                "local_copy_excluded": [root_path],
-            })
-            continue
-
-        listing_pass = dir_listing_cache.ListingPass(listing_cache)
-        excluded_hits = []
-        outcome = _walk_root_bounded(
-            root, root_path, mount_root, known, seen_new_paths, reachability,
-            files_checked, total, progress_callback, progress_every,
-            last_emitted, stall_timeout,
-            reachability_generation=reachability_generation,
-            listing_pass=listing_pass,
-            excluded_dirs=excluded_dirs,
-            excluded_hits=excluded_hits,
+        _count_root_new_images(
+            tally, root, known, reachability, staged_sources,
+            source_resolutions, reachability_generation, sample_limit,
+            progress_callback, progress_every, stall_timeout, listing_cache,
         )
-        if outcome is None:
-            # Offline (error or stall): nothing from this root is kept.
-            _unreachable(root, mount_root)
-            continue
-        root_new_paths, checked, last_emitted = outcome
-        files_checked += checked
-        folders_read += listing_pass.read
-        folders_unchanged += listing_pass.unchanged
-        total += len(root_new_paths)
-        seen_new_paths.update(root_new_paths)
-        for path in root_new_paths:
-            if sample_limit is None or len(sample) < sample_limit:
-                sample.append(path)
-
-        entry = {
-            "folder_id": root["id"], "path": root_path,
-            "new_count": len(root_new_paths),
-        }
-        if excluded_hits:
-            entry["local_copy_excluded"] = list(excluded_hits)
-            local_copy_excluded.extend(excluded_hits)
-        per_root.append(entry)
 
     if progress_callback is not None:
-        progress_callback(files_checked, total)
+        progress_callback(tally.files_checked, tally.total)
     volume_reachability.record_known_mount_roots(
-        db, {root: True for root in live_mount_roots}
+        db, {root: True for root in tally.live_mount_roots}
     )
 
-    return {
-        "new_count": total,
-        "per_root": per_root,
-        "sample": sample,
-        "sample_complete": sample_limit is None or len(sample) >= total,
-        "unreachable_roots": unreachable_roots,
-        # Folders left out because their originals are staged as a local
-        # copy. ``new_count`` and ``sample`` exclude them, so an import of
-        # this answer never names a path the import would refuse.
-        "local_copy_excluded": sorted(set(local_copy_excluded)),
-        "folders_read": folders_read,
-        "folders_unchanged": folders_unchanged,
-        # Wall-clock stamp of when this answer was produced. The banner shows
-        # it whenever a root was skipped: a user who clicks "Check again" on a
-        # volume that is *still* offline gets the same sentence back, and the
-        # time is the only thing that tells them the recheck really ran.
-        "checked_at": time.time(),
-    }
+    return tally.result(sample_limit)
 
 
 # A root walk that makes no progress for this long — no directory entry
@@ -544,30 +575,15 @@ def _reachability_generation(reachability):
     return getter() if callable(getter) else None
 
 
-def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
-                       reachability, files_checked, total, progress_callback,
-                       progress_every, last_emitted, stall_timeout,
-                       reachability_generation=None, listing_pass=None,
-                       excluded_dirs=None, excluded_hits=None):
-    """Walk one root on a worker thread under a stall watchdog.
+def _reserve_root_walk(root_path, mount_root, reachability,
+                       reachability_generation):
+    """Reserve ``root_path``'s slot in the stalled-walk registry.
 
-    Returns ``(root_new_paths, files_checked_in_root, last_emitted)`` on
-    success, or ``None`` when the root is offline — either an offline-class
-    ``OSError`` surfaced through ``_RootOffline`` or the walk stalled for
-    ``stall_timeout`` seconds. The worker never mutates the caller's
-    counters or ``seen_new_paths``: it works on a snapshot and the caller
-    merges only on success, so an abandoned thread that wakes up later can
-    not corrupt a result that has already been published. ``listing_pass``
-    is this root's own, and the caller reads its counts only on success.
-
-    ``excluded_dirs`` maps the :func:`_path_key` of each directory to leave
-    out (staged local-copy sources) to its reported path; the ones the walk
-    actually met are appended to ``excluded_hits`` on success only.
+    Waits out a healthy overlapping walk of the same root. Returns False,
+    without reserving, when the root must be reported offline instead: a
+    wedged walk from this epoch still holds it, the worker limit is reached,
+    or the predecessor found the volume offline.
     """
-    # Recorded on this root if the watchdog fires: it dates the outage to the
-    # world this walk started in, so a later recheck can tell it apart from
-    # one observed after the user asked us to look again.
-    walk_epoch = _current_walk_epoch()
     while True:
         wait_for = None
         with _STALLED_WALKS_LOCK:
@@ -593,7 +609,7 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
                         _mark_offline(
                             reachability, mount_root, reachability_generation,
                         )
-                        return None
+                        return False
                     # Another workspace is walking the same root. Wait outside
                     # the lock, then retry; an active healthy walk is not
                     # evidence that the shared volume is offline.
@@ -618,9 +634,9 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
                         "new-images: root-walk limit reached while checking %s; "
                         "not starting another worker", root_path,
                     )
-                    return None
+                    return False
                 _STALLED_WALKS[root_path] = _WALK_RESERVED
-                break
+                return True
         if wait_for is _WALK_RESERVED:
             time.sleep(_WALK_POLL_SECONDS)
         else:
@@ -632,14 +648,14 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
                 # walk into the same disconnected share again.
                 _checked_root, still_reachable = reachability.check(root_path)
                 if not still_reachable:
-                    return None
+                    return False
 
-    state = {
-        "checked": 0, "paths": [], "last": time.monotonic(),
-        "emitted": last_emitted, "abandoned": False, "offline": None,
-        "excluded": [],
-    }
-    local_seen = set(seen_new_paths)
+
+def _root_walk_worker(state, root_path, mount_root, known, local_seen,
+                      reachability, reachability_generation, files_checked,
+                      total, progress_callback, progress_every, listing_pass,
+                      excluded_dirs):
+    """Build the worker that walks one root, recording into ``state``."""
 
     def _beat():
         if state["abandoned"]:
@@ -701,6 +717,48 @@ def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
         except Exception as exc:  # surfaced to the caller below
             state["offline"] = exc
 
+    return worker
+
+
+def _walk_root_bounded(root, root_path, mount_root, known, seen_new_paths,
+                       reachability, files_checked, total, progress_callback,
+                       progress_every, last_emitted, stall_timeout,
+                       reachability_generation=None, listing_pass=None,
+                       excluded_dirs=None, excluded_hits=None):
+    """Walk one root on a worker thread under a stall watchdog.
+
+    Returns ``(root_new_paths, files_checked_in_root, last_emitted)`` on
+    success, or ``None`` when the root is offline — either an offline-class
+    ``OSError`` surfaced through ``_RootOffline`` or the walk stalled for
+    ``stall_timeout`` seconds. The worker never mutates the caller's
+    counters or ``seen_new_paths``: it works on a snapshot and the caller
+    merges only on success, so an abandoned thread that wakes up later can
+    not corrupt a result that has already been published. ``listing_pass``
+    is this root's own, and the caller reads its counts only on success.
+
+    ``excluded_dirs`` maps the :func:`_path_key` of each directory to leave
+    out (staged local-copy sources) to its reported path; the ones the walk
+    actually met are appended to ``excluded_hits`` on success only.
+    """
+    # Recorded on this root if the watchdog fires: it dates the outage to the
+    # world this walk started in, so a later recheck can tell it apart from
+    # one observed after the user asked us to look again.
+    walk_epoch = _current_walk_epoch()
+    if not _reserve_root_walk(
+        root_path, mount_root, reachability, reachability_generation,
+    ):
+        return None
+    state = {
+        "checked": 0, "paths": [], "last": time.monotonic(),
+        "emitted": last_emitted, "abandoned": False, "offline": None,
+        "excluded": [],
+    }
+    local_seen = set(seen_new_paths)
+    worker = _root_walk_worker(
+        state, root_path, mount_root, known, local_seen, reachability,
+        reachability_generation, files_checked, total, progress_callback,
+        progress_every, listing_pass, excluded_dirs,
+    )
     thread = threading.Thread(
         target=worker, daemon=True, name="new-images-walk-root",
     )
@@ -1005,6 +1063,43 @@ class NewImagesCache:
             done.set()
             return done
         key = (db_path, workspace_id)
+        event, generation = self._claim_compute_slot(
+            key, compute_fn, on_spawn, can_start,
+        )
+        if generation is None:
+            return event
+
+        # Run on_spawn outside the cache lock so user code (e.g. JobRunner
+        # registration) cannot deadlock the cache on a contended lock.
+        progress_cb = None
+        if on_spawn is not None:
+            try:
+                progress_cb = on_spawn(event)
+            except Exception:
+                log.exception(
+                    "new-images on_spawn callback raised; continuing without it"
+                )
+                progress_cb = None
+
+        def worker():
+            self._run_compute(
+                key, db_path, workspace_id, compute_fn, progress_cb,
+                event, generation,
+            )
+
+        threading.Thread(
+            target=worker, daemon=True, name="new-images-compute",
+        ).start()
+        return event
+
+    def _claim_compute_slot(self, key, compute_fn, on_spawn, can_start):
+        """Claim the in-flight slot for ``key`` under the cache lock.
+
+        Returns ``(event, generation)`` for a new worker to run, or
+        ``(event, None)`` when no worker should start: a fresh entry is
+        cached, a recent failure is backing off, or a compute is already in
+        flight (stale ones get a rerun token).
+        """
         with self._lock:
             # Race guard: a worker finishing between the caller's
             # ``cache.get()`` (which returned None) and this call would
@@ -1021,7 +1116,7 @@ class NewImagesCache:
                 if time.monotonic() - set_at <= self._ttl:
                     done = threading.Event()
                     done.set()
-                    return done
+                    return done, None
 
             err_entry = self._errors.get(key)
             if err_entry is not None:
@@ -1030,7 +1125,7 @@ class NewImagesCache:
                     # Suppress retry inside the backoff window.
                     done = threading.Event()
                     done.set()
-                    return done
+                    return done, None
                 # Backoff window elapsed — let a fresh attempt run.
                 del self._errors[key]
 
@@ -1052,7 +1147,7 @@ class NewImagesCache:
                         and cached_result.get("sample_complete")):
                     done = threading.Event()
                     done.set()
-                    return done
+                    return done, None
 
             generation = self._generations.get(key, 0)
             existing = self._inflight.get(key)
@@ -1066,81 +1161,68 @@ class NewImagesCache:
                     # rerun, so a burst of polls during scan-time invalidation
                     # storms can't queue a backlog of walks.
                     self._rerun_pending[key] = (compute_fn, on_spawn, can_start)
-                return existing_event
+                return existing_event, None
             event = threading.Event()
             self._inflight[key] = (event, generation)
+        return event, generation
 
-        # Run on_spawn outside the cache lock so user code (e.g. JobRunner
-        # registration) cannot deadlock the cache on a contended lock.
-        progress_cb = None
-        if on_spawn is not None:
-            try:
-                progress_cb = on_spawn(event)
-            except Exception:
-                log.exception(
-                    "new-images on_spawn callback raised; continuing without it"
+    def _run_compute(self, key, db_path, workspace_id, compute_fn, progress_cb,
+                     event, generation):
+        """Body of a background compute worker: store the result or error,
+        free the in-flight slot, then fire any deferred rerun."""
+        try:
+            if progress_cb is not None:
+                result = compute_fn(progress_callback=progress_cb)
+            else:
+                result = compute_fn()
+            self.set(db_path, workspace_id, result, generation=generation)
+            # Successful compute clears any prior failure so a transient
+            # error doesn't keep suppressing retries after recovery.
+            # Generation-guarded so a stale thread finishing after a
+            # fresh one started doesn't wipe the fresh thread's error.
+            with self._lock:
+                if self._generations.get(key, 0) == generation:
+                    self._errors.pop(key, None)
+        except Exception as e:
+            log.exception(
+                "new-images background compute failed for %s ws=%s",
+                db_path, workspace_id,
+            )
+            with self._lock:
+                # Drop the failure if the generation moved while we were
+                # running. Mirrors the stale-write guard in :meth:`set`:
+                # if ``invalidate_workspaces`` ran mid-compute (workspace
+                # switched, scan completed), this error is for a key that
+                # has already moved on and must not force the next
+                # request into the 30s backoff window.
+                if self._generations.get(key, 0) == generation:
+                    self._errors[key] = (str(e) or e.__class__.__name__,
+                                         time.monotonic())
+        finally:
+            with self._lock:
+                # Only clear the in-flight slot if it still belongs to
+                # this thread. Defensive: under the coalescing design
+                # nothing else writes to this slot while we're alive,
+                # but the identity check keeps the invariant locally
+                # checkable rather than relying on global reasoning.
+                current = self._inflight.get(key)
+                if current is not None and current[0] is event:
+                    del self._inflight[key]
+                rerun_fn = self._rerun_pending.pop(key, None)
+            event.set()
+            if rerun_fn is not None:
+                # A kickoff arrived during this compute while the
+                # generation was stale. Fire the deferred rerun now that
+                # the in-flight slot is free; it picks up the current
+                # generation inside the lock. Recursion depth is bounded:
+                # each rerun consumes its token and a new one is only
+                # added by another stale-generation kickoff arriving
+                # during the next worker.
+                compute_again, spawn_again, start_again = rerun_fn
+                self.kickoff_compute(
+                    db_path, workspace_id, compute_again,
+                    on_spawn=spawn_again, can_start=start_again,
                 )
-                progress_cb = None
-
-        def worker():
-            try:
-                if progress_cb is not None:
-                    result = compute_fn(progress_callback=progress_cb)
-                else:
-                    result = compute_fn()
-                self.set(db_path, workspace_id, result, generation=generation)
-                # Successful compute clears any prior failure so a transient
-                # error doesn't keep suppressing retries after recovery.
-                # Generation-guarded so a stale thread finishing after a
-                # fresh one started doesn't wipe the fresh thread's error.
-                with self._lock:
-                    if self._generations.get(key, 0) == generation:
-                        self._errors.pop(key, None)
-            except Exception as e:
-                log.exception(
-                    "new-images background compute failed for %s ws=%s",
-                    db_path, workspace_id,
-                )
-                with self._lock:
-                    # Drop the failure if the generation moved while we were
-                    # running. Mirrors the stale-write guard in :meth:`set`:
-                    # if ``invalidate_workspaces`` ran mid-compute (workspace
-                    # switched, scan completed), this error is for a key that
-                    # has already moved on and must not force the next
-                    # request into the 30s backoff window.
-                    if self._generations.get(key, 0) == generation:
-                        self._errors[key] = (str(e) or e.__class__.__name__,
-                                             time.monotonic())
-            finally:
-                with self._lock:
-                    # Only clear the in-flight slot if it still belongs to
-                    # this thread. Defensive: under the coalescing design
-                    # nothing else writes to this slot while we're alive,
-                    # but the identity check keeps the invariant locally
-                    # checkable rather than relying on global reasoning.
-                    current = self._inflight.get(key)
-                    if current is not None and current[0] is event:
-                        del self._inflight[key]
-                    rerun_fn = self._rerun_pending.pop(key, None)
-                event.set()
-                if rerun_fn is not None:
-                    # A kickoff arrived during this compute while the
-                    # generation was stale. Fire the deferred rerun now that
-                    # the in-flight slot is free; it picks up the current
-                    # generation inside the lock. Recursion depth is bounded:
-                    # each rerun consumes its token and a new one is only
-                    # added by another stale-generation kickoff arriving
-                    # during the next worker.
-                    compute_again, spawn_again, start_again = rerun_fn
-                    self.kickoff_compute(
-                        db_path, workspace_id, compute_again,
-                        on_spawn=spawn_again, can_start=start_again,
-                    )
-
-        threading.Thread(
-            target=worker, daemon=True, name="new-images-compute",
-        ).start()
-        return event
 
     def clear(self):
         with self._lock:

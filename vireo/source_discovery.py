@@ -103,6 +103,26 @@ def _empty_result(folder, error=False):
     }
 
 
+def _attach_capture_dates(files, folder, cancel, emit):
+    """Add each file's ``capture_date``; False when cancelled part-way."""
+    # Bound metadata reads so a disconnected preview stops between
+    # batches. Capture dates deliberately never fall back to file mtime.
+    for start in range(0, len(files), 128):
+        if cancel.is_set():
+            return False
+        batch = files[start:start + 128]
+        timestamps = source_capture_timestamps([Path(f["path"]) for f in batch])
+        for f in batch:
+            timestamp = timestamps.get(Path(f["path"]))
+            f["capture_date"] = timestamp.date().isoformat() if timestamp else None
+        emit({
+            "type": "folder_progress", "path": folder,
+            "stage": "capture_dates", "checked": start + len(batch),
+            "found": len(files),
+        })
+    return True
+
+
 def _walk_folder(folder, root_name, multi_source, file_types, recursive,
                  cancel, emit, include_capture_dates=False):
     """Walk one folder; returns a per-folder result or None when cancelled."""
@@ -180,22 +200,10 @@ def _walk_folder(folder, root_name, multi_source, file_types, recursive,
                 "checked": index,
                 "found": len(discovered),
             })
-    if include_capture_dates:
-        # Bound metadata reads so a disconnected preview stops between
-        # batches. Capture dates deliberately never fall back to file mtime.
-        for start in range(0, len(files), 128):
-            if cancel.is_set():
-                return None
-            batch = files[start:start + 128]
-            timestamps = source_capture_timestamps([Path(f["path"]) for f in batch])
-            for f in batch:
-                timestamp = timestamps.get(Path(f["path"]))
-                f["capture_date"] = timestamp.date().isoformat() if timestamp else None
-            emit({
-                "type": "folder_progress", "path": folder,
-                "stage": "capture_dates", "checked": start + len(batch),
-                "found": len(files),
-            })
+    if include_capture_dates and not _attach_capture_dates(
+        files, folder, cancel, emit,
+    ):
+        return None
     return {
         "path": folder,
         "files": files,
@@ -209,16 +217,11 @@ def _walk_folder(folder, root_name, multi_source, file_types, recursive,
     }
 
 
-def stream_folder_preview(folders, file_types="both", recursive=True,
-                          classify=None, include_capture_dates=False):
-    """Yield SSE frames for a storage-aware multi-folder discovery walk.
+def _source_policies(folders, classify):
+    """Drop repeated paths and give every folder a scan policy.
 
-    Frame sequence: one ``policy`` frame, then interleaved
-    ``folder_started`` / ``folder_progress`` / ``folder_done`` frames as
-    walkers run, then a final ``done`` frame whose payload matches the old
-    synchronous folder-preview response.
+    Returns ``(folders, policies)``.
     """
-    classify = classify or source_scan_policy.classify_sources
     # The UI can't submit duplicate paths; drop exact repeats defensively
     # so the running-walker registry stays keyed by path.
     seen = set()
@@ -231,6 +234,86 @@ def stream_folder_preview(folders, file_types="both", recursive=True,
             "storage": "unknown",
             "max_parallel": 1,
         })
+    return folders, policies
+
+
+def _launch_ready_walkers(pending, running, policies, worker, frame):
+    """Start every pending walker its volume lane and the global cap allow.
+
+    Yields each ``folder_started`` frame before its thread starts.
+    """
+    launched = True
+    while launched and pending and len(running) < GLOBAL_SCAN_LIMIT:
+        launched = False
+        for folder in pending:
+            policy = policies[folder]
+            active_on_volume = sum(
+                1 for other in running
+                if policies[other]["volume_key"]
+                == policy["volume_key"]
+            )
+            if active_on_volume >= policy["max_parallel"]:
+                continue
+            if not _try_acquire_volume_lane(
+                    policy["volume_key"], policy["max_parallel"]):
+                continue
+            pending.remove(folder)
+            thread = threading.Thread(
+                target=worker, args=(folder,), daemon=True,
+            )
+            running[folder] = thread
+            # Yield started before the thread runs so the client
+            # never sees progress for a folder it wasn't told about.
+            try:
+                yield frame({
+                    "type": "folder_started",
+                    "path": folder,
+                    "storage": policy["storage"],
+                })
+                thread.start()
+            except BaseException:
+                running.pop(folder, None)
+                _release_volume_lane(policy["volume_key"])
+                raise
+            launched = True
+            break
+
+
+def _done_payload(folders, results):
+    """The final ``done`` frame, shaped like the old synchronous response."""
+    all_files = []
+    type_breakdown = {}
+    total_size = 0
+    source_counts = {}
+    for folder in folders:
+        result = results.get(folder) or _empty_result(folder)
+        all_files.extend(result["files"])
+        for ext, count in result["type_breakdown"].items():
+            type_breakdown[ext] = type_breakdown.get(ext, 0) + count
+        total_size += result["total_size"]
+        source_counts[folder] = result["count"]
+    return {
+        "type": "done",
+        "total_count": len(all_files),
+        "total_size": total_size,
+        "type_breakdown": type_breakdown,
+        "duplicate_count": 0,
+        "files": all_files,
+        "source_counts": source_counts,
+    }
+
+
+def stream_folder_preview(folders, file_types="both", recursive=True,
+                          classify=None, include_capture_dates=False):
+    """Yield SSE frames for a storage-aware multi-folder discovery walk.
+
+    Frame sequence: one ``policy`` frame, then interleaved
+    ``folder_started`` / ``folder_progress`` / ``folder_done`` frames as
+    walkers run, then a final ``done`` frame whose payload matches the old
+    synchronous folder-preview response.
+    """
+    classify = classify or source_scan_policy.classify_sources
+    folders, policies = _source_policies(folders, classify)
 
     root_names = unique_root_names(folders)
     multi_source = len(folders) > 1
@@ -282,41 +365,9 @@ def stream_folder_preview(folders, file_types="both", recursive=True,
             ],
         })
         while pending or running:
-            launched = True
-            while launched and pending and len(running) < GLOBAL_SCAN_LIMIT:
-                launched = False
-                for folder in pending:
-                    policy = policies[folder]
-                    active_on_volume = sum(
-                        1 for other in running
-                        if policies[other]["volume_key"]
-                        == policy["volume_key"]
-                    )
-                    if active_on_volume >= policy["max_parallel"]:
-                        continue
-                    if not _try_acquire_volume_lane(
-                            policy["volume_key"], policy["max_parallel"]):
-                        continue
-                    pending.remove(folder)
-                    thread = threading.Thread(
-                        target=worker, args=(folder,), daemon=True,
-                    )
-                    running[folder] = thread
-                    # Yield started before the thread runs so the client
-                    # never sees progress for a folder it wasn't told about.
-                    try:
-                        yield frame({
-                            "type": "folder_started",
-                            "path": folder,
-                            "storage": policy["storage"],
-                        })
-                        thread.start()
-                    except BaseException:
-                        running.pop(folder, None)
-                        _release_volume_lane(policy["volume_key"])
-                        raise
-                    launched = True
-                    break
+            yield from _launch_ready_walkers(
+                pending, running, policies, worker, frame,
+            )
             try:
                 event = events.get(timeout=HEARTBEAT_SECONDS)
             except queue.Empty:
@@ -341,25 +392,6 @@ def stream_folder_preview(folders, file_types="both", recursive=True,
             else:
                 yield frame(event)
 
-        all_files = []
-        type_breakdown = {}
-        total_size = 0
-        source_counts = {}
-        for folder in folders:
-            result = results.get(folder) or _empty_result(folder)
-            all_files.extend(result["files"])
-            for ext, count in result["type_breakdown"].items():
-                type_breakdown[ext] = type_breakdown.get(ext, 0) + count
-            total_size += result["total_size"]
-            source_counts[folder] = result["count"]
-        yield frame({
-            "type": "done",
-            "total_count": len(all_files),
-            "total_size": total_size,
-            "type_breakdown": type_breakdown,
-            "duplicate_count": 0,
-            "files": all_files,
-            "source_counts": source_counts,
-        })
+        yield frame(_done_payload(folders, results))
     finally:
         cancel.set()

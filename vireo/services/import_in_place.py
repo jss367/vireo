@@ -103,8 +103,6 @@ def enqueue_import_in_place(
     it scans only the frozen paths and never promotes their leaf folders to
     additional workspace roots.
     """
-    from image_loader import is_excluded_scan_path
-
     source_snapshot_id = body.get("source_snapshot_id")
     copy_only_error = _copy_only_option_error(body)
     if copy_only_error is not None:
@@ -112,27 +110,12 @@ def enqueue_import_in_place(
     dependency_error = service._validate_import_metadata_dependency(body)
     if dependency_error is not None:
         return dependency_error
-    sources = body.get("sources")
-    if isinstance(sources, str):
-        sources = [sources]
+    sources, _conflict_paths, sources_error = _requested_in_place_sources(
+        service, db, body, source_snapshot_id,
+    )
+    if sources_error is not None:
+        return sources_error
     snapshot_paths = None
-
-    if source_snapshot_id is not None:
-        snapshot_request_error = _snapshot_request_error(
-            body, sources, source_snapshot_id,
-        )
-        if snapshot_request_error is not None:
-            return snapshot_request_error
-    else:
-        sources_error = _explicit_sources_error(
-            service, db, sources, is_excluded_scan_path,
-        )
-        if sources_error is not None:
-            return sources_error
-        # Re-checked atomically with ``runner.start`` below so a stage
-        # request that races between the pre-flight release and job
-        # registration still blocks on the same boundary lock.
-        _conflict_paths = list(sources)
 
     recursive = bool(body.get("recursive", True))
     import_tags, location_from_gps, tag_options_err = (
@@ -148,8 +131,8 @@ def enqueue_import_in_place(
             return snapshot_err
         sources = sorted(snapshot_paths_by_root)
         # Re-checked atomically with ``runner.start`` below. See the
-        # explicit-sources branch above for why the pre-flight check is
-        # not sufficient on its own.
+        # explicit-sources branch of ``_requested_in_place_sources`` for
+        # why the pre-flight check is not sufficient on its own.
         _conflict_paths = list(snapshot_paths)
     else:
         snapshot_paths_by_root = None
@@ -157,25 +140,11 @@ def enqueue_import_in_place(
     # a bad value doesn't leave an orphan Card Import behind. The
     # omitted branch has to wait until AFTER the workspace switch — see
     # below.
-    explicit_after_import = "after_import" in body
-    after_import = None
-    if explicit_after_import:
-        after_import = body.get("after_import")
-        # A restart carrying a frozen ``after_import_snapshot`` captured at
-        # the parent import's enqueue time waives the "process still exists"
-        # check: the snapshot substitutes for ``db.resolve_process`` in
-        # ``_admit_in_place_job``, so a Settings delete between the failed
-        # run and the restart no longer strands the recovery (same pattern
-        # as the archive-import recovery-retry path in ``import_photos.py``).
-        has_frozen_snapshot = (
-            restart_config is not None
-            and restart_config.get("after_import_snapshot") is not None
-        )
-        err = service._validate_after_import(
-            after_import, db, allow_missing=has_frozen_snapshot,
-        )
-        if err is not None:
-            return err
+    explicit_after_import, after_import, err = _explicit_after_import(
+        service, db, body, restart_config,
+    )
+    if err is not None:
+        return err
 
     active_ws, created_workspace, previous_active_ws, workspace_err = (
         service._prepare_import_workspace(db, body)
@@ -209,6 +178,64 @@ def enqueue_import_in_place(
     return service._admit_into_import_workspace(
         db, created_workspace, previous_active_ws, admit,
     )
+
+
+def _requested_in_place_sources(service, db, body, source_snapshot_id):
+    """Normalize and check the request's sources.
+
+    Returns ``(sources, conflict_paths, error)``. ``conflict_paths`` is
+    None in snapshot mode, whose paths are resolved from the snapshot later.
+    """
+    from image_loader import is_excluded_scan_path
+
+    sources = body.get("sources")
+    if isinstance(sources, str):
+        sources = [sources]
+    conflict_paths = None
+    if source_snapshot_id is not None:
+        snapshot_request_error = _snapshot_request_error(
+            body, sources, source_snapshot_id,
+        )
+        if snapshot_request_error is not None:
+            return None, None, snapshot_request_error
+    else:
+        sources_error = _explicit_sources_error(
+            service, db, sources, is_excluded_scan_path,
+        )
+        if sources_error is not None:
+            return None, None, sources_error
+        # Re-checked atomically with ``runner.start`` (in the admit step)
+        # so a stage request that races between the pre-flight release and
+        # job registration still blocks on the same boundary lock.
+        conflict_paths = list(sources)
+    return sources, conflict_paths, None
+
+
+def _explicit_after_import(service, db, body, restart_config):
+    """Validate an explicit ``after_import``.
+
+    Returns ``(explicit_after_import, after_import, error)``.
+    """
+    explicit_after_import = "after_import" in body
+    after_import = None
+    if explicit_after_import:
+        after_import = body.get("after_import")
+        # A restart carrying a frozen ``after_import_snapshot`` captured at
+        # the parent import's enqueue time waives the "process still exists"
+        # check: the snapshot substitutes for ``db.resolve_process`` in
+        # ``_admit_in_place_job``, so a Settings delete between the failed
+        # run and the restart no longer strands the recovery (same pattern
+        # as the archive-import recovery-retry path in ``import_photos.py``).
+        has_frozen_snapshot = (
+            restart_config is not None
+            and restart_config.get("after_import_snapshot") is not None
+        )
+        err = service._validate_after_import(
+            after_import, db, allow_missing=has_frozen_snapshot,
+        )
+        if err is not None:
+            return None, None, err
+    return explicit_after_import, after_import, None
 
 
 def _admit_in_place_job(

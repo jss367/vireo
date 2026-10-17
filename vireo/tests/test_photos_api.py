@@ -8475,7 +8475,7 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
     db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
     db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
     db.conn.commit()
-    db.conn.close()
+    db.close()
 
     real_listdir = app_module.os.listdir
 
@@ -8497,7 +8497,7 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
         # Version stays old so the next boot retries the scan.
         assert db2.get_meta("edit_math_version") == str(EDIT_MATH_VERSION - 1)
     finally:
-        db2.conn.close()
+        db2.close()
 
     # Once the dir becomes readable, a later boot completes the migration.
     monkeypatch.setattr(app_module.os, "listdir", real_listdir)
@@ -8506,7 +8506,7 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
     try:
         assert db3.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
     finally:
-        db3.conn.close()
+        db3.close()
 
 
 def test_external_edit_handoff_meta_includes_math_version(
@@ -8590,7 +8590,7 @@ def test_edit_math_version_migration_scans_preview_dir_once(
 
     db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
     db.conn.commit()
-    db.conn.close()
+    db.close()
 
     real_listdir = app_module.os.listdir
     calls = []
@@ -8616,7 +8616,7 @@ def test_edit_math_version_migration_scans_preview_dir_once(
     try:
         assert db2.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
     finally:
-        db2.conn.close()
+        db2.close()
 
 
 def test_edit_math_version_migration_is_noop_on_fresh_db(tmp_path, monkeypatch):

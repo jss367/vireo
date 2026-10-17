@@ -5024,7 +5024,7 @@ def _setup_two_photo_classify_workspace(tmp_path):
         "static",
         json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
     )
-    db.conn.close()
+    db.close()
     return db_path, ws, col_id, p1, p2
 
 
@@ -5233,7 +5233,7 @@ def test_classify_job_always_skips_wildlife_excluded_photos(tmp_path):
     db = Database(db_path)
     db.set_active_workspace(ws)
     db.update_photo_wildlife_excluded(p2, True)
-    db.conn.close()
+    db.close()
 
     seen, events, _ = _run_classify_capturing_photos(
         db_path, ws, col_id, reclassify=True,
@@ -5273,7 +5273,7 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),
     )
-    db.conn.close()
+    db.close()
 
     runner = FakeRunner()
     job = _make_job()
@@ -5350,7 +5350,7 @@ def test_classify_job_zero_photos_skips_model_resolution(tmp_path):
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),
     )
-    db.conn.close()
+    db.close()
 
     runner = FakeRunner()
     job = _make_job()

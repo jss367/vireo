@@ -795,25 +795,12 @@ class PhotoRepository:
         """
         return self.conn.execute(query, params).fetchone()[0]
 
-    def get_browse_summary(
-        self,
-        folder_id=None,
-        collection_id=None,
-        rules=None,
-        *,
-        get_folder_subtree_ids,
-        build_collection_query,
-        build_query_from_rules,
-        detector_confidence,
+    @staticmethod
+    def _browse_summary_scope(
+        ws, folder_id, collection_id, rules, get_folder_subtree_ids,
+        build_collection_query, build_query_from_rules,
     ):
-        """Return the browse panel's totals, classified count, top species
-        and folder breakdown.
-
-        ``detector_confidence()`` returns the workspace's detector floor; it
-        is called after the two counts, where the façade used to read it.
-        """
-        ws = self.workspace_id
-
+        """``(conditions, join_params, where_params)`` for the summary's photo set."""
         # Build shared filter conditions. Metadata filtering arrives
         # exclusively as a universal-filter ``rules`` tree (legacy per-field
         # params removed in Phase 5).
@@ -858,6 +845,31 @@ class PhotoRepository:
             )
             conditions.append(f"p.id IN ({rules_subquery})")
             where_params.extend(r_params)
+        return conditions, join_params, where_params
+
+    def get_browse_summary(
+        self,
+        folder_id=None,
+        collection_id=None,
+        rules=None,
+        *,
+        get_folder_subtree_ids,
+        build_collection_query,
+        build_query_from_rules,
+        detector_confidence,
+    ):
+        """Return the browse panel's totals, classified count, top species
+        and folder breakdown.
+
+        ``detector_confidence()`` returns the workspace's detector floor; it
+        is called after the two counts, where the façade used to read it.
+        """
+        ws = self.workspace_id
+
+        conditions, join_params, where_params = self._browse_summary_scope(
+            ws, folder_id, collection_id, rules, get_folder_subtree_ids,
+            build_collection_query, build_query_from_rules,
+        )
 
         join_clause = ("JOIN photo_workspace_visibility wf ON wf.photo_id = p.id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -1038,6 +1050,55 @@ class PhotoRepository:
 
         return {"ids": all_ids, "files": files, "_rows": rows}
 
+    def _expire_drained_move_provenance(self, deleted_stems_by_folder, folder_paths):
+        """Clear move provenance whose last same-stem source sibling was deleted."""
+        # A moved RAW/JPEG sibling stores the source folder path as
+        # provenance so another same-stem sibling can follow it to the
+        # destination without tripping the developed-render collision
+        # guard. Once delete_photos removes the last such sibling from
+        # the source, that proof is no longer valid: a later unrelated
+        # photo imported at the same path must not inherit the old
+        # render. Find source stems drained by this delete and expire
+        # their provenance in the same transaction.
+        drained_stems_by_path = {}
+        for folder_id, deleted_stems in deleted_stems_by_folder.items():
+            remaining_stems = {
+                os.path.splitext(row["filename"])[0]
+                for row in self.conn.execute(
+                    "SELECT filename FROM photos WHERE folder_id = ?",
+                    (folder_id,),
+                )
+            }
+            drained = deleted_stems - remaining_stems
+            if drained:
+                drained_stems_by_path.setdefault(
+                    folder_paths[folder_id], set()
+                ).update(drained)
+
+        stale_provenance_ids = []
+        provenance_paths = list(drained_stems_by_path)
+        for path_chunk in self._chunks(provenance_paths):
+            path_ph = ",".join("?" for _ in path_chunk)
+            for row in self.conn.execute(
+                f"SELECT id, filename, last_move_source_folder_path "
+                f"FROM photos WHERE last_move_source_folder_path "
+                f"IN ({path_ph})",
+                path_chunk,
+            ):
+                stem = os.path.splitext(row["filename"])[0]
+                if stem in drained_stems_by_path[
+                    row["last_move_source_folder_path"]
+                ]:
+                    stale_provenance_ids.append(row["id"])
+        for stale_chunk in self._chunks(stale_provenance_ids):
+            stale_ph = ",".join("?" for _ in stale_chunk)
+            self.conn.execute(
+                f"UPDATE photos SET "
+                f"last_move_source_folder_path = NULL "
+                f"WHERE id IN ({stale_ph})",
+                stale_chunk,
+            )
+
     def delete(
         self,
         all_ids,
@@ -1084,52 +1145,7 @@ class PhotoRepository:
             with photo_row_deletion(self.conn) as photo_rows:
                 photo_rows.delete(dict.fromkeys(all_ids))
 
-            # A moved RAW/JPEG sibling stores the source folder path as
-            # provenance so another same-stem sibling can follow it to the
-            # destination without tripping the developed-render collision
-            # guard. Once delete_photos removes the last such sibling from
-            # the source, that proof is no longer valid: a later unrelated
-            # photo imported at the same path must not inherit the old
-            # render. Find source stems drained by this delete and expire
-            # their provenance in the same transaction.
-            drained_stems_by_path = {}
-            for folder_id, deleted_stems in deleted_stems_by_folder.items():
-                remaining_stems = {
-                    os.path.splitext(row["filename"])[0]
-                    for row in self.conn.execute(
-                        "SELECT filename FROM photos WHERE folder_id = ?",
-                        (folder_id,),
-                    )
-                }
-                drained = deleted_stems - remaining_stems
-                if drained:
-                    drained_stems_by_path.setdefault(
-                        folder_paths[folder_id], set()
-                    ).update(drained)
-
-            stale_provenance_ids = []
-            provenance_paths = list(drained_stems_by_path)
-            for path_chunk in self._chunks(provenance_paths):
-                path_ph = ",".join("?" for _ in path_chunk)
-                for row in self.conn.execute(
-                    f"SELECT id, filename, last_move_source_folder_path "
-                    f"FROM photos WHERE last_move_source_folder_path "
-                    f"IN ({path_ph})",
-                    path_chunk,
-                ):
-                    stem = os.path.splitext(row["filename"])[0]
-                    if stem in drained_stems_by_path[
-                        row["last_move_source_folder_path"]
-                    ]:
-                        stale_provenance_ids.append(row["id"])
-            for stale_chunk in self._chunks(stale_provenance_ids):
-                stale_ph = ",".join("?" for _ in stale_chunk)
-                self.conn.execute(
-                    f"UPDATE photos SET "
-                    f"last_move_source_folder_path = NULL "
-                    f"WHERE id IN ({stale_ph})",
-                    stale_chunk,
-                )
+            self._expire_drained_move_provenance(deleted_stems_by_folder, folder_paths)
 
             # Update folder counts
             for fid, count in folder_counts.items():

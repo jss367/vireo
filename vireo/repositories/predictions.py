@@ -124,6 +124,195 @@ class PredictionRepository:
         """The active workspace id, resolved at each read (raises if none)."""
         return self._resolve_workspace_id()
 
+    @staticmethod
+    def _normalized_species(species):
+        """``species`` in keyword-storage form, as every prediction stores it."""
+        # Fold the species into keyword-storage form so a curly-apostrophe
+        # label file (`Swinhoe’s White-eye`) cannot re-mint a predictions row
+        # that fails to match its accepted ASCII keyword (`Swinhoe's
+        # white-eye`) under exact and COLLATE NOCASE joins. Doing it here
+        # rather than only in the classify_job helpers covers every caller —
+        # `_store_pending_detection_prediction`, `_store_match_prediction`,
+        # and any future write path — so the invariant that keyword-side and
+        # prediction-side spellings agree can't drift by adding a new caller
+        # that forgot to normalize. Idempotent on already-folded strings.
+        if species is not None:
+            normalized_species = normalize_keyword_display(species)
+            if normalized_species:
+                species = normalized_species
+        return species
+
+    def _insert_prediction(
+        self, detection_id, model, labels_fingerprint, labels_fingerprint_full,
+        species, confidence, category, tax, match_score,
+    ):
+        """``INSERT OR IGNORE`` the raw classifier output; return the cursor."""
+        return self.conn.execute(
+            """INSERT OR IGNORE INTO predictions
+               (detection_id, classifier_model, labels_fingerprint,
+                labels_fingerprint_full,
+                species, confidence, category,
+                taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
+                taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name,
+                source_taxon_id, match_score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                detection_id,
+                model,
+                labels_fingerprint,
+                labels_fingerprint_full,
+                species,
+                confidence,
+                category,
+                tax.get("kingdom"),
+                tax.get("phylum"),
+                tax.get("class"),
+                tax.get("order"),
+                tax.get("family"),
+                tax.get("genus"),
+                tax.get("scientific_name"),
+                tax.get("taxon_id"),
+                match_score,
+            ),
+        )
+
+    def _existing_prediction_id(
+        self, detection_id, model, labels_fingerprint, labels_fingerprint_full,
+        species, confidence, category, tax, match_score, refresh_output,
+        from_fresh_inference,
+    ):
+        """The id of the row the ignored insert collided with, refreshed.
+
+        Returns ``None`` when no such row exists.
+        """
+        row = self.conn.execute(
+            """SELECT id FROM predictions
+                   WHERE detection_id = ? AND classifier_model = ?
+                     AND labels_fingerprint = ? AND species IS ?""",
+            (detection_id, model, labels_fingerprint, species),
+        ).fetchone()
+        pred_id = row["id"] if row else None
+        if pred_id is not None and refresh_output:
+            self.conn.execute(
+                """UPDATE predictions SET confidence=?, category=?,
+                       taxonomy_kingdom=?, taxonomy_phylum=?, taxonomy_class=?,
+                       taxonomy_order=?, taxonomy_family=?, taxonomy_genus=?,
+                       scientific_name=?, source_taxon_id=?, match_score=?
+                       WHERE id=?""",
+                (confidence, category, tax.get("kingdom"), tax.get("phylum"),
+                 tax.get("class"), tax.get("order"), tax.get("family"),
+                 tax.get("genus"), tax.get("scientific_name"), tax.get("taxon_id"),
+                 match_score, pred_id),
+            )
+        if pred_id is not None and labels_fingerprint_full is not None:
+            self.conn.execute(
+                """UPDATE predictions
+                       SET labels_fingerprint_full = ?
+                       WHERE id = ? AND labels_fingerprint_full IS NULL""",
+                (labels_fingerprint_full, pred_id),
+            )
+        # Who wins depends on where the incoming score came from, so the
+        # caller has to say (``from_fresh_inference``):
+        #
+        #   fresh inference  -> overwrite. The model just ran on this
+        #     detection and this is what it measured.
+        #   anything else    -> fill the gap only, like the fingerprint
+        #     above. Cache materialization and enrichment backfills are
+        #     replaying a recorded value, and a real local measurement
+        #     should not be churned by a later import; it also keeps the
+        #     column stable for a calibration pass that already read it.
+        #
+        # The unique key is NOT grounds to keep the stored value. A
+        # non-reclassify pass re-runs inference whenever the existing
+        # ``classifier_runs`` row has a different runtime fingerprint
+        # (new weights under the same model name, different runtime), and
+        # the runtime fingerprint is not part of
+        # (detection, model, list, species). So the same key genuinely can
+        # produce a materially different score, and keeping the old one
+        # would leave the Pipeline Inspector showing a per-candidate score
+        # from the previous runtime next to the run-level summary
+        # ``record_classifier_match_score`` just wrote for the new one —
+        # two contradictory facts on one surface.
+        if pred_id is not None and match_score is not None:
+            if from_fresh_inference:
+                self.conn.execute(
+                    "UPDATE predictions SET match_score = ? WHERE id = ?",
+                    (match_score, pred_id),
+                )
+            else:
+                self.conn.execute(
+                    """UPDATE predictions
+                           SET match_score = ?
+                           WHERE id = ? AND match_score IS NULL""",
+                    (match_score, pred_id),
+                )
+        return pred_id
+
+    def _write_review_state(
+        self, pred_id, status, group_id, vote_count, total_votes, individual,
+        preserve_manual_review, refresh_output,
+    ):
+        """Upsert the active workspace's review row for a stored prediction.
+
+        Leaves an existing manual decision alone unless ``refresh_output``
+        recomputes its burst membership.
+        """
+        # Write workspace-scoped review state only when the caller actually
+        # supplied something beyond the defaults. Keeping pending rows out of
+        # prediction_review is intentional: absence == pending. A refreshed
+        # candidate must also clear an earlier automatic alternative status.
+        has_review_state = (
+            refresh_output
+            or status != "pending"
+            or group_id is not None
+            or vote_count is not None
+            or total_votes is not None
+            or individual is not None
+        )
+        if not has_review_state:
+            return
+        ws_id = self.workspace_id
+        if preserve_manual_review or refresh_output:
+            review = self.conn.execute(
+                """SELECT status, individual FROM prediction_review
+                       WHERE prediction_id = ? AND workspace_id = ?""",
+                (pred_id, ws_id),
+            ).fetchone()
+            if (
+                review is not None
+                and review["status"] in {"accepted", "rejected"}
+                and review["individual"] != self.AUTO_MATCH_REVIEW_MARKER
+            ):
+                if refresh_output:
+                    # Review decisions survive reinference, but burst
+                    # membership is recomputed for the active workspace.
+                    self.conn.execute(
+                        """UPDATE prediction_review SET group_id=?, vote_count=?,
+                               total_votes=?, individual=?
+                               WHERE prediction_id=? AND workspace_id=?""",
+                        (group_id, vote_count, total_votes,
+                         None if individual == self.AUTO_MATCH_REVIEW_MARKER else individual,
+                         pred_id, ws_id),
+                    )
+                return
+        metadata_updates = ", ".join(
+            f"{field} = excluded.{field}" if refresh_output
+            else f"{field} = COALESCE(excluded.{field}, {field})"
+            for field in ("individual", "group_id", "vote_count", "total_votes")
+        )
+        self.conn.execute(
+            f"""INSERT INTO prediction_review
+                     (prediction_id, workspace_id, status, reviewed_at,
+                      individual, group_id, vote_count, total_votes)
+                   VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)
+                   ON CONFLICT(prediction_id, workspace_id)
+                   DO UPDATE SET status      = excluded.status,
+                                 reviewed_at = excluded.reviewed_at,
+                                 {metadata_updates}""",
+            (pred_id, ws_id, status, individual, group_id,
+             vote_count, total_votes),
+        )
+
     def add(
         self,
         detection_id,
@@ -184,47 +373,11 @@ class PredictionRepository:
                 "predictions without a detection row are orphaned and "
                 "invisible to workspace-scoped queries"
             )
-        # Fold the species into keyword-storage form so a curly-apostrophe
-        # label file (`Swinhoe’s White-eye`) cannot re-mint a predictions row
-        # that fails to match its accepted ASCII keyword (`Swinhoe's
-        # white-eye`) under exact and COLLATE NOCASE joins. Doing it here
-        # rather than only in the classify_job helpers covers every caller —
-        # `_store_pending_detection_prediction`, `_store_match_prediction`,
-        # and any future write path — so the invariant that keyword-side and
-        # prediction-side spellings agree can't drift by adding a new caller
-        # that forgot to normalize. Idempotent on already-folded strings.
-        if species is not None:
-            normalized_species = normalize_keyword_display(species)
-            if normalized_species:
-                species = normalized_species
+        species = self._normalized_species(species)
         tax = taxonomy or {}
-        cur = self.conn.execute(
-            """INSERT OR IGNORE INTO predictions
-               (detection_id, classifier_model, labels_fingerprint,
-                labels_fingerprint_full,
-                species, confidence, category,
-                taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name,
-                source_taxon_id, match_score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                detection_id,
-                model,
-                labels_fingerprint,
-                labels_fingerprint_full,
-                species,
-                confidence,
-                category,
-                tax.get("kingdom"),
-                tax.get("phylum"),
-                tax.get("class"),
-                tax.get("order"),
-                tax.get("family"),
-                tax.get("genus"),
-                tax.get("scientific_name"),
-                tax.get("taxon_id"),
-                match_score,
-            ),
+        cur = self._insert_prediction(
+            detection_id, model, labels_fingerprint, labels_fingerprint_full,
+            species, confidence, category, tax, match_score,
         )
         # SQLite's ``cur.lastrowid`` stays at the previous successful insert
         # even when this INSERT OR IGNORE was skipped by the UNIQUE
@@ -234,121 +387,15 @@ class PredictionRepository:
         if cur.rowcount == 1:
             pred_id = cur.lastrowid
         else:
-            row = self.conn.execute(
-                """SELECT id FROM predictions
-                   WHERE detection_id = ? AND classifier_model = ?
-                     AND labels_fingerprint = ? AND species IS ?""",
-                (detection_id, model, labels_fingerprint, species),
-            ).fetchone()
-            pred_id = row["id"] if row else None
-            if pred_id is not None and refresh_output:
-                self.conn.execute(
-                    """UPDATE predictions SET confidence=?, category=?,
-                       taxonomy_kingdom=?, taxonomy_phylum=?, taxonomy_class=?,
-                       taxonomy_order=?, taxonomy_family=?, taxonomy_genus=?,
-                       scientific_name=?, source_taxon_id=?, match_score=?
-                       WHERE id=?""",
-                    (confidence, category, tax.get("kingdom"), tax.get("phylum"),
-                     tax.get("class"), tax.get("order"), tax.get("family"),
-                     tax.get("genus"), tax.get("scientific_name"), tax.get("taxon_id"),
-                     match_score, pred_id),
-                )
-            if pred_id is not None and labels_fingerprint_full is not None:
-                self.conn.execute(
-                    """UPDATE predictions
-                       SET labels_fingerprint_full = ?
-                       WHERE id = ? AND labels_fingerprint_full IS NULL""",
-                    (labels_fingerprint_full, pred_id),
-                )
-            # Who wins depends on where the incoming score came from, so the
-            # caller has to say (``from_fresh_inference``):
-            #
-            #   fresh inference  -> overwrite. The model just ran on this
-            #     detection and this is what it measured.
-            #   anything else    -> fill the gap only, like the fingerprint
-            #     above. Cache materialization and enrichment backfills are
-            #     replaying a recorded value, and a real local measurement
-            #     should not be churned by a later import; it also keeps the
-            #     column stable for a calibration pass that already read it.
-            #
-            # The unique key is NOT grounds to keep the stored value. A
-            # non-reclassify pass re-runs inference whenever the existing
-            # ``classifier_runs`` row has a different runtime fingerprint
-            # (new weights under the same model name, different runtime), and
-            # the runtime fingerprint is not part of
-            # (detection, model, list, species). So the same key genuinely can
-            # produce a materially different score, and keeping the old one
-            # would leave the Pipeline Inspector showing a per-candidate score
-            # from the previous runtime next to the run-level summary
-            # ``record_classifier_match_score`` just wrote for the new one —
-            # two contradictory facts on one surface.
-            if pred_id is not None and match_score is not None:
-                if from_fresh_inference:
-                    self.conn.execute(
-                        "UPDATE predictions SET match_score = ? WHERE id = ?",
-                        (match_score, pred_id),
-                    )
-                else:
-                    self.conn.execute(
-                        """UPDATE predictions
-                           SET match_score = ?
-                           WHERE id = ? AND match_score IS NULL""",
-                        (match_score, pred_id),
-                    )
-        # Write workspace-scoped review state only when the caller actually
-        # supplied something beyond the defaults. Keeping pending rows out of
-        # prediction_review is intentional: absence == pending. A refreshed
-        # candidate must also clear an earlier automatic alternative status.
-        has_review_state = (
-            refresh_output
-            or status != "pending"
-            or group_id is not None
-            or vote_count is not None
-            or total_votes is not None
-            or individual is not None
-        )
-        if pred_id is not None and has_review_state:
-            ws_id = self.workspace_id
-            if preserve_manual_review or refresh_output:
-                review = self.conn.execute(
-                    """SELECT status, individual FROM prediction_review
-                       WHERE prediction_id = ? AND workspace_id = ?""",
-                    (pred_id, ws_id),
-                ).fetchone()
-                if (
-                    review is not None
-                    and review["status"] in {"accepted", "rejected"}
-                    and review["individual"] != self.AUTO_MATCH_REVIEW_MARKER
-                ):
-                    if refresh_output:
-                        # Review decisions survive reinference, but burst
-                        # membership is recomputed for the active workspace.
-                        self.conn.execute(
-                            """UPDATE prediction_review SET group_id=?, vote_count=?,
-                               total_votes=?, individual=?
-                               WHERE prediction_id=? AND workspace_id=?""",
-                            (group_id, vote_count, total_votes,
-                             None if individual == self.AUTO_MATCH_REVIEW_MARKER else individual,
-                             pred_id, ws_id),
-                        )
-                    self.conn.commit()
-                    return
-            metadata_updates = ", ".join(
-                f"{field} = excluded.{field}" if refresh_output
-                else f"{field} = COALESCE(excluded.{field}, {field})"
-                for field in ("individual", "group_id", "vote_count", "total_votes")
+            pred_id = self._existing_prediction_id(
+                detection_id, model, labels_fingerprint, labels_fingerprint_full,
+                species, confidence, category, tax, match_score, refresh_output,
+                from_fresh_inference,
             )
-            self.conn.execute(
-                f"""INSERT INTO prediction_review
-                     (prediction_id, workspace_id, status, reviewed_at,
-                      individual, group_id, vote_count, total_votes)
-                   VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)
-                   ON CONFLICT(prediction_id, workspace_id)
-                   DO UPDATE SET status      = excluded.status,
-                                 reviewed_at = excluded.reviewed_at,
-                                 {metadata_updates}""",
-                (pred_id, ws_id, status, individual, group_id,
-                 vote_count, total_votes),
+        if pred_id is not None:
+            self._write_review_state(
+                pred_id, status, group_id, vote_count, total_votes, individual,
+                preserve_manual_review, refresh_output,
             )
         self.conn.commit()
 
@@ -437,6 +484,121 @@ class PredictionRepository:
             )
         self.commit_with_retry(self.conn)
 
+    def _clear_prediction_chunk(
+        self, ws, chunk, extra_conds, extra_params, cms_extra_conds,
+        cms_extra_params,
+    ):
+        """Delete one photo chunk's predictions and their match summaries."""
+        conds = list(extra_conds)
+        params = list(extra_params)
+        if chunk is not None:
+            placeholders = ",".join("?" for _ in chunk)
+            conds.append(f"d.photo_id IN ({placeholders})")
+            params.extend(chunk)
+        where_clause = (" WHERE " + " AND ".join(conds)) if conds else ""
+        self.conn.execute(
+            f"""DELETE FROM predictions WHERE id IN (
+                    SELECT pr.id FROM predictions pr
+                    JOIN detections d ON d.id = pr.detection_id
+                    JOIN photos ph ON ph.id = d.photo_id
+                    JOIN photo_workspace_visibility wf
+                      ON wf.photo_id = ph.id AND wf.workspace_id = ?
+                    {where_clause}
+                )""",
+            [ws, *params],
+        )
+
+        # Match summaries live at the same key as the predictions we just
+        # cleared, and outlast their predictions when left behind: a
+        # detection whose predictions are cleared but whose
+        # classifier_match_scores row survives keeps reporting the prior
+        # run's verdict in Browse and the Pipeline Inspector, even though
+        # the predictions that verdict described are gone. This has to
+        # fire whether or not classifier_runs is being cleared — in
+        # particular, the pipeline's deferred reclassify path calls
+        # ``clear_predictions(..., clear_run_keys=False)`` after writing
+        # fresh runs for detections that succeeded, and would otherwise
+        # leave the previous run's match score attached to any detection
+        # whose inference failed.
+        cms_conds = list(cms_extra_conds)
+        cms_params = list(cms_extra_params)
+        if chunk is not None:
+            placeholders = ",".join("?" for _ in chunk)
+            cms_conds.append(f"d.photo_id IN ({placeholders})")
+            cms_params.extend(chunk)
+        cms_where = (
+            " WHERE " + " AND ".join(cms_conds)
+        ) if cms_conds else ""
+        self.conn.execute(
+            f"""DELETE FROM classifier_match_scores
+                    WHERE rowid IN (
+                        SELECT cms.rowid
+                        FROM classifier_match_scores cms
+                        JOIN detections d ON d.id = cms.detection_id
+                        JOIN photos ph ON ph.id = d.photo_id
+                        JOIN photo_workspace_visibility wf
+                          ON wf.photo_id = ph.id AND wf.workspace_id = ?
+                        {cms_where}
+                    )""",
+            [ws, *cms_params],
+        )
+
+    def _clear_classifier_run_keys(self, ws, id_chunks, model, labels_fingerprint):
+        """Delete the ``classifier_runs`` keys of the cleared predictions."""
+        # Also clear matching classifier_runs rows so the next pass actually
+        # re-runs the classifier. Without this, the skip gate at
+        # classifier_runs would still report "done" even though the cached
+        # predictions are gone, leaving detections permanently unclassified
+        # unless the user forces a reclassify.
+        #
+        # classifier_runs has PK (detection_id, classifier_model,
+        # labels_fingerprint), so delete by the full composite key, not by
+        # detection_id alone — otherwise another fingerprint's run key on
+        # the same detection would be wiped too.
+        #
+        # Run for every clear_predictions() call: when model is None we just
+        # built a workspace-wide DELETE on predictions, so leaving the run
+        # keys behind would strand those detections (the (detection, model,
+        # fingerprint) gate would treat them as already classified).
+        base_run_conds = []
+        base_run_params = []
+        if model is not None:
+            base_run_conds.append("cr.classifier_model = ?")
+            base_run_params.append(model)
+        if labels_fingerprint is not None:
+            base_run_conds.append("cr.labels_fingerprint = ?")
+            base_run_params.append(labels_fingerprint)
+        # Set-based DELETE via a rowid subquery — the previous
+        # SELECT + per-row DELETE loop issued one statement per matching
+        # run, which on a reclassify of a multi-thousand-detection
+        # workspace dominates wall time on the startup-blocking thread.
+        # Match semantics are identical: the subquery shape is the same
+        # (JOIN through detections/photos/workspace_folders, same
+        # optional filters), and rowid uniquely identifies each
+        # classifier_runs row under the implicit-rowid default.
+        # Photo-id chunking mirrors the predictions DELETE above.
+        for chunk in id_chunks:
+            run_conds = list(base_run_conds)
+            run_params = list(base_run_params)
+            if chunk is not None:
+                placeholders = ",".join("?" for _ in chunk)
+                run_conds.append(f"d.photo_id IN ({placeholders})")
+                run_params.extend(chunk)
+            run_where = (" WHERE " + " AND ".join(run_conds)) if run_conds else ""
+            self.conn.execute(
+                f"""DELETE FROM classifier_runs
+                    WHERE rowid IN (
+                        SELECT cr.rowid
+                        FROM classifier_runs cr
+                        JOIN detections d ON d.id = cr.detection_id
+                        JOIN photos ph ON ph.id = d.photo_id
+                        JOIN photo_workspace_visibility wf
+                          ON wf.photo_id = ph.id AND wf.workspace_id = ?
+                        {run_where}
+                    )""",
+                [ws, *run_params],
+            )
+
     def clear(self, model=None, collection_photo_ids=None,
                           labels_fingerprint=None, clear_run_keys=True):
         """Clear predictions, optionally filtered by model, photo set, and fingerprint.
@@ -500,117 +662,16 @@ class PredictionRepository:
             cms_extra_params.append(labels_fingerprint)
 
         for chunk in id_chunks:
-            conds = list(extra_conds)
-            params = list(extra_params)
-            if chunk is not None:
-                placeholders = ",".join("?" for _ in chunk)
-                conds.append(f"d.photo_id IN ({placeholders})")
-                params.extend(chunk)
-            where_clause = (" WHERE " + " AND ".join(conds)) if conds else ""
-            self.conn.execute(
-                f"""DELETE FROM predictions WHERE id IN (
-                    SELECT pr.id FROM predictions pr
-                    JOIN detections d ON d.id = pr.detection_id
-                    JOIN photos ph ON ph.id = d.photo_id
-                    JOIN photo_workspace_visibility wf
-                      ON wf.photo_id = ph.id AND wf.workspace_id = ?
-                    {where_clause}
-                )""",
-                [ws, *params],
-            )
-
-            # Match summaries live at the same key as the predictions we just
-            # cleared, and outlast their predictions when left behind: a
-            # detection whose predictions are cleared but whose
-            # classifier_match_scores row survives keeps reporting the prior
-            # run's verdict in Browse and the Pipeline Inspector, even though
-            # the predictions that verdict described are gone. This has to
-            # fire whether or not classifier_runs is being cleared — in
-            # particular, the pipeline's deferred reclassify path calls
-            # ``clear_predictions(..., clear_run_keys=False)`` after writing
-            # fresh runs for detections that succeeded, and would otherwise
-            # leave the previous run's match score attached to any detection
-            # whose inference failed.
-            cms_conds = list(cms_extra_conds)
-            cms_params = list(cms_extra_params)
-            if chunk is not None:
-                placeholders = ",".join("?" for _ in chunk)
-                cms_conds.append(f"d.photo_id IN ({placeholders})")
-                cms_params.extend(chunk)
-            cms_where = (
-                " WHERE " + " AND ".join(cms_conds)
-            ) if cms_conds else ""
-            self.conn.execute(
-                f"""DELETE FROM classifier_match_scores
-                    WHERE rowid IN (
-                        SELECT cms.rowid
-                        FROM classifier_match_scores cms
-                        JOIN detections d ON d.id = cms.detection_id
-                        JOIN photos ph ON ph.id = d.photo_id
-                        JOIN photo_workspace_visibility wf
-                          ON wf.photo_id = ph.id AND wf.workspace_id = ?
-                        {cms_where}
-                    )""",
-                [ws, *cms_params],
+            self._clear_prediction_chunk(
+                ws, chunk, extra_conds, extra_params, cms_extra_conds,
+                cms_extra_params,
             )
 
         if not clear_run_keys:
             self.conn.commit()
             return
 
-        # Also clear matching classifier_runs rows so the next pass actually
-        # re-runs the classifier. Without this, the skip gate at
-        # classifier_runs would still report "done" even though the cached
-        # predictions are gone, leaving detections permanently unclassified
-        # unless the user forces a reclassify.
-        #
-        # classifier_runs has PK (detection_id, classifier_model,
-        # labels_fingerprint), so delete by the full composite key, not by
-        # detection_id alone — otherwise another fingerprint's run key on
-        # the same detection would be wiped too.
-        #
-        # Run for every clear_predictions() call: when model is None we just
-        # built a workspace-wide DELETE on predictions, so leaving the run
-        # keys behind would strand those detections (the (detection, model,
-        # fingerprint) gate would treat them as already classified).
-        base_run_conds = []
-        base_run_params = []
-        if model is not None:
-            base_run_conds.append("cr.classifier_model = ?")
-            base_run_params.append(model)
-        if labels_fingerprint is not None:
-            base_run_conds.append("cr.labels_fingerprint = ?")
-            base_run_params.append(labels_fingerprint)
-        # Set-based DELETE via a rowid subquery — the previous
-        # SELECT + per-row DELETE loop issued one statement per matching
-        # run, which on a reclassify of a multi-thousand-detection
-        # workspace dominates wall time on the startup-blocking thread.
-        # Match semantics are identical: the subquery shape is the same
-        # (JOIN through detections/photos/workspace_folders, same
-        # optional filters), and rowid uniquely identifies each
-        # classifier_runs row under the implicit-rowid default.
-        # Photo-id chunking mirrors the predictions DELETE above.
-        for chunk in id_chunks:
-            run_conds = list(base_run_conds)
-            run_params = list(base_run_params)
-            if chunk is not None:
-                placeholders = ",".join("?" for _ in chunk)
-                run_conds.append(f"d.photo_id IN ({placeholders})")
-                run_params.extend(chunk)
-            run_where = (" WHERE " + " AND ".join(run_conds)) if run_conds else ""
-            self.conn.execute(
-                f"""DELETE FROM classifier_runs
-                    WHERE rowid IN (
-                        SELECT cr.rowid
-                        FROM classifier_runs cr
-                        JOIN detections d ON d.id = cr.detection_id
-                        JOIN photos ph ON ph.id = d.photo_id
-                        JOIN photo_workspace_visibility wf
-                          ON wf.photo_id = ph.id AND wf.workspace_id = ?
-                        {run_where}
-                    )""",
-                [ws, *run_params],
-            )
+        self._clear_classifier_run_keys(ws, id_chunks, model, labels_fingerprint)
         # ``classifier_match_scores`` is already cleared alongside the
         # predictions above, whether or not classifier_runs is being wiped
         # here — see the companion delete inside the predictions loop.
@@ -735,6 +796,32 @@ class PredictionRepository:
                 rows_by_photo.setdefault(row["photo_id"], []).append(row)
         return rows_by_photo
 
+    def _append_rules_scope(self, rules, base_conditions, base_params):
+        """Limit ``get_rows`` to the photos a rules tree selects."""
+        # ``_build_query_from_rules`` compiles ``none(...)`` as photo-level
+        # ``NOT EXISTS(...)``. For a row-level predicate like
+        # ``none(prediction_confidence >= 0.8)`` that drops any photo with
+        # a sibling row over the threshold — even when the 0.10 sibling
+        # satisfies the outer expression at the row level. Strip prediction
+        # leaves nested inside a ``none`` group before scoping photos so
+        # ``_filter_prediction_rows_by_rules`` can decide those per row
+        # against the ORIGINAL tree — see r3618822252.
+        scope_rules = self._relax_negated_prediction_leaves(rules)
+        # row_scoped=True selects broader candidate SQL for the negative
+        # prediction-field operators — the row filter below drops the
+        # matching sibling rows so we can safely widen photo selection.
+        # Photo-scoped callers (photo queries, saved collections) must
+        # keep the default False to preserve the NOT EXISTS semantics
+        # that include photos with no current predictions (r3619275290).
+        r_folder_join, r_join_clause, r_where, r_params = (
+            self._build_query_from_rules(scope_rules, row_scoped=True)
+        )
+        base_conditions.append(
+            "p.id IN (SELECT DISTINCT p.id FROM photos p "
+            f"{r_folder_join} {r_join_clause} {r_where})"
+        )
+        base_params.extend(r_params)
+
     def get_rows(self, photo_ids=None, model=None, status=None,
                         rules=None):
         """Get predictions with photo, detection and review info.
@@ -767,29 +854,7 @@ class PredictionRepository:
         base_conditions = ["wf.workspace_id = ?"]
         base_params = [ws]
         if rules is not None:
-            # ``_build_query_from_rules`` compiles ``none(...)`` as photo-level
-            # ``NOT EXISTS(...)``. For a row-level predicate like
-            # ``none(prediction_confidence >= 0.8)`` that drops any photo with
-            # a sibling row over the threshold — even when the 0.10 sibling
-            # satisfies the outer expression at the row level. Strip prediction
-            # leaves nested inside a ``none`` group before scoping photos so
-            # ``_filter_prediction_rows_by_rules`` can decide those per row
-            # against the ORIGINAL tree — see r3618822252.
-            scope_rules = self._relax_negated_prediction_leaves(rules)
-            # row_scoped=True selects broader candidate SQL for the negative
-            # prediction-field operators — the row filter below drops the
-            # matching sibling rows so we can safely widen photo selection.
-            # Photo-scoped callers (photo queries, saved collections) must
-            # keep the default False to preserve the NOT EXISTS semantics
-            # that include photos with no current predictions (r3619275290).
-            r_folder_join, r_join_clause, r_where, r_params = (
-                self._build_query_from_rules(scope_rules, row_scoped=True)
-            )
-            base_conditions.append(
-                "p.id IN (SELECT DISTINCT p.id FROM photos p "
-                f"{r_folder_join} {r_join_clause} {r_where})"
-            )
-            base_params.extend(r_params)
+            self._append_rules_scope(rules, base_conditions, base_params)
         if model:
             base_conditions.append("pr.classifier_model = ?")
             base_params.append(model)

@@ -1006,11 +1006,6 @@ class _ImportPhotosRequest:
         return remote_target
 
     def job_config(self):
-        parent_config = self.parent_config
-        parent_resume = self.parent_resume
-        parent_allowed_fingerprints = self.parent_allowed_fingerprints
-        parent_id_raw = self.parent_id_raw
-        carry_photo_ids = self.carry_photo_ids
         include_paths = self.include_paths
         move_target_snapshot = self.move_target_snapshot
         job_config = {
@@ -1046,6 +1041,51 @@ class _ImportPhotosRequest:
             ),
             "workspace_id": self.active_ws,
             "created_workspace": self.created_workspace,
+        }
+        job_config.update(self._recovery_job_config())
+        if include_paths is not None:
+            job_config["previewed_count"] = self.previewed_count
+            job_config["checked_count"] = self.checked_count
+            # Persist the actual path list so a recovery retry can
+            # reconstruct the original selection. Without this a
+            # ``retryBodyFromFinishedJob``-driven retry would either be
+            # rejected by the source-signature drift check (parent
+            # snapshot is now over the pre-selection set — see
+            # ``_capture_source_snapshots`` — but the ``include_paths``
+            # the parent actually ran is the useful thing to compare
+            # against a retry that also filters) or, once that hurdle is
+            # cleared, silently re-import the files the user deliberately
+            # deselected. Stored as a sorted list so the JSON round-trips
+            # deterministically; the set is rebuilt in ``_apply_selection``.
+            # Size cost is bounded by ``previewed_count`` (thousands of
+            # short path strings in the worst realistic case) and is
+            # accepted deliberately as the price of a retry that stays
+            # true to the parent's scope.
+            job_config["include_paths"] = sorted(include_paths)
+        if move_target_snapshot is not None and not self.local_processing:
+            job_config["after_process_move"] = {
+                "remote_target_id": move_target_snapshot["id"],
+                "target_name": move_target_snapshot["name"],
+                # Persisted alongside the id so a recovery retry can
+                # detect a Settings edit that would redirect the
+                # chained transfer to a different host or root.
+                # Parallels ``remote_target_snapshot`` for the primary
+                # remote destination. See the parent-verification
+                # block above.
+                "target_snapshot": self.service._move_target_snapshot(
+                    move_target_snapshot,
+                ),
+            }
+        return job_config
+
+    def _recovery_job_config(self):
+        """The retry/resume lineage keys of the persisted job config."""
+        parent_config = self.parent_config
+        parent_resume = self.parent_resume
+        parent_allowed_fingerprints = self.parent_allowed_fingerprints
+        parent_id_raw = self.parent_id_raw
+        carry_photo_ids = self.carry_photo_ids
+        return {
             "carry_photo_ids": carry_photo_ids,
             # Recovery scope from ``_validate_parent_import_job``: the paths
             # the parent's landings sit at,
@@ -1110,40 +1150,6 @@ class _ImportPhotosRequest:
                 else None
             ),
         }
-        if include_paths is not None:
-            job_config["previewed_count"] = self.previewed_count
-            job_config["checked_count"] = self.checked_count
-            # Persist the actual path list so a recovery retry can
-            # reconstruct the original selection. Without this a
-            # ``retryBodyFromFinishedJob``-driven retry would either be
-            # rejected by the source-signature drift check (parent
-            # snapshot is now over the pre-selection set — see
-            # ``_capture_source_snapshots`` — but the ``include_paths``
-            # the parent actually ran is the useful thing to compare
-            # against a retry that also filters) or, once that hurdle is
-            # cleared, silently re-import the files the user deliberately
-            # deselected. Stored as a sorted list so the JSON round-trips
-            # deterministically; the set is rebuilt in ``_apply_selection``.
-            # Size cost is bounded by ``previewed_count`` (thousands of
-            # short path strings in the worst realistic case) and is
-            # accepted deliberately as the price of a retry that stays
-            # true to the parent's scope.
-            job_config["include_paths"] = sorted(include_paths)
-        if move_target_snapshot is not None and not self.local_processing:
-            job_config["after_process_move"] = {
-                "remote_target_id": move_target_snapshot["id"],
-                "target_name": move_target_snapshot["name"],
-                # Persisted alongside the id so a recovery retry can
-                # detect a Settings edit that would redirect the
-                # chained transfer to a different host or root.
-                # Parallels ``remote_target_snapshot`` for the primary
-                # remote destination. See the parent-verification
-                # block above.
-                "target_snapshot": self.service._move_target_snapshot(
-                    move_target_snapshot,
-                ),
-            }
-        return job_config
 
 
 class _ImportPhotosJob:
@@ -1385,7 +1391,6 @@ class _ImportPhotosJob:
         active_ws = self.active_ws
         after_import = self.after_import
         pending_archive_id = self.pending_archive_id
-        move_target_snapshot = self.move_target_snapshot
         photo_ids = result.get("photo_ids") or []
         carry_photo_ids = list(
             (job.get("config") or {}).get("carry_photo_ids") or []
@@ -1435,57 +1440,8 @@ class _ImportPhotosJob:
             )
             return False
         try:
-            after_move = None
-            if move_target_snapshot is not None and not self.defer_nas_transfer:
-                after_move = self._plan_after_move(thread_db, chain_scope)
-            process_job_id, model_warning, process_blocker = (
-                service.enqueue_process_job(
-                    thread_db, self.runner, active_ws,
-                    collection_id=col_id,
-                    process_id=after_import,
-                    chained_from=job["id"],
-                    expanded=self.after_import_snapshot,
-                    after_move=after_move,
-                )
-            )
-            if process_blocker:
-                result["after_import_skipped"] = process_blocker
-                if after_move:
-                    # Processing is paused before any pipeline job was
-                    # enqueued (e.g. Classify needs a species list the
-                    # user hasn't downloaded yet), so the finally-hook
-                    # that normally fires the chained NAS move never
-                    # runs. But the user accepted a chain that ends on
-                    # the NAS — leaving these photos in the local
-                    # archive without saying so would break the promise
-                    # and hide the outcome behind an "after_import
-                    # skipped" pill that doesn't mention the move. Fire
-                    # the move here off the import job itself, so the
-                    # "photos end on the NAS" invariant holds the same
-                    # way it does for a runtime process failure. The
-                    # hook writes move_job_ids / after_move_errors on
-                    # the import result and adds a "Move to NAS" step
-                    # to the import job's tree, so the outcome is
-                    # visible either way.
-                    service.chain_after_move(
-                        job, result, after_move, active_ws)
-                return False
-            result["process_job_id"] = process_job_id
-            if after_move is not None:
-                # Surface the planned move on the import's result card so
-                # the user can see what will happen before it fires —
-                # including, honestly, that nothing (or not everything)
-                # will move when folders were skipped.
-                result["after_process_move_planned"] = {
-                    "target_name": move_target_snapshot["name"],
-                    "folders": after_move["folders"],
-                }
-                if after_move.get("skip_note"):
-                    result["after_process_move_planned"]["note"] = (
-                        after_move["skip_note"])
-            if model_warning:
-                result["model_warning"] = model_warning
-            return process_job_id is not None
+            return self._enqueue_chained_processing(
+                job, result, thread_db, col_id, chain_scope)
         except Exception as e:
             # The import itself succeeded — record the chaining failure
             # rather than flipping the whole job red, but never
@@ -1496,6 +1452,69 @@ class _ImportPhotosJob:
                 f"failed to enqueue processing: {e}"
             )
             return False
+
+    def _enqueue_chained_processing(self, job, result, thread_db, col_id, chain_scope):
+        """Queue the after-import processing run (and its planned NAS move).
+
+        Returns whether the chain was paid; a blocked process records why
+        on ``result`` and still fires the accepted move off the import.
+        """
+        service = self.service
+        active_ws = self.active_ws
+        after_import = self.after_import
+        move_target_snapshot = self.move_target_snapshot
+        after_move = None
+        if move_target_snapshot is not None and not self.defer_nas_transfer:
+            after_move = self._plan_after_move(thread_db, chain_scope)
+        process_job_id, model_warning, process_blocker = (
+            service.enqueue_process_job(
+                thread_db, self.runner, active_ws,
+                collection_id=col_id,
+                process_id=after_import,
+                chained_from=job["id"],
+                expanded=self.after_import_snapshot,
+                after_move=after_move,
+            )
+        )
+        if process_blocker:
+            result["after_import_skipped"] = process_blocker
+            if after_move:
+                # Processing is paused before any pipeline job was
+                # enqueued (e.g. Classify needs a species list the
+                # user hasn't downloaded yet), so the finally-hook
+                # that normally fires the chained NAS move never
+                # runs. But the user accepted a chain that ends on
+                # the NAS — leaving these photos in the local
+                # archive without saying so would break the promise
+                # and hide the outcome behind an "after_import
+                # skipped" pill that doesn't mention the move. Fire
+                # the move here off the import job itself, so the
+                # "photos end on the NAS" invariant holds the same
+                # way it does for a runtime process failure. The
+                # hook writes move_job_ids / after_move_errors on
+                # the import result and adds a "Move to NAS" step
+                # to the import job's tree, so the outcome is
+                # visible either way.
+                service.chain_after_move(
+                    job, result, after_move, active_ws)
+            return False
+        result["process_job_id"] = process_job_id
+        # ``after_move`` is only planned when there is a move target.
+        if after_move is not None and move_target_snapshot is not None:
+            # Surface the planned move on the import's result card so
+            # the user can see what will happen before it fires —
+            # including, honestly, that nothing (or not everything)
+            # will move when folders were skipped.
+            result["after_process_move_planned"] = {
+                "target_name": move_target_snapshot["name"],
+                "folders": after_move["folders"],
+            }
+            if after_move.get("skip_note"):
+                result["after_process_move_planned"]["note"] = (
+                    after_move["skip_note"])
+        if model_warning:
+            result["model_warning"] = model_warning
+        return process_job_id is not None
 
     def _plan_after_move(self, thread_db, chain_scope):
         """Which imported folders must the chained NAS move relocate?

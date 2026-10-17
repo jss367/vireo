@@ -59,21 +59,7 @@ def _highlight_score_bucket(photos, picked_first=False):
     max_bg_sep = max(bg_sep_values) if bg_sep_values else None
 
     for p in photos:
-        if p.get("eye_tenengrad") is not None and eye_values:
-            focus = _rank01(p.get("eye_tenengrad"), eye_values)
-            focus_label = "eye focus"
-        else:
-            subject_t = p.get("subject_tenengrad")
-            rank = _rank01(subject_t, subject_values)
-            if subject_t is not None and p.get("bg_tenengrad") is not None:
-                ratio = math.log((subject_t + 1e-8) / (p.get("bg_tenengrad") + 1e-8))
-                bg_term = 1.0 / (1.0 + math.exp(-ratio))
-                focus = 0.70 * rank + 0.30 * bg_term
-            elif subject_t is not None:
-                focus = rank
-            else:
-                focus = p.get("quality_score") if p.get("quality_score") is not None else 0.0
-            focus_label = "focus"
+        focus, focus_label = _highlight_focus(p, eye_values, subject_values)
 
         exposure = _highlight_exposure_score(p)
         crop = p.get("crop_complete")
@@ -125,28 +111,9 @@ def _highlight_score_bucket(photos, picked_first=False):
         if p.get("flag") == "flagged":
             score += 0.08
 
-        reasons = []
-        if p.get("flag") == "flagged":
-            reasons.append("picked")
-        if rating:
-            reasons.append(f"{rating} star")
-        if focus >= 0.72:
-            reasons.append(f"strong {focus_label}")
-        elif focus < 0.35 and rich_available:
-            reasons.append("soft subject")
-        if exposure >= 0.70:
-            reasons.append("good exposure")
-        elif p.get("subject_clip_high") is not None and p.get("subject_clip_high") > 0.30:
-            reasons.append("highlight clipping")
-        if crop is not None:
-            if crop >= 0.90:
-                reasons.append("clean crop")
-            elif crop < 0.60:
-                reasons.append("clipped subject")
-        if area >= 0.50:
-            reasons.append("large subject")
-        if not reasons:
-            reasons.append("legacy quality")
+        reasons = _highlight_reasons(
+            p, rating, focus, focus_label, rich_available, exposure, crop, area,
+        )
 
         p["highlight_score"] = round(max(0.0, min(1.0, score)), 4)
         p["highlight_base_score"] = round(
@@ -161,6 +128,60 @@ def _highlight_score_bucket(photos, picked_first=False):
         }
         p["reasons"] = reasons[:3]
 
+    _sort_highlight_bucket(photos, picked_first)
+
+
+def _highlight_focus(p, eye_values, subject_values):
+    """``(focus score, reason label)`` for one photo in a bucket."""
+    if p.get("eye_tenengrad") is not None and eye_values:
+        focus = _rank01(p.get("eye_tenengrad"), eye_values)
+        focus_label = "eye focus"
+    else:
+        subject_t = p.get("subject_tenengrad")
+        rank = _rank01(subject_t, subject_values)
+        if subject_t is not None and p.get("bg_tenengrad") is not None:
+            ratio = math.log((subject_t + 1e-8) / (p.get("bg_tenengrad") + 1e-8))
+            bg_term = 1.0 / (1.0 + math.exp(-ratio))
+            focus = 0.70 * rank + 0.30 * bg_term
+        elif subject_t is not None:
+            focus = rank
+        else:
+            focus = p.get("quality_score") if p.get("quality_score") is not None else 0.0
+        focus_label = "focus"
+
+    return focus, focus_label
+
+
+def _highlight_reasons(p, rating, focus, focus_label, rich_available,
+                       exposure, crop, area):
+    """The compact reason labels shown for one scored photo."""
+    reasons = []
+    if p.get("flag") == "flagged":
+        reasons.append("picked")
+    if rating:
+        reasons.append(f"{rating} star")
+    if focus >= 0.72:
+        reasons.append(f"strong {focus_label}")
+    elif focus < 0.35 and rich_available:
+        reasons.append("soft subject")
+    if exposure >= 0.70:
+        reasons.append("good exposure")
+    elif p.get("subject_clip_high") is not None and p.get("subject_clip_high") > 0.30:
+        reasons.append("highlight clipping")
+    if crop is not None:
+        if crop >= 0.90:
+            reasons.append("clean crop")
+        elif crop < 0.60:
+            reasons.append("clipped subject")
+    if area >= 0.50:
+        reasons.append("large subject")
+    if not reasons:
+        reasons.append("legacy quality")
+    return reasons
+
+
+def _sort_highlight_bucket(photos, picked_first):
+    """Order a scored bucket for the Highlights page or the ranked baseline."""
     if picked_first:
         # Highlights page ordering: three contiguous regions —
         #   1. picks (flagged): analyzed first (by score desc), then
@@ -453,43 +474,9 @@ def collect_highlight_buckets(
             species = None
             is_accepted = False
 
-        photo = {
-            "id": r["id"],
-            "filename": r["filename"],
-            "timestamp": r.get("timestamp"),
-            "folder_name": r.get("folder_name"),
-            "folder_path": r.get("folder_path"),
-            "keyword_names": r.get("keyword_names") or "",
-            "rating": r.get("rating") or 0,
-            "flag": r.get("flag") or "none",
-            "quality_score": r.get("quality_score"),
-            "is_analyzed": r.get("quality_score") is not None,
-            "subject_sharpness": r.get("subject_sharpness"),
-            "subject_size": r.get("subject_size"),
-            "sharpness": r.get("sharpness"),
-            "mask_path": r.get("mask_path"),
-            "subject_tenengrad": r.get("subject_tenengrad"),
-            "bg_tenengrad": r.get("bg_tenengrad"),
-            "crop_complete": r.get("crop_complete"),
-            "bg_separation": r.get("bg_separation"),
-            "subject_clip_high": r.get("subject_clip_high"),
-            "subject_clip_low": r.get("subject_clip_low"),
-            "subject_y_median": r.get("subject_y_median"),
-            "noise_estimate": r.get("noise_estimate"),
-            "eye_tenengrad": r.get("eye_tenengrad"),
-            "species": accepted,
-            "canonical_species": species if is_accepted else None,
-            "prediction_id": r.get("prediction_id"),
-            "predicted_species": r.get("predicted_species"),
-            "predicted_confidence": predicted_conf,
-            "has_accepted_species": accepted is not None,
-            "is_unidentified": species is None,
-            "is_confirmable_prediction": (
-                accepted is None
-                and species is not None
-                and r.get("prediction_id") is not None
-            ),
-        }
+        photo = _highlight_candidate_photo(
+            r, accepted, species, is_accepted, predicted_conf,
+        )
 
         if species is None:
             unidentified_photos.append(photo)
@@ -502,31 +489,7 @@ def collect_highlight_buckets(
 
     buckets = []
     for species, entry in bucket_map.items():
-        photos = entry["photos"]
-        _highlight_score_bucket(photos, picked_first=True)
-        confidences = [
-            p["predicted_confidence"]
-            for p in photos
-            if p.get("predicted_confidence") is not None
-        ]
-        avg_confidence = (
-            round(sum(confidences) / len(confidences), 4)
-            if confidences else None
-        )
-        top = photos[0] if photos else {}
-        buckets.append({
-            "species": species,
-            "is_accepted": entry["is_accepted"],
-            "certainty": _highlight_confidence_label(
-                avg_confidence, entry["is_accepted"]
-            ),
-            "avg_confidence": avg_confidence,
-            "photo_count": len(photos),
-            "best_quality": top.get("quality_score"),
-            "best_score": bucket_best_score(photos),
-            "best_timestamp": top.get("timestamp"),
-            "photos": photos,
-        })
+        buckets.append(_highlight_bucket_entry(species, entry))
 
     _highlight_score_bucket(unidentified_photos, picked_first=True)
     buckets.sort(
@@ -538,6 +501,76 @@ def collect_highlight_buckets(
         reverse=True,
     )
     return buckets, unidentified_photos
+
+
+def _highlight_candidate_photo(r, accepted, species, is_accepted, predicted_conf):
+    """The Highlights photo entry for one candidate row."""
+    return {
+        "id": r["id"],
+        "filename": r["filename"],
+        "timestamp": r.get("timestamp"),
+        "folder_name": r.get("folder_name"),
+        "folder_path": r.get("folder_path"),
+        "keyword_names": r.get("keyword_names") or "",
+        "rating": r.get("rating") or 0,
+        "flag": r.get("flag") or "none",
+        "quality_score": r.get("quality_score"),
+        "is_analyzed": r.get("quality_score") is not None,
+        "subject_sharpness": r.get("subject_sharpness"),
+        "subject_size": r.get("subject_size"),
+        "sharpness": r.get("sharpness"),
+        "mask_path": r.get("mask_path"),
+        "subject_tenengrad": r.get("subject_tenengrad"),
+        "bg_tenengrad": r.get("bg_tenengrad"),
+        "crop_complete": r.get("crop_complete"),
+        "bg_separation": r.get("bg_separation"),
+        "subject_clip_high": r.get("subject_clip_high"),
+        "subject_clip_low": r.get("subject_clip_low"),
+        "subject_y_median": r.get("subject_y_median"),
+        "noise_estimate": r.get("noise_estimate"),
+        "eye_tenengrad": r.get("eye_tenengrad"),
+        "species": accepted,
+        "canonical_species": species if is_accepted else None,
+        "prediction_id": r.get("prediction_id"),
+        "predicted_species": r.get("predicted_species"),
+        "predicted_confidence": predicted_conf,
+        "has_accepted_species": accepted is not None,
+        "is_unidentified": species is None,
+        "is_confirmable_prediction": (
+            accepted is None
+            and species is not None
+            and r.get("prediction_id") is not None
+        ),
+    }
+
+
+def _highlight_bucket_entry(species, entry):
+    """Score one species bucket and summarize it for the page."""
+    photos = entry["photos"]
+    _highlight_score_bucket(photos, picked_first=True)
+    confidences = [
+        p["predicted_confidence"]
+        for p in photos
+        if p.get("predicted_confidence") is not None
+    ]
+    avg_confidence = (
+        round(sum(confidences) / len(confidences), 4)
+        if confidences else None
+    )
+    top = photos[0] if photos else {}
+    return {
+        "species": species,
+        "is_accepted": entry["is_accepted"],
+        "certainty": _highlight_confidence_label(
+            avg_confidence, entry["is_accepted"]
+        ),
+        "avg_confidence": avg_confidence,
+        "photo_count": len(photos),
+        "best_quality": top.get("quality_score"),
+        "best_score": bucket_best_score(photos),
+        "best_timestamp": top.get("timestamp"),
+        "photos": photos,
+    }
 
 
 def _highlight_search_fields(photo):
@@ -681,6 +714,53 @@ def _life_list_alphabetical_key(name):
     return _LIFE_LIST_LEADING_APOSTROPHE_RE.sub("", str(name or "")).lower()
 
 
+def _filter_highlights_by_species(
+    buckets, unidentified_photos, species_filter, species_match_case,
+    species_whole_word,
+):
+    """Keep the buckets (and the Unidentified section) the species filter matches."""
+    if species_filter:
+        buckets = [
+            b for b in buckets
+            if text_search_match(
+                b["species"],
+                species_filter,
+                species_match_case,
+                species_whole_word,
+            )
+        ]
+        if not text_search_match(
+            "unidentified",
+            species_filter,
+            species_match_case,
+            species_whole_word,
+        ):
+            unidentified_photos = []
+    return buckets, unidentified_photos
+
+
+def _limit_highlight_buckets(db, buckets, unidentified_photos, limit_per_bucket):
+    """Trim each section to its first page and attach the shown photos' edits."""
+    def limited_bucket(bucket):
+        photos = bucket["photos"]
+        limited = photos[:limit_per_bucket]
+        return {
+            **bucket,
+            "photos": limited,
+            "loaded_count": len(limited),
+            "has_more": len(photos) > len(limited),
+        }
+
+    limited_buckets = [limited_bucket(b) for b in buckets]
+    unidentified_limited = unidentified_photos[:limit_per_bucket]
+    visible_photos = []
+    for bucket in limited_buckets:
+        visible_photos.extend(bucket["photos"])
+    visible_photos.extend(unidentified_limited)
+    attach_edit_recipes(db, visible_photos)
+    return limited_buckets, unidentified_limited
+
+
 def build_highlights_payload(
     db,
     scope="folder",
@@ -723,23 +803,10 @@ def build_highlights_payload(
     eligible_count = sum(b["photo_count"] for b in buckets) + len(
         unidentified_photos
     )
-    if species_filter:
-        buckets = [
-            b for b in buckets
-            if text_search_match(
-                b["species"],
-                species_filter,
-                species_match_case,
-                species_whole_word,
-            )
-        ]
-        if not text_search_match(
-            "unidentified",
-            species_filter,
-            species_match_case,
-            species_whole_word,
-        ):
-            unidentified_photos = []
+    buckets, unidentified_photos = _filter_highlights_by_species(
+        buckets, unidentified_photos, species_filter, species_match_case,
+        species_whole_word,
+    )
 
     buckets, unidentified_photos = filter_highlight_sections(
         buckets,
@@ -757,23 +824,9 @@ def build_highlights_payload(
         representative_filter,
     )
 
-    def limited_bucket(bucket):
-        photos = bucket["photos"]
-        limited = photos[:limit_per_bucket]
-        return {
-            **bucket,
-            "photos": limited,
-            "loaded_count": len(limited),
-            "has_more": len(photos) > len(limited),
-        }
-
-    limited_buckets = [limited_bucket(b) for b in buckets]
-    unidentified_limited = unidentified_photos[:limit_per_bucket]
-    visible_photos = []
-    for bucket in limited_buckets:
-        visible_photos.extend(bucket["photos"])
-    visible_photos.extend(unidentified_limited)
-    attach_edit_recipes(db, visible_photos)
+    limited_buckets, unidentified_limited = _limit_highlight_buckets(
+        db, buckets, unidentified_photos, limit_per_bucket,
+    )
 
     return {
         "buckets": limited_buckets,
@@ -801,34 +854,8 @@ def build_highlights_payload(
     }
 
 
-def build_life_list_payload(
-    db,
-    photos_per_species=12,
-    photo_offset=0,
-    species_filter=None,
-):
-    rows = db.get_life_list_candidates(species=species_filter)
-    locations_by_species = db.get_life_list_locations(species=species_filter)
-    class_by_taxon = db.get_class_ancestors_for_taxa({
-        row["taxon_id"] for row in rows if row["taxon_id"] is not None
-    })
-    photo_offset = max(0, int(photo_offset))
-    if photos_per_species is None:
-        photo_limit = None
-    else:
-        photo_limit = max(
-            1, min(int(photos_per_species), 100)
-        )
-
-    # Canonicalize each row's species to the root keyword's stored
-    # spelling. After the retired duplicate-species repair detached a
-    # redundant root row, a photo may only carry the hierarchy leaf
-    # (``verdin``) whose spelling differs from the curation-keyed
-    # root (``Verdin``); without canonicalization, that photo would
-    # sit in its own ``verdin`` bucket, its curation on
-    # ``Verdin`` would never apply, and single-species API loads
-    # for ``Verdin`` would return an entry named ``verdin``.
-    canonicalize = species_canonicalizer(db)
+def _merge_life_list_locations(canonicalize, locations_by_species):
+    """Fold each species' locations under its canonical spelling."""
     merged_locations = {}
     for raw_species, locations in locations_by_species.items():
         canonical = canonicalize(raw_species) or raw_species
@@ -836,8 +863,11 @@ def build_life_list_payload(
         for loc in locations:
             if loc not in existing:
                 existing.append(loc)
-    locations_by_species = merged_locations
+    return merged_locations
 
+
+def _life_list_buckets(rows, canonicalize, class_by_taxon):
+    """Group candidate rows by canonical species, one entry per photo."""
     buckets = {}
     for row in rows:
         r = dict(row)
@@ -887,23 +917,146 @@ def build_life_list_payload(
             "noise_estimate": r.get("noise_estimate"),
             "eye_tenengrad": r.get("eye_tenengrad"),
         })
+    return buckets
 
-    def compact(photo):
-        return {
-            "id": photo["id"],
-            "filename": photo["filename"],
-            "timestamp": photo.get("timestamp"),
-            "flag": photo.get("flag") or "none",
-            "quality_score": photo.get("quality_score"),
-            "highlight_score": photo.get("highlight_score"),
-            "reasons": photo.get("reasons") or [],
-            "is_species_representative": bool(
-                photo.get("is_species_representative")
-            ),
-            "is_life_list_photo": bool(photo.get("is_species_representative")),
-            "is_highlighted": bool(photo.get("is_highlighted")),
-            "highlight_rank": photo.get("highlight_rank"),
-        }
+
+def _compact_life_list_photo(photo):
+    """The trimmed photo dict a Life List entry carries."""
+    return {
+        "id": photo["id"],
+        "filename": photo["filename"],
+        "timestamp": photo.get("timestamp"),
+        "flag": photo.get("flag") or "none",
+        "quality_score": photo.get("quality_score"),
+        "highlight_score": photo.get("highlight_score"),
+        "reasons": photo.get("reasons") or [],
+        "is_species_representative": bool(
+            photo.get("is_species_representative")
+        ),
+        "is_life_list_photo": bool(photo.get("is_species_representative")),
+        "is_highlighted": bool(photo.get("is_highlighted")),
+        "highlight_rank": photo.get("highlight_rank"),
+    }
+
+
+def _life_list_species_entry(
+    species, entry, photos, representatives, highlights_by_species,
+    locations_by_species, photo_offset, photo_limit,
+):
+    """Rank one species' photos and build its Life List entry."""
+    timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
+    _highlight_score_bucket(photos)
+    representative_ids = representatives.get(species) or []
+    representative_order = {
+        photo_id: idx for idx, photo_id in enumerate(representative_ids)
+    }
+    preferred_id = representative_ids[0] if representative_ids else None
+    highlight_ranks = highlights_by_species.get(species, {})
+    for photo in photos:
+        rank = highlight_ranks.get(photo["id"])
+        photo["is_highlighted"] = rank is not None
+        photo["highlight_rank"] = rank
+        photo["is_species_representative"] = (
+            photo["id"] in representative_order
+        )
+    preferred_applied = any(
+        photo.get("is_species_representative") for photo in photos
+    )
+    if not preferred_applied and highlight_ranks:
+        valid_highlights = [
+            (highlight_ranks[p["id"]], p["id"])
+            for p in photos
+            if p["id"] in highlight_ranks
+        ]
+        if valid_highlights:
+            _, highlight_id = min(valid_highlights)
+            for idx, photo in enumerate(photos):
+                if photo["id"] == highlight_id:
+                    if idx:
+                        photos.insert(0, photos.pop(idx))
+                    break
+    # Life List curation order is explicit representative selection,
+    # then Picks (the P flag), then the existing highlight/algorithmic
+    # ranking. Keep ranked positions as the final tie-breaker so
+    # multiple Picks retain their quality order and non-Picks behave
+    # exactly as before.
+    ranked_position = {
+        photo["id"]: idx for idx, photo in enumerate(photos)
+    }
+    photos.sort(key=lambda photo: (
+        0 if photo["id"] in representative_order else (
+            1 if photo.get("flag") == "flagged" else 2
+        ),
+        representative_order.get(photo["id"], 0),
+        ranked_position.get(photo["id"], 0),
+    ))
+    best_photo = photos[0] if photos else {}
+    if best_photo.get("is_species_representative"):
+        best_source = "representative"
+    elif best_photo.get("flag") == "flagged":
+        best_source = "pick"
+    elif best_photo.get("is_highlighted"):
+        best_source = "highlight"
+    else:
+        best_source = "algorithm"
+    if photo_limit is None:
+        top = photos[photo_offset:]
+    else:
+        top = photos[photo_offset:photo_offset + photo_limit]
+    return {
+        "species": species,
+        "scientific_name": entry["scientific_name"],
+        "common_name": entry["common_name"],
+        "taxon_id": entry["taxon_id"],
+        "taxon_rank": entry["taxon_rank"],
+        "taxonomic_class": entry["taxonomic_class"],
+        "photo_count": len(photos),
+        "first_seen": min(timestamps) if timestamps else None,
+        "last_seen": max(timestamps) if timestamps else None,
+        "locations": locations_by_species.get(species, []),
+        "preferred_photo_id": preferred_id,
+        "has_preferred_photo": preferred_applied,
+        "best_source": best_source,
+        "best": _compact_life_list_photo(photos[0]) if photos else None,
+        "photos": [_compact_life_list_photo(p) for p in top],
+        "loaded_count": min(len(photos), photo_offset + len(top)),
+        "has_more": photo_offset + len(top) < len(photos),
+    }
+
+
+def build_life_list_payload(
+    db,
+    photos_per_species=12,
+    photo_offset=0,
+    species_filter=None,
+):
+    rows = db.get_life_list_candidates(species=species_filter)
+    locations_by_species = db.get_life_list_locations(species=species_filter)
+    class_by_taxon = db.get_class_ancestors_for_taxa({
+        row["taxon_id"] for row in rows if row["taxon_id"] is not None
+    })
+    photo_offset = max(0, int(photo_offset))
+    if photos_per_species is None:
+        photo_limit = None
+    else:
+        photo_limit = max(
+            1, min(int(photos_per_species), 100)
+        )
+
+    # Canonicalize each row's species to the root keyword's stored
+    # spelling. After the retired duplicate-species repair detached a
+    # redundant root row, a photo may only carry the hierarchy leaf
+    # (``verdin``) whose spelling differs from the curation-keyed
+    # root (``Verdin``); without canonicalization, that photo would
+    # sit in its own ``verdin`` bucket, its curation on
+    # ``Verdin`` would never apply, and single-species API loads
+    # for ``Verdin`` would return an entry named ``verdin``.
+    canonicalize = species_canonicalizer(db)
+    locations_by_species = _merge_life_list_locations(
+        canonicalize, locations_by_species,
+    )
+
+    buckets = _life_list_buckets(rows, canonicalize, class_by_taxon)
 
     species_entries = []
     distinct_photo_ids = set()
@@ -912,84 +1065,10 @@ def build_life_list_payload(
     for species, entry in buckets.items():
         photos = entry["photos"]
         distinct_photo_ids.update(p["id"] for p in photos)
-        timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
-        _highlight_score_bucket(photos)
-        representative_ids = representatives.get(species) or []
-        representative_order = {
-            photo_id: idx for idx, photo_id in enumerate(representative_ids)
-        }
-        preferred_id = representative_ids[0] if representative_ids else None
-        highlight_ranks = highlights_by_species.get(species, {})
-        for photo in photos:
-            rank = highlight_ranks.get(photo["id"])
-            photo["is_highlighted"] = rank is not None
-            photo["highlight_rank"] = rank
-            photo["is_species_representative"] = (
-                photo["id"] in representative_order
-            )
-        preferred_applied = any(
-            photo.get("is_species_representative") for photo in photos
-        )
-        if not preferred_applied and highlight_ranks:
-            valid_highlights = [
-                (highlight_ranks[p["id"]], p["id"])
-                for p in photos
-                if p["id"] in highlight_ranks
-            ]
-            if valid_highlights:
-                _, highlight_id = min(valid_highlights)
-                for idx, photo in enumerate(photos):
-                    if photo["id"] == highlight_id:
-                        if idx:
-                            photos.insert(0, photos.pop(idx))
-                        break
-        # Life List curation order is explicit representative selection,
-        # then Picks (the P flag), then the existing highlight/algorithmic
-        # ranking. Keep ranked positions as the final tie-breaker so
-        # multiple Picks retain their quality order and non-Picks behave
-        # exactly as before.
-        ranked_position = {
-            photo["id"]: idx for idx, photo in enumerate(photos)
-        }
-        photos.sort(key=lambda photo: (
-            0 if photo["id"] in representative_order else (
-                1 if photo.get("flag") == "flagged" else 2
-            ),
-            representative_order.get(photo["id"], 0),
-            ranked_position.get(photo["id"], 0),
+        species_entries.append(_life_list_species_entry(
+            species, entry, photos, representatives, highlights_by_species,
+            locations_by_species, photo_offset, photo_limit,
         ))
-        best_photo = photos[0] if photos else {}
-        if best_photo.get("is_species_representative"):
-            best_source = "representative"
-        elif best_photo.get("flag") == "flagged":
-            best_source = "pick"
-        elif best_photo.get("is_highlighted"):
-            best_source = "highlight"
-        else:
-            best_source = "algorithm"
-        if photo_limit is None:
-            top = photos[photo_offset:]
-        else:
-            top = photos[photo_offset:photo_offset + photo_limit]
-        species_entries.append({
-            "species": species,
-            "scientific_name": entry["scientific_name"],
-            "common_name": entry["common_name"],
-            "taxon_id": entry["taxon_id"],
-            "taxon_rank": entry["taxon_rank"],
-            "taxonomic_class": entry["taxonomic_class"],
-            "photo_count": len(photos),
-            "first_seen": min(timestamps) if timestamps else None,
-            "last_seen": max(timestamps) if timestamps else None,
-            "locations": locations_by_species.get(species, []),
-            "preferred_photo_id": preferred_id,
-            "has_preferred_photo": preferred_applied,
-            "best_source": best_source,
-            "best": compact(photos[0]) if photos else None,
-            "photos": [compact(p) for p in top],
-            "loaded_count": min(len(photos), photo_offset + len(top)),
-            "has_more": photo_offset + len(top) < len(photos),
-        })
 
     # Life-list numbering: chronological by first photographed date,
     # the way birders count lifers. Species with no capture time go
