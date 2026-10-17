@@ -705,12 +705,13 @@ class KeywordRepository:
             # in the user's tree; bind to that row rather than mint a
             # top-level twin (see ``_find_add_candidate``).
             placed = self.conn.execute(
-                "SELECT id FROM keywords WHERE parent_id IS NOT NULL AND type = 'taxonomy' "
+                "SELECT id, (name = ? COLLATE NOCASE) AS name_match FROM keywords "
+                "WHERE parent_id IS NOT NULL AND type = 'taxonomy' "
                 "AND (source_taxon_id = ? OR (source_taxon_id IS NULL AND taxon_id = ?)) "
-                "LIMIT 2",
-                (source_taxon_id, local_id),
+                "ORDER BY name_match DESC, id LIMIT 2",
+                (name, source_taxon_id, local_id),
             ).fetchall()
-            if len(placed) == 1:
+            if len(placed) == 1 or (placed and placed[0]["name_match"] and not placed[1]["name_match"]):
                 existing = placed[0]
         if existing:
             kid = existing["id"]
@@ -1122,48 +1123,65 @@ class KeywordRepository:
         return existing
 
     def _placed_taxonomy_keyword(self, name):
-        """The one taxonomy row named ``name`` below a parent, or None.
+        """One placed row whose identity agrees with the requested species.
 
-        Two such rows (``Raptors > Osprey`` and ``Accipitriformes >
-        Osprey``) leave a flat name ambiguous, so neither is chosen.
+        A name alone cannot reassign a genus or another species homonym.
+        Unknown or conflicting identity stays for an explicit user choice.
         """
+        requested = self._lookup_taxon_id_for_keyword(name, species_only=True)
+        if requested is None:
+            return None
         rows = self.conn.execute(
             "SELECT id, type FROM keywords WHERE name = ? COLLATE NOCASE "
-            "AND parent_id IS NOT NULL AND type = 'taxonomy' LIMIT 2",
-            (name,),
+            "AND parent_id IS NOT NULL AND type = 'taxonomy' "
+            "AND (taxon_id = ? OR (taxon_id IS NULL AND source_taxon_id = "
+            "(SELECT inat_id FROM taxa WHERE id = ?))) "
+            "AND (source_taxon_id IS NULL OR source_taxon_id = "
+            "(SELECT inat_id FROM taxa WHERE id = ?)) LIMIT 2",
+            (name, requested, requested, requested),
         ).fetchall()
         return rows[0] if len(rows) == 1 else None
 
     def taxonomy_root_twins(self):
-        """``(top_level_id, placed_id)`` pairs naming one taxon twice.
+        """Childless root twins with one placed row and consistent identity.
 
-        A pair is a childless top-level taxonomy row and the single
-        taxonomy row of the same spelling and taxon filed below a parent,
-        with no conflicting iNaturalist ids. Older top-level adds minted
-        the top-level row beside the user's own (see
-        ``_find_add_candidate``). A row with two placed twins, or whose
-        twin differs in taxon or even only in case (merging would change
-        the displayed name, and the sidecars keep the old spelling), is
-        left for a reviewed merge on the Keywords page.
+        Group by exact spelling before filtering identities: conflicts between
+        roots or placed rows must not disappear from the ambiguity check.
+        A shared source id proves identity even without a local taxon link.
         """
-        return [
-            (row["root_id"], row["placed_id"]) for row in self.conn.execute(
-                """SELECT r.id AS root_id, MIN(p.id) AS placed_id
-                   FROM keywords r
-                   JOIN keywords p
-                     ON p.type = 'taxonomy' AND p.parent_id IS NOT NULL
-                    AND p.taxon_id = r.taxon_id AND p.name = r.name
-                   WHERE r.type = 'taxonomy' AND r.parent_id IS NULL
-                     AND r.taxon_id IS NOT NULL
-                     AND NOT EXISTS (
-                         SELECT 1 FROM keywords c WHERE c.parent_id = r.id
-                     )
-                     AND (r.source_taxon_id IS NULL OR p.source_taxon_id IS NULL
-                          OR r.source_taxon_id = p.source_taxon_id)
-                   GROUP BY r.id HAVING COUNT(*) = 1
-                   ORDER BY r.id"""
-            )
-        ]
+        groups = {}
+        rows = self.conn.execute(
+            "SELECT k.id, k.name, k.parent_id, k.taxon_id, k.source_taxon_id, "
+            "t.inat_id AS local_source, "
+            "EXISTS(SELECT 1 FROM keywords c WHERE c.parent_id = k.id) AS has_children "
+            "FROM keywords k LEFT JOIN taxa t ON t.id = k.taxon_id "
+            "WHERE k.type = 'taxonomy' AND k.name IS NOT NULL ORDER BY k.id",
+        ).fetchall()
+        for row in rows:
+            groups.setdefault(row["name"], []).append(row)
+        pairs = []
+        for group in groups.values():
+            placed = [row for row in group if row["parent_id"] is not None]
+            local_ids = {row["taxon_id"] for row in group if row["taxon_id"] is not None}
+            sources = {value for row in group for value in
+                       (row["source_taxon_id"], row["local_source"]) if value is not None}
+            if len(placed) != 1 or len(local_ids) > 1 or len(sources) > 1:
+                continue
+            if any(not isinstance(value, int) or value <= 0 for value in sources):
+                continue
+            target = placed[0]
+            target_source = (target["source_taxon_id"] if target["source_taxon_id"] is not None
+                             else target["local_source"])
+            for root in group:
+                if root["parent_id"] is not None or root["has_children"]:
+                    continue
+                root_source = (root["source_taxon_id"] if root["source_taxon_id"] is not None
+                               else root["local_source"])
+                same_local = root["taxon_id"] is not None and root["taxon_id"] == target["taxon_id"]
+                same_source = root_source is not None and root_source == target_source
+                if same_local or same_source:
+                    pairs.append((root["id"], target["id"]))
+        return sorted(pairs)
 
     def merge_duplicates(self):
         """Find and merge normalized duplicate keywords in active workspace.

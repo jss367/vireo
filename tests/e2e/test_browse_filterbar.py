@@ -11,6 +11,7 @@ Seed data (conftest): 3 hawk photos in /photos/park, 2 robins in
 """
 
 import json
+import re
 
 import pytest
 from playwright.sync_api import expect
@@ -1284,3 +1285,49 @@ def test_extension_picker_load_failure_retry_and_empty_workspace(live_server, pa
                lambda route: route.fulfill(json=[]))
     page.click(".vf-filters-btn")
     expect(picker).to_contain_text("No file formats in this workspace.")
+
+
+def test_sidebar_highlights_follow_scope_switches(live_server, page):
+    """The sidebar marks only the folder, keyword or collection on screen.
+
+    Opening a collection cleared ``activeFolderId`` but left the folder row
+    painted active, so All Photos showed the whole workspace under a
+    highlighted folder, and no collection row was ever marked.
+    """
+    all_photos_id = next(
+        collection["id"]
+        for collection in live_server["db"].get_collections()
+        if collection["name"] == "All Photos"
+    )
+    folder_id = live_server["data"]["folders"][1]
+    folder_row = page.locator(f'#folderTree .tree-item[data-folder-id="{folder_id}"]')
+    collection_row = page.locator(
+        f'#collectionList .tree-item[data-collection-id="{all_photos_id}"]'
+    )
+    active_rows = page.locator(
+        "#folderTree .tree-item.active, #keywordTree .tree-item.active, "
+        "#collectionList .tree-item.active"
+    )
+    _open_browse(page, live_server)
+
+    page.evaluate("folderId => filterByFolder(folderId)", folder_id)
+    expect(folder_row).to_have_class(re.compile(r"\bactive\b"))
+    expect(active_rows).to_have_count(1)
+
+    collection_row.click()
+    _wait_total(page, 5)
+    expect(collection_row).to_have_class(re.compile(r"\bactive\b"))
+    expect(active_rows).to_have_count(1)
+
+    # Editing the opened collection's chips means the grid no longer shows
+    # the saved collection, so its row stops claiming it.
+    page.locator('.vf-shortcuts [data-value="flagged"]').click()
+    expect(active_rows).to_have_count(0)
+
+    collection_row.click()
+    expect(collection_row).to_have_class(re.compile(r"\bactive\b"))
+    page.evaluate("filterByKeyword('Red-tailed Hawk')")
+    expect(page.locator('#keywordTree .tree-item[data-keyword="Red-tailed Hawk"]')).to_have_class(
+        re.compile(r"\bactive\b")
+    )
+    expect(active_rows).to_have_count(1)

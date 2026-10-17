@@ -496,9 +496,7 @@ function filterByFolder(/** @type {number} */ folderId) {
   // bypasses VireoFilter, so clear it explicitly here.
   openedCollectionId = null;
   clearOfflineCollectionState();
-  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item')).forEach(function(el) {
-    el.classList.toggle('active', parseInt(el.dataset.folderId || '') === activeFolderId);
-  });
+  syncSidebarHighlights();
   if (hadSidebarKeyword && window.VireoFilter && VireoFilter.isReady()) {
     if (VireoFilter.removeField('keyword', { reason: 'scopeChanged' })) return;
   }

@@ -5780,6 +5780,8 @@ class Database:
         """
         merged = 0
         with self.transaction():
+            if not self.in_transaction:
+                self.begin_immediate()
             for root_id, placed_id in self.keywords.taxonomy_root_twins():
                 merged += self._merge_keyword_into(
                     root_id, placed_id, pending_source_only=True,
