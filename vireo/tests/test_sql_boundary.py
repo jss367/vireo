@@ -76,7 +76,6 @@ CONN_USE_LIMITS = {
     "species_identity_repair.py": 3,
     "staging_recovery.py": 1,
     "sync.py": 5,
-    "thumbnails.py": 11,
     "volume_reachability.py": 8,
 }
 
