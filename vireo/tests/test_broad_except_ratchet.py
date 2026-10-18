@@ -167,6 +167,13 @@ def _join_bindings(*states):
     }
 
 
+def _declared_globals(statements):
+    return {
+        name for node in _own_nodes(statements) if isinstance(node, ast.Global)
+        for name in node.names
+    }
+
+
 def _possible_aliases(bindings):
     """Only imported aliases matter to a function's possible module globals."""
     return {
@@ -223,7 +230,8 @@ def broad_handlers(tree):
     alias possible on either path (even a statically false branch is inspected
     for the syntax ratchet). Match captures propagate across guards: an
     irrefutable capture binds before its guard regardless of the guard result.
-    Functions retain conservative whole-local-scope shadowing. This is not a
+    Functions retain conservative whole-local-scope shadowing; explicitly
+    global names advance in statement order. This is not a
     general Python control-flow or dynamic-value analyzer. Try handlers join
     possible statement-prefix states; named stores in conditions flow into
     both branches, without inferring which values make a condition true. Loop
@@ -233,6 +241,7 @@ def broad_handlers(tree):
     """
     found = []
     state_only = False
+    flow_globals, module_globals = frozenset(), {}
     module_prefixes, definition_offsets, definition_globals = [], {}, {}
     def body(statements, bindings, lexical, function_lexical, ordered, prefixes=()):
         current = dict(bindings)
@@ -241,14 +250,17 @@ def broad_handlers(tree):
         for child in statements:
             updated = visit(child, current, current if lexical is None else lexical,
                             function_lexical, ordered, prefixes)
-            if ordered:
-                current = updated if updated is not None else _scope_bindings([child], current)
+            if ordered or flow_globals:
+                candidate = updated if updated is not None else _scope_bindings([child], current)
+                current = candidate if ordered else {
+                    **current, **{name: candidate.get(name) for name in flow_globals},
+                }
             for collector in prefixes:
                 collector.append(current)
         return current
 
     def visit(node, bindings, lexical, function_lexical, ordered, prefixes=()):
-        nonlocal state_only
+        nonlocal state_only, flow_globals, module_globals
         # Module bindings flow into nested class bodies; class namespaces do not.
         nested_lexical = None if lexical is bindings else lexical
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -268,12 +280,24 @@ def broad_handlers(tree):
                 definition_offsets[id(node)] = len(module_prefixes), _possible_aliases(seed)
             if not state_only:
                 definition_lexical = definition_globals.get(id(node), function_lexical)
-                if isinstance(node, ast.ClassDef):
-                    class_lexical = current if lexical is bindings else lexical
-                    body(node.body, class_lexical, class_lexical, definition_lexical, True)
-                else:
-                    local = _scope_bindings(node.body, definition_lexical, node.args)
-                    body(node.body, local, local, local, False)
+                previous_flow, previous_module = flow_globals, module_globals
+                module_globals = {
+                    **definition_globals.get(id(node), module_globals),
+                    **{name: bindings.get(name) for name in flow_globals},
+                }
+                flow_globals = frozenset() if isinstance(node, ast.ClassDef) else _declared_globals(node.body)
+                try:
+                    if isinstance(node, ast.ClassDef):
+                        class_lexical = current if lexical is bindings else lexical
+                        body(node.body, class_lexical, class_lexical, definition_lexical, True)
+                    else:
+                        local = _scope_bindings(node.body, definition_lexical, node.args)
+                        # Global assignments do not make function locals. Only
+                        # these declared names advance in statement order.
+                        local.update({name: module_globals.get(name) for name in flow_globals})
+                        body(node.body, local, local, local, False)
+                finally:
+                    flow_globals, module_globals = previous_flow, previous_module
             return dict(current, **{node.name: None})
         if isinstance(node, ast.ExceptHandler):
             if _is_broad_type(node.type):
@@ -336,7 +360,7 @@ def broad_handlers(tree):
             # For iterables run once; while tests and for targets run on every
             # iteration. Join the finite alias states before inspecting syntax.
             head = _expression_bindings(condition, bindings) if is_for else bindings
-            if ordered:
+            if ordered or flow_globals:
                 checkpoint, previous_state_only = len(found), state_only
                 state_only = True
                 try:
@@ -389,6 +413,8 @@ def broad_handlers(tree):
                         visit(child, bindings, lexical, function_lexical, ordered, prefixes)
             elif isinstance(value, ast.AST):
                 visit(value, bindings, lexical, function_lexical, ordered, prefixes)
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            return bindings  # An annotation alone does not replace a value.
         if isinstance(node, (ast.Expr, ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Assert)):
             # Only assignment targets bind unconditionally. Stores inside a
             # short-circuited RHS/expression retain the skipped incoming path.
@@ -1032,3 +1058,35 @@ def test_decorator_expression_store_precedes_possible_callback():
         "def quiet():\n    with quiet(Exception): pass\n"
     )
     assert len(broad_handlers(ast.parse(source))) == 0
+
+
+@pytest.mark.parametrize("statement, count", [
+    ("quiet: object", 1),
+    ("quiet: 'deferred annotation'", 1),
+    ("quiet: object = replacement", 0),
+])
+@pytest.mark.parametrize("scope", ["module", "class"])
+def test_annotation_without_value_preserves_imported_binding(statement, count, scope):
+    source = "from contextlib import suppress as quiet\n" + statement + "\nwith quiet(Exception): pass"
+    if scope == "class":
+        source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
+    assert len(broad_handlers(ast.parse(source))) == count
+
+
+def test_annotation_still_makes_a_function_local():
+    source = "from contextlib import suppress as quiet\ndef f():\n    quiet: object\n    with quiet(Exception): pass"
+    assert len(broad_handlers(ast.parse(source))) == 0
+
+
+@pytest.mark.parametrize("source, count", [
+    ("from contextlib import suppress as quiet\ndef f():\n    global quiet\n    with quiet(Exception): pass\n    quiet = replacement", 1),
+    ("from contextlib import suppress as quiet\ndef f():\n    global quiet\n    quiet = replacement\n    with quiet(Exception): pass", 0),
+    ("def f():\n    global quiet\n    from contextlib import suppress as quiet\n    with quiet(Exception): pass\n    quiet = replacement\n    with quiet(Exception): pass", 1),
+    ("from contextlib import suppress as quiet\ndef f():\n    global quiet\n    if condition:\n        quiet = replacement\n    with quiet(Exception): pass", 1),
+    ("from contextlib import suppress as quiet\ndef f():\n    global quiet\n    if condition:\n        quiet = replacement\n        with quiet(Exception): pass", 0),
+    ("from contextlib import suppress as quiet\ndef f():\n    global quiet\n    if condition:\n        quiet = replacement\n    else:\n        quiet = other\n    with quiet(Exception): pass", 0),
+    ("from contextlib import suppress as quiet\ndef outer():\n    quiet = replacement\n    def inner():\n        global quiet\n        with quiet(Exception): pass", 1),
+    ("quiet = replacement\ndef f():\n    global quiet\n    for item in values:\n        with quiet(Exception): pass\n        from contextlib import suppress as quiet", 1),
+])
+def test_explicit_function_globals_advance_without_local_shadowing(source, count):
+    assert len(broad_handlers(ast.parse(source))) == count
