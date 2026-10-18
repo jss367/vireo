@@ -65,6 +65,25 @@ def test_state_rows_with_no_ids_reads_nothing(db):
     assert statements == []
 
 
+def test_root_source_paths_lists_staged_roots_by_source_path(db):
+    z, a, child = (_folder(db, f"/lf/{name}") for name in ("z", "a", "a-child"))
+    for root in (z, a):
+        _local(db, root, "active")
+    db.conn.executemany(
+        "INSERT INTO local_folder_mappings "
+        "(root_folder_id, folder_id, source_path, local_path, is_root) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(z, z, "/src/z", "/l/z", 1), (a, a, "/src/a", "/l/a", 1),
+         (a, child, "/src/a/child", "/l/a/child", 0)],
+    )
+    db.conn.commit()
+    db.set_active_workspace(None)  # catalog-wide: no workspace needed
+
+    rows = db.local_folders.root_source_paths()
+    assert [r["source_path"] for r in rows] == ["/src/a", "/src/z"]
+    assert rows[0].keys() == ["source_path"]
+
+
 # -- structure ------------------------------------------------------------------
 
 

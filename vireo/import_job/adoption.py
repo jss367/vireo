@@ -5,6 +5,9 @@ bytes already at the destination.
 import logging
 import os
 import stat as stat_mod
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 
 from import_job.copy_verify import DestReadCancelled, _hash_dest_file
 from import_job.destination import _is_source_backed_dest
@@ -15,8 +18,25 @@ from scanner import EMPTY_FILE_SHA256
 log = logging.getLogger(__name__)
 
 
-def _book_adoption(state, batch_st, checker, *, rel, source_file, dest_path,
-                   verified_hash, record_hash, src_size, src_mtime_ns):
+@dataclass(frozen=True)
+class _CardFile:
+    """The card file one collision walk places, with its source identity.
+
+    ``hash_fn`` is the zero-arg RAW source hash (see
+    ``_resolve_dest_collision``); ``size`` and ``mtime_ns`` are the source
+    stat the transport captured before the walk.
+    """
+
+    file: Path
+    rel: str
+    """The file's card folder, keying its per-folder counts."""
+    hash_fn: Callable[[], str | None]
+    size: int
+    mtime_ns: int
+
+
+def _book_adoption(state, batch_st, checker, src, *, dest_path,
+                   verified_hash, record_hash):
     """Book one crash-recovery adoption: count the duplicate skip, fold
     the file into ``landed`` with origin "skipped_duplicate" (see the
     rsync call site's rationale comment for why adoptions ride
@@ -29,17 +49,17 @@ def _book_adoption(state, batch_st, checker, *, rel, source_file, dest_path,
     None for a zero-byte source on the rsync transport).
     """
     state.skipped_duplicate += 1
-    _counts(state, rel)["skipped_duplicate"] += 1
+    _counts(state, src.rel)["skipped_duplicate"] += 1
     batch_st.landed.append(_LandedFile(
         dest_path=dest_path,
         verified_hash=verified_hash,
-        source_path=str(source_file),
+        source_path=str(src.file),
         origin="skipped_duplicate",
-        src_size=src_size,
-        src_mtime_ns=src_mtime_ns,
+        src_size=src.size,
+        src_mtime_ns=src.mtime_ns,
     ))
     _record_checker(
-        state, checker, source_file, batch_st.dest_folder, record_hash,
+        state, checker, src.file, batch_st.dest_folder, record_hash,
     )
 
 
@@ -69,9 +89,8 @@ _WALK_PLACED = "placed"
 _WALK_CANCELLED = "cancelled"
 
 
-def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
-                            checker, src_hash_fn, src_size, src_mtime_ns,
-                            claims, stop_requested):
+def _resolve_dest_collision(state, batch_st, ctx, src, *, checker, claims,
+                            stop_requested):
     """Walk the primary basename and its numeric suffixes to an adoption,
     an intra-batch duplicate skip, or a free destination basename.
 
@@ -79,7 +98,7 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
     hand-mirrored copy inside each of them). The two remaining
     transport-shaped inputs are parameters rather than branches:
 
-    ``src_hash_fn``: zero-arg callable returning the RAW source hash —
+    ``src.hash_fn``: zero-arg callable returning the RAW source hash —
     ``None`` means a checker'd zero-byte source, the convention the
     intra-batch maps rely on. Memoized-lazy on the local transport (which
     may never need a source hash at all), precomputed on rsync (which
@@ -97,12 +116,13 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
     while rsync dup-skips against the claim.
 
     ``DestReadCancelled`` (and any source-read ``OSError`` from
-    ``src_hash_fn``) propagate to the caller's existing handlers. An
+    ``src.hash_fn``) propagate to the caller's existing handlers. An
     unreadable *candidate*, by contrast, is advanced past — it is a
     destination artifact, not a source problem.
 
     Returns ``(_WALK_HANDLED, None)`` or ``(_WALK_PLACED, basename)``.
     """
+    source_file = src.file
     stem, suffix = os.path.splitext(source_file.name)
     group_key = _companion_key(source_file)
     anchor = batch_st.companion_slots.get(group_key)
@@ -120,8 +140,7 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
             candidate_key = ctx.fold_basename(candidate)
             if candidate_key in claims:
                 if _skip_claimed_identical_sibling(
-                    state, batch_st, claims[candidate_key], source_file=source_file,
-                    rel=rel, checker=checker, src_hash_fn=src_hash_fn,
+                    state, batch_st, claims[candidate_key], src, checker=checker,
                 ):
                     return _WALK_HANDLED, None
                 counter += 1
@@ -140,16 +159,13 @@ def _resolve_dest_collision(state, batch_st, ctx, *, source_file, rel,
             # spec row 13.) Nothing to adopt either — there are no bytes
             # behind it — so advance.
             adopt = _existing_candidate_adoption(
-                state, ctx, source_file=source_file, cand_path=cand_path,
-                src_size=src_size, src_hash_fn=src_hash_fn,
+                state, ctx, src, cand_path=cand_path,
                 stop_requested=stop_requested,
             )
             if adopt is not None and _settle_adoption(
-                state, batch_st, ctx, adopt, source_file=source_file,
-                rel=rel, checker=checker, src_hash_fn=src_hash_fn,
-                src_size=src_size, src_mtime_ns=src_mtime_ns, claims=claims,
-                stop_requested=stop_requested, slot=slot, anchor=anchor,
-                candidate=candidate,
+                state, batch_st, ctx, adopt, src, checker=checker,
+                claims=claims, stop_requested=stop_requested, slot=slot,
+                anchor=anchor, candidate=candidate,
             ):
                 return _WALK_HANDLED, None
             counter += 1
@@ -200,9 +216,8 @@ def _stopped_while_advancing(counter, stop_requested):
     return stop_requested()
 
 
-def _skip_claimed_identical_sibling(state, batch_st, claimed_hash, *,
-                                    source_file, rel, checker,
-                                    src_hash_fn):
+def _skip_claimed_identical_sibling(state, batch_st, claimed_hash, src, *,
+                                    checker):
     """Book an intra-batch duplicate skip against a claimed basename.
 
     Returns True when the file was booked (the walk is done), False when
@@ -218,18 +233,17 @@ def _skip_claimed_identical_sibling(state, batch_st, claimed_hash, *,
     # verified run report ``safe_to_format=True`` because
     # ``copied + skipped_duplicate == discovered`` without an
     # off-card row for it. See PR #1113 review.
-    if checker is not None and claimed_hash == src_hash_fn():
+    if checker is not None and claimed_hash == src.hash_fn():
         state.skipped_duplicate += 1
-        _counts(state, rel)["skipped_duplicate"] += 1
-        batch_st.dup_skips.append((source_file, False))
-        _record_checker(state, checker, source_file,
-                        batch_st.dest_folder, src_hash_fn())
+        _counts(state, src.rel)["skipped_duplicate"] += 1
+        batch_st.dup_skips.append((src.file, False))
+        _record_checker(state, checker, src.file,
+                        batch_st.dest_folder, src.hash_fn())
         return True
     return False
 
 
-def _existing_candidate_adoption(state, ctx, *, source_file, cand_path,
-                                 src_size, src_hash_fn, stop_requested):
+def _existing_candidate_adoption(state, ctx, src, *, cand_path, stop_requested):
     """Decide whether the existing entry at ``cand_path`` holds this
     source's bytes.
 
@@ -266,7 +280,7 @@ def _existing_candidate_adoption(state, ctx, *, source_file, cand_path,
     # this geometry with the same two probes, so this can only
     # fire from counter 1 on — it is kept unconditional so the
     # walk does not depend on its caller's ordering.)
-    if _is_source_backed_dest(ctx, source_file, cand_path):
+    if _is_source_backed_dest(ctx, src.file, cand_path):
         log.warning(
             "%s: destination candidate %s resolves to source "
             "media; skipping it (never adopt bytes the card "
@@ -298,8 +312,8 @@ def _existing_candidate_adoption(state, ctx, *, source_file, cand_path,
         # equally right for it. CodeRabbit review of PR #1450.
         return None
     return _candidate_bytes_adoption(
-        source_file, cand_path, cand_stat.st_size, src_size=src_size,
-        src_hash_fn=src_hash_fn, stop_requested=stop_requested,
+        src.file, cand_path, cand_stat.st_size, src_size=src.size,
+        src_hash_fn=src.hash_fn, stop_requested=stop_requested,
     )
 
 
@@ -374,12 +388,12 @@ def _candidate_bytes_adoption(source_file, cand_path, cand_size, *,
     return None
 
 
-def _settle_adoption(state, batch_st, ctx, adopt, *, source_file, rel,
-                     checker, src_hash_fn, src_size, src_mtime_ns, claims,
+def _settle_adoption(state, batch_st, ctx, adopt, src, *, checker, claims,
                      stop_requested, slot, anchor, candidate):
     """Book an adoptable candidate unless its companion group cannot
     settle at ``slot``; returns True when booked, False to advance.
     """
+    source_file = src.file
     stem = os.path.splitext(source_file.name)[0]
     # A byte-identical file already at this slot is only a valid
     # adopt if the whole companion group can settle here — same
@@ -401,16 +415,14 @@ def _settle_adoption(state, batch_st, ctx, adopt, *, source_file, rel,
         # zero-byte source) so a later same-basename sibling
         # compares against the same convention the queued path
         # uses.
-        claims[ctx.fold_basename(candidate)] = src_hash_fn()
+        claims[ctx.fold_basename(candidate)] = src.hash_fn()
     # ``_book_adoption`` folds the file into ``landed`` with
     # origin "skipped_duplicate" — deliberately NOT ``dup_skips``
     # — so the restricted scan catalogs it and the rollback
     # decrements the right counter. See its docstring.
     _book_adoption(
-        state, batch_st, checker, rel=rel,
-        source_file=source_file, dest_path=dest_path,
+        state, batch_st, checker, src, dest_path=dest_path,
         verified_hash=verified_hash, record_hash=record_hash,
-        src_size=src_size, src_mtime_ns=src_mtime_ns,
     )
     batch_st.companion_slots.setdefault(_companion_key(source_file), slot)
     return True

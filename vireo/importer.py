@@ -336,7 +336,7 @@ def execute_import(
 
     for i, (key, kw_data) in enumerate(merged.items()):
         if pause_callback:
-            db.conn.commit()
+            db.commit()
             pause_callback()
         file_path = kw_data["path"]
         photo = kw_data["photo"]
