@@ -1,8 +1,12 @@
+import { safeFetch } from './navbar-shared-helpers.js';
+
+/** @type {number | null} */ var _pipelineEscToken = null;
+
 /** @param {number} photoId */
-function openPipeline(photoId) {
-  var alreadyOpen = !!window._pipelineEscToken;
-  if (alreadyOpen) Keymap.popEsc(window._pipelineEscToken ?? -1);
-  window._pipelineEscToken = Keymap.pushEsc(function() { closePipeline(); });
+export function openPipeline(photoId) {
+  var alreadyOpen = !!_pipelineEscToken;
+  if (alreadyOpen) Keymap.popEsc(_pipelineEscToken ?? -1);
+  _pipelineEscToken = Keymap.pushEsc(function() { closePipeline(); });
 
   var overlay = /** @type {HTMLElement} */ (document.getElementById('pipelineOverlay'));
   var content = /** @type {HTMLElement} */ (document.getElementById('pipelineContent'));
@@ -15,9 +19,9 @@ function openPipeline(photoId) {
     .catch(function(e) { content.innerHTML = '<p style="color:var(--danger);">Failed to load: ' + escapeHtml(e.message) + '</p>'; });
 }
 
-function closePipeline() {
-  var wasOpen = !!window._pipelineEscToken;
-  if (wasOpen) { Keymap.popEsc(window._pipelineEscToken ?? -1); window._pipelineEscToken = null; }
+export function closePipeline() {
+  var wasOpen = !!_pipelineEscToken;
+  if (wasOpen) { Keymap.popEsc(_pipelineEscToken ?? -1); _pipelineEscToken = null; }
   /** @type {HTMLElement} */ (document.getElementById('pipelineOverlay')).classList.remove('active');
   if (wasOpen) Keymap.unlockBodyScroll();
 }

@@ -6,7 +6,8 @@
 //     editor can offer Prev/Next.
 //   - copied recipe: edit settings copied from one photo, to paste onto a
 //     selection elsewhere.
-window.vireoEditNav = (function() {
+/** @type {NavEditorNavigation} */
+export var vireoEditNav = (function() {
   var LAST_KEY = 'vireo:lastPhoto';
   var NAV_KEY = 'vireo:editNav';
   var COPY_KEY = 'vireo:copiedRecipe';

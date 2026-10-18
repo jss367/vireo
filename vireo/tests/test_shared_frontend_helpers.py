@@ -14,6 +14,8 @@ Deadline: the entries in ``REMAINING_COPIES`` are gone by 2026-12-31
 import re
 from pathlib import Path
 
+from page_scripts import module_graph
+
 STATIC = Path(__file__).resolve().parents[1] / "static"
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
 SHARED_SOURCE = "static/vireo-utils.js"
@@ -122,19 +124,15 @@ def test_navbar_loads_shared_helpers_before_every_other_script():
 def test_navbar_persisted_controls_are_restored_after_they_are_parsed():
     """``vireo-utils.js`` restores ``[data-view-preference]`` controls when it
     loads, which on a navbar page is before any navbar markup exists. The
-    navbar's own persisted controls are therefore restored by the first
-    navbar script after its markup."""
+    navbar's own persisted controls are therefore restored by one of the
+    navbar's modules, which run after the whole document is parsed."""
     html = (TEMPLATES / "_navbar.html").read_text(encoding="utf-8")
-    last_control = max(m.end() for m in re.finditer(r"data-view-preference=", html))
-    scripts_after = re.findall(
-        r'<script src="/static/([^"]+)"></script>', html[last_control:]
-    )
+    assert '<script type="module" src="/static/navbar-boot.js"></script>' in html
     restorers = [
-        name for name in scripts_after
-        if "VireoViewPreferences.restoreAll(document)" in
-        (STATIC / name).read_text(encoding="utf-8")
+        path.name for path in module_graph(STATIC / "navbar-boot.js")
+        if "VireoViewPreferences.restoreAll(document)" in path.read_text(encoding="utf-8")
     ]
     assert restorers, (
-        "no navbar script after the navbar's persisted controls restores them; "
+        "no navbar module restores the navbar's persisted controls; "
         "navbar-shared-helpers.js used to"
     )

@@ -488,7 +488,7 @@ class _ClassifyPass:
     def _prepare_pipeline_image(
         self, photo: sqlite3.Row, detection: DetectionDict | None,
     ) -> tuple[Image.Image | None, str, str]:
-        kwargs = {"raw_analysis": self.raw_session} if self.raw_session is not None else {}
+        kwargs: dict[str, Any] = {"raw_analysis": self.raw_session} if self.raw_session is not None else {}
         img, folder_path, image_path = self.classify_job._prepare_image(
             photo, self.folders, detection, **kwargs,
         )

@@ -1,0 +1,7 @@
+{
+  "extends": "../tsconfig.frontend.base.json",
+  "files": [
+    "../types/pages/map.d.ts",
+    "../vireo/static/map-page.js"
+  ]
+}

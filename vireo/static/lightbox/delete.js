@@ -1,11 +1,16 @@
+import { lbState } from './shared-state.js';
+import { _lbGuardReadOnly, vireoLightboxSession } from './state.js';
+import { openLightbox } from './navigation.js';
+import { closeLightbox } from './controls.js';
+import { safeEventSource, safeFetch, showToast } from '../navbar-shared-helpers.js';
 
 /* ---------- Delete Confirmation ---------- */
-/** @type {number[]} */ var _deletePhotoIds = [];
-/** @type {((data: LightboxDeleteResult) => void) | null} */ var _deleteCallback = null;
+/** @type {number[]} */ export var _deletePhotoIds = [];
+/** @type {((data: LightboxDeleteResult) => void) | null} */ export var _deleteCallback = null;
 /** @type {EventSource | null} */ var _deleteJobSource = null;
 /** @type {string[]} */ var _deleteProgressStageOrder = [];
 
-function showDeleteDialog(/** @type {number[]} */ photoIds, /** @type {number} */ companionCount, /** @type {((data: LightboxDeleteResult) => void) | null} */ callback) {
+export function showDeleteDialog(/** @type {number[]} */ photoIds, /** @type {number} */ companionCount, /** @type {((data: LightboxDeleteResult) => void) | null} */ callback) {
   _deletePhotoIds = photoIds;
   _deleteCallback = callback;
   var count = photoIds.length;
@@ -25,7 +30,7 @@ function showDeleteDialog(/** @type {number[]} */ photoIds, /** @type {number} *
   /** @type {HTMLElement} */ (document.getElementById('deleteModal')).classList.add('open');
 }
 
-function hideDeleteModal() {
+export function hideDeleteModal() {
   if (_deleteJobSource) {
     _deleteJobSource.close();
     _deleteJobSource = null;
@@ -325,7 +330,7 @@ function setDeleteModalBusy(/** @type {boolean} */ busy, /** @type {number | und
   }
 }
 
-async function confirmDelete() {
+export async function confirmDelete() {
   if (_deleteBusy) return;  // guard against double-submit
   var mode = /** @type {HTMLInputElement} */ (document.querySelector('input[name="deleteMode"]:checked')).value;
   var includeCompanions = /** @type {HTMLInputElement} */ (document.getElementById('deleteCompanionCheck')).checked &&
@@ -363,11 +368,11 @@ async function confirmDelete() {
   });
 }
 
-async function lightboxToggleWildlifeExcluded() {
+export async function lightboxToggleWildlifeExcluded() {
   if (!vireoLightboxSession.requestedPhotoId()) return;
   if (_lbGuardReadOnly()) return false;
   const currentId = vireoLightboxSession.requestedPhotoId(); if (currentId == null) return;
-  var excluded = !_lbCurrentWildlifeExcluded;
+  var excluded = !lbState.currentWildlifeExcluded;
   try {
     var setWildlifeExcludedFor = Vireo.pageHook('setWildlifeExcludedFor');
     if (setWildlifeExcludedFor) {
@@ -380,23 +385,23 @@ async function lightboxToggleWildlifeExcluded() {
         body: JSON.stringify({ excluded: excluded }),
       }, { toast: false });
     }
-    _lbCurrentWildlifeExcluded = excluded;
+    lbState.currentWildlifeExcluded = excluded;
   } catch (e) {
     showToast('Update failed: ' + (e instanceof Error ? e.message : 'unknown'), 'error');
   }
 }
 
-function lightboxDelete() {
+export function lightboxDelete() {
   if (_lbGuardReadOnly()) return false;
   var overlay = document.getElementById('lightboxOverlay');
   if (
-    _lbVisualTransitionPending ||
+    lbState.visualTransitionPending ||
     !vireoLightboxSession.requestedPhotoId() ||
     !overlay ||
     !overlay.classList.contains('active')
   ) return;
   const currentId = vireoLightboxSession.requestedPhotoId(); if (currentId == null) return;
-  var p = _lightboxPhotoList.find(function(x) { return x.id === currentId; });
+  var p = lbState.photoList.find(function(x) { return x.id === currentId; });
   var companionCount = (p && p.companion_path) ? 1 : 0;
 
   showDeleteDialog([currentId], companionCount, function(data) {
@@ -412,7 +417,7 @@ function lightboxDelete() {
     // Capture the lightbox position before Browse updates its grid. Browse's
     // lazy-loaded lightbox deliberately shares the same array object, so a
     // grid removal may also remove the lightbox entry in one splice.
-    var idx = _lightboxPhotoList.findIndex(function(x) { return x.id === currentId; });
+    var idx = lbState.photoList.findIndex(function(x) { return x.id === currentId; });
     var removedFromSharedLightboxList = false;
 
     // Update the page's grid before touching lightbox state. Otherwise
@@ -421,20 +426,20 @@ function lightboxDelete() {
     // block would then null out — leaving the sidebar blank).
     var removeDeletedLightboxPhoto = Vireo.pageHook('removeDeletedLightboxPhoto');
     if (removeDeletedLightboxPhoto) {
-      removedFromSharedLightboxList = removeDeletedLightboxPhoto(currentId, _lightboxPhotoList);
+      removedFromSharedLightboxList = removeDeletedLightboxPhoto(currentId, lbState.photoList);
     }
 
     // Remove from a page-specific lightbox list. When Browse shared its live
     // array, the grid splice above already performed this removal.
     if (!removedFromSharedLightboxList && idx >= 0) {
-      _lightboxPhotoList.splice(idx, 1);
+      lbState.photoList.splice(idx, 1);
     }
 
-    if (_lightboxPhotoList.length === 0) {
+    if (lbState.photoList.length === 0) {
       closeLightbox();
     } else {
-      var nextIdx = Math.min(idx, _lightboxPhotoList.length - 1);
-      var next = _lightboxPhotoList[nextIdx]; if (!next) return;
+      var nextIdx = Math.min(idx, lbState.photoList.length - 1);
+      var next = lbState.photoList[nextIdx]; if (!next) return;
       // Re-evaluate the owning page's read-only decision for the next photo,
       // mirroring lightboxNav. The deleted photo was editable (_lbReadOnly ===
       // false), so without this hook openLightbox would inherit that and leave
@@ -449,7 +454,7 @@ function lightboxDelete() {
           navOptions.readOnlyMessage = opened.readOnlyMessage;
         }
       }
-      openLightbox(next.id, next.filename, _lightboxPhotoList, navOptions);
+      openLightbox(next.id, next.filename, lbState.photoList, navOptions);
     }
 
     try {

@@ -3,12 +3,14 @@ import {readFileSync} from 'node:fs';
 import {test} from 'node:test';
 import vm from 'node:vm';
 import {parse} from 'acorn';
+import {moduleAsScript} from './module-source.mjs';
 
 const actions = readFileSync('vireo/static/review/photo-actions.js', 'utf8');
 const pageHooks = readFileSync('vireo/static/vireo-page-hooks.js', 'utf8');
 const navbar = readFileSync('vireo/static/navbar-shared-helpers.js', 'utf8');
-const nativeActions = parse(navbar, {ecmaVersion: 'latest'}).body
-  .filter(node => ['nativeMenuSetRating', 'nativeMenuSetFlag'].includes(node.id?.name))
+const nativeActions = parse(navbar, {ecmaVersion: 'latest', sourceType: 'module'}).body
+  .map(node => node.type === 'ExportNamedDeclaration' ? node.declaration : node)
+  .filter(node => ['nativeMenuSetRating', 'nativeMenuSetFlag'].includes(node?.id?.name))
   .map(node => navbar.slice(node.start, node.end)).join('\n');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
@@ -225,10 +227,10 @@ function lightboxHookHarness() {
   const noop = () => {};
   const ctx = vm.createContext({
     document: {getElementById: () => null},
-    _lbReadOnly: false, _lbReadOnlyMessage: 'Read only',
-    _lbBoxesVisible: false, _lbMasksVisible: false, _lbEyeVisible: false,
-    _lbTrackEyeEnabled: false, _lbInfoVisible: false, _lbChromeVisible: false,
-    _lbCurrentWildlifeExcluded: false,
+    // controls.js's imports from the other lightbox modules.
+    lbState: {readOnly: false, readOnlyMessage: 'Read only', currentWildlifeExcluded: false},
+    lbOverlays: {boxesVisible: false, masksVisible: false, eyeVisible: false,
+      trackEyeEnabled: false, infoVisible: false, chromeVisible: false},
     toggleLightboxBoxes: noop, toggleLightboxMasks: noop, toggleLightboxEye: noop,
     toggleLightboxTrackEye: noop, toggleLightboxInfo: noop, toggleLightboxChrome: noop,
     lightboxToggleWildlifeExcluded: noop,
@@ -238,7 +240,7 @@ function lightboxHookHarness() {
     },
   });
   ctx.window = ctx;
-  vm.runInContext(pageHooks + '\n' + lightboxControls, ctx);
+  vm.runInContext(pageHooks + '\n' + moduleAsScript(lightboxControls), ctx);
   const spy = name => (...args) => calls.push({name, args: JSON.parse(JSON.stringify(args))});
   const register = hooks => ctx.Vireo.registerPageHooks(hooks);
   const build = () => ctx.buildLightboxContextMenu(11);

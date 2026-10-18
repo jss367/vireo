@@ -1,10 +1,22 @@
 """Per-detection classification behind the classifier_runs gate."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from keyword_normalization import normalize_keyword_display
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def _run_classifier_on_detection(db, detection_id, classifier_model, labels,
-                                  labels_fingerprint, classify_fn=None):
+    from classify_job.classify_types import Prediction
+    from db import Database
+
+
+def _run_classifier_on_detection(
+    db: Database, detection_id: int, classifier_model: str, labels: list[str] | None,
+    labels_fingerprint: str, classify_fn: Callable[[], list[Prediction] | None] | None = None,
+) -> list[Prediction]:
     """Run the classifier for a single detection and persist results.
 
     This is a thin adapter that the gate wrapper calls. ``classify_fn`` is an
@@ -69,9 +81,9 @@ def _run_classifier_on_detection(db, detection_id, classifier_model, labels,
     return predictions
 
 
-def _classify_detection_gated(db, detection_id, classifier_model,
-                               labels_fingerprint, labels, reclassify,
-                               classify_fn=None):
+def _classify_detection_gated(db: Database, detection_id: int, classifier_model: str,
+                               labels_fingerprint: str, labels: list[str] | None, reclassify: bool,
+                               classify_fn: Callable[[], list[Prediction] | None] | None = None) -> list[Prediction]:
     """Run the classifier only if we haven't already for this triple.
 
     The gate is keyed on (detection_id, classifier_model, labels_fingerprint):

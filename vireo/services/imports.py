@@ -1932,7 +1932,7 @@ class ImportService:
         """
         root = (target.get("local_archive_root") or "").strip()
         mount = (target.get("mount_path") or "").strip()
-        # Containment goes through move.py's alias-folding helper, not a raw
+        # Containment goes through move.paths' alias-folding helper, not a raw
         # commonpath: on the default case-insensitive macOS/Windows volumes a
         # destination typed with different casing than the saved root (e.g.
         # "/volumes/photos/…" vs "/Volumes/Photos") is the same directory,

@@ -12,7 +12,7 @@ const assert = require('node:assert/strict');
 
 const scripts = Array.from(
   fs.readFileSync('vireo/templates/pipeline_review.html', 'utf8')
-    .matchAll(/<script src="\/static\/(pipeline-review\/[^"]+\.js)"><\/script>/g),
+    .matchAll(/<script(?: defer)? src="\/static\/(pipeline-review\/[^"]+\.js)"><\/script>/g),
   match => 'vireo/static/' + match[1],
 ).filter(file => !file.endsWith('/boot.js'));
 assert(scripts.length > 10, 'Pipeline Review scripts must be loaded by the template');

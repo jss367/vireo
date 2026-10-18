@@ -1446,7 +1446,7 @@ def test_photo_syncable_in_workspace_checks_membership_through_the_facade(
     assert statements == []
 
 
-# -- move.py's file-move job SQL (``db.moves_merge``) ------------------------
+# -- The move package's file-move job SQL (``db.moves_merge``) ---------------
 
 
 def _committed(db, sql, params=()):
@@ -1873,14 +1873,18 @@ def test_moves_merge_accessor_builds_through_the_factory():
 
 
 def test_move_module_reaches_sql_only_through_the_accessor():
-    """``move.py`` moves originals; its catalog SQL lives in the repository."""
+    """The ``move`` package moves originals; its catalog SQL lives in the
+    repository."""
     import ast
     from pathlib import Path
 
     import move
 
-    tree = ast.parse(Path(move.__file__).read_text())
+    modules = sorted(Path(move.__file__).parent.glob("*.py"))
+    assert len(modules) > 1
     assert not [
-        node.lineno for node in ast.walk(tree)
+        f"{module.name}:{node.lineno}"
+        for module in modules
+        for node in ast.walk(ast.parse(module.read_text()))
         if isinstance(node, ast.Attribute) and node.attr == "conn"
     ]

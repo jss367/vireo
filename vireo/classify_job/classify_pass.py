@@ -4,16 +4,46 @@ Prepares each detection's image, runs batches through the model, gates on
 cached classifier runs, and records and publishes the batch's classifier runs.
 """
 
+from __future__ import annotations
+
 import contextlib
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from classify_job.common import _photo_timestamp, load_image, load_working_image, log
 from classify_job.store_predictions import _cached_prediction_taxonomy
 from keyword_normalization import folded_species_key as _folded_species_key
 from resource_ledger import ResourceWaitCancelled
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable, Mapping, Sequence
+    from contextlib import AbstractContextManager
+    from datetime import datetime
+
+    import numpy as np
+    from classify_job.classify_types import (
+        AnyClassifier,
+        BatchEntry,
+        DetectionDict,
+        DetectionMap,
+        PhotoRecord,
+        Prediction,
+        RawResult,
+    )
+    from computation_cache import ArtifactStore
+    from db import Database
+    from jobs import JobRunner
+    from PIL import Image
+    from raw_analysis import RawAnalysisSession
+    from services.service_types import JobDict
+    # One image's classifier output: its ranked predictions and, for
+    # embedding models, the image embedding.
+    _ImageResult = tuple[list[Prediction], np.ndarray | None]
+    from classifier import Classifier
+    from timm_classifier import TimmClassifier
 
 # ``_folded_species_key`` / ``_species_match_key`` live in
 # ``keyword_normalization`` with the rest of the name folds. The private
@@ -42,7 +72,10 @@ class ClassifierModel:
     """Predictions kept per detection."""
 
 
-def _prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None):
+def _prepare_image(
+    photo: PhotoRecord, folders: Mapping[int, str], detection: DetectionDict | None,
+    vireo_dir: str | None = None, raw_analysis: RawAnalysisSession | None = None,
+) -> tuple[Image.Image | None, str, str]:
     """Load and crop a photo to a specific detection's bounding box.
 
     Args:
@@ -69,13 +102,16 @@ def _prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None)
     input_source = "original"
     if raw_analysis is not None:
         img, analysis_report = raw_analysis.prepare(image_path, detection)
+    # ``return_source=True`` returns ``(image, source kind)``, and
+    # ``image_loader`` yields a ``FloatImage`` only in RAW_DECODE_LINEAR
+    # mode, which neither load here requests.
     if img is None and vireo_dir and load_working_image is not None:
-        img, input_source = load_working_image(
+        img, input_source = cast("tuple[Image.Image | None, str]", load_working_image(
             photo, vireo_dir, max_size=None, folders=folders,
             return_source=True,
-        )
+        ))
     if img is None:
-        img = load_image(image_path, max_size=None)
+        img = cast("Image.Image | None", load_image(image_path, max_size=None))
         input_source = "original"
     if img is None:
         return None, folder_path, image_path
@@ -96,7 +132,7 @@ def _prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None)
         else:
             crop.close()
 
-    img.thumbnail((1024, 1024), Image.LANCZOS)
+    img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
     # Classification artifacts are published after predictions are persisted,
     # which may be long after this image was loaded. Carry the actual pixel
     # source with the in-memory image so quota eviction cannot make a
@@ -107,7 +143,7 @@ def _prepare_image(photo, folders, detection, vireo_dir=None, raw_analysis=None)
     return img, folder_path, image_path
 
 
-def _match_stats(all_preds, model_type):
+def _match_stats(all_preds: list[Prediction], model_type: str) -> dict[str, Any] | None:
     """Summarize how well the best label in the list actually matched.
 
     Every caller here classifies with ``threshold=0``, so ``all_preds`` is the
@@ -157,8 +193,10 @@ def _match_stats(all_preds, model_type):
     }
 
 
-def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1,
-                 propagate_cancel=False):
+def _flush_batch(
+    batch: Sequence[BatchEntry], clf: AnyClassifier, model_type: str, model_name: str, db: Database,
+    raw_results: list[RawResult], top_k: int = 1, propagate_cancel: bool = False,
+) -> int:
     """Classify a batch of prepared images and append results.
 
     Returns the number of failures within this batch.
@@ -198,7 +236,10 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1,
     return failed
 
 
-def _classify_batch_images(batch, images, clf, model_type, propagate_cancel):
+def _classify_batch_images(
+    batch: Sequence[BatchEntry], images: list[Image.Image], clf: AnyClassifier, model_type: str,
+    propagate_cancel: bool,
+) -> tuple[list[_ImageResult | None], int]:
     """Classify a batch at once, falling back to one image at a time.
 
     Returns ``(batch_results, failed)``: one ``(preds, embedding)`` pair per
@@ -211,12 +252,15 @@ def _classify_batch_images(batch, images, clf, model_type, propagate_cancel):
     # path holds no process-wide lock around preprocessing, DB upserts,
     # or result-building. See ``Classifier._get_image_embedding`` and
     # ``TimmClassifier.classify[_batch]``.
+    # ``model_type`` "timm" means a ``TimmClassifier``; any other is a
+    # ``Classifier``.
+    batch_results: list[_ImageResult | None] | None
     try:
         if model_type == "timm":
-            batch_preds = clf.classify_batch(images, threshold=0)
+            batch_preds = cast("TimmClassifier", clf).classify_batch(images, threshold=0)
             batch_results = [(preds, None) for preds in batch_preds]
         else:
-            batch_results = clf.classify_batch_with_embedding(images, threshold=0)
+            batch_results = cast("Classifier", clf).classify_batch_with_embedding(images, threshold=0)
     except ResourceWaitCancelled:
         if propagate_cancel:
             raise
@@ -233,7 +277,7 @@ def _classify_batch_images(batch, images, clf, model_type, propagate_cancel):
                     preds = clf.classify(entry["img"], threshold=0)
                     batch_results.append((preds, None))
                 else:
-                    preds, emb = clf.classify_with_embedding(entry["img"], threshold=0)
+                    preds, emb = cast("Classifier", clf).classify_with_embedding(entry["img"], threshold=0)
                     batch_results.append((preds, emb))
             except ResourceWaitCancelled:
                 if propagate_cancel:
@@ -248,7 +292,7 @@ def _classify_batch_images(batch, images, clf, model_type, propagate_cancel):
     return batch_results, failed
 
 
-def _store_batch_embedding(db, entry, model_name, embedding):
+def _store_batch_embedding(db: Database, entry: BatchEntry, model_name: str, embedding: np.ndarray) -> None:
     """Persist one classified entry's embedding by photo and by detection."""
     emb_bytes = embedding.tobytes()
     db.upsert_photo_embedding(
@@ -269,7 +313,10 @@ def _store_batch_embedding(db, entry, model_name, embedding):
         )
 
 
-def _batch_raw_result(entry, all_preds, embedding, model_type, top_k):
+def _batch_raw_result(
+    entry: BatchEntry, all_preds: list[Prediction], embedding: np.ndarray | None, model_type: str,
+    top_k: int,
+) -> RawResult:
     """The raw classifier result for one entry with predictions."""
     # Computed from the unfiltered list, before anything below is
     # allowed to drop labels.
@@ -327,9 +374,10 @@ class _ClassifyPhotosPass:
     """
 
     def __init__(
-        self, photos, folders, detection_map, model, runner, job, db,
-        vireo_dir, reclassify,
-    ):
+        self, photos: Sequence[sqlite3.Row], folders: dict[int, str], detection_map: DetectionMap,
+        model: ClassifierModel, runner: JobRunner, job: JobDict, db: Database,
+        vireo_dir: str | None, reclassify: bool,
+    ) -> None:
         self.folders = folders
         self.detection_map = detection_map
         self.model = model
@@ -373,12 +421,12 @@ class _ClassifyPhotosPass:
 
     # -- flushing ----------------------------------------------------
 
-    def _flush_preserving_cleared(self):
+    def _flush_preserving_cleared(self) -> AbstractContextManager[object]:
         if self.reclassify:
             return self._bind_resource_cancel_check(None)
         return contextlib.nullcontext()
 
-    def flush_pending(self, pending):
+    def flush_pending(self, pending: Sequence[BatchEntry]) -> bool:
         """Flush ``pending``; False when a Stop cancelled its inference.
 
         A Stop that lands while the batch waits for an inference slot raises
@@ -409,7 +457,10 @@ class _ClassifyPhotosPass:
         )
         return True
 
-    def _enqueue(self, photo, detection_id, folder_path, image_path, img):
+    def _enqueue(
+        self, photo: sqlite3.Row, detection_id: int, folder_path: str, image_path: str,
+        img: Image.Image,
+    ) -> None:
         """Queue one prepared image, flushing once the batch is full."""
         self.batch.append({
             "photo": photo,
@@ -426,7 +477,7 @@ class _ClassifyPhotosPass:
 
     # -- classifier-run gate -----------------------------------------
 
-    def _runtime_aware_run_keys(self, detection_id):
+    def _runtime_aware_run_keys(self, detection_id: int) -> set[tuple[str, str]]:
         expected_runtime = None
         if self.portable_labels_full and self.portable_model_identity:
             try:
@@ -447,7 +498,7 @@ class _ClassifyPhotosPass:
             detection_id, runtime_fingerprint=expected_runtime,
         )
 
-    def _cached_embedding(self, photo, detection_id, photo_level_fallback):
+    def _cached_embedding(self, photo: sqlite3.Row, detection_id: int, photo_level_fallback: bool) -> np.ndarray | None:
         embedding = None
         if self.model.model_type != "timm":
             # Prefer per-detection variant so multi-subject photos don't
@@ -469,9 +520,9 @@ class _ClassifyPhotosPass:
         return embedding
 
     def _reuse_cached_run(
-        self, photo, detection_id, folder_path, image_path, timestamp,
-        photo_level_fallback,
-    ):
+        self, photo: sqlite3.Row, detection_id: int, folder_path: str, image_path: str,
+        timestamp: Callable[[], datetime | None], photo_level_fallback: bool,
+    ) -> bool:
         """True when the classifier-run gate skips inference for a detection.
 
         If (detection, model, fingerprint) has a run key AND has cached
@@ -537,7 +588,7 @@ class _ClassifyPhotosPass:
 
     # -- per photo ---------------------------------------------------
 
-    def classify_photo(self, i, photo):
+    def classify_photo(self, i: int, photo: sqlite3.Row) -> None:
         """Clear, report progress for and classify or queue one photo."""
         # Per-photo reclassify predictions purge. Lives here (rather than
         # alongside ``detections.clear`` in the detection loop) so that:
@@ -607,7 +658,7 @@ class _ClassifyPhotosPass:
         else:
             self._classify_full_image(photo, folder_path, image_path)
 
-    def _report_progress(self, i, photo):
+    def _report_progress(self, i: int, photo: sqlite3.Row) -> None:
         job, runner, total = self.job, self.runner, self.total
         job["progress"]["current"] = i + 1
         job["progress"]["current_file"] = photo["filename"]
@@ -630,8 +681,8 @@ class _ClassifyPhotosPass:
         )
 
     def _classify_detections(
-        self, photo, photo_detections, folder_path, image_path,
-    ):
+        self, photo: sqlite3.Row, photo_detections: list[DetectionDict], folder_path: str, image_path: str,
+    ) -> None:
         """Classify each detection independently.
 
         No photo-level short-circuit here: a prior short-circuit that
@@ -664,7 +715,7 @@ class _ClassifyPhotosPass:
             if self.cancelled:
                 break
 
-    def _full_image_detection_id(self, photo):
+    def _full_image_detection_id(self, photo: sqlite3.Row) -> int:
         """Use (or create) a full-image synthetic detection for ``photo``.
 
         It carries the classifier output when the photo has no detections.
@@ -709,7 +760,7 @@ class _ClassifyPhotosPass:
         )
         return full_det_ids[0]
 
-    def _classify_full_image(self, photo, folder_path, image_path):
+    def _classify_full_image(self, photo: sqlite3.Row, folder_path: str, image_path: str) -> None:
         full_det_id = self._full_image_detection_id(photo)
         # Gate check for the synthetic full-image detection too.
         # Mirror the regular detection branch: when gated, surface the
@@ -747,9 +798,10 @@ class _ClassifyPhotosPass:
 
 
 def _classify_photos(
-    photos, folders, detection_map, model, runner, job, db, *,
-    vireo_dir=None, reclassify=False, finish_cleared_only=False,
-):
+    photos: Sequence[sqlite3.Row], folders: dict[int, str], detection_map: DetectionMap,
+    model: ClassifierModel, runner: JobRunner, job: JobDict, db: Database, *,
+    vireo_dir: str | None = None, reclassify: bool = False, finish_cleared_only: bool = False,
+) -> tuple[list[RawResult], int, int]:
     """Classify detections in batches, cropping to each detection's bounding box.
 
     For each photo, iterates over all detections (from detection_map) and
@@ -835,7 +887,7 @@ def _classify_photos(
     return run.raw_results, run.failed, run.skipped_existing
 
 
-def _classify_summary_parts(raw_results, skipped_existing, failed):
+def _classify_summary_parts(raw_results: list[RawResult], skipped_existing: int, failed: int) -> list[str]:
     """Summary fragments for the classify step ("N classified, M cached").
 
     Cache hits that surfaced a stored top-1 are in ``raw_results`` flagged
@@ -854,9 +906,10 @@ def _classify_summary_parts(raw_results, skipped_existing, failed):
 
 
 def _record_batch_classifier_runs(
-    db, batch, model_name, labels_fingerprint, raw_results, raw_results_start=0,
-    labels_fingerprint_full=None, model_identity=None,
-):
+    db: Database, batch: Sequence[BatchEntry], model_name: str, labels_fingerprint: str,
+    raw_results: list[RawResult], raw_results_start: int = 0,
+    labels_fingerprint_full: str | None = None, model_identity: dict[str, Any] | None = None,
+) -> None:
     """Record classifier_runs rows for every detection in ``batch``.
 
     ``batch`` is the list of entries that were just passed to _flush_batch.
@@ -911,10 +964,10 @@ def _record_batch_classifier_runs(
 
 
 def _publish_classifier_runs_for_raw_results(
-    db, raw_results, classifier_model, labels_fingerprint,
-    labels_fingerprint_full=None, model_identity=None,
-    taxonomy_identity="no-tax", store=None,
-):
+    db: Database, raw_results: list[RawResult], classifier_model: str, labels_fingerprint: str,
+    labels_fingerprint_full: str | None = None, model_identity: dict[str, Any] | None = None,
+    taxonomy_identity: str = "no-tax", store: ArtifactStore | None = None,
+) -> None:
     """Publish portable classifier artifacts for freshly-classified detections.
 
     ``promote_and_publish_classifier_run`` reads the persisted ``predictions``

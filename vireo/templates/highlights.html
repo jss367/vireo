@@ -1446,8 +1446,8 @@ document.addEventListener('lightbox:flagchanged', function(e) {
 VireoViewPreferences.restoreAll(document.getElementById('controlsBar'));
 document.getElementById('perRowValue').textContent =
   document.getElementById('perRowSlider').value;
-updateAdvancedHighlightsOptions();
-loadHighlights();
+document.addEventListener('DOMContentLoaded', function() { updateAdvancedHighlightsOptions(); });
+document.addEventListener('DOMContentLoaded', function() { loadHighlights(); });
 </script>
 </body>
 </html>

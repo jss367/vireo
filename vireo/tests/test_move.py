@@ -541,7 +541,7 @@ def test_move_photos_rejects_case_folded_stale_developed_render(
     from move import move_photos
 
     monkeypatch.setattr(
-        move_module, "_is_case_insensitive_path", lambda _: True,
+        move_module.photos, "_is_case_insensitive_path", lambda _: True,
     )
 
     db = Database(str(tmp_path / "test.db"))
@@ -1435,7 +1435,7 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
     ``C:\\Photos`` with a descendant row ``c:\\photos\\2026`` would drop
     the descendant and leave those photos behind.
 
-    Executes on non-Windows hosts by swapping ``move``'s ``sys`` for a
+    Executes on non-Windows hosts by swapping ``move.dates``' ``sys`` for a
     shim that reports ``platform == "win32"`` — patching the real
     ``sys.platform`` would leak into stdlib modules that gate
     Windows-only imports (multiprocessing, etc.).
@@ -1446,7 +1446,7 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
     from move import plan_folder_date_moves
 
     shim = types.SimpleNamespace(platform="win32")
-    monkeypatch.setattr(move_mod, "sys", shim)
+    monkeypatch.setattr(move_mod.dates, "sys", shim)
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -1538,7 +1538,7 @@ def test_plan_folder_date_moves_matches_case_alias_on_casefolding_posix(
     # Simulate a case-insensitive POSIX filesystem while retaining the
     # host's POSIX path implementation. Root-scoped fallback in
     # _path_equal_or_descends then folds the case-only alias safely.
-    monkeypatch.setattr(move_mod, "_case_insensitive_root", lambda path: "/")
+    monkeypatch.setattr(move_mod.dates, "_case_insensitive_root", lambda path: "/")
 
     plan = move_mod.plan_folder_date_moves(
         db, parent_fid, str(tmp_path / "archive"), "%Y-%m-%d",
@@ -2525,9 +2525,10 @@ def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
     import move as move_module
     from move import move_photos
 
-    monkeypatch.setattr(
-        move_module, "_is_case_insensitive_path", lambda _: True,
-    )
+    # ``move.photos`` folds render stems with this probe; ``move.paths``
+    # asks it again for the tracked-``developed`` check.
+    for module in (move_module.photos, move_module.paths):
+        monkeypatch.setattr(module, "_is_case_insensitive_path", lambda _: True)
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -2584,9 +2585,10 @@ def test_move_photos_folds_stems_for_configured_developed_volume(
     def fake_case_probe(path):
         return os.path.normpath(path) == os.path.normpath(developed_dir)
 
-    monkeypatch.setattr(
-        move_module, "_is_case_insensitive_path", fake_case_probe,
-    )
+    # ``move.photos`` folds render stems with this probe; ``move.paths``
+    # asks it again for the tracked-``developed`` check.
+    for module in (move_module.photos, move_module.paths):
+        monkeypatch.setattr(module, "_is_case_insensitive_path", fake_case_probe)
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -2633,9 +2635,10 @@ def test_move_photos_rejects_same_source_case_only_stem_collision(
     import move as move_module
     from move import move_photos
 
-    monkeypatch.setattr(
-        move_module, "_is_case_insensitive_path", lambda _: True,
-    )
+    # ``move.photos`` folds render stems with this probe; ``move.paths``
+    # asks it again for the tracked-``developed`` check.
+    for module in (move_module.photos, move_module.paths):
+        monkeypatch.setattr(module, "_is_case_insensitive_path", lambda _: True)
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -2688,9 +2691,10 @@ def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
     import move as move_module
     from move import move_photos
 
-    monkeypatch.setattr(
-        move_module, "_is_case_insensitive_path", lambda _: False,
-    )
+    # ``move.photos`` folds render stems with this probe; ``move.paths``
+    # asks it again for the tracked-``developed`` check.
+    for module in (move_module.photos, move_module.paths):
+        monkeypatch.setattr(module, "_is_case_insensitive_path", lambda _: False)
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -2891,7 +2895,7 @@ def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
 
     env = move_env
 
-    original_remove = move_mod.os.remove
+    original_remove = move_mod.photos.os.remove
     target_src = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
 
     def failing_remove(path):
@@ -2899,7 +2903,7 @@ def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
             raise OSError("permission denied")
         return original_remove(path)
 
-    monkeypatch.setattr(move_mod.os, "remove", failing_remove)
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
 
     result = move_mod.move_photos(
         db=env["db"],
@@ -2940,7 +2944,7 @@ def test_move_photos_rebases_developed_before_source_cleanup(
     (developed / old_key).mkdir()
     (developed / old_key / "bird1.jpg").write_bytes(b"bird1-dev")
 
-    original_remove = move_mod.os.remove
+    original_remove = move_mod.photos.os.remove
     target_src = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
 
     def failing_remove(path):
@@ -2948,7 +2952,7 @@ def test_move_photos_rebases_developed_before_source_cleanup(
             raise OSError("permission denied")
         return original_remove(path)
 
-    monkeypatch.setattr(move_mod.os, "remove", failing_remove)
+    monkeypatch.setattr(move_mod.photos.os, "remove", failing_remove)
 
     move_mod.move_photos(
         db=env["db"],
@@ -3241,7 +3245,7 @@ def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
     def raise_on_rmtree(path):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(move_mod.shutil, "rmtree", raise_on_rmtree)
+    monkeypatch.setattr(move_mod.folder.shutil, "rmtree", raise_on_rmtree)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
@@ -4900,7 +4904,7 @@ def test_move_folder_refuses_case_alias_missing_tracked_destination(move_env, mo
     assert not stale_landing.exists()
     env["db"].add_folder(str(stale_landing), name="src")
 
-    monkeypatch.setattr(move_mod, "_is_case_insensitive_path", lambda p: True)
+    monkeypatch.setattr(move_mod.paths, "_is_case_insensitive_path", lambda p: True)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(dest_input)
@@ -5003,7 +5007,7 @@ def test_path_equal_or_descends_folds_root_case_alias_in_candidate(
             return True
         return real_samefile(a, b)
 
-    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+    monkeypatch.setattr(move_mod.paths, "_samefile_or_false", fake_samefile)
 
     assert move_mod._path_equal_or_descends(
         stale, dest, case_insensitive_root=root_real
@@ -5096,7 +5100,7 @@ def test_tracked_destination_overlap_skips_rows_outside_ci_root(move_env, monkey
 
     # Force the probe True so the case-fold branch is exercised regardless
     # of the host FS (CI tends to be case-sensitive ext4).
-    monkeypatch.setattr(move_mod, "_is_case_insensitive_path", lambda p: True)
+    monkeypatch.setattr(move_mod.paths, "_is_case_insensitive_path", lambda p: True)
 
     assert move_mod._tracked_destination_overlap(
         env["db"], env["fid_src"], dest
@@ -5131,7 +5135,7 @@ def test_tracked_destination_overlap_caches_case_insensitivity_probe(move_env, m
         calls.append(path)
         return real_probe(path)
 
-    monkeypatch.setattr(move_mod, "_is_case_insensitive_path", counting_probe)
+    monkeypatch.setattr(move_mod.paths, "_is_case_insensitive_path", counting_probe)
 
     move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(dest_input)
@@ -5193,7 +5197,7 @@ def test_is_case_insensitive_path_probes_inside_target_fs(tmp_path, monkeypatch)
         names = {os.path.basename(a), os.path.basename(b)}
         return names == {"Mount", "mOUNT"}
 
-    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_samefile)
+    monkeypatch.setattr(move_mod.paths, "_samefile_tristate", fake_samefile)
 
     # Deepest existing ancestor of the missing leaf is `mount`. The fixed
     # probe must look inside `mount` and report case-sensitive (False).
@@ -5228,8 +5232,8 @@ def test_is_case_insensitive_path_detects_case_insensitive_fs(tmp_path, monkeypa
 
     # Child probe alone is no longer authoritative for True — patch both
     # entry points so the temp-dir confirmation also sees the case fold.
-    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_samefile)
-    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+    monkeypatch.setattr(move_mod.paths, "_samefile_tristate", fake_samefile)
+    monkeypatch.setattr(move_mod.paths, "_samefile_or_false", fake_samefile)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing_leaf")
@@ -5275,8 +5279,8 @@ def test_is_case_insensitive_path_inconclusive_child_probe_keeps_scanning(
             and os.path.basename(a).lower() == os.path.basename(b).lower()
         )
 
-    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
-    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile_or_false)
+    monkeypatch.setattr(move_mod.paths, "_samefile_tristate", fake_tristate)
+    monkeypatch.setattr(move_mod.paths, "_samefile_or_false", fake_samefile_or_false)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing_leaf")
@@ -5319,7 +5323,7 @@ def test_is_case_insensitive_path_child_alias_confirmed_by_temp_probe(
     # Temp probe uses the real `_samefile_or_false`; on real case-sensitive
     # POSIX tmp_path the probe and its flipped spelling do NOT resolve to
     # the same inode, so the final answer is False.
-    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
+    monkeypatch.setattr(move_mod.paths, "_samefile_tristate", fake_tristate)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing_leaf")
@@ -5360,8 +5364,8 @@ def test_is_case_insensitive_path_child_scan_short_circuits_on_definitive_false(
             return False
         return None
 
-    monkeypatch.setattr(move_mod.tempfile, "mkdtemp", fake_mkdtemp)
-    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
+    monkeypatch.setattr(move_mod.paths.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(move_mod.paths, "_samefile_tristate", fake_tristate)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing_leaf")
@@ -5394,7 +5398,7 @@ def test_is_case_insensitive_path_temp_probe_runs_before_child_scan(
         (target / f"entry_{i}").touch()
 
     call_order = []
-    real_mkdtemp = move_mod.tempfile.mkdtemp
+    real_mkdtemp = move_mod.paths.tempfile.mkdtemp
     real_tristate = move_mod._samefile_tristate
 
     def tracked_mkdtemp(*a, **kw):
@@ -5410,8 +5414,8 @@ def test_is_case_insensitive_path_temp_probe_runs_before_child_scan(
             call_order.append("tristate")
         return real_tristate(a, b)
 
-    monkeypatch.setattr(move_mod.tempfile, "mkdtemp", tracked_mkdtemp)
-    monkeypatch.setattr(move_mod, "_samefile_tristate", tracked_tristate)
+    monkeypatch.setattr(move_mod.paths.tempfile, "mkdtemp", tracked_mkdtemp)
+    monkeypatch.setattr(move_mod.paths, "_samefile_tristate", tracked_tristate)
 
     # Real tmp_path is case-sensitive on Linux CI; the temp probe creates
     # a fresh dir whose flipped name doesn't exist, so samefile raises and
@@ -5465,8 +5469,8 @@ def test_is_case_insensitive_path_all_inconclusive_falls_back_to_temp_probe(
             and os.path.basename(a).lower() == os.path.basename(b).lower()
         )
 
-    monkeypatch.setattr(move_mod, "_samefile_tristate", fake_tristate)
-    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile_or_false)
+    monkeypatch.setattr(move_mod.paths, "_samefile_tristate", fake_tristate)
+    monkeypatch.setattr(move_mod.paths, "_samefile_or_false", fake_samefile_or_false)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing_leaf")
@@ -5494,7 +5498,7 @@ def test_is_case_insensitive_path_no_letter_children_falls_back_to_temp_probe(
     target.mkdir()
     (target / "123").touch()
     (target / "456").mkdir()
-    monkeypatch.setattr(move_mod, "_samefile_or_false", lambda _a, _b: False)
+    monkeypatch.setattr(move_mod.paths, "_samefile_or_false", lambda _a, _b: False)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(str(target), "missing")
@@ -5530,7 +5534,7 @@ def test_is_case_insensitive_path_empty_ancestor_detects_case_insensitive_fs(
             and os.path.basename(a).lower() == os.path.basename(b).lower()
         )
 
-    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+    monkeypatch.setattr(move_mod.paths, "_samefile_or_false", fake_samefile)
 
     assert move_mod._is_case_insensitive_path(
         os.path.join(target_str, "missing", "sub")
@@ -5591,7 +5595,7 @@ def test_is_case_insensitive_path_unreadable_ancestor_falls_back_to_temp_probe(
             and os.path.basename(a).lower() == os.path.basename(b).lower()
         )
 
-    monkeypatch.setattr(move_mod, "_samefile_or_false", fake_samefile)
+    monkeypatch.setattr(move_mod.paths, "_samefile_or_false", fake_samefile)
 
     original_mode = target.stat().st_mode
     os.chmod(target, 0o300)  # write+execute, not readable
@@ -5638,7 +5642,7 @@ def test_move_folder_merge_verify_fail_preserves_originals_and_dest(move_env, mo
     sentinel.write_text("pre-existing")
 
     # Force the copy step to be a no-op so a source file is "missing" at dest.
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
@@ -5674,7 +5678,7 @@ def test_move_folder_merge_rejects_symlinked_dest_file(move_env, monkeypatch):
 
     # Force rsync to no-op (it would normally honor --ignore-existing and
     # leave the symlink anyway; this just removes the dependency on rsync).
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
@@ -5713,7 +5717,7 @@ def test_move_folder_merge_rejects_symlinked_dest_subdir(move_env, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
@@ -5742,7 +5746,7 @@ def test_move_folder_merge_rejects_broken_symlink(move_env, monkeypatch):
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed",
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed",
                         lambda *a, **k: (0, "", False))
 
     result = move_mod.move_folder(
@@ -5902,7 +5906,7 @@ def test_merge_copy_progress_finishes_with_skipped_files(move_env, monkeypatch, 
                 progress(copied, total, path.name, "Copying files")
         return 0, "", False
 
-    monkeypatch.setattr(move, "_run_rsync_streamed", resume)
+    monkeypatch.setattr(move.folder_transfer, "_run_rsync_streamed", resume)
     calls = []
     result = move.move_folder(env["db"], env["fid_src"], str(env["dst"]), merge=True,
                               progress_cb=lambda *args: calls.append(args))
@@ -5920,7 +5924,7 @@ def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
     def _no_rsync(*a, **k):
         raise FileNotFoundError("rsync")
 
-    monkeypatch.setattr(move_mod.subprocess, "Popen", _no_rsync)
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen", _no_rsync)
 
     env = move_env
     calls = []
@@ -5946,16 +5950,16 @@ def test_move_folder_prefers_discovered_gnu_rsync(move_env, monkeypatch):
 
     env = move_env
     captured = {}
-    monkeypatch.setattr(move_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(move_mod.folder_transfer.sys, "platform", "darwin")
     monkeypatch.setattr(
-        move_mod, "resolve_rsync_bin", lambda configured="": "/gnu/rsync",
+        move_mod.folder_transfer, "resolve_rsync_bin", lambda configured="": "/gnu/rsync",
     )
 
     def fake_run(*args, **kwargs):
         captured["rsync_bin"] = kwargs.get("rsync_bin")
         return 1, "simulated failure", False
 
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_run)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_run)
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"],
         destination=str(env["dst"]),
@@ -5971,18 +5975,18 @@ def test_move_folder_windows_skips_discovered_rsync(move_env, monkeypatch):
 
     env = move_env
     captured = {}
-    monkeypatch.setattr(move_mod.sys, "platform", "win32")
+    monkeypatch.setattr(move_mod.folder_transfer.sys, "platform", "win32")
 
     def unexpected_resolve(configured=""):
         raise AssertionError("Windows local moves must not discover rsync")
 
-    monkeypatch.setattr(move_mod, "resolve_rsync_bin", unexpected_resolve)
+    monkeypatch.setattr(move_mod.folder_transfer, "resolve_rsync_bin", unexpected_resolve)
 
     def fake_run(*args, **kwargs):
         captured["rsync_bin"] = kwargs.get("rsync_bin")
         return 1, "simulated failure", False
 
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_run)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_run)
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"],
         destination=str(env["dst"]),
@@ -5999,7 +6003,7 @@ def test_move_folder_stall_preserves_rsync_diagnostic(move_env, monkeypatch):
 
     env = move_env
     monkeypatch.setattr(
-        move_mod,
+        move_mod.folder_transfer,
         "_run_rsync_streamed",
         lambda *args, **kwargs: (
             -9,
@@ -6037,7 +6041,7 @@ def test_move_folder_shutil_fallback_preserves_dir_symlink(move_env, monkeypatch
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod.subprocess, "Popen",
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen",
                         lambda *a, **k: (_ for _ in ()).throw(
                             FileNotFoundError("rsync")))
 
@@ -6067,13 +6071,13 @@ def test_move_folder_shutil_fallback_aborts_on_unreadable_subdir(move_env, monke
     sub.mkdir()
     (sub / "nest.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 30)
 
-    monkeypatch.setattr(move_mod.subprocess, "Popen",
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen",
                         lambda *a, **k: (_ for _ in ()).throw(
                             FileNotFoundError("rsync")))
 
     # Force os.walk to surface a scandir error for the subdirectory, as it
     # would on a permission failure (default os.walk swallows this).
-    real_walk = move_mod.os.walk
+    real_walk = move_mod.transfer.os.walk
 
     def _walk_with_error(path, *a, **k):
         onerror = k.get("onerror")
@@ -6082,7 +6086,7 @@ def test_move_folder_shutil_fallback_aborts_on_unreadable_subdir(move_env, monke
                 onerror(OSError(13, "Permission denied", str(sub)))
             yield root, dirs, files
 
-    monkeypatch.setattr(move_mod.os, "walk", _walk_with_error)
+    monkeypatch.setattr(move_mod.transfer.os, "walk", _walk_with_error)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"])
@@ -6110,7 +6114,7 @@ def test_move_folder_shutil_fallback_preserves_dir_mode(move_env, monkeypatch):
     (sub / "secret.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 20)
     os.chmod(str(sub), 0o700)
 
-    monkeypatch.setattr(move_mod.subprocess, "Popen",
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen",
                         lambda *a, **k: (_ for _ in ()).throw(
                             FileNotFoundError("rsync")))
 
@@ -6139,7 +6143,7 @@ def test_move_folder_shutil_fallback_preserves_file_symlink(move_env, monkeypatc
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
 
-    monkeypatch.setattr(move_mod.subprocess, "Popen",
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen",
                         lambda *a, **k: (_ for _ in ()).throw(
                             FileNotFoundError("rsync")))
 
@@ -6184,7 +6188,7 @@ def test_move_folder_fresh_move_detects_late_source_file(move_env, monkeypatch):
         (env["src"] / "late_arrival.jpg").write_bytes(b"new content")
         return 0, "", False
 
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", _copy_then_inject)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", _copy_then_inject)
 
     result = move_mod.move_folder(
         db=env["db"], folder_id=env["fid_src"], destination=str(env["dst"]),
@@ -6281,7 +6285,7 @@ def test_rsync_stall_watchdog_kills_silent_process(monkeypatch):
         proc_holder["proc"] = proc
         return proc
 
-    monkeypatch.setattr(move_mod.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen", _fake_popen)
 
     rc, stderr, timed_out = move_mod._run_rsync_streamed(
         "/src", "/dst", ["--checksum"], 10, None, stall_timeout=0.3,
@@ -6305,7 +6309,7 @@ def test_rsync_streamed_runs_as_long_as_it_progresses(monkeypatch):
         # the previous 0.1s-vs-0.3s spacing over the edge on macOS.
         return _FakeProc(_StreamingStdout(n=12, gap=0.1))
 
-    monkeypatch.setattr(move_mod.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen", _fake_popen)
 
     seen = []
     rc, stderr, timed_out = move_mod._run_rsync_streamed(
@@ -6338,7 +6342,7 @@ def test_rsync_streamed_cancel_check_kills_transfer(monkeypatch):
         proc_holder["proc"] = proc
         return proc
 
-    monkeypatch.setattr(move_mod.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen", _fake_popen)
 
     start = time.monotonic()
     rc, stderr, timed_out = move_mod._run_rsync_streamed(
@@ -6360,7 +6364,7 @@ def test_rsync_streamed_cancel_check_false_leaves_transfer_alone(monkeypatch):
     import move as move_mod
 
     monkeypatch.setattr(
-        move_mod.subprocess, "Popen",
+        move_mod.transfer.subprocess, "Popen",
         lambda *_a, **_k: _FakeProc(_StreamingStdout(n=5, gap=0.05)),
     )
 
@@ -6427,12 +6431,12 @@ def test_rsync_streamed_closes_pty_fds_when_popen_fails(monkeypatch):
         opened.extend((master, slave))
         return master, slave
 
-    monkeypatch.setattr(move_mod.os, "openpty", _tracking_openpty)
+    monkeypatch.setattr(move_mod.transfer.os, "openpty", _tracking_openpty)
 
     def _boom(*_a, **_k):
         raise FileNotFoundError("no such rsync binary")
 
-    monkeypatch.setattr(move_mod.subprocess, "Popen", _boom)
+    monkeypatch.setattr(move_mod.transfer.subprocess, "Popen", _boom)
 
     with pytest.raises(FileNotFoundError):
         move_mod._run_rsync_streamed(
@@ -6511,7 +6515,7 @@ def _lose_timestamps_in_transfer(monkeypatch, skip=None):
                                 os.path.join(target, fn))
         return 0, "", False
 
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_transfer)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", fake_transfer)
 
 
 def _count_feature_computations(monkeypatch):
@@ -6810,8 +6814,8 @@ def test_timestamp_plan_runs_before_the_copy_is_verified(tmp_path, monkeypatch):
         order.append("verify")
         return real_verify(*a, **kw)
 
-    monkeypatch.setattr(move_mod, "_plan_moved_file_mtimes", traced_plan)
-    monkeypatch.setattr(move_mod, "_first_missing_source_file", traced_verify)
+    monkeypatch.setattr(move_mod.folder_transfer, "_plan_moved_file_mtimes", traced_plan)
+    monkeypatch.setattr(move_mod.folder_transfer, "_first_missing_source_file", traced_verify)
     _lose_timestamps_in_transfer(monkeypatch)
 
     result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
@@ -6841,7 +6845,7 @@ def test_a_copy_lost_during_planning_still_aborts_the_move(
         (dst / "shoot" / "a.xmp").unlink()
         return result
 
-    monkeypatch.setattr(move_mod, "_plan_moved_file_mtimes",
+    monkeypatch.setattr(move_mod.folder_transfer, "_plan_moved_file_mtimes",
                         plan_then_lose_a_sidecar)
     _lose_timestamps_in_transfer(monkeypatch)
 
@@ -7023,7 +7027,7 @@ def test_a_differently_sized_copy_stops_a_fresh_move(tmp_path, monkeypatch):
             handle.write(b"\xff\xd8")
         return 0, "", False
 
-    monkeypatch.setattr(move_mod, "_run_rsync_streamed", truncating_transfer)
+    monkeypatch.setattr(move_mod.folder_transfer, "_run_rsync_streamed", truncating_transfer)
     result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
 
     assert result["moved"] == 0
@@ -7060,7 +7064,7 @@ def test_a_destination_truncated_after_planning_stops_a_fresh_move(
             handle.write(b"\xff\xd8")
         return result
 
-    monkeypatch.setattr(move_mod, "_plan_moved_file_mtimes", plan_then_truncate)
+    monkeypatch.setattr(move_mod.folder_transfer, "_plan_moved_file_mtimes", plan_then_truncate)
     _lose_timestamps_in_transfer(monkeypatch)
     result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst))
 
@@ -7245,7 +7249,7 @@ def test_thumbnail_alignment_never_fails_a_committed_move(
     def explode(*_a, **_kw):
         raise sqlite3.OperationalError("too many SQL variables")
 
-    monkeypatch.setattr(move_mod, "_chunks", explode)
+    monkeypatch.setattr(move_mod.folder_catalog, "_chunks", explode)
     _lose_timestamps_in_transfer(monkeypatch)
 
     result = move_mod.move_folder(db=db, folder_id=fid, destination=str(dst),
@@ -7265,7 +7269,7 @@ def test_thumbnail_lookup_is_chunked_under_the_sqlite_bind_limit(tmp_path):
     import move as move_mod
 
     seen = []
-    for chunk in move_mod._chunks(list(range(2500))):
+    for chunk in move_mod.folder_catalog._chunks(list(range(2500))):
         seen.append(len(chunk))
     assert max(seen) <= 999
     assert sum(seen) == 2500
@@ -7308,7 +7312,7 @@ def test_photo_move_checks_directory_identity_once_per_folder(move_env, monkeypa
     def counted(*args):
         calls.append(args)
         return original(*args)
-    monkeypatch.setattr(move, "_is_same_directory", counted)
+    monkeypatch.setattr(move.photos, "_is_same_directory", counted)
     env = move_env
     result = move.move_photos(env["db"], [env["p1"], env["p2"]], str(env["dst"]))
     assert result["moved"] == 2

@@ -1,8 +1,9 @@
 // The Misses page's boundary with the shared navbar, lightbox, filter bar and
-// vireo-utils.js, which are still classic scripts that publish globals. Page
-// modules import these names from here instead of reaching for globals, so
-// this file is the one list of what the page uses from shared code. When a
-// shared script becomes a module, change its import here, not in every file.
+// vireo-utils.js. The navbar and lightbox are modules whose bridge
+// (navbar-globals.js) publishes the functions pages use as globals; the others
+// are classic scripts. Page modules import these names from here instead of
+// reaching for globals, so this file is the one list of what the page uses
+// from shared code.
 //
 // The forwarders look the global up at call time, as the classic page did, so
 // a shared function that is absent on a page keeps its `typeof` guard here and

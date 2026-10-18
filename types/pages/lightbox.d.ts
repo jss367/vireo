@@ -54,7 +54,7 @@ interface LightboxSessionOptions {
   preloadBudgetBytes?: number;
 }
 
-interface Window {
+interface LightboxApi {
   VireoLightboxSession: { create(options: LightboxSessionOptions): LightboxSession };
 }
 interface LightboxSession {
@@ -156,7 +156,7 @@ interface LightboxViewport {
   oneToOne(event?: Pick<MouseEvent, 'clientX' | 'clientY'>): void;
   toggleZoom(event?: Pick<MouseEvent, 'clientX' | 'clientY'>): void;
 }
-interface Window { VireoLightboxViewport: { create(options: LightboxViewportOptions): LightboxViewport } }
+interface LightboxApi { VireoLightboxViewport: { create(options: LightboxViewportOptions): LightboxViewport } }
 
 type LightboxFlag = 'none' | 'flagged' | 'rejected';
 interface LightboxPhoto {
@@ -164,23 +164,18 @@ interface LightboxPhoto {
   photo_id?: number;
   extension?: string;
   companion_path?: string | null;
-  eye_x?: number | null; eye_y?: number | null; eye_conf?: number | null;
+  eye_x?: number | null; eye_y?: number | null; eye_conf?: number | null; eye_tenengrad?: number | null;
   metadata?: LightboxMetadata | null;
 }
 interface LightboxMetadata { Orientation?: number | string; orientation?: number | string; [tag: string]: string | number | boolean | null | undefined }
 interface Window {
   VIREO_FULL_PREVIEW_MAX_SIZE?: number;
-  _lightboxZoomHandled?: boolean;
+}
+interface LightboxApi {
   setLightboxReadOnlyMode(readOnly: boolean, message?: string): void;
   setLightboxProvisionalFlag(photoId: number, flag: LightboxFlag, editSeq?: number): void;
   clearLightboxProvisionalFlags(photoIds?: number[]): void;
-  safeFetch: typeof safeFetch;
 }
-declare function showToast(message: string, type?: string): void;
-declare function safeFetch<T = unknown>(url: string, options?: RequestInit, errors?: {toast: boolean}): Promise<T>;
-
-declare var VireoLightboxSession: Window['VireoLightboxSession'];
-declare var VireoLightboxViewport: Window['VireoLightboxViewport'];
 type LightboxPhotoId = number | string;
 interface LightboxAdjustments {
   exposure?: number; highlights?: number; shadows?: number; whites?: number;
@@ -191,7 +186,7 @@ interface LightboxAdjustments {
 type LightboxAdjustmentValues = Required<Omit<LightboxAdjustments, 'white_balance'>>;
 interface LightboxAdjustmentSource {url: string; image: HTMLImageElement; ready: Promise<boolean>}
 interface LightboxCropDrag {handle: string; startX: number; startY: number; startCrop: LightboxCrop; imgW: number; imgH: number}
-interface Window {
+interface LightboxApi {
   vireoPhotoIsRawJpegPair(photo: LightboxPhoto | null | undefined): boolean;
   vireoRememberPhotoPair(photo: LightboxPhoto | null | undefined): void;
   vireoUpdatePairSourceControls(photoId: LightboxPhotoId | null): void;
@@ -202,9 +197,6 @@ interface Window {
   vireoPhotoHasOrientationEdit(photoId: LightboxPhotoId | null): boolean;
   vireoRememberPhotoEditRecipe(photoId: LightboxPhotoId | null, recipe: LightboxRecipe | null | undefined, options?: {skipIfLocallyWritten: boolean}): void;
   vireoRememberPhotoRenderKey(photoId: LightboxPhotoId | null, key: string | null | undefined, options?: {skipIfLocallyWritten: boolean}): void;
-  vireoPhotoEditRecipe(photoId: LightboxPhotoId | null): LightboxRecipe;
-  vireoPreviewUrl: typeof vireoPreviewUrl;
-  vireoCacheBustedPhotoUrl: typeof vireoCacheBustedPhotoUrl;
 }
 interface LightboxMaskVariant { variant: string; url: string; created_at?: string }
 interface LightboxDetection { box_x: number | null; box_y: number | null; box_w: number; box_h: number; category?: string; detector_confidence?: number }
@@ -212,45 +204,18 @@ interface LightboxCurationEntry { species: string; is_current_photo?: boolean; i
 interface LightboxPhoto { life_list?: LightboxCurationEntry[]; highlight_list?: LightboxCurationEntry[]; species?: string | string[] }
 interface LightboxCurationOptions {getPhoto?: (id: number) => LightboxPhoto | null | undefined; photoById?: Record<string, LightboxPhoto>; showFetchFallback?: boolean}
 interface LightboxMenuItem {label?: string; title?: string; separator?: boolean; disabled?: boolean; disabledHint?: string | null; onClick?: () => unknown; chips?: LightboxMenuItem[]; color?: string | null; colorBaseTitle?: string}
-interface LightboxKeymap { pushEsc(handler: () => void): number; popEsc(token: number | null | undefined): boolean; lockBodyScroll(): void; unlockBodyScroll(): void }
-declare var Keymap: LightboxKeymap;
-declare function escapeHtml(value: string | number): string;
-declare function escapeAttr(value: string | number): string;
-declare function openContextMenu(event: MouseEvent, items: LightboxMenuItem[]): void;
-declare function showRevealFeedback(data: unknown): void;
-interface Window {
-  _lbEscToken?: number | null;
-  _vireoShortcuts?: Record<string, Record<string, string>>;
-  setLifeListPhoto: typeof setLifeListPhoto;
-  chooseSpeciesRepresentativeForPhoto: typeof chooseSpeciesRepresentativeForPhoto;
+interface LightboxApi {
   buildSpeciesRepresentativeMenuItems(ids: number[], opts?: LightboxCurationOptions): LightboxMenuItem[];
-  setSpeciesHighlightFromMenu: typeof setSpeciesHighlightFromMenu;
-  chooseSpeciesHighlightForPhoto: typeof chooseSpeciesHighlightForPhoto;
   buildSpeciesHighlightMenuItems(ids: number[], opts?: LightboxCurationOptions): LightboxMenuItem[];
-  VireoColorLabels?: {title(color: string, fallback: string): string};
-  openInBrowse(id: number): void;
-  findSimilar(id: number): unknown;
-  openInEditor(id: number): unknown;
-  buildOpenInEditorMenuItems(ids: number[]): LightboxMenuItem[];
-  VIREO_REVEAL_LABEL: string;
 }
-interface LightboxPhoto { keywords?: {name: string}[]; wildlife_excluded?: boolean; full_uses_original?: boolean; full_preview_max_size?: number }
-interface Window {
-  vireoRefreshEditRecipeCache: typeof _lbRefreshEditRecipeCache;
-  vireoEditNav?: {setLastPhoto(id: number): void; setList(photos: LightboxPhoto[], currentId: number): void};
-  _cropEventsReady?: boolean;
-}
+interface LightboxPhoto { keywords?: {name: string; type?: string}[]; wildlife_excluded?: boolean | number; full_uses_original?: boolean; full_preview_max_size?: number }
+
 interface Document { webkitFullscreenElement?: Element | null; webkitExitFullscreen?: () => void | Promise<void> }
 interface HTMLElement { webkitRequestFullscreen?: () => void | Promise<void> }
-declare function openPipeline(id: number): unknown;
-declare function findSimilar(id: number): unknown;
 interface LightboxDeleteResult {deleted: number; trashed: number; failed_photo_ids?: number[]; trash_failed?: {path: string}[]}
 interface LightboxDeleteProgress {phase?: string; total?: number; current?: number; failed?: number; stage_failures?: Record<string, number>; current_file?: string; detail?: string}
 interface LightboxDeleteCompletion {status?: string; result?: LightboxDeleteResult; errors?: string[]}
 interface LightboxJobStreamOptions<P, R> {onProgress?: (data: P) => void; onComplete?: (data: R) => void; onError?: () => void}
-declare function safeEventSource<P, R>(url: string, options: LightboxJobStreamOptions<P, R>): EventSource;
-interface Window { _inatEscToken?: number | null}
-declare function isTauri(): boolean;
 declare function openExternal(url: string): Promise<boolean>;
 declare function showExternalOpenFailure(url: string, message: string): void;
 declare function copyExternalUrl(url: string): Promise<boolean>;
@@ -271,5 +236,3 @@ interface InatQueueItem {
 interface InatPreparationFailure {photo_id: number; error: string}
 interface InatExportProgress {current?: number; total?: number}
 interface InatExportCompletion {status?: string; result?: {exported?: unknown[]; errors?: {error: string}[]; revealed?: boolean}}
-// The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
-declare var Vireo: VireoPageHookRegistry;

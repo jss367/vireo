@@ -1,3 +1,13 @@
+import { navbarState } from '../navbar-state.js';
+import { lbState } from './shared-state.js';
+import { vireoLightboxSession, vireoLightboxViewport } from './state.js';
+import { _lbApplyFlag } from './flags.js';
+import { toggleLightboxBoxes, toggleLightboxChrome } from './overlays.js';
+import {
+  exitLightboxFullscreen, lightboxKeyMatchesConfiguredBrowseShortcut, lightboxNav,
+  requestLightboxFullscreen,
+} from './navigation.js';
+import { closeLightbox, toggleLightboxZoom } from './controls.js';
 
 // NOTE: Page navigation shortcuts (Cmd+1..0, Cmd+Shift+D/W/L, Cmd+,) are
 // handled by the native menu bar when running inside the Tauri desktop shell.
@@ -15,7 +25,8 @@
   if (t instanceof HTMLInputElement) return !(t.type === 'checkbox' || t.type === 'radio');
   return t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || !!t.isContentEditable;
 }
-document.addEventListener('keydown', function(e) {
+/** @param {KeyboardEvent} e */
+function onLightboxKeydown(e) {
   // Esc handling for the lightbox + overlay cascade is owned by the Keymap.pushEsc
   // stack now: each open*() pushes its close*() and each close*() pops it. The
   // listener below still handles arrow keys / +/-/0 / B / Z / F / G while the
@@ -48,7 +59,7 @@ document.addEventListener('keydown', function(e) {
   // The outgoing photo is still visible while the incoming source decodes.
   // Suppress photo-targeted shortcuts until the visible identity commits so
   // ratings, edits, and zoom operations cannot affect a hidden photo.
-  if (_lbVisualTransitionPending && e.key !== 'Escape') {
+  if (lbState.visualTransitionPending && e.key !== 'Escape') {
     e.preventDefault();
     e.stopImmediatePropagation();
     return;
@@ -68,7 +79,7 @@ document.addEventListener('keydown', function(e) {
       return;
     }
   }
-  var boxesKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.toggle_boxes) || 'b';
+  var boxesKey = (navbarState.shortcuts && navbarState.shortcuts.browse && navbarState.shortcuts.browse.toggle_boxes) || 'b';
   if (matchesShortcut(e, boxesKey)) {
     if (!_lbKeyTargetEditable(e.target)) {
       toggleLightboxBoxes();
@@ -80,7 +91,7 @@ document.addEventListener('keydown', function(e) {
   // Presence check: `''` means the migration blanked this to avoid stealing
   // an existing user binding on 'h'. Only fall back to the 'h' default when
   // the key is genuinely absent from config (shortcuts not yet loaded).
-  var browseSc = window._vireoShortcuts && window._vireoShortcuts.browse;
+  var browseSc = navbarState.shortcuts && navbarState.shortcuts.browse;
   var uiKey = browseSc && 'toggle_ui' in browseSc ? browseSc.toggle_ui : 'h';
   if (matchesShortcut(e, uiKey)) {
     if (!_lbKeyTargetEditable(e.target)) {
@@ -90,7 +101,7 @@ document.addEventListener('keydown', function(e) {
       return;
     }
   }
-  var zoomKey = (window._vireoShortcuts && window._vireoShortcuts.browse) ? window._vireoShortcuts.browse.zoom : 'z';
+  var zoomKey = (navbarState.shortcuts && navbarState.shortcuts.browse) ? navbarState.shortcuts.browse.zoom : 'z';
   if (matchesShortcut(e, zoomKey) && !_lbKeyTargetEditable(e.target)) {
     // Zoom toggle — simulate a click in the center
     var wrap = document.getElementById('lightboxWrap'); if (!wrap) return;
@@ -112,9 +123,9 @@ document.addEventListener('keydown', function(e) {
   // user rebindings to combos like Ctrl+P still match — matchesShortcut
   // already enforces the exact modifier set the binding declares.
   if (!editable) {
-    var flagKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.flag) || 'p';
-    var rejectKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.reject) || 'x';
-    var unflagKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.unflag) || 'u';
+    var flagKey = (navbarState.shortcuts && navbarState.shortcuts.browse && navbarState.shortcuts.browse.flag) || 'p';
+    var rejectKey = (navbarState.shortcuts && navbarState.shortcuts.browse && navbarState.shortcuts.browse.reject) || 'x';
+    var unflagKey = (navbarState.shortcuts && navbarState.shortcuts.browse && navbarState.shortcuts.browse.unflag) || 'u';
     /** @type {LightboxFlag | null} */ var lbFlag = null;
     if (matchesShortcut(e, flagKey)) lbFlag = 'flagged';
     else if (matchesShortcut(e, rejectKey)) lbFlag = 'rejected';
@@ -151,10 +162,11 @@ document.addEventListener('keydown', function(e) {
       e.stopImmediatePropagation();
     }
   }
-});
+}
 
 /* ---------- Ctrl+Tab / Ctrl+Shift+Tab — cycle navbar tabs ---------- */
-document.addEventListener('keydown', function(e) {
+/** @param {KeyboardEvent} e */
+function cycleNavTabs(e) {
   if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey) return;
   e.preventDefault();
   var navLinks = Array.from(/** @type {NodeListOf<HTMLAnchorElement>} */ (document.querySelectorAll('#navTabStrip .nav-tab[href]')));
@@ -166,18 +178,26 @@ document.addEventListener('keydown', function(e) {
   var dir = e.shiftKey ? -1 : 1;
   var next = (activeIdx + dir + navLinks.length) % navLinks.length;
   var link = navLinks[next]; if (link) window.location.href = link.href;
-});
+}
+
+// The lightbox's keys and Ctrl+Tab tab cycling. Bound by navbar-boot.js last
+// among the navbar's document keydown listeners, the classic scripts' order:
+// the lightbox handler stops propagation for the keys it takes.
+export function bindLightboxKeyboard() {
+  document.addEventListener('keydown', onLightboxKeydown);
+  document.addEventListener('keydown', cycleNavTabs);
+}
 
 /* ---------- Keyboard Shortcut Helpers (global) ---------- */
-/** @param {string} str */ function parseShortcut(str) {
+/** @param {string} str */ export function parseShortcut(str) {
   var parts = str.toLowerCase().split('+');
-  var key = parts.pop();
+  var key = /** @type {string} */ (parts.pop());
   var mods = {ctrl: false, meta: false, shift: false, alt: false};
   parts.forEach(function(m) { if (m === 'ctrl' || m === 'meta' || m === 'shift' || m === 'alt') mods[m] = true; });
   return {key: key, ctrl: mods.ctrl, meta: mods.meta, shift: mods.shift, alt: mods.alt};
 }
 
-function matchesShortcut(/** @type {KeyboardEvent} */ e, /** @type {string | undefined} */ shortcutStr) {
+export function matchesShortcut(/** @type {KeyboardEvent} */ e, /** @type {string | undefined} */ shortcutStr) {
   if (!shortcutStr) return false;
   var sc = parseShortcut(shortcutStr);
   if (e.key.toLowerCase() !== sc.key) return false;
@@ -189,7 +209,7 @@ function matchesShortcut(/** @type {KeyboardEvent} */ e, /** @type {string | und
   return true;
 }
 
-/** @param {string} str */ function formatShortcut(str) {
+/** @param {string} str */ export function formatShortcut(str) {
   if (!str) return 'Unassigned';
   return str.split('+').map(function(p) {
     if (p === ' ') return 'Space';

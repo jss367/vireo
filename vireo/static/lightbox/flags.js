@@ -1,11 +1,17 @@
+import { lbState } from './shared-state.js';
+import {
+  _lbConfirmedFlags, _lbFlagPendingByPhoto, _lbProvisionalFlagSeq, _lbProvisionalFlags,
+  vireoLightboxSession,
+} from './state.js';
+import { safeFetch } from '../navbar-shared-helpers.js';
 
-/** @returns {LightboxFlag | null} */ function _lbNormalizeFlag(/** @type {unknown} */ flag) {
+/** @returns {LightboxFlag | null} */ export function _lbNormalizeFlag(/** @type {unknown} */ flag) {
   if (flag === 'flagged' || flag === 'rejected' || flag === 'none') return flag;
   if (flag == null || flag === '') return 'none';
   return null;
 }
 
-function _lbSetFlagStatus(/** @type {unknown} */ flag) {
+export function _lbSetFlagStatus(/** @type {unknown} */ flag) {
   var normalized = typeof flag === 'undefined' ? null : _lbNormalizeFlag(flag);
   var flagBtn = document.getElementById('lightboxFlagBtn');
   var rejectBtn = document.getElementById('lightboxRejectBtn');
@@ -45,23 +51,23 @@ function _lbSetPendingFlagStatus(/** @type {LightboxFlag} */ flag) {
 }
 
 function _lbFlagFromPhotoList(/** @type {number | null} */ photoId) {
-  var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  var p = lbState.photoList.find(function(x) { return x.id === photoId; });
   if (!p || !Object.prototype.hasOwnProperty.call(p, 'flag')) return undefined;
   return p.flag;
 }
 
-function _lbRememberConfirmedFlag(/** @type {number | null} */ photoId, /** @type {unknown} */ flag) {
+export function _lbRememberConfirmedFlag(/** @type {number | null} */ photoId, /** @type {unknown} */ flag) {
   const normalized = _lbNormalizeFlag(flag);
   if (!normalized || photoId == null) return;
   _lbConfirmedFlags[String(photoId)] = normalized;
 }
 
-function _lbForgetConfirmedFlag(/** @type {number | null} */ photoId) {
+export function _lbForgetConfirmedFlag(/** @type {number | null} */ photoId) {
   if (photoId == null) return;
   delete _lbConfirmedFlags[String(photoId)];
 }
 
-function _lbConfirmedFlagFor(/** @type {number | null} */ photoId) {
+export function _lbConfirmedFlagFor(/** @type {number | null} */ photoId) {
   var key = String(photoId);
   if (Object.prototype.hasOwnProperty.call(_lbConfirmedFlags, key)) {
     return _lbConfirmedFlags[key];
@@ -69,7 +75,7 @@ function _lbConfirmedFlagFor(/** @type {number | null} */ photoId) {
   return _lbFlagFromPhotoList(photoId);
 }
 
-function _lbDisplayedFlagFor(/** @type {number | null} */ photoId) {
+export function _lbDisplayedFlagFor(/** @type {number | null} */ photoId) {
   var key = String(photoId);
   if (Object.prototype.hasOwnProperty.call(_lbProvisionalFlags, key)) {
     return _lbProvisionalFlags[key];
@@ -77,25 +83,25 @@ function _lbDisplayedFlagFor(/** @type {number | null} */ photoId) {
   return _lbConfirmedFlagFor(photoId);
 }
 
-window.setLightboxProvisionalFlag = function(photoId, flag, editSeq) {
+/** @type {LightboxApi['setLightboxProvisionalFlag']} */ export function setLightboxProvisionalFlag(photoId, flag, editSeq) {
   const normalized = _lbNormalizeFlag(flag);
   if (photoId == null || !normalized) return;
   var key = String(photoId);
-  var seq = typeof editSeq === 'number' && Number.isInteger(editSeq) ? editSeq : (_lbFlagEditSeq + 1);
+  var seq = typeof editSeq === 'number' && Number.isInteger(editSeq) ? editSeq : (lbState.flagEditSeq + 1);
   if (seq < (_lbProvisionalFlagSeq[key] || 0)) return;
-  _lbFlagEditSeq = Math.max(_lbFlagEditSeq, seq);
+  lbState.flagEditSeq = Math.max(lbState.flagEditSeq, seq);
   _lbProvisionalFlags[key] = normalized;
   _lbProvisionalFlagSeq[key] = seq;
   if (vireoLightboxSession.requestedPhotoId() === Number(photoId)) {
     _lbSetFlagStatus(normalized);
   }
-};
+}
 
 // A page that stages flag edits can clear its lightbox-only provisional
 // display when the staging session ends. Forget the confirmed memo too so
 // the page's now-authoritative photo list (persisted on Apply, unchanged on
 // discard) supplies the next visible value.
-window.clearLightboxProvisionalFlags = function(photoIds) {
+/** @type {LightboxApi['clearLightboxProvisionalFlags']} */ export function clearLightboxProvisionalFlags(photoIds) {
   (photoIds || []).forEach(function(photoId) {
     delete _lbProvisionalFlags[String(photoId)];
     delete _lbProvisionalFlagSeq[String(photoId)];
@@ -106,15 +112,15 @@ window.clearLightboxProvisionalFlags = function(photoIds) {
   })) {
     _lbSetFlagStatus(_lbDisplayedFlagFor(vireoLightboxSession.requestedPhotoId()));
   }
-};
+}
 
-function _lbRecordFlag(/** @type {number | null} */ photoId, /** @type {unknown} */ flag) {
+export function _lbRecordFlag(/** @type {number | null} */ photoId, /** @type {unknown} */ flag) {
   const normalized = _lbNormalizeFlag(flag);
   if (!normalized) return;
-  var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  var p = lbState.photoList.find(function(x) { return x.id === photoId; });
   if (p) p.flag = normalized;
   _lbRememberConfirmedFlag(photoId, normalized);
-  if (vireoLightboxSession.requestedPhotoId() === photoId && !_lbVisualTransitionPending) {
+  if (vireoLightboxSession.requestedPhotoId() === photoId && !lbState.visualTransitionPending) {
     _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
   }
 }
@@ -122,23 +128,23 @@ function _lbRecordFlag(/** @type {number | null} */ photoId, /** @type {unknown}
 function _lbCacheFlag(/** @type {number} */ photoId, /** @type {unknown} */ flag) {
   const normalized = _lbNormalizeFlag(flag);
   if (!normalized) return;
-  var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  var p = lbState.photoList.find(function(x) { return x.id === photoId; });
   if (p) p.flag = normalized;
   _lbRememberConfirmedFlag(photoId, normalized);
 }
 
-function _lbRecordFetchedFlag(/** @type {number} */ photoId, /** @type {unknown} */ flag, /** @type {number} */ flagFetchSeq) {
-  if (_lbFlagEditSeq !== flagFetchSeq) return;
+export function _lbRecordFetchedFlag(/** @type {number} */ photoId, /** @type {unknown} */ flag, /** @type {number} */ flagFetchSeq) {
+  if (lbState.flagEditSeq !== flagFetchSeq) return;
   _lbRecordFlag(photoId, flag);
 }
 
-function _lbApplyFlag(/** @type {number | null} */ photoId, /** @type {unknown} */ flag) {
+export function _lbApplyFlag(/** @type {number | null} */ photoId, /** @type {unknown} */ flag) {
   const normalized = _lbNormalizeFlag(flag);
   if (!normalized || photoId == null) return false;
   var previousFlag = _lbNormalizeFlag(_lbConfirmedFlagFor(photoId)) || 'none';
-  var seq = _lbFlagEditSeq + 1;
-  _lbFlagEditSeq = seq;
-  _lbFlagPendingWrites += 1;
+  var seq = lbState.flagEditSeq + 1;
+  lbState.flagEditSeq = seq;
+  lbState.flagPendingWrites += 1;
   _lbFlagPendingByPhoto[photoId] = (_lbFlagPendingByPhoto[photoId] || 0) + 1;
   _lbSetPendingFlagStatus(normalized);
   var write;
@@ -146,8 +152,8 @@ function _lbApplyFlag(/** @type {number | null} */ photoId, /** @type {unknown} 
   var setFlagFor = Vireo.pageHook('setFlagFor') || Vireo.pageHook('setReviewFlag');
   if (setFlagFor) {
     write = /** @type {Promise<boolean | void | {provisional: boolean}>} */ (setFlagFor(photoId, normalized));
-  } else if (typeof window.safeFetch === 'function') {
-    write = window.safeFetch('/api/photos/' + photoId + '/flag', {
+  } else if (typeof safeFetch === 'function') {
+    write = safeFetch('/api/photos/' + photoId + '/flag', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({flag: normalized}),
     }, { toast: false }).then(function() { return true; }).catch(function() { return false; });
@@ -169,14 +175,14 @@ function _lbApplyFlag(/** @type {number | null} */ photoId, /** @type {unknown} 
       result && typeof result === 'object' && result.provisional === true
     );
     var landed = result !== false && !provisional;
-    _lbFlagPendingWrites = Math.max(0, _lbFlagPendingWrites - 1);
+    lbState.flagPendingWrites = Math.max(0, lbState.flagPendingWrites - 1);
     var remaining = (_lbFlagPendingByPhoto[photoId] || 1) - 1;
     if (remaining > 0) _lbFlagPendingByPhoto[photoId] = remaining;
     else delete _lbFlagPendingByPhoto[photoId];
 
     if (provisional) {
-      window.setLightboxProvisionalFlag(photoId, normalized, seq);
-      if (vireoLightboxSession.requestedPhotoId() === photoId && (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0)) {
+      setLightboxProvisionalFlag(photoId, normalized, seq);
+      if (vireoLightboxSession.requestedPhotoId() === photoId && (lbState.flagEditSeq === seq || lbState.flagPendingWrites === 0)) {
         _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
       }
     } else if (landed) {
@@ -188,10 +194,10 @@ function _lbApplyFlag(/** @type {number | null} */ photoId, /** @type {unknown} 
       // Cache the confirmed flag even if the user has navigated away, so the
       // quiescence emit below reflects what actually landed for this photo.
       _lbCacheFlag(photoId, normalized);
-      if (vireoLightboxSession.requestedPhotoId() === photoId && (_lbFlagEditSeq === seq || _lbFlagPendingWrites === 0)) {
+      if (vireoLightboxSession.requestedPhotoId() === photoId && (lbState.flagEditSeq === seq || lbState.flagPendingWrites === 0)) {
         _lbSetFlagStatus(_lbDisplayedFlagFor(photoId));
       }
-    } else if (vireoLightboxSession.requestedPhotoId() === photoId && _lbFlagEditSeq === seq) {
+    } else if (vireoLightboxSession.requestedPhotoId() === photoId && lbState.flagEditSeq === seq) {
       // Write failed: the prior confirmed flag stands; restore the chip to it.
       _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
     }

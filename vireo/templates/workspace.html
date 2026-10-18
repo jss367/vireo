@@ -166,8 +166,8 @@
   </div>
 </div>
 
-<script src="/static/vireo-work-locally.js"></script>
-<script src="/static/workspace-deletion.js"></script>
+<script defer src="/static/vireo-work-locally.js"></script>
+<script defer src="/static/workspace-deletion.js"></script>
 <script>
 
 /* ---------- Subject Types ---------- */
@@ -208,12 +208,12 @@ document.getElementById('saveSubjectTypesBtn').addEventListener('click', async f
 });
 
 /* Set workspace name in page heading */
-safeFetch('/api/workspaces/active', {}, { toast: false }).then(function(ws) {
+document.addEventListener('DOMContentLoaded', () => safeFetch('/api/workspaces/active', {}, { toast: false }).then(function(ws) {
   if (ws && ws.name) {
     var el = document.getElementById('wsPageName');
     if (el) el.textContent = ws.name;
   }
-}).catch(function() {});
+}).catch(function() {}));
 
 /* ---------- Folders ---------- */
 var _wsFoldersById = {};
@@ -553,10 +553,10 @@ async function doMoveFolders() {
   }
 }
 
-loadWsFolders();
-loadHistory();
-loadWorkspaces();
-loadSubjectTypes();
+document.addEventListener('DOMContentLoaded', function() { loadWsFolders(); });
+document.addEventListener('DOMContentLoaded', function() { loadHistory(); });
+document.addEventListener('DOMContentLoaded', function() { loadWorkspaces(); });
+document.addEventListener('DOMContentLoaded', function() { loadSubjectTypes(); });
 
 </script>
 </body>

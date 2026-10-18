@@ -1,3 +1,18 @@
+import { navbarState } from './navbar-state.js';
+import { lbState } from './lightbox/shared-state.js';
+import { vireoResolveNavigationHref } from './navbar-tabs.js';
+import { vireoWorkspaceSwitcher } from './navbar-workspace-switcher-init.js';
+import { _lbPhotoDataByPhoto, vireoLightboxSession } from './lightbox/state.js';
+import { _lbRenderLifeListPanel } from './lightbox/curation.js';
+import { _lbApplyFlag, _lbRecordFlag } from './lightbox/flags.js';
+import {
+  _lbRefreshEditRecipeCache, _lbRenderKeywords, lightboxNav, openLightbox,
+} from './lightbox/navigation.js';
+import { closeLightbox } from './lightbox/controls.js';
+import { lightboxDelete } from './lightbox/delete.js';
+import { findSimilar } from './navbar-similar-photos.js';
+import { openRescanModal } from './navbar-folder-banners.js';
+
 /* ---------- Persisted navbar controls ---------- */
 // vireo-utils.js is loaded before the navbar markup, so its load-time
 // restoreAll() found none of the navbar's [data-view-preference] controls
@@ -7,15 +22,13 @@
 VireoViewPreferences.restoreAll(document);
 
 /* ---------- Toast Notifications ---------- */
-(function() {
-  var container = document.createElement('div');
-  container.id = 'toastContainer';
-  container.style.cssText = 'position:fixed;top:16px;right:16px;z-index:100000;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
-  document.body.appendChild(container);
-})();
+var container = document.createElement('div');
+container.id = 'toastContainer';
+container.style.cssText = 'position:fixed;top:16px;right:16px;z-index:100000;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
+document.body.appendChild(container);
 
 /** @param {string} msg @param {string} [type] */
-function showToast(msg, type) {
+export function showToast(msg, type) {
   /** @type {Record<string,string>} */ var colors = {
     success: 'var(--success)',
     info: 'var(--info)',
@@ -56,7 +69,7 @@ function showToast(msg, type) {
 // OS browser via openExternal (tauri-bridge.js) and prevent the dead in-app
 // navigation. Use on <a> tags as: onclick="return openExternalLink(event, this.href)".
 /** @param {Event} event @param {string} url */
-function openExternalLink(event, url) {
+export function openExternalLink(event, url) {
   if (event) event.preventDefault();
   if (typeof openExternalWithRecovery !== 'function') {
     showToast('Could not open link: ' + url, 'error');
@@ -66,10 +79,24 @@ function openExternalLink(event, url) {
   return false;
 }
 
+/**
+ * Route every `a[data-external-link]` under root through openExternalLink.
+ * Markup the navbar builds marks its external links this way instead of
+ * carrying an inline onclick.
+ * @param {ParentNode} root
+ */
+export function bindExternalLinks(root) {
+  root.querySelectorAll('a[data-external-link]').forEach(function(link) {
+    link.addEventListener('click', function(event) {
+      openExternalLink(event, /** @type {HTMLAnchorElement} */ (link).href);
+    });
+  });
+}
+
 /* ---------- Safe Fetch ---------- */
 /** @template [T=unknown] @param {RequestInfo | URL} url @param {RequestInit} [opts]
  * @param {{toast?: boolean}} [options] @returns {Promise<T>} */
-async function safeFetch(url, opts, options) {
+export async function safeFetch(url, opts, options) {
   var api = window.Vireo && window.Vireo.api;
   if (!api) throw new Error('Browser transport is unavailable');
   return api.json(url, opts, options);
@@ -100,7 +127,7 @@ function revealFeedbackMessage(data) {
 }
 
 /** @param {NavRevealResult | null | undefined} data */
-function showRevealFeedback(data) {
+export function showRevealFeedback(data) {
   var isError = data && data.ok === false;
   var msg = revealFeedbackMessage(data);
   if (typeof showToast === 'function') showToast(msg, isError ? 'error' : 'success');
@@ -110,7 +137,7 @@ function showRevealFeedback(data) {
 
 /** @param {string} path */
 function nativeMenuRoute(path) {
-  window.location.href = window.vireoResolveNavigationHref(path);
+  window.location.href = vireoResolveNavigationHref(path);
 }
 
 function nativeMenuLightboxOpen() {
@@ -118,11 +145,11 @@ function nativeMenuLightboxOpen() {
   return !!(overlay && overlay.classList.contains('active'));
 }
 
-function nativeMenuActivePhotoIds() {
+export function nativeMenuActivePhotoIds() {
   if (nativeMenuLightboxOpen()) {
     // Navigation advances the internal id before the incoming bitmap is
     // visible. Do not let native Photo menu commands target that hidden photo.
-    if (typeof _lbVisualTransitionPending !== 'undefined' && _lbVisualTransitionPending) {
+    if (typeof lbState.visualTransitionPending !== 'undefined' && lbState.visualTransitionPending) {
       return [];
     }
     if (typeof vireoLightboxSession === 'undefined' || vireoLightboxSession.requestedPhotoId() == null) {
@@ -167,7 +194,7 @@ async function nativeMenuBatch(endpoint, payload, success) {
   if (success) nativeMenuInfo(success);
 }
 
-function nativeMenuOpenLightbox() {
+export function nativeMenuOpenLightbox() {
   var openBrowseShortcutPhoto = Vireo.pageHook('openBrowseShortcutPhoto');
   if (openBrowseShortcutPhoto && openBrowseShortcutPhoto(false)) return;
   const ids = nativeMenuRequirePhotos('Open in Lightbox');
@@ -189,7 +216,7 @@ function nativeMenuOpenLightbox() {
   nativeMenuError('Open in Lightbox is available from photo grids.');
 }
 
-function nativeMenuOpenBrowse() {
+export function nativeMenuOpenBrowse() {
   var ids = nativeMenuRequirePhotos('Open in Browse');
   if (!ids) return;
   if (ids.length !== 1) {
@@ -214,8 +241,8 @@ function nativeMenuPhotoIdsForWrite() {
 }
 
 /** @param {number[]} ids */
-function nativeMenuSetPhotoIdsOverride(ids) {
-  window._vireoNativeMenuPhotoIdsOverride = ids ? ids.slice() : null;
+export function nativeMenuSetPhotoIdsOverride(ids) {
+  navbarState.nativeMenuPhotoIdsOverride = ids ? ids.slice() : null;
 }
 
 function nativeMenuCloseLightboxForModal() {
@@ -225,7 +252,7 @@ function nativeMenuCloseLightboxForModal() {
 }
 
 /** @param {number} rating */
-async function nativeMenuSetRating(rating) {
+export async function nativeMenuSetRating(rating) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
   var setRatingFor = Vireo.pageHook('setRatingFor');
@@ -253,7 +280,7 @@ async function nativeMenuSetRating(rating) {
 }
 
 /** @param {VireoHookFlag} flag */
-async function nativeMenuSetFlag(flag) {
+export async function nativeMenuSetFlag(flag) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
   var setReviewFlag = Vireo.pageHook('setReviewFlag');
@@ -280,7 +307,7 @@ async function nativeMenuSetFlag(flag) {
 }
 
 /** @param {boolean} excluded */
-async function nativeMenuSetWildlifeExcluded(excluded) {
+export async function nativeMenuSetWildlifeExcluded(excluded) {
   var ids = nativeMenuPhotoIdsForWrite();
   if (!ids) return;
   var setWildlifeExcludedFor = Vireo.pageHook('setWildlifeExcludedFor');
@@ -298,7 +325,7 @@ async function nativeMenuSetWildlifeExcluded(excluded) {
     return false;
   }
   if (typeof vireoLightboxSession !== 'undefined' && ids.indexOf(vireoLightboxSession.requestedPhotoId() ?? -1) !== -1) {
-    _lbCurrentWildlifeExcluded = excluded;
+    lbState.currentWildlifeExcluded = excluded;
   }
   nativeMenuInfo(excluded ? 'Excluded from wildlife classification' : 'Marked as wildlife');
 }
@@ -384,7 +411,7 @@ async function nativeMenuCancelCurrentJob() {
   });
   var target = inWorkspace[0];
   if (!target) return;
-  var name = window.formatJobType ? window.formatJobType(target.type) : (target.type || 'job');
+  var name = formatJobType ? formatJobType(target.type) : (target.type || 'job');
   await safeFetch('/api/jobs/' + target.id + '/cancel', {method: 'POST'});
   nativeMenuInfo('Cancel requested: ' + name);
 }
@@ -587,18 +614,18 @@ async function nativeMenuReviewOrToolCommand(command) {
   return true;
 }
 
-window.handleNativeMenuCommand = async function(command) {
+/** @type {NavbarApi['handleNativeMenuCommand']} */ export async function handleNativeMenuCommand(command) {
   try {
     switch (command) {
       case 'find':
         window.VireoPageFind?.open();
         break;
       case 'new_workspace':
-        if (window.vireoWorkspaceSwitcher) vireoWorkspaceSwitcher.showCreate();
+        if (vireoWorkspaceSwitcher) vireoWorkspaceSwitcher.showCreate();
         else nativeMenuRoute('/workspace');
         break;
       case 'open_workspace':
-        if (window.vireoWorkspaceSwitcher) vireoWorkspaceSwitcher.toggle();
+        if (vireoWorkspaceSwitcher) vireoWorkspaceSwitcher.toggle();
         else nativeMenuRoute('/workspace');
         break;
       case 'import_photos':
@@ -633,7 +660,7 @@ window.handleNativeMenuCommand = async function(command) {
   } catch (e) {
     nativeMenuError(e instanceof Error ? e.message : 'Menu command failed');
   }
-};
+}
 
 /* ---------- Open in External Editor ----------
  * Two entry points for opening photos in an external editor:
@@ -696,26 +723,26 @@ async function getExternalEditors() {
 // or an empty array if the cache hasn't been warmed yet. Pages that build
 // menus call getExternalEditors() at init so this is normally populated by
 // the time the user opens a menu.
-window.getExternalEditorsSync = function() {
+function getExternalEditorsSync() {
   return _externalEditorsCache || [];
-};
+}
 
-window.invalidateEditorsCache = function() {
+export function invalidateEditorsCache() {
   _externalEditorsCache = null;
   _externalEditorsLoading = null;
-};
+}
 
 function photoExternalEditDisabledHint() {
-  if (_lbReadOnly && typeof nativeMenuLightboxOpen === 'function' &&
+  if (lbState.readOnly && typeof nativeMenuLightboxOpen === 'function' &&
       nativeMenuLightboxOpen()) {
-    return _lbReadOnlyMessage;
+    return lbState.readOnlyMessage;
   }
   var pageHint = Vireo.pageHook('getPhotoExternalEditDisabledHint');
   return pageHint ? pageHint() : null;
 }
 
 /** @param {number[]} photoIds @param {number} [editorIndex] */
-async function openInEditor(photoIds, editorIndex) {
+export async function openInEditor(photoIds, editorIndex) {
   if (!photoIds || !photoIds.length) return;
   var disabledHint = photoExternalEditDisabledHint();
   if (disabledHint) {
@@ -740,8 +767,9 @@ async function openInEditor(photoIds, editorIndex) {
 // configured, this is a single "Open in Editor" item (backend picks default).
 // With 2+, it returns one "Open in <name>" item per editor so the user picks
 // inline without a nested submenu.
-window.buildOpenInEditorMenuItems = function(photoIds) {
-  var editors = window.getExternalEditorsSync();
+/** @type {NavbarApi['buildOpenInEditorMenuItems']} */
+export function buildOpenInEditorMenuItems(photoIds) {
+  var editors = getExternalEditorsSync();
   var disabledHint = photoExternalEditDisabledHint();
   if (editors.length > 1) {
     return editors.map(function(ed, idx) {
@@ -749,7 +777,7 @@ window.buildOpenInEditorMenuItems = function(photoIds) {
         label: 'Open in ' + ed.name,
         disabled: !!disabledHint,
         disabledHint: disabledHint || undefined,
-        onClick: function() { window.openInEditor(photoIds, idx); },
+        onClick: function() { openInEditor(photoIds, idx); },
       };
     });
   }
@@ -757,20 +785,14 @@ window.buildOpenInEditorMenuItems = function(photoIds) {
     label: 'Open in Editor',
     disabled: !!disabledHint,
     disabledHint: disabledHint || undefined,
-    onClick: function() { window.openInEditor(photoIds); },
+    onClick: function() { openInEditor(photoIds); },
   }];
-};
+}
 
 // Warm the cache so context-menu builders can render editor entries
 // synchronously the first time the user opens a menu.
-(function() {
-  var run = function() { getExternalEditors().catch(function() {}); };
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', run, { once: true });
-  } else {
-    run();
-  }
-})();
+// Module scripts run before DOMContentLoaded, so this still waits for it.
+document.addEventListener('DOMContentLoaded', function() { getExternalEditors().catch(function() {}); }, { once: true });
 
 /* ---------- Develop with darktable ----------
  * Lifted out of browse.html so review.html (burst-review modal) and any
@@ -779,7 +801,7 @@ window.buildOpenInEditorMenuItems = function(photoIds) {
  * progress via SSE.
  */
 /** @param {number[]} photoIds */
-async function developPhotos(photoIds) {
+export async function developPhotos(photoIds) {
   if (!photoIds || !photoIds.length) return;
   var disabledHint = photoExternalEditDisabledHint();
   if (disabledHint) {
@@ -831,7 +853,7 @@ async function developPhotos(photoIds) {
 // The CSS `scroll-behavior: auto` override in vireo-base.css does not reach
 // an explicit `behavior: 'smooth'` passed to scrollIntoView/scrollTo, so
 // scripted scrolls ask here instead.
-function preferredScrollBehavior() {
+export function preferredScrollBehavior() {
   return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
     ? 'auto'
     : 'smooth';
@@ -841,7 +863,7 @@ function preferredScrollBehavior() {
 // A dropped stream toasts "Connection lost" unless the caller passes
 // quietError: true because its onError shows a more specific message.
 /** @template [Progress=unknown] @template [Complete=unknown] @param {string} url @param {SafeEventSourceCallbacks<Progress, Complete>} [callbacks] */
-function safeEventSource(url, callbacks) {
+export function safeEventSource(url, callbacks) {
   callbacks = callbacks || {};
   var source = new EventSource(url);
   source.addEventListener('progress', function(e) {
@@ -865,7 +887,7 @@ function safeEventSource(url, callbacks) {
 
 /* ---------- Bottom Panel ---------- */
 /** @param {number | null | undefined} seconds */
-function formatDuration(seconds) {
+export function formatDuration(seconds) {
   if (seconds == null) return '-';
   if (seconds < 60) return seconds.toFixed(1) + 's';
   if (seconds < 3600) {
@@ -878,1046 +900,1018 @@ function formatDuration(seconds) {
   return h + 'h ' + m + 'm';
 }
 
-(function() {
-  /** @type {Record<string,number>} */ var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
-  /** @type {NavLogRecord[]} */ var lpLines = [];
-  /** @type {EventSource | null} */ var lpSource = null;
-  var lpMaxLines = 200;
-  /** @type {NavJob[]} */ var activeJobs = [];
-  /** @type {number | null} */ var _activeWsId = null;
-  var currentBpTab = 'jobs';
-  /** @type {VisiblePollHandle | null} */ var _jobPollTimer = null;
-  /** @type {VisiblePollHandle | null} */ var _navJobPollTimer = null;
+/** @type {Record<string,number>} */ var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
+/** @type {NavLogRecord[]} */ var lpLines = [];
+/** @type {EventSource | null} */ var lpSource = null;
+var lpMaxLines = 200;
+/** @type {NavJob[]} */ var activeJobs = [];
+/** @type {number | null} */ var _activeWsId = null;
+var currentBpTab = 'jobs';
+/** @type {VisiblePollHandle | null} */ var _jobPollTimer = null;
+/** @type {VisiblePollHandle | null} */ var _navJobPollTimer = null;
 
-  // Job polls pause while the window is hidden, except while a job is live:
-  // the dock/taskbar progress is read from a minimized window. (``active``
-  // also carries jobs that finished within the last hour.)
-  /** @param {number} intervalMs */
-  function startJobPoll(intervalMs) {
-    return /** @type {VisiblePoll} */ (/** @type {VireoNamespace} */ (Vireo).pollWhileVisible)(pollJobs, intervalMs, {
-      runWhileHidden: function() { return activeJobs.some(isLiveJob); },
-    });
+// Job polls pause while the window is hidden, except while a job is live:
+// the dock/taskbar progress is read from a minimized window. (``active``
+// also carries jobs that finished within the last hour.)
+/** @param {number} intervalMs */
+function startJobPoll(intervalMs) {
+  return /** @type {VisiblePoll} */ (/** @type {VireoNamespace} */ (Vireo).pollWhileVisible)(pollJobs, intervalMs, {
+    runWhileHidden: function() { return activeJobs.some(isLiveJob); },
+  });
+}
+/** @param {VisiblePollHandle | null} poll */
+function stopJobPoll(poll) {
+  if (poll) poll.stop();
+  return null;
+}
+
+/** @param {string} id */
+function runtimeWarningDismissKey(id) {
+  return 'vireo_runtime_warning_dismissed_' + String(id || '');
+}
+
+function findRuntimeWarning() {
+  for (var i = 0; i < activeJobs.length; i++) {
+    var j = activeJobs[i];
+    if (j?.status === 'running' && j.runtime_warning) return j.runtime_warning;
   }
-  /** @param {VisiblePollHandle | null} poll */
-  function stopJobPoll(poll) {
-    if (poll) poll.stop();
-    return null;
-  }
+  return null;
+}
 
-  /** @param {string} id */
-  function runtimeWarningDismissKey(id) {
-    return 'vireo_runtime_warning_dismissed_' + String(id || '');
-  }
+function updateRuntimeWarningBanner() {
+  var banner = /** @type {HTMLElement} */ (document.getElementById('runtimeWarningBanner'));
+  var text = /** @type {HTMLElement} */ (document.getElementById('runtimeWarningText'));
+  if (!banner || !text) return;
 
-  function findRuntimeWarning() {
-    for (var i = 0; i < activeJobs.length; i++) {
-      var j = activeJobs[i];
-      if (j?.status === 'running' && j.runtime_warning) return j.runtime_warning;
-    }
-    return null;
-  }
-
-  function updateRuntimeWarningBanner() {
-    var banner = /** @type {HTMLElement} */ (document.getElementById('runtimeWarningBanner'));
-    var text = /** @type {HTMLElement} */ (document.getElementById('runtimeWarningText'));
-    if (!banner || !text) return;
-
-    var warning = findRuntimeWarning();
-    if (!warning || localStorage.getItem(runtimeWarningDismissKey(warning.id)) === '1') {
-      banner.style.display = 'none';
-      banner.dataset.warningId = '';
-      return;
-    }
-
-    banner.dataset.warningId = warning.id || '';
-    text.innerHTML =
-      '<strong>' + bpEscape(warning.title || 'Using CPU only') + '.</strong> ' +
-      bpEscape(warning.message || 'This job may be much slower than expected.') +
-      ' ' + bpEscape(warning.detail || '') +
-      ' ' + bpEscape(warning.next_action || '');
-    banner.style.display = 'flex';
-  }
-
-  window.dismissRuntimeWarning = function() {
-    var banner = /** @type {HTMLElement} */ (document.getElementById('runtimeWarningBanner'));
-    if (!banner) return;
-    var id = banner.dataset.warningId || 'cpu-only-ml';
-    localStorage.setItem(runtimeWarningDismissKey(id), '1');
+  var warning = findRuntimeWarning();
+  if (!warning || localStorage.getItem(runtimeWarningDismissKey(warning.id)) === '1') {
     banner.style.display = 'none';
-    fetch('/api/jobs/runtime-warning/dismiss', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({id: id})
-    }).catch(function() {});
-  };
-
-  // Theme system
-  var THEMES = [
-    {id: 'vireo-dark', name: 'Vireo Dark', icon: '\u2600'},
-    {id: 'vireo-light', name: 'Vireo Light', icon: '\u263D'},
-    {id: 'classic-dark', name: 'Classic Dark', icon: '\u2605'},
-    {id: 'vireo-gold', name: 'Vireo Gold', icon: '\u2736'},
-    {id: 'high-contrast', name: 'High Contrast', icon: '\u25C9'},
-  ];
-
-  window.getThemeList = function() { return THEMES; };
-
-  // Restore theme on load (before init to avoid flash)
-  (function() {
-    var saved = localStorage.getItem('vireo_theme') || 'vireo-gold';
-    // Migrate old values
-    if (saved === 'dark') saved = 'vireo-dark';
-    if (saved === 'light') saved = 'vireo-light';
-    applyTheme(saved, true);
-  })();
-
-  /** @param {string} themeId @param {boolean} [skipSave] */
-  function applyTheme(themeId, skipSave) {
-    document.documentElement.setAttribute('data-theme', themeId);
-    if (!skipSave) localStorage.setItem('vireo_theme', themeId);
-    updateThemeIcon();
+    banner.dataset.warningId = '';
+    return;
   }
 
-  window.setTheme = function(themeId) {
-    applyTheme(themeId);
-  };
+  banner.dataset.warningId = warning.id || '';
+  text.innerHTML =
+    '<strong>' + bpEscape(warning.title || 'Using CPU only') + '.</strong> ' +
+    bpEscape(warning.message || 'This job may be much slower than expected.') +
+    ' ' + bpEscape(warning.detail || '') +
+    ' ' + bpEscape(warning.next_action || '');
+  banner.style.display = 'flex';
+}
 
-  window.toggleTheme = function() {
-    var current = document.documentElement.getAttribute('data-theme') || 'vireo-dark';
-    var idx = THEMES.findIndex(function(t) { return t.id === current; });
-    var next = THEMES[(idx + 1) % THEMES.length];
-    if (next) applyTheme(next.id);
-  };
+export function dismissRuntimeWarning() {
+  var banner = /** @type {HTMLElement} */ (document.getElementById('runtimeWarningBanner'));
+  if (!banner) return;
+  var id = banner.dataset.warningId || 'cpu-only-ml';
+  localStorage.setItem(runtimeWarningDismissKey(id), '1');
+  banner.style.display = 'none';
+  fetch('/api/jobs/runtime-warning/dismiss', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: id})
+  }).catch(function() {});
+}
 
-  function updateThemeIcon() {
-    var btn = /** @type {HTMLElement} */ (document.getElementById('themeToggle'));
-    if (!btn) return;
-    var current = document.documentElement.getAttribute('data-theme') || 'vireo-dark';
-    var theme = THEMES.find(function(t) { return t.id === current; }) || THEMES[0];
-    btn.textContent = theme?.icon || '';
-    btn.title = 'Theme: ' + (theme?.name || current) + ' (click to cycle)';
+// Theme system
+var THEMES = [
+  {id: 'vireo-dark', name: 'Vireo Dark', icon: '\u2600'},
+  {id: 'vireo-light', name: 'Vireo Light', icon: '\u263D'},
+  {id: 'classic-dark', name: 'Classic Dark', icon: '\u2605'},
+  {id: 'vireo-gold', name: 'Vireo Gold', icon: '\u2736'},
+  {id: 'high-contrast', name: 'High Contrast', icon: '\u25C9'},
+];
+
+export function getThemeList() { return THEMES; }
+
+// Restore theme on load (before init to avoid flash)
+(function() {
+  var saved = localStorage.getItem('vireo_theme') || 'vireo-gold';
+  // Migrate old values
+  if (saved === 'dark') saved = 'vireo-dark';
+  if (saved === 'light') saved = 'vireo-light';
+  applyTheme(saved, true);
+})();
+
+/** @param {string} themeId @param {boolean} [skipSave] */
+function applyTheme(themeId, skipSave) {
+  document.documentElement.setAttribute('data-theme', themeId);
+  if (!skipSave) localStorage.setItem('vireo_theme', themeId);
+  updateThemeIcon();
+}
+
+/** @param {string} themeId */
+export function setTheme(themeId) {
+  applyTheme(themeId);
+}
+
+export function toggleTheme() {
+  var current = document.documentElement.getAttribute('data-theme') || 'vireo-dark';
+  var idx = THEMES.findIndex(function(t) { return t.id === current; });
+  var next = THEMES[(idx + 1) % THEMES.length];
+  if (next) applyTheme(next.id);
+}
+
+function updateThemeIcon() {
+  var btn = /** @type {HTMLElement} */ (document.getElementById('themeToggle'));
+  if (!btn) return;
+  var current = document.documentElement.getAttribute('data-theme') || 'vireo-dark';
+  var theme = THEMES.find(function(t) { return t.id === current; }) || THEMES[0];
+  btn.textContent = theme?.icon || '';
+  btn.title = 'Theme: ' + (theme?.name || current) + ' (click to cycle)';
+}
+
+// Advanced mode system. Keep the old dev-mode names as aliases so pages
+// and tests that still use them continue to work.
+(function() {
+  var stored = localStorage.getItem('vireo_advanced_mode');
+  if (stored == null) stored = localStorage.getItem('vireo_dev_mode');
+  var on = stored === 'true';
+  document.documentElement.setAttribute('data-advanced-mode', on ? 'true' : 'false');
+  document.documentElement.setAttribute('data-dev-mode', on ? 'true' : 'false');
+  var btn = /** @type {HTMLElement} */ (document.getElementById('devModeToggle'));
+  if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Advanced mode: ' + (on ? 'ON' : 'OFF'); }
+})();
+
+export function isAdvancedMode() {
+  return document.documentElement.getAttribute('data-advanced-mode') === 'true';
+}
+
+export function toggleAdvancedMode() {
+  var on = !isAdvancedMode();
+  document.documentElement.setAttribute('data-advanced-mode', on ? 'true' : 'false');
+  document.documentElement.setAttribute('data-dev-mode', on ? 'true' : 'false');
+  localStorage.setItem('vireo_advanced_mode', on ? 'true' : 'false');
+  localStorage.setItem('vireo_dev_mode', on ? 'true' : 'false');
+  var btn = /** @type {HTMLElement} */ (document.getElementById('devModeToggle'));
+  if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Advanced mode: ' + (on ? 'ON' : 'OFF'); }
+  // Notify pages that may want to re-render
+  window.dispatchEvent(new Event('advancedmodechange'));
+  window.dispatchEvent(new Event('devmodechange'));
+}
+
+function init() {
+  // Restore panel state and height
+  if (localStorage.getItem('vireo_panel_open') === 'true') {
+    var savedH = parseInt(localStorage.getItem('vireo_panel_height') || '') || 240;
+    var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
+    panel.classList.add('open');
+    panel.style.height = savedH + 'px';
+    /** @type {HTMLElement} */ (document.getElementById('bottomToggle')).classList.add('open');
+    document.body.style.paddingBottom = (savedH + 28) + 'px';
+    document.body.style.setProperty('--bottom-offset', (savedH + 28) + 'px');
   }
+  var savedTab = localStorage.getItem('vireo_panel_tab') || 'jobs';
+  switchBpTab(savedTab);
 
-  // Advanced mode system. Keep the old dev-mode names as aliases so pages
-  // and tests that still use them continue to work.
-  (function() {
-    var stored = localStorage.getItem('vireo_advanced_mode');
-    if (stored == null) stored = localStorage.getItem('vireo_dev_mode');
-    var on = stored === 'true';
-    document.documentElement.setAttribute('data-advanced-mode', on ? 'true' : 'false');
-    document.documentElement.setAttribute('data-dev-mode', on ? 'true' : 'false');
-    var btn = /** @type {HTMLElement} */ (document.getElementById('devModeToggle'));
-    if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Advanced mode: ' + (on ? 'ON' : 'OFF'); }
-  })();
-
-  window.isAdvancedMode = function() {
-    return document.documentElement.getAttribute('data-advanced-mode') === 'true';
-  };
-  window.isDevMode = window.isAdvancedMode;
-
-  window.toggleAdvancedMode = function() {
-    var on = !isAdvancedMode();
-    document.documentElement.setAttribute('data-advanced-mode', on ? 'true' : 'false');
-    document.documentElement.setAttribute('data-dev-mode', on ? 'true' : 'false');
-    localStorage.setItem('vireo_advanced_mode', on ? 'true' : 'false');
-    localStorage.setItem('vireo_dev_mode', on ? 'true' : 'false');
-    var btn = /** @type {HTMLElement} */ (document.getElementById('devModeToggle'));
-    if (btn) { btn.style.opacity = on ? '1' : '0.4'; btn.title = 'Advanced mode: ' + (on ? 'ON' : 'OFF'); }
-    // Notify pages that may want to re-render
-    window.dispatchEvent(new Event('advancedmodechange'));
-    window.dispatchEvent(new Event('devmodechange'));
-  };
-  window.toggleDevMode = window.toggleAdvancedMode;
-
-  function init() {
-    // Restore panel state and height
-    if (localStorage.getItem('vireo_panel_open') === 'true') {
-      var savedH = parseInt(localStorage.getItem('vireo_panel_height') || '') || 240;
-      var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
-      panel.classList.add('open');
-      panel.style.height = savedH + 'px';
-      /** @type {HTMLElement} */ (document.getElementById('bottomToggle')).classList.add('open');
-      document.body.style.paddingBottom = (savedH + 28) + 'px';
-      document.body.style.setProperty('--bottom-offset', (savedH + 28) + 'px');
+  // Infinite scroll for history pane
+  /** @type {HTMLElement} */ (document.getElementById('bpHistoryList')).addEventListener('scroll', function() {
+    var el = this;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20) {
+      loadEditHistory(true);
     }
-    var savedTab = localStorage.getItem('vireo_panel_tab') || 'jobs';
-    switchBpTab(savedTab);
+  });
 
-    // Infinite scroll for history pane
-    /** @type {HTMLElement} */ (document.getElementById('bpHistoryList')).addEventListener('scroll', function() {
-      var el = this;
-      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20) {
-        loadEditHistory(true);
-      }
-    });
-
-    // SSE for logs — only connect when panel is open
-    var panelOpen = localStorage.getItem('vireo_panel_open') === 'true';
-    if (panelOpen) { startLogStream(); }
-    // Close SSE and stop polling immediately on link click (before unload)
-    var isInternalNav = false;
-    document.addEventListener('click', function(e) {
-      var link = /** @type {HTMLElement} */ (e.target).closest('a[href]');
-      if (link instanceof HTMLAnchorElement && !e.defaultPrevented && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey &&
-          (!e.button || e.button === 0) && link.target !== '_blank' && !link.hasAttribute('download') &&
-          link.hostname === location.hostname && !link.getAttribute('href')?.startsWith('#') &&
-          !(link.pathname === location.pathname && link.search === location.search && link.hash)) {
-        isInternalNav = true;
-        // Kill SSE and polling NOW so threads are freed for the next page
-        if (lpSource) { lpSource.close(); lpSource = null; }
-        _jobPollTimer = stopJobPoll(_jobPollTimer);
-        _navJobPollTimer = stopJobPoll(_navJobPollTimer);
-      }
-    });
-
-    window.addEventListener('beforeunload', function(e) {
-      // Save logs to sessionStorage so they persist across page navigations
-      try {
-        sessionStorage.setItem('vireo_logs', JSON.stringify(lpLines.slice(-lpMaxLines)));
-      } catch(ex) {}
+  // SSE for logs — only connect when panel is open
+  var panelOpen = localStorage.getItem('vireo_panel_open') === 'true';
+  if (panelOpen) { startLogStream(); }
+  // Close SSE and stop polling immediately on link click (before unload)
+  var isInternalNav = false;
+  document.addEventListener('click', function(e) {
+    var link = /** @type {HTMLElement} */ (e.target).closest('a[href]');
+    if (link instanceof HTMLAnchorElement && !e.defaultPrevented && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey &&
+        (!e.button || e.button === 0) && link.target !== '_blank' && !link.hasAttribute('download') &&
+        link.hostname === location.hostname && !link.getAttribute('href')?.startsWith('#') &&
+        !(link.pathname === location.pathname && link.search === location.search && link.hash)) {
+      isInternalNav = true;
+      // Kill SSE and polling NOW so threads are freed for the next page
       if (lpSource) { lpSource.close(); lpSource = null; }
-      // Only warn on actual tab close, not internal navigation
-      if (isInternalNav) { isInternalNav = false; return; }
-      // Warn on tab close when user-attention work exists, including queued
-      // or pending jobs. Ambient system jobs should not block tab close.
-      var running = activeJobs.filter(isAttentionJob);
-      if (running.length > 0) {
-        e.preventDefault();
-        e.returnValue = '';
-      }
-    });
+      _jobPollTimer = stopJobPoll(_jobPollTimer);
+      _navJobPollTimer = stopJobPoll(_navJobPollTimer);
+    }
+  });
 
-    // Restore logs from sessionStorage (persisted across page navigations)
-    /** @type {NavLogRecord[]} */ var savedLogs = [];
+  window.addEventListener('beforeunload', function(e) {
+    // Save logs to sessionStorage so they persist across page navigations
     try {
-      var raw = sessionStorage.getItem('vireo_logs');
-      if (raw) savedLogs = JSON.parse(raw);
+      sessionStorage.setItem('vireo_logs', JSON.stringify(lpLines.slice(-lpMaxLines)));
     } catch(ex) {}
-
-    if (savedLogs.length > 0) {
-      // Use saved logs and merge with any newer server logs
-      savedLogs.forEach(function(l) { addLpLine(l, true); });
-      var lastTime = savedLogs[savedLogs.length - 1]?.time || 0;
-      fetch('/api/logs/recent?count=200')
-        .then(function(r) { return r.json(); })
-        .then(function(/** @type {NavLogRecord[]} */ logs) {
-          logs.forEach(function(l) {
-            if (l.time > lastTime) addLpLine(l, true);
-          });
-          lpApplyFilter();
-        });
-    } else {
-      fetch('/api/logs/recent?count=200')
-        .then(function(r) { return r.json(); })
-        .then(function(/** @type {NavLogRecord[]} */ logs) {
-          logs.forEach(function(l) { addLpLine(l, true); });
-          lpApplyFilter();
-        });
+    if (lpSource) { lpSource.close(); lpSource = null; }
+    // Only warn on actual tab close, not internal navigation
+    if (isInternalNav) { isInternalNav = false; return; }
+    // Warn on tab close when user-attention work exists, including queued
+    // or pending jobs. Ambient system jobs should not block tab close.
+    var running = activeJobs.filter(isAttentionJob);
+    if (running.length > 0) {
+      e.preventDefault();
+      e.returnValue = '';
     }
+  });
 
-    refreshHistoryControls();
+  // Restore logs from sessionStorage (persisted across page navigations)
+  /** @type {NavLogRecord[]} */ var savedLogs = [];
+  try {
+    var raw = sessionStorage.getItem('vireo_logs');
+    if (raw) savedLogs = JSON.parse(raw);
+  } catch(ex) {}
 
-    // Always poll once for navbar badge
-    pollJobs();
-
-    // Clear any existing timers before starting new ones
-    _jobPollTimer = stopJobPoll(_jobPollTimer);
-    _navJobPollTimer = stopJobPoll(_navJobPollTimer);
-
-    if (panelOpen) {
-      // Fast poll when panel is open; no slow poll needed
-      _jobPollTimer = startJobPoll(2000);
-    } else {
-      // Slow background poll keeps navbar badge current
-      _navJobPollTimer = startJobPoll(15000);
-    }
-  }
-
-  /* ---------- Tab switching ---------- */
-  window.switchBpTab = function(tab) {
-    currentBpTab = tab;
-    var tabNames = ['jobs', 'history', 'logs'];
-    /** @type {Record<string,string>} */ var paneIds = {'jobs': 'bpJobs', 'history': 'bpHistory', 'logs': 'bpLogs'};
-    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.bp-tab')).forEach(function(t, i) {
-      t.classList.toggle('active', tabNames[i] === tab);
-    });
-    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.bp-pane')).forEach(function(p) {
-      p.classList.toggle('active', p.id === paneIds[tab]);
-    });
-    localStorage.setItem('vireo_panel_tab', tab);
-    if (tab === 'history') loadEditHistory();
-  };
-
-  /* ---------- History tab ---------- */
-  var _historySessionCount = 0;
-  var _historyLoadSeq = 0;
-  var _historyAppendPending = false;
-
-  /** @param {boolean} [append] */
-  function loadEditHistory(append) {
-    if (append && _historyAppendPending) return;
-    if (!append) { _historyLoadSeq++; _historyAppendPending = false; }
-    var sequence = _historyLoadSeq;
-    var list = /** @type {HTMLElement} */ (document.getElementById('bpHistoryList'));
-    if (!list) return;
-    _historyAppendPending = true;
-    var offset = append ? /** @type {NodeListOf<HTMLElement>} */ (list.querySelectorAll('.bp-history-row')).length : 0;
-    /** @type {Promise<NavHistoryEntry[]>} */ var historyPromise = safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false});
-    /** @type {Promise<NavHistoryStatus | null>} */ var redoPromise = !append ? /** @type {Promise<NavHistoryStatus>} */ (safeFetch('/api/redo/status', {}, {toast: false})).catch(function() { return null; }) : Promise.resolve(null);
-    /** @type {Promise<NavHistoryStatus>} */ var undoPromise = safeFetch('/api/undo/status', {}, {toast: false});
-    Promise.all([historyPromise, redoPromise, undoPromise])
-      .then(function(results) {
-        if (sequence !== _historyLoadSeq) return;
-        var data = results[0];
-        var redoStatus = results[1];
-        if (!append) list.innerHTML = '';
-        // Show redo banner if there's something to redo
-        if (!append && redoStatus && redoStatus.available) {
-          var redoRow = document.createElement('div');
-          redoRow.className = 'bp-history-redo';
-          redoRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border-subtle);color:var(--text-muted);font-style:italic;';
-          redoRow.innerHTML = '<span style="opacity:0.5;min-width:70px;">redo</span>'
-            + '<span style="min-width:16px;text-align:center;">\u21B6</span>'
-            + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(redoStatus.description) + '</span>'
-            + '<button onclick="doRedo(this)" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px;">Redo</button>';
-          list.appendChild(redoRow);
-        }
-        if (!data || data.length === 0) {
-          if (!append && !/** @type {HTMLElement | null} */ (list.querySelector('.bp-history-redo'))) list.innerHTML = '<div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>';
-          return;
-        }
-        data.forEach(function(entry) {
-          if (list.querySelector('[data-edit-id="' + entry.id + '"]')) return;
-          var row = document.createElement('div');
-          row.className = 'bp-history-row';
-          row.dataset.editId = String(entry.id);
-          row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border-subtle);';
-
-          var icon = entry.action_type === 'rating' ? '\u2605' :
-                     entry.action_type === 'flag' ? '\u2691' : '\uD83C\uDFF7';
-
-          var ago = _timeAgo(entry.created_at);
-          var isFirst = results[2] && entry.id === results[2].id;
-
-          row.innerHTML = '<span style="opacity:0.5;min-width:70px;">' + ago + '</span>'
-            + '<span style="min-width:16px;text-align:center;">' + icon + '</span>'
-            + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(entry.description) + '</span>'
-            + (isFirst ? '<button onclick="doUndo(this)" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px;">Undo</button>'
-                       : '');
-          list.appendChild(row);
+  if (savedLogs.length > 0) {
+    // Use saved logs and merge with any newer server logs
+    savedLogs.forEach(function(l) { addLpLine(l, true); });
+    var lastTime = savedLogs[savedLogs.length - 1]?.time || 0;
+    fetch('/api/logs/recent?count=200')
+      .then(function(r) { return r.json(); })
+      .then(function(/** @type {NavLogRecord[]} */ logs) {
+        logs.forEach(function(l) {
+          if (l.time > lastTime) addLpLine(l, true);
         });
-      })
-      .catch(function() {}).finally(function() {
-        if (sequence === _historyLoadSeq) _historyAppendPending = false;
+        lpApplyFilter();
+      });
+  } else {
+    fetch('/api/logs/recent?count=200')
+      .then(function(r) { return r.json(); })
+      .then(function(/** @type {NavLogRecord[]} */ logs) {
+        logs.forEach(function(l) { addLpLine(l, true); });
+        lpApplyFilter();
       });
   }
 
-  /** @param {unknown} s */
-  function _escapeHtml(s) {
-    if (typeof escapeHtml === 'function') return escapeHtml(s);
-    var d = document.createElement('div');
-    d.textContent = String(s ?? '');
-    return d.innerHTML;
+  refreshHistoryControls();
+
+  // Always poll once for navbar badge
+  pollJobs();
+
+  // Clear any existing timers before starting new ones
+  _jobPollTimer = stopJobPoll(_jobPollTimer);
+  _navJobPollTimer = stopJobPoll(_navJobPollTimer);
+
+  if (panelOpen) {
+    // Fast poll when panel is open; no slow poll needed
+    _jobPollTimer = startJobPoll(2000);
+  } else {
+    // Slow background poll keeps navbar badge current
+    _navJobPollTimer = startJobPoll(15000);
   }
+}
 
-  var historyBusy = false;
-  var historyPendingWrites = 0;
-  var historyStatusSeq = 0;
-  /** @type {{undo: NavHistoryStatus; redo: NavHistoryStatus}} */ var historyStatus = {undo: {available: false}, redo: {available: false}};
+/* ---------- Tab switching ---------- */
+/** @param {string} tab */
+export function switchBpTab(tab) {
+  currentBpTab = tab;
+  var tabNames = ['jobs', 'history', 'logs'];
+  /** @type {Record<string,string>} */ var paneIds = {'jobs': 'bpJobs', 'history': 'bpHistory', 'logs': 'bpLogs'};
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.bp-tab')).forEach(function(t, i) {
+    t.classList.toggle('active', tabNames[i] === tab);
+  });
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.bp-pane')).forEach(function(p) {
+    p.classList.toggle('active', p.id === paneIds[tab]);
+  });
+  localStorage.setItem('vireo_panel_tab', tab);
+  if (tab === 'history') loadEditHistory();
+}
 
-  /** @param {VireoHistoryOperation} operation @returns {NavHistoryStatus | null} */
-  function localHistoryStatus(operation) {
-    var pageStatus = Vireo.pageHook('localHistoryStatus');
-    return pageStatus ? pageStatus(operation) : null;
-  }
+/* ---------- History tab ---------- */
+var _historySessionCount = 0;
+var _historyLoadSeq = 0;
+var _historyAppendPending = false;
 
-  function renderHistoryControls() {
-    var blocked = historyBusy || historyPendingWrites > 0;
-    /** @type {VireoHistoryOperation[]} */ (['undo', 'redo']).forEach(function(operation) {
-      var button = /** @type {HTMLButtonElement} */ (document.getElementById(operation === 'undo' ? 'historyUndoBtn' : 'historyRedoBtn'));
-      var status = localHistoryStatus(operation) || historyStatus[operation === 'undo' ? 'undo' : 'redo'];
-      button.disabled = blocked || !status.available;
-      var label = operation === 'undo' ? 'Undo' : 'Redo';
-      button.title = status.available ? label + ': ' + status.description : 'Nothing to ' + operation;
-      var modifier = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
-      button.title += ' (' + modifier + (operation === 'undo' ? 'Z' : 'Shift+Z') + ')';
-      button.setAttribute('aria-label', button.title);
-      button.setAttribute('aria-keyshortcuts', operation === 'undo' ? 'Control+z Meta+z' : 'Control+Shift+z Meta+Shift+z');
+/** @param {boolean} [append] */
+function loadEditHistory(append) {
+  if (append && _historyAppendPending) return;
+  if (!append) { _historyLoadSeq++; _historyAppendPending = false; }
+  var sequence = _historyLoadSeq;
+  var list = /** @type {HTMLElement} */ (document.getElementById('bpHistoryList'));
+  if (!list) return;
+  _historyAppendPending = true;
+  var offset = append ? /** @type {NodeListOf<HTMLElement>} */ (list.querySelectorAll('.bp-history-row')).length : 0;
+  /** @type {Promise<NavHistoryEntry[]>} */ var historyPromise = safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false});
+  /** @type {Promise<NavHistoryStatus | null>} */ var redoPromise = !append ? /** @type {Promise<NavHistoryStatus>} */ (safeFetch('/api/redo/status', {}, {toast: false})).catch(function() { return null; }) : Promise.resolve(null);
+  /** @type {Promise<NavHistoryStatus>} */ var undoPromise = safeFetch('/api/undo/status', {}, {toast: false});
+  Promise.all([historyPromise, redoPromise, undoPromise])
+    .then(function(results) {
+      if (sequence !== _historyLoadSeq) return;
+      var data = results[0];
+      var redoStatus = results[1];
+      if (!append) list.innerHTML = '';
+      // Show redo banner if there's something to redo
+      if (!append && redoStatus && redoStatus.available) {
+        var redoRow = document.createElement('div');
+        redoRow.className = 'bp-history-redo';
+        redoRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border-subtle);color:var(--text-muted);font-style:italic;';
+        redoRow.innerHTML = '<span style="opacity:0.5;min-width:70px;">redo</span>'
+          + '<span style="min-width:16px;text-align:center;">\u21B6</span>'
+          + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(redoStatus.description) + '</span>'
+          + '<button type="button" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px;">Redo</button>';
+        /** @type {HTMLButtonElement} */ (redoRow.querySelector('button')).addEventListener('click', function() {
+          doRedo(/** @type {HTMLButtonElement} */ (this));
+        });
+        list.appendChild(redoRow);
+      }
+      if (!data || data.length === 0) {
+        if (!append && !/** @type {HTMLElement | null} */ (list.querySelector('.bp-history-redo'))) list.innerHTML = '<div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>';
+        return;
+      }
+      data.forEach(function(entry) {
+        if (list.querySelector('[data-edit-id="' + entry.id + '"]')) return;
+        var row = document.createElement('div');
+        row.className = 'bp-history-row';
+        row.dataset.editId = String(entry.id);
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border-subtle);';
+
+        var icon = entry.action_type === 'rating' ? '\u2605' :
+                   entry.action_type === 'flag' ? '\u2691' : '\uD83C\uDFF7';
+
+        var ago = _timeAgo(entry.created_at);
+        var isFirst = results[2] && entry.id === results[2].id;
+
+        row.innerHTML = '<span style="opacity:0.5;min-width:70px;">' + ago + '</span>'
+          + '<span style="min-width:16px;text-align:center;">' + icon + '</span>'
+          + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(entry.description) + '</span>'
+          + (isFirst ? '<button type="button" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px;">Undo</button>'
+                     : '');
+        var undoButton = /** @type {HTMLButtonElement | null} */ (row.querySelector('button'));
+        if (undoButton) undoButton.addEventListener('click', function() { doUndo(/** @type {HTMLButtonElement} */ (this)); });
+        list.appendChild(row);
+      });
+    })
+    .catch(function() {}).finally(function() {
+      if (sequence === _historyLoadSeq) _historyAppendPending = false;
     });
-    var status = localHistoryStatus('undo') || historyStatus.undo;
-    /** @type {HTMLElement} */ (document.getElementById('undoMsg')).textContent = historyBusy ? 'Updating…' : (status.description || '');
-    /** @type {HTMLElement} */ (document.getElementById('undoToast')).setAttribute('aria-busy', String(blocked));
-  }
+}
 
-  function refreshHistoryControls() {
-    var seq = ++historyStatusSeq;
-    return Promise.all([
-      /** @type {Promise<NavHistoryStatus>} */ (safeFetch('/api/undo/status', {}, {toast: false})),
-      /** @type {Promise<NavHistoryStatus>} */ (safeFetch('/api/redo/status', {}, {toast: false}))
-    ]).then(function(results) {
-      if (seq !== historyStatusSeq) return;
-      historyStatus = {undo: results[0], redo: results[1]};
-      renderHistoryControls();
-    }).catch(function() {
-      // Keep the last known action retryable after a transient status failure.
-      if (seq === historyStatusSeq) renderHistoryControls();
-    });
-  }
-  window.refreshHistoryControls = refreshHistoryControls;
-  // Local editor steps change synchronously and need no server status poll.
-  window.renderHistoryControls = renderHistoryControls;
-  window.addEventListener('focus', refreshHistoryControls);
-  window.vireoHistoryBusy = function() { return historyBusy; };
+/** @param {unknown} s */
+function _escapeHtml(s) {
+  if (typeof escapeHtml === 'function') return escapeHtml(s);
+  var d = document.createElement('div');
+  d.textContent = String(s ?? '');
+  return d.innerHTML;
+}
 
-  /** @param {VireoHistoryOperation} operation @param {HTMLButtonElement} [btn] */
-  async function changeHistory(operation, btn) {
-    if (historyBusy || historyPendingWrites) return false;
-    var changeLocalHistory = Vireo.pageHook('changeLocalHistory');
-    if (changeLocalHistory) {
-      var localResult = changeLocalHistory(operation);
-      if (localResult !== null) return localResult;
-    }
-    var beforeHistoryChange = Vireo.pageHook('beforeHistoryChange');
-    if (beforeHistoryChange && beforeHistoryChange() === false) return false;
-    historyBusy = true;
-    document.dispatchEvent(new CustomEvent('vireo:edit-history-busy', {detail: {busy: true}}));
-    if (btn) btn.disabled = true;
+var historyBusy = false;
+var historyPendingWrites = 0;
+var historyStatusSeq = 0;
+/** @type {{undo: NavHistoryStatus; redo: NavHistoryStatus}} */ var historyStatus = {undo: {available: false}, redo: {available: false}};
+
+/** @param {VireoHistoryOperation} operation @returns {NavHistoryStatus | null} */
+function localHistoryStatus(operation) {
+  var pageStatus = Vireo.pageHook('localHistoryStatus');
+  return pageStatus ? pageStatus(operation) : null;
+}
+
+export function renderHistoryControls() {
+  var blocked = historyBusy || historyPendingWrites > 0;
+  /** @type {VireoHistoryOperation[]} */ (['undo', 'redo']).forEach(function(operation) {
+    var button = /** @type {HTMLButtonElement} */ (document.getElementById(operation === 'undo' ? 'historyUndoBtn' : 'historyRedoBtn'));
+    var status = localHistoryStatus(operation) || historyStatus[operation === 'undo' ? 'undo' : 'redo'];
+    button.disabled = blocked || !status.available;
+    var label = operation === 'undo' ? 'Undo' : 'Redo';
+    button.title = status.available ? label + ': ' + status.description : 'Nothing to ' + operation;
+    var modifier = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
+    button.title += ' (' + modifier + (operation === 'undo' ? 'Z' : 'Shift+Z') + ')';
+    button.setAttribute('aria-label', button.title);
+    button.setAttribute('aria-keyshortcuts', operation === 'undo' ? 'Control+z Meta+z' : 'Control+Shift+z Meta+Shift+z');
+  });
+  var status = localHistoryStatus('undo') || historyStatus.undo;
+  /** @type {HTMLElement} */ (document.getElementById('undoMsg')).textContent = historyBusy ? 'Updating…' : (status.description || '');
+  /** @type {HTMLElement} */ (document.getElementById('undoToast')).setAttribute('aria-busy', String(blocked));
+}
+
+function refreshHistoryControls() {
+  var seq = ++historyStatusSeq;
+  return Promise.all([
+    /** @type {Promise<NavHistoryStatus>} */ (safeFetch('/api/undo/status', {}, {toast: false})),
+    /** @type {Promise<NavHistoryStatus>} */ (safeFetch('/api/redo/status', {}, {toast: false}))
+  ]).then(function(results) {
+    if (seq !== historyStatusSeq) return;
+    historyStatus = {undo: results[0], redo: results[1]};
     renderHistoryControls();
-    try {
-      /** @type {NavHistoryChange} */ var data = await safeFetch('/api/' + operation, {method: 'POST'});
-      if (!data || !data.ok) return false;
-      _lbRefreshEditRecipeCache(data.edit_recipes);
-      // Invalidate older in-flight lightbox flag reads before refreshing it.
-      _lbFlagEditSeq++;
-      var description = data[operation === 'undo' ? 'undone' : 'redone'];
-      showToast((operation === 'undo' ? 'Undone: ' : 'Redone: ') + description, 'success');
-      _historySessionCount = Math.max(0, _historySessionCount + (operation === 'undo' ? -1 : 1));
-      /** @type {HTMLElement} */ (document.getElementById('historyBadge')).textContent = String(_historySessionCount || '');
-      loadEditHistory();
-      document.dispatchEvent(new CustomEvent('vireo:edit-history-changed', {
-        detail: { operation: operation, result: data }
-      }));
-      var afterHistoryChange = Vireo.pageHook('afterHistoryChange');
-      if (afterHistoryChange) {
-        try { await afterHistoryChange(data); }
-        catch (e) { showToast('The edit was saved, but the view could not refresh. Reload to see the current state.', 'error'); }
-      }
-      await refreshHistoryLightbox();
-      return true;
-    } catch (e) {
-      // safeFetch reports the error. The server retains the history entry.
-      return false;
-    } finally {
-      await refreshHistoryControls();
-      historyBusy = false;
-      document.dispatchEvent(new CustomEvent('vireo:edit-history-busy', {detail: {busy: false}}));
-      if (btn) btn.disabled = false;
+  }).catch(function() {
+    // Keep the last known action retryable after a transient status failure.
+    if (seq === historyStatusSeq) renderHistoryControls();
+  });
+}
+// Local editor steps change synchronously and need no server status poll.
+window.addEventListener('focus', refreshHistoryControls);
+export function vireoHistoryBusy() { return historyBusy; }
+
+/** @param {VireoHistoryOperation} operation @param {HTMLButtonElement} [btn] */
+async function changeHistory(operation, btn) {
+  if (historyBusy || historyPendingWrites) return false;
+  var changeLocalHistory = Vireo.pageHook('changeLocalHistory');
+  if (changeLocalHistory) {
+    var localResult = changeLocalHistory(operation);
+    if (localResult !== null) return localResult;
+  }
+  var beforeHistoryChange = Vireo.pageHook('beforeHistoryChange');
+  if (beforeHistoryChange && beforeHistoryChange() === false) return false;
+  historyBusy = true;
+  document.dispatchEvent(new CustomEvent('vireo:edit-history-busy', {detail: {busy: true}}));
+  if (btn) btn.disabled = true;
+  renderHistoryControls();
+  try {
+    /** @type {NavHistoryChange} */ var data = await safeFetch('/api/' + operation, {method: 'POST'});
+    if (!data || !data.ok) return false;
+    _lbRefreshEditRecipeCache(data.edit_recipes);
+    // Invalidate older in-flight lightbox flag reads before refreshing it.
+    lbState.flagEditSeq++;
+    var description = data[operation === 'undo' ? 'undone' : 'redone'];
+    showToast((operation === 'undo' ? 'Undone: ' : 'Redone: ') + description, 'success');
+    _historySessionCount = Math.max(0, _historySessionCount + (operation === 'undo' ? -1 : 1));
+    /** @type {HTMLElement} */ (document.getElementById('historyBadge')).textContent = String(_historySessionCount || '');
+    loadEditHistory();
+    document.dispatchEvent(new CustomEvent('vireo:edit-history-changed', {
+      detail: { operation: operation, result: data }
+    }));
+    var afterHistoryChange = Vireo.pageHook('afterHistoryChange');
+    if (afterHistoryChange) {
+      try { await afterHistoryChange(data); }
+      catch (e) { showToast('The edit was saved, but the view could not refresh. Reload to see the current state.', 'error'); }
+    }
+    await refreshHistoryLightbox();
+    return true;
+  } catch (e) {
+    // safeFetch reports the error. The server retains the history entry.
+    return false;
+  } finally {
+    await refreshHistoryControls();
+    historyBusy = false;
+    document.dispatchEvent(new CustomEvent('vireo:edit-history-busy', {detail: {busy: false}}));
+    if (btn) btn.disabled = false;
+    renderHistoryControls();
+  }
+}
+
+async function refreshHistoryLightbox() {
+  var photoId = vireoLightboxSession.requestedPhotoId();
+  var openToken = vireoLightboxSession.capture();
+  if (photoId == null || !/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) return;
+  try {
+    /** @type {NavPhoto} */ var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
+    if (!vireoLightboxSession.isCurrent(openToken)) return;
+    _lbPhotoDataByPhoto[photoId] = photo;
+    _lbRecordFlag(photoId, photo.flag);
+    _lbRenderKeywords(photo.keywords);
+    _lbRenderLifeListPanel(photoId);
+  } catch (e) {
+    showToast('The edit was saved, but the photo details could not refresh. Reopen the photo to see its current state.', 'error');
+  }
+}
+
+/** @param {HTMLButtonElement} [btn] */
+export function doUndo(btn) { return changeHistory('undo', btn); }
+/** @param {HTMLButtonElement} [btn] */
+export function doRedo(btn) { return changeHistory('redo', btn); }
+
+// Browse keeps its configurable shortcut bindings; fields retain native
+// text undo, and staged modal edits must not undo the catalog behind them.
+Keymap.register('global', {name: 'undo_history', key: 'ctrl+z', action: function(e) {
+  return historyShortcut(e, 'undo');
+}});
+Keymap.register('global', {name: 'redo_history', key: 'ctrl+shift+z', action: function(e) {
+  return historyShortcut(e, 'redo');
+}});
+/** @param {Event} e @param {VireoHistoryOperation} operation */
+function historyShortcut(e, operation) {
+  if (location.pathname === '/browse' || location.pathname.indexOf('/edit') === 0) return false;
+  if (/** @type {HTMLElement | null} */ (document.querySelector('.modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active, .folder-browser-overlay.open, .shortcuts-overlay.open'))) return false;
+  e.stopImmediatePropagation();
+  changeHistory(operation);
+  return true;
+}
+
+
+function _bumpHistoryBadge() {
+  _historySessionCount++;
+  var badge = /** @type {HTMLElement} */ (document.getElementById('historyBadge'));
+  if (badge) badge.textContent = String(_historySessionCount);
+  if (currentBpTab === 'history') loadEditHistory();
+}
+
+// Track at the shared transport so fetch, Request objects, and safeFetch
+// all participate in the same pending-write guard exactly once.
+/** @type {VireoApi} */ (/** @type {VireoNamespace} */ (Vireo).api).trackHistoryRequest = function(input, opts, send) {
+  var url = input instanceof Request ? input.url : String(input);
+  var method = (opts && opts.method) || (input instanceof Request ? input.method : 'GET');
+  var mutation = /^(POST|PUT|PATCH|DELETE)$/i.test(method);
+  var historyWrite = mutation && /\/(rating|flag|color_label|keywords|edit-recipe|batch\/|predictions\/|culling\/|misses\/reject|highlights\/(confirm|relabel)|species\/label-cluster|encounters\/species|sync\/discard|pipeline\/(detach-|group\/apply|save-cache)|photos\/\d+\/(wildlife_excluded|location))/.test(url);
+  if (historyWrite && historyBusy) {
+    /** @type {Error & {code?: string}} */ var error = new Error('Undo or redo is still finishing — try again in a moment');
+    error.code = 'history_busy';
+    showToast(error.message, 'warning');
+    return Promise.reject(error);
+  }
+  if (historyWrite) { historyPendingWrites++; renderHistoryControls(); }
+  return Promise.resolve().then(send).then(function(response) {
+    if (historyWrite && response.ok) _bumpHistoryBadge();
+    return response;
+  }).finally(function() {
+    if (historyWrite) {
+      historyPendingWrites--;
+      refreshHistoryControls();
       renderHistoryControls();
     }
+  });
+};
+
+/** @param {string | undefined} isoStr */
+function _timeAgo(isoStr) {
+  var d = new Date(isoStr + 'Z');
+  var now = new Date();
+  var sec = Math.floor((now.getTime() - d.getTime()) / 1000);
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+  return d.toLocaleDateString();
+}
+
+export function toggleBottomPanel() {
+  var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
+  var toggle = /** @type {HTMLElement} */ (document.getElementById('bottomToggle'));
+  panel.classList.add('animating');
+  panel.classList.toggle('open');
+  toggle.classList.toggle('open');
+  var isOpen = panel.classList.contains('open');
+  localStorage.setItem('vireo_panel_open', String(isOpen));
+  var h = isOpen ? (parseInt(localStorage.getItem('vireo_panel_height') || '') || 240) : 0;
+  panel.style.height = h + 'px';
+  var newPad = isOpen ? (h + 28) + 'px' : '28px';
+  document.body.style.paddingBottom = newPad;
+  document.body.style.setProperty('--bottom-offset', newPad);
+  // Start/stop SSE and polling based on panel visibility
+  if (isOpen) {
+    startLogStream();
+    // Fast poll while panel open; pause slow nav poll to avoid double-polling
+    _navJobPollTimer = stopJobPoll(_navJobPollTimer);
+    if (!_jobPollTimer) { pollJobs(); _jobPollTimer = startJobPoll(2000); }
+  } else {
+    stopLogStream();
+    _jobPollTimer = stopJobPoll(_jobPollTimer);
+    // Resume slow poll for navbar badge
+    if (!_navJobPollTimer) { _navJobPollTimer = startJobPoll(15000); }
   }
+  setTimeout(function() { panel.classList.remove('animating'); }, 200);
+}
 
-  async function refreshHistoryLightbox() {
-    var photoId = vireoLightboxSession.requestedPhotoId();
-    var openToken = vireoLightboxSession.capture();
-    if (photoId == null || !/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) return;
-    try {
-      /** @type {NavPhoto} */ var photo = await safeFetch('/api/photos/' + photoId, {}, {toast: false});
-      if (!vireoLightboxSession.isCurrent(openToken)) return;
-      _lbPhotoDataByPhoto[photoId] = photo;
-      _lbRecordFlag(photoId, photo.flag);
-      _lbRenderKeywords(photo.keywords);
-      _lbRenderLifeListPanel(photoId);
-    } catch (e) {
-      showToast('The edit was saved, but the photo details could not refresh. Reopen the photo to see its current state.', 'error');
-    }
+/* ---------- Panel drag resize ---------- */
+(function() {
+  var handle = /** @type {HTMLElement} */ (document.getElementById('bpDragHandle'));
+  var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
+  var dragging = false;
+  var startY = 0, startH = 0;
+
+  handle.addEventListener('mousedown', function(e) {
+    dragging = true;
+    startY = e.clientY;
+    startH = panel.offsetHeight;
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    var newH = Math.max(100, Math.min(window.innerHeight - 100, startH + (startY - e.clientY)));
+    panel.style.height = newH + 'px';
+    document.body.style.paddingBottom = (newH + 28) + 'px';
+    document.body.style.setProperty('--bottom-offset', (newH + 28) + 'px');
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    localStorage.setItem('vireo_panel_height', String(panel.offsetHeight));
+  });
+})();
+
+/* ---------- Log stream lifecycle ---------- */
+function startLogStream() {
+  if (lpSource) return;
+  lpSource = new EventSource('/api/logs/stream');
+  lpSource.addEventListener('log', function(e) {
+    try { addLpLine(JSON.parse(e.data)); } catch(ex) { /* ignore malformed SSE data */ }
+  });
+}
+
+function stopLogStream() {
+  if (lpSource) { lpSource.close(); lpSource = null; }
+}
+
+/* ---------- Jobs polling ---------- */
+// Pages signal job completion via this event so activeJobs stays current
+window.addEventListener('vireo-job-done', function(e) {
+  refreshHistoryControls();
+  var jobId = /** @type {CustomEvent<{job_id?: string}>} */ (e).detail?.job_id;
+  if (jobId) {
+    activeJobs = activeJobs.filter(function(j) { return j.id !== jobId; });
+    renderJobs();
+    updateSummary();
+    updateActivityDot();
+    updateDockProgress();
+    updateRuntimeWarningBanner();
   }
+});
 
-  window.doUndo = function(btn) { return changeHistory('undo', btn); };
-  window.doRedo = function(btn) { return changeHistory('redo', btn); };
-
-  // Browse keeps its configurable shortcut bindings; fields retain native
-  // text undo, and staged modal edits must not undo the catalog behind them.
-  Keymap.register('global', {name: 'undo_history', key: 'ctrl+z', action: function(e) {
-    return historyShortcut(e, 'undo');
-  }});
-  Keymap.register('global', {name: 'redo_history', key: 'ctrl+shift+z', action: function(e) {
-    return historyShortcut(e, 'redo');
-  }});
-  /** @param {Event} e @param {VireoHistoryOperation} operation */
-  function historyShortcut(e, operation) {
-    if (location.pathname === '/browse' || location.pathname.indexOf('/edit') === 0) return false;
-    if (/** @type {HTMLElement | null} */ (document.querySelector('.modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active, .folder-browser-overlay.open, .shortcuts-overlay.open'))) return false;
-    e.stopImmediatePropagation();
-    changeHistory(operation);
-    return true;
-  }
-
-  /** @param {{action_type?: string; edit_recipes?: {photo_id: number; recipe?: NavRecipe | null}[]}} data */
-  function _refreshEditRecipeHistoryChanges(data) {
-    if (!data || data.action_type !== 'edit_recipe' || !Array.isArray(data.edit_recipes)) return;
-    /** @type {number[]} */ var photoIds = [];
-    data.edit_recipes.forEach(function(update) {
-      if (!update || update.photo_id == null) return;
-      var photoId = Number(update.photo_id);
-      if (!Number.isFinite(photoId)) return;
-      photoIds.push(photoId);
-      _lbMarkEditRecipeWrite(photoId);
-      _lbRememberEditRecipe(photoId, update.recipe);
-      const cachedPhoto = _lbPhotoDataByPhoto[photoId];
-      if (cachedPhoto) {
-        cachedPhoto.edit_recipe = update.recipe || null;
-      }
-      _vireoBumpRenderVersion(photoId);
-    });
-    if (!photoIds.length) return;
-    if (typeof window.vireoRefreshPhotoRenders === 'function') {
-      window.vireoRefreshPhotoRenders(photoIds);
-    }
-    if (vireoLightboxSession.requestedPhotoId() != null && photoIds.indexOf(Number(vireoLightboxSession.requestedPhotoId())) !== -1) {
-      _lbReloadCurrentRenderAfterEdit(Number(vireoLightboxSession.requestedPhotoId()));
-    }
-  }
-
-  function _bumpHistoryBadge() {
-    _historySessionCount++;
-    var badge = /** @type {HTMLElement} */ (document.getElementById('historyBadge'));
-    if (badge) badge.textContent = String(_historySessionCount);
-    if (currentBpTab === 'history') loadEditHistory();
-  }
-
-  // Track at the shared transport so fetch, Request objects, and safeFetch
-  // all participate in the same pending-write guard exactly once.
-  /** @type {VireoApi} */ (/** @type {VireoNamespace} */ (Vireo).api).trackHistoryRequest = function(input, opts, send) {
-    var url = input instanceof Request ? input.url : String(input);
-    var method = (opts && opts.method) || (input instanceof Request ? input.method : 'GET');
-    var mutation = /^(POST|PUT|PATCH|DELETE)$/i.test(method);
-    var historyWrite = mutation && /\/(rating|flag|color_label|keywords|edit-recipe|batch\/|predictions\/|culling\/|misses\/reject|highlights\/(confirm|relabel)|species\/label-cluster|encounters\/species|sync\/discard|pipeline\/(detach-|group\/apply|save-cache)|photos\/\d+\/(wildlife_excluded|location))/.test(url);
-    if (historyWrite && historyBusy) {
-      /** @type {Error & {code?: string}} */ var error = new Error('Undo or redo is still finishing — try again in a moment');
-      error.code = 'history_busy';
-      showToast(error.message, 'warning');
-      return Promise.reject(error);
-    }
-    if (historyWrite) { historyPendingWrites++; renderHistoryControls(); }
-    return Promise.resolve().then(send).then(function(response) {
-      if (historyWrite && response.ok) _bumpHistoryBadge();
-      return response;
-    }).finally(function() {
-      if (historyWrite) {
-        historyPendingWrites--;
-        refreshHistoryControls();
-        renderHistoryControls();
-      }
-    });
-  };
-
-  /** @param {string | undefined} isoStr */
-  function _timeAgo(isoStr) {
-    var d = new Date(isoStr + 'Z');
-    var now = new Date();
-    var sec = Math.floor((now.getTime() - d.getTime()) / 1000);
-    if (sec < 60) return 'just now';
-    if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
-    if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
-    return d.toLocaleDateString();
-  }
-
-  window.toggleBottomPanel = function() {
-    var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
-    var toggle = /** @type {HTMLElement} */ (document.getElementById('bottomToggle'));
-    panel.classList.add('animating');
-    panel.classList.toggle('open');
-    toggle.classList.toggle('open');
-    var isOpen = panel.classList.contains('open');
-    localStorage.setItem('vireo_panel_open', String(isOpen));
-    var h = isOpen ? (parseInt(localStorage.getItem('vireo_panel_height') || '') || 240) : 0;
-    panel.style.height = h + 'px';
-    var newPad = isOpen ? (h + 28) + 'px' : '28px';
-    document.body.style.paddingBottom = newPad;
-    document.body.style.setProperty('--bottom-offset', newPad);
-    // Start/stop SSE and polling based on panel visibility
-    if (isOpen) {
-      startLogStream();
-      // Fast poll while panel open; pause slow nav poll to avoid double-polling
-      _navJobPollTimer = stopJobPoll(_navJobPollTimer);
-      if (!_jobPollTimer) { pollJobs(); _jobPollTimer = startJobPoll(2000); }
-    } else {
-      stopLogStream();
-      _jobPollTimer = stopJobPoll(_jobPollTimer);
-      // Resume slow poll for navbar badge
-      if (!_navJobPollTimer) { _navJobPollTimer = startJobPoll(15000); }
-    }
-    setTimeout(function() { panel.classList.remove('animating'); }, 200);
-  };
-
-  /* ---------- Panel drag resize ---------- */
-  (function() {
-    var handle = /** @type {HTMLElement} */ (document.getElementById('bpDragHandle'));
-    var panel = /** @type {HTMLElement} */ (document.getElementById('bottomPanel'));
-    var dragging = false;
-    var startY = 0, startH = 0;
-
-    handle.addEventListener('mousedown', function(e) {
-      dragging = true;
-      startY = e.clientY;
-      startH = panel.offsetHeight;
-      handle.classList.add('dragging');
-      document.body.style.userSelect = 'none';
-      e.preventDefault();
-    });
-
-    document.addEventListener('mousemove', function(e) {
-      if (!dragging) return;
-      var newH = Math.max(100, Math.min(window.innerHeight - 100, startH + (startY - e.clientY)));
-      panel.style.height = newH + 'px';
-      document.body.style.paddingBottom = (newH + 28) + 'px';
-      document.body.style.setProperty('--bottom-offset', (newH + 28) + 'px');
-    });
-
-    document.addEventListener('mouseup', function() {
-      if (!dragging) return;
-      dragging = false;
-      handle.classList.remove('dragging');
-      document.body.style.userSelect = '';
-      localStorage.setItem('vireo_panel_height', String(panel.offsetHeight));
-    });
-  })();
-
-  /* ---------- Log stream lifecycle ---------- */
-  function startLogStream() {
-    if (lpSource) return;
-    lpSource = new EventSource('/api/logs/stream');
-    lpSource.addEventListener('log', function(e) {
-      try { addLpLine(JSON.parse(e.data)); } catch(ex) { /* ignore malformed SSE data */ }
-    });
-  }
-
-  function stopLogStream() {
-    if (lpSource) { lpSource.close(); lpSource = null; }
-  }
-
-  /* ---------- Jobs polling ---------- */
-  // Pages signal job completion via this event so activeJobs stays current
-  window.addEventListener('vireo-job-done', function(e) {
-    refreshHistoryControls();
-    var jobId = /** @type {CustomEvent<{job_id?: string}>} */ (e).detail?.job_id;
-    if (jobId) {
-      activeJobs = activeJobs.filter(function(j) { return j.id !== jobId; });
+function pollJobs() {
+  fetch('/api/jobs')
+    .then(function(r) { return r.json(); })
+    .then(function(/** @type {NavJobsPayload} */ data) {
+      // Import tags and other worker edits commit after their start request
+      // returns. Reconcile even if a short job finished between two polls.
+      refreshHistoryControls();
+      activeJobs = data.active || [];
+      _activeWsId = data.active_workspace_id || null;
       renderJobs();
       updateSummary();
       updateActivityDot();
       updateDockProgress();
       updateRuntimeWarningBanner();
-    }
+    })
+    .catch(function() {});
+}
+
+// Show OS-level progress on the dock/taskbar icon for the longest-running
+// job so users can see progress when the window is minimized. No-op outside
+// Tauri. With multiple concurrent jobs we pick the one that started first
+// (earliest started_at); phases without a known total pulse instead.
+/** @type {{state: string | null; value: number | null}} */ var _lastDockProgress = { state: null, value: -1 };
+/** @param {NavProgress | null | undefined} progress */
+function bpActiveProgress(progress) {
+  if (!progress) return null;
+  if (typeof progress.phase_current === 'number' && Number(progress.phase_total) > 0) {
+    return {
+      current: progress.phase_current,
+      total: Number(progress.phase_total),
+      label: progress.phase_label || progress.phase || 'Current phase',
+      phase: true,
+    };
+  }
+  if (Number(progress.total) > 0) {
+    return {
+      current: progress.current || 0,
+      total: Number(progress.total),
+      label: 'Overall',
+      phase: false,
+    };
+  }
+  return null;
+}
+
+/** @param {{current: number; total: number} | null} info */
+function bpProgressPct(info) {
+  if (!info || !info.total) return 0;
+  return Math.max(0, Math.min(100, Math.round((info.current / info.total) * 100)));
+}
+
+function updateDockProgress() {
+  if (!window.__TAURI_INTERNALS__) return;
+  var running = activeJobs.filter(function(j) {
+    return j.status === 'running' && countsForBadge(j);
   });
-
-  function pollJobs() {
-    fetch('/api/jobs')
-      .then(function(r) { return r.json(); })
-      .then(function(/** @type {NavJobsPayload} */ data) {
-        // Import tags and other worker edits commit after their start request
-        // returns. Reconcile even if a short job finished between two polls.
-        refreshHistoryControls();
-        activeJobs = data.active || [];
-        _activeWsId = data.active_workspace_id || null;
-        renderJobs();
-        updateSummary();
-        updateActivityDot();
-        updateDockProgress();
-        updateRuntimeWarningBanner();
-      })
-      .catch(function() {});
-  }
-
-  // Show OS-level progress on the dock/taskbar icon for the longest-running
-  // job so users can see progress when the window is minimized. No-op outside
-  // Tauri. With multiple concurrent jobs we pick the one that started first
-  // (earliest started_at); phases without a known total pulse instead.
-  /** @type {{state: string | null; value: number | null}} */ var _lastDockProgress = { state: null, value: -1 };
-  /** @param {NavProgress | null | undefined} progress */
-  function bpActiveProgress(progress) {
-    if (!progress) return null;
-    if (typeof progress.phase_current === 'number' && Number(progress.phase_total) > 0) {
-      return {
-        current: progress.phase_current,
-        total: Number(progress.phase_total),
-        label: progress.phase_label || progress.phase || 'Current phase',
-        phase: true,
-      };
+  var state, value;
+  if (running.length === 0) {
+    state = 'none'; value = null;
+  } else {
+    var longest = /** @type {NavJob} */ (running[0]);
+    for (const candidate of running.slice(1)) {
+      var a = candidate.started_at || '';
+      var b = longest.started_at || '';
+      if (a && (!b || a < b)) longest = candidate;
     }
-    if (Number(progress.total) > 0) {
-      return {
-        current: progress.current || 0,
-        total: Number(progress.total),
-        label: 'Overall',
-        phase: false,
-      };
-    }
-    return null;
-  }
-
-  /** @param {{current: number; total: number} | null} info */
-  function bpProgressPct(info) {
-    if (!info || !info.total) return 0;
-    return Math.max(0, Math.min(100, Math.round((info.current / info.total) * 100)));
-  }
-
-  function updateDockProgress() {
-    if (!window.__TAURI_INTERNALS__) return;
-    var running = activeJobs.filter(function(j) {
-      return j.status === 'running' && countsForBadge(j);
-    });
-    var state, value;
-    if (running.length === 0) {
-      state = 'none'; value = null;
-    } else {
-      var longest = /** @type {NavJob} */ (running[0]);
-      for (const candidate of running.slice(1)) {
-        var a = candidate.started_at || '';
-        var b = longest.started_at || '';
-        if (a && (!b || a < b)) longest = candidate;
-      }
-      var progressInfo = bpActiveProgress(longest.progress);
-      if (progressInfo) {
-        var pct = bpProgressPct(progressInfo);
-        state = 'normal'; value = pct;
-      } else {
-        state = 'indeterminate'; value = null;
-      }
-    }
-    if (_lastDockProgress.state === state && _lastDockProgress.value === value) return;
-    _lastDockProgress = { state: state, value: value };
-    try {
-      window.__TAURI_INTERNALS__.invoke('set_job_progress', {
-        progress: value,
-        indeterminate: state === 'indeterminate',
-      }).catch(function() {});
-    } catch (e) { /* ignore */ }
-  }
-
-  function renderJobs() {
-    var container = /** @type {HTMLElement} */ (document.getElementById('bpJobsList'));
-    // "Active" includes queued/pending work waiting behind a busy slot,
-    // not just running ones. Otherwise the bottom panel shows nothing
-    // when the user has queued work and the slot is held by a sibling
-    // pipeline — there'd be no way to find or cancel the queued run
-    // from this surface.
-    var allRunning = activeJobs.filter(isLiveJob);
-    var attentionJobs = allRunning.filter(countsForBadge);
-    // Workspace-agnostic jobs (null workspace_id — the startup backfills
-    // run over globally-shared photos) list with the current workspace's
-    // jobs: they are running for this workspace too, so filing them under
-    // "Other Workspaces" would tell the user the opposite of the truth.
-    var thisWs = allRunning.filter(function(j) {
-      return j.workspace_id == null || j.workspace_id === _activeWsId;
-    });
-    var otherWs = allRunning.filter(function(j) {
-      return j.workspace_id != null && j.workspace_id !== _activeWsId;
-    });
-
-    // Badges count attention-worthy work across workspaces. Ambient system
-    // jobs stay visible in the panel without asking for attention.
-    /** @type {HTMLElement} */ (document.getElementById('jobsBadge')).textContent = String(attentionJobs.length);
-    var navBadge = /** @type {HTMLElement} */ (document.getElementById('navJobBadge'));
-    if (navBadge) navBadge.textContent = attentionJobs.length > 0 ? ' (' + attentionJobs.length + ')' : '';
-
-    if (allRunning.length === 0) {
-      // "Last run" fallback must exclude live state — running,
-      // queued, and pending. A queued job that hasn't started is not a "last
-      // run" any more than a running one is.
-      var lastDone = activeJobs.filter(function(j) { return !isLiveJob(j); }).sort(function(a, b) {
-        return String(b.finished_at || b.created_at || '').localeCompare(String(a.finished_at || a.created_at || ''));
-      })[0];
-      if (lastDone) {
-        container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
-          bpEscape(window.formatJobType(lastDone.type)) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
-          ' <a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
-      } else {
-        container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. ' +
-          '<a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
-      }
-      return;
-    }
-
-    var html = '';
-
-    // Current workspace jobs
-    if (thisWs.length > 0) {
-      html += renderJobList(thisWs);
-    } else if (otherWs.length > 0) {
-      html += '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No jobs in this workspace.</div>';
-    }
-
-    // Other workspace jobs
-    if (otherWs.length > 0) {
-      html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-color);">';
-      html += '<div style="font-size:11px;color:var(--text-invisible);margin-bottom:4px;">Other Workspaces</div>';
-      html += '<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Jobs can be long-running, so Vireo lets you change workspaces while your jobs run. You can still view them here.</div>';
-      html += renderJobList(otherWs);
-      html += '</div>';
-    }
-
-    container.innerHTML = html;
-  }
-
-  /** @param {NavJob[]} jobs */
-  function renderJobList(jobs) {
-    var html = '';
-    jobs.forEach(function(j) {
-      var progressInfo = bpActiveProgress(j.progress);
-      var pct = progressInfo ? bpProgressPct(progressInfo) : 0;
-      var phase = j.progress && j.progress.phase ? j.progress.phase : '';
-      var detail = '';
-      if (progressInfo) {
-        detail = progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString();
-        if (pct > 0) detail += ' (' + pct + '%)';
-      }
-      // Queued/pending work gets a muted dot so the user can tell it apart
-      // from jobs actually consuming the GPU.
-      var isWaiting = isWaitingJob(j);
-      var isPaused = j.status === 'pausing' || j.status === 'paused';
-      var waitingLabel = isPaused ? j.status : 'queued';
-      var dotBg = isPaused ? 'var(--warning, #d99a24)' :
-        (isWaiting ? 'var(--text-muted)' : 'var(--accent)');
-      html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
-      html += '<span style="width:6px;height:6px;border-radius:50%;background:' + dotBg + ';flex-shrink:0;"></span>';
-      html += '<span style="font-weight:600;">' + bpEscape(window.formatJobType(j.type)) + '</span>';
-      if (isWaiting || isPaused) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
-      if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
-      if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
-      html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
-      html += '</div>';
-    });
-    return html;
-  }
-
-  function updateSummary() {
-    var summary = /** @type {HTMLElement} */ (document.getElementById('jobSummary'));
-    var liveJobs = activeJobs.filter(isLiveJob);
-    var attentionJobs = liveJobs.filter(countsForBadge);
-    var running = attentionJobs.filter(function(j) { return j.status === 'running'; });
-    var waiting = attentionJobs.filter(isWaitingJob);
-    var paused = attentionJobs.filter(function(j) {
-      return j.status === 'pausing' || j.status === 'paused';
-    });
-
-    if (running.length === 0 && waiting.length === 0 && paused.length > 0) {
-      summary.textContent = paused.length === 1
-        ? window.formatJobType(paused[0]?.type) + ' ' + paused[0]?.status
-        : paused.length + ' jobs paused';
-      summary.classList.add('idle');
-      summary.classList.remove('active');
-      return;
-    }
-
-    if (running.length === 0 && waiting.length === 0) {
-      if (liveJobs.length > 0) {
-        summary.textContent = liveJobs.length === 1
-          ? 'Background: ' + window.formatJobType(liveJobs[0]?.type)
-          : liveJobs.length + ' background jobs';
-      } else {
-        summary.textContent = 'No active jobs';
-      }
-      summary.classList.add('idle');
-      summary.classList.remove('active');
-      return;
-    }
-
-    summary.classList.remove('idle');
-
-    // When the slot is empty and only waiting jobs exist (shouldn't
-    // happen with the current scheduler — promotion is immediate on
-    // enqueue when a slot is free — but cheap to handle), render a
-    // short waiting-state line. Waiting jobs have no progress to drive
-    // the running-job render path below.
-    if (running.length === 0) {
-      summary.textContent = waiting.length === 1
-        ? 'Processing queued'
-        : waiting.length + ' processing jobs queued';
-      return;
-    }
-
-    var j = /** @type {NavJob} */ (running[0]);
-    var text = window.formatJobType(j.type);
-    if (j.progress && j.progress.phase) {
-      text += ' — ' + j.progress.phase;
-    }
-    var progressInfo = bpActiveProgress(j.progress);
+    var progressInfo = bpActiveProgress(longest.progress);
     if (progressInfo) {
       var pct = bpProgressPct(progressInfo);
-      var isBytes = j.type && j.type.indexOf('download') !== -1 && progressInfo.total > 1000000;
-      if (isBytes) {
-        text += ' ' + (progressInfo.current / (1024*1024)).toFixed(0) + '/' + (progressInfo.total / (1024*1024)).toFixed(0) + ' MB (' + pct + '%)';
-      } else {
-        text += ' ' + progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString() + ' (' + pct + '%)';
-      }
-      if ((j.progress?.rate || 0) > 0) {
-        text += ' ' + ((j.progress?.rate || 0) / (1024*1024)).toFixed(1) + ' MB/s';
-      }
-    } else if (j.progress && j.progress.current_file) {
-      text += ' ' + j.progress.current_file;
+      state = 'normal'; value = pct;
+    } else {
+      state = 'indeterminate'; value = null;
     }
-    // The "+ N more" suffix counts running siblings AND any waiting jobs
-    // so the user sees their total backlog at a glance.
-    var extras = (running.length - 1) + waiting.length;
-    if (extras > 0) {
-      text += ' + ' + extras + ' more';
+  }
+  if (_lastDockProgress.state === state && _lastDockProgress.value === value) return;
+  _lastDockProgress = { state: state, value: value };
+  try {
+    window.__TAURI_INTERNALS__.invoke('set_job_progress', {
+      progress: value,
+      indeterminate: state === 'indeterminate',
+    }).catch(function() {});
+  } catch (e) { /* ignore */ }
+}
+
+function renderJobs() {
+  var container = /** @type {HTMLElement} */ (document.getElementById('bpJobsList'));
+  // "Active" includes queued/pending work waiting behind a busy slot,
+  // not just running ones. Otherwise the bottom panel shows nothing
+  // when the user has queued work and the slot is held by a sibling
+  // pipeline — there'd be no way to find or cancel the queued run
+  // from this surface.
+  var allRunning = activeJobs.filter(isLiveJob);
+  var attentionJobs = allRunning.filter(countsForBadge);
+  // Workspace-agnostic jobs (null workspace_id — the startup backfills
+  // run over globally-shared photos) list with the current workspace's
+  // jobs: they are running for this workspace too, so filing them under
+  // "Other Workspaces" would tell the user the opposite of the truth.
+  var thisWs = allRunning.filter(function(j) {
+    return j.workspace_id == null || j.workspace_id === _activeWsId;
+  });
+  var otherWs = allRunning.filter(function(j) {
+    return j.workspace_id != null && j.workspace_id !== _activeWsId;
+  });
+
+  // Badges count attention-worthy work across workspaces. Ambient system
+  // jobs stay visible in the panel without asking for attention.
+  /** @type {HTMLElement} */ (document.getElementById('jobsBadge')).textContent = String(attentionJobs.length);
+  var navBadge = /** @type {HTMLElement} */ (document.getElementById('navJobBadge'));
+  if (navBadge) navBadge.textContent = attentionJobs.length > 0 ? ' (' + attentionJobs.length + ')' : '';
+
+  if (allRunning.length === 0) {
+    // "Last run" fallback must exclude live state — running,
+    // queued, and pending. A queued job that hasn't started is not a "last
+    // run" any more than a running one is.
+    var lastDone = activeJobs.filter(function(j) { return !isLiveJob(j); }).sort(function(a, b) {
+      return String(b.finished_at || b.created_at || '').localeCompare(String(a.finished_at || a.created_at || ''));
+    })[0];
+    if (lastDone) {
+      container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
+        bpEscape(formatJobType(lastDone.type)) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
+        ' <a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
+    } else {
+      container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. ' +
+        '<a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
     }
-    summary.textContent = text;
+    return;
   }
 
-  function updateActivityDot() {
-    // The dot signals attention-worthy work; ambient system jobs remain in
-    // the Jobs panel without lighting up the navbar.
-    var running = activeJobs.filter(isAttentionJob);
-    var dot = /** @type {HTMLElement} */ (document.getElementById('navActivityDot'));
-    if (dot) dot.classList.toggle('active', running.length > 0);
+  var html = '';
+
+  // Current workspace jobs
+  if (thisWs.length > 0) {
+    html += renderJobList(thisWs);
+  } else if (otherWs.length > 0) {
+    html += '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No jobs in this workspace.</div>';
   }
 
-  /** @param {number} secs */
-  function formatElapsed(secs) {
-    if (secs < 60) return Math.round(secs) + 's';
-    if (secs < 3600) return Math.floor(secs / 60) + 'm ' + Math.round(secs % 60) + 's';
-    return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+  // Other workspace jobs
+  if (otherWs.length > 0) {
+    html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-color);">';
+    html += '<div style="font-size:11px;color:var(--text-invisible);margin-bottom:4px;">Other Workspaces</div>';
+    html += '<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Jobs can be long-running, so Vireo lets you change workspaces while your jobs run. You can still view them here.</div>';
+    html += renderJobList(otherWs);
+    html += '</div>';
   }
 
-  /* ---------- Log lines ---------- */
-  // Live log lines arrive over SSE at the job's log rate (can be many per
-  // second for hours). Doing per-line DOM work — appending, a forced
-  // auto-scroll reflow, and a full lpApplyFilter() re-scan over every
-  // retained node — saturates the renderer main thread and freezes the UI
-  // even while the backend stays responsive. So the live (non-bulk) path
-  // only enqueues; a single requestAnimationFrame flush coalesces a whole
-  // frame's worth of lines into one append + one scroll + one count write,
-  // with the level filter read once and applied inline per new node (no
-  // O(n) re-scan). lpApplyFilter() stays for the filter <select> onchange,
-  // where a full re-scan of existing lines is genuinely required.
-  /** @type {NavLogRecord[]} */ var _lpPending = [];
-  var _lpFlushScheduled = false;
+  container.innerHTML = html;
+}
 
-  function _lpMinOrder() {
-    var sel = /** @type {HTMLSelectElement} */ (document.getElementById('lpLevelFilter'));
-    return LEVEL_ORDER[sel ? sel.value : 'DEBUG'] || 0;
-  }
-
-  /** @param {NavLogRecord} record @param {number} minOrder */
-  function _lpMakeLineEl(record, minOrder) {
-    var time = new Date(record.time * 1000);
-    var timeStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    var div = document.createElement('div');
-    div.className = 'lp-line lp-' + record.level;
-    div.dataset.level = record.level;
-    div.innerHTML = '<span class="lp-time">' + timeStr + '</span>' +
-      '<span class="lp-level">' + record.level + '</span>' +
-      bpEscape(record.message || '');
-    // Apply the active level filter to just this node — cheap, and avoids
-    // re-scanning every existing line on each new line.
-    if ((LEVEL_ORDER[record.level] || 0) < minOrder) div.style.display = 'none';
-    return div;
-  }
-
-  function _lpFlush() {
-    _lpFlushScheduled = false;
-    if (_lpPending.length === 0) return;
-    var batch = _lpPending;
-    _lpPending = [];
-    var container = /** @type {HTMLElement} */ (document.getElementById('lpContent'));
-    if (!container) return;
-    var minOrder = _lpMinOrder();
-
-    for (const record of batch) lpLines.push(record);
-    var overflow = lpLines.length - lpMaxLines;
-    if (overflow > 0) lpLines.splice(0, overflow);
-
-    // Only build nodes we'll actually keep — a single burst larger than
-    // the cap would otherwise create (and immediately discard) thousands.
-    var keepFrom = Math.max(0, batch.length - lpMaxLines);
-    var frag = document.createDocumentFragment();
-    for (const record of batch.slice(keepFrom)) {
-      frag.appendChild(_lpMakeLineEl(record, minOrder));
+/** @param {NavJob[]} jobs */
+function renderJobList(jobs) {
+  var html = '';
+  jobs.forEach(function(j) {
+    var progressInfo = bpActiveProgress(j.progress);
+    var pct = progressInfo ? bpProgressPct(progressInfo) : 0;
+    var phase = j.progress && j.progress.phase ? j.progress.phase : '';
+    var detail = '';
+    if (progressInfo) {
+      detail = progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString();
+      if (pct > 0) detail += ' (' + pct + '%)';
     }
-    container.appendChild(frag);
-    while (container.childNodes.length > lpMaxLines && container.firstChild) {
-      container.firstChild.remove();
-    }
+    // Queued/pending work gets a muted dot so the user can tell it apart
+    // from jobs actually consuming the GPU.
+    var isWaiting = isWaitingJob(j);
+    var isPaused = j.status === 'pausing' || j.status === 'paused';
+    var waitingLabel = isPaused ? j.status : 'queued';
+    var dotBg = isPaused ? 'var(--warning, #d99a24)' :
+      (isWaiting ? 'var(--text-muted)' : 'var(--accent)');
+    html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
+    html += '<span style="width:6px;height:6px;border-radius:50%;background:' + dotBg + ';flex-shrink:0;"></span>';
+    html += '<span style="font-weight:600;">' + bpEscape(formatJobType(j.type)) + '</span>';
+    if (isWaiting || isPaused) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
+    if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
+    if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
+    html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
+    html += '</div>';
+  });
+  return html;
+}
 
-    var autoScroll = /** @type {HTMLInputElement} */ (document.getElementById('lpAutoScroll'));
-    if (autoScroll && autoScroll.checked) {
-      container.scrollTop = container.scrollHeight;
+function updateSummary() {
+  var summary = /** @type {HTMLElement} */ (document.getElementById('jobSummary'));
+  var liveJobs = activeJobs.filter(isLiveJob);
+  var attentionJobs = liveJobs.filter(countsForBadge);
+  var running = attentionJobs.filter(function(j) { return j.status === 'running'; });
+  var waiting = attentionJobs.filter(isWaitingJob);
+  var paused = attentionJobs.filter(function(j) {
+    return j.status === 'pausing' || j.status === 'paused';
+  });
+
+  if (running.length === 0 && waiting.length === 0 && paused.length > 0) {
+    summary.textContent = paused.length === 1
+      ? formatJobType(paused[0]?.type) + ' ' + paused[0]?.status
+      : paused.length + ' jobs paused';
+    summary.classList.add('idle');
+    summary.classList.remove('active');
+    return;
+  }
+
+  if (running.length === 0 && waiting.length === 0) {
+    if (liveJobs.length > 0) {
+      summary.textContent = liveJobs.length === 1
+        ? 'Background: ' + formatJobType(liveJobs[0]?.type)
+        : liveJobs.length + ' background jobs';
+    } else {
+      summary.textContent = 'No active jobs';
     }
+    summary.classList.add('idle');
+    summary.classList.remove('active');
+    return;
+  }
+
+  summary.classList.remove('idle');
+
+  // When the slot is empty and only waiting jobs exist (shouldn't
+  // happen with the current scheduler — promotion is immediate on
+  // enqueue when a slot is free — but cheap to handle), render a
+  // short waiting-state line. Waiting jobs have no progress to drive
+  // the running-job render path below.
+  if (running.length === 0) {
+    summary.textContent = waiting.length === 1
+      ? 'Processing queued'
+      : waiting.length + ' processing jobs queued';
+    return;
+  }
+
+  var j = /** @type {NavJob} */ (running[0]);
+  var text = formatJobType(j.type);
+  if (j.progress && j.progress.phase) {
+    text += ' — ' + j.progress.phase;
+  }
+  var progressInfo = bpActiveProgress(j.progress);
+  if (progressInfo) {
+    var pct = bpProgressPct(progressInfo);
+    var isBytes = j.type && j.type.indexOf('download') !== -1 && progressInfo.total > 1000000;
+    if (isBytes) {
+      text += ' ' + (progressInfo.current / (1024*1024)).toFixed(0) + '/' + (progressInfo.total / (1024*1024)).toFixed(0) + ' MB (' + pct + '%)';
+    } else {
+      text += ' ' + progressInfo.current.toLocaleString() + '/' + progressInfo.total.toLocaleString() + ' (' + pct + '%)';
+    }
+    if ((j.progress?.rate || 0) > 0) {
+      text += ' ' + ((j.progress?.rate || 0) / (1024*1024)).toFixed(1) + ' MB/s';
+    }
+  } else if (j.progress && j.progress.current_file) {
+    text += ' ' + j.progress.current_file;
+  }
+  // The "+ N more" suffix counts running siblings AND any waiting jobs
+  // so the user sees their total backlog at a glance.
+  var extras = (running.length - 1) + waiting.length;
+  if (extras > 0) {
+    text += ' + ' + extras + ' more';
+  }
+  summary.textContent = text;
+}
+
+function updateActivityDot() {
+  // The dot signals attention-worthy work; ambient system jobs remain in
+  // the Jobs panel without lighting up the navbar.
+  var running = activeJobs.filter(isAttentionJob);
+  var dot = /** @type {HTMLElement} */ (document.getElementById('navActivityDot'));
+  if (dot) dot.classList.toggle('active', running.length > 0);
+}
+
+
+/* ---------- Log lines ---------- */
+// Live log lines arrive over SSE at the job's log rate (can be many per
+// second for hours). Doing per-line DOM work — appending, a forced
+// auto-scroll reflow, and a full lpApplyFilter() re-scan over every
+// retained node — saturates the renderer main thread and freezes the UI
+// even while the backend stays responsive. So the live (non-bulk) path
+// only enqueues; a single requestAnimationFrame flush coalesces a whole
+// frame's worth of lines into one append + one scroll + one count write,
+// with the level filter read once and applied inline per new node (no
+// O(n) re-scan). lpApplyFilter() stays for the filter <select> onchange,
+// where a full re-scan of existing lines is genuinely required.
+/** @type {NavLogRecord[]} */ var _lpPending = [];
+var _lpFlushScheduled = false;
+
+function _lpMinOrder() {
+  var sel = /** @type {HTMLSelectElement} */ (document.getElementById('lpLevelFilter'));
+  return LEVEL_ORDER[sel ? sel.value : 'DEBUG'] || 0;
+}
+
+/** @param {NavLogRecord} record @param {number} minOrder */
+function _lpMakeLineEl(record, minOrder) {
+  var time = new Date(record.time * 1000);
+  var timeStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  var div = document.createElement('div');
+  div.className = 'lp-line lp-' + record.level;
+  div.dataset.level = record.level;
+  div.innerHTML = '<span class="lp-time">' + timeStr + '</span>' +
+    '<span class="lp-level">' + record.level + '</span>' +
+    bpEscape(record.message || '');
+  // Apply the active level filter to just this node — cheap, and avoids
+  // re-scanning every existing line on each new line.
+  if ((LEVEL_ORDER[record.level] || 0) < minOrder) div.style.display = 'none';
+  return div;
+}
+
+function _lpFlush() {
+  _lpFlushScheduled = false;
+  if (_lpPending.length === 0) return;
+  var batch = _lpPending;
+  _lpPending = [];
+  var container = /** @type {HTMLElement} */ (document.getElementById('lpContent'));
+  if (!container) return;
+  var minOrder = _lpMinOrder();
+
+  for (const record of batch) lpLines.push(record);
+  var overflow = lpLines.length - lpMaxLines;
+  if (overflow > 0) lpLines.splice(0, overflow);
+
+  // Only build nodes we'll actually keep — a single burst larger than
+  // the cap would otherwise create (and immediately discard) thousands.
+  var keepFrom = Math.max(0, batch.length - lpMaxLines);
+  var frag = document.createDocumentFragment();
+  for (const record of batch.slice(keepFrom)) {
+    frag.appendChild(_lpMakeLineEl(record, minOrder));
+  }
+  container.appendChild(frag);
+  while (container.childNodes.length > lpMaxLines && container.firstChild) {
+    container.firstChild.remove();
+  }
+
+  var autoScroll = /** @type {HTMLInputElement} */ (document.getElementById('lpAutoScroll'));
+  if (autoScroll && autoScroll.checked) {
+    container.scrollTop = container.scrollHeight;
+  }
+  /** @type {HTMLElement} */ (document.getElementById('lpCount')).textContent = String(lpLines.length);
+  /** @type {HTMLElement} */ (document.getElementById('logsBadge')).textContent = String(lpLines.length);
+}
+
+/** @param {NavLogRecord} record @param {boolean} [bulk] */
+export function addLpLine(record, bulk) {
+  if (bulk) {
+    // Restore/backfill path: synchronous so callers that immediately
+    // run lpApplyFilter() afterwards see the final DOM. Still bounded,
+    // still no per-line scroll.
+    if (lpLines.length >= lpMaxLines) {
+      lpLines.shift();
+      var firstB = /** @type {HTMLElement} */ (document.getElementById('lpContent')).firstChild;
+      if (firstB) firstB.remove();
+    }
+    lpLines.push(record);
+    /** @type {HTMLElement} */ (document.getElementById('lpContent')).appendChild(
+      _lpMakeLineEl(record, _lpMinOrder())
+    );
     /** @type {HTMLElement} */ (document.getElementById('lpCount')).textContent = String(lpLines.length);
     /** @type {HTMLElement} */ (document.getElementById('logsBadge')).textContent = String(lpLines.length);
+    return;
   }
-
-  window.addLpLine = function(record, bulk) {
-    if (bulk) {
-      // Restore/backfill path: synchronous so callers that immediately
-      // run lpApplyFilter() afterwards see the final DOM. Still bounded,
-      // still no per-line scroll.
-      if (lpLines.length >= lpMaxLines) {
-        lpLines.shift();
-        var firstB = /** @type {HTMLElement} */ (document.getElementById('lpContent')).firstChild;
-        if (firstB) firstB.remove();
-      }
-      lpLines.push(record);
-      /** @type {HTMLElement} */ (document.getElementById('lpContent')).appendChild(
-        _lpMakeLineEl(record, _lpMinOrder())
-      );
-      /** @type {HTMLElement} */ (document.getElementById('lpCount')).textContent = String(lpLines.length);
-      /** @type {HTMLElement} */ (document.getElementById('logsBadge')).textContent = String(lpLines.length);
-      return;
-    }
-    _lpPending.push(record);
-    // Bound the queue independent of rAF. A hidden/minimized tab pauses
-    // requestAnimationFrame while the EventSource keeps delivering, so
-    // without this the pending array would grow unbounded for the entire
-    // life of a long job and then process one giant batch on resume.
-    // Only the last lpMaxLines can ever be shown (the DOM cap in
-    // _lpFlush), so dropping older pending records here is lossless and
-    // mirrors the lpLines cap.
-    if (_lpPending.length > lpMaxLines) {
-      _lpPending.splice(0, _lpPending.length - lpMaxLines);
-    }
-    if (!_lpFlushScheduled) {
-      _lpFlushScheduled = true;
-      requestAnimationFrame(_lpFlush);
-    }
-  };
-
-  window.lpApplyFilter = function() {
-    var minLevel = /** @type {HTMLSelectElement} */ (document.getElementById('lpLevelFilter')).value;
-    var minOrder = LEVEL_ORDER[minLevel] || 0;
-    /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#lpContent .lp-line')).forEach(function(el) {
-      var ok = (LEVEL_ORDER[el.dataset.level || ''] || 0) >= minOrder;
-      el.style.display = ok ? '' : 'none';
-    });
-  };
-
-  /** @param {unknown} str */
-  function bpEscape(str) {
-    if (str == null) return '';
-    var div = document.createElement('div');
-    div.appendChild(document.createTextNode(String(str)));
-    return div.innerHTML;
+  _lpPending.push(record);
+  // Bound the queue independent of rAF. A hidden/minimized tab pauses
+  // requestAnimationFrame while the EventSource keeps delivering, so
+  // without this the pending array would grow unbounded for the entire
+  // life of a long job and then process one giant batch on resume.
+  // Only the last lpMaxLines can ever be shown (the DOM cap in
+  // _lpFlush), so dropping older pending records here is lossless and
+  // mirrors the lpLines cap.
+  if (_lpPending.length > lpMaxLines) {
+    _lpPending.splice(0, _lpPending.length - lpMaxLines);
   }
-
-  // Convert internal job-type identifiers like "new_images_walk" or
-  // "duplicate-scan" into a user-facing label ("New Images Walk", "Duplicate
-  // Scan"). Exposed on window so per-page scripts (e.g. jobs.html) can reuse it.
-  window.formatJobType = function(type) {
-    if (!type) return '';
-    if (type === 'retained-cache-cleanup') return 'Generated file and history cleanup';
-    if (type === 'retained-cache-maintenance') return 'Storage retention maintenance';
-    return String(type)
-      .split(/[-_]+/)
-      .filter(function(w) { return w.length > 0; })
-      .map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); })
-      .join(' ');
-  };
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
+  if (!_lpFlushScheduled) {
+    _lpFlushScheduled = true;
+    requestAnimationFrame(_lpFlush);
   }
-})();
+}
+
+export function lpApplyFilter() {
+  var minLevel = /** @type {HTMLSelectElement} */ (document.getElementById('lpLevelFilter')).value;
+  var minOrder = LEVEL_ORDER[minLevel] || 0;
+  /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#lpContent .lp-line')).forEach(function(el) {
+    var ok = (LEVEL_ORDER[el.dataset.level || ''] || 0) >= minOrder;
+    el.style.display = ok ? '' : 'none';
+  });
+}
+
+/** @param {unknown} str */
+function bpEscape(str) {
+  if (str == null) return '';
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+
+// Convert internal job-type identifiers like "new_images_walk" or
+// "duplicate-scan" into a user-facing label ("New Images Walk", "Duplicate
+// Scan"). Exposed on window so per-page scripts (e.g. jobs.html) can reuse it.
+/** @param {string | undefined} type @returns {string} */
+export function formatJobType(type) {
+  if (!type) return '';
+  if (type === 'retained-cache-cleanup') return 'Generated file and history cleanup';
+  if (type === 'retained-cache-maintenance') return 'Storage retention maintenance';
+  return String(type)
+    .split(/[-_]+/)
+    .filter(function(w) { return w.length > 0; })
+    .map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); })
+    .join(' ');
+}
+
+// After the page's own scripts, as when this was a classic script waiting
+// for DOMContentLoaded: module scripts always run before it fires.
+document.addEventListener('DOMContentLoaded', init);

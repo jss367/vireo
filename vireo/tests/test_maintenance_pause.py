@@ -83,7 +83,7 @@ def test_move_pause_reconciles_folder_counts(client_with_photo, monkeypatch, tmp
             assert release.wait(synchronization_timeout(5))
         return original(src, dst)
 
-    monkeypatch.setattr(move, "_copy_and_verify", copy)
+    monkeypatch.setattr(move.photos, "_copy_and_verify", copy)
     client = app.test_client()
     runner = app._job_runner
     job_id = client.post("/api/jobs/move-photos", json={

@@ -1,5 +1,7 @@
 from playwright.sync_api import expect
 
+from e2e.browser_doubles import fulfill_sse, record_toasts, toasts
+
 
 def test_toasts_use_semantic_colors_and_accessibility_roles(live_server, page):
     page.goto(f"{live_server['url']}/browse")
@@ -48,49 +50,33 @@ def test_toasts_use_semantic_colors_and_accessibility_roles(live_server, page):
 
 
 def test_develop_completion_toast_reads_nested_job_result(live_server, page):
+    payloads = [
+        {
+            "status": "completed",
+            "result": {"developed": 2, "errors": 0, "total": 2},
+            "errors": [],
+        },
+        {
+            "status": "failed",
+            "result": {"developed": 1, "errors": 1, "total": 2},
+            "errors": ["robin.jpg: export failed"],
+        },
+    ]
+    page.route("**/api/darktable/status", lambda route: route.fulfill(json={"available": True}))
+    page.route("**/api/jobs/develop", lambda route: route.fulfill(json={"job_id": 42}))
+    page.route("**/api/jobs/42/stream", lambda route: fulfill_sse(route, "complete", payloads.pop(0)))
     page.goto(f"{live_server['url']}/browse")
+    record_toasts(page)
+    page.evaluate("window.confirm = () => true")
 
-    toasts = page.evaluate(
-        """async () => {
-          const payloads = [
-            {
-              status: 'completed',
-              result: {developed: 2, errors: 0, total: 2},
-              errors: []
-            },
-            {
-              status: 'failed',
-              result: {developed: 1, errors: 1, total: 2},
-              errors: ['robin.jpg: export failed']
-            }
-          ];
-          const original = {
-            confirm: window.confirm,
-            safeFetch: window.safeFetch,
-            safeEventSource: window.safeEventSource,
-            showToast: window.showToast
-          };
-          const seen = [];
-          window.confirm = () => true;
-          window.safeFetch = async url => url.endsWith('/status')
-            ? {available: true}
-            : {job_id: 42};
-          window.safeEventSource = (_url, callbacks) => {
-            callbacks.onComplete(payloads.shift());
-            return {close: () => {}};
-          };
-          window.showToast = (message, type) => seen.push({message, type});
-          try {
-            await developPhotos([1, 2]);
-            await developPhotos([1, 2]);
-            return seen.filter(item => item.message.startsWith('Development'));
-          } finally {
-            Object.assign(window, original);
-          }
-        }"""
+    page.evaluate("developPhotos([1, 2])")
+    page.wait_for_function("window.__toasts.some(toast => toast.message.startsWith('Development'))")
+    page.evaluate("developPhotos([1, 2])")
+    page.wait_for_function(
+        "window.__toasts.filter(toast => toast.message.startsWith('Development')).length === 2"
     )
 
-    assert toasts == [
+    assert toasts(page, "Development") == [
         {
             "message": "Development complete: 2 developed, 0 errors",
             "type": "success",

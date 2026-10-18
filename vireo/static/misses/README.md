@@ -44,17 +44,19 @@ plain exports. Nothing the page declares is a global: a top-level `var` or
 
 ## The shared-code boundary
 
-The navbar, lightbox, filter bar and `vireo-utils.js` are still classic
-scripts that publish globals. Page files never reach for them directly
-(ESLint's `no-undef` fails on a bare `showToast`); they import them from
-`shared.js`, which is the one list of what the page uses from shared code.
+The navbar and lightbox are ES modules whose bridge (`navbar-globals.js`)
+publishes the functions pages use as globals; the filter bar and
+`vireo-utils.js` are classic scripts that publish globals. Page files never
+reach for them directly (ESLint's `no-undef` fails on a bare `showToast`);
+they import them from `shared.js`, which is the one list of what the page uses
+from shared code. It reads the globals rather than importing the navbar's
+modules, so the page's type-check project stays its own.
 The forwarders there look the global up at call time, as the classic page
 did, so a shared function that is missing keeps its `typeof` guard there
 (`hasLightbox()`, `hasContextMenu()`, `hasDeleteDialog()`, and `showToast`
 that no-ops) and one replaced at runtime is still the one called. The escape
 helpers, which `_navbar.html` loads first and nobody replaces, and
 `VireoFilter`, which `_filterbar.html` loads before the page, are bound once.
-When a shared script becomes a module, change its import in `shared.js`.
 
 The other direction: the shared navbar and lightbox call a few page
 functions. `boot.js` hands them to `registerPageHooks()` in `shared.js`, which

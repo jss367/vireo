@@ -1,8 +1,15 @@
+import { lbState } from './shared-state.js';
+import { _lbDisplayDimsForRecipe, _lbSrcRank } from './viewport.js';
+import { vireoLightboxSession, vireoLightboxViewport } from './state.js';
+import {
+  _lbEditVersionByPhoto, _vireoPairKnownByPhoto, _vireoPairSource, _vireoUrlWithQueryParam,
+  _vireoUrlWithRenderVersion, vireoRenderedUrl,
+} from './edits.js';
+import { _lbMetadataOrientation, _lbOrientationSwapsAxes } from './overlays.js';
 
-/** @type {string | null} */ var _lbDesiredSrcKey = null;
 
-function _lbSetPreviewLoading(/** @type {boolean} */ loading) {
-  _lbPreviewLoading = !!loading;
+export function _lbSetPreviewLoading(/** @type {boolean} */ loading) {
+  lbState.previewLoading = !!loading;
   _lbRenderDetailStatus();
 }
 
@@ -12,39 +19,44 @@ function _lbSetPreviewLoading(/** @type {boolean} */ loading) {
 // identical on screen. The chip names which one it is: Loading (the incoming
 // photo has not decoded yet), Sharpening (a sharper tier is in flight), then a
 // brief Full detail once the tier the current zoom needs is the one displayed.
-// Loads that finish inside LB_DETAIL_SHOW_DELAY_MS never show anything, so
+// Loads that finish inside lbDetailStatus.showDelayMs never show anything, so
 // arrowing through cached photos stays quiet instead of strobing.
-var LB_DETAIL_SHOW_DELAY_MS = 250;
-var LB_DETAIL_SETTLED_MS = 900;
-var LB_DETAIL_FADE_MS = 250;
-var _lbInitialDecodePending = false; // this photo's first bitmap has not decoded
-var _lbDetailStatusShown = false;    // chip is on screen (past the show delay)
-var _lbDetailStatusSettled = false;  // showing the Full detail confirmation
-var _lbDetailStatusHold = 0;         // >0 suppresses paints mid-transition
-/** @type {number | null} */ var _lbDetailShowTimer = null;
-/** @type {number | null} */ var _lbDetailSettleTimer = null;
-/** @type {number | null} */ var _lbDetailFadeTimer = null;
+export const lbDetailStatus = {
+  showDelayMs: 250,
+  settledMs: 900,
+  fadeMs: 250,
+  // chip is on screen (past the show delay)
+  shown: false,
+  // showing the Full detail confirmation
+  settled: false,
+  /** @type {number | null} */
+  showTimer: null,
+  /** @type {number | null} */
+  settleTimer: null,
+  /** @type {number | null} */
+  fadeTimer: null,
+};
 
-function _lbDetailSharpeningPending() {
+export function _lbDetailSharpeningPending() {
   // Derived rather than read off _lbPreviewLoading: the first drag of a pan
   // calls vireoLightboxViewport.cancelRestore, which drops that flag even though the
   // queued swap keeps running. Panning around while the original loads at 1:1
   // is the pixel-peeping path, so the chip has to survive it.
-  if (_lbProgressiveTargetKey) return true;
-  if (!_lbDesiredSrcKey || _lbDesiredSrcKey === _lbCurrentSrcKey) return false;
+  if (lbState.progressiveTargetKey) return true;
+  if (!lbState.desiredSrcKey || lbState.desiredSrcKey === lbState.currentSrcKey) return false;
   // A known-missing original is never going to arrive; claiming otherwise would
   // leave the chip spinning forever.
-  if (_lbOriginalUnavailable && _lbDesiredSrcKey === 'original') return false;
-  return _lbSrcRank(_lbDesiredSrcKey) > _lbSrcRank(_lbCurrentSrcKey);
+  if (lbState.originalUnavailable && lbState.desiredSrcKey === 'original') return false;
+  return _lbSrcRank(lbState.desiredSrcKey) > _lbSrcRank(lbState.currentSrcKey);
 }
 
 function _lbDetailStatusPhase() {
   // _lbVisualTransitionPending is navigation-only -- it stays false when the
   // lightbox opens from closed, which is the case with the emptiest overlay and
   // the most need for a signal. _lbInitialDecodePending covers both.
-  if (_lbVisualTransitionPending || _lbInitialDecodePending) return 'loading';
-  if (_lbPreviewLoading || _lbDetailSharpeningPending()) return 'sharpening';
-  if (_lbDetailStatusSettled) return 'full';
+  if (lbState.visualTransitionPending || lbState.initialDecodePending) return 'loading';
+  if (lbState.previewLoading || _lbDetailSharpeningPending()) return 'sharpening';
+  if (lbDetailStatus.settled) return 'full';
   return 'off';
 }
 
@@ -74,20 +86,20 @@ function _lbPaintDetailStatus(/** @type {string} */ phase) {
 }
 
 function _lbCancelDetailConfirmation() {
-  if (_lbDetailSettleTimer) { clearTimeout(_lbDetailSettleTimer); _lbDetailSettleTimer = null; }
-  if (_lbDetailFadeTimer) { clearTimeout(_lbDetailFadeTimer); _lbDetailFadeTimer = null; }
-  _lbDetailStatusSettled = false;
+  if (lbDetailStatus.settleTimer) { clearTimeout(lbDetailStatus.settleTimer); lbDetailStatus.settleTimer = null; }
+  if (lbDetailStatus.fadeTimer) { clearTimeout(lbDetailStatus.fadeTimer); lbDetailStatus.fadeTimer = null; }
+  lbDetailStatus.settled = false;
 }
 
-function _lbResetDetailStatus() {
-  if (_lbDetailShowTimer) { clearTimeout(_lbDetailShowTimer); _lbDetailShowTimer = null; }
+export function _lbResetDetailStatus() {
+  if (lbDetailStatus.showTimer) { clearTimeout(lbDetailStatus.showTimer); lbDetailStatus.showTimer = null; }
   _lbCancelDetailConfirmation();
-  _lbDetailStatusShown = false;
+  lbDetailStatus.shown = false;
   _lbPaintDetailStatus('off');
 }
 
-function _lbRenderDetailStatus() {
-  if (_lbDetailStatusHold > 0) return;
+export function _lbRenderDetailStatus() {
+  if (lbState.detailStatusHold > 0) return;
   var phase = _lbDetailStatusPhase();
   if (phase === 'off') {
     _lbResetDetailStatus();
@@ -95,26 +107,26 @@ function _lbRenderDetailStatus() {
   }
   if (phase === 'full') {
     // Only confirm a load the user actually watched happen.
-    if (!_lbDetailStatusShown) { _lbResetDetailStatus(); return; }
+    if (!lbDetailStatus.shown) { _lbResetDetailStatus(); return; }
     _lbPaintDetailStatus('full');
     return;
   }
   // A fresh load started: the previous confirmation is stale.
   _lbCancelDetailConfirmation();
-  if (_lbDetailStatusShown) { _lbPaintDetailStatus(phase); return; }
-  if (_lbDetailShowTimer) return;  // delay already armed; do not restart it
-  _lbDetailShowTimer = setTimeout(function() {
-    _lbDetailShowTimer = null;
+  if (lbDetailStatus.shown) { _lbPaintDetailStatus(phase); return; }
+  if (lbDetailStatus.showTimer) return;  // delay already armed; do not restart it
+  lbDetailStatus.showTimer = setTimeout(function() {
+    lbDetailStatus.showTimer = null;
     var next = _lbDetailStatusPhase();
     if (next !== 'loading' && next !== 'sharpening') { _lbResetDetailStatus(); return; }
-    _lbDetailStatusShown = true;
+    lbDetailStatus.shown = true;
     _lbPaintDetailStatus(next);
-  }, LB_DETAIL_SHOW_DELAY_MS);
+  }, lbDetailStatus.showDelayMs);
 }
 
-function _lbMarkDetailSettled() {
+export function _lbMarkDetailSettled() {
   // Nothing was announced, so there is nothing to confirm.
-  if (!_lbDetailStatusShown) return;
+  if (!lbDetailStatus.shown) return;
   // /original failed for this photo, so the displayed tier may hold fewer pixels
   // than the file does -- and when it does, vireoLightboxViewport.layoutDims rebases onto the
   // fallback, making 1:1 mean 1:1 of the preview while the zoom badge still
@@ -122,28 +134,28 @@ function _lbMarkDetailSettled() {
   // (crop, rotation, JPEG companion, viewport and DPR all change the answer),
   // withhold the claim whenever the original is gone. Absence asserts nothing;
   // "Full detail" would assert something we cannot vouch for.
-  if (_lbOriginalUnavailable) return;
+  if (lbState.originalUnavailable) return;
   _lbCancelDetailConfirmation();
-  _lbDetailStatusSettled = true;
-  _lbDetailFadeTimer = setTimeout(function() {
-    _lbDetailFadeTimer = null;
+  lbDetailStatus.settled = true;
+  lbDetailStatus.fadeTimer = setTimeout(function() {
+    lbDetailStatus.fadeTimer = null;
     var el = document.getElementById('lightboxPreviewStatus');
-    if (el && _lbDetailStatusSettled) el.classList.add('is-fading');
-  }, Math.max(0, LB_DETAIL_SETTLED_MS - LB_DETAIL_FADE_MS));
-  _lbDetailSettleTimer = setTimeout(function() {
-    _lbDetailSettleTimer = null;
-    _lbDetailStatusSettled = false;
-    _lbDetailStatusShown = false;
+    if (el && lbDetailStatus.settled) el.classList.add('is-fading');
+  }, Math.max(0, lbDetailStatus.settledMs - lbDetailStatus.fadeMs));
+  lbDetailStatus.settleTimer = setTimeout(function() {
+    lbDetailStatus.settleTimer = null;
+    lbDetailStatus.settled = false;
+    lbDetailStatus.shown = false;
     _lbRenderDetailStatus();
-  }, LB_DETAIL_SETTLED_MS);
+  }, lbDetailStatus.settledMs);
 }
 
-function _lbFullPreviewLimit() {
-  if (_lbPreviewMaxSize === 0 || _lbFullUsesOriginal === true || _lbSessionFullUsesOriginal === true) return Infinity;
-  return _lbPreviewMaxSize || 1920;
+export function _lbFullPreviewLimit() {
+  if (lbState.previewMaxSize === 0 || lbState.fullUsesOriginal === true || lbState.sessionFullUsesOriginal === true) return Infinity;
+  return lbState.previewMaxSize || 1920;
 }
 
-function _lbInitialSourceKey(/** @type {LightboxPhoto} */ photo, /** @type {number} */ zoom, /** @type {boolean} */ oneToOne) {
+export function _lbInitialSourceKey(/** @type {LightboxPhoto} */ photo, /** @type {number} */ zoom, /** @type {boolean} */ oneToOne) {
   var w = Number(photo.width), h = Number(photo.height);
   if (!w || !h) return oneToOne || zoom > 1.001 ? 'original' : 'full';
   if (_vireoPairKnownByPhoto[String(photo.id)] && _vireoPairSource(photo.id) === 'jpeg') {
@@ -167,7 +179,7 @@ function _lbInitialSourceKey(/** @type {LightboxPhoto} */ photo, /** @type {numb
   return 'original';
 }
 
-function _lbPickSourceKey(/** @type {number | null | undefined} */ targetZoom = undefined) {
+export function _lbPickSourceKey(/** @type {number | null | undefined} */ targetZoom = undefined) {
   // Returns 'full' | '2560' | '3840' | 'original' based on current display needs.
   // Fall back to /full at fit and /original when zoomed whenever we can't compute
   // a proper displayed-long-edge (photo dims missing, or nativeZoom not yet
@@ -176,7 +188,7 @@ function _lbPickSourceKey(/** @type {number | null | undefined} */ targetZoom = 
   var dims = vireoLightboxViewport.layoutDims();
   var zoom = targetZoom != null ? targetZoom : vireoLightboxViewport.zoom();
   if (!dims || !dims.w || !dims.h || !vireoLightboxViewport.nativeZoom()) {
-    return (zoom > 1.001 && !_lbOriginalUnavailable) ? 'original' : 'full';
+    return (zoom > 1.001 && !lbState.originalUnavailable) ? 'original' : 'full';
   }
   var longEdge = Math.max(dims.w, dims.h);
   var displayedLong = longEdge * vireoLightboxViewport.fitScale() * zoom;
@@ -186,20 +198,20 @@ function _lbPickSourceKey(/** @type {number | null | undefined} */ targetZoom = 
   // /full's actual long edge depends on the server's preview_max_size config (default 1920).
   // Prefer this photo's decoded size. Before it loads, use the configured cap;
   // a previous small photo may never have reached that cap.
-  var fullLongEdge = _lbFullLongEdge || _lbFullPreviewLimit();
+  var fullLongEdge = lbState.fullLongEdge || _lbFullPreviewLimit();
   if (needed <= fullLongEdge) return 'full';
   if (needed <= 2560) return '2560';
   if (needed <= 3840) return '3840';
-  return _lbOriginalUnavailable ? '3840' : 'original';
+  return lbState.originalUnavailable ? '3840' : 'original';
 }
 
-function _lbSrcUrl(/** @type {number | null} */ photoId, /** @type {string} */ key, /** @type {boolean | undefined} */ speculative = undefined) {
+export function _lbSrcUrl(/** @type {number | null} */ photoId, /** @type {string} */ key, /** @type {boolean | undefined} */ speculative = undefined) {
   var url;
   if (key === 'original') url = '/photos/' + photoId + '/original';
   else if (key === 'full') url = '/photos/' + photoId + '/full';
   else url = '/photos/' + photoId + '/preview?size=' + key;
-  url = window.vireoRenderedUrl
-    ? window.vireoRenderedUrl(url, photoId)
+  url = vireoRenderedUrl
+    ? vireoRenderedUrl(url, photoId)
     : _vireoUrlWithRenderVersion(url, photoId);
   var version = _lbEditVersionByPhoto[String(photoId)];
   if (version) url = _vireoUrlWithQueryParam(url, 'editv', version);
@@ -213,26 +225,26 @@ function _lbSrcUrl(/** @type {number | null} */ photoId, /** @type {string} */ k
   return url;
 }
 
-function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZoom = undefined, /** @type {boolean | undefined} */ immediate = undefined) {
+export function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZoom = undefined, /** @type {boolean | undefined} */ immediate = undefined) {
   if (!vireoLightboxSession.requestedPhotoId()) return;
   // Was a sharper tier already requested for the displayed bitmap? Read this
   // before retargeting: if the new target is the tier already on screen, that
   // request is being abandoned rather than fulfilled. _lbProgressiveTargetKey
   // deliberately does not count -- it is the initial pick being evaluated for
   // the first time, not a request in flight.
-  var abandoningRequest = !!_lbDesiredSrcKey
-    && _lbDesiredSrcKey !== _lbCurrentSrcKey
-    && _lbSrcRank(_lbDesiredSrcKey) > _lbSrcRank(_lbCurrentSrcKey);
+  var abandoningRequest = !!lbState.desiredSrcKey
+    && lbState.desiredSrcKey !== lbState.currentSrcKey
+    && _lbSrcRank(lbState.desiredSrcKey) > _lbSrcRank(lbState.currentSrcKey);
   var desired = _lbPickSourceKey(targetZoom);
   // Metadata may still be in flight when a warm preview first becomes visible.
   // Keep the initial conservative tier until geometry can refine it.
-  if (_lbProgressiveTargetKey && !vireoLightboxViewport.nativeZoom()) desired = _lbProgressiveTargetKey;
-  _lbDesiredSrcKey = desired;
+  if (lbState.progressiveTargetKey && !vireoLightboxViewport.nativeZoom()) desired = lbState.progressiveTargetKey;
+  lbState.desiredSrcKey = desired;
   if (vireoLightboxViewport.zoom() > 1.001 && desired !== 'original') {
     vireoLightboxSession.cancelOriginal();
   }
-  if (desired === _lbCurrentSrcKey) {
-    _lbProgressiveTargetKey = null;
+  if (desired === lbState.currentSrcKey) {
+    lbState.progressiveTargetKey = null;
     // Zooming back to a level the current tier already satisfies cancels the
     // sharper request. Nothing loaded, so go quiet rather than claim the pixels
     // the user was waiting on arrived.
@@ -242,20 +254,20 @@ function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZoom = un
     return;
   }
 
-  _lbSetPreviewLoading(_lbSrcRank(desired) > _lbSrcRank(_lbCurrentSrcKey) || !!_lbProgressiveTargetKey);
+  _lbSetPreviewLoading(_lbSrcRank(desired) > _lbSrcRank(lbState.currentSrcKey) || !!lbState.progressiveTargetKey);
   vireoLightboxSession.scheduleSwap(function() {
-    if (_lbDesiredSrcKey !== desired) return;          // newer request won
-    if (_lbDesiredSrcKey === _lbCurrentSrcKey) return; // already there
+    if (lbState.desiredSrcKey !== desired) return;          // newer request won
+    if (lbState.desiredSrcKey === lbState.currentSrcKey) return; // already there
     var photoId = vireoLightboxSession.requestedPhotoId();
     var swapToken = vireoLightboxSession.capture();
-    var key = _lbDesiredSrcKey; if (photoId == null || key == null) return;
+    var key = lbState.desiredSrcKey; if (photoId == null || key == null) return;
     var url = _lbSrcUrl(photoId, key);
 
     vireoLightboxSession.loadSource(url, function() {
       // Ignore stale: different photo, or desired key changed to something else
       if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
       if (!vireoLightboxSession.isCurrent(swapToken)) return;
-      if (_lbDesiredSrcKey !== key) return;
+      if (lbState.desiredSrcKey !== key) return;
       const img = /** @type {HTMLImageElement | null} */ (document.getElementById('lightboxImg'));
       if (!img) return;
       // After the new source loads, recompute nativeZoom — the aspect ratio is
@@ -268,17 +280,17 @@ function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZoom = un
         // A newer swap may have preempted us before this load fired — in that
         // case img.naturalWidth belongs to a DIFFERENT source than our closure's
         // `key`, so bail rather than record wrong dims or recalibrate stale state.
-        if (_lbCurrentSrcKey !== key) return;
-        _lbProgressiveTargetKey = null;
+        if (lbState.currentSrcKey !== key) return;
+        lbState.progressiveTargetKey = null;
         _lbMarkDetailSettled();
         _lbSetPreviewLoading(false);
         // Keep the decoded background original alive until the visible image
         // has adopted it; releasing it earlier can make some WebViews decode
         // the same full-resolution bytes a second time on the first 100% click.
         if (key === 'original') vireoLightboxSession.cancelOriginal();
-        if (!_lbPhotoW && key === 'original' && img.naturalWidth) {
-          _lbPhotoW = img.naturalWidth;
-          _lbPhotoH = img.naturalHeight;
+        if (!lbState.photoW && key === 'original' && img.naturalWidth) {
+          lbState.photoW = img.naturalWidth;
+          lbState.photoH = img.naturalHeight;
         }
         vireoLightboxViewport.recomputeNativeZoom();
         // If the user pressed z/click when nativeZoom was unknown, upgrade to
@@ -294,12 +306,12 @@ function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZoom = un
         vireoLightboxSession.scheduleAdjacent(key);
       });
       img.src = url;
-      _lbCurrentSrcKey = key;
+      lbState.currentSrcKey = key;
     }, function() {
       if (vireoLightboxSession.requestedPhotoId() !== photoId) return;
       if (!vireoLightboxSession.isCurrent(swapToken)) return;
-      if (_lbDesiredSrcKey !== key) return;
-      _lbProgressiveTargetKey = null;
+      if (lbState.desiredSrcKey !== key) return;
+      lbState.progressiveTargetKey = null;
       // Record the failure BEFORE clearing the loading flag. The chip's
       // sharpening state is derived from the desired/current tiers, so a tier
       // that is never going to arrive has to stop counting as in flight first
@@ -307,7 +319,7 @@ function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZoom = un
       // leaves the spinner up with no request behind it.
       if (key === 'original') {
         var had1To1Pending = vireoLightboxViewport.pendingOneToOne();
-        _lbOriginalUnavailable = true;
+        lbState.originalUnavailable = true;
         _lbSetPreviewLoading(false);
         vireoLightboxViewport.recomputeNativeZoom();
         if (had1To1Pending) {
@@ -322,14 +334,14 @@ function _lbScheduleSourceSwap(/** @type {number | undefined} */ targetZoom = un
       } else {
         // The failed request is no longer pending. Keep the usable bitmap
         // and resume its neighbors without automatically retrying this tier.
-        _lbDesiredSrcKey = _lbCurrentSrcKey;
+        lbState.desiredSrcKey = lbState.currentSrcKey;
         _lbSetPreviewLoading(false);
         if (vireoLightboxViewport.pendingOneToOne()) {
           vireoLightboxViewport.cancelPendingZoom();
           vireoLightboxViewport.updateControls();
           vireoLightboxViewport.save(photoId);
         }
-        vireoLightboxSession.scheduleAdjacent(_lbCurrentSrcKey);
+        vireoLightboxSession.scheduleAdjacent(lbState.currentSrcKey);
       }
       // Keep current source on failure
     });

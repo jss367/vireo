@@ -5,14 +5,26 @@ an auto-accepted match or a pending review item, then releases the run's
 reserved classifier runs.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
+from typing import TYPE_CHECKING, Any, cast
 
 from classify_job.common import log
 from db import AUTO_MATCH_REVIEW_MARKER
 from keyword_normalization import folded_species_key as _folded_species_key
 from keyword_normalization import species_match_key as _species_match_key
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable, Iterable, Mapping
+
+    from classify_job.classify_types import RawResult
+    from db import Database
+    from species_identity import SpeciesIdentity
+    from taxonomy import Taxonomy
 
 # ``_folded_species_key`` / ``_species_match_key`` live in
 # ``keyword_normalization`` with the rest of the name folds. The private
@@ -20,7 +32,7 @@ from keyword_normalization import species_match_key as _species_match_key
 # the leading underscore signalling "this module's rule".
 
 
-def _record_match_scores(db, raw_results, model_name, labels_fingerprint):
+def _record_match_scores(db: Database, raw_results: list[RawResult], model_name: str, labels_fingerprint: str) -> None:
     """Persist the per-run match summaries collected during classification.
 
     Runs before the grouping/consensus pass stores predictions, and covers
@@ -54,7 +66,7 @@ def _record_match_scores(db, raw_results, model_name, labels_fingerprint):
             )
 
 
-def _cached_prediction_taxonomy(row):
+def _cached_prediction_taxonomy(row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any] | None:
     row = dict(row)
     if not row.get("source_taxon_id") and row.get("labels_fingerprint") != "tol":
         return None  # Legacy custom-label scientific names were inferred.
@@ -65,7 +77,9 @@ def _cached_prediction_taxonomy(row):
     return {key: value for key, value in result.items() if value} or None
 
 
-def _prediction_taxonomy(tax, species, supplied=None):
+def _prediction_taxonomy(
+    tax: Taxonomy | None, species: str, supplied: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Enrich source-backed labels by binomial, preserving source provenance."""
     supplied = supplied or {}
     from species_identity import SpeciesResolver
@@ -77,7 +91,7 @@ def _prediction_taxonomy(tax, species, supplied=None):
     return {**hierarchy, **supplied}
 
 
-def _row_match_score(item, species):
+def _row_match_score(item: RawResult, species: str | None) -> float | None:
     """This frame's raw match score for ``species``, or None if it has none.
 
     Burst consensus can hand these storage helpers a species that is not this
@@ -96,10 +110,10 @@ def _row_match_score(item, species):
 
 
 def _store_match_prediction(
-    db, item, model_name, labels_fingerprint, tax=None,
-    species=None, confidence=None, taxonomy=None,
-    store_alternatives=True,
-):
+    db: Database, item: RawResult, model_name: str, labels_fingerprint: str, tax: Taxonomy | None = None,
+    species: str | None = None, confidence: float | None = None, taxonomy: Mapping[str, Any] | None = None,
+    store_alternatives: bool = True,
+) -> None:
     """Persist an already-labeled classifier result as a reusable cache row.
 
     A taxonomy ``match`` means the photo's XMP already carries this species, so
@@ -118,10 +132,10 @@ def _store_match_prediction(
     would let a per-frame alternative outrank the consensus primary and become
     the cached top-1 on later non-reclassify runs.
     """
-    species = species or item["prediction"]
+    species = cast("str", species or item["prediction"])
     refresh_output = item.get("_replace_prediction_outputs", False) and not item.get("_existing")
     retained_species = [species]
-    confidence = item["confidence"] if confidence is None else confidence
+    confidence = cast("float", item["confidence"] if confidence is None else confidence)
     tax_hierarchy = _prediction_taxonomy(tax, species, taxonomy or item.get("taxonomy"))
     db.predictions.add(
         detection_id=item["detection_id"],
@@ -196,7 +210,7 @@ def _store_match_prediction(
         db.predictions.retain_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
 
 
-def _recognized_taxon_keywords(keywords, tax):
+def _recognized_taxon_keywords(keywords: Iterable[str] | None, tax: Taxonomy | None) -> list[str]:
     """Return XMP keywords that the loaded taxonomy recognizes as taxa."""
     if not tax or not hasattr(tax, "is_taxon"):
         return []
@@ -213,7 +227,7 @@ def _recognized_taxon_keywords(keywords, tax):
     return taxa
 
 
-def _categorize_detection_prediction(prediction, existing_keywords, tax):
+def _categorize_detection_prediction(prediction: str, existing_keywords: Iterable[str], tax: Taxonomy | None) -> str:
     """Categorize one detection prediction against its photo-level keywords.
 
     Photo keywords are not detection-scoped, so this only describes whether
@@ -227,7 +241,9 @@ def _categorize_detection_prediction(prediction, existing_keywords, tax):
     return categorize(prediction, existing_keywords, tax)
 
 
-def _can_auto_accept_detection_prediction(prediction, category, existing_keywords, tax):
+def _can_auto_accept_detection_prediction(
+    prediction: str, category: str, existing_keywords: Iterable[str], tax: Taxonomy | None,
+) -> bool:
     """Return True when a photo-level match is unambiguous for one detection.
 
     A photo may carry taxonomy-hierarchy keywords (e.g. ``Aves`` alongside
@@ -268,9 +284,9 @@ def _can_auto_accept_detection_prediction(prediction, category, existing_keyword
 
 
 def _reconcile_existing_pending_prediction(
-    db, item, model_name, labels_fingerprint, category,
-    group_id, vote_count, total_votes, individual,
-):
+    db: Database, item: RawResult, model_name: str, labels_fingerprint: str, category: str,
+    group_id: str | None, vote_count: int | None, total_votes: int | None, individual: str | None,
+) -> bool:
     """Refresh a reused cached prediction's review and group state in place.
 
     Returns True when the cached row exists (nothing further to store), False
@@ -313,17 +329,17 @@ def _reconcile_existing_pending_prediction(
 
 
 def _store_pending_detection_prediction(
-    db,
-    item,
-    model_name,
-    labels_fingerprint,
-    category,
-    tax=None,
-    group_id=None,
-    vote_count=None,
-    total_votes=None,
-    individual=None,
-):
+    db: Database,
+    item: RawResult,
+    model_name: str,
+    labels_fingerprint: str,
+    category: str,
+    tax: Taxonomy | None = None,
+    group_id: str | None = None,
+    vote_count: int | None = None,
+    total_votes: int | None = None,
+    individual: str | None = None,
+) -> None:
     tax_hierarchy = _prediction_taxonomy(tax, item["prediction"], item.get("taxonomy"))
     if item.get("_existing") and _reconcile_existing_pending_prediction(
         db, item, model_name, labels_fingerprint, category,
@@ -387,7 +403,10 @@ def _store_pending_detection_prediction(
         db.predictions.retain_candidates(item["detection_id"], model_name, labels_fingerprint, retained_species)
 
 
-def _xmp_review_category(item, tax, comparison_name, read_keywords):
+def _xmp_review_category(
+    item: RawResult, tax: Taxonomy | None, comparison_name: Callable[[RawResult], str],
+    read_keywords: Callable[[str], Iterable[str]],
+) -> tuple[str, bool]:
     """Categorize one result against its photo's XMP keywords.
 
     Returns ``(category, auto_accept)``; without a taxonomy every result is
@@ -412,9 +431,12 @@ def _xmp_review_category(item, tax, comparison_name, read_keywords):
 
 
 def _store_burst_group(
-    db, group, gid, model_name, labels_fingerprint, tax,
-    identity_for, comparison_name, consensus_prediction, read_keywords,
-):
+    db: Database, group: list[RawResult], gid: str, model_name: str, labels_fingerprint: str,
+    tax: Taxonomy | None, identity_for: Callable[[RawResult], SpeciesIdentity],
+    comparison_name: Callable[[RawResult], str],
+    consensus_prediction: Callable[[list[dict[str, Any]]], dict[str, Any] | None],
+    read_keywords: Callable[[str], Iterable[str]],
+) -> tuple[int, int]:
     """Store one burst group's predictions under its consensus vote.
 
     Returns ``(stored, already_labeled)``; both are 0 when the group has no
@@ -482,9 +504,9 @@ def _store_burst_group(
 
 
 def _store_single_prediction(
-    db, item, model_name, labels_fingerprint, tax,
-    comparison_name, read_keywords,
-):
+    db: Database, item: RawResult, model_name: str, labels_fingerprint: str, tax: Taxonomy | None,
+    comparison_name: Callable[[RawResult], str], read_keywords: Callable[[str], Iterable[str]],
+) -> tuple[int, int]:
     """Store a result that formed no burst group.
 
     Returns ``(stored, already_labeled)``: ``(0, 1)`` when it auto-accepted
@@ -506,7 +528,9 @@ def _store_single_prediction(
     return 1, 0
 
 
-def _release_stored_classifier_runs(db, raw_results, model_name, labels_fingerprint):
+def _release_stored_classifier_runs(
+    db: Database, raw_results: list[RawResult], model_name: str, labels_fingerprint: str,
+) -> None:
     """Mark this run's freshly stored classifier_runs reusable, then commit.
 
     A flush only reserves a run. It becomes reusable once its predictions
@@ -523,9 +547,10 @@ def _release_stored_classifier_runs(db, raw_results, model_name, labels_fingerpr
 
 
 def _store_grouped_predictions(
-    raw_results, job_id, model_name, grouping_window, similarity_threshold, tax, db,
-    labels_fingerprint="legacy",
-):
+    raw_results: list[RawResult], job_id: str, model_name: str, grouping_window: int,
+    similarity_threshold: float, tax: Taxonomy | None, db: Database,
+    labels_fingerprint: str = "legacy",
+) -> dict[str, int]:
     """Group results by timestamp/similarity, compute consensus, store to DB.
 
     ``labels_fingerprint`` is written verbatim onto each prediction row so
@@ -559,12 +584,12 @@ def _store_grouped_predictions(
     # while it still refers to this frame's own run.
     _record_match_scores(db, raw_results, model_name, labels_fingerprint)
 
-    def identity_for(item):
+    def identity_for(item: RawResult) -> SpeciesIdentity:
         supplied = item.get("taxonomy") or {}
         source = supplied if supplied.get("taxon_id") else None
         return resolver.resolve(item["prediction"], supplied.get("scientific_name"), source)
 
-    def comparison_name(item):
+    def comparison_name(item: RawResult) -> str:
         identity = identity_for(item)
         return identity.scientific_name or identity.display_name
 
