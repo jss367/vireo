@@ -1,12 +1,24 @@
 """Photo rating and flag workflow coordination."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from db import Database
+    from services.service_types import JsonDict
+
 #: Bounds on the provenance a flag write may carry (``source``: who decided,
 #: ``reason``: why). Long enough for a sentence, short enough for a panel.
 FLAG_SOURCE_MAX_CHARS = 60
 FLAG_REASON_MAX_CHARS = 300
 
 
-def flag_description(flag, *, count=None, source=None, reason=None):
+def flag_description(
+    flag: str, *, count: int | None = None, source: str | None = None, reason: str | None = None,
+) -> str:
     """The edit-history line for a flag write.
 
     ``Set flag to rejected`` for the user's own click, ``... on 3 photos``
@@ -26,7 +38,7 @@ def flag_description(flag, *, count=None, source=None, reason=None):
     return text
 
 
-def flag_note(db, photo_id, current_flag):
+def flag_note(db: Database, photo_id: int, current_flag: str | None) -> JsonDict | None:
     """Only durable current attribution, never a guess from retained undo history."""
     note = db.photo_review.current_flag_note(photo_id)
     if note is None or (note["flag"] or "none") != (current_flag or "none"):
@@ -35,10 +47,10 @@ def flag_note(db, photo_id, current_flag):
 
 
 class PhotoReviewService:
-    def __init__(self, db):
+    def __init__(self, db: Database) -> None:
         self.db = db
 
-    def set_rating(self, photo_id, rating):
+    def set_rating(self, photo_id: int, rating: int) -> None:
         old = self.db.get_photo(photo_id)
         old_rating = old["rating"] if old else 0
         self.db.photo_review.set_rating(photo_id, rating)
@@ -54,10 +66,12 @@ class PhotoReviewService:
             }],
         )
 
-    def set_flag(self, photo_id, flag, *, source=None, reason=None):
+    def set_flag(
+        self, photo_id: int, flag: str, *, source: str | None = None, reason: str | None = None,
+    ) -> None:
         self._write_flags([photo_id], flag, source=source, reason=reason, is_batch=False)
 
-    def set_ratings(self, photo_ids, rating):
+    def set_ratings(self, photo_ids: Sequence[int], rating: int) -> int:
         photos_map = self.db.get_photos_by_ids(photo_ids)
         old_values = {
             photo_id: photos_map[photo_id]["rating"]
@@ -85,10 +99,14 @@ class PhotoReviewService:
         )
         return len(old_values)
 
-    def set_flags(self, photo_ids, flag, *, source=None, reason=None):
+    def set_flags(
+        self, photo_ids: Sequence[int], flag: str, *, source: str | None = None, reason: str | None = None,
+    ) -> int:
         return self._write_flags(photo_ids, flag, source=source, reason=reason, is_batch=True)
 
-    def _write_flags(self, photo_ids, flag, *, source, reason, is_batch):
+    def _write_flags(
+        self, photo_ids: Sequence[int], flag: str, *, source: str | None, reason: str | None, is_batch: bool,
+    ) -> int:
         with self.db.photo_review.flag_write() as owns_transaction:
             photos = self.db.get_photos_by_ids(photo_ids)
             old_values = {pid: photos[pid]["flag"] for pid in photo_ids if pid in photos}

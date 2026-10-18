@@ -416,7 +416,7 @@ class _ThumbPass:
     def thumbnail_collection(self):
         run = self.run
         coll_photos = self.filter_excluded(
-            self.thread_db.get_collection_photos(run.collection_id, per_page=999999)
+            self.thread_db.collections.get_photos(run.collection_id, per_page=999999)
         )
         folders = {f["id"]: f["path"] for f in self.thread_db.get_folder_tree()}
         total = len(coll_photos)
@@ -690,7 +690,7 @@ def previews_stage(
         os.makedirs(preview_dir, exist_ok=True)
 
         if run.collection_id:
-            photos = _filter_excluded(thread_db.get_collection_photos(run.collection_id, per_page=999999))
+            photos = _filter_excluded(thread_db.collections.get_photos(run.collection_id, per_page=999999))
         elif not skip_scan:
             # Scan ran but produced no photos — skip previews to avoid
             # unexpectedly processing the entire workspace.

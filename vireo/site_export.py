@@ -73,13 +73,13 @@ def _caption_fields(exif_data):
 def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
                       snapshot, progress):
     """Materialize all database reads while the caller holds one read snapshot."""
-    photo_ids = sorted(db.query_photo_ids([], include_offline_folders=True))
+    photo_ids = sorted(db.collections.query_photo_ids([], include_offline_folders=True))
     eligible = set(photo_ids)
     total = len(photo_ids)
     albums = []
     memberships = {}
     errors = []
-    for row in db.get_collections():
+    for row in db.collections.list_all():
         progress(0, total, row["name"], "Reading albums")
         album = {"id": row["id"], "name": row["name"], "status": "complete"}
         album["manifest"] = f"albums/{row['id']}-{slugify(row['name'])[:80]}/album.json"
@@ -95,7 +95,7 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
                 if ids is None:
                     raise ValueError(f"Visual search unavailable: {info['status']}")
             else:
-                ids = db.query_photo_ids(rules, include_offline_folders=True)
+                ids = db.collections.query_photo_ids(rules, include_offline_folders=True)
             album["photo_ids"] = sorted(eligible.intersection(ids))
             for pid in album["photo_ids"]:
                 memberships.setdefault(pid, []).append(row["id"])

@@ -2500,7 +2500,7 @@ def test_reject_shortcut_refreshes_rejected_collection_count(live_server, page):
     """Flagging a photo as rejected should refresh matching smart-collection counts."""
     db = live_server["db"]
     rules = json.dumps([{"field": "flag", "op": "is", "value": "rejected"}])
-    collection_id = db.add_collection("Rejected", rules)
+    collection_id = db.collections.add("Rejected", rules)
 
     url = live_server["url"]
     page.goto(f"{url}/browse")
@@ -2568,7 +2568,7 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
     """
     db = live_server["db"]
     rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
-    collection_id = db.add_collection("All JPGs", rules)
+    collection_id = db.collections.add("All JPGs", rules)
 
     url = live_server["url"]
     page.goto(f"{url}/browse")
@@ -2604,11 +2604,11 @@ def test_filterByCollection_clears_multiselect_set(live_server, page):
 def test_delete_refreshes_smart_collection_count(live_server, page):
     """Deleting a photo from Browse refreshes smart collection counts."""
     db = live_server["db"]
-    needs = next(c for c in db.get_collections() if c["name"] == "Needs Identification")
+    needs = next(c for c in db.collections.list_all() if c["name"] == "Needs Identification")
     collection_id = needs["id"]
     delete_id = live_server["data"]["photos"][1]
-    before = db.count_collection_photos(collection_id)
-    assert delete_id in db.collection_photo_ids(collection_id)
+    before = db.collections.count_photos(collection_id)
+    assert delete_id in db.collections.photo_ids(collection_id)
 
     url = live_server["url"]
     page.goto(f"{url}/browse")
@@ -2635,7 +2635,7 @@ def test_filterByCollection_cancels_pending_search_debounce(live_server, page):
     """A delayed search apply must not kick the user out of collection mode."""
     db = live_server["db"]
     rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
-    collection_id = db.add_collection("Debounce Collection", rules)
+    collection_id = db.collections.add("Debounce Collection", rules)
 
     url = live_server["url"]
     page.goto(f"{url}/browse")

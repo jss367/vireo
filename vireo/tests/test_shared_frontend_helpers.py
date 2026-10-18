@@ -33,9 +33,11 @@ REMAINING_COPIES = {
     "timeAgo": 2,
 }
 
+# ``export`` is optional: the module pages (frontend-module-pages.json) export
+# their declarations, and an exported copy is still a copy.
 _DECLARATION_RE = re.compile(
-    r"^\s*(?:/\*\*[^\n]*?\*/\s*)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\("
-    r"|^\s*(?:/\*\*[^\n]*?\*/\s*)?(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>)",
+    r"^\s*(?:/\*\*[^\n]*?\*/\s*)?(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\("
+    r"|^\s*(?:/\*\*[^\n]*?\*/\s*)?(?:export\s+)?(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>)",
     re.M,
 )
 _SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)

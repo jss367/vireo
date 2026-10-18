@@ -1,6 +1,10 @@
 // Keeping Representative badges and the applied flag filter current after a
 // Life List change or a flag change made in the shared lightbox.
-// Classic page script; load boot.js after all definitions.
+// ES module.
+
+import { state, CATEGORY_ORDER } from './state.js';
+import { render } from './render.js';
+import { _clearMissRepresentativeStateIfIneligible, refreshAppliedFlagFilter } from './flagging.js';
 
 // setLifeListPhoto (miss card context menu / shared lightbox action) only emits
 // a lifelist:changed event and updates its own caches; without this listener
@@ -8,7 +12,7 @@
 // the newly assigned photo stays un-badged and any previously visible former
 // representative keeps its badge until a full reload. Walk missesData across
 // all categories in place, flip the species entry's flags, and rerender.
-function bindMissLifeListEvents() {
+export function bindMissLifeListEvents() {
   document.addEventListener('lifelist:changed', function(e) {
     var detail = e && e.detail ? e.detail : {};
     const species = detail.species;
@@ -16,7 +20,7 @@ function bindMissLifeListEvents() {
     if (!species || !photoId) return;
     var changed = false;
     CATEGORY_ORDER.forEach(function(cat) {
-      var photos = missesData[cat] || [];
+      var photos = state.missesData[cat] || [];
       photos.forEach(function(p) {
         var entries = Array.isArray(p.life_list) ? p.life_list : [];
         var touched = false;
@@ -57,7 +61,7 @@ function bindMissLifeListEvents() {
 // "Representative" after a lightbox reject until the next loadMisses().
 // _lbApplyFlag emits lightbox:flagchanged with the settled flag; listen here
 // and reuse the same clearing helper the keyboard/bulk reject paths use.
-function bindMissLightboxFlagEvents() {
+export function bindMissLightboxFlagEvents() {
   document.addEventListener('lightbox:flagchanged', function(e) {
     var detail = e && e.detail ? e.detail : {};
     const photoId = detail.photoId;

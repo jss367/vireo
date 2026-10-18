@@ -37,11 +37,26 @@ function checkedFiles(project) {
   return configuration.files.map(filename => path.resolve(path.dirname(project), filename));
 }
 
-function rejectSuppressions(filename) {
+// Classic scripts parse as scripts; the ES module pages listed in
+// frontend-module-pages.json (import/export) only parse as modules.
+function parseComments(source) {
   const comments = [];
-  parse(readFileSync(filename, 'utf8'), {
-    ecmaVersion: 'latest', sourceType: 'script', onComment: comments,
-  });
+  try {
+    parse(source, {ecmaVersion: 'latest', sourceType: 'script', onComment: comments});
+    return comments;
+  } catch (scriptError) {
+    const moduleComments = [];
+    try {
+      parse(source, {ecmaVersion: 'latest', sourceType: 'module', onComment: moduleComments});
+    } catch {
+      throw scriptError;
+    }
+    return moduleComments;
+  }
+}
+
+function rejectSuppressions(filename) {
+  const comments = parseComments(readFileSync(filename, 'utf8'));
   for (const comment of comments) {
     if (/@ts-(?:nocheck|ignore|expect-error)\b/.test(comment.value)) {
       throw new Error(`${filename}: first-party implementations must not suppress type errors`);
