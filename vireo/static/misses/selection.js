@@ -1,6 +1,10 @@
 // The multi-selection: clearing, toggling, the selection bar, shift-click
 // ranges, and card click and double-click.
-// Classic page script; load boot.js after all definitions.
+// ES module.
+
+import { state } from './state.js';
+import { openMiss } from './photo-open.js';
+import { setFocused } from './keyboard.js';
 
 /* ---------- Selection ----------
  * Plain click selects exactly one photo. Ctrl/Cmd-click toggles additional
@@ -12,18 +16,18 @@
  * mental model of "this row" maps to "this category". Cross-category bulk
  * selection still works via repeated ctrl-click.
  */
-function clearSelection() {
-  if (selection.size === 0) return;
-  selection.clear();
+export function clearSelection() {
+  if (state.selection.size === 0) return;
+  state.selection.clear();
   document.querySelectorAll('.miss-card.selected').forEach(function(el) {
     el.classList.remove('selected');
   });
   updateSelectionBar();
 }
 
-/** @param {number} photoId @param {boolean} on */ function setSelected(photoId, on) {
-  if (on) selection.add(photoId);
-  else selection.delete(photoId);
+/** @param {number} photoId @param {boolean} on */ export function setSelected(photoId, on) {
+  if (on) state.selection.add(photoId);
+  else state.selection.delete(photoId);
   // querySelectorAll: a photo can appear in multiple miss categories at once
   // (e.g. both `clipped` and `oof`), and each section renders its own card.
   // querySelector would only update the first match, leaving the duplicate
@@ -33,21 +37,21 @@ function clearSelection() {
   updateSelectionBar();
 }
 
-function updateSelectionBar() {
+export function updateSelectionBar() {
   var bar = /** @type {HTMLElement} */ (document.getElementById('missesSelectionBar'));
   var countEl = /** @type {HTMLElement} */ (document.getElementById('missesSelectionCount'));
   if (!bar || !countEl) return;
-  var n = selection.size;
+  var n = state.selection.size;
   bar.classList.toggle('active', n > 0);
   countEl.textContent = n + ' selected';
   var unflagBtn = /** @type {HTMLButtonElement} */ (document.getElementById('missesSelectionUnflagBtn'));
-  if (unflagBtn) unflagBtn.disabled = previewActive;
+  if (unflagBtn) unflagBtn.disabled = state.previewActive;
   var browseBtn = /** @type {HTMLButtonElement} */ (document.getElementById('missesSelectionBrowseBtn'));
   if (browseBtn) browseBtn.disabled = n !== 1;
 }
 
 /** @param {MissCategory} cat @param {number} fromIdx @param {number} toIdx */ function selectRangeWithinCategory(cat, fromIdx, toIdx) {
-  var photos = missesData[cat] || [];
+  var photos = state.missesData[cat] || [];
   if (!photos.length) return;
   var lo = Math.min(fromIdx, toIdx);
   var hi = Math.max(fromIdx, toIdx);
@@ -57,20 +61,20 @@ function updateSelectionBar() {
   }
 }
 
-/** @param {MissCategory} cat @param {number} idx @param {number} photoId @param {MouseEvent=} e */ function onCardClick(cat, idx, photoId, e) {
+/** @param {MissCategory} cat @param {number} idx @param {number} photoId @param {MouseEvent=} e */ export function onCardClick(cat, idx, photoId, e) {
   // Let the inner unflag button keep its own click behavior.
   if (e && e.target instanceof Element && e.target.closest('button')) return;
   if (e && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     e.stopPropagation();
-    setSelected(photoId, !selection.has(photoId));
+    setSelected(photoId, !state.selection.has(photoId));
     setFocused(cat, idx);
     return;
   }
   if (e && e.shiftKey) {
     e.preventDefault();
     e.stopPropagation();
-    var anchorIdx = (focusedCategory === cat && focusedIndex >= 0) ? focusedIndex : idx;
+    var anchorIdx = (state.focusedCategory === cat && state.focusedIndex >= 0) ? state.focusedIndex : idx;
     selectRangeWithinCategory(cat, anchorIdx, idx);
     setFocused(cat, idx);
     return;
@@ -85,7 +89,7 @@ function updateSelectionBar() {
   setFocused(cat, idx);
 }
 
-/** @param {MissCategory} cat @param {number} idx @param {MouseEvent=} e */ function onCardDoubleClick(cat, idx, e) {
+/** @param {MissCategory} cat @param {number} idx @param {MouseEvent=} e */ export function onCardDoubleClick(cat, idx, e) {
   if (e && e.target instanceof Element && e.target.closest('button')) return;
   if (e) {
     e.preventDefault();

@@ -1,5 +1,84 @@
+import {readFileSync} from 'node:fs';
 import js from '@eslint/js';
 import globals from 'globals';
+
+// Pages whose scripts are ES modules (see CLAUDE.md and
+// vireo/tests/test_module_pages.py). Their files share nothing through
+// globals: every name is imported, declared, or a browser global, and the
+// only window writes allowed are the page hooks and shared-script latches
+// the list names, made from the page's shared.js.
+const modulePages = JSON.parse(readFileSync(new URL('./frontend-module-pages.json', import.meta.url), 'utf8'));
+const GLOBAL_OBJECTS = '/^(window|globalThis|self)$/';
+const inlineHandlerRestrictions = [
+  {
+    selector: 'Literal[value=/\\bon[a-z]+\\s*=/i]',
+    message: 'Module pages bind events with addEventListener, not inline on*= markup.',
+  },
+  {
+    selector: 'TemplateElement[value.raw=/\\bon[a-z]+\\s*=/i]',
+    message: 'Module pages bind events with addEventListener, not inline on*= markup.',
+  },
+  {
+    selector: 'AssignmentExpression > MemberExpression.left[property.name=/^on[a-z]+$/i]',
+    message: 'Module pages bind events with addEventListener, not on* properties.',
+  },
+  {
+    selector: 'AssignmentExpression > MemberExpression.left[computed=true][property.value=/^on[a-z]+$/i]',
+    message: 'Module pages bind events with addEventListener, not on* properties.',
+  },
+  {
+    selector: `UpdateExpression > MemberExpression.argument[object.name=${GLOBAL_OBJECTS}], UnaryExpression[operator='delete'] > MemberExpression.argument[object.name=${GLOBAL_OBJECTS}]`,
+    message: 'Module pages own no globals: export the value instead.',
+  },
+  {
+    selector: `CallExpression[callee.object.name='Reflect'][callee.property.name=/^(set|defineProperty|deleteProperty)$/][arguments.0.name=${GLOBAL_OBJECTS}]`,
+    message: 'Module pages own no globals: export the value instead.',
+  },
+  {
+    selector: "CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^on[a-z]+$/i]",
+    message: 'Module pages bind events with addEventListener, not on* attributes.',
+  },
+  {
+    selector: `CallExpression[callee.object.name='Object'][callee.property.name=/^(assign|defineProperty|defineProperties)$/][arguments.0.name=${GLOBAL_OBJECTS}]`,
+    message: 'Module pages own no globals: export the value instead.',
+  },
+];
+
+/** @param {string} page @param {{pageHooks: string[], sharedWrites: string[]}} contract */
+function modulePageConfig(page, contract) {
+  const allowed = [...contract.pageHooks, ...contract.sharedWrites].join('|');
+  const pageFiles = `vireo/static/${page}/**/*.js`;
+  const shim = `vireo/static/${page}/shared.js`;
+  const rules = {
+    'no-undef': 'error',
+    'no-unused-vars': ['error', {caughtErrors: 'none'}],
+  };
+  return [
+    {
+      files: [pageFiles],
+      languageOptions: {sourceType: 'module', globals: globals.browser},
+      rules: {
+        ...rules,
+        'no-restricted-syntax': ['error', ...inlineHandlerRestrictions, {
+          selector: `AssignmentExpression > MemberExpression.left[object.name=${GLOBAL_OBJECTS}]`,
+          message: 'Module pages own no globals: export the value, or expose a page hook from shared.js '
+            + '(listed in frontend-module-pages.json).',
+        }],
+      },
+    },
+    {
+      files: [shim],
+      rules: {
+        'no-restricted-syntax': ['error', ...inlineHandlerRestrictions, {
+          selector: `AssignmentExpression > MemberExpression.left[object.name=${GLOBAL_OBJECTS}]`
+            + `:not([computed=false][property.name=/^(${allowed})$/])`,
+          message: `${shim} may only write the page hooks and shared latches listed for "${page}" `
+            + 'in frontend-module-pages.json.',
+        }],
+      },
+    },
+  ];
+}
 
 const checkedControllers = [
   'vireo/static/browse/panel-requests.js',
@@ -83,4 +162,5 @@ export default [
       },
     },
   },
+  ...Object.entries(modulePages).flatMap(([page, contract]) => modulePageConfig(page, contract)),
 ];

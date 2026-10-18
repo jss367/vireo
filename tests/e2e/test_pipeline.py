@@ -22,7 +22,7 @@ def test_pipeline_start_button_disabled_without_folders(live_server, page):
 @pytest.mark.parametrize("source", ["folders", "collection"])
 def test_pipeline_plan_requires_source_and_clears_counts(live_server, page, source):
     """Empty selections must never display or request a workspace-wide plan."""
-    collection_id = live_server["db"].add_collection(
+    collection_id = live_server["db"].collections.add(
         "All test photos", json.dumps({"mode": "all", "rules": []}),
     )
     requests = []

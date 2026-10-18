@@ -529,13 +529,9 @@ def mark_preview_cache_invalid(db, photo_id, size, *, commit=True):
     adopted and re-registered verbatim. Only this row keeps it out. The table
     is part of the canonical schema (``canonical_schema.FORMERLY_LAZY_OBJECTS``).
     """
-    db.conn.execute(
-        "INSERT OR IGNORE INTO preview_cache_invalidations (photo_id, size) "
-        "VALUES (?, ?)",
-        (photo_id, size),
-    )
+    db.caches.mark_preview_invalidated(photo_id, size)
     if commit:
-        db.conn.commit()
+        db.commit()
 
 
 def _preview_size_from_path(path, photo_id, preview_dir=None):
@@ -888,8 +884,8 @@ def reconcile_preview_cache(db, vireo_dir):
             try:
                 # Another app may publish after the startup snapshot. Use
                 # the publisher's writer lock and recheck before unlinking.
-                with db.conn:
-                    db.conn.execute("BEGIN IMMEDIATE")
+                with db.transaction():
+                    db.begin_immediate()
                     if db.caches.paired_preview_get(os.path.basename(path)) is None:
                         os.remove(path)
             except OSError:

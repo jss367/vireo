@@ -20,7 +20,7 @@ resolver this repository feeds.
 
 import os
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from keyword_identity import embedded_keyword_associations_for_merge
@@ -588,6 +588,29 @@ class DuplicatesRepository:
                 "INSERT OR IGNORE INTO duplicate_rejections(photo_id) VALUES (?)",
                 [(pid,) for pid in chunk],
             )
+
+    def photo_rows_with_folder(self, photo_ids: Sequence[int], columns: str,
+                               where_extra: str = "", *,
+                               chunk_size: int) -> list[sqlite3.Row]:
+        """``SELECT {columns} FROM photos p LEFT JOIN folders f WHERE p.id IN (...) {where_extra}``.
+
+        The duplicate scan's row reads: ``columns`` and ``where_extra`` are
+        the scan's own literal SQL fragments (``where_extra`` starts with
+        `` AND``). The ids are sent ``chunk_size`` at a time, below SQLite's
+        parameter cap; the caller passes its own cap so a patched one still
+        applies. Returns the rows of every chunk, in order, as one list.
+        """
+        rows = []
+        for i in range(0, len(photo_ids), chunk_size):
+            chunk = photo_ids[i:i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            sql = (
+                f"SELECT {columns} "
+                f"FROM photos p LEFT JOIN folders f ON f.id = p.folder_id "
+                f"WHERE p.id IN ({placeholders}){where_extra}"
+            )
+            rows.extend(self.conn.execute(sql, chunk).fetchall())
+        return rows
 
     def _chunks(self, values):
         values = list(values)

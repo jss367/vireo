@@ -2166,7 +2166,7 @@ class _PipelineLaunch:
                 "use Import for " + ", ".join(filesystem_scopes)
             )
 
-        # Pipeline stages iterate ``thread_db.get_collection_photos(...)``
+        # Pipeline stages iterate ``thread_db.collections.get_photos(...)``
         # (see pipeline_job / classify_job / sharpness / culling), which
         # evaluates ``rules`` only. Reject visual collections here so a
         # run isn't silently scoped to every metadata-matching photo
@@ -2632,7 +2632,7 @@ class _PipelineLaunch:
         # truthy — a caller expecting misses off would get them on.
         #
         # Validate BEFORE the folder-scope collection is materialized so a
-        # bad value 400s cleanly; otherwise ``db.add_collection`` commits
+        # bad value 400s cleanly; otherwise ``db.collections.add`` commits
         # first and the rejected request leaves a stray "Process …" row.
         miss_enabled_body = body.get("miss_enabled")
         if miss_enabled_body is not None and not isinstance(miss_enabled_body, bool):
@@ -2663,7 +2663,7 @@ class _PipelineLaunch:
         # in ways that raise TypeError on non-list / non-hashable payloads
         # (e.g. ``model_ids: 5`` or an entry that's a list/dict). Without
         # this guard those escape as opaque 500s, and for folder-scoped
-        # runs ``db.add_collection`` has already committed by then, leaving
+        # runs ``db.collections.add`` has already committed by then, leaving
         # a stray "Process …" collection in the workspace after the request
         # fails. Rejecting up front keeps error responses 4xx and prevents
         # orphaned rows on every scope shape.
@@ -2764,7 +2764,7 @@ class _PipelineLaunch:
                 pending_folder_collection["leaf"],
                 _dt.now().strftime("%Y-%m-%d %H:%M"),
             )
-            self.collection_id = db.add_collection(
+            self.collection_id = db.collections.add(
                 self.collection_name,
                 json.dumps([{
                     "field": "photo_ids",
@@ -2776,7 +2776,7 @@ class _PipelineLaunch:
             self.collection_name = next(
                 (
                     c["name"]
-                    for c in db.get_collections()
+                    for c in db.collections.list_all()
                     if c["id"] == self.collection_id
                 ),
                 None,
@@ -2791,7 +2791,7 @@ class _PipelineLaunch:
         if collection_id:
             work_units = runtime_warning_work_units(
                 "pipeline collection",
-                lambda: db.count_collection_photos(collection_id),
+                lambda: db.collections.count_photos(collection_id),
             )
         elif source_snapshot_id is not None:
             work_units = runtime_warning_work_units(
