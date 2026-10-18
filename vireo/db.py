@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from repositories.caches import CachesRepository
     from repositories.collections import CollectionRepository
     from repositories.companion_pairing import CompanionPairingRepository
+    from repositories.computation_cache import ComputationCacheRepository
     from repositories.detections import DetectionsRepository
     from repositories.duplicates import DuplicatesRepository
     from repositories.edit_history import EditHistoryRepository
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from repositories.local_workspaces import LocalWorkspaceRepository
     from repositories.masks_features import MasksFeaturesRepository
     from repositories.model_runs import ModelRunsRepository
+    from repositories.moves_merge import MovesMergeRepository
     from repositories.pending_archives import PendingArchiveRepository
     from repositories.photo_labels import PhotoLabelRepository
     from repositories.photo_review import PhotoReviewRepository
@@ -2645,6 +2647,17 @@ class Database:
             subtree_relative=_subtree_relative,
             join_subtree_path=_join_subtree_path,
         )
+
+    @property
+    def moves_merge(self) -> MovesMergeRepository:
+        """The moves domain: ``db.moves_merge.folder_path_row(id)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_moves_merge_repository``, exactly as a forwarding
+        wrapper called at that moment would, so the connection is resolved per
+        use. ``move.py``'s file-move jobs reach their SQL through it.
+        """
+        return self._moves_merge_repository()
 
     def create_move_rule(self, name, destination, criteria):
         """Create a saved move rule. Returns the rule id."""
@@ -8202,6 +8215,25 @@ class Database:
         resolve the workspace's detector floor stay there too.
         """
         return self._model_runs_repository()
+
+    def _computation_cache_repository(self):
+        """Build the (catalog-wide) computation-cache repository on this connection."""
+        from repositories.computation_cache import ComputationCacheRepository
+
+        return ComputationCacheRepository(self.conn)
+
+    @property
+    def computation_cache(self) -> ComputationCacheRepository:
+        """The portable computation cache's catalog SQL: ``db.computation_cache.run_predictions(...)``.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_computation_cache_repository``, exactly as a
+        forwarding wrapper called at that moment would. Every table it reads
+        or writes is catalog-wide, so no method needs an active workspace, and
+        none commits: ``computation_cache`` commits or rolls back through
+        ``db.commit()`` / ``db.rollback()``.
+        """
+        return self._computation_cache_repository()
 
     def detector_run_is_pinned(self, photo_id, detector_model):
         """Return whether any workspace manually reviewed this detector output.

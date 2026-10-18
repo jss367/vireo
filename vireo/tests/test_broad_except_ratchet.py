@@ -155,6 +155,30 @@ def _irrefutable_pattern(pattern):
     )
 
 
+def _expression_bindings(node, bindings):
+    """Named-expression stores on normal evaluation paths, without truth refinement."""
+    if isinstance(node, ast.Lambda):
+        return bindings  # Its body is another scope and is not evaluated now.
+    if isinstance(node, ast.NamedExpr):
+        current = _expression_bindings(node.value, bindings)
+        return _scope_bindings([node.target], current)
+    if isinstance(node, ast.BoolOp):
+        current = _expression_bindings(node.values[0], bindings)
+        for value in node.values[1:]:
+            current = _join_bindings(current, _expression_bindings(value, current))
+        return current
+    if isinstance(node, ast.IfExp):
+        current = _expression_bindings(node.test, bindings)
+        return _join_bindings(_expression_bindings(node.body, current),
+                              _expression_bindings(node.orelse, current))
+    current = bindings
+    for child in ast.iter_child_nodes(node):
+        current = _expression_bindings(child, current)
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        return _join_bindings(bindings, current)  # May perform no iterations.
+    return current
+
+
 def broad_handlers(tree):
     """Direct broad types and contextlib aliases on bounded possible paths.
 
@@ -163,19 +187,27 @@ def broad_handlers(tree):
     for the syntax ratchet). Match captures propagate across guards: an
     irrefutable capture binds before its guard regardless of the guard result.
     Functions retain conservative whole-local-scope shadowing. This is not a
-    general Python control-flow, exception-flow or dynamic-value analyzer.
+    general Python control-flow or dynamic-value analyzer. Try handlers join
+    possible statement-prefix states; named stores in conditions flow into
+    both branches, without inferring which values make a condition true.
     """
     found = []
-    def body(statements, bindings, lexical, function_lexical, ordered):
+    state_only = False
+    def body(statements, bindings, lexical, function_lexical, ordered, prefixes=()):
         current = dict(bindings)
+        for collector in prefixes:
+            collector.append(current)
         for child in statements:
             updated = visit(child, current, current if lexical is None else lexical,
-                            function_lexical, ordered)
+                            function_lexical, ordered, prefixes)
             if ordered:
                 current = updated if updated is not None else _scope_bindings([child], current)
+            for collector in prefixes:
+                collector.append(current)
         return current
 
-    def visit(node, bindings, lexical, function_lexical, ordered):
+    def visit(node, bindings, lexical, function_lexical, ordered, prefixes=()):
+        nonlocal state_only
         # Module bindings flow into nested class bodies; class namespaces do not.
         nested_lexical = None if lexical is bindings else lexical
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -195,34 +227,68 @@ def broad_handlers(tree):
             for item in node.items:
                 if _is_broad_suppress(item.context_expr, current):
                     found.append(("suppress", node))
-                visit(item.context_expr, current, lexical, function_lexical, ordered)
+                visit(item.context_expr, current, lexical, function_lexical, ordered, prefixes)
                 if item.optional_vars is not None:
                     current = _scope_bindings([item.optional_vars], current)
-            return body(node.body, current, nested_lexical, function_lexical, ordered)
+            return body(node.body, current, nested_lexical, function_lexical, ordered, prefixes)
         elif isinstance(node, ast.If):
-            visit(node.test, bindings, lexical, function_lexical, ordered)
+            visit(node.test, bindings, lexical, function_lexical, ordered, prefixes)
+            current = _expression_bindings(node.test, bindings)
             return _join_bindings(
-                body(node.body, bindings, nested_lexical, function_lexical, ordered),
-                body(node.orelse, bindings, nested_lexical, function_lexical, ordered),
+                body(node.body, current, nested_lexical, function_lexical, ordered, prefixes),
+                body(node.orelse, current, nested_lexical, function_lexical, ordered, prefixes),
             )
+        elif isinstance(node, (ast.Try, ast.TryStar)):
+            interrupted = []
+            after_try = body(node.body, bindings, nested_lexical, function_lexical,
+                             ordered, (*prefixes, interrupted))
+            # Exceptions may arrive before or after any same-scope statement,
+            # including inside a conditional. Else belongs only to normal exit.
+            exceptional = _join_bindings(*interrupted)
+            outcomes = [body(node.orelse, after_try, nested_lexical,
+                             function_lexical, ordered, prefixes)]
+            for handler in node.handlers:
+                if _is_broad_type(handler.type):
+                    found.append(("except", handler))
+                incoming = dict(exceptional)
+                if handler.name:
+                    incoming[handler.name] = None
+                outcomes.append(body(handler.body, incoming, nested_lexical,
+                                     function_lexical, ordered, prefixes))
+            normal = _join_bindings(*outcomes)
+            if not node.finalbody or state_only:
+                return body(node.finalbody, normal, nested_lexical,
+                            function_lexical, ordered, prefixes)
+            # Finally is inspected on uncaught paths too, but only normal/
+            # handled paths can reach the statement following this try.
+            body(node.finalbody, _join_bindings(exceptional, normal),
+                 nested_lexical, function_lexical, ordered, prefixes)
+            checkpoint = len(found)
+            state_only = True
+            try:
+                return body(node.finalbody, normal, nested_lexical,
+                            function_lexical, ordered)
+            finally:
+                state_only = False
+                del found[checkpoint:]
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
             is_for = isinstance(node, (ast.For, ast.AsyncFor))
-            visit(node.iter if is_for else node.test, bindings, lexical, function_lexical, ordered)
+            visit(node.iter if is_for else node.test, bindings, lexical, function_lexical, ordered, prefixes)
             current = _scope_bindings([node.target], bindings) if is_for else bindings
-            after_body = body(node.body, current, nested_lexical, function_lexical, ordered)
+            after_body = body(node.body, current, nested_lexical, function_lexical, ordered, prefixes)
             # Else may run after zero iterations; break may bypass else.
             after_else = body(node.orelse, _join_bindings(bindings, after_body),
-                              nested_lexical, function_lexical, ordered)
+                              nested_lexical, function_lexical, ordered, prefixes)
             return _join_bindings(bindings, after_body, after_else)
         elif isinstance(node, ast.Match):
-            visit(node.subject, bindings, lexical, function_lexical, ordered)
+            visit(node.subject, bindings, lexical, function_lexical, ordered, prefixes)
             fallthrough = bindings
             outcomes = []
             for case in node.cases:
                 current = _scope_bindings([case.pattern], fallthrough)
                 if case.guard is not None:
-                    visit(case.guard, current, lexical, function_lexical, ordered)
-                after_body = body(case.body, current, nested_lexical, function_lexical, ordered)
+                    visit(case.guard, current, lexical, function_lexical, ordered, prefixes)
+                after_body = body(case.body, current, nested_lexical, function_lexical, ordered, prefixes)
                 guard = case.guard.value if isinstance(case.guard, ast.Constant) else None
                 if case.guard is None or guard is not False:
                     outcomes.append(after_body)
@@ -236,13 +302,13 @@ def broad_handlers(tree):
             return _join_bindings(fallthrough, *outcomes)
         for _field, value in ast.iter_fields(node):
             if isinstance(value, list) and value and all(isinstance(n, ast.stmt) for n in value):
-                body(value, bindings, lexical, function_lexical, ordered)
+                body(value, bindings, lexical, function_lexical, ordered, prefixes)
             elif isinstance(value, list):
                 for child in value:
                     if isinstance(child, ast.AST):
-                        visit(child, bindings, lexical, function_lexical, ordered)
+                        visit(child, bindings, lexical, function_lexical, ordered, prefixes)
             elif isinstance(value, ast.AST):
-                visit(value, bindings, lexical, function_lexical, ordered)
+                visit(value, bindings, lexical, function_lexical, ordered, prefixes)
         return None
 
     initial = {"contextlib": "contextlib"}
@@ -604,6 +670,26 @@ def test_compound_unrelated_targets_preserve_suppress_alias():
 ])
 @pytest.mark.parametrize("scope", ["module", "class"])
 def test_possible_branch_bindings(compound, count, scope):
+    source = "from contextlib import suppress as quiet\n" + compound
+    if scope == "class":
+        source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
+    assert len(broad_handlers(ast.parse(source))) == count
+
+
+@pytest.mark.parametrize("compound, count", [
+    ("try:\n    risky()\nexcept OSError:\n    quiet = replacement\nwith quiet(Exception): pass\n", 1),
+    ("try:\n    risky()\n    quiet = replacement\nexcept OSError:\n    with quiet(Exception): pass\n", 1),
+    ("try:\n    risky()\nexcept OSError:\n    pass\nelse:\n    quiet = replacement\nwith quiet(Exception): pass\n", 1),
+    ("try:\n    risky()\nfinally:\n    if condition:\n        quiet = replacement\nwith quiet(Exception): pass\n", 1),
+    ("try:\n    risky()\nfinally:\n    quiet = replacement\nwith quiet(Exception): pass\n", 0),
+    ("try:\n    quiet = replacement\nfinally:\n    pass\nwith quiet(Exception): pass\n", 0),
+    ("try:\n    quiet = replacement\n    from contextlib import suppress as quiet\n    risky()\n    quiet = replacement\nexcept OSError:\n    with quiet(Exception): pass\n", 1),
+    ("try:\n    if condition:\n        from contextlib import suppress as quiet\n        risky()\n        quiet = replacement\nexcept OSError:\n    with quiet(Exception): pass\n", 1),
+    ("if (quiet := replacement):\n    with quiet(Exception): pass\nelse:\n    with quiet(Exception): pass\n", 0),
+    ("if condition and (quiet := replacement):\n    pass\nwith quiet(Exception): pass\n", 1),
+])
+@pytest.mark.parametrize("scope", ["module", "class"])
+def test_try_paths_and_condition_stores(compound, count, scope):
     source = "from contextlib import suppress as quiet\n" + compound
     if scope == "class":
         source = "class C:\n" + "\n".join("    " + line for line in source.splitlines())
