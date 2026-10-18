@@ -2,18 +2,32 @@
 duplicate twins into the workspace.
 """
 
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from import_dedup import stored_metadata_key
 from import_job.cataloging import _invalidate_new_images
 from import_job.state import _counts
 
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable, Iterable
+    from pathlib import Path
+
+    from db import Database
+    from import_job.import_types import DupToken, Emit
+    from import_job.state import _ImportBatchState, _ImportRunState
+
 log = logging.getLogger(__name__)
 
 
-def _link_twins_and_emit(state, batch_st, db, workspace_id, emit, rel,
-                         queued):
+def _link_twins_and_emit(
+    state: _ImportRunState, batch_st: _ImportBatchState, db: Database, workspace_id: int,
+    emit: Emit, rel: str, queued: int,
+) -> None:
     """Link verified duplicate-twin folders into the workspace and emit
     the end-of-batch progress line. Shared verbatim by both import
     paths; the caller keeps the ``if state.cancelled: break``.
@@ -50,7 +64,7 @@ def _link_twins_and_emit(state, batch_st, db, workspace_id, emit, rel,
     )
 
 
-def _key_twin_rows(db, key):
+def _key_twin_rows(db: Database, key: tuple[str, int, str]) -> list[sqlite3.Row]:
     """Catalog rows whose stored identity equals a source metadata key.
 
     ``CatalogIndex`` retains only identity sets, so the safe-to-format
@@ -66,11 +80,13 @@ def _key_twin_rows(db, key):
     ]
 
 
-def _hash_twin_rows(db, file_hash):
+def _hash_twin_rows(db: Database, file_hash: str) -> list[sqlite3.Row]:
     return db.imports.twin_rows_by_hash(file_hash)
 
 
-def _likely_twin_rows(db, token, source_file, path_under_source):
+def _likely_twin_rows(
+    db: Database, token: DupToken, source_file: Path, path_under_source: Callable[[str], bool],
+) -> list[sqlite3.Row]:
     """Return live off-source catalog twins that plausibly back ``token``.
 
     This is the intentionally fast duplicate mode: the checker has already
@@ -102,7 +118,7 @@ def _likely_twin_rows(db, token, source_file, path_under_source):
     return likely
 
 
-def _linkable_twin_dirs(rows, under_destination):
+def _linkable_twin_dirs(rows: Iterable[sqlite3.Row], under_destination: Callable[[str], bool]) -> set[str]:
     """Destination-scoped folders holding a duplicate's cataloged twin.
 
     Only folders under the import destination are linked after a
@@ -139,7 +155,9 @@ def _linkable_twin_dirs(rows, under_destination):
     return dirs
 
 
-def _link_duplicate_twin_dirs(db, workspace_id, dup_dirs):
+def _link_duplicate_twin_dirs(
+    db: Database, workspace_id: int, dup_dirs: Iterable[str],
+) -> tuple[set[str], dict[str, str]]:
     """Link cataloged duplicate folders without walking archive storage.
 
     ``_linkable_twin_dirs`` has already proved each path is a cataloged

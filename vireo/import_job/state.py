@@ -2,9 +2,26 @@
 every phase books files through.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
+    from pathlib import Path
+
+    from import_dedup import DuplicateChecker
+    from import_job.import_types import (
+        CompanionKey,
+        DupToken,
+        LandedIdentity,
+        QueuedTransfer,
+        UnsafeFile,
+        WorkingCopySources,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -13,7 +30,7 @@ log = logging.getLogger(__name__)
 class ImportParams:
     """Parameters for an import job run."""
 
-    sources: list
+    sources: list[str]
     destination: str
     folder_template: str = "%Y/%Y-%m-%d"
     file_types: str = "both"
@@ -31,7 +48,7 @@ class ImportParams:
     # UI rendered as unchecked duplicates, so the duplicate checker can see,
     # skip and COUNT them. Dropping them here makes them land in no ledger
     # bucket and falsely reports a fully-archived card as unsafe to format.
-    include_paths: set | None = None
+    include_paths: Collection[str] | None = None
     # Size of the previewed set and the count the UI showed as checked. Both
     # are transport for values the job cannot reconstruct; ``previewed_count``
     # additionally gates a card-safety condition, so it is not just reporting.
@@ -51,7 +68,7 @@ class ImportParams:
     #    "ssh_base": remote_path/subpath (NAS-side),
     #    "mount_base": mount_path/subpath (== destination)}
     # ``None`` keeps the local copy path unchanged.
-    remote_target: dict | None = None
+    remote_target: dict[str, Any] | None = None
     # Vireo data dir for working-copy extraction (Task 2.5). None skips
     # extraction (tests, or callers that defer to the scanner backfill).
     vireo_dir: str | None = None
@@ -67,14 +84,14 @@ class ImportParams:
     # Photo IDs a recovery retry carries from its parent import (already
     # validated against the parent's scope). The run finishes their
     # working copies, which an interrupted parent may never have reached.
-    carry_photo_ids: list | None = None
+    carry_photo_ids: list[int] | None = None
     # Set only when resuming an interrupted import: the files the
     # interrupted run (and any interrupted run it resumed) recorded as
     # landed before cataloging them, ``{dest_path: [size, mtime_ns]}``. A
     # photo row whose file is still that landing is that run's, whether or
     # not its checkpoint got to record the photo id. See
     # ``_recover_parent_landings``.
-    recover_landed_files: dict | None = None
+    recover_landed_files: dict[str, LandedIdentity] | None = None
 
 
 @dataclass(frozen=True)
@@ -119,25 +136,25 @@ class _ImportRunState:
     # plus one f-string interpolation of the path into a failure reason.
     mount_ever_lost: str | None = None
     dup_link_failed: bool = False
-    unsafe_files: list = field(default_factory=list)  # [{path, reason}]
-    folder_counts: dict = field(default_factory=dict)
-    discovery_errors: list = field(default_factory=list)
-    imported_photo_ids: set = field(default_factory=set)
+    unsafe_files: list[UnsafeFile] = field(default_factory=list)
+    folder_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    discovery_errors: list[OSError] = field(default_factory=list)
+    imported_photo_ids: set[int] = field(default_factory=set)
     # Fingerprints of ``imported_photo_ids`` captured so far for the
     # resume scope (see ``_publish_resume_scope``).
-    resume_fingerprints: dict = field(default_factory=dict)
+    resume_fingerprints: dict[str, str] = field(default_factory=dict)
     # Rows an interrupted parent landed (see ``_recover_parent_landings``).
-    recovered_photo_ids: set = field(default_factory=set)
+    recovered_photo_ids: set[int] = field(default_factory=set)
     # Files this run landed, ``{dest_path: [size, mtime_ns]}``, recorded
     # (and flushed to the history row) before each batch is cataloged, so
     # a resume can tell this run's rows from anyone else's. See
     # ``_record_landed_files``.
-    landed_files: dict = field(default_factory=dict)
-    linked_dup_dirs: set = field(default_factory=set)
-    run_dest_folders: dict = field(default_factory=dict)
-    run_verified_hashes: dict = field(default_factory=dict)
-    wc_source_paths: dict = field(default_factory=dict)
-    wc_dest_folders: set = field(default_factory=set)
+    landed_files: dict[str, LandedIdentity] = field(default_factory=dict)
+    linked_dup_dirs: set[str] = field(default_factory=set)
+    run_dest_folders: dict[DupToken, str] = field(default_factory=dict)
+    run_verified_hashes: dict[DupToken, str | None] = field(default_factory=dict)
+    wc_source_paths: WorkingCopySources = field(default_factory=dict)
+    wc_dest_folders: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -162,12 +179,12 @@ class _ImportBatchState:
     # catalog-stamping loop can cross-check the scanned MOUNT row
     # against the bytes we confirmed. Populated starting from the
     # per-file loop because the adoption branch inside it appends here.
-    landed: list = field(default_factory=list)
+    landed: list[_LandedFile] = field(default_factory=list)
     # Twin folders (under destination) whose bytes we RE-HASHED this run
     # and confirmed against source hashes — safe to scan/link into the
     # active workspace after this batch's fresh-scan runs. See PR #1113
     # review.
-    dup_dirs: set = field(default_factory=set)
+    dup_dirs: set[str] = field(default_factory=set)
     # Accepted duplicate skips for this batch —
     # (source_file, counted_unverified). A skip asserts the archive
     # already holds these bytes, which stops being true the moment the
@@ -178,7 +195,7 @@ class _ImportBatchState:
     # discovered and reports safe_to_format True over an archive
     # holding none of the bytes. See PR #1396 review (Codex P1
     # r3687506040; remote fold r3688498501 / r3688501706).
-    dup_skips: list = field(default_factory=list)
+    dup_skips: list[tuple[Path, bool]] = field(default_factory=list)
     # dest_paths the post-scan cross-checks reclassified from
     # copied/skipped_duplicate to failed. The entries stay in ``landed``
     # (mutating a list during its own iteration is error-prone), so the
@@ -190,7 +207,7 @@ class _ImportBatchState:
     # whose archive bytes no longer match what we copied, and cache a
     # working copy that doesn't correspond to what the rest of the app
     # sees at the archive path. See PR #1107 review.
-    reclassified_landed_paths: set = field(default_factory=set)
+    reclassified_landed_paths: set[str] = field(default_factory=set)
     # Sticky once tripped: a batch can hold hundreds of files (the
     # 2026-07-26 folder held 200), and when it is the only batch there
     # is no later batch boundary to catch a detach. Probing per file
@@ -217,10 +234,10 @@ class _ImportBatchState:
     # --- Remote-only trio (unused on the local path until PR 7) ------
     # Files queued for the batch rsync:
     # (source_file, dest_basename, src_hash, src_size, src_mtime_ns).
-    to_transfer: list = field(default_factory=list)
+    to_transfer: list[QueuedTransfer] = field(default_factory=list)
     # dest basename -> src_hash, for intra-batch same-basename collision
     # resolution (FIX 2). Populated as files are queued/skipped.
-    claimed_basenames: dict = field(default_factory=dict)
+    claimed_basenames: dict[str, str | None] = field(default_factory=dict)
     # src_hash set, for intra-batch same-content different-basename
     # dedup: the local path calls ``_record_checker`` inside its own
     # batch loop (right after each copy_and_hash_verify), so a byte-
@@ -232,7 +249,7 @@ class _ImportBatchState:
     # queued/rsynced/cataloged again. Track queued src hashes here
     # to catch that case at enqueue time — the file that was already
     # queued backs this skip. See PR #1113 review.
-    queued_src_hashes: dict = field(default_factory=dict)
+    queued_src_hashes: dict[str, str] = field(default_factory=dict)
     # Same-stem card files (IMG_0001.CR3 + IMG_0001.JPG) must keep one
     # shared stem at the destination, or a collision rename splits the
     # pair (IMG_0001_1.CR3 beside IMG_0001.JPG) and the scan's companion
@@ -241,8 +258,8 @@ class _ImportBatchState:
     # files sharing it (only groups of 2+). ``companion_slots``: companion
     # key -> the numeric suffix (0 = original name) the group's first
     # landed member took, which later members try first.
-    companion_siblings: dict = field(default_factory=dict)
-    companion_slots: dict = field(default_factory=dict)
+    companion_siblings: dict[CompanionKey, list[Path]] = field(default_factory=dict)
+    companion_slots: dict[CompanionKey, int] = field(default_factory=dict)
     # Workspace-photo grants this batch newly inserted via
     # ``photo_visibility.grant_verified_twins_tracked``, with the folders it promoted
     # from ``status='missing'`` to ``'ok'`` in the same call. A mount-loss
@@ -251,25 +268,25 @@ class _ImportBatchState:
     # workspace visibility or folder reachability. Pre-existing grants
     # from an earlier batch (or an earlier run) are deliberately excluded
     # by the tracked grant path. See ``_rollback_on_mount_loss``.
-    dup_granted_photo_ids: list = field(default_factory=list)
-    dup_promoted_folder_ids: list = field(default_factory=list)
+    dup_granted_photo_ids: list[int] = field(default_factory=list)
+    dup_promoted_folder_ids: list[int] = field(default_factory=list)
 
 
-def _counts(state, rel):
+def _counts(state: _ImportRunState, rel: str) -> dict[str, int]:
     return state.folder_counts.setdefault(
         rel, {"copied": 0, "skipped_duplicate": 0, "failed": 0},
     )
 
 
-def _fail(state, rel, source_file, reason):
+def _fail(state: _ImportRunState, rel: str, source_file: str | Path, reason: str) -> None:
     state.failed += 1
     _counts(state, rel)["failed"] += 1
     state.unsafe_files.append({"path": str(source_file), "reason": reason})
     log.warning("%s failed for %s: %s", state.log_label, source_file, reason)
 
 
-def _reclassify_landed_failed(state, rel, entry, reason,
-                              attests_bytes):
+def _reclassify_landed_failed(state: _ImportRunState, rel: str, entry: _LandedFile, reason: str,
+                              attests_bytes: bool) -> None:
     """Move a landed file's count from copied/skipped_duplicate to failed.
 
     A landed entry has already been booked into ``copied`` (fresh copy)
@@ -302,7 +319,10 @@ def _reclassify_landed_failed(state, rel, entry, reason,
     _fail(state, rel, dest_path, reason)
 
 
-def _record_checker(state, checker, source_file, dest_folder, file_hash):
+def _record_checker(
+    state: _ImportRunState, checker: DuplicateChecker | None, source_file: Path, dest_folder: str,
+    file_hash: str | None,
+) -> None:
     """Register a landed/adopted file's identity with the intra-run checker.
 
     Without this the checker only sees the pre-run catalog, so a later
@@ -332,7 +352,7 @@ def _record_checker(state, checker, source_file, dest_folder, file_hash):
         state.run_verified_hashes[tok] = file_hash
 
 
-def _fail_whole_batch(state, rel, batch, reason):
+def _fail_whole_batch(state: _ImportRunState, rel: str, batch: list[Path], reason: str) -> None:
     """Book every file of a batch ``_batch_preflight`` refused as failed.
 
     Each file also counts as emitted: ``emitted`` otherwise only advances

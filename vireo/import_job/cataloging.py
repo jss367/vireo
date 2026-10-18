@@ -3,8 +3,11 @@ validation of landed files, derived-cache invalidation, and the
 deferred working-copy extraction.
 """
 
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from import_job.copy_verify import DestReadCancelled, _rehash_dest_or_none
 from import_job.progress import _IMPORT_ETA_PROGRESS_KEYS
@@ -12,10 +15,20 @@ from import_job.state import _reclassify_landed_failed
 from job_contract import progress_event
 from scanner import EMPTY_FILE_SHA256, ScanControl, ScanOptions
 
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable
+
+    from db import Database
+    from import_job.import_types import ScanFunction, StopCheck
+    from import_job.state import ImportParams, _ImportBatchState, _ImportRunState, _LandedFile
+    from jobs import JobRunner
+    from services.service_types import JobDict
+
 log = logging.getLogger(__name__)
 
 
-def _invalidate_new_images(db, root):
+def _invalidate_new_images(db: Database, root: str) -> None:
     """Invalidate the /new-images cache for ``root`` after a restricted scan.
 
     Lazy import so import_job.py stays independent of new_images at
@@ -32,8 +45,11 @@ def _invalidate_new_images(db, root):
         )
 
 
-def _catalog_scan_and_prescan(state, batch_st, db, params, scan, destination,
-                              rel, attests_bytes, *, runner=None, job=None):
+def _catalog_scan_and_prescan(
+    state: _ImportRunState, batch_st: _ImportBatchState, db: Database, params: ImportParams,
+    scan: ScanFunction, destination: str, rel: str, attests_bytes: bool, *,
+    runner: JobRunner | None = None, job: JobDict | None = None,
+) -> dict[str, str | None]:
     """Run the restricted per-batch catalog scan for everything in
     ``batch_st.landed`` (fresh copies/transfers AND adoptions), capturing
     each landed path's pre-scan photo-row hash first so the caller's
@@ -114,8 +130,10 @@ def _catalog_scan_and_prescan(state, batch_st, db, params, scan, destination,
     return pre_scan_hashes
 
 
-def _run_preservation_scan(scan, destination, db, batch_st, landed_paths,
-                           params, *, runner, job):
+def _run_preservation_scan(
+    scan: ScanFunction, destination: str, db: Database, batch_st: _ImportBatchState,
+    landed_paths: set[str], params: ImportParams, *, runner: JobRunner | None, job: JobDict | None,
+) -> None:
     """The restricted per-batch ``scan()`` behind
     ``_catalog_scan_and_prescan``: runs to completion even after Stop,
     with only the PAUSE probe wired (see the comments below).
@@ -163,32 +181,12 @@ def _run_preservation_scan(scan, destination, db, batch_st, landed_paths,
     # owns hard shutdown via its own deadline. The pause probe is
     # kept, so a user Pause still unwinds the scan pool cleanly.
     #
-    # ``cancel_check`` is set to a parking callback rather than
-    # ``None`` so the job actually transitions to ``paused`` when a
-    # user pauses mid-scan. ``pause_check`` alone is non-blocking:
-    # scanner releases its pool and then polls ``pause_check``
-    # every 50 ms, leaving the job stuck in ``pausing``. The
-    # parking callback invokes ``wait_if_paused(publish_paused=True)``
-    # to park AND publish the paused status, then returns ``False``
-    # unconditionally — the parking side-effect matters, the
-    # ``cancelled`` return value must be ignored to keep the
-    # preservation contract intact.
+    # ``cancel_check`` is a parking callback rather than ``None``; see
+    # ``_preservation_scan_probes``.
     from resource_ledger import bind_resource_cancel_check
-    scan_pause_check = None
-    scan_park_only_check = None
-    if runner is not None and job is not None:
-        job_id = job["id"]
-
-        def scan_pause_check():
-            return runner.pause_requested(job_id)
-
-        def scan_park_only_check():
-            # Park via wait_if_paused so the job publishes ``paused``
-            # while the scanner is safely at its pause checkpoint.
-            # Discard the cancellation return value — the preservation
-            # contract requires this scan to run to completion.
-            runner.wait_if_paused(job_id, publish_paused=True)
-            return False
+    scan_pause_check, scan_park_only_check = _preservation_scan_probes(
+        runner, job,
+    )
     with bind_resource_cancel_check(None):
         scan(
             destination, db,
@@ -216,9 +214,44 @@ def _run_preservation_scan(scan, destination, db, batch_st, landed_paths,
         )
 
 
-def _stamp_landed_and_validate_catalog(state, batch_st, db, params, rel, *,
-                                       attests_bytes, dest_noun,
-                                       stop_requested):
+def _preservation_scan_probes(
+    runner: JobRunner | None, job: JobDict | None,
+) -> tuple[Callable[[], bool] | None, Callable[[], bool] | None]:
+    """``(pause_check, park_only_check)`` for the preservation scan.
+
+    Both are None without a runner and job. ``park_only_check`` is the
+    scan's ``cancel_check``: a parking callback rather than ``None`` so the
+    job actually transitions to ``paused`` when a user pauses mid-scan.
+    ``pause_check`` alone is non-blocking: scanner releases its pool and
+    then polls ``pause_check`` every 50 ms, leaving the job stuck in
+    ``pausing``. The parking callback invokes
+    ``wait_if_paused(publish_paused=True)`` to park AND publish the paused
+    status, then returns ``False`` unconditionally — the parking
+    side-effect matters, the ``cancelled`` return value must be ignored to
+    keep the preservation contract intact.
+    """
+    if runner is None or job is None:
+        return None, None
+    job_id = job["id"]
+
+    def scan_pause_check() -> bool:
+        return runner.pause_requested(job_id)
+
+    def scan_park_only_check() -> bool:
+        # Park via wait_if_paused so the job publishes ``paused``
+        # while the scanner is safely at its pause checkpoint.
+        # Discard the cancellation return value — the preservation
+        # contract requires this scan to run to completion.
+        runner.wait_if_paused(job_id, publish_paused=True)
+        return False
+
+    return scan_pause_check, scan_park_only_check
+
+
+def _stamp_landed_and_validate_catalog(
+    state: _ImportRunState, batch_st: _ImportBatchState, db: Database, params: ImportParams,
+    rel: str, *, attests_bytes: bool, dest_noun: str, stop_requested: StopCheck,
+) -> set[int]:
     """Cross-check every landed file against what scan() cataloged and
     stamp the integrity verdicts; returns the RAW photo ids whose
     derived caches need invalidation because a landed JPEG became (or
@@ -276,9 +309,11 @@ def _stamp_landed_and_validate_catalog(state, batch_st, db, params, rel, *,
     return raw_companion_invalidations
 
 
-def _validate_rowless_landing(state, batch_st, db, rel, entry,
-                              raw_companion_invalidations, *,
-                              attests_bytes, dest_noun, stop_requested):
+def _validate_rowless_landing(
+    state: _ImportRunState, batch_st: _ImportBatchState, db: Database, rel: str, entry: _LandedFile,
+    raw_companion_invalidations: set[int], *, attests_bytes: bool, dest_noun: str,
+    stop_requested: StopCheck,
+) -> bool:
     """Validate a landed file that scan() left without a photo row of
     its own; returns False when a Stop interrupted the destination
     re-read (``state.cancelled`` is set and the stamping loop ends).
@@ -360,8 +395,10 @@ def _validate_rowless_landing(state, batch_st, db, rel, entry,
     return True
 
 
-def _stamp_cataloged_landing(state, batch_st, db, rel, entry, row, *,
-                             attests_bytes, dest_noun, stop_requested):
+def _stamp_cataloged_landing(
+    state: _ImportRunState, batch_st: _ImportBatchState, db: Database, rel: str, entry: _LandedFile,
+    row: sqlite3.Row, *, attests_bytes: bool, dest_noun: str, stop_requested: StopCheck,
+) -> bool:
     """Cross-check a landed file's own photo ``row`` and stamp it; returns
     False when a Stop interrupted the destination re-read
     (``state.cancelled`` is set and the stamping loop ends).
@@ -435,9 +472,10 @@ def _stamp_cataloged_landing(state, batch_st, db, rel, entry, row, *,
     return True
 
 
-def _invalidate_changed_and_sweep(state, batch_st, db, params,
-                                  pre_scan_hashes,
-                                  raw_companion_invalidations):
+def _invalidate_changed_and_sweep(
+    state: _ImportRunState, batch_st: _ImportBatchState, db: Database, params: ImportParams,
+    pre_scan_hashes: dict[str, str | None], raw_companion_invalidations: set[int],
+) -> None:
     """Invalidate derived caches for landed rows whose content identity
     changed (pre-scan hash differs from the attested hash) and for RAW
     rows that gained a companion this batch, then commit the batch and
@@ -505,7 +543,7 @@ def _invalidate_changed_and_sweep(state, batch_st, db, params,
         )
 
 
-def _fill_wc_overrides(state, batch_st, params):
+def _fill_wc_overrides(state: _ImportRunState, batch_st: _ImportBatchState, params: ImportParams) -> None:
     """Record the card-side working-copy source override for every landed
     entry the post-scan checks did not reclassify. Shared verbatim by
     both import paths.
@@ -539,7 +577,9 @@ def _fill_wc_overrides(state, batch_st, params):
         state.wc_dest_folders.add(batch_st.dest_folder)
 
 
-def _extract_deferred_working_copies(state, params, runner, job, db):
+def _extract_deferred_working_copies(
+    state: _ImportRunState, params: ImportParams, runner: JobRunner, job: JobDict, db: Database,
+) -> None:
     """One working-copy extraction pass over every folder this run
     touched, after all batches have landed and been paired. Shared
     verbatim by both import paths.
@@ -559,8 +599,9 @@ def _extract_deferred_working_copies(state, params, runner, job, db):
         from scanner import _extract_working_copies
 
         def _working_copy_status(
-            message, phase_current=None, phase_total=None, phase_label=None,
-        ):
+            message: str, phase_current: int | None = None, phase_total: int | None = None,
+            phase_label: str | None = None,
+        ) -> None:
             """Expose deferred extraction without replacing import totals."""
             extra = {
                 "phase_current": phase_current,
