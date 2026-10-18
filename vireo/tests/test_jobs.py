@@ -102,7 +102,7 @@ def test_workspace_transfer_reservation_covers_pipeline_persistence(monkeypatch)
         release.set()
         thread.join(timeout=synchronization_timeout(10))
     assert errors == ["database unavailable"]
-    assert not runner._pipeline_admissions
+    assert not runner._queue.admissions
     transfer, _, _ = runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
                                             workspace_id=1, exclusive_workspace=True)
     assert wait_for_job_via_runner(runner, transfer)["status"] == "completed"
@@ -191,8 +191,8 @@ def test_exclusive_workspace_mutation_blocks_job_admission_and_releases():
                 pytest.fail("Mutation entered a workspace being deleted")
     job_id = runner.start("import", lambda job: None, workspace_id=1)
     assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
-    assert not runner._exclusive_workspace_mutations
-    assert not runner._workspace_mutations
+    assert not runner._reservations.exclusive
+    assert not runner._reservations.mutations
     runner.shutdown()
 
 
@@ -216,7 +216,7 @@ def test_busy_rejection_names_the_request_holding_the_workspace():
 
 
 def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatch, caplog):
-    import jobs
+    import job_runner.reservations as reservations_module
     from jobs import JobRunner, WorkspaceBusyError
 
     runner = JobRunner()
@@ -231,7 +231,7 @@ def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatc
     thread.start()
     try:
         assert holder_entered.wait(10)
-        monkeypatch.setattr(jobs, "STALE_WORKSPACE_MUTATION_SECS", 0)
+        monkeypatch.setattr(reservations_module, "STALE_WORKSPACE_MUTATION_SECS", 0)
         with caplog.at_level("WARNING", logger="jobs"):
             with pytest.raises(WorkspaceBusyError, match="taking longer than usual") as excinfo:
                 runner.start_singleton("send-to-nas", lambda job: None, singleton_key="archive",
@@ -243,7 +243,7 @@ def test_busy_rejection_names_long_running_request_and_logs_its_stack(monkeypatc
     assert "restart" not in str(excinfo.value)
     # The holder's current stack remains available for diagnosis.
     assert any("in hold" in r.getMessage() and "/api/hung" in r.getMessage() for r in caplog.records)
-    assert not runner._workspace_mutations
+    assert not runner._reservations.mutations
     runner.shutdown()
 
 
@@ -294,7 +294,7 @@ def test_job_runner_shutdown_cancels_and_joins_workers():
     job_id = runner.start("test", work)
     assert started.wait(timeout=synchronization_timeout(2))
     with runner._lock:
-        runner._schedule_promotion_retry_locked()
+        runner._queue.schedule_retry_locked()
 
     assert runner.shutdown(timeout=2) is True
     assert stopped.is_set()
@@ -318,7 +318,7 @@ def test_job_runner_shutdown_joins_after_queued_cancel_failure(monkeypatch):
         stopped.set()
 
     runner.start("test", work)
-    runner._queued_pipelines["queued"] = {}
+    runner._queue.queued["queued"] = {}
     observed_timeouts = []
 
     def fail_cancel(_job_id, *, promote_after_cancel, db_timeout):
@@ -332,7 +332,7 @@ def test_job_runner_shutdown_joins_after_queued_cancel_failure(monkeypatch):
     assert observed_timeouts and 0 < observed_timeouts[0] <= 2
     assert not runner._workers.threads
     with runner._lock:
-        runner._queued_pipelines.clear()
+        runner._queue.queued.clear()
 
 
 def _wait_for_status(runner, job_id, status, timeout=3.0):
@@ -504,7 +504,7 @@ def test_pause_status_events_stay_ordered_through_completion():
     checkpoint_reached = threading.Event()
     pausing_published = threading.Event()
     release_pausing = threading.Event()
-    original_publish = runner._publish_status_locked
+    original_publish = runner._streams.publish_status_locked
 
     def controlled_publish(job, status):
         original_publish(job, status)
@@ -512,7 +512,7 @@ def test_pause_status_events_stay_ordered_through_completion():
             pausing_published.set()
             assert release_pausing.wait(timeout=synchronization_timeout(2))
 
-    runner._publish_status_locked = controlled_publish
+    runner._streams.publish_status_locked = controlled_publish
 
     def work(job):
         work_started.set()
