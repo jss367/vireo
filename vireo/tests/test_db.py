@@ -410,7 +410,7 @@ def test_calendar_data_folder_includes_descendants(tmp_path):
 
 
 def test_geolocated_photos_folder_includes_descendants(tmp_path):
-    """get_geolocated_photos(folder_id=parent) includes descendant-folder photos."""
+    """locations.get_geolocated_photos(folder_id=parent) includes descendant-folder photos."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     root = db.add_folder('/p', name='p')
@@ -423,7 +423,7 @@ def test_geolocated_photos_folder_includes_descendants(tmp_path):
     db.conn.execute("UPDATE photos SET latitude = 11.0, longitude = 21.0 WHERE id = ?", (pid2,))
     db.conn.commit()
 
-    photos = db.get_geolocated_photos(folder_id=root)
+    photos = db.locations.get_geolocated_photos(folder_id=root)
     assert len(photos) == 2
 
 
@@ -2620,7 +2620,7 @@ def test_repair_misclassified_location_ancestors_keeps_distinct_place_roots(
 def test_place_upsert_avoids_ambiguous_place_bearing_root_parent(tmp_path):
     """Distinct-place-id same-name roots must not silently claim children.
 
-    _merge_duplicate_location_roots keeps two same-name location roots with
+    locations.merge_duplicate_roots keeps two same-name location roots with
     distinct place_ids apart because they represent different Google
     places. Google's per-component address_components do not carry
     place_ids, so a later child place upsert whose address component just
@@ -2738,7 +2738,7 @@ def test_repair_preserves_coordless_anchor_beside_distinct_place_roots(
     When two same-name roots carry distinct non-null place_ids (e.g.
     Georgia the country and Georgia the state) plus a coordless anchor
     that ``_upsert_one_keyword`` inserted for ambiguous address
-    components, ``_merge_duplicate_location_roots`` must leave the
+    components, ``locations.merge_duplicate_roots`` must leave the
     coordless anchor alone. Merging it into either place-bearing root
     would silently reparent its descendants under an arbitrary Google
     place and undo the ambiguity guard for future coordless children.
@@ -5299,7 +5299,7 @@ def test_get_calendar_data_empty_year(tmp_path):
 
 
 def test_get_geolocated_photos_excludes_null_coords(tmp_path):
-    """get_geolocated_photos only returns photos with lat/lon."""
+    """locations.get_geolocated_photos only returns photos with lat/lon."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -5311,7 +5311,7 @@ def test_get_geolocated_photos_excludes_null_coords(tmp_path):
     db.conn.execute("UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE id=?", (p1,))
     db.conn.commit()
 
-    results = db.get_geolocated_photos()
+    results = db.locations.get_geolocated_photos()
     assert len(results) == 1
     assert results[0]['filename'] == 'geo.jpg'
     assert results[0]['latitude'] == 37.77
@@ -5319,7 +5319,7 @@ def test_get_geolocated_photos_excludes_null_coords(tmp_path):
 
 
 def test_get_geolocated_photos_workspace_scoped(tmp_path):
-    """get_geolocated_photos respects workspace scoping."""
+    """locations.get_geolocated_photos respects workspace scoping."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -5331,12 +5331,12 @@ def test_get_geolocated_photos_workspace_scoped(tmp_path):
     # Create a second workspace without this folder
     ws2 = db.create_workspace('Other')
     db.set_active_workspace(ws2)
-    results = db.get_geolocated_photos()
+    results = db.locations.get_geolocated_photos()
     assert len(results) == 0
 
 
 def test_get_geolocated_photos_filters(tmp_path):
-    """get_geolocated_photos applies rating and date filters."""
+    """locations.get_geolocated_photos applies rating and date filters."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -5351,12 +5351,12 @@ def test_get_geolocated_photos_filters(tmp_path):
 
     # Metadata filtering flows exclusively through the universal-filter
     # rules tree (legacy per-field params removed in Phase 5).
-    results = db.get_geolocated_photos(
+    results = db.locations.get_geolocated_photos(
         rules=[{"field": "rating", "op": ">=", "value": 4}])
     assert len(results) == 1
     assert results[0]['filename'] == 'b.jpg'
 
-    results = db.get_geolocated_photos(
+    results = db.locations.get_geolocated_photos(
         rules=[{"field": "timestamp", "op": ">=", "value": "2024-03-01"}])
     assert len(results) == 1
     assert results[0]['filename'] == 'b.jpg'
@@ -5380,17 +5380,17 @@ def test_get_geolocated_photos_keyword_search_options(tmp_path):
     # legacy tokenized keyword param with case/whole-word options was
     # removed in Phase 5 along with its endpoint surface).
     assert {
-        r['filename'] for r in db.get_geolocated_photos(
+        r['filename'] for r in db.locations.get_geolocated_photos(
             rules=[{"field": "keyword", "op": "contains", "value": "tern"}])
     } == {'western.jpg', 'tern.jpg'}
     assert {
-        r['filename'] for r in db.get_geolocated_photos(
+        r['filename'] for r in db.locations.get_geolocated_photos(
             rules=[{"field": "keyword", "op": "is", "value": "Common Tern"}])
     } == {'tern.jpg'}
 
 
 def test_get_geolocated_photos_with_species(tmp_path):
-    """get_geolocated_photos includes species from accepted predictions."""
+    """locations.get_geolocated_photos includes species from accepted predictions."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -5406,13 +5406,13 @@ def test_get_geolocated_photos_with_species(tmp_path):
     pred = db.predictions.get_rows(photo_ids=[p1])
     db.accept_prediction(pred[0]['id'])
 
-    results = db.get_geolocated_photos()
+    results = db.locations.get_geolocated_photos()
     assert len(results) == 1
     assert results[0]['species'] == 'Red-tailed Hawk'
 
 
 def test_get_geolocated_photos_no_prediction_species_null(tmp_path):
-    """get_geolocated_photos returns species=None when no accepted prediction."""
+    """locations.get_geolocated_photos returns species=None when no accepted prediction."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -5421,13 +5421,13 @@ def test_get_geolocated_photos_no_prediction_species_null(tmp_path):
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
 
-    results = db.get_geolocated_photos()
+    results = db.locations.get_geolocated_photos()
     assert len(results) == 1
     assert results[0]['species'] is None
 
 
 def test_get_geolocated_photos_species_filter(tmp_path):
-    """get_geolocated_photos filters by species when provided."""
+    """locations.get_geolocated_photos filters by species when provided."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -5450,12 +5450,12 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     for pr in preds:
         db.accept_prediction(pr['id'])
 
-    results = db.get_geolocated_photos(
+    results = db.locations.get_geolocated_photos(
         rules=[{"field": "species", "op": "is", "value": "Red-tailed Hawk"}])
     assert len(results) == 1
     assert results[0]['filename'] == 'hawk.jpg'
 
-    results = db.get_geolocated_photos(
+    results = db.locations.get_geolocated_photos(
         rules=[{"field": "species", "op": "is", "value": "Great Blue Heron"}])
     assert len(results) == 1
     assert results[0]['filename'] == 'heron.jpg'
@@ -5483,13 +5483,13 @@ def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
     # Photo is tagged with both; either rules value must return it. The
     # species display column shows the latest-confirmed identification
     # (single-column display; the multi-species truth lives in keywords).
-    rows = db.get_geolocated_photos(
+    rows = db.locations.get_geolocated_photos(
         rules=[{"field": "species", "op": "is", "value": "Red-tailed Hawk"}])
     assert len(rows) == 1
-    rows = db.get_geolocated_photos(
+    rows = db.locations.get_geolocated_photos(
         rules=[{"field": "species", "op": "is", "value": "Sparrow"}])
     assert len(rows) == 1
-    assert db.get_geolocated_photos(
+    assert db.locations.get_geolocated_photos(
         rules=[{"field": "species", "op": "is", "value": "Cardinal"}]) == []
 
 
@@ -5516,7 +5516,7 @@ def test_get_geolocated_photos_falls_back_to_keyword_coords(tmp_path):
     )
     db.conn.commit()
 
-    rows = db.get_geolocated_photos()
+    rows = db.locations.get_geolocated_photos()
     assert len(rows) == 1
     r = rows[0]
     assert r['filename'] == 'no_gps.jpg'
@@ -5548,7 +5548,7 @@ def test_get_geolocated_photos_prefers_exif_over_keyword(tmp_path):
     )
     db.conn.commit()
 
-    rows = db.get_geolocated_photos()
+    rows = db.locations.get_geolocated_photos()
     assert len(rows) == 1
     r = rows[0]
     assert r['latitude'] == 37.7749
@@ -5582,7 +5582,7 @@ def test_get_geolocated_photos_excludes_photos_with_neither(tmp_path):
     )
     db.conn.commit()
 
-    rows = db.get_geolocated_photos()
+    rows = db.locations.get_geolocated_photos()
     assert rows == []
 
 
@@ -5615,7 +5615,7 @@ def test_get_geolocated_photos_with_partial_exif_uses_keyword_pair(tmp_path):
     )
     db.conn.commit()
 
-    rows = db.get_geolocated_photos()
+    rows = db.locations.get_geolocated_photos()
     assert len(rows) == 1
     r = rows[0]
     # Coords must come as a pair from the keyword (not 37.7749 + -73.9654,
@@ -5714,7 +5714,7 @@ def test_get_effective_photo_locations_returns_bulk_mapping(tmp_path):
     )
     db.conn.commit()
 
-    locations = db.get_effective_photo_locations(
+    locations = db.locations.get_effective(
         [p_exif, p_keyword, p_empty, p_exif], verify_workspace=False
     )
 
@@ -5846,7 +5846,7 @@ def test_get_accepted_species_multiple_species_per_photo(tmp_path):
 
 def test_get_accepted_species_includes_keyword_coord_photos(tmp_path):
     """A photo without EXIF GPS but with a 'location'-type keyword that has
-    coords must still surface its species in the dropdown — get_geolocated_photos
+    coords must still surface its species in the dropdown — locations.get_geolocated_photos
     renders such photos as map markers, so the filter list has to match."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
@@ -5879,7 +5879,7 @@ def test_get_accepted_species_includes_keyword_coord_photos(tmp_path):
 
 def test_get_accepted_species_ignores_coordless_location_keywords(tmp_path):
     """A 'location'-type keyword *without* coords (free-text "the meadow")
-    is not enough — get_geolocated_photos won't render the photo, so the
+    is not enough — locations.get_geolocated_photos won't render the photo, so the
     species filter shouldn't list it either."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
@@ -5929,7 +5929,7 @@ def test_count_photos_without_gps(tmp_path):
 def test_count_photos_without_gps_excludes_keyword_coord_photos(tmp_path):
     """A photo with no EXIF GPS but a coord-bearing location keyword IS
     plottable on the map — count_photos_without_gps must not count it,
-    so total_with_gps stays >= len(get_geolocated_photos())."""
+    so total_with_gps stays >= len(locations.get_geolocated_photos())."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -5972,10 +5972,10 @@ def test_count_photos_without_gps_excludes_keyword_coord_photos(tmp_path):
     # Photos 3 and 4 are not plottable (no EXIF, no coord-bearing keyword).
     assert db.count_photos_without_gps() == 2
 
-    # Sanity: get_geolocated_photos returns the two plottable photos
+    # Sanity: locations.get_geolocated_photos returns the two plottable photos
     # (Photo 1 via EXIF, Photo 2 via keyword fallback). Total of plottable
-    # (= 4 photos - 2 without_gps = 2) matches len(get_geolocated_photos).
-    geo = db.get_geolocated_photos()
+    # (= 4 photos - 2 without_gps = 2) matches len(locations.get_geolocated_photos).
+    geo = db.locations.get_geolocated_photos()
     assert len(geo) == 2
 
 
@@ -17951,7 +17951,7 @@ def test_set_photo_location_preserves_non_location_keywords(db):
 
 
 def test_clear_photo_location_removes_links_but_keeps_keyword_rows(db):
-    """clear_photo_location deletes the link only, never the keyword row."""
+    """locations.clear_photo deletes the link only, never the keyword row."""
     pid = _make_photo(db)
     loc_id = db.conn.execute(
         "INSERT INTO keywords (name, type) VALUES (?, 'location')",
@@ -17971,7 +17971,7 @@ def test_clear_photo_location_removes_links_but_keeps_keyword_rows(db):
     )
     db.conn.commit()
 
-    db.clear_photo_location(pid)
+    db.locations.clear_photo(pid)
 
     # Location link gone, general link survives.
     rows = db.conn.execute(
@@ -18410,7 +18410,7 @@ def test_location_edits_are_non_undoable(db):
 def test_set_photo_location_rejects_non_location_keyword(db):
     """Passing a non-'location' keyword must raise ValueError; otherwise the
     DELETE would strip real location links and the INSERT would add a
-    keyword that clear_photo_location can't clean up."""
+    keyword that locations.clear_photo can't clean up."""
     import pytest
 
     pid = _make_photo(db)
@@ -27338,7 +27338,7 @@ def test_queue_location_changes_for_tagged_photos_is_idempotent(tmp_path):
     db.add_photo(folder_id=folder_id, filename="c.jpg", extension=".jpg",
                  file_size=1, file_mtime=0)
 
-    assert db.count_photos_with_location() == 2
+    assert db.locations.count_photos_with_location() == 2
     assert db.queue_location_changes_for_tagged_photos() == {
         "photos": 2, "queued": 2, "already_queued": 0,
     }
@@ -27363,9 +27363,9 @@ def test_has_pending_location_change(tmp_path):
     db.set_active_workspace(db.ensure_default_workspace())
     pid, _leaf, _folder = _located_photo(db, tmp_path, "a.jpg", ["Kumeyaay Lake"])
 
-    assert db.has_pending_location_change(pid) is False
+    assert db.locations.has_pending_change(pid) is False
     db.queue_change(pid, "location", "effective")
-    assert db.has_pending_location_change(pid) is True
+    assert db.locations.has_pending_change(pid) is True
     db.close()
 
 

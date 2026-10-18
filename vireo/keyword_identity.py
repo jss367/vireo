@@ -208,7 +208,7 @@ def drop_stale_vireo_location_keywords(db, photo_id, xmp_path,
     ``(flat_set, hierarchical_list)``.
     """
     flat, hierarchical = set(flat_keywords), list(hierarchical_keywords)
-    if not db.has_pending_location_change(photo_id):
+    if not db.locations.has_pending_change(photo_id):
         return flat, hierarchical
     leaf, path = location_keyword_entries(read_vireo_location_keywords(xmp_path))
     if not path:

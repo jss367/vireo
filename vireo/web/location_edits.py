@@ -201,7 +201,7 @@ def walk_parent_chain(db, leaf_parent_id):
     for _ in range(10):
         if current_parent_id is None:
             break
-        row = db.get_keyword_place_row(current_parent_id)
+        row = db.locations.keyword_place_row(current_parent_id)
         if row is None or row["type"] != "location":
             break
         parents.append({"id": row["id"], "name": row["name"]})
@@ -227,7 +227,7 @@ def serialize_photo_location(db, photo_id):
 
     Returns ``None`` if the photo has no ``type='location'`` keyword link.
     """
-    leaf = db.get_photo_location_leaf(photo_id)
+    leaf = db.locations.photo_location_leaf(photo_id)
     if leaf is None:
         return None
 

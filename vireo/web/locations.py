@@ -257,7 +257,7 @@ def _serialize_keyword(db, keyword_id):
 
     Returns ``None`` if the keyword does not exist.
     """
-    leaf = db.get_keyword_place_row(keyword_id)
+    leaf = db.locations.keyword_place_row(keyword_id)
     if leaf is None:
         return None
     return {
@@ -420,13 +420,13 @@ def create_locations_blueprint(
                     return json_error("Enable Write assigned locations to XMP in Settings before queueing corrections.", 409)
                 for photo_id in photo_ids:
                     queue_location_sync_if_enabled(db, photo_id, _commit=False)
-                    db.delete_location_gps_review(photo_id)
+                    db.locations.delete_gps_review(photo_id)
             else:
                 for photo_id in photo_ids:
-                    if db.has_pending_location_change(photo_id):
+                    if db.locations.has_pending_change(photo_id):
                         db.rollback()
                         return json_error("A selected photo has a pending location change. Review that change before keeping its GPS.", 409)
-                db.save_location_gps_reviews(
+                db.locations.save_gps_reviews(
                     [(pid, current[pid]["fingerprint"]) for pid in photo_ids],
                 )
             db.record_edit(
@@ -465,7 +465,7 @@ def create_locations_blueprint(
         radius_m = min(radius_m, 100_000.0)
 
         db = get_db()
-        rows = db.get_located_keywords_in_workspace()
+        rows = db.locations.located_keywords_in_workspace()
 
         def distance_m(row):
             lat1 = math.radians(lat)

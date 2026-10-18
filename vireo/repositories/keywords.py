@@ -343,7 +343,7 @@ class KeywordRepository:
     def get_accepted_species(self):
         """Return distinct marker species from geolocated photos in the active workspace.
 
-        Uses the same "geolocated" definition as get_geolocated_photos: a
+        Uses the same "geolocated" definition as locations.get_geolocated_photos: a
         photo is included if it has EXIF coords OR a ``type='location'``
         keyword with coords. That keeps the species filter dropdown in sync
         with which photos can actually appear as markers — otherwise photos

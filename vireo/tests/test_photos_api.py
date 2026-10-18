@@ -14354,7 +14354,7 @@ def test_api_photos_geo_visual_scoped_to_plottable(app_and_db, monkeypatch):
     """Map visual search must not silently return zero when the only
     embedded photos are non-plottable. Without scoping the candidate set
     to plottable ids, ``VisualScope.resolve`` would return ``status: ok``
-    with non-plottable ids and ``get_geolocated_photos`` would then
+    with non-plottable ids and ``locations.get_geolocated_photos`` would then
     intersect them away — leaving the user with a "visual match" chip
     and zero markers, no fallback / no-index warning.
     """
@@ -14364,7 +14364,7 @@ def test_api_photos_geo_visual_scoped_to_plottable(app_and_db, monkeypatch):
     # Only bird3 is plottable — and only bird1 and bird2 (both
     # non-plottable in this test) carry embeddings. Without the
     # plottable-scoped candidate set, VisualScope.resolve would happily
-    # return bird1/bird2 as ``ok`` matches and get_geolocated_photos
+    # return bird1/bird2 as ``ok`` matches and locations.get_geolocated_photos
     # would then intersect them away.
     db.conn.execute(
         "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id = ?",

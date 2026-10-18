@@ -64,7 +64,7 @@ def attach_location_statuses(db, photo_dicts):
     if not photo_dicts:
         return photo_dicts
     ids = [p["id"] for p in photo_dicts if isinstance(p.get("id"), int)]
-    statuses = db.get_photo_location_statuses(ids)
+    statuses = db.locations.get_photo_statuses(ids)
     for photo in photo_dicts:
         photo["location_status"] = statuses.get(photo.get("id"), "none")
     return photo_dicts

@@ -2182,7 +2182,7 @@ def test_sync_to_xmp_removes_location_keywords_when_the_place_is_cleared(
     db.queue_change(pid, "location", "effective")
     sync_to_xmp(db)
 
-    db.clear_photo_location(pid)
+    db.locations.clear_photo(pid)
     db.queue_change(pid, "location", "effective")
     sync_to_xmp(db)
 
@@ -2372,7 +2372,7 @@ def test_sync_to_xmp_preserves_ordinary_keyword_matching_cleared_location_leaf(
     # In the same sync: user adds "Paris" as an ordinary keyword AND
     # clears the location. The flat entry is already there, so add is a
     # no-op; cleanup must not strip it under the marker's flat ownership.
-    db.clear_photo_location(pid)
+    db.locations.clear_photo(pid)
     db.queue_change(pid, "location", "effective")
     db.queue_change(pid, "keyword_add", "Paris")
     sync_to_xmp(db)

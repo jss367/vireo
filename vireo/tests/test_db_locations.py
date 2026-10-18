@@ -85,7 +85,7 @@ def fid(db):
 
 def test_photo_location_statuses_empty_input_skips_query(db):
     statements = _trace(db)
-    assert db.get_photo_location_statuses([]) == {}
+    assert db.locations.get_photo_statuses([]) == {}
     assert statements == []
 
 
@@ -101,7 +101,7 @@ def test_photo_location_statuses_classify_each_source(db, fid):
     _link(db, assigned, placed)
     _link(db, coordless, text_only)
 
-    assert db.get_photo_location_statuses(
+    assert db.locations.get_photo_statuses(
         [exif, half, assigned, bare, coordless, 999_999]
     ) == {
         exif: "exif",
@@ -116,7 +116,7 @@ def test_photo_location_statuses_dedupes_and_chunks(db, fid):
     pid = _photo(db, fid, "a.jpg", 1.0, 2.0)
     ids = [pid, pid] + list(range(10_000, 10_000 + _SQLITE_PARAM_CHUNK_SIZE))
     statements = _trace(db)
-    result = db.get_photo_location_statuses(ids)
+    result = db.locations.get_photo_statuses(ids)
     assert result == {pid: "exif"}
     queries = _selects(statements, "AS location_status")
     assert len(queries) == 2
@@ -143,7 +143,7 @@ def test_geolocated_photos_shape_fallback_and_order(db, fid):
     _link(db, early, root)
     _link(db, early, leaf)
 
-    rows = db.get_geolocated_photos()
+    rows = db.locations.get_geolocated_photos()
     assert [r["id"] for r in rows] == [early, late, undated]
     by_id = {r["id"]: dict(r) for r in rows}
     assert by_id[early]["coord_source"] == "keyword"
@@ -167,7 +167,7 @@ def test_geolocated_photos_resolves_workspace_before_folder_subtree(
     )
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.get_geolocated_photos(folder_id=fid)
+        db.locations.get_geolocated_photos(folder_id=fid)
     assert calls == []
 
 
@@ -195,7 +195,7 @@ def test_geolocated_photos_route_folder_and_rules_through_facade(
     monkeypatch.setattr(db, "get_folder_subtree_ids", subtree)
     monkeypatch.setattr(db, "_build_query_from_rules", rules)
     rule_tree = [{"field": "rating", "op": ">=", "value": 0}]
-    rows = db.get_geolocated_photos(folder_id=child, rules=rule_tree)
+    rows = db.locations.get_geolocated_photos(folder_id=child, rules=rule_tree)
     assert [r["id"] for r in rows] == [in_child]
     assert subtree_calls == [child]
     assert rules_calls == [rule_tree]
@@ -210,9 +210,9 @@ def test_plottable_photo_ids_folder_subtree_and_keyword_coords(db, fid):
     elsewhere = _photo(db, other, "elsewhere.jpg", 1.0, 2.0)
     _link(db, by_kw, _kw(db, "Park", lat=1.0, lng=1.0))
 
-    assert sorted(db.get_plottable_photo_ids()) == sorted([exif, by_kw, elsewhere])
-    assert sorted(db.get_plottable_photo_ids(folder_id=fid)) == sorted([exif, by_kw])
-    assert db.get_plottable_photo_ids(folder_id=child) == [exif]
+    assert sorted(db.locations.get_plottable_photo_ids()) == sorted([exif, by_kw, elsewhere])
+    assert sorted(db.locations.get_plottable_photo_ids(folder_id=fid)) == sorted([exif, by_kw])
+    assert db.locations.get_plottable_photo_ids(folder_id=child) == [exif]
 
 
 def test_plottable_photo_ids_resolves_workspace_before_subtree(db, fid, monkeypatch):
@@ -220,7 +220,7 @@ def test_plottable_photo_ids_resolves_workspace_before_subtree(db, fid, monkeypa
     monkeypatch.setattr(db, "get_folder_subtree_ids", lambda f: calls.append(f) or [f])
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace"):
-        db.get_plottable_photo_ids(folder_id=fid)
+        db.locations.get_plottable_photo_ids(folder_id=fid)
     assert calls == []
 
 
@@ -234,10 +234,10 @@ def test_count_photos_without_coordinates_skips_missing_folders(db, fid):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (gone,))
     db.conn.commit()
 
-    assert db.count_photos_without_coordinates() == 1
+    assert db.locations.count_photos_without_coordinates() == 1
     assert db.count_photos_without_gps() == 1
     db.set_active_workspace(db.create_workspace("Empty"))
-    assert db.count_photos_without_coordinates() == 0
+    assert db.locations.count_photos_without_coordinates() == 0
 
 
 def test_count_photos_with_location_is_distinct_and_workspace_scoped(db, fid):
@@ -247,12 +247,12 @@ def test_count_photos_with_location_is_distinct_and_workspace_scoped(db, fid):
     _link(db, pid, root)
     _link(db, pid, _kw(db, "Mara", parent_id=root))
     _link(db, pid, _kw(db, "Bird", kw_type="general"))
-    assert db.count_photos_with_location() == 1
+    assert db.locations.count_photos_with_location() == 1
     db.set_active_workspace(db.create_workspace("Other"))
-    assert db.count_photos_with_location() == 0
+    assert db.locations.count_photos_with_location() == 0
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError):
-        db.count_photos_with_location()
+        db.locations.count_photos_with_location()
 
 
 # -- assigned / effective locations ---------------------------------------------
@@ -312,7 +312,7 @@ def test_assigned_photo_location_workspace_guards(db, fid, monkeypatch):
 def test_effective_photo_locations_empty_input_needs_no_workspace(db):
     db.set_active_workspace(None)
     statements = _trace(db)
-    assert db.get_effective_photo_locations([]) == {}
+    assert db.locations.get_effective([]) == {}
     assert statements == []
 
 
@@ -323,7 +323,7 @@ def test_effective_photo_locations_shapes_and_omissions(db, fid):
     _link(db, half, _kw(db, "Park", lat=5.0, lng=6.0, place_id="pp"))
     _link(db, exif, _kw(db, "Ignored", lat=7.0, lng=8.0))
 
-    result = db.get_effective_photo_locations([exif, half, bare, exif])
+    result = db.locations.get_effective([exif, half, bare, exif])
     assert result == {
         exif: {
             "photo_id": exif, "latitude": 1.0, "longitude": 2.0,
@@ -344,13 +344,13 @@ def test_effective_photo_locations_reports_first_missing_photo(db, fid):
     with pytest.raises(
         ValueError, match="Photo 424242 does not belong to the active workspace",
     ):
-        db.get_effective_photo_locations([inside, 424242, 525252])
+        db.locations.get_effective([inside, 424242, 525252])
 
 
 def test_effective_photo_locations_unverified_skips_workspace(db, fid):
     pid = _photo(db, fid, "a.jpg", 1.0, 2.0)
     db.set_active_workspace(None)
-    result = db.get_effective_photo_locations([pid, 999], verify_workspace=False)
+    result = db.locations.get_effective([pid, 999], verify_workspace=False)
     assert list(result) == [pid]
 
 
@@ -363,12 +363,12 @@ def test_effective_photo_locations_chunks_and_resolves_workspace_per_chunk(
     real_ws = db._ws_id
     monkeypatch.setattr(db, "_ws_id", lambda: calls.append(1) or real_ws())
     statements = _trace(db)
-    result = db.get_effective_photo_locations(ids, verify_workspace=False)
+    result = db.locations.get_effective(ids, verify_workspace=False)
     assert list(result) == [pid]
     assert len(_selects(statements, "ranked_locations")) == 2
     assert calls == []
     with pytest.raises(ValueError, match="Photo 50000 does not belong"):
-        db.get_effective_photo_locations(ids)
+        db.locations.get_effective(ids)
     assert len(calls) == 2
 
 
@@ -399,7 +399,7 @@ def test_photo_location_leaves_chunk_and_dedupe(db, fid):
     _link(db, pid, kid)
     ids = [pid, pid] + list(range(70_000, 70_000 + _SQLITE_PARAM_CHUNK_SIZE))
     statements = _trace(db)
-    leaves = db._get_photo_location_leaves(ids)
+    leaves = db.locations.get_photo_leaves(ids)
     assert list(leaves) == [pid]
     assert tuple(leaves[pid]) == (pid, kid, "Park", None, None, None, None)
     assert len(_selects(statements, "ROW_NUMBER()")) == 2
@@ -434,14 +434,14 @@ def test_photo_location_paths_walk_share_and_stop(db, fid):
 
 def test_has_pending_location_change_reads_across_workspaces(db, fid):
     pid = _photo(db, fid, "a.jpg")
-    assert db.has_pending_location_change(pid) is False
+    assert db.locations.has_pending_change(pid) is False
     db.queue_change(pid, "rating", "3")
-    assert db.has_pending_location_change(pid) is False
+    assert db.locations.has_pending_change(pid) is False
     db.queue_change(pid, "location", "effective")
     db.set_active_workspace(db.create_workspace("Other"))
-    assert db.has_pending_location_change(pid) is True
+    assert db.locations.has_pending_change(pid) is True
     db.set_active_workspace(None)
-    assert db.has_pending_location_change(pid) is True
+    assert db.locations.has_pending_change(pid) is True
 
 
 # -- sync backfill ------------------------------------------------------------------
@@ -566,7 +566,7 @@ def test_clear_photo_location_commits_and_keeps_other_keywords(db, fid):
     bird = _kw(db, "Bird", kw_type="general")
     _link(db, pid, loc)
     _link(db, pid, bird)
-    db.clear_photo_location(pid)
+    db.locations.clear_photo(pid)
     assert not db.conn.in_transaction
     with _reader(db) as other:
         rows = other.execute(
@@ -686,12 +686,12 @@ def test_get_keyword_place_row_reads_place_fields_of_any_type(db):
     root = _kw(db, "France")
     leaf = _kw(db, "Paris", parent_id=root, lat=48.8, lng=2.3, place_id="pid-paris")
     general = _kw(db, "Bird", kw_type="general")
-    assert tuple(db.get_keyword_place_row(leaf)) == (
+    assert tuple(db.locations.keyword_place_row(leaf)) == (
         leaf, "Paris", "pid-paris", 48.8, 2.3, root, "location",
     )
-    assert tuple(db.get_keyword_place_row(root)) == (root, "France", None, None, None, None, "location")
-    assert db.get_keyword_place_row(general)["name"] == "Bird"
-    assert db.get_keyword_place_row(987_654) is None
+    assert tuple(db.locations.keyword_place_row(root)) == (root, "France", None, None, None, None, "location")
+    assert db.locations.keyword_place_row(general)["name"] == "Bird"
+    assert db.locations.keyword_place_row(987_654) is None
 
 
 def test_get_photo_location_leaf_reads_a_linked_location_keyword(db, fid):
@@ -703,11 +703,11 @@ def test_get_photo_location_leaf_reads_a_linked_location_keyword(db, fid):
     _link(db, located, leaf)
     _link(db, located, _kw(db, "Bird", kw_type="general"))
     _link(db, general_only, _kw(db, "Heron", kw_type="general"))
-    assert tuple(db.get_photo_location_leaf(located)) == (
+    assert tuple(db.locations.photo_location_leaf(located)) == (
         leaf, "Paris", "pid-paris", 48.8, 2.3, root, "location",
     )
-    assert db.get_photo_location_leaf(general_only) is None
-    assert db.get_photo_location_leaf(bare) is None
+    assert db.locations.photo_location_leaf(general_only) is None
+    assert db.locations.photo_location_leaf(bare) is None
 
 
 def test_get_located_keywords_in_workspace_counts_visible_photos(db, fid):
@@ -726,24 +726,24 @@ def test_get_located_keywords_in_workspace_counts_visible_photos(db, fid):
     _link(db, p1, half)
     _link(db, p1, text_only)
     _link(db, p1, general)
-    rows = db.get_located_keywords_in_workspace()
+    rows = db.locations.located_keywords_in_workspace()
     assert [tuple(r) for r in rows] == [(park, "Park", "pid-park", 1.0, 2.0, None, 2)]
     assert unused not in {r["id"] for r in rows}
     db.set_active_workspace(None)
     with pytest.raises(RuntimeError, match="No active workspace set"):
-        db.get_located_keywords_in_workspace()
+        db.locations.located_keywords_in_workspace()
 
 
 def test_location_gps_reviews_save_replace_and_delete_leave_commit_to_caller(db, fid):
     p1 = _photo(db, fid, "a.jpg")
     p2 = _photo(db, fid, "b.jpg")
-    db.save_location_gps_reviews([(p1, "f1"), (p2, "f2")])
+    db.locations.save_gps_reviews([(p1, "f1"), (p2, "f2")])
     assert db.conn.in_transaction
     with _reader(db) as other:
         assert other.execute("SELECT COUNT(*) FROM location_gps_reviews").fetchone()[0] == 0
     db.conn.commit()
-    db.save_location_gps_reviews([(p1, "f1-new")])
-    db.delete_location_gps_review(p2)
+    db.locations.save_gps_reviews([(p1, "f1-new")])
+    db.locations.delete_gps_review(p2)
     assert db.conn.in_transaction
     db.conn.commit()
     with _reader(db) as other:
@@ -758,7 +758,7 @@ def test_fill_missing_location_coordinates_keeps_an_established_point(db):
     half = _kw(db, "Pond", lat=1.5)
     placed = _kw(db, "Marsh", lat=10.0, lng=20.0)
     for kid in (empty, half, placed):
-        db.fill_missing_location_coordinates(kid, 3.0, 4.0)
+        db.locations.fill_missing_coordinates(kid, 3.0, 4.0)
         assert not db.conn.in_transaction
     with _reader(db) as other:
         rows = {
@@ -909,9 +909,9 @@ def test_repair_merges_coordless_duplicate_roots_through_facade(
 def test_repair_keeps_place_bearing_root_and_single_coordless_anchor(db):
     placed = _kw(db, "Turkey", place_id="pl-turkey", lat=39.0, lng=35.0)
     anchor = _kw(db, "Turkey")
-    assert db._merge_duplicate_location_roots() == 0
+    assert db.locations.merge_duplicate_roots() == 0
     extra = _kw(db, "Turkey")
-    assert db._merge_duplicate_location_roots() == 1
+    assert db.locations.merge_duplicate_roots() == 1
     ids = [
         r[0] for r in db.conn.execute(
             "SELECT id FROM keywords WHERE name = 'Turkey' ORDER BY id"
@@ -969,11 +969,11 @@ def test_get_first_linked_location_keywords_picks_lowest_rowid(db, fid):
     db.tag_photo(p0, later)
     db.tag_photo(p1, later)
     db.tag_photo(p2, general)
-    leaves = db.get_first_linked_location_keywords([p0, p1, p2])
+    leaves = db.locations.get_first_linked_leaves([p0, p1, p2])
     assert set(leaves) == {p0, p1}
     assert leaves[p0]["id"] == first
     assert tuple(leaves[p1]) == (p1, later, "Later", "pl", 1.0, 2.0, country)
-    assert db.get_first_linked_location_keywords([]) == {}
+    assert db.locations.get_first_linked_leaves([]) == {}
 
 
 def test_get_first_linked_location_keywords_chunks_by_400(db, fid):
@@ -981,7 +981,7 @@ def test_get_first_linked_location_keywords_chunks_by_400(db, fid):
     pid = _photo(db, fid, "a.jpg")
     db.tag_photo(pid, place)
     statements = _trace(db)
-    leaves = db.get_first_linked_location_keywords(list(range(100_000, 100_400)) + [pid])
+    leaves = db.locations.get_first_linked_leaves(list(range(100_000, 100_400)) + [pid])
     db.conn.set_trace_callback(None)
     assert list(leaves) == [pid]
     assert len(_selects(statements, "ORDER BY pk.rowid")) == 2
@@ -1021,40 +1021,48 @@ def test_gps_discrepancy_rows_pick_the_sync_leaf_and_review(db, fid):
 
 # -- structure: the location SQL lives in the repository -----------------------
 
-# Database methods whose SQL moved to repositories/locations.py. Each stays on
-# Database as a thin wrapper so existing call sites keep working; none may
-# reach the connection directly again. ``link_keyword_to_place`` is not here:
-# it is a photo_keywords writer, so it delegates to KeywordProvenanceRepository
+# Database methods whose SQL moved to repositories/locations.py and that stay
+# on Database: the ones that compose other domains (keyword upserts,
+# ``tag_photo``, the sync queue) or that another repository binds by name
+# (``_restore_misclassified_location_ancestor`` is in
+# ``repositories.keyword_provenance.FACADE_METHODS``). None may reach the
+# connection directly again. ``link_keyword_to_place`` is not here: it is a
+# photo_keywords writer, so it delegates to KeywordProvenanceRepository
 # (test_keyword_provenance_contract keys it to repositories/keyword_provenance.py).
 _DELEGATING_LOCATION_METHODS = (
+    "get_assigned_photo_location",
+    "get_photo_location_paths",
+    "queue_location_changes_for_tagged_photos",
+    "_restore_misclassified_location_ancestor",
+    "repair_misclassified_location_ancestors",
+    "upsert_place_chain",
+    "set_photo_location",
+    "get_or_create_text_location",
+    "reverse_geocode_cache_get",
+    "reverse_geocode_cache_put",
+)
+
+# The forwarding wrappers this domain used to have on ``Database``; callers
+# reach the same methods through ``db.locations`` now.
+_REMOVED_LOCATION_WRAPPERS = (
     "get_photo_location_statuses",
     "get_geolocated_photos",
-    "get_assigned_photo_location",
     "_get_photo_location_leaves",
     "get_photo_location_keywords",
-    "get_photo_location_paths",
     "get_first_linked_location_keywords",
     "has_pending_location_change",
     "count_photos_with_location",
-    "queue_location_changes_for_tagged_photos",
     "get_effective_photo_locations",
     "count_photos_without_coordinates",
     "get_plottable_photo_ids",
-    "_restore_misclassified_location_ancestor",
-    "repair_misclassified_location_ancestors",
     "_merge_duplicate_location_roots",
-    "upsert_place_chain",
-    "set_photo_location",
     "clear_photo_location",
-    "get_or_create_text_location",
     "fill_missing_location_coordinates",
     "get_keyword_place_row",
     "get_photo_location_leaf",
     "get_located_keywords_in_workspace",
     "delete_location_gps_review",
     "save_location_gps_reviews",
-    "reverse_geocode_cache_get",
-    "reverse_geocode_cache_put",
 )
 
 
@@ -1084,14 +1092,15 @@ def test_location_method_delegates_to_repository(name):
 @pytest.mark.parametrize(
     ("name", "facade_calls"),
     [
-        ("get_geolocated_photos", {"get_folder_subtree_ids", "_build_query_from_rules"}),
-        ("get_plottable_photo_ids", {"get_folder_subtree_ids"}),
+        (
+            "_location_repository",
+            {"get_folder_subtree_ids", "_build_query_from_rules", "_merge_keyword_into"},
+        ),
         ("queue_location_changes_for_tagged_photos", {"queue_change"}),
         (
             "repair_misclassified_location_ancestors",
-            {"_restore_misclassified_location_ancestor", "_merge_duplicate_location_roots"},
+            {"_restore_misclassified_location_ancestor"},
         ),
-        ("_merge_duplicate_location_roots", {"_merge_keyword_into"}),
         ("set_photo_location", {"tag_photo"}),
         ("upsert_place_chain", {"_upsert_location_parent_chain", "keyword_provenance"}),
         ("get_or_create_text_location", {"keyword_provenance"}),
@@ -1115,6 +1124,12 @@ def test_set_photo_location_tags_as_an_attribute_call():
     assert len(calls) == 1
     source = {kw.arg: kw.value for kw in calls[0].keywords}["source"]
     assert isinstance(source, ast.Name) and source.id == "KEYWORD_SOURCE_MANUAL"
+
+
+def test_locations_has_no_other_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.locations``; Database keeps no aliases."""
+    for name in _REMOVED_LOCATION_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.locations"
 
 
 def test_repository_builds_without_an_active_workspace(db):
@@ -1172,14 +1187,14 @@ def test_location_leaf_remains_coherent_during_keyword_change(db, fid, monkeypat
         # A real competing connection changes the chosen keyword immediately
         # after the SELECT returns. The result must retain that coherent row,
         # rather than doing a second lookup that loses the location entirely.
-        row = db.get_photo_location_leaf(pid)
+        row = db.locations.photo_location_leaf(pid)
         assert changed == [True]
         assert row is not None
         assert (row['id'], row['name'], row['latitude'], row['longitude'], row['type']) == (
             selected, 'Selected', 3, 4, 'location',
         )
         repository.conn = connection
-        assert db.get_photo_location_leaf(pid)['id'] == remaining
+        assert db.locations.photo_location_leaf(pid)['id'] == remaining
     finally:
         repository.conn = connection
         writer.close()

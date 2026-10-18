@@ -148,7 +148,7 @@ def create_batch_blueprint(
             # A custom name chosen from the map should be available as a
             # nearby saved suggestion next time. Preserve an existing
             # location's established map point when the name is reused.
-            db.fill_missing_location_coordinates(leaf_id, latitude, longitude)
+            db.locations.fill_missing_coordinates(leaf_id, latitude, longitude)
 
         items = []
         for pid in photo_ids:

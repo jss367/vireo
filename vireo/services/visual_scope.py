@@ -212,7 +212,7 @@ class VisualScope:
         candidate set. The Map endpoint passes plottable ids so a
         workspace whose only embeddings sit on non-plottable photos
         surfaces as ``no_embeddings`` (metadata fallback) instead of
-        returning ``ok`` with ids that ``get_geolocated_photos`` will
+        returning ``ok`` with ids that ``locations.get_geolocated_photos`` will
         silently intersect down to zero.
         """
         import numpy as np

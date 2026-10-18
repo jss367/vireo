@@ -4237,6 +4237,9 @@ class Database:
         Photos and keywords are catalog-wide; the few workspace-scoped
         methods resolve the active workspace through ``self._ws_id`` at the
         point the original code did, so building the repository never raises.
+        The façade methods the map reads and the root merge call (folder
+        subtrees, the rules query builder, ``_merge_keyword_into``) are
+        handed over bound, so patches of them keep reaching the moved SQL.
         """
         from repositories.locations import LocationRepository
 
@@ -4245,6 +4248,9 @@ class Database:
             self._ws_id,
             chunk_size=_SQLITE_PARAM_CHUNK_SIZE,
             photo_date_asc_order=_PHOTO_DATE_ASC_ORDER,
+            folder_subtree_ids=self.get_folder_subtree_ids,
+            build_query_from_rules=self._build_query_from_rules,
+            merge_keyword_into=self._merge_keyword_into,
         )
 
     @property
@@ -4258,10 +4264,6 @@ class Database:
         Do not hold the returned repository across ``set_active_workspace``.
         """
         return self._location_repository()
-
-    def get_photo_location_statuses(self, photo_ids):
-        """Return ``{photo_id: exif|assigned|none}`` for the requested photos."""
-        return self._location_repository().get_photo_statuses(photo_ids)
 
     def get_browse_summary(
         self,
@@ -4289,35 +4291,6 @@ class Database:
             detector_confidence=detector_confidence,
         )
 
-    def get_geolocated_photos(
-        self,
-        folder_id=None,
-        rules=None,
-    ):
-        """Return all geolocated photos, scoped to active workspace.
-
-        ``rules`` (a universal-filter rule tree) restricts the plottable set
-        exactly like Browse's grid — the Map page passes the shared filter
-        bar's expression here, which is the only metadata filtering this
-        method supports (legacy per-field params removed in Phase 5).
-
-        Returns photos that have either non-null EXIF latitude/longitude OR a
-        ``type='location'`` keyword link whose keyword has non-null coords. No
-        pagination — returns all matching photos for map rendering. Includes
-        the photo's species keyword (or NULL if none), derived from
-        photo_keywords joined to keywords where is_species = 1.
-
-        Output columns include ``coord_source`` (``'exif'`` or ``'keyword'``)
-        and ``keyword_location_name`` (the location keyword's name when EXIF is
-        absent, NULL otherwise) so the map can show provenance.
-        """
-        return self._location_repository().get_geolocated_photos(
-            folder_id,
-            rules,
-            folder_subtree_ids=self.get_folder_subtree_ids,
-            build_query_from_rules=self._build_query_from_rules,
-        )
-
     def get_assigned_photo_location(self, photo_id, verify_workspace=True,
                                     allow_sync_only=False):
         """Return linked location-keyword coordinates for one visible photo.
@@ -4338,21 +4311,9 @@ class Database:
 
         return self._location_repository().get_assigned(photo_id)
 
-    def _get_photo_location_leaves(self, photo_ids):
-        """Choose the effective exported location row for each photo."""
-        return self._location_repository().get_photo_leaves(photo_ids)
-
-    def get_photo_location_keywords(self, photo_ids):
-        """Exported location leaves with names, coordinates and parent ids.
-
-        Uses the same choice as sidecar location paths and assigned GPS;
-        photos with no linked location keyword are absent.
-        """
-        return self._location_repository().get_photo_leaves(photo_ids)
-
     def get_photo_location_keyword_ids(self, photo_ids):
         """Return the keyword IDs owning each photo's exported location."""
-        return {pid: row["id"] for pid, row in self._get_photo_location_leaves(photo_ids).items()}
+        return {pid: row["id"] for pid, row in self.locations.get_photo_leaves(photo_ids).items()}
 
     def get_photo_location_paths(self, photo_ids):
         """Return ``{photo_id: [broadest, ..., leaf]}`` location keyword names.
@@ -4374,35 +4335,8 @@ class Database:
         how the sync engine tells "write these keywords" from "remove the ones
         we wrote".
         """
-        leaves = self._get_photo_location_leaves(photo_ids)
+        leaves = self.locations.get_photo_leaves(photo_ids)
         return self._location_repository().get_photo_paths(leaves)
-
-    def get_first_linked_location_keywords(self, photo_ids):
-        """``{photo_id: row}``: each photo's first-linked location keyword.
-
-        "First" is the lowest ``photo_keywords`` rowid, not the effective
-        leaf :meth:`get_photo_location_paths` picks. Detail and sync callers
-        use :meth:`get_photo_location_keywords` instead. Rows carry ``photo_id``,
-        ``id``, ``name``, ``place_id``, ``latitude``, ``longitude`` and
-        ``parent_id``; photos with no location keyword are absent.
-        """
-        return self._location_repository().get_first_linked_leaves(photo_ids)
-
-    def has_pending_location_change(self, photo_id):
-        """Return whether a ``location`` change is queued for ``photo_id``.
-
-        Reads across workspaces for the same reason
-        ``pending_changes.keyword_removal_keys`` does: photo metadata is
-        global even though the sync queue is presented per workspace. Import
-        callers use it to decide whether a sidecar's Vireo-written location
-        keywords are still current or describe a place the user has already
-        changed in Vireo.
-        """
-        return self._location_repository().has_pending_change(photo_id)
-
-    def count_photos_with_location(self):
-        """Count photos in the active workspace carrying a location keyword."""
-        return self._location_repository().count_photos_with_location()
 
     def queue_location_changes_for_tagged_photos(self):
         """Queue a ``location`` change for every located photo in the workspace.
@@ -4436,59 +4370,13 @@ class Database:
         ``type='location'`` keyword coordinates. Returns ``None`` when neither
         source has a complete coordinate pair.
         """
-        return self.get_effective_photo_locations(
+        return self.locations.get_effective(
             [photo_id], verify_workspace=verify_workspace
         ).get(photo_id)
 
-    def get_effective_photo_locations(self, photo_ids, verify_workspace=True):
-        """Return effective locations for many photos keyed by photo ID.
-
-        Each chunk uses one query while preserving the single-photo lookup's
-        EXIF-pair preference and linked-location fallback. Photos without a
-        complete coordinate pair are omitted from the returned mapping.
-        """
-        return self._location_repository().get_effective(
-            photo_ids, verify_workspace=verify_workspace,
-        )
-
     def count_photos_without_gps(self):
-        """Backward-compatible alias for :meth:`count_photos_without_coordinates`."""
-        return self.count_photos_without_coordinates()
-
-    def count_photos_without_coordinates(self):
-        """Count photos in the active workspace that the map can't plot.
-
-        A photo IS plottable when either its EXIF lat/lng are both present
-        OR it carries a ``type='location'`` keyword whose lat/lng are both
-        present (matches :meth:`get_geolocated_photos`'s paired-fallback
-        semantics). This counter excludes those.
-
-        Used by the ``/api/photos/geo`` response to drive the map's
-        "Showing N of M geolocated photos" label — keeping the two
-        definitions in lockstep so M is never less than N.
-        """
-        return self._location_repository().count_photos_without_coordinates()
-
-    def get_plottable_photo_ids(self, folder_id=None):
-        """Return ids of every photo the Map endpoint could render.
-
-        A photo is plottable when either its EXIF lat/lng are both present
-        OR it carries a ``type='location'`` keyword whose lat/lng are both
-        present — the same paired-fallback semantics
-        :meth:`get_geolocated_photos` and
-        :meth:`count_photos_without_coordinates` use.
-
-        Callers pass this to ``VisualScope.apply_to_rules`` for the Map path so
-        the visual candidate set is restricted to plottable photos BEFORE
-        the embedding query runs. Without it, a workspace with embeddings
-        on non-plottable photos but none on plottable ones returns
-        ``status: "ok"`` with non-plottable ids; ``get_geolocated_photos``
-        then intersects them away and the map silently renders zero
-        markers with no fallback / no-index warning.
-        """
-        return self._location_repository().get_plottable_photo_ids(
-            folder_id, folder_subtree_ids=self.get_folder_subtree_ids,
-        )
+        """Backward-compatible alias for :meth:`locations.count_photos_without_coordinates`."""
+        return self.locations.count_photos_without_coordinates()
 
     def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True,
                                        _commit=True):
@@ -5456,7 +5344,6 @@ class Database:
         repaired, merged_roots = (
             self._location_repository().repair_misclassified_ancestors(
                 restore_ancestor=self._restore_misclassified_location_ancestor,
-                merge_duplicate_roots=self._merge_duplicate_location_roots,
             )
         )
         if repaired:
@@ -5470,33 +5357,6 @@ class Database:
                 merged_roots,
             )
         return repaired
-
-    def _merge_duplicate_location_roots(self):
-        """Collapse same-name ``type='location'`` roots into a single row.
-
-        Retyping a place-bearing taxonomy root at startup can leave two
-        location rows with the same ``name`` and ``parent_id IS NULL``
-        because SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
-        NULL parents. Multiple coordless duplicates without any competing
-        place-bearing root describe the same neutral hierarchy anchor and
-        must collapse so children stay under one shared parent.
-
-        Whenever any place-bearing root exists at this name, coordless
-        roots are neutral hierarchy anchors that
-        ``_upsert_one_keyword`` installs (or preserves) for
-        component-only references — Google's per-component
-        ``address_components`` carry no ``place_id``, so we cannot prove
-        which specific Google place the caller meant. Merging a
-        coordless anchor into the place-bearing root would silently
-        reparent its descendants under that Google place — the wrong
-        answer once a second same-name Google place appears. Leave
-        place-bearing roots and their coordless anchors alone; only
-        consolidate coordless duplicates so ambiguous children still
-        share one shared parent.
-        """
-        return self._location_repository().merge_duplicate_roots(
-            merge_keyword_into=self._merge_keyword_into,
-        )
 
     @staticmethod
     def _location_component_rank(component):
@@ -5668,7 +5528,7 @@ class Database:
         Raises ``ValueError`` if ``leaf_keyword_id`` does not exist or its
         keyword type is not ``'location'`` — otherwise the DELETE would strip
         real location links and replace them with a non-location link that
-        :meth:`clear_photo_location` could not clean up.
+        :meth:`locations.clear_photo` could not clean up.
         """
         repo = self._location_repository()
         repo.require_location_keyword(leaf_keyword_id)
@@ -5681,15 +5541,6 @@ class Database:
                 photo_id, leaf_keyword_id,
                 source=KEYWORD_SOURCE_MANUAL, _commit=False,
             )
-
-    def clear_photo_location(self, photo_id):
-        """Remove any ``type='location'`` keyword links for ``photo_id``.
-
-        Does NOT delete the keyword rows themselves — other photos may still
-        reference them, and even if they don't, free-text/place-id keywords
-        are part of the user's vocabulary.
-        """
-        self._location_repository().clear_photo(photo_id)
 
     def get_or_create_text_location(self, name):
         """Find or create a free-text ``type='location'`` keyword.
@@ -5721,42 +5572,6 @@ class Database:
                 latitude=None,
                 longitude=None,
             )
-
-    def fill_missing_location_coordinates(self, keyword_id, latitude, longitude):
-        """Set a keyword's latitude/longitude where each is NULL, and commit.
-
-        A location reused from the map keeps its established point.
-        """
-        self._location_repository().fill_missing_coordinates(
-            keyword_id, latitude, longitude,
-        )
-
-    def get_keyword_place_row(self, keyword_id):
-        """Row (``id``, ``name``, ``place_id``, ``latitude``, ``longitude``,
-        ``parent_id``, ``type``) of one keyword of any type, or None when the id is unknown."""
-        return self._location_repository().keyword_place_row(keyword_id)
-
-    def get_photo_location_leaf(self, photo_id):
-        """A ``type='location'`` keyword row linked to ``photo_id`` (columns as
-        ``get_keyword_place_row``), or None. Matches the exported location."""
-        return self._location_repository().photo_location_leaf(photo_id)
-
-    def get_located_keywords_in_workspace(self):
-        """Location keywords with coordinates tagged on active-workspace photos,
-        each with its distinct visible ``photo_count``.
-
-        Raises ``RuntimeError`` when no workspace is active.
-        """
-        return self._location_repository().located_keywords_in_workspace()
-
-    def delete_location_gps_review(self, photo_id):
-        """Forget a photo's GPS discrepancy decision. Caller owns the transaction."""
-        self._location_repository().delete_gps_review(photo_id)
-
-    def save_location_gps_reviews(self, reviews):
-        """Store ``(photo_id, fingerprint)`` GPS keep decisions, replacing earlier
-        ones. Caller owns the transaction."""
-        self._location_repository().save_gps_reviews(reviews)
 
     @staticmethod
     def _reverse_geocode_grid(lat, lng):
@@ -7685,18 +7500,18 @@ class Database:
     def _edit_set_photo_location(self, pid, value):
         from services.pending_changes import queue_location_sync_if_enabled
         state = json.loads(value)
-        self.clear_photo_location(pid)
+        self.locations.clear_photo(pid)
         for link in state['links']:
             # Deleted vocabulary stays deleted, like ordinary keyword undo.
-            row = self.get_keyword_place_row(link['keyword_id'])
+            row = self.locations.keyword_place_row(link['keyword_id'])
             if row is not None and row['type'] == 'location':
                 self.tag_photo(
                     pid, link['keyword_id'],
                     source=keyword_source_max(link['source']), _commit=False,
                 )
-        self.delete_location_gps_review(pid)
+        self.locations.delete_gps_review(pid)
         if state.get('gps_review') is not None:
-            self.save_location_gps_reviews([(pid, state['gps_review'])])
+            self.locations.save_gps_reviews([(pid, state['gps_review'])])
         queue_location_sync_if_enabled(self, pid, _commit=False)
 
     def _edit_set_prediction_status(self, pid, value):

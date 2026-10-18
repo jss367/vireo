@@ -181,7 +181,7 @@ def test_location_detail_and_sync_preview_choose_exported_location(client_with_p
     db.queue_change(pid, "location", "effective")
     photo = app.test_client().get("/api/sync/preview").get_json()["photos"][0]
     assert photo["changes"][0]["presentation"]["after"] == "Paris, France"
-    assert db.get_photo_location_leaf(pid)["id"] == chosen
+    assert db.locations.photo_location_leaf(pid)["id"] == chosen
 
 
 def test_location_breadcrumb_stops_at_general_parent(app_and_db):

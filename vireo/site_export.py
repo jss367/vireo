@@ -117,7 +117,7 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
         exif = _get_photo_exif_data(db, batch)
         keywords = db.keywords.get_for_photos(batch)
         species = db.keywords.get_species_for_photos(batch, include_identities=True)
-        locations = db.get_effective_photo_locations(
+        locations = db.locations.get_effective(
             batch, verify_workspace=False,
         ) if include_locations else {}
         for pid in batch:

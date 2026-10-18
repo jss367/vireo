@@ -124,11 +124,11 @@ def _map_selection_summary(db, selection_ids, shown, *, filtered):
     selection came from another tab before a workspace switch).
     """
     visible = db.photo_visibility.visible_photo_ids(selection_ids)
-    statuses = db.get_photo_location_statuses(visible)
+    statuses = db.locations.get_photo_statuses(visible)
     located = {pid for pid in visible if statuses.get(pid, "none") != "none"}
     if filtered:
         plottable = {
-            row["id"] for row in db.get_geolocated_photos(
+            row["id"] for row in db.locations.get_geolocated_photos(
                 rules=_within_selection(selection_ids, None),
             )
         }
@@ -168,7 +168,7 @@ def _unplottable_map_focus(db, photo_id):
     if folder_status not in ("ok", "partial"):
         focus["reason"] = "unavailable"
         return focus
-    status = db.get_photo_location_statuses([photo_id]).get(photo_id, "none")
+    status = db.locations.get_photo_statuses([photo_id]).get(photo_id, "none")
     if status != "none":
         focus["reason"] = "unavailable"
         return focus
@@ -1320,11 +1320,11 @@ def create_photos_blueprint(
         # Restrict the visual candidate set to plottable photos so a
         # workspace whose only embeddings live on non-plottable photos
         # doesn't return ``status: ok`` with ids that
-        # ``get_geolocated_photos`` then intersects to zero — the user
+        # ``locations.get_geolocated_photos`` then intersects to zero — the user
         # would see a "visual match" chip over an empty map with no
         # fallback / no-index warning.
         plottable_ids = (
-            db.get_plottable_photo_ids(folder_id=folder_id)
+            db.locations.get_plottable_photo_ids(folder_id=folder_id)
             if visual is not None else None
         )
         if plottable_ids is not None and selection_ids is not None:
@@ -1356,7 +1356,7 @@ def create_photos_blueprint(
             return json_error(str(e), 400)
 
         try:
-            photos = db.get_geolocated_photos(
+            photos = db.locations.get_geolocated_photos(
                 folder_id=folder_id,
                 rules=(
                     rules if selection_ids is None
@@ -1367,7 +1367,7 @@ def create_photos_blueprint(
             return json_error(str(e), 400)
 
         total_photos = db.photos.count()
-        total_without_coordinates = db.count_photos_without_coordinates()
+        total_without_coordinates = db.locations.count_photos_without_coordinates()
         total_geolocated = total_photos - total_without_coordinates
 
         total_filtered = len(photos)
