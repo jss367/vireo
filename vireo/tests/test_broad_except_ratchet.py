@@ -138,32 +138,52 @@ def broad_handlers(tree):
 
     Canonical contextlib is recognized without an import in AST snippets.
     Other aliases require explicit imports; local definitions/parameters and
-    assignments shadow them. Exception-type aliases remain outside scope.
+    assignments shadow them. Module/class statements advance bindings in
+    source order; functions conservatively resolve their whole local scope.
+    Branch outcomes, dynamic values and exception-type aliases are not inferred.
     """
     found = []
-    def visit(node, bindings, lexical):
+    def body(statements, bindings, lexical, function_lexical, ordered):
+        current = dict(bindings)
+        for child in statements:
+            visit(child, current, current if lexical is None else lexical,
+                  function_lexical, ordered)
+            if ordered:
+                current = _scope_bindings([child], current)
+
+    def visit(node, bindings, lexical, function_lexical, ordered):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            local = _scope_bindings(node.body, lexical, node.args)
-            for child in node.body:
-                visit(child, local, local)
+            # Function assignments/parameters are local for the whole body;
+            # do not treat an earlier unbound local as the outer import.
+            local = _scope_bindings(node.body, function_lexical, node.args)
+            body(node.body, local, local, local, False)
             return
         if isinstance(node, ast.ClassDef):
-            # Class namespaces are not enclosing lexical scopes for a nested
-            # class, just as they are not for methods.
-            local = _scope_bindings(node.body, lexical)
-            for child in node.body:
-                visit(child, local, lexical)
+            # Neither methods nor nested classes inherit class namespaces.
+            # Class statements themselves execute in order.
+            body(node.body, lexical, lexical, function_lexical, True)
             return
-        if isinstance(node, ast.ExceptHandler) and _is_broad_type(node.type):
-            found.append(("except", node))
+        if isinstance(node, ast.ExceptHandler):
+            if _is_broad_type(node.type):
+                found.append(("except", node))
+            if node.name:
+                bindings = dict(bindings, **{node.name: None})
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             found.extend(("suppress", node) for item in node.items
                          if _is_broad_suppress(item.context_expr, bindings))
-        for child in ast.iter_child_nodes(node):
-            visit(child, bindings, lexical)
-    bindings = _scope_bindings(tree.body, {"contextlib": "contextlib"})
-    for child in tree.body:
-        visit(child, bindings, bindings)
+        for _field, value in ast.iter_fields(node):
+            if isinstance(value, list) and value and all(isinstance(n, ast.stmt) for n in value):
+                body(value, bindings, lexical, function_lexical, ordered)
+            elif isinstance(value, list):
+                for child in value:
+                    if isinstance(child, ast.AST):
+                        visit(child, bindings, lexical, function_lexical, ordered)
+            elif isinstance(value, ast.AST):
+                visit(value, bindings, lexical, function_lexical, ordered)
+
+    initial = {"contextlib": "contextlib"}
+    function_lexical = _scope_bindings(tree.body, initial)
+    body(tree.body, initial, None, function_lexical, True)
     return found
 
 
@@ -369,6 +389,11 @@ def test_documented_roots_exist():
     ("import contextlib as ctx\nclass Outer:\n    ctx = other\n    class Inner:\n        with ctx.suppress(Exception): pass\n", 1),
     ("def f():\n    import contextlib as ctx\n    class Outer:\n        ctx = other\n        class Inner:\n            with ctx.suppress(Exception): pass\n", 1),
     ("import contextlib as ctx\nclass Outer:\n    class Inner:\n        ctx = other\n        with ctx.suppress(Exception): pass\n", 0),
+    ("from contextlib import suppress as quiet\nwith quiet(Exception): pass\nquiet = replacement\n", 1),
+    ("class C:\n    from contextlib import suppress as quiet\n    with quiet(Exception): pass\n    quiet = replacement\n", 1),
+    ("from contextlib import suppress as quiet\nquiet = replacement\nwith quiet(Exception): pass\n", 0),
+    ("class C:\n    from contextlib import suppress as quiet\n    quiet = replacement\n    with quiet(Exception): pass\n", 0),
+    ("from contextlib import suppress as quiet\ndef f():\n    with quiet(Exception): pass\n    quiet = replacement\n", 0),
 ])
 def test_broad_handler_detection(source, count):
     assert len(broad_handlers(ast.parse(source))) == count
