@@ -35,7 +35,7 @@ def _wait_for_flag(db, photo_id, expected, timeout=3.0):
     deadline = time.time() + timeout
     flag = None
     while time.time() < deadline:
-        photo = db.get_photo(photo_id)
+        photo = db.photos.get(photo_id)
         flag = photo["flag"] if photo else None
         if flag == expected:
             return flag
@@ -110,7 +110,7 @@ def test_misses_x_no_focus_does_nothing(live_server, page):
     # Give the handler a moment to (not) fire.
     time.sleep(0.3)
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     flag = photo["flag"] if photo else None
     # Flag should remain unset (None or 'none').
     assert flag in (None, "none"), f"expected unflagged, got {flag!r}"
@@ -149,7 +149,7 @@ def test_misses_honors_modifier_rebind(live_server, page):
     # Bare 'x' should now be a no-op (modifier mismatch).
     page.keyboard.press("x")
     time.sleep(0.3)
-    assert db.get_photo(pid)["flag"] in (None, "none")
+    assert db.photos.get(pid)["flag"] in (None, "none")
 
     # Alt+X should reject the focused card.
     page.keyboard.press("Alt+x")

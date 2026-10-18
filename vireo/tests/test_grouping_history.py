@@ -9,7 +9,7 @@ from pipeline import load_results_raw, save_results_raw
 
 
 def _seed(db):
-    ids = sorted(p['id'] for p in db.get_photos())
+    ids = sorted(p['id'] for p in db.photos.list_page())
     cache = {
         'photos': [{'id': pid, 'label': 'REVIEW', 'rating': 0} for pid in ids],
         'encounters': [{
@@ -49,16 +49,16 @@ def test_grouping_and_flags_undo_redo_in_one_history(app_and_db):
     client = app.test_client()
     assert client.post('/api/undo').status_code == 200
     assert _load(db)['encounters'] == first['encounters']
-    assert all(db.get_photo(pid)['flag'] == 'rejected' for pid in ids)
+    assert all(db.photos.get(pid)['flag'] == 'rejected' for pid in ids)
     assert client.post('/api/undo').status_code == 200
-    assert all(db.get_photo(pid)['flag'] == 'none' for pid in ids)
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
     assert client.post('/api/undo').status_code == 200
     assert _load(db)['encounters'] == original['encounters']
     assert client.get('/api/undo/status').json['available'] is False
     for _ in range(3):
         assert client.post('/api/redo').status_code == 200
     assert _load(db)['encounters'] == last['encounters']
-    assert all(db.get_photo(pid)['flag'] == 'rejected' for pid in ids)
+    assert all(db.photos.get(pid)['flag'] == 'rejected' for pid in ids)
 
 
 def test_snapshot_budget_keeps_a_replayable_newest_chain(app_and_db):
@@ -123,7 +123,7 @@ def test_stale_grouping_entry_is_retired_and_preserves_newer_work(app_and_db):
     advertised = client.get('/api/undo/status').json
     assert 'detach' in advertised['description'].lower()
     assert client.post('/api/undo').status_code == 409
-    assert all(db.get_photo(pid)['flag'] == 'flagged' for pid in ids)
+    assert all(db.photos.get(pid)['flag'] == 'flagged' for pid in ids)
     refreshed = client.get('/api/undo/status').json
     assert refreshed['id'] != advertised['id']
     assert 'flag' in refreshed['description'].lower()
@@ -131,11 +131,11 @@ def test_stale_grouping_entry_is_retired_and_preserves_newer_work(app_and_db):
     assert response.status_code == 200, response.get_json()
     assert 'flag' in response.get_json()['undone'].lower()
     assert _load(db)['encounters'] == updated['encounters']
-    assert all(db.get_photo(pid)['flag'] == 'none' for pid in ids)
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
     assert client.get('/api/undo/status').json['count'] == 0
     # Redo replays the flag edit; the retired detach never resurfaces.
     assert client.post('/api/redo').status_code == 200
-    assert all(db.get_photo(pid)['flag'] == 'flagged' for pid in ids)
+    assert all(db.photos.get(pid)['flag'] == 'flagged' for pid in ids)
     assert client.get('/api/redo/status').json['available'] is False
     assert _load(db)['encounters'] == updated['encounters']
 
@@ -675,10 +675,10 @@ def test_group_review_removal_and_flags_share_one_history_action(app_and_db, cha
     assert client.get('/api/undo/status').json['count'] == 1
     assert client.post('/api/undo').status_code == 200
     assert _load(db)['encounters'] == before['encounters']
-    assert db.get_photo(ids[0])['flag'] == 'none'
+    assert db.photos.get(ids[0])['flag'] == 'none'
     assert client.post('/api/redo').status_code == 200
     assert _load(db)['encounters'] == after['encounters']
-    assert db.get_photo(ids[0])['flag'] == ('flagged' if change_flags else 'none')
+    assert db.photos.get(ids[0])['flag'] == ('flagged' if change_flags else 'none')
 
 
 def test_delayed_cache_snapshot_cannot_overwrite_undo(app_and_db):
@@ -899,11 +899,11 @@ def test_stale_redo_reports_retirement_before_replaying_next_action(app_and_db):
     save_results_raw(newer, os.path.dirname(db._db_path), db._ws_id())
     assert 'detach' in client.get('/api/redo/status').json['description'].lower()
     assert client.post('/api/redo').status_code == 409
-    assert all(db.get_photo(pid)['flag'] == 'none' for pid in ids)
+    assert all(db.photos.get(pid)['flag'] == 'none' for pid in ids)
     assert _load(db) == newer
     assert 'flag' in client.get('/api/redo/status').json['description'].lower()
     assert client.post('/api/redo').status_code == 200
-    assert all(db.get_photo(pid)['flag'] == 'flagged' for pid in ids)
+    assert all(db.photos.get(pid)['flag'] == 'flagged' for pid in ids)
     assert _load(db) == newer
 
 

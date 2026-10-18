@@ -82,7 +82,7 @@ def test_scan_uses_frozen_discovered_files_manifest(tmp_path):
     )
 
     assert result["discovered"] == 1
-    assert {photo["filename"] for photo in db.get_photos(per_page=100)} == {
+    assert {photo["filename"] for photo in db.photos.list_page(per_page=100)} == {
         "selected.jpg",
     }
     assert progress
@@ -210,7 +210,7 @@ def test_scan_frozen_manifest_rejects_paths_in_excluded_bundle(tmp_path):
     assert result["discovered"] == 2
     assert result["vanished"] == 1
     assert progress[-1] == (2, 2)
-    assert {p['filename'] for p in db.get_photos(per_page=100)} == {'real.jpg'}
+    assert {p['filename'] for p in db.photos.list_page(per_page=100)} == {'real.jpg'}
 
 
 def test_scan_frozen_manifest_rejects_paths_under_symlinked_bundle(tmp_path):
@@ -259,7 +259,7 @@ def test_scan_frozen_manifest_rejects_paths_under_symlinked_bundle(tmp_path):
 
     assert result["discovered"] == 2
     assert result["vanished"] == 1
-    filenames = {p['filename'] for p in db.get_photos(per_page=100)}
+    filenames = {p['filename'] for p in db.photos.list_page(per_page=100)}
     assert filenames == {'real.jpg'}
 
 
@@ -286,7 +286,7 @@ def test_scan_skips_app_managed_library_bundles(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     filenames = {p['filename'] for p in photos}
     assert filenames == {'real.jpg'}
 
@@ -315,7 +315,7 @@ def test_scan_skips_excluded_root_itself(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    assert db.get_photos(per_page=100) == []
+    assert db.photos.list_page(per_page=100) == []
     assert db.get_folder_tree() == []
 
 
@@ -340,7 +340,7 @@ def test_scan_skips_root_nested_in_excluded_bundle(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(nested_root, db)
 
-    assert db.get_photos(per_page=100) == []
+    assert db.photos.list_page(per_page=100) == []
     assert db.get_folder_tree() == []
 
 
@@ -374,7 +374,7 @@ def test_scan_skips_restrict_dirs_inside_excluded_bundle(tmp_path):
     # produce from a workspace that had previously linked the bundle).
     scan(root, db, options=ScanOptions(restrict_dirs=[root, bundle_sub]))
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert {p['filename'] for p in photos} == {'real.jpg'}
     folder_paths = [f['path'] for f in db.get_folder_tree()]
     assert not any('.photoslibrary' in p for p in folder_paths)
@@ -469,7 +469,7 @@ def test_scan_skips_symlinked_excluded_bundle_child(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     filenames = {p['filename'] for p in photos}
     assert filenames == {'real.jpg'}
 
@@ -511,7 +511,7 @@ def test_scan_rejects_excluded_root_before_statting(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "test.db"))
     scan(str(bundle), db)
 
-    assert db.get_photos(per_page=100) == []
+    assert db.photos.list_page(per_page=100) == []
 
 
 def test_scan_discovers_photos(tmp_path):
@@ -528,7 +528,7 @@ def test_scan_discovers_photos(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     filenames = {p['filename'] for p in photos}
     assert filenames == {'img1.jpg', 'img2.jpg', 'img3.jpg'}
 
@@ -588,7 +588,7 @@ def test_scan_cancel_check_aborts_before_discovery(tmp_path):
     with pytest.raises(RuntimeError, match="scan cancelled"):
         scan(root, db, control=ScanControl(cancel_check=lambda: True))
 
-    assert db.get_photos(per_page=100) == []
+    assert db.photos.list_page(per_page=100) == []
 
 
 def test_scan_cancel_check_aborts_before_metadata_extraction(tmp_path, monkeypatch):
@@ -617,7 +617,7 @@ def test_scan_cancel_check_aborts_before_metadata_extraction(tmp_path, monkeypat
             control=ScanControl(cancel_check=lambda: cancelled["value"]),
         )
 
-    assert db.get_photos(per_page=100) == []
+    assert db.photos.list_page(per_page=100) == []
 
 
 def test_scan_reports_metadata_phase_progress(tmp_path, monkeypatch):
@@ -672,7 +672,7 @@ def test_scan_non_recursive_only_finds_root_photos(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db, options=ScanOptions(recursive=False))
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     filenames = {p['filename'] for p in photos}
     assert filenames == {'root.jpg'}
 
@@ -705,7 +705,7 @@ def test_scan_non_recursive_skips_bundle_children_before_stat(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db, options=ScanOptions(recursive=False))
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     filenames = {p['filename'] for p in photos}
     assert filenames == {'real.jpg'}
 
@@ -754,7 +754,7 @@ def test_scan_non_recursive_does_not_stat_bundle_children(tmp_path, monkeypatch)
     db = Database(str(tmp_path / "test.db"))
     scan(root, db, options=ScanOptions(recursive=False))
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     filenames = {p['filename'] for p in photos}
     assert filenames == {'real.jpg'}
 
@@ -772,7 +772,7 @@ def test_scan_reads_dimensions(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     assert photos[0]['width'] == 640
     assert photos[0]['height'] == 480
 
@@ -790,7 +790,7 @@ def test_scan_records_file_mtime(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     assert photos[0]['file_mtime'] is not None
     assert photos[0]['file_mtime'] > 0
 
@@ -828,7 +828,7 @@ def test_scan_ignores_non_image_files(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     assert len(photos) == 1
     assert photos[0]['filename'] == 'photo.jpg'
 
@@ -874,7 +874,7 @@ def test_scan_imports_xmp_keywords(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     assert len(photos) == 1
     keywords = db.get_photo_keywords(photos[0]['id'])
     kw_names = {k['name'] for k in keywords}
@@ -907,7 +907,7 @@ def test_scan_skips_empty_normalized_keywords(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     assert len(photos) == 1
     kw_names = {k['name'] for k in db.get_photo_keywords(photos[0]['id'])}
     # The valid flat keyword lands; the lone-quote entry is skipped without
@@ -949,7 +949,7 @@ def test_scan_imports_keywords_embedded_in_jpeg(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     assert {k["name"] for k in db.get_photo_keywords(photo["id"])} == {
         "1Locations", "Chichén Itzá", "2Birds", "Turquoise-browed motmot",
     }
@@ -974,7 +974,7 @@ def test_incremental_scan_imports_keywords_written_into_jpeg_later(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     assert db.get_photo_keywords(photo["id"]) == []
 
     time.sleep(0.05)
@@ -1015,7 +1015,7 @@ def test_scan_merges_embedded_keywords_with_sidecar(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
 
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     assert {k["name"] for k in db.get_photo_keywords(photo["id"])} == {
         "Dyke Marsh", "8Landscape", "Sunrise",
     }
@@ -1325,7 +1325,7 @@ def test_incremental_scan_skips_unchanged(tmp_path):
         hooks=ScanHooks(progress=lambda cur, tot: processed.append(cur)),
     )
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     filenames = {p['filename'] for p in photos}
     assert 'old.jpg' in filenames
     assert 'new.jpg' in filenames
@@ -1397,7 +1397,7 @@ def test_incremental_scan_converges_after_file_change(tmp_path):
     Image.new('RGB', (150, 150)).save(path)
 
     scan(root, db, options=ScanOptions(incremental=True))
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     assert photo['width'] == 150  # re-processed
     assert photo['file_mtime'] == os.stat(path).st_mtime  # fresh mtime stored
 
@@ -1491,7 +1491,7 @@ def test_incremental_scan_forgets_deleted_xmp(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     scan(root, db)
-    assert db.get_photos()[0]['xmp_mtime'] is not None
+    assert db.photos.list_page()[0]['xmp_mtime'] is not None
 
     # Simulate ExifTool having run (it isn't installed in CI) so the
     # metadata_missing retry path doesn't force re-processing.
@@ -1500,7 +1500,7 @@ def test_incremental_scan_forgets_deleted_xmp(tmp_path):
 
     os.remove(os.path.join(root, 'bird.xmp'))
     scan(root, db, options=ScanOptions(incremental=True))
-    assert db.get_photos()[0]['xmp_mtime'] is None
+    assert db.photos.list_page()[0]['xmp_mtime'] is None
 
     statuses = []
     scan(root, db, options=ScanOptions(incremental=True), hooks=ScanHooks(status=statuses.append))
@@ -1535,7 +1535,7 @@ def test_scan_survives_file_vanishing_mid_scan(tmp_path):
 
     scan(root, db, hooks=ScanHooks(photo=cb))
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert len(photos) == 1  # only the survivor was ingested
     status = db.conn.execute(
         "SELECT status FROM folders WHERE path = ?", (root,)
@@ -1562,7 +1562,7 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
     scan(root, db)
 
     # Verify initial keyword
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     kws = db.get_photo_keywords(photos[0]['id'])
     assert {k['name'] for k in kws} == {'Sparrow'}
 
@@ -3460,7 +3460,7 @@ def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
 
     _pair_raw_jpeg_companions(db, vireo_dir=str(tmp_path))
 
-    photo = db.get_photo(raw_id)
+    photo = db.photos.get(raw_id)
     assert photo["companion_path"] == "IMG_002.jpg"
     assert not display_cache.exists()
 
@@ -4070,7 +4070,7 @@ def test_scan_extracts_working_copy_for_raw(tmp_path, monkeypatch):
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
-    photos = db.get_photos(per_page=999999)
+    photos = db.photos.list_page(per_page=999999)
     assert len(photos) == 1
     assert photos[0]["working_copy_path"] is not None
     assert os.path.exists(os.path.join(str(vireo_dir), photos[0]["working_copy_path"]))
@@ -4305,7 +4305,7 @@ def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
-    photos = db.get_photos(per_page=999999)
+    photos = db.photos.list_page(per_page=999999)
     assert len(photos) == 1
     assert photos[0]["working_copy_path"] is None
     assert len(calls) == 0
@@ -4351,7 +4351,7 @@ def test_scan_uses_raw_primary_for_raw_working_copy(tmp_path, monkeypatch):
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
     # After companion pairing, the RAW should have a working copy
-    photos = db.get_photos(per_page=999999)
+    photos = db.photos.list_page(per_page=999999)
     raw_photos = [p for p in photos if p["extension"] == ".nef"]
     assert len(raw_photos) == 1
     assert raw_photos[0]["working_copy_path"] is not None
@@ -4410,7 +4410,7 @@ def test_scan_falls_back_to_companion_when_raw_extraction_fails(
     db = Database(str(vireo_dir / "test.db"))
     scanner.scan(str(photo_dir), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
-    photos = db.get_photos(per_page=999999)
+    photos = db.photos.list_page(per_page=999999)
     raw_photos = [p for p in photos if p["extension"] == ".nef"]
     assert len(raw_photos) == 1
     assert raw_photos[0]["working_copy_path"] is not None
@@ -4978,7 +4978,7 @@ def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):
     )
 
     # new_untracked.jpg should NOT have been ingested.
-    filenames = [p["filename"] for p in db.get_photos(per_page=999999)]
+    filenames = [p["filename"] for p in db.photos.list_page(per_page=999999)]
     assert "new_untracked.jpg" not in filenames
     assert "existing.jpg" in filenames
 
@@ -5442,7 +5442,7 @@ def test_scan_releases_cpu_permits_while_paused(tmp_path, monkeypatch):
     # photo must be recorded — the pause path is not allowed to drop
     # work on the floor.
     assert ledger.snapshot()["cpu"]["allocated"] == 0
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert {os.path.basename(p["filename"]) for p in photos} == {
         "a.jpg", "b.jpg", "c.jpg",
     }
@@ -5504,7 +5504,7 @@ def test_scan_does_not_construct_worker_pool_while_pause_remains_pending(
         resource_ledger._set_resource_ledger_for_tests(previous)
 
     assert pool_pause_states == [False]
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert {os.path.basename(photo["filename"]) for photo in photos} == set(filenames)
 
 
@@ -5603,7 +5603,7 @@ def test_scan_cancel_only_check_prevents_parking_inside_lease(tmp_path):
         f"parked the job while retaining CPU permits is still open."
     )
     # Every file must still land: pause+resume is not allowed to drop work.
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert len(photos) == 6, f"expected 6 photos indexed, got {len(photos)}"
 
 
@@ -5620,7 +5620,7 @@ def test_scan_pause_check_none_preserves_existing_behavior(tmp_path):
     # Should not raise and must catalog every file.
     scanner.scan(root, db)
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert len(photos) == 2
 
 
@@ -5786,7 +5786,7 @@ def test_scan_pause_requeues_worker_result(
 
     assert pause_state["triggered"]
     assert parking_alloc == [0]
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert {os.path.basename(photo["filename"]) for photo in photos} == set(filenames)
 
 
@@ -5832,7 +5832,7 @@ def test_sequential_scan_pause_after_compute_releases_lease(tmp_path, monkeypatc
         resource_ledger._set_resource_ledger_for_tests(previous)
 
     assert parking_alloc == [0]
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert {os.path.basename(photo["filename"]) for photo in photos} == set(filenames)
 
 
@@ -5897,7 +5897,7 @@ def test_scan_consumer_pause_resumes_generator_before_parking(
 
     assert pause_state["triggered"]
     assert parking_alloc == [0]
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert {os.path.basename(photo["filename"]) for photo in photos} == set(filenames)
 
 
@@ -6132,7 +6132,7 @@ def test_partial_folder_photos_remain_visible_in_queries(tmp_path):
     db.conn.commit()
 
     # Photo queries should still return the photo.
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     filenames = {p["filename"] for p in photos}
     assert "seen.jpg" in filenames, (
         f"photo in partial folder should remain visible, got {filenames}"
@@ -6259,7 +6259,7 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
     db = Database(str(vireo_dir / "test.db"))
     scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert len(photos) == 1
     photo_id = photos[0]["id"]
     original_hash = db.conn.execute(
@@ -6326,7 +6326,7 @@ def test_rescan_clears_thumb_path_column_when_content_changes(tmp_path):
 
     db = Database(str(vireo_dir / "test.db"))
     scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
-    photo_id = db.get_photos(per_page=100)[0]["id"]
+    photo_id = db.photos.list_page(per_page=100)[0]["id"]
 
     # Generate a thumbnail and stamp the column the way thumbnail_stage does.
     generate_thumbnail(photo_id, img_path, str(cache_dir))
@@ -6373,7 +6373,7 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     db = Database(str(vireo_dir / "test.db"))
     scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
-    photo_id = db.get_photos(per_page=100)[0]["id"]
+    photo_id = db.photos.list_page(per_page=100)[0]["id"]
 
     # Seed a preview file + accounting row, as /photos/<id>/preview would.
     preview_file = preview_dir / f"{photo_id}_1920.jpg"
@@ -6423,7 +6423,7 @@ def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeyp
 
     db = Database(str(vireo_dir / "test.db"))
     scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
-    photo_id = db.get_photos(per_page=100)[0]["id"]
+    photo_id = db.photos.list_page(per_page=100)[0]["id"]
 
     preview_file = preview_dir / f"{photo_id}_1920.jpg"
     Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
@@ -6476,7 +6476,7 @@ def test_rescan_sweeps_untracked_preview_files(tmp_path):
 
     db = Database(str(vireo_dir / "test.db"))
     scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
-    photo_id = db.get_photos(per_page=100)[0]["id"]
+    photo_id = db.photos.list_page(per_page=100)[0]["id"]
 
     # Seed an *untracked* preview (file exists, no preview_cache row).
     untracked = preview_dir / f"{photo_id}_800.jpg"
@@ -6572,7 +6572,7 @@ def test_audit_import_untracked_invalidates_using_caller_vireo_dir(tmp_path):
     db = Database(str(db_dir / "vireo.db"))
     scan(str(root), db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
-    photo_id = db.get_photos(per_page=100)[0]["id"]
+    photo_id = db.photos.list_page(per_page=100)[0]["id"]
     thumb_path = vireo_dir / "thumbnails" / f"{photo_id}.jpg"
     generate_thumbnail(photo_id, str(img), str(vireo_dir / "thumbnails"))
     assert thumb_path.exists()
@@ -6667,7 +6667,7 @@ def test_invalidation_honors_custom_thumb_cache_dir(tmp_path):
         str(root), db,
         options=ScanOptions(vireo_dir=str(vireo_dir), thumb_cache_dir=str(thumb_dir)),
     )
-    photo_id = db.get_photos(per_page=100)[0]["id"]
+    photo_id = db.photos.list_page(per_page=100)[0]["id"]
 
     thumb = thumb_dir / f"{photo_id}.jpg"
     generate_thumbnail(photo_id, str(img), str(thumb_dir))
@@ -6757,7 +6757,7 @@ def test_rescan_invalidates_when_prev_file_hash_was_null(tmp_path):
 
     db = Database(str(vireo_dir / "test.db"))
     scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
-    photo_id = db.get_photos(per_page=100)[0]["id"]
+    photo_id = db.photos.list_page(per_page=100)[0]["id"]
 
     thumb_path = str(cache_dir / f"{photo_id}.jpg")
     generate_thumbnail(photo_id, img_path, str(cache_dir))
@@ -6808,7 +6808,7 @@ def test_rescan_invalidates_caches_when_file_truncated_to_zero(tmp_path):
 
     db = Database(str(vireo_dir / "test.db"))
     scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
-    photo_id = db.get_photos(per_page=100)[0]["id"]
+    photo_id = db.photos.list_page(per_page=100)[0]["id"]
 
     thumb_path = str(cache_dir / f"{photo_id}.jpg")
     generate_thumbnail(photo_id, img_path, str(cache_dir))
@@ -6873,7 +6873,7 @@ def test_rescan_invalidates_caches_on_null_to_empty_transition(tmp_path):
 
     db = Database(str(vireo_dir / "test.db"))
     scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
-    photo_id = db.get_photos(per_page=100)[0]["id"]
+    photo_id = db.photos.list_page(per_page=100)[0]["id"]
 
     thumb_path = str(cache_dir / f"{photo_id}.jpg")
     generate_thumbnail(photo_id, img_path, str(cache_dir))
@@ -6937,7 +6937,7 @@ def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     db = Database(str(vireo_dir / "test.db"))
     scan(root, db, options=ScanOptions(vireo_dir=str(vireo_dir)))
 
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert len(photos) == 1
     photo_id = photos[0]["id"]
     assert photos[0]["working_copy_path"] is not None
@@ -6955,7 +6955,7 @@ def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     scan(root, db, options=ScanOptions(incremental=True, vireo_dir=str(vireo_dir)))
 
     # Working copy should point to a regenerated file whose pixels match the new source.
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     wc_rel = photos[0]["working_copy_path"]
     assert wc_rel is not None, "Scanner must re-set working_copy_path after invalidation"
     wc_path = vireo_dir / wc_rel
@@ -7205,7 +7205,7 @@ def test_scan_surfaces_permission_denied_subdirs(tmp_path):
         denied = []
         scan(root, db, hooks=ScanHooks(permission_error=denied.append))
 
-        photos = {p['filename'] for p in db.get_photos(per_page=100)}
+        photos = {p['filename'] for p in db.photos.list_page(per_page=100)}
         assert 'ok.jpg' in photos, "accessible files must still be scanned"
         assert 'hidden.jpg' not in photos, "denied dir must not yield photos"
         assert any(forbidden in p for p in denied), (
@@ -7237,7 +7237,7 @@ def test_scan_continues_after_permission_denied(tmp_path):
         denied = []
         scan(root, db, hooks=ScanHooks(permission_error=denied.append))
 
-        photos = {p['filename'] for p in db.get_photos(per_page=100)}
+        photos = {p['filename'] for p in db.photos.list_page(per_page=100)}
         assert photos == {'a.jpg', 'c.jpg'}
         assert any(locked in p for p in denied)
     finally:
@@ -7269,7 +7269,7 @@ def test_scan_skips_broken_symlinks(tmp_path):
     # Must not raise FileNotFoundError; must still scan the real file.
     scan(root, db)
 
-    photos = {p['filename'] for p in db.get_photos(per_page=100)}
+    photos = {p['filename'] for p in db.photos.list_page(per_page=100)}
     assert 'real.jpg' in photos
     assert 'broken.jpg' not in photos
 
@@ -7325,7 +7325,7 @@ def test_scan_restrict_dirs_surfaces_permission_denied(tmp_path, monkeypatch):
         hooks=ScanHooks(permission_error=denied.append),
     )
 
-    photos = {p['filename'] for p in db.get_photos(per_page=100)}
+    photos = {p['filename'] for p in db.photos.list_page(per_page=100)}
     assert 'ok.jpg' in photos, (
         "accessible restrict_dir entries must still be scanned"
     )

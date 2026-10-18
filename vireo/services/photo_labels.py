@@ -24,7 +24,7 @@ class PhotoLabelService:
         return self.db.photo_labels.set_description(color, description)
 
     def set_label(self, photo_id: int, color: str | None) -> None:
-        photo = self.db.get_photo(photo_id)
+        photo = self.db.photos.get(photo_id)
         if photo is None:
             raise LookupError("not found")
         self.db._verify_photo_in_workspace(photo_id)

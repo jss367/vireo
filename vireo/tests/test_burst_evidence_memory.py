@@ -130,9 +130,12 @@ def invented_row(pid, name, seconds):
 def compare_scope():
     rows = [invented_row(1, "DSC_0001.jpg", 0), invented_row(2, "IMG_0999.jpg", 1), invented_row(3, "bird.jpg", 2)]
     db = types.SimpleNamespace(
-        get_photo=lambda pid, **kw: rows[pid - 1],
         require_workspace_id=lambda: 1,
-        photos=types.SimpleNamespace(best_batch_sequence_rows=lambda *a: rows, best_batch_folder_rows=lambda *a: rows),
+        photos=types.SimpleNamespace(
+            get=lambda pid, **kw: rows[pid - 1],
+            best_batch_sequence_rows=lambda *a: rows,
+            best_batch_folder_rows=lambda *a: rows,
+        ),
     )
     listing = [[r["id"] for r in b] for b in pure["group_folder_bursts"](rows)]
     scoped, method = pure["best_batch_scope"](db, 1)
@@ -248,7 +251,7 @@ def focus(photo=None, args=None, size=(3000, 2000), enabled=True, mask_path=None
         "_read_mask_bytes": lambda path: events.append(("mask-read", path)) or b"fake-mask",
     }
     db = types.SimpleNamespace(
-        get_photo=get_photo,
+        photos=types.SimpleNamespace(get=get_photo),
         get_detections=lambda pid: boxes if detections is None else detections,
         get_folder=lambda fid: {"path": "/invented"},
         get_effective_config=lambda cfg: cfg,
@@ -480,9 +483,12 @@ def overlapping_scopes():
     rows = [invented_row(1, "DSC_0001.jpg", 0), invented_row(2, "DSC_0002.jpg", 1), invented_row(3, "bird.jpg", 2)]
     scopes = pure["folder_burst_scopes"](rows)
     db = types.SimpleNamespace(
-        get_photo=lambda pid, **kw: rows[pid - 1],
         require_workspace_id=lambda: 1,
-        photos=types.SimpleNamespace(best_batch_sequence_rows=lambda *a: rows, best_batch_folder_rows=lambda *a: rows),
+        photos=types.SimpleNamespace(
+            get=lambda pid, **kw: rows[pid - 1],
+            best_batch_sequence_rows=lambda *a: rows,
+            best_batch_folder_rows=lambda *a: rows,
+        ),
     )
     for scope in scopes:
         expected, method = pure["best_batch_scope"](db, scope["seed_photo_id"])
@@ -593,9 +599,9 @@ def test_long_folder_scope_matches_default_seed_evidence_window():
         for r in rows
     }
     db = types.SimpleNamespace(
-        get_photo=lambda pid, **kw: rows[pid - 1],
         require_workspace_id=lambda: 1,
         photos=types.SimpleNamespace(
+            get=lambda pid, **kw: rows[pid - 1],
             best_batch_sequence_rows=lambda *a: rows,
             best_batch_folder_rows=lambda *a, **kw: rows,
             analysis_evidence_rows=lambda *a: evidence,

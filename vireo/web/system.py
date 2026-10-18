@@ -157,7 +157,7 @@ def _issue_report_app_state(get_db):
         ws = db.workspaces.get(ws_id) if ws_id is not None else None
         ws_name = ws["name"] if ws else "unknown"
         folder_count = db.count_all_folders()
-        photo_count = db.count_catalog_photos()
+        photo_count = db.photos.count_all()
         # Predictions are global now; workspace scoping happens through
         # the detection -> photo -> workspace_folders join.
         pred_count = db.count_workspace_predictions()
@@ -424,7 +424,7 @@ def create_system_blueprint(
             duplicate_scope = body.get("scope") == "duplicates"
             if duplicate_scope and not db.duplicates.is_group_member(pid_int):
                 return None, False, json_error("photo not found", 404)
-            photo = db.get_photo(pid_int, verify_workspace=not duplicate_scope)
+            photo = db.photos.get(pid_int, verify_workspace=not duplicate_scope)
             if not photo:
                 return None, False, json_error("photo not found", 404)
             folder_row = db.get_folder(photo["folder_id"])
@@ -782,8 +782,8 @@ def create_system_blueprint(
         # also count photos in missing folders).
         return jsonify(
             {
-                "photo_count": db.count_photos_in_workspace(),
-                "accessible_photo_count": db.count_photos(),
+                "photo_count": db.photos.count_in_workspace(),
+                "accessible_photo_count": db.photos.count(),
                 "missing_folder_count": len(db.get_missing_folders()),
                 "folder_count": db.count_folders(),
                 "keyword_count": db.count_keywords_in_workspace(),

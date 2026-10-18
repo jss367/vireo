@@ -160,7 +160,7 @@ def test_search_photos_caps_the_page_size(mcp):
 
 def test_get_photo_trims_and_optionally_includes_exif(mcp):
     server, db, _ = mcp
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     detail = call(server, "get_photo", photo_id=pid)
     assert detail["id"] == pid
     assert detail["path"].endswith(detail["filename"])
@@ -202,7 +202,7 @@ def test_photo_summary_reports_quality_analysis_state():
 
 def test_view_photo_thumbnail_returns_the_jpeg(mcp):
     server, db, _ = mcp
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     content = call(server, "view_photo", photo_id=pid, view="thumbnail")
     assert content[0].type == "image"
     assert content[0].mime_type == "image/jpeg"
@@ -211,7 +211,7 @@ def test_view_photo_thumbnail_returns_the_jpeg(mcp):
 
 def test_view_photo_preview_renders_the_frame(mcp, app_and_db, tmp_path):
     server, db, transport = mcp
-    photo = db.get_photos()[0]
+    photo = db.photos.list_page()[0]
     photo_dir = tmp_path / "photo_files"
     photo_dir.mkdir()
     with db.transaction():
@@ -226,7 +226,7 @@ def test_view_photo_preview_renders_the_frame(mcp, app_and_db, tmp_path):
 
 def test_burst_passes_the_apps_precondition_through(mcp):
     server, db, _ = mcp
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     message = call_error(server, "burst", photo_id=pid)
     assert "Vireo answered 404: No neighboring batch photos found" in message
 
@@ -234,13 +234,13 @@ def test_burst_passes_the_apps_precondition_through(mcp):
 def test_set_flag_writes_only_what_the_route_persists(mcp):
     # Omitted provenance preserves the ordinary manual-write payload.
     server, db, transport = mcp
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     result = call(server, "set_flag", photo_ids=[pid], flag="rejected")
     assert result == {"updated": 1, "flag": "rejected"}
     method, path, _, body = transport.calls[-1]
     assert (method, path) == ("POST", "/api/batch/flag")
     assert body == {"photo_ids": [pid], "flag": "rejected"}
-    assert db.get_photo(pid)["flag"] == "rejected"
+    assert db.photos.get(pid)["flag"] == "rejected"
     assert "Vireo answered 400" in call_error(server, "set_flag", photo_ids=[pid], flag="maybe")
 
 
@@ -252,15 +252,15 @@ def test_set_flag_tool_advertises_supported_provenance(mcp):
 
 def test_set_rating_writes_the_rating(mcp):
     server, db, _ = mcp
-    pid = db.get_photos()[1]["id"]
+    pid = db.photos.list_page()[1]["id"]
     assert call(server, "set_rating", photo_ids=[pid], rating=4) == {"updated": 1, "rating": 4}
-    assert db.get_photo(pid)["rating"] == 4
+    assert db.photos.get(pid)["rating"] == 4
     assert "Vireo answered 400" in call_error(server, "set_rating", photo_ids=[pid], rating=9)
 
 
 def test_add_and_remove_keyword(mcp):
     server, db, _ = mcp
-    pid = db.get_photos()[2]["id"]
+    pid = db.photos.list_page()[2]["id"]
     added = call(server, "add_keyword", photo_ids=[pid], name="Great horned owl")
     keyword_id = added["keyword_id"]
     assert "Great horned owl" in [k["name"] for k in db.get_photo_keywords(pid)]
@@ -276,7 +276,7 @@ def test_search_keywords_matches_substrings_and_builds_paths(mcp):
     child = db.add_keyword("Barn owl", parent_id=parent)
     # The tree holds keywords used by photos in the workspace plus their
     # ancestors, so tagging the child surfaces the parent too.
-    db.tag_photo(db.get_photos()[0]["id"], child)
+    db.tag_photo(db.photos.list_page()[0]["id"], child)
     found = call(server, "search_keywords", query="owl")
     assert found["total_matches"] == 2
     assert {k["path"] for k in found["keywords"]} == {"Owls", "Owls / Barn owl"}
@@ -407,7 +407,7 @@ def test_stdio_session_against_a_served_app(app_and_db, tmp_path):
     from werkzeug.serving import make_server
 
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     http = make_server("127.0.0.1", 0, app, threaded=True)
     thread = threading.Thread(target=http.serve_forever, daemon=True)
     thread.start()
@@ -445,7 +445,7 @@ def test_stdio_session_against_a_served_app(app_and_db, tmp_path):
     assert not flagged.is_error
     written = json.loads(flagged.content[0].text)
     assert written == {"updated": 1, "flag": "rejected"}
-    assert db.get_photo(pid)["flag"] == "rejected"
+    assert db.photos.get(pid)["flag"] == "rejected"
 
 
 def test_mcp_flag_does_not_start_an_instance(tmp_path):

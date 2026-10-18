@@ -135,7 +135,7 @@ class _DetectPass:
             thread_db.collections.get_photos(run.collection_id, per_page=999999)
         )
         photo_ids = [p["id"] for p in photos]
-        kept_ids = set(thread_db.filter_out_wildlife_excluded(photo_ids))
+        kept_ids = set(thread_db.photos.filter_out_wildlife_excluded(photo_ids))
         skipped_wildlife = len(photos) - len(kept_ids)
         if skipped_wildlife:
             log.info(

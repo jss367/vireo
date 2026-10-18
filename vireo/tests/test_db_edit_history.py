@@ -278,7 +278,7 @@ def test_undo_skips_non_undoable_and_marks_entry_undone(db, pids):
     assert entry["undone"] == 0  # the row as selected, before the flip
     assert not db.conn.in_transaction
     assert _history_rows(db, "id = ?", (target,))[0]["undone"] == 1
-    assert db.get_photo(pids[0])["rating"] == 2
+    assert db.photos.get(pids[0])["rating"] == 2
 
 
 def test_undo_reads_non_undoable_from_instance(db, pids):
@@ -296,15 +296,15 @@ def test_undo_picks_latest_and_redo_replays_oldest_first(db, pids):
 
     assert db.undo_last_edit()["id"] == second
     assert db.undo_last_edit()["id"] == first
-    assert db.get_photo(pids[0])["rating"] == 0
+    assert db.photos.get(pids[0])["rating"] == 0
 
     redone = db.redo_last_undo()
     assert redone["id"] == first
     assert not db.conn.in_transaction
     assert _history_rows(db, "id = ?", (first,))[0]["undone"] == 0
-    assert db.get_photo(pids[0])["rating"] == 1
+    assert db.photos.get(pids[0])["rating"] == 1
     assert db.redo_last_undo()["id"] == second
-    assert db.get_photo(pids[0])["rating"] == 2
+    assert db.photos.get(pids[0])["rating"] == 2
     assert db.redo_last_undo() is None
 
 

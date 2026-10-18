@@ -12,7 +12,7 @@ def test_navbar_buttons_round_trip_saved_actions(live_server, page, action):
     pred_id = db.conn.execute('SELECT p.id FROM predictions p JOIN detections d ON d.id=p.detection_id WHERE d.photo_id=?', (pid,)).fetchone()[0]
 
     def state():
-        photo = db.get_photo(pid)
+        photo = db.photos.get(pid)
         return {
             'flag': photo['flag'], 'rating': photo['rating'],
             'color': db.photo_labels.get(pid),
@@ -72,11 +72,11 @@ def test_history_buttons_work_across_pages(live_server, page, path):
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
     page.locator('#historyUndoBtn').click()
     expect(page.locator('#historyRedoBtn')).to_be_enabled()
-    assert db.get_photo(pid)['flag'] == 'none'
+    assert db.photos.get(pid)['flag'] == 'none'
     page.locator('#historyRedoBtn').click()
     page.wait_for_function('!window.vireoHistoryBusy()')
     expect(page.locator('#historyRedoBtn')).to_be_disabled()
-    assert db.get_photo(pid)['flag'] == 'rejected'
+    assert db.photos.get(pid)['flag'] == 'rejected'
 
 
 def test_location_review_rebuilds_queue_after_history_change(live_server, page):

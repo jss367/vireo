@@ -750,7 +750,7 @@ class _PhotoExportBatch:
 
     def _load_catalog(self, db):
         """Fetch catalog data once for the whole batch."""
-        self.photos_map = db.get_photos_by_ids(self.photo_ids)
+        self.photos_map = db.photos.get_by_ids(self.photo_ids)
         self.folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
         self.exif_data_map = _get_photo_exif_data(db, self.photo_ids)
         self.camera_data_map = (
@@ -2201,7 +2201,7 @@ def preview_export(db, photo_ids, destination=None, options=None):
         if options.get("export_to_subfolder") else ""
     )
 
-    photos_map = db.get_photos_by_ids(photo_ids)
+    photos_map = db.photos.get_by_ids(photo_ids)
     folders = {folder["id"]: folder["path"] for folder in db.get_folder_tree()}
     species_map = db.get_species_keywords_for_photos(photo_ids)
     exif_data_map = _get_photo_exif_data(db, photo_ids)

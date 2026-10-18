@@ -94,7 +94,7 @@ def test_set_color_label(app_and_db):
     """POST /api/photos/<id>/color_label sets the color label."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/color_label', json={'color': 'red'})
@@ -106,7 +106,7 @@ def test_remove_color_label(app_and_db):
     """POST /api/photos/<id>/color_label with null removes the label."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     client.post(f'/api/photos/{pid}/color_label', json={'color': 'blue'})
@@ -119,7 +119,7 @@ def test_set_color_label_invalid(app_and_db):
     """POST /api/photos/<id>/color_label rejects invalid colors."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/color_label', json={'color': 'orange'})
@@ -130,7 +130,7 @@ def test_batch_color_label(app_and_db):
     """POST /api/batch/color_label sets labels on multiple photos."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:2]]
 
     resp = client.post('/api/batch/color_label', json={'photo_ids': pids, 'color': 'green'})
@@ -143,7 +143,7 @@ def test_get_color_labels(app_and_db):
     """GET /api/photos/color_labels returns labels keyed by photo id."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [photo['id'] for photo in photos[:2]]
     db.photo_labels.set(pids[0], 'purple')
 
@@ -252,7 +252,7 @@ def test_photo_review_routes_are_owned_by_domain_blueprint(app_and_db):
 def test_photo_review_routes_preserve_workspace_isolation(app_and_db):
     """Individual and batch review edits reject hidden photos atomically."""
     app, db = app_and_db
-    visible_id = db.get_photos()[0]["id"]
+    visible_id = db.photos.list_page()[0]["id"]
     active_workspace_id = db._active_workspace_id
     other_workspace_id = db.create_workspace("Other review workspace")
     db.set_active_workspace(other_workspace_id)
@@ -279,10 +279,10 @@ def test_photo_review_routes_preserve_workspace_isolation(app_and_db):
         )
         assert batch.status_code == 403
 
-    assert db.get_photo(visible_id)["rating"] == 3
-    assert db.get_photo(visible_id)["flag"] == "none"
-    assert db.get_photo(hidden_id)["rating"] == 0
-    assert db.get_photo(hidden_id)["flag"] == "none"
+    assert db.photos.get(visible_id)["rating"] == 3
+    assert db.photos.get(visible_id)["flag"] == "none"
+    assert db.photos.get(hidden_id)["rating"] == 0
+    assert db.photos.get(hidden_id)["flag"] == "none"
 
 
 def test_photo_review_batches_skip_stale_ids_and_keep_requested_history_count(
@@ -290,7 +290,7 @@ def test_photo_review_batches_skip_stale_ids_and_keep_requested_history_count(
 ):
     """Batch review edits retain their stale-ID and audit-description contract."""
     app, db = app_and_db
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
     client = app.test_client()
 
     response = client.post(
@@ -300,7 +300,7 @@ def test_photo_review_batches_skip_stale_ids_and_keep_requested_history_count(
 
     assert response.status_code == 200
     assert response.get_json() == {"ok": True, "updated": 1}
-    assert db.get_photo(photo_id)["rating"] == 2
+    assert db.photos.get(photo_id)["rating"] == 2
     history = db.edit_history.list_recent()
     assert history[0]["description"] == "Set rating to 2 on 2 photos"
 
@@ -309,14 +309,14 @@ def test_set_rating(app_and_db):
     """POST /api/photos/<id>/rating updates rating and queues pending change."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/rating',
                        json={'rating': 5})
     assert resp.status_code == 200
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     assert photo['rating'] == 5
 
     changes = db.pending_changes.list_all()
@@ -327,7 +327,7 @@ def test_undo_noop_rating_edit_preserves_earlier_pending_change(app_and_db):
     """Undoing a repeated same-value rating edit should not clear the earlier pending sync."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/rating', json={'rating': 4})
@@ -339,7 +339,7 @@ def test_undo_noop_rating_edit_preserves_earlier_pending_change(app_and_db):
     resp = client.post('/api/undo')
     assert resp.status_code == 200
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     assert photo['rating'] == 4
 
     changes = db.pending_changes.list_all()
@@ -352,7 +352,7 @@ def test_undo_old_rating_action_does_not_clear_new_pending_change_reusing_id(app
     """Undo must not delete unrelated pending work even if an old row id is reused."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/rating', json={'rating': 4})
@@ -387,14 +387,14 @@ def test_set_flag(app_and_db):
     """POST /api/photos/<id>/flag updates the flag and queues XMP sync by default."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/flag',
                        json={'flag': 'flagged'})
     assert resp.status_code == 200
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     assert photo['flag'] == 'flagged'
 
     changes = db.pending_changes.list_all()
@@ -412,7 +412,7 @@ def test_set_flag_clears_pending_xmp_when_sync_disabled(app_and_db):
 
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/flag', json={'flag': 'flagged'})
@@ -430,7 +430,7 @@ def test_set_flag_clears_pending_xmp_when_sync_disabled(app_and_db):
 
     resp = client.post(f'/api/photos/{pid}/flag', json={'flag': 'rejected'})
     assert resp.status_code == 200
-    assert db.get_photo(pid)['flag'] == 'rejected'
+    assert db.photos.get(pid)['flag'] == 'rejected'
     assert not any(
         c['photo_id'] == pid and c['change_type'] == 'flag'
         for c in db.pending_changes.list_all()
@@ -441,7 +441,7 @@ def test_add_keyword_to_photo(app_and_db):
     """POST /api/photos/<id>/keywords adds keyword and queues pending change."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/keywords',
@@ -460,7 +460,7 @@ def test_remove_keyword_from_photo(app_and_db):
     """DELETE /api/photos/<id>/keywords/<kid> removes keyword and queues pending change."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     keywords = db.get_photo_keywords(pid)
@@ -480,7 +480,7 @@ def test_undo_keyword_remove_clears_pending_change(app_and_db):
     """Undoing a keyword removal restores the tag and removes the pending delete."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     keywords = db.get_photo_keywords(pid)
@@ -507,7 +507,7 @@ def test_readding_removed_keyword_cancels_pending_remove(app_and_db):
     """Removing and re-adding the same keyword before sync leaves no pending keyword change."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     keywords = db.get_photo_keywords(pid)
@@ -536,7 +536,7 @@ def test_sync_status(app_and_db):
     assert data['pending_photo_count'] == 0
     assert data['change_type_counts'] == {}
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     db.queue_change(photos[0]['id'], 'rating', '3')
 
     resp = client.get('/api/sync/status')
@@ -549,7 +549,7 @@ def test_sync_status(app_and_db):
 def test_sync_preview_pages_photos_with_stable_summary(app_and_db):
     """Progressive preview pages retain totals and a stable revision."""
     app, db = app_and_db
-    photo_ids = [photo["id"] for photo in db.get_photos()[:2]]
+    photo_ids = [photo["id"] for photo in db.photos.list_page()[:2]]
     assert len(photo_ids) == 2
     for index, photo_id in enumerate(photo_ids, start=3):
         db.queue_change(photo_id, "rating", str(index))
@@ -584,7 +584,7 @@ def test_sync_preview_pages_photos_with_stable_summary(app_and_db):
 def test_sync_preview_rejects_stale_progressive_revision(app_and_db):
     """A changed pending queue cannot be mixed into an older preview."""
     app, db = app_and_db
-    photo_ids = [photo["id"] for photo in db.get_photos()[:2]]
+    photo_ids = [photo["id"] for photo in db.photos.list_page()[:2]]
     db.queue_change(photo_ids[0], "rating", "3")
     client = app.test_client()
     first = client.get("/api/sync/preview?limit=1&offset=0").get_json()
@@ -605,8 +605,8 @@ def test_sync_preview_revalidates_after_final_page_enrichment(
     from web import sync as web_sync
 
     app, db = app_and_db
-    photo_ids = [photo["id"] for photo in db.get_photos()[:2]]
-    first_photo = db.get_photo(photo_ids[0])
+    photo_ids = [photo["id"] for photo in db.photos.list_page()[:2]]
+    first_photo = db.photos.get(photo_ids[0])
     db.conn.execute(
         "UPDATE folders SET path = ? WHERE id = ?",
         (str(tmp_path), first_photo["folder_id"]),
@@ -644,7 +644,7 @@ def test_sync_preview_reuses_snapshot_across_page_requests(app_and_db):
     is cached, later pages must not re-query ``pending_changes``.
     """
     app, db = app_and_db
-    photo_ids = [photo["id"] for photo in db.get_photos()[:3]]
+    photo_ids = [photo["id"] for photo in db.photos.list_page()[:3]]
     assert len(photo_ids) == 3
     for index, photo_id in enumerate(photo_ids, start=1):
         db.queue_change(photo_id, "rating", str(index))
@@ -689,7 +689,7 @@ def test_sync_preview_cache_isolated_by_database(app_and_db, tmp_path):
     from web import sync as web_sync
 
     _app, first_db = app_and_db
-    first_photo = first_db.get_photos()[0]
+    first_photo = first_db.photos.list_page()[0]
     first_db.queue_change(first_photo["id"], "rating", "3")
     first_snapshot = web_sync._sync_preview_get_snapshot(
         first_db, first_db._ws_id(), None,
@@ -730,7 +730,7 @@ def test_sync_preview_cache_evicts_obsolete_workspace_revision(app_and_db):
     _app, db = app_and_db
     ws_id = db._ws_id()
     database_key = os.path.abspath(db._db_path)
-    photos = db.get_photos()[:2]
+    photos = db.photos.list_page()[:2]
     db.queue_change(photos[0]["id"], "rating", "3")
     first_snapshot = web_sync._sync_preview_get_snapshot(db, ws_id, None)
 
@@ -761,7 +761,7 @@ def test_sync_preview_detects_top_id_replacement(app_and_db):
     the INSERT so the second request rebuilds against the new row.
     """
     app, db = app_and_db
-    photo_ids = [photo["id"] for photo in db.get_photos()[:2]]
+    photo_ids = [photo["id"] for photo in db.photos.list_page()[:2]]
     assert len(photo_ids) == 2
     original_token = db.queue_change(photo_ids[0], "rating", "3")
     assert original_token is not None
@@ -822,7 +822,7 @@ def test_sync_preview_describes_location_keyword_as_xmp_delta(
     db.set_photo_location(photo_id, tallahassee_id)
     db.queue_change(photo_id, "location", "effective")
 
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1040,7 +1040,7 @@ def test_sync_preview_shows_hierarchical_keyword_before_removal(
     from xmp import write_sidecar
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1070,7 +1070,7 @@ def test_sync_preview_reports_flat_and_hierarchy_when_both_will_be_removed(
     from xmp import write_sidecar
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1101,7 +1101,7 @@ def test_sync_preview_preserves_hierarchy_during_paired_keyword_rename(
     from xmp import write_sidecar
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1153,7 +1153,7 @@ def test_sync_preview_clears_rename_flags_after_discarding_paired_keyword_add(
     from xmp import write_sidecar
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1194,7 +1194,7 @@ def test_sync_preview_treats_flag_as_unchanged_when_sync_is_disabled(
     from xmp import write_pick_flag
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1223,7 +1223,7 @@ def test_sync_preview_does_not_promise_removal_from_unreadable_xmp(
 ):
     """Keyword removal cannot modify a corrupt sidecar."""
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1270,7 +1270,7 @@ def test_sync_preview_keyword_add_matches_actual_sidecar_change(
     from xmp import read_sync_preview_metadata, write_sidecar
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],),
     ).fetchone()["path"]
@@ -1341,7 +1341,7 @@ def test_sync_preview_reports_paired_flat_rename_as_replacement(
     from xmp import write_sidecar
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1393,7 +1393,7 @@ def test_sync_preview_skips_writes_when_folder_is_offline(client_with_photo):
     import shutil
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1444,7 +1444,7 @@ def test_sync_preview_does_not_promise_edit_clear_from_unreadable_xmp(
 ):
     """Clearing a Vireo edit marker cannot modify a corrupt sidecar."""
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()["path"]
@@ -1492,7 +1492,7 @@ def test_edit_history_recorded_on_rating(app_and_db):
     """Setting a rating records an entry in edit_history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     client.post(f'/api/photos/{pid}/rating', json={'rating': 5})
@@ -1507,7 +1507,7 @@ def test_edit_history_recorded_on_flag(app_and_db):
     """Setting a flag records an entry in edit_history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     client.post(f'/api/photos/{pid}/flag', json={'flag': 'flagged'})
@@ -1521,7 +1521,7 @@ def test_edit_history_recorded_on_keyword_add(app_and_db):
     """Adding a keyword records an entry in edit_history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     client.post(f'/api/photos/{pid}/keywords', json={'name': 'Eagle'})
@@ -1535,7 +1535,7 @@ def test_edit_history_recorded_on_keyword_remove(app_and_db):
     """Removing a keyword records an entry in edit_history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
     keywords = db.get_photo_keywords(pid)
     kid = keywords[0]['id']
@@ -1551,7 +1551,7 @@ def test_edit_history_recorded_on_batch_rating(app_and_db):
     """Batch rating records a single grouped entry in edit_history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:2]]
 
     client.post('/api/batch/rating', json={'photo_ids': pids, 'rating': 4})
@@ -1566,16 +1566,16 @@ def test_undo_api_uses_db(app_and_db):
     """POST /api/undo restores from DB-backed edit history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
     original_rating = photos[0]['rating']
 
     client.post(f'/api/photos/{pid}/rating', json={'rating': 5})
-    assert db.get_photo(pid)['rating'] == 5
+    assert db.photos.get(pid)['rating'] == 5
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
-    assert db.get_photo(pid)['rating'] == original_rating
+    assert db.photos.get(pid)['rating'] == original_rating
     assert len(db.edit_history.list_recent()) == 0
 
 
@@ -1587,7 +1587,7 @@ def test_undo_status_uses_db(app_and_db):
     resp = client.get('/api/undo/status')
     assert resp.get_json()['available'] is False
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     client.post(f'/api/photos/{photos[0]["id"]}/rating', json={'rating': 5})
 
     resp = client.get('/api/undo/status')
@@ -1600,7 +1600,7 @@ def test_edit_history_api(app_and_db):
     """GET /api/edit-history returns paginated history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     client.post(f'/api/photos/{pid}/rating', json={'rating': 1})
@@ -1620,7 +1620,7 @@ def test_accept_prediction_records_history(app_and_db):
     """Accepting a prediction records prediction_accept in edit history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     det_ids = db.save_detections(pid, [
@@ -1643,7 +1643,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     """Undoing an accepted prediction restores keyword, pending changes, and prediction status."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     det_ids = db.save_detections(pid, [
@@ -1683,7 +1683,7 @@ def test_reject_prediction_records_history(app_and_db):
     """New rejection history reverses and replays the exact prediction status."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
@@ -1710,7 +1710,7 @@ def test_prediction_group_apply_records_history(app_and_db):
     """Group apply records separate flag and keyword_add history entries."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:3]]
 
     resp = client.post('/api/predictions/group/apply',
@@ -1730,7 +1730,7 @@ def test_culling_apply_records_history(app_and_db):
     """Culling apply records flag changes in edit history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:3]]
 
     resp = client.post('/api/culling/apply',
@@ -1748,33 +1748,33 @@ def test_culling_apply_undo_restores_flags(app_and_db):
     """Undoing culling restores original flag values."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
     original_flag = photos[0]['flag'] or 'none'
 
     client.post('/api/culling/apply', json={'keepers': [pid], 'rejects': []})
-    assert db.get_photo(pid)['flag'] == 'flagged'
+    assert db.photos.get(pid)['flag'] == 'flagged'
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
-    assert (db.get_photo(pid)['flag'] or 'none') == original_flag
+    assert (db.photos.get(pid)['flag'] or 'none') == original_flag
 
 
 def test_culling_apply_unflag_clears_previous_flag(app_and_db):
     """Moving an applied photo back to Review clears its saved flag."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     client.post('/api/culling/apply', json={'keepers': [pid], 'rejects': []})
-    assert db.get_photo(pid)['flag'] == 'flagged'
+    assert db.photos.get(pid)['flag'] == 'flagged'
 
     resp = client.post('/api/culling/apply',
                        json={'keepers': [], 'rejects': [], 'unflag': [pid]})
     assert resp.status_code == 200
     assert resp.get_json()['cleared'] == 1
-    assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+    assert (db.photos.get(pid)['flag'] or 'none') == 'none'
 
     history = db.edit_history.list_recent()
     assert history[0]['action_type'] == 'flag'
@@ -1785,24 +1785,24 @@ def test_culling_apply_unflag_undo_restores_flag(app_and_db):
     """Undo puts back the flag a Review decision cleared."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]['id']
+    pid = db.photos.list_page()[0]['id']
 
     client.post('/api/culling/apply', json={'keepers': [pid], 'rejects': []})
     client.post('/api/culling/apply',
                 json={'keepers': [], 'rejects': [], 'unflag': [pid]})
-    assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+    assert (db.photos.get(pid)['flag'] or 'none') == 'none'
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
-    assert db.get_photo(pid)['flag'] == 'flagged'
+    assert db.photos.get(pid)['flag'] == 'flagged'
 
 
 def test_culling_apply_unflag_ignores_unflagged_photos(app_and_db):
     """Clearing a photo that has no flag is a no-op, not a history entry."""
     app, db = app_and_db
     client = app.test_client()
-    pid = db.get_photos()[0]['id']
-    assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+    pid = db.photos.list_page()[0]['id']
+    assert (db.photos.get(pid)['flag'] or 'none') == 'none'
 
     resp = client.post('/api/culling/apply',
                        json={'keepers': [], 'rejects': [], 'unflag': [pid]})
@@ -1831,7 +1831,7 @@ def test_culling_apply_rejects_overlapping_action_lists(app_and_db):
     """A photo can't be requested for two conflicting flag values at once."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:3]]
 
     # keepers ∩ rejects
@@ -1857,7 +1857,7 @@ def test_culling_apply_rejects_overlapping_action_lists(app_and_db):
 
     # Nothing was mutated for any of the three requests.
     for pid in pids:
-        assert (db.get_photo(pid)['flag'] or 'none') == 'none'
+        assert (db.photos.get(pid)['flag'] or 'none') == 'none'
     assert db.edit_history.list_recent() == []
 
 
@@ -1865,7 +1865,7 @@ def test_encounter_species_records_history(app_and_db):
     """Confirming encounter species records keyword_add in edit history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:2]]
 
     resp = client.post('/api/encounters/species',
@@ -1882,7 +1882,7 @@ def test_sync_discard_records_history(app_and_db):
     """Discarding pending changes records discard in edit history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     db.queue_change(pid, 'rating', '5')
@@ -1901,7 +1901,7 @@ def test_sync_discard_records_history(app_and_db):
 def test_sync_discard_all_rejects_stale_preview_revision(app_and_db):
     """Discard All never removes changes that appeared after the review."""
     app, db = app_and_db
-    photos = db.get_photos()[:2]
+    photos = db.photos.list_page()[:2]
     db.queue_change(photos[0]["id"], "rating", "3")
     client = app.test_client()
     revision = client.get("/api/sync/preview").get_json()["revision"]
@@ -1920,7 +1920,7 @@ def test_sync_discard_all_rejects_stale_preview_revision(app_and_db):
 def test_sync_discard_all_uses_reviewed_revision(app_and_db):
     """A current reviewed revision atomically clears the whole workspace."""
     app, db = app_and_db
-    photos = db.get_photos()[:2]
+    photos = db.photos.list_page()[:2]
     db.queue_change(photos[0]["id"], "rating", "3")
     db.queue_change(photos[1]["id"], "rating", "4")
     client = app.test_client()
@@ -1941,13 +1941,13 @@ def test_undo_skips_non_undoable_entries(app_and_db, action):
     """Undo skips incomplete legacy rejection and audit-only discard entries."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     # Create an undoable edit (rating change)
-    original_rating = db.get_photo(pid)['rating']
+    original_rating = db.photos.get(pid)['rating']
     client.post(f'/api/photos/{pid}/rating', json={'rating': 5})
-    assert db.get_photo(pid)['rating'] == 5
+    assert db.photos.get(pid)['rating'] == 5
 
     # Legacy rejection rows lack prediction IDs; discarded work is audit-only.
     db.record_edit(action, 'Legacy audit action', '', [
@@ -1961,7 +1961,7 @@ def test_undo_skips_non_undoable_entries(app_and_db, action):
     # Undo skips the audit entry and restores the rating.
     resp = client.post('/api/undo')
     assert resp.status_code == 200
-    assert db.get_photo(pid)['rating'] == original_rating
+    assert db.photos.get(pid)['rating'] == original_rating
 
     # The audit entry stays in history while the rating is marked undone.
     history = db.edit_history.list_recent()
@@ -1974,7 +1974,7 @@ def test_undo_status_skips_non_undoable(app_and_db, action):
     """Undo status reports the next undoable entry, not a non-undoable one."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     # Create an undoable edit
@@ -1998,7 +1998,7 @@ def test_undo_nothing_when_only_non_undoable(app_and_db, action):
     """Undo returns error when only non-undoable entries exist."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     # Legacy rejection rows lack prediction IDs; discarded work is audit-only.
@@ -2020,23 +2020,23 @@ def test_undo_flag_restores_original(app_and_db):
     """Undoing a flag change restores the photo's original flag value."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
     original_flag = photos[0]['flag'] or 'none'
 
     client.post(f'/api/photos/{pid}/flag', json={'flag': 'flagged'})
-    assert db.get_photo(pid)['flag'] == 'flagged'
+    assert db.photos.get(pid)['flag'] == 'flagged'
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
-    assert (db.get_photo(pid)['flag'] or 'none') == original_flag
+    assert (db.photos.get(pid)['flag'] or 'none') == original_flag
 
 
 def test_undo_keyword_add_removes_keyword(app_and_db):
     """Undoing a keyword addition removes the keyword and clears pending change."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     client.post(f'/api/photos/{pid}/keywords', json={'name': 'Heron'})
@@ -2060,45 +2060,45 @@ def test_undo_batch_rating_restores_all_photos(app_and_db):
     """Undoing a batch rating restores each photo's original rating."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:3]]
     originals = {p['id']: p['rating'] for p in photos[:3]}
 
     client.post('/api/batch/rating', json={'photo_ids': pids, 'rating': 1})
     for pid in pids:
-        assert db.get_photo(pid)['rating'] == 1
+        assert db.photos.get(pid)['rating'] == 1
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
 
     for pid in pids:
-        assert db.get_photo(pid)['rating'] == originals[pid]
+        assert db.photos.get(pid)['rating'] == originals[pid]
 
 
 def test_undo_batch_flag_restores_all_photos(app_and_db):
     """Undoing a batch flag restores each photo's original flag."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:3]]
     originals = {p['id']: (p['flag'] or 'none') for p in photos[:3]}
 
     client.post('/api/batch/flag', json={'photo_ids': pids, 'flag': 'rejected'})
     for pid in pids:
-        assert db.get_photo(pid)['flag'] == 'rejected'
+        assert db.photos.get(pid)['flag'] == 'rejected'
 
     resp = client.post('/api/undo')
     assert resp.status_code == 200
 
     for pid in pids:
-        assert (db.get_photo(pid)['flag'] or 'none') == originals[pid]
+        assert (db.photos.get(pid)['flag'] or 'none') == originals[pid]
 
 
 def test_redo_batch_flag_restores_per_photo_flag_values(app_and_db):
     """Redoing a batch flag action uses per-item values, not the action summary."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:3]]
 
     resp = client.post('/api/culling/apply',
@@ -2110,9 +2110,9 @@ def test_redo_batch_flag_restores_per_photo_flag_values(app_and_db):
     resp = client.post('/api/redo')
     assert resp.status_code == 200
 
-    assert db.get_photo(pids[0])['flag'] == 'flagged'
-    assert db.get_photo(pids[1])['flag'] == 'rejected'
-    assert db.get_photo(pids[2])['flag'] == 'rejected'
+    assert db.photos.get(pids[0])['flag'] == 'flagged'
+    assert db.photos.get(pids[1])['flag'] == 'rejected'
+    assert db.photos.get(pids[2])['flag'] == 'rejected'
 
     queued = {
         c['photo_id']: c['value']
@@ -2130,7 +2130,7 @@ def test_undo_batch_keyword_add_removes_from_all_photos(app_and_db):
     """Undoing a batch keyword add removes the keyword from every photo."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pids = [p['id'] for p in photos[:3]]
 
     client.post('/api/batch/keyword', json={'photo_ids': pids, 'name': 'Owl'})
@@ -2154,7 +2154,7 @@ def test_multiple_sequential_undos(app_and_db):
     """Multiple undos in sequence each reverse the correct action."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
     original_rating = photos[0]['rating']
     original_flag = photos[0]['flag'] or 'none'
@@ -2176,12 +2176,12 @@ def test_multiple_sequential_undos(app_and_db):
     # Undo 2: flag reversed
     resp = client.post('/api/undo')
     assert resp.status_code == 200
-    assert (db.get_photo(pid)['flag'] or 'none') == original_flag
+    assert (db.photos.get(pid)['flag'] or 'none') == original_flag
 
     # Undo 1: rating reversed
     resp = client.post('/api/undo')
     assert resp.status_code == 200
-    assert db.get_photo(pid)['rating'] == original_rating
+    assert db.photos.get(pid)['rating'] == original_rating
 
     # Nothing left
     resp = client.post('/api/undo')
@@ -2195,7 +2195,7 @@ def test_history_pruning_respects_max(app_and_db):
     """Old history entries are pruned when exceeding max_edit_history."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     import config as cfg
@@ -2218,7 +2218,7 @@ def test_history_isolated_between_workspaces(app_and_db):
     """History in one workspace is invisible to another; undo doesn't cross workspaces."""
     app, db = app_and_db
     client = app.test_client()
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
 
     # Record an edit in the default workspace
@@ -2254,7 +2254,7 @@ def test_set_edit_recipe_removes_regeneration_sidecar(app_and_db, tmp_path):
     sidecar the same way it sweeps ``<pid>.jpg``.
     """
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]['id']
     thumb_dir = app.config["THUMB_CACHE_DIR"]
 
@@ -2336,7 +2336,7 @@ def test_sync_preview_reports_a_location_keyword_already_in_xmp(client_with_phot
     _assign_location(db, photo_id, ["France", "Pont de Gau"])
     db.queue_change(photo_id, "location", "effective")
 
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.get_folder(photo["folder_id"])["path"]
     editor = SidecarEditor(os.path.join(folder, "test.xmp"))
     editor.set_location_keywords(["France", "Pont de Gau"])
@@ -2371,7 +2371,7 @@ def test_sync_preview_reports_a_normalized_hierarchy_variant_as_already_listed(
     _assign_location(db, photo_id, ["France", "Camargue", "Pont de Gau"])
     db.queue_change(photo_id, "location", "effective")
 
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.get_folder(photo["folder_id"])["path"]
     xmp_path = os.path.join(folder, "test.xmp")
     # Simulate a sidecar where Vireo previously wrote the location but the
@@ -2407,7 +2407,7 @@ def test_sync_preview_reports_removing_location_keywords_when_disabled(
     _assign_location(db, photo_id, ["France", "Pont de Gau"])
     db.queue_change(photo_id, "location", "effective")
 
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.get_folder(photo["folder_id"])["path"]
     editor = SidecarEditor(os.path.join(folder, "test.xmp"))
     editor.set_location_keywords(["France", "Pont de Gau"])
@@ -2638,7 +2638,7 @@ def test_sync_preview_says_marker_only_when_the_keyword_is_already_gone(
     _assign_location(db, photo_id, ["France", "Pont de Gau"])
     db.queue_change(photo_id, "location", "effective")
 
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.get_folder(photo["folder_id"])["path"]
     xmp_path = os.path.join(folder, "test.xmp")
     editor = SidecarEditor(xmp_path)
@@ -2981,7 +2981,7 @@ def test_photo_payloads_carry_render_key(app_and_db):
     already has cached.
     """
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     client = app.test_client()
 
     def keys_for(recipe):

@@ -13,7 +13,7 @@ def _make_detection(db, photo_id):
 
 def _seed_predictions(db):
     """Add predictions using the detection-based schema."""
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     det0 = _make_detection(db, photos[0]['id'])
     det1 = _make_detection(db, photos[1]['id'])
     db.add_prediction(detection_id=det0, species='Northern Cardinal',
@@ -112,7 +112,7 @@ def test_accept_prediction(app_and_db):
 
 def _burst_pair(db, group_id, species, photo_indexes=(0, 1)):
     """Two photos of one burst carrying the same species from one model."""
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pred_ids = []
     for offset, index in enumerate(photo_indexes):
         det = _make_detection(db, photos[index]['id'])
@@ -328,14 +328,14 @@ def test_prediction_group_apply(app_and_db):
     assert resp.get_json()['ok'] is True
 
     # Pick photo should be flagged and have the species keyword
-    pick_photo = db.get_photo(pick_id)
+    pick_photo = db.photos.get(pick_id)
     assert pick_photo['flag'] == 'flagged'
 
     pick_kws = {k['name'] for k in db.get_photo_keywords(pick_id)}
     assert 'Northern Cardinal' in pick_kws
 
     # Reject photo should be rejected
-    reject_photo = db.get_photo(reject_id)
+    reject_photo = db.photos.get(reject_id)
     assert reject_photo['flag'] == 'rejected'
 
     # Predictions for the pick should be accepted (review state in prediction_review)
@@ -385,7 +385,7 @@ def test_predictions_for_collection(app_and_db):
 def test_predictions_include_alternatives(app_and_db):
     """GET /api/predictions includes alternatives for each prediction."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     det_ids = db.save_detections(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
@@ -431,7 +431,7 @@ def test_predictions_alternatives_survive_row_level_rules(app_and_db):
     the user cannot accept an alternate species in that filtered view.
     """
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     det_ids = db.save_detections(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
@@ -464,7 +464,7 @@ def test_predictions_alternatives_survive_row_level_rules(app_and_db):
 def test_accept_alternative_prediction(app_and_db):
     """Accepting an alternative marks it accepted, rejects the top-1, and adds keyword."""
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     det_ids = db.save_detections(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
@@ -555,7 +555,7 @@ def test_get_predictions_species_rule_keeps_disagreement_rows(app_and_db):
     re-check the prediction's proposed species against the keyword filter
     and hide it (species is a photo-keyword field, not a per-row field)."""
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     # Confirmed species keyword on p1.
     robin_id = db.add_keyword('Robin', is_species=True)
     db.tag_photo(photos[0]['id'], robin_id)
@@ -581,7 +581,7 @@ def test_get_predictions_none_group_mixes_metadata_and_prediction(app_and_db):
     False and drop all rows — the very rows the filter was designed to
     show."""
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     # Fixture: photos[0] has rating 3; give it two low-confidence preds.
     low_photo = photos[0]['id']
     det = _make_detection(db, low_photo)
@@ -612,7 +612,7 @@ def test_get_predictions_all_group_still_narrows_by_prediction_confidence(app_an
     low-confidence sibling row on a rating-3 photo that also has one
     high-confidence prediction."""
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     # p1 already has rating 3 in the fixture.
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
@@ -643,7 +643,7 @@ def test_get_predictions_any_group_mixes_metadata_and_prediction(app_and_db):
     even though rating is 3.
     """
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     # p1 has rating 3 in the fixture.
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
@@ -679,7 +679,7 @@ def test_get_predictions_any_group_none_prediction_branch_broadens(app_and_db):
     filter could keep it (see r3619014565).
     """
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     # p1 has rating 3 in the fixture.
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
@@ -716,7 +716,7 @@ def test_get_predictions_any_group_none_mixed_subgroup_broadens(app_and_db):
     under it — so the photo isn't scoped away by ``rating >= 999`` alone.
     """
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
     db.add_prediction(detection_id=det, species='Low', confidence=0.10,
@@ -757,7 +757,7 @@ def test_get_predictions_status_is_not_keeps_pending_siblings(app_and_db):
     row the visible filter should have surfaced.
     """
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
     # Two predictions on the same detection.
@@ -791,7 +791,7 @@ def test_get_predictions_status_not_in_keeps_pending_siblings(app_and_db):
     a single Rejected sibling.
     """
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
     db.add_prediction(detection_id=det, species='PendingPick', confidence=0.9,
@@ -823,7 +823,7 @@ def test_get_predictions_needs_review_no_keeps_non_pending_siblings(app_and_db):
     the visible filter should have surfaced (r3619118948).
     """
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
     db.add_prediction(detection_id=det, species='PendingPick', confidence=0.9,
@@ -858,7 +858,7 @@ def test_get_predictions_classifier_model_is_not_keeps_other_model_siblings(app_
     visible filter should have surfaced.
     """
     _, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
     db.add_prediction(detection_id=det, species='PickA', confidence=0.9,
@@ -886,7 +886,7 @@ def _one_prediction(db, species='Blue Jay', photo_index=2, model='test-model'):
     Each call makes its own detection, so several predictions can share a
     photo without colliding — the fixture catalog is small.
     """
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     photo_id = photos[photo_index % len(photos)]['id']
     det = _make_detection(db, photo_id)
     db.add_prediction(detection_id=det, species=species, confidence=0.90,
@@ -972,7 +972,7 @@ def test_group_apply_records_decisions_under_the_lock(app_and_db):
     batch endpoints' check-then-write window rather than landing inside it.
     """
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pick, reject = photos[0]['id'], photos[1]['id']
     det_a = _make_detection(db, pick)
     det_b = _make_detection(db, reject)
@@ -1028,7 +1028,7 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     with the same shape that must go through.
     """
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     accepted_photo = photos[0]['id']
     rejected_photo = photos[1]['id']
     det_a = _make_detection(db, accepted_photo)
@@ -1093,7 +1093,7 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     rejected_keywords = {
         k['name'] for k in db.get_photo_keywords(rejected_photo)}
     assert 'Azure Jay' not in rejected_keywords
-    assert (db.get_photo(rejected_photo)['flag'] or 'none') == 'none'
+    assert (db.photos.get(rejected_photo)['flag'] or 'none') == 'none'
 
     # Rows that were still pending are still writable: a fresh prediction
     # on a third photo takes the group-apply status normally, so the
@@ -1121,7 +1121,7 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
 
 def _seed_burst_group(db, group_id='gbaseline'):
     """Two grouped predictions on two photos; returns (pred, photo) pairs."""
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     out = []
     for photo in photos[:2]:
         det = _make_detection(db, photo['id'])
@@ -1158,7 +1158,7 @@ def test_group_apply_skips_photos_decided_since_the_modal_rendered(app_and_db):
     # but tests nothing about applying the untouched remainder.
     db.update_prediction_status(pred_a, 'rejected')
     assert db.get_review_status(pred_a, ws) == 'rejected'
-    flag_before = db.get_photo(photo_a)['flag'] or 'none'
+    flag_before = db.photos.get(photo_a)['flag'] or 'none'
 
     resp = client.post('/api/predictions/group/apply', json={
         'picks': [photo_a],
@@ -1175,12 +1175,12 @@ def test_group_apply_skips_photos_decided_since_the_modal_rendered(app_and_db):
     # including the keyword, which is the half an under-the-lock status guard
     # alone would still have written.
     assert db.get_review_status(pred_a, ws) == 'rejected'
-    assert (db.get_photo(photo_a)['flag'] or 'none') == flag_before
+    assert (db.photos.get(photo_a)['flag'] or 'none') == flag_before
     assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
 
     # The rest of the burst still applied.
     assert db.get_review_status(pred_b, ws) == 'rejected'
-    assert db.get_photo(photo_b)['flag'] == 'rejected'
+    assert db.photos.get(photo_b)['flag'] == 'rejected'
 
 
 def test_group_apply_allows_a_deliberate_re_decision(app_and_db):
@@ -1277,7 +1277,7 @@ def test_group_apply_writes_every_side_effect_in_one_transaction(
     assert resp.status_code == 403
 
     # Nothing was written for photo A, which the loop reached first.
-    assert (db.get_photo(photo_a)['flag'] or 'none') == 'none'
+    assert (db.photos.get(photo_a)['flag'] or 'none') == 'none'
     assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
     assert db.get_review_status(pred_a, ws) == 'pending'
     assert not [
@@ -1328,7 +1328,7 @@ def test_group_apply_treats_regenerated_predictions_as_stale(app_and_db):
         (det_a, 'test-model', 'Verdin'),
     ).fetchone()['id']
     assert new_pred_a != pred_a
-    flag_before = db.get_photo(photo_a)['flag'] or 'none'
+    flag_before = db.photos.get(photo_a)['flag'] or 'none'
 
     resp = client.post('/api/predictions/group/apply', json={
         'picks': [photo_a],
@@ -1346,12 +1346,12 @@ def test_group_apply_treats_regenerated_predictions_as_stale(app_and_db):
     # would have blindly touched — and the modal's species did not attach.
     assert db.get_review_status(pred_a, ws) == 'pending'
     assert db.get_review_status(new_pred_a, ws) == 'pending'
-    assert (db.get_photo(photo_a)['flag'] or 'none') == flag_before
+    assert (db.photos.get(photo_a)['flag'] or 'none') == flag_before
     assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
 
     # Photo B, whose detections were untouched, still applies.
     assert db.get_review_status(pred_b, ws) == 'rejected'
-    assert db.get_photo(photo_b)['flag'] == 'rejected'
+    assert db.photos.get(photo_b)['flag'] == 'rejected'
 
 
 def test_group_apply_rejects_a_malformed_baseline(app_and_db):
@@ -1441,7 +1441,7 @@ def test_group_apply_pick_accepts_only_its_member_and_undo_restores_it(
     rows accepted, and a later single Accept of the photo answered 409.
     """
     app, db = app_and_db
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pick, reject = photos[0]['id'], photos[1]['id']
     det_pick = _make_detection(db, pick)
     det_reject = _make_detection(db, reject)

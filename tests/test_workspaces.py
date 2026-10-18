@@ -110,7 +110,7 @@ def test_workspace_root_materializes_existing_path_descendants(db):
 
     folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
     roots = db.get_workspace_folder_roots(ws_id)
-    photos = db.get_photos()
+    photos = db.photos.list_page()
 
     assert root_id in folders
     assert child_id in folders
@@ -206,7 +206,7 @@ def test_workspace_root_hides_materialized_descendant_when_parent_has_photos(db)
     db.add_workspace_folder(ws_id, root_id)
 
     assert [f["id"] for f in db.get_workspace_folder_roots(ws_id)] == [root_id]
-    assert {p["filename"] for p in db.get_photos()} == {"root.jpg", "child.jpg"}
+    assert {p["filename"] for p in db.photos.list_page()} == {"root.jpg", "child.jpg"}
 
 
 def test_workspace_folder_roots_report_subtree_photo_counts(db):
@@ -274,7 +274,7 @@ def test_workspace_root_materializes_windows_style_descendants(db):
 
     folders = {f["id"] for f in db.get_workspace_folders(ws_id)}
     roots = db.get_workspace_folder_roots(ws_id)
-    photos = db.get_photos()
+    photos = db.photos.list_page()
 
     assert root_id in folders
     assert child_id in folders
@@ -298,7 +298,7 @@ def test_workspace_root_materialization_is_case_sensitive(db):
     assert root_id in folders
     assert child_id in folders
     assert other_id not in folders
-    assert {p["filename"] for p in db.get_photos()} == {"bird.jpg"}
+    assert {p["filename"] for p in db.photos.list_page()} == {"bird.jpg"}
 
 
 def test_workspace_large_recursive_root_operations_chunk_sql_params(db):
@@ -369,7 +369,7 @@ def test_remove_workspace_root_unlinks_descendants(db):
     db.remove_workspace_folder_tree(ws_id, root_id)
 
     assert len(db.get_workspace_folders(ws_id)) == 0
-    assert db.get_photos() == []
+    assert db.photos.list_page() == []
 
 
 def test_set_active_workspace(db):
@@ -742,7 +742,7 @@ def test_get_photos_scoped_to_workspace(db):
     db.add_photo(f1, "lion.jpg", ".jpg", 1000, 1.0)
     db.add_photo(f2, "eagle.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws)
-    photos = db.get_photos(per_page=100)
+    photos = db.photos.list_page(per_page=100)
     assert len(photos) == 1
     assert photos[0]["filename"] == "lion.jpg"
 
@@ -755,7 +755,7 @@ def test_count_photos_scoped_to_workspace(db):
     db.add_photo(f1, "lion.jpg", ".jpg", 1000, 1.0)
     db.add_photo(f2, "eagle.jpg", ".jpg", 1000, 1.0)
     db.set_active_workspace(ws)
-    assert db.count_photos() == 1
+    assert db.photos.count() == 1
 
 
 def test_count_folders_scoped_to_workspace(db):

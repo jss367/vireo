@@ -8,7 +8,7 @@ import pytest
 
 def _expected_full_path(db, pid):
     """Resolve the on-disk path the endpoint will build for a given photo id."""
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     folder_row = db.conn.execute(
         "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
     ).fetchone()
@@ -17,7 +17,7 @@ def _expected_full_path(db, pid):
 
 def test_reveal_macos(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     expected_path = _expected_full_path(db, pid)
     with app.test_client() as c, \
          patch("web.system.sys.platform", "darwin"), \
@@ -36,7 +36,7 @@ def test_reveal_macos(app_and_db):
 
 def test_reveal_linux_opens_parent(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     expected_parent = os.path.dirname(_expected_full_path(db, pid))
     # The Linux photo-reveal path verifies the photo file exists before
     # opening its parent — the sample DB uses synthetic paths, so pretend
@@ -62,7 +62,7 @@ def test_reveal_linux_missing_photo_reports_error(app_and_db):
     endpoint should check the photo path first and report a real failure.
     """
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     with app.test_client() as c, \
          patch("web.system.sys.platform", "linux"), \
          patch("web.system.os.path.isfile", return_value=False), \
@@ -84,7 +84,7 @@ def test_reveal_windows_ignores_nonzero_exit(app_and_db):
     endpoint deliberately ignores explorer.exe's returncode on Windows.
     """
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     # The Windows photo-reveal path preflights the photo file before
     # launching Explorer; the sample DB uses synthetic paths, so pretend
     # the file is on disk so subprocess still gets called.
@@ -100,7 +100,7 @@ def test_reveal_windows_ignores_nonzero_exit(app_and_db):
 
 def test_reveal_windows_select(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     with app.test_client() as c, \
          patch("web.system.sys.platform", "win32"), \
          patch("web.system.os.path.isfile", return_value=True), \
@@ -120,7 +120,7 @@ def test_reveal_windows_missing_photo_reports_error(app_and_db):
     path and report a real failure instead of a bogus success.
     """
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     with app.test_client() as c, \
          patch("web.system.sys.platform", "win32"), \
          patch("web.system.os.path.isfile", return_value=False), \
@@ -144,7 +144,7 @@ def test_reveal_unknown_photo_returns_error(app_and_db):
 
 def test_reveal_shell_failure_reports_reason(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     with app.test_client() as c, \
          patch("web.system.sys.platform", "darwin"), \
          patch("web.system.subprocess.run") as run:
@@ -158,7 +158,7 @@ def test_reveal_shell_failure_reports_reason(app_and_db):
 
 def test_reveal_nonzero_exit_reports_reason(app_and_db):
     app, db = app_and_db
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     with app.test_client() as c, \
          patch("web.system.sys.platform", "darwin"), \
          patch("web.system.subprocess.run") as run:

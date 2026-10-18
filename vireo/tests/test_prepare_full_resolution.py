@@ -159,7 +159,7 @@ def test_prepared_render_invalidates_when_primary_changes_before_scan(
     app, db, photo_id = client_with_photo
     client = app.test_client()
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder_path = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
     ).fetchone()["path"]
@@ -192,7 +192,7 @@ def test_preferred_offline_source_rejects_stale_primary(client_with_photo):
     from offline_cache import cache_photo_original, resolve_original_path
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder_path = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
     ).fetchone()["path"]
@@ -221,7 +221,7 @@ def test_preferred_offline_source_rejects_stale_companion(client_with_photo):
     from offline_cache import cache_photo_original, resolve_original_path
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder_path = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
     ).fetchone()["path"]
@@ -233,7 +233,7 @@ def test_preferred_offline_source_rejects_stale_companion(client_with_photo):
         ("companion.jpg", photo_id),
     )
     db.conn.commit()
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
     assert cache_photo_original(
@@ -438,7 +438,7 @@ def test_preparation_skips_concurrently_deleted_photos(
     from preview_cache import cleanup_cached_files_for_deleted_photos
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
     ).fetchone()["path"]
@@ -548,7 +548,7 @@ def test_preparation_preserves_errors_for_existing_photos(
 
     app, db, photo_id = client_with_photo
     if failure == "missing_source":
-        photo = db.get_photo(photo_id)
+        photo = db.photos.get(photo_id)
         folder = db.conn.execute(
             "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
         ).fetchone()["path"]
@@ -576,7 +576,7 @@ def test_preparation_preserves_errors_for_existing_photos(
     assert result["skipped_deleted"] == 0
     assert result["ready"] == 0
     assert len(result["errors"]) == 1
-    assert db.get_photo(photo_id) is not None
+    assert db.photos.get(photo_id) is not None
 
 
 @pytest.mark.parametrize(
@@ -589,7 +589,7 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
     from preview_cache import cleanup_cached_files_for_deleted_photos
 
     app, db, photo_id = client_with_photo
-    selected = db.get_photo(photo_id)
+    selected = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (selected["folder_id"],),
     ).fetchone()["path"]
@@ -604,7 +604,7 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
         Path(folder, selected["filename"]).rename(Path(folder, name))
         db.conn.execute("UPDATE photos SET filename=?, extension=? WHERE id=?", (name, suffix, photo_id))
         db.conn.commit()
-        selected = db.get_photo(photo_id)
+        selected = db.photos.get(photo_id)
 
     def replace_photo():
         other_db = Database(app.config["DB_PATH"])
@@ -634,7 +634,7 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
             if stage == "before_turn":
                 # Work not yet started must leave the new owner's cache alone.
                 cached = offline_cache.cache_photo_original(
-                    other_db, other_db.get_photo(new_id), vireo_dir,
+                    other_db, other_db.photos.get(new_id), vireo_dir,
                     {selected["folder_id"]: folder},
                 )
                 replacement_cache.append(cached["path"])
@@ -698,14 +698,14 @@ def test_preparation_rejects_recycled_photo_id(client_with_photo, monkeypatch, s
     assert job["result"]["reused"] == 0
     assert job["result"]["bytes"] == 0
     assert job["result"]["errors"] == []
-    assert db.get_photo(photo_id)["filename"] == "replacement.jpg"
+    assert db.photos.get(photo_id)["filename"] == "replacement.jpg"
     assert Path(replacement_path).read_bytes() == replacement_bytes[0]
     for path, expected in replacement_artifacts.items():
         assert path.read_bytes() == expected, path
     assert not list(Path(vireo_dir, "originals").glob("*.tmp"))
     assert not list(Path(vireo_dir, "working").glob("*.tmp"))
     if stage == "working_copy_render":
-        assert db.get_photo(photo_id)["working_copy_path"] is None
+        assert db.photos.get(photo_id)["working_copy_path"] is None
     if stage == "before_turn":
         assert Path(replacement_cache[0]).read_bytes() == replacement_bytes[0]
         assert db.caches.offline_original_get(photo_id) is not None
@@ -753,7 +753,7 @@ def test_replacement_cache_writer_waits_for_stale_preparation_cleanup(
     from preview_cache import cleanup_cached_files_for_deleted_photos
 
     app, db, photo_id = client_with_photo
-    selected = db.get_photo(photo_id)
+    selected = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (selected["folder_id"],),
     ).fetchone()["path"]
@@ -828,7 +828,7 @@ def test_preparation_publishes_current_source_extraction(client_with_photo, monk
     import image_loader
 
     app, db, photo_id = client_with_photo
-    photo = db.get_photo(photo_id)
+    photo = db.photos.get(photo_id)
     folder = db.conn.execute("SELECT path FROM folders WHERE id=?", (photo["folder_id"],)).fetchone()["path"]
     filename = "extract" + extension
     Path(folder, photo["filename"]).rename(Path(folder, filename))
@@ -861,7 +861,7 @@ def test_preparation_publishes_current_source_extraction(client_with_photo, monk
     if extension == ".nef":
         rendered = vireo_dir / "originals" / f"{photo_id}.display.jpg"
     else:
-        rendered = vireo_dir / db.get_photo(photo_id)["working_copy_path"]
+        rendered = vireo_dir / db.photos.get(photo_id)["working_copy_path"]
     with Image.open(rendered) as image:
         assert image.size == (800, 600)
 
@@ -1000,7 +1000,7 @@ def test_preview_publication_refused_after_photo_id_recycled(client_with_photo, 
     from preview_cache import cleanup_cached_files_for_deleted_photos
 
     app, db, photo_id = client_with_photo
-    selected = db.get_photo(photo_id)
+    selected = db.photos.get(photo_id)
     folder = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (selected["folder_id"],),
     ).fetchone()["path"]
@@ -1308,9 +1308,9 @@ def test_prepare_raw_jpeg_pair_warms_paired_jpeg_tiers(
                     )
                     writer = Database(db._db_path)
                     try:
-                        folder_id = writer.get_photo(photo_id)["folder_id"]
+                        folder_id = writer.photos.get(photo_id)["folder_id"]
                         writer.relocate_folder(folder_id, str(relocated))
-                        assert writer.get_photo(photo_id)["folder_id"] == folder_id
+                        assert writer.photos.get(photo_id)["folder_id"] == folder_id
                     finally:
                         writer.close()
             return original_check(*args)

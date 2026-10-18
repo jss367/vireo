@@ -284,7 +284,7 @@ class LocationErrors:
 
     def photo_location_edit_error(self, db, photo_id):
         """Return an error response when a photo cannot be edited in this workspace."""
-        if photo_id not in db.get_existing_photo_ids([photo_id]):
+        if photo_id not in db.photos.existing_ids([photo_id]):
             return self._photo_not_found_error()
         if not db._photo_in_workspace(photo_id):
             return self._json_error(

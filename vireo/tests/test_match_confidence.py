@@ -392,7 +392,7 @@ def test_pipeline_inspector_reports_runs_the_prediction_table_hides(app_and_db):
     cover them even when `predictions` comes back empty.
     """
     app, db = app_and_db
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
     weak = db.save_detections(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.04,
@@ -424,7 +424,7 @@ def test_pipeline_inspector_reports_runs_the_prediction_table_hides(app_and_db):
 def test_pipeline_summary_uses_the_best_crop_per_model(app_and_db):
     """A bad crop must not outvote a good one from the same model."""
     app, db = app_and_db
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
     for conf, score in ((0.04, 0.11), (0.9, 0.31)):
         det = db.save_detections(
             photo_id,
@@ -445,7 +445,7 @@ def test_pipeline_summary_uses_the_best_crop_per_model(app_and_db):
 
 def test_predictions_api_reports_match_state_per_photo(app_and_db):
     app, db = app_and_db
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
     det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
     db.add_prediction(detection_id=det, species="House Sparrow",
                       confidence=0.8, model="BioCLIP-2.5", match_score=0.11)
@@ -478,7 +478,7 @@ def test_calibrated_threshold_reaches_the_api(app_and_db):
     )
     db.conn.commit()
 
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
     det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
     db.add_prediction(detection_id=det, species="Rufous-winged Sparrow",
                       confidence=0.99, model="BioCLIP-2.5", match_score=0.11)
@@ -667,7 +667,7 @@ def test_pipeline_reports_superseded_runs_with_the_current_verdict(app_and_db):
         }}), db._active_workspace_id),
     )
     db.conn.commit()
-    photo_id = db.get_photos()[0]["id"]
+    photo_id = db.photos.list_page()[0]["id"]
     det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
     db.add_prediction(detection_id=det, species="Yellow-breasted Chat",
                       confidence=0.99, model="BioCLIP-2.5",

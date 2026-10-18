@@ -200,7 +200,7 @@ def test_browse_lightbox_single_photo_window_waits_for_previous_page(
     """Previous is honored while a one-photo deep-link page is prepending."""
     db = live_server["db"]
     folder_id = live_server["data"]["folders"][0]
-    existing = len(db.get_photos(folder_id=folder_id))
+    existing = len(db.photos.list_page(folder_id=folder_id))
     for idx in range(50 - existing):
         db.add_photo(
             folder_id=folder_id,

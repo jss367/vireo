@@ -68,7 +68,7 @@ def test_collection_list_keeps_offline_members_in_total(app_and_db):
     app, db = app_and_db
     _clear_default_collections(app, db)
     client = app.test_client()
-    available_before = db.count_photos()
+    available_before = db.photos.count()
 
     ok_folder = db.add_folder("/available", name="available")
     offline_folder = db.add_folder("/offline", name="offline")
@@ -406,7 +406,7 @@ def test_collection_photos_includes_detections_and_species(app_and_db):
     _clear_default_collections(app, db)
     client = app.test_client()
 
-    target = [p for p in db.get_photos() if p["filename"] == "bird1.jpg"][0]
+    target = [p for p in db.photos.list_page() if p["filename"] == "bird1.jpg"][0]
     db.save_detections(target["id"], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.7, "category": "animal"},
         {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
@@ -617,7 +617,7 @@ def test_collection_add_photos(app_and_db):
     resp = client.post("/api/collections", json={"name": "Static"})
     cid = resp.get_json()["id"]
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid1 = photos[0]["id"]
     pid2 = photos[1]["id"]
 
@@ -640,7 +640,7 @@ def test_cannot_add_photos_to_all_photos_default(app_and_db):
     client = app.test_client()
 
     all_photos = next(c for c in db.collections.list_all() if c["name"] == "All Photos")
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     resp = client.post(
@@ -667,7 +667,7 @@ def test_cannot_add_photos_to_smart_collection(app_and_db):
         json={"name": "High Rated", "rules": rules},
     )
     cid = resp.get_json()["id"]
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
 
     resp = client.post(
         f"/api/collections/{cid}/add-photos",
@@ -697,7 +697,7 @@ def test_cannot_add_photos_to_none_grouped_collection(app_and_db):
     )
     cid = resp.get_json()["id"]
 
-    pid = db.get_photos()[0]["id"]
+    pid = db.photos.list_page()[0]["id"]
     resp = client.post(
         f"/api/collections/{cid}/add-photos",
         json={"photo_ids": [pid]},
@@ -750,7 +750,7 @@ def test_collection_add_photos_deduplicates(app_and_db):
     resp = client.post("/api/collections", json={"name": "Dedup"})
     cid = resp.get_json()["id"]
 
-    photos = db.get_photos()
+    photos = db.photos.list_page()
     pid = photos[0]["id"]
 
     # Add the same photo twice in one call
@@ -975,7 +975,7 @@ def test_list_collections_flags_degraded_visual_collection(app_and_db):
 
 def test_browse_init_visual_collection_scope_returns_empty_first_paint(app_and_db):
     """``/api/browse/init?collection_id=<visual>`` cannot resolve the
-    visual clause — ``db.get_photos(collection_id=...)`` /
+    visual clause — ``db.photos.list_page(collection_id=...)`` /
     ``count_filtered_photos`` expand only ``collections.rules``, the same
     rules-only path guarded elsewhere by ``reject_visual_collection``.
     For a visual-only collection (rules ``[]``) that would silently widen

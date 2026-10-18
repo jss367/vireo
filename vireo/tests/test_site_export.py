@@ -27,7 +27,7 @@ def _read(root, path):
 
 def test_complete_export_preserves_albums_metadata_and_workspace_scope(tmp_path, monkeypatch):
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
-    pids = db.get_photo_ids()
+    pids = db.photos.get_ids()
     default_albums = {row['id'] for row in db.collections.list_all()}
     first = db.collections.add('../Same / name', json.dumps([
         {'field': 'photo_ids', 'value': pids[:2]},
@@ -239,7 +239,7 @@ def test_export_metadata_is_consistent_when_workspace_changes_during_capture(tmp
     assert _read(root, album['manifest'])['photo_ids'] == [pid]
     with Image.open(root / record['image']) as image:
         assert image.size == (600, 800)
-    assert db.get_photo_ids() == []
+    assert db.photos.get_ids() == []
     assert db.get_photo_edit_recipe(pid) is None
     db.close()
 
@@ -414,7 +414,7 @@ def test_site_export_renders_preserved_photo_without_destination_siblings(tmp_pa
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
     b = db.create_workspace('Receiving')
     photo = meta['p1']
-    source = db.get_photo(photo)['folder_id']
+    source = db.photos.get(photo)['folder_id']
     db.add_workspace_folder(b, source)
     destination = tmp_path / 'moved'
     destination.mkdir()

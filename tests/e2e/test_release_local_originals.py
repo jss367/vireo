@@ -19,7 +19,7 @@ def cached_photo(live_server, tmp_path):
     thumb_dir = Path(live_server["app"].config["THUMB_CACHE_DIR"])
     Image.new("RGB", (100, 100), "green").save(thumb_dir / f"{pid}.jpg")
     base = thumb_dir.parent
-    result = cache_photo_original(db, db.get_photo(pid), str(base), {folder_id: str(folder)})
+    result = cache_photo_original(db, db.photos.get(pid), str(base), {folder_id: str(folder)})
     return {"id": pid, "folder_id": folder_id, "source": source, "cached": Path(result["path"])}
 
 

@@ -211,7 +211,7 @@ def test_add_and_get_photo(tmp_path):
     )
     assert pid is not None
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     assert photo['filename'] == 'DSC_0001.NEF'
     assert photo['extension'] == '.nef'
     assert photo['folder_id'] == fid
@@ -228,11 +228,11 @@ def test_get_photos_pagination(tmp_path):
         db.add_photo(folder_id=fid, filename=f'IMG_{i:04d}.jpg', extension='.jpg',
                      file_size=1000, file_mtime=1700000000.0 + i)
 
-    page1 = db.get_photos(page=1, per_page=10)
+    page1 = db.photos.list_page(page=1, per_page=10)
     assert len(page1) == 10
-    page2 = db.get_photos(page=2, per_page=10)
+    page2 = db.photos.list_page(page=2, per_page=10)
     assert len(page2) == 10
-    page3 = db.get_photos(page=3, per_page=10)
+    page3 = db.photos.list_page(page=3, per_page=10)
     assert len(page3) == 5
 
 
@@ -246,7 +246,7 @@ def test_get_photos_filter_by_folder(tmp_path):
     db.add_photo(folder_id=f2, filename='b1.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.add_photo(folder_id=f2, filename='b2.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
-    results = db.get_photos(folder_id=f2)
+    results = db.photos.list_page(folder_id=f2)
     assert len(results) == 2
     assert all(r['folder_id'] == f2 for r in results)
 
@@ -274,7 +274,7 @@ def test_folder_subtree_does_not_expand_when_root_is_inactive(tmp_path):
     # Only A itself comes back (no expansion into B).
     assert db.get_folder_subtree_ids(a) == [a]
     # And since A itself isn't in the active workspace, the photo query returns nothing.
-    assert db.get_photos(folder_id=a) == []
+    assert db.photos.list_page(folder_id=a) == []
 
 
 def test_folder_subtree_matches_effective_tree_without_exposing_hidden_nodes(tmp_path):
@@ -305,7 +305,7 @@ def test_folder_subtree_matches_effective_tree_without_exposing_hidden_nodes(tmp
     tree = {row['id']: row for row in db.get_folder_tree()}
     assert b not in tree
     assert tree[c]['parent_id'] == a
-    results = db.get_photos(folder_id=a)
+    results = db.photos.list_page(folder_id=a)
     assert {row['filename'] for row in results} == {'a.jpg', 'c.jpg'}
 
 
@@ -323,10 +323,10 @@ def test_get_photos_folder_filter_includes_descendants(tmp_path):
     db.add_photo(folder_id=leaf, filename='deep.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
     db.add_photo(folder_id=sibling, filename='other.jpg', extension='.jpg', file_size=100, file_mtime=4.0)
 
-    assert len(db.get_photos(folder_id=root)) == 3
-    assert len(db.get_photos(folder_id=year)) == 2
-    assert len(db.get_photos(folder_id=leaf)) == 1
-    assert len(db.get_photos(folder_id=sibling)) == 1
+    assert len(db.photos.list_page(folder_id=root)) == 3
+    assert len(db.photos.list_page(folder_id=year)) == 2
+    assert len(db.photos.list_page(folder_id=leaf)) == 1
+    assert len(db.photos.list_page(folder_id=sibling)) == 1
 
 
 def test_count_filtered_photos_folder_includes_descendants(tmp_path):
@@ -338,8 +338,8 @@ def test_count_filtered_photos_folder_includes_descendants(tmp_path):
     db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.add_photo(folder_id=child, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
 
-    assert db.count_filtered_photos(folder_id=root) == 2
-    assert db.count_filtered_photos(folder_id=child) == 2
+    assert db.photos.count_filtered(folder_id=root) == 2
+    assert db.photos.count_filtered(folder_id=child) == 2
 
 
 def test_browse_summary_folder_includes_descendants(tmp_path):
@@ -405,7 +405,7 @@ def test_calendar_data_folder_includes_descendants(tmp_path):
     db.add_photo(folder_id=child, filename='y.jpg', extension='.jpg', file_size=100,
                  file_mtime=2.0, timestamp='2024-06-15T00:01:00')
 
-    data = db.get_calendar_data(year=2024, folder_id=root)
+    data = db.photos.get_calendar_data(year=2024, folder_id=root)
     assert data['days'].get('2024-06-15') == 2
 
 
@@ -437,7 +437,7 @@ def test_get_photos_filter_by_rating(tmp_path):
     db.photo_review.set_rating(p1, 3)
     db.photo_review.set_rating(p2, 5)
 
-    results = db.get_photos(rating_min=4)
+    results = db.photos.list_page(rating_min=4)
     assert len(results) == 1
     assert results[0]['filename'] == 'b.jpg'
 
@@ -459,18 +459,18 @@ def test_get_photos_filter_by_flag(tmp_path):
     db.photo_review.set_flag(picked, 'flagged')
     db.photo_review.set_flag(rejected, 'rejected')
 
-    picks = db.get_photos(flag='flagged')
-    rejects = db.get_photos(flag='rejected')
+    picks = db.photos.list_page(flag='flagged')
+    rejects = db.photos.list_page(flag='rejected')
 
     assert [p['filename'] for p in picks] == ['pick.jpg']
     assert [p['filename'] for p in rejects] == ['reject.jpg']
-    assert db.count_filtered_photos(flag='flagged') == 1
-    assert db.count_filtered_photos(flag='rejected') == 1
+    assert db.photos.count_filtered(flag='flagged') == 1
+    assert db.photos.count_filtered(flag='rejected') == 1
     # get_browse_summary filters via rules only (Phase 5).
     assert db.get_browse_summary(
         rules=[{"field": "flag", "op": "is", "value": "flagged"}]
     )['filtered_total'] == 1
-    assert db.get_calendar_data(
+    assert db.photos.get_calendar_data(
         2024, rules=[{"field": "flag", "op": "is", "value": "rejected"}]
     )['days'] == {'2024-01-02': 1}
 
@@ -487,7 +487,7 @@ def test_get_photos_filter_by_date_range(tmp_path):
     db.add_photo(folder_id=fid, filename='dec.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-12-15T10:00:00')
 
-    results = db.get_photos(date_from='2024-03-01', date_to='2024-09-01')
+    results = db.photos.list_page(date_from='2024-03-01', date_to='2024-09-01')
     assert len(results) == 1
     assert results[0]['filename'] == 'jun.jpg'
 
@@ -502,13 +502,13 @@ def test_get_photos_sort(tmp_path):
     db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-01-01T00:00:00')
 
-    by_name = db.get_photos(sort='name')
+    by_name = db.photos.list_page(sort='name')
     assert by_name[0]['filename'] == 'a.jpg'
 
-    by_date = db.get_photos(sort='date')
+    by_date = db.photos.list_page(sort='date')
     assert by_date[0]['filename'] == 'a.jpg'  # earlier date first
 
-    by_date_desc = db.get_photos(sort='date_desc')
+    by_date_desc = db.photos.list_page(sort='date_desc')
     assert by_date_desc[0]['filename'] == 'b.jpg'
 
 
@@ -524,13 +524,13 @@ def test_get_photos_date_sort_puts_missing_timestamps_last(tmp_path):
     db.add_photo(folder_id=fid, filename='older.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-01-01T00:00:00')
 
-    by_date = db.get_photos(sort='date')
+    by_date = db.photos.list_page(sort='date')
     assert [p['filename'] for p in by_date] == ['older.jpg', 'newer.jpg', 'undated.jpg']
 
-    by_date_desc = db.get_photos(sort='date_desc')
+    by_date_desc = db.photos.list_page(sort='date_desc')
     assert [p['filename'] for p in by_date_desc] == ['newer.jpg', 'older.jpg', 'undated.jpg']
 
-    ids_by_date = db.get_photo_ids(sort='date')
+    ids_by_date = db.photos.get_ids(sort='date')
     assert ids_by_date == [p['id'] for p in by_date]
 
 
@@ -547,10 +547,10 @@ def test_sort_date_tiebreaker(tmp_path):
     db.add_photo(folder_id=fid, filename='IMG_002.jpg', extension='.jpg', file_size=100,
                  file_mtime=1.0, timestamp='2024-06-15T14:30:00')
 
-    by_date = db.get_photos(sort='date')
+    by_date = db.photos.list_page(sort='date')
     assert [p['filename'] for p in by_date] == ['IMG_001.jpg', 'IMG_002.jpg', 'IMG_003.jpg']
 
-    by_date_desc = db.get_photos(sort='date_desc')
+    by_date_desc = db.photos.list_page(sort='date_desc')
     assert [p['filename'] for p in by_date_desc] == ['IMG_001.jpg', 'IMG_002.jpg', 'IMG_003.jpg']
 
 
@@ -565,15 +565,15 @@ def test_date_filter_inclusive_with_subsec(tmp_path):
                  file_mtime=1.0, timestamp='2024-06-15T12:00:00')
 
     # Bare date bound should include both photos
-    photos = db.get_photos(date_to='2024-06-15')
+    photos = db.photos.list_page(date_to='2024-06-15')
     assert len(photos) == 2
 
     # Second-precision bound should still include sub-second photo
-    photos = db.get_photos(date_to='2024-06-15T23:59:59')
+    photos = db.photos.list_page(date_to='2024-06-15T23:59:59')
     assert len(photos) == 2
 
     # Bound before the sub-second photo should exclude it
-    photos = db.get_photos(date_to='2024-06-15T23:59:58')
+    photos = db.photos.list_page(date_to='2024-06-15T23:59:58')
     assert len(photos) == 1
     assert photos[0]['filename'] == 'b.jpg'
 
@@ -605,7 +605,7 @@ def test_update_photo_rating(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_rating(pid, 4)
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     assert photo['rating'] == 4
 
 
@@ -616,7 +616,7 @@ def test_update_photo_flag(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_review.set_flag(pid, 'flagged')
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     assert photo['flag'] == 'flagged'
 
 
@@ -896,7 +896,7 @@ def test_get_photos_keyword_search(tmp_path):
     db.tag_photo(p1, k1)
     db.tag_photo(p2, k2)
 
-    results = db.get_photos(keyword='Cardinal')
+    results = db.photos.list_page(keyword='Cardinal')
     assert len(results) == 1
     assert results[0]['filename'] == 'cardinal.jpg'
 
@@ -919,18 +919,18 @@ def test_get_photos_keyword_multi_token(tmp_path):
 
     # "red bill" matches the hyphenated single keyword (p1) and the
     # split-across-two-keywords photo (p3); token order is irrelevant.
-    assert {r['filename'] for r in db.get_photos(keyword='red bill')} == {'a.jpg', 'c.jpg'}
-    assert {r['filename'] for r in db.get_photos(keyword='bill red')} == {'a.jpg', 'c.jpg'}
+    assert {r['filename'] for r in db.photos.list_page(keyword='red bill')} == {'a.jpg', 'c.jpg'}
+    assert {r['filename'] for r in db.photos.list_page(keyword='bill red')} == {'a.jpg', 'c.jpg'}
 
     # Every token must match: no photo has both a "red*" and a "cardinal*" tag.
-    assert db.get_photos(keyword='red cardinal') == []
+    assert db.photos.list_page(keyword='red cardinal') == []
 
     # A token can be satisfied by a different keyword on the same photo.
-    assert {r['filename'] for r in db.get_photos(keyword='northern card')} == {'b.jpg'}
+    assert {r['filename'] for r in db.photos.list_page(keyword='northern card')} == {'b.jpg'}
 
     # count_filtered_photos and get_photo_ids agree with get_photos.
-    assert db.count_filtered_photos(keyword='red bill') == 2
-    assert len(db.get_photo_ids(keyword='red bill')) == 2
+    assert db.photos.count_filtered(keyword='red bill') == 2
+    assert len(db.photos.get_ids(keyword='red bill')) == 2
 
 
 def test_get_photos_keyword_whole_word_excludes_embedded_token(tmp_path):
@@ -959,13 +959,13 @@ def test_get_photos_keyword_whole_word_excludes_embedded_token(tmp_path):
     db.tag_photo(eastern, db.add_keyword('Eastern Phoebe'))
 
     assert {
-        r['filename'] for r in db.get_photos(keyword='tern')
+        r['filename'] for r in db.photos.list_page(keyword='tern')
     } == {'western-gull.jpg', 'common-tern.jpg', 'tern_001.jpg', 'eastern-phoebe.jpg'}
 
-    whole_word = db.get_photos(keyword='tern', keyword_whole_word=True)
+    whole_word = db.photos.list_page(keyword='tern', keyword_whole_word=True)
     assert {r['filename'] for r in whole_word} == {'common-tern.jpg', 'tern_001.jpg'}
-    assert db.count_filtered_photos(keyword='tern', keyword_whole_word=True) == 2
-    assert set(db.get_photo_ids(keyword='tern', keyword_whole_word=True)) == {
+    assert db.photos.count_filtered(keyword='tern', keyword_whole_word=True) == 2
+    assert set(db.photos.get_ids(keyword='tern', keyword_whole_word=True)) == {
         common,
         file_only,
     }
@@ -986,14 +986,14 @@ def test_get_photos_keyword_match_case(tmp_path):
     )
 
     assert {
-        r['filename'] for r in db.get_photos(keyword='Tern')
+        r['filename'] for r in db.photos.list_page(keyword='Tern')
     } == {'Common-Tern.jpg', 'common-tern.jpg'}
     assert {
-        r['filename'] for r in db.get_photos(keyword='Tern', keyword_match_case=True)
+        r['filename'] for r in db.photos.list_page(keyword='Tern', keyword_match_case=True)
     } == {'Common-Tern.jpg'}
     assert {
         r['filename']
-        for r in db.get_photos(
+        for r in db.photos.list_page(
             keyword='Tern',
             keyword_match_case=True,
             keyword_whole_word=True,
@@ -4041,10 +4041,10 @@ def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
         "/photos/park", "/photos/yard",
     }
 
-    browse = db.get_photos(folder_id=yard, **scope)
+    browse = db.photos.list_page(folder_id=yard, **scope)
     assert [photo["id"] for photo in browse] == [june_yard]
-    assert db.get_photo_ids(folder_id=yard, **scope) == [june_yard]
-    assert db.count_filtered_photos(folder_id=yard, **scope) == 1
+    assert db.photos.get_ids(folder_id=yard, **scope) == [june_yard]
+    assert db.photos.count_filtered(folder_id=yard, **scope) == 1
 
 
 def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
@@ -5268,7 +5268,7 @@ def _make_calendar_db(tmp_path):
 def test_get_calendar_data_basic(tmp_path):
     """get_calendar_data returns daily counts and year bounds."""
     db = _make_calendar_db(tmp_path)
-    data = db.get_calendar_data(year=2024)
+    data = db.photos.get_calendar_data(year=2024)
     assert data["year"] == 2024
     assert "2024-01-15" in data["days"]
     assert "2024-06-10" in data["days"]
@@ -5282,10 +5282,10 @@ def test_get_calendar_data_filters(tmp_path):
     db = _make_calendar_db(tmp_path)
     folders = db.get_folder_tree()
     jan = [f for f in folders if f["name"] == "January"][0]
-    data = db.get_calendar_data(year=2024, folder_id=jan["id"])
+    data = db.photos.get_calendar_data(year=2024, folder_id=jan["id"])
     assert list(data["days"].keys()) == ["2024-01-20"]
 
-    data = db.get_calendar_data(
+    data = db.photos.get_calendar_data(
         year=2024, rules=[{"field": "rating", "op": ">=", "value": 4}])
     assert list(data["days"].keys()) == ["2024-06-10"]
 
@@ -5293,7 +5293,7 @@ def test_get_calendar_data_filters(tmp_path):
 def test_get_calendar_data_empty_year(tmp_path):
     """get_calendar_data returns empty days for a year with no photos."""
     db = _make_calendar_db(tmp_path)
-    data = db.get_calendar_data(year=2020)
+    data = db.photos.get_calendar_data(year=2020)
     assert data["days"] == {}
     assert data["year"] == 2020
 
@@ -6275,7 +6275,7 @@ def test_undo_last_edit_rating(tmp_path):
     """undo_last_edit restores photo rating and removes the history entry."""
     db, pids = _make_db_with_photos(tmp_path)
     pid = pids[0]
-    original_rating = db.get_photo(pid)['rating']
+    original_rating = db.photos.get(pid)['rating']
 
     db.photo_review.set_rating(pid, 5)
     db.record_edit('rating', 'Set rating to 5', '5',
@@ -6284,7 +6284,7 @@ def test_undo_last_edit_rating(tmp_path):
     result = db.undo_last_edit()
     assert result is not None
     assert result['description'] == 'Set rating to 5'
-    assert db.get_photo(pid)['rating'] == original_rating
+    assert db.photos.get(pid)['rating'] == original_rating
     assert len(db.edit_history.list_recent()) == 0
 
 
@@ -6298,7 +6298,7 @@ def test_undo_last_edit_flag(tmp_path):
                    [{'photo_id': pid, 'old_value': 'none', 'new_value': 'flagged'}])
 
     result = db.undo_last_edit()
-    assert db.get_photo(pid)['flag'] == 'none'
+    assert db.photos.get(pid)['flag'] == 'none'
 
 
 def test_undo_last_edit_keyword_add(tmp_path):
@@ -6348,7 +6348,7 @@ def test_undo_last_edit_batch(tmp_path):
     db, pids = _make_db_with_photos(tmp_path)
     original_ratings = {}
     for pid in pids[:2]:
-        original_ratings[pid] = db.get_photo(pid)['rating']
+        original_ratings[pid] = db.photos.get(pid)['rating']
 
     items = []
     for pid, old_r in original_ratings.items():
@@ -6358,7 +6358,7 @@ def test_undo_last_edit_batch(tmp_path):
 
     db.undo_last_edit()
     for pid, old_r in original_ratings.items():
-        assert db.get_photo(pid)['rating'] == old_r
+        assert db.photos.get(pid)['rating'] == old_r
 
 
 def test_undo_last_edit_empty(tmp_path):
@@ -10562,15 +10562,15 @@ def test_missing_folder_photos_hidden_from_browse(tmp_path):
                  file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
 
     # Both visible before marking missing
-    assert db.count_photos() == 2
-    assert len(db.get_photos()) == 2
+    assert db.photos.count() == 2
+    assert len(db.photos.list_page()) == 2
 
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
     db.conn.commit()
 
     # Only one visible after marking missing
-    assert db.count_photos() == 1
-    photos = db.get_photos()
+    assert db.photos.count() == 1
+    photos = db.photos.list_page()
     assert len(photos) == 1
     assert photos[0]["filename"] == "visible.jpg"
 
@@ -10595,15 +10595,15 @@ def test_count_photos_in_workspace_includes_missing(tmp_path):
     db.add_photo(folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0)
 
-    assert db.count_photos() == 2
-    assert db.count_photos_in_workspace() == 2
+    assert db.photos.count() == 2
+    assert db.photos.count_in_workspace() == 2
 
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
     db.conn.commit()
 
     # count_photos hides missing-folder photos, but the total inventory does not
-    assert db.count_photos() == 1
-    assert db.count_photos_in_workspace() == 2
+    assert db.photos.count() == 1
+    assert db.photos.count_in_workspace() == 2
 
 
 def test_count_keywords_in_workspace_includes_missing(tmp_path):
@@ -10651,9 +10651,9 @@ def test_count_photos_in_workspace_scoped_to_active_workspace(tmp_path):
     db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
                  file_size=1000, file_mtime=1.0)
 
-    assert db.count_photos_in_workspace() == 1
+    assert db.photos.count_in_workspace() == 1
     db.set_active_workspace(ws_b)
-    assert db.count_photos_in_workspace() == 0
+    assert db.photos.count_in_workspace() == 0
 
 
 def test_dashboard_stats_metadata_survives_missing_folders(tmp_path):
@@ -10938,8 +10938,8 @@ def test_batch_update_photo_folder(db):
     p1 = db.add_photo(folder_id=fid1, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid1, filename="b.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
     db.batch_update_photo_folder([p1, p2], fid2)
-    photo1 = db.get_photo(p1)
-    photo2 = db.get_photo(p2)
+    photo1 = db.photos.get(p1)
+    photo2 = db.photos.get(p2)
     assert photo1["folder_id"] == fid2
     assert photo2["folder_id"] == fid2
 
@@ -10999,7 +10999,7 @@ def test_startup_repairs_stale_folder_parent(tmp_path, startup):
                                 parent_id=date)
         pid = seed.add_photo(folder_id=date, filename="bird.jpg", extension=".jpg",
                              file_size=100, file_mtime=1.0)
-        photo_before = dict(seed.get_photo(pid))
+        photo_before = dict(seed.photos.get(pid))
         folders_before = {r["id"]: dict(r) for r in seed.conn.execute("SELECT * FROM folders")}
         memberships_before = [tuple(r) for r in seed.conn.execute(
             "SELECT * FROM workspace_folders ORDER BY workspace_id, folder_id"
@@ -11020,7 +11020,7 @@ def test_startup_repairs_stale_folder_parent(tmp_path, startup):
         assert date not in reopened.get_folder_subtree_ids(month)
         folders_before[date]["parent_id"] = year
         assert {r["id"]: dict(r) for r in reopened.conn.execute("SELECT * FROM folders")} == folders_before
-        assert dict(reopened.get_photo(pid)) == photo_before
+        assert dict(reopened.photos.get(pid)) == photo_before
         assert [tuple(r) for r in reopened.conn.execute(
             "SELECT * FROM workspace_folders ORDER BY workspace_id, folder_id"
         )] == memberships_before
@@ -11105,7 +11105,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     labels = db.photo_labels.get_for_photos(huge)
     db.photo_labels.set_many(huge, None)
 
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     assert photo["rating"] == 4
     assert photo["flag"] == "flagged"
     assert labels == {pid: "red"}
@@ -11121,7 +11121,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     # filtered id list into get_photos_by_ids + get_species_keywords_for_photos,
     # and pipeline.load_photo_features feeds the entire scoped id list into
     # get_detections_for_photos twice.
-    photos_map = db.get_photos_by_ids(huge)
+    photos_map = db.photos.get_by_ids(huge)
     assert pid in photos_map  # the one real row survives the chunked select
     species_map = db.get_species_keywords_for_photos(huge)
     assert species_map == {}  # no keywords attached, but no OperationalError
@@ -11129,7 +11129,7 @@ def test_bulk_photo_id_apis_chunk_param_lists(tmp_path):
     assert det_map == {}
 
     # Sidecar-path resolution takes the same whole-list treatment.
-    assert db.get_photo_filenames(huge) == {pid: (fid, "a.jpg")}
+    assert db.photos.get_filenames(huge) == {pid: (fid, "a.jpg")}
 
 
 def test_get_photo_filenames_returns_folder_and_name_for_existing_ids(db):
@@ -11138,8 +11138,8 @@ def test_get_photo_filenames_returns_folder_and_name_for_existing_ids(db):
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=10, file_mtime=1.0)
 
-    assert db.get_photo_filenames([]) == {}
-    assert db.get_photo_filenames([pid, pid + 999]) == {pid: (fid, "bird.jpg")}
+    assert db.photos.get_filenames([]) == {}
+    assert db.photos.get_filenames([pid, pid + 999]) == {pid: (fid, "bird.jpg")}
 
 
 def test_move_folder_path_does_not_touch_wildcard_siblings(db):
@@ -15019,7 +15019,7 @@ def test_get_highlights_candidates_skips_missing_descendants(tmp_path):
     assert len(candidates) == 1
     assert candidates[0]["filename"] == 'a.jpg'
     # Consistent with count_filtered_photos
-    assert db.count_filtered_photos(folder_id=root) == 1
+    assert db.photos.count_filtered(folder_id=root) == 1
 
 
 def test_get_highlights_candidates_excludes_rejected(tmp_path):
@@ -15562,7 +15562,7 @@ def test_get_photos_filter_by_color_label(tmp_path):
     db.photo_labels.set(p1, 'red')
     db.photo_labels.set(p2, 'blue')
 
-    results = db.get_photos(color_label='red')
+    results = db.photos.list_page(color_label='red')
     assert len(results) == 1
     assert results[0]['filename'] == 'a.jpg'
 
@@ -15576,7 +15576,7 @@ def test_count_filtered_photos_with_color_label(tmp_path):
     p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     db.photo_labels.set(p1, 'green')
 
-    count = db.count_filtered_photos(color_label='green')
+    count = db.photos.count_filtered(color_label='green')
     assert count == 1
 
 
@@ -15595,11 +15595,11 @@ def test_get_photos_filter_color_label_combined_with_rating(tmp_path):
     db.photo_labels.set(p3, 'red')
 
     # Only p1 has both rating >= 4 AND color_label red
-    results = db.get_photos(rating_min=4, color_label='red')
+    results = db.photos.list_page(rating_min=4, color_label='red')
     assert len(results) == 1
     assert results[0]['filename'] == 'a.jpg'
 
-    count = db.count_filtered_photos(rating_min=4, color_label='red')
+    count = db.photos.count_filtered(rating_min=4, color_label='red')
     assert count == 1
 
 
@@ -16917,7 +16917,7 @@ def test_filter_out_wildlife_excluded_drops_marked_photos(tmp_path):
 
     db.update_photo_wildlife_excluded(p1, True)
 
-    assert db.filter_out_wildlife_excluded([p1, p2]) == [p2]
+    assert db.photos.filter_out_wildlife_excluded([p1, p2]) == [p2]
 
 
 def test_filter_out_subject_tagged_empty_set_returns_all(tmp_path):
@@ -20343,7 +20343,7 @@ def test_add_photo_retries_on_database_is_locked(tmp_path):
 
     assert pid is not None, "add_photo must succeed after transient lock retries"
     assert fail_remaining["n"] == 0, "the flaky executor should have been hit"
-    photo = db.get_photo(pid)
+    photo = db.photos.get(pid)
     assert photo["filename"] == "DSC_0001.NEF"
 
 

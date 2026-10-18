@@ -85,7 +85,9 @@ class _ClassifyJobRun:
         photo_ids = [p["id"] for p in photos]
         pre_count = len(photos)
         kept_raw = getattr(
-            thread_db, "filter_out_wildlife_excluded", lambda ids: ids
+            getattr(thread_db, "photos", None),
+            "filter_out_wildlife_excluded",
+            lambda ids: ids,
         )(photo_ids)
         if not isinstance(kept_raw, list | tuple | set):
             kept_raw = photo_ids

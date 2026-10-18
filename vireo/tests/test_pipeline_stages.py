@@ -90,7 +90,7 @@ def test_concurrent_runs_keep_their_created_collections(tmp_path, monkeypatch):
             assert result["errors"] == []
             db.set_active_workspace(workspace_id)
             ids = db.collections.get_photo_ids(result["collection_id"])
-            assert [db.get_photo(photo_id)["filename"] for photo_id in ids] == [
+            assert [db.photos.get(photo_id)["filename"] for photo_id in ids] == [
                 f"photo-{index}.jpg",
             ]
     finally:
@@ -192,7 +192,7 @@ def test_on_scanned_photo_normalizes_companion_first_callback_to_raw_path(tmp_pa
     (folder / "IMG_001.jpg").write_bytes(b"")
 
     scan.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: {42: (7, "IMG_001.cr3")},
+        photos=SimpleNamespace(get_filenames=lambda ids: {42: (7, "IMG_001.cr3")}),
         get_folder=lambda folder_id: {"path": str(folder)},
     )
 
@@ -252,7 +252,7 @@ def test_on_scanned_photo_keeps_companion_path_when_canonical_raw_missing(tmp_pa
     (folder / "IMG_001.jpg").write_bytes(b"")
 
     scan.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: {42: (7, "IMG_001.cr3")},
+        photos=SimpleNamespace(get_filenames=lambda ids: {42: (7, "IMG_001.cr3")}),
         get_folder=lambda folder_id: {"path": str(folder)},
     )
 
@@ -303,7 +303,7 @@ def test_on_scanned_photo_leaves_matching_basename_alone():
         return {"path": "/photos"}
 
     scan.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: {42: (7, "IMG_001.cr3")},
+        photos=SimpleNamespace(get_filenames=lambda ids: {42: (7, "IMG_001.cr3")}),
         get_folder=record_folder,
     )
 
@@ -357,7 +357,7 @@ def test_scan_resets_dedup_set_between_invocations():
     )
     scan.pipeline_cfg = {}
     scan.thread_db = SimpleNamespace(
-        get_photo_filenames=lambda ids: {},
+        photos=SimpleNamespace(get_filenames=lambda ids: {}),
         get_folder=lambda folder_id: None,
     )
 
@@ -469,10 +469,10 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
     # different folder: the transient JPEG that was queued under id 42
     # has been deleted and the id has been reused for a new photo.
     thumbs.thread_db = SimpleNamespace(
-        get_photos_by_ids=lambda ids: (
+        photos=SimpleNamespace(get_by_ids=lambda ids: (
             {42: _RowLike(folder_id=99, filename="IMG_002.jpg", companion_path=None)}
             if 42 in ids else {}
-        ),
+        )),
         get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -491,7 +491,7 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
     # Row entirely absent from the catalog (deleted but not yet reused)
     # is also skipped.
     thumbs.thread_db = SimpleNamespace(
-        get_photos_by_ids=lambda ids: {},
+        photos=SimpleNamespace(get_by_ids=lambda ids: {}),
         get_folder=lambda _fid: None,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -505,10 +505,10 @@ def test_thumbnail_skips_stale_queue_entry_after_id_reuse(tmp_path):
     # the function proceeds and increments the generated tally.
     generated_path = os.path.join(str(tmp_path), "42.jpg")
     thumbs.thread_db = SimpleNamespace(
-        get_photos_by_ids=lambda ids: (
+        photos=SimpleNamespace(get_by_ids=lambda ids: (
             {42: _RowLike(folder_id=99, filename="IMG_002.jpg", companion_path=None)}
             if 42 in ids else {}
-        ),
+        )),
         get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -543,10 +543,10 @@ def test_thumbnail_skips_queue_entry_when_folder_differs(tmp_path):
     thumbs.generate_thumbnail = _generate_must_not_run
     # Catalog says id 42 is /B/IMG_001.jpg (folder B, same filename).
     thumbs.thread_db = SimpleNamespace(
-        get_photos_by_ids=lambda ids: (
+        photos=SimpleNamespace(get_by_ids=lambda ids: (
             {42: _RowLike(folder_id=7, filename="IMG_001.jpg", companion_path=None)}
             if 42 in ids else {}
-        ),
+        )),
         get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 7 else None,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -597,7 +597,7 @@ def test_thumbnail_discards_cache_when_ownership_changes_during_generate(tmp_pat
         return None
 
     thumbs.thread_db = SimpleNamespace(
-        get_photos_by_ids=get_photos_by_ids,
+        photos=SimpleNamespace(get_by_ids=get_photos_by_ids),
         get_folder=get_folder,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -647,10 +647,10 @@ def test_thumbnail_still_owns_works_with_real_sqlite_row_folders(tmp_path):
 
     thumbs = _make_thumb_pass(tmp_path)
     thumbs.thread_db = SimpleNamespace(
-        get_photos_by_ids=lambda ids: (
+        photos=SimpleNamespace(get_by_ids=lambda ids: (
             {42: _RowLike(folder_id=99, filename="IMG_002.jpg", companion_path=None)}
             if 42 in ids else {}
-        ),
+        )),
         get_folder=get_folder,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -685,15 +685,14 @@ def test_thumbnail_post_check_uses_canonical_queued_path_not_mutated_render_sour
     # rewrite ``thumb.photo_path`` to a working-copy JPEG that lives
     # under a completely different name (``/working-copy/42.jpg``).
     thumbs.thread_db = SimpleNamespace(
-        get_photos_by_ids=lambda ids: (
+        photos=SimpleNamespace(get_by_ids=lambda ids: (
             {42: _RowLike(folder_id=99, filename="IMG_001.cr3", companion_path=None)}
             if 42 in ids else {}
-        ),
+        ), get=lambda _id: None),
         get_folder=lambda fid: (
             _RowLike(id=99, path="/B") if fid == 99 else None
         ),
         get_photo_edit_recipe=lambda _id: None,
-        get_photo=lambda _id: None,
     )
     generated_path = os.path.join(str(tmp_path), "42.jpg")
 
@@ -736,14 +735,14 @@ def test_thumbnail_accepts_queued_companion_path_when_canonical_raw_is_missing(t
     # Owner at id 42 is a RAW with a paired JPEG companion. The queue
     # entry carries the companion's full path (RAW is missing on disk).
     thumbs.thread_db = SimpleNamespace(
-        get_photos_by_ids=lambda ids: (
+        photos=SimpleNamespace(get_by_ids=lambda ids: (
             {42: _RowLike(
                 folder_id=99,
                 filename="IMG_001.cr3",
                 companion_path="IMG_001.jpg",
             )}
             if 42 in ids else {}
-        ),
+        )),
         get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -760,14 +759,14 @@ def test_thumbnail_accepts_queued_companion_path_when_canonical_raw_is_missing(t
     # to what the catalog actually ties to this id.
     thumbs = _make_thumb_pass(tmp_path)
     thumbs.thread_db = SimpleNamespace(
-        get_photos_by_ids=lambda ids: (
+        photos=SimpleNamespace(get_by_ids=lambda ids: (
             {42: _RowLike(
                 folder_id=99,
                 filename="IMG_001.cr3",
                 companion_path="IMG_001.jpg",
             )}
             if 42 in ids else {}
-        ),
+        )),
         get_folder=lambda fid: _RowLike(id=fid, path="/B") if fid == 99 else None,
         get_photo_edit_recipe=lambda _id: None,
     )
@@ -865,7 +864,7 @@ def test_scanned_raw_thumbnail_renders_available_companion(
                     (image.width // 2, image.height // 2),
                 )
             assert pixel[1] >= 80 and pixel[0] < 50 and pixel[2] < 50
-            assert db.get_photo(photo_id)["thumb_path"] == f"{photo_id}.jpg"
+            assert db.photos.get(photo_id)["thumb_path"] == f"{photo_id}.jpg"
         finally:
             if raw.exists():
                 raw.chmod(0o600)

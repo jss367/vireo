@@ -716,7 +716,7 @@ def test_cleanup_matches_banner_without_saved_scan_or_disk_checks(app_and_db, mo
     assert [p["id"] for p in proposal["losers"]] == [rejected]
     assert "exists" not in proposal["winner"]
     assert "exists" not in proposal["losers"][0]
-    assert db.get_photo(rejected)["flag"] == "rejected"
+    assert db.photos.get(rejected)["flag"] == "rejected"
     assert db.job_history.last_completed_with_result("duplicate-scan") is None
 
 
@@ -760,7 +760,7 @@ def test_catalog_cleanup_cannot_trash_last_surviving_copy(app_and_db, tmp_path):
     assert result["trashed"] == 0
     assert result["skipped"] == [{"id": rejected, "reason": "no verified distinct duplicate winner exists"}]
     assert copy.read_bytes() == b"surviving photo"
-    assert db.get_photo(rejected) is not None
+    assert db.photos.get(rejected) is not None
 
 
 def test_catalog_cleanup_shows_copies_from_other_workspaces(app_and_db):
@@ -774,7 +774,7 @@ def test_catalog_cleanup_shows_copies_from_other_workspaces(app_and_db):
     db.conn.commit()
     db.set_photo_edit_recipe(rejected, {"rotation": 90})
     db.set_active_workspace(original_ws)
-    assert db.get_photo(rejected, verify_workspace=True) is None
+    assert db.photos.get(rejected, verify_workspace=True) is None
 
     result = app.test_client().get("/api/duplicates/cleanup").get_json()
     proposal, = result["proposals"]
@@ -1397,7 +1397,7 @@ def test_keep_endpoint_waits_out_a_cleanup_in_progress(app_and_db, tmp_path, mon
         worker.join(synchronization_timeout())
     assert cleanup["resp"].get_json()["trashed"] == 1
     # The trashed copy is gone, and the other copy is still the kept one.
-    assert db.get_photo(rejected) is None
+    assert db.photos.get(rejected) is None
     assert not os.path.exists(rejected_path)
     flag = db.conn.execute("SELECT flag FROM photos WHERE id=?", (kept,)).fetchone()["flag"]
     assert flag != "rejected"

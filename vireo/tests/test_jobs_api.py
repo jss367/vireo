@@ -8302,7 +8302,6 @@ def test_import_gps_tagging_stops_when_cancelled_during_resolution(
     app_and_db, tmp_path, monkeypatch,
 ):
     import import_job
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
@@ -8326,7 +8325,9 @@ def test_import_gps_tagging_stops_when_cancelled_during_resolution(
             "errors": [],
         }
 
-    original_get = Database.get_photos_by_ids
+    from repositories.photos import PhotoRepository
+
+    original_get = PhotoRepository.get_by_ids
 
     def cancel_during_resolution(self, photo_ids):
         running_ids = [
@@ -8338,7 +8339,7 @@ def test_import_gps_tagging_stops_when_cancelled_during_resolution(
         return original_get(self, photo_ids)
 
     monkeypatch.setattr(import_job, "run_import_job", imported_result)
-    monkeypatch.setattr(Database, "get_photos_by_ids", cancel_during_resolution)
+    monkeypatch.setattr(PhotoRepository, "get_by_ids", cancel_during_resolution)
     quick_look_id = _process_id(db, "Quick look")
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
@@ -8380,11 +8381,12 @@ def test_import_tag_options_are_validated_before_starting_job(
 def test_import_can_add_structured_locations_from_each_photos_gps(
     app_and_db, tmp_path, monkeypatch,
 ):
-    from db import Database
 
     app, db = app_and_db
     client = app.test_client()
-    original_get = Database.get_photos_by_ids
+    from repositories.photos import PhotoRepository
+
+    original_get = PhotoRepository.get_by_ids
     details = {
         "place_id": "import-gps-place",
         "name": "Central Park",
@@ -8406,13 +8408,13 @@ def test_import_can_add_structured_locations_from_each_photos_gps(
             photo["latitude"] = details["lat"]
             photo["longitude"] = details["lng"]
             enriched[photo_id] = photo
-        self.reverse_geocode_cache_put(
+        db.reverse_geocode_cache_put(
             details["lat"], details["lng"], details["place_id"],
             json.dumps(details),
         )
         return enriched
 
-    monkeypatch.setattr(Database, "get_photos_by_ids", photos_with_gps)
+    monkeypatch.setattr(PhotoRepository, "get_by_ids", photos_with_gps)
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),

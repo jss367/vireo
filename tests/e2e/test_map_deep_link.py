@@ -36,7 +36,7 @@ def test_map_photo_id_deep_link_reports_missing_location(live_server, page):
     page.route("https://unpkg.com/**", stub_leaflet)
     page.goto(f"{live_server['url']}/map?photo_id={pid}")
 
-    filename = live_server["db"].get_photo(pid)["filename"]
+    filename = live_server["db"].photos.get(pid)["filename"]
     notice = page.locator("#mapFocusNotice")
     expect(notice).to_be_visible()
     expect(notice).to_contain_text(f"{filename} has no map location")

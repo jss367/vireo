@@ -85,7 +85,7 @@ def test_removing_shared_folder_preserves_other_workspaces_photos(shared_tree):
                          file_size=100, file_mtime=1.0)
     assert db.delete_folder(missing) == {"deleted_photos": 0, "files": []}
     assert {f["id"] for f in db.get_workspace_folders(workspace)} == {parent}
-    assert db.get_photo(photo) is not None
+    assert db.photos.get(photo) is not None
     assert {f["id"] for f in db.get_workspace_folders(other)} == {parent, missing, child}
 
 

@@ -176,7 +176,7 @@ def create_photo_edit_recipes_blueprint(
     @blueprint.route("/api/photos/<int:photo_id>/edit-recipe", methods=["GET"])
     def api_get_photo_edit_recipe(photo_id):
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         recipe = db.get_photo_edit_recipe(photo_id)
@@ -197,7 +197,7 @@ def create_photo_edit_recipes_blueprint(
         live mask can regenerate without silently changing committed edits.
         """
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         try:
@@ -214,7 +214,7 @@ def create_photo_edit_recipes_blueprint(
     @blueprint.route("/api/photos/<int:photo_id>/local-mask/correct", methods=["POST"])
     def api_correct_local_mask(photo_id):
         db = get_db()
-        if not db.get_photo(photo_id, verify_workspace=True):
+        if not db.photos.get(photo_id, verify_workspace=True):
             return photo_not_found_error(legacy_error="not found")
         body = request.get_json(silent=True)
         if not isinstance(body, dict):
@@ -243,7 +243,7 @@ def create_photo_edit_recipes_blueprint(
             description = "Updated photo edit recipe"
         if not isinstance(recipe, dict):
             return json_error("recipe must be a JSON object")
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         from image_edits import RecipeError, normalize_recipe, recipe_to_json
@@ -290,7 +290,7 @@ def create_photo_edit_recipes_blueprint(
     @blueprint.route("/api/photos/<int:photo_id>/edit-recipe", methods=["DELETE"])
     def api_clear_photo_edit_recipe(photo_id):
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         from image_edits import recipe_to_json
@@ -337,7 +337,7 @@ def create_photo_edit_recipes_blueprint(
         from image_edits import normalize_recipe
 
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         body = request.get_json(silent=True)
@@ -414,7 +414,7 @@ def create_photo_edit_recipes_blueprint(
         # Slider edits need no photo metadata. Geometry and local masks use
         # dimensions, loaded in chunks only for those operations.
         needs_dimensions = has_local or bool(fields and {"rotation", "flip"}.intersection(fields))
-        photos = db.get_photos_by_ids(visible_ids, include_exif=True) if needs_dimensions else {}
+        photos = db.photos.get_by_ids(visible_ids, include_exif=True) if needs_dimensions else {}
         items, applied, skipped, local_errors, applied_recipes = (
             _compose_bulk_targets(
                 db, ids, visible_set, photos, old_recipes, recipe, fields,
@@ -453,7 +453,7 @@ def create_photo_edit_recipes_blueprint(
     @blueprint.route("/api/photos/<int:photo_id>/edit-history")
     def api_photo_edit_history(photo_id):
         db = get_db()
-        photo = db.get_photo(photo_id, verify_workspace=True)
+        photo = db.photos.get(photo_id, verify_workspace=True)
         if not photo:
             return photo_not_found_error(legacy_error="not found")
         limit = min(max(1, request.args.get("limit", 50, type=int)), 200)

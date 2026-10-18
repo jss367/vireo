@@ -300,7 +300,7 @@ class BulkGpsLocations:
                 "unresolved": [],
                 "skipped": [],
             }, None
-        photos_map = db.get_photos_by_ids(photo_ids)
+        photos_map = db.photos.get_by_ids(photo_ids)
         if len(photos_map) != len(photo_ids):
             return None, self._json_error("One or more photos were not found", 404)
         for pid in photo_ids:

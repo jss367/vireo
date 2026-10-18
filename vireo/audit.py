@@ -30,7 +30,7 @@ def check_drift(db):
         list of {photo_id, filename, folder_path, field, db_value, xmp_value,
                  added_in_xmp, removed_in_xmp, direction}
     """
-    photos = db.get_photos(per_page=999999)
+    photos = db.photos.list_page(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     drifts = []
 
@@ -129,7 +129,7 @@ def check_untracked(db, root_paths):
         list of {path, folder}
     """
     # Build set of known file paths
-    photos = db.get_photos(per_page=999999)
+    photos = db.photos.list_page(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     known_paths = set()
     for photo in photos:
@@ -524,7 +524,7 @@ def accept_current_hash(db, photo_ids):
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     accepted = 0
     for pid in photo_ids:
-        photo = db.get_photo(pid)
+        photo = db.photos.get(pid)
         if not photo:
             continue
         folder_path = folders.get(photo["folder_id"], "")

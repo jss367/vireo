@@ -140,7 +140,7 @@ def score_collection_photos(db, collection_id, progress_callback=None, vireo_dir
     if collection_id:
         photos = db.collections.get_photos(collection_id, per_page=999999)
     else:
-        photos = db.get_photos(per_page=999999)
+        photos = db.photos.list_page(per_page=999999)
 
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     total = len(photos)
