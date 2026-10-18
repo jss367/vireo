@@ -11286,8 +11286,8 @@ def test_pipeline_benign_skip_note_keeps_the_run_completed(
     result = job["result"]
     assert result["ok"] is True
     assert result["notes"] == notes
-    from jobs import JobRunner
-    assert JobRunner._error_total(job) == 0
+    from job_runner.outcome import error_total
+    assert error_total(job) == 0
 
 
 def test_pipeline_error_that_is_not_a_note_still_fails_the_run(
@@ -11305,8 +11305,8 @@ def test_pipeline_error_that_is_not_a_note_still_fails_the_run(
     assert denied in job["errors"]
     assert job["result"]["ok"] is False
     assert denied not in job["result"]["notes"]
-    from jobs import JobRunner
-    assert JobRunner._error_total(job) == 1
+    from job_runner.outcome import error_total
+    assert error_total(job) == 1
 
 
 def test_pipeline_eye_keypoints_download_cancel_finalizes_as_cancelled_not_failure(

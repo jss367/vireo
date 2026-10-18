@@ -158,6 +158,7 @@ ignore = [
 "vireo/detector.py" = ["B904"]
 "vireo/dino_embed.py" = ["B904"]
 "vireo/importer.py" = ["B007"]
+"vireo/job_runner/history.py" = ["SIM105"]
 "vireo/jobs.py" = ["SIM105"]
 "vireo/masking.py" = ["B904"]
 "vireo/models.py" = ["B904", "F401"]
@@ -174,7 +175,7 @@ ignore = [
 # Type checking starts on the service and repository layers and widens one
 # directory at a time. Modules import each other as top-level names
 # (``import config``), so ``vireo`` is on the search path.
-include = ["vireo/services", "vireo/repositories", "vireo/pipeline_stages"]
+include = ["vireo/services", "vireo/repositories", "vireo/pipeline_stages", "vireo/import_job", "tests/typecheck"]
 extraPaths = ["vireo"]
 pythonVersion = "3.14"
 typeCheckingMode = "basic"

@@ -6,6 +6,8 @@ promotes it only once its hash matches the source;
 a stall watchdog.
 """
 
+from __future__ import annotations
+
 import contextlib
 import errno
 import hashlib
@@ -15,8 +17,12 @@ import shutil
 import threading
 import time
 import uuid
+from typing import TYPE_CHECKING
 
 from import_dedup import compute_file_hash
+
+if TYPE_CHECKING:
+    from import_job.import_types import StopCheck
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +38,7 @@ except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None
 
 
-def copy_and_hash_verify(src, dst, *, src_hash=None):
+def copy_and_hash_verify(src: str, dst: str, *, src_hash: str | None = None) -> tuple[bool, str | None]:
     """Copy ``src`` to ``dst`` and verify the landed bytes by content hash.
 
     The copy goes to a hidden sibling temp path first; only a copy whose
@@ -128,7 +134,7 @@ def copy_and_hash_verify(src, dst, *, src_hash=None):
                 os.unlink(tmp)
 
 
-def _rename_promote_locked(src, tmp, dst, dst_dir):
+def _rename_promote_locked(src: str, tmp: str, dst: str, dst_dir: str) -> bool:
     """Promote the verified ``tmp`` to ``dst`` without a hard link.
 
     Returns True once ``tmp`` has been renamed onto ``dst`` (the temp no
@@ -215,7 +221,7 @@ _HARDLINK_UNSUPPORTED_ERRNOS = frozenset(
 )
 
 
-def _fs_lacks_hardlinks(err):
+def _fs_lacks_hardlinks(err: OSError) -> bool:
     """True when ``err`` from os.link indicates a hardlinkless target FS."""
     return getattr(err, "errno", None) in _HARDLINK_UNSUPPORTED_ERRNOS
 
@@ -237,8 +243,8 @@ class DestReadCancelled(OSError):
     """
 
 
-def _hash_dest_file(path, cancel_check, *,
-                    stall_timeout=DEST_HASH_STALL_TIMEOUT):
+def _hash_dest_file(path: str, cancel_check: StopCheck, *,
+                    stall_timeout: float = DEST_HASH_STALL_TIMEOUT) -> str:
     """SHA-256 a destination/mount-side file without letting a sick
     network mount hold cancellation hostage.
 
@@ -266,7 +272,7 @@ def _hash_dest_file(path, cancel_check, *,
     activity = {"t": time.monotonic()}
     done = threading.Event()
 
-    def _worker():
+    def _worker() -> None:
         h = hashlib.sha256()
         try:
             with open(path, "rb") as f:
@@ -299,7 +305,7 @@ def _hash_dest_file(path, cancel_check, *,
     return result["hash"]
 
 
-def _rehash_dest_or_none(path, stop_requested):
+def _rehash_dest_or_none(path: str, stop_requested: StopCheck) -> str | None:
     """Re-hash a landed destination file, returning None on read failure.
 
     The stamping loop's last-line check that the bytes currently at the

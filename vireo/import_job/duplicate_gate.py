@@ -1,11 +1,24 @@
 """The per-file duplicate gate and its byte-verified twins."""
 
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING, cast
 
 from import_job.copy_verify import DestReadCancelled, _hash_dest_file
 from import_job.state import _counts, _fail
 from import_job.twins import _hash_twin_rows, _key_twin_rows, _likely_twin_rows
+
+if TYPE_CHECKING:
+    import sqlite3
+    from pathlib import Path
+
+    from db import Database
+    from import_dedup import DuplicateChecker
+    from import_job.destination import _DestContext
+    from import_job.import_types import DupToken, StopCheck
+    from import_job.state import ImportParams, _ImportBatchState, _ImportRunState
 
 log = logging.getLogger(__name__)
 
@@ -28,8 +41,11 @@ _GATE_PROCEED = "proceed"
 _GATE_CANCELLED = "cancelled"
 
 
-def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
-                    params, ctx, stop_requested):
+def _duplicate_gate(
+    state: _ImportRunState, batch_st: _ImportBatchState, *, source_file: Path, rel: str,
+    checker: DuplicateChecker | None, db: Database, params: ImportParams, ctx: _DestContext,
+    stop_requested: StopCheck,
+) -> str:
     """Decide whether ``source_file`` is a duplicate of cataloged or
     intra-run bytes, doing the byte-verification reads that decision
     requires. Shared verbatim by both import paths (the 2026-08-08
@@ -99,15 +115,19 @@ def _duplicate_gate(state, batch_st, *, source_file, rel, checker, db,
     return _GATE_PROCEED
 
 
-def _grant_twin_visibility(state, batch_st, db, rel, source_file, rows):
+def _grant_twin_visibility(
+    state: _ImportRunState, batch_st: _ImportBatchState, db: Database, rel: str, source_file: Path,
+    rows: list[sqlite3.Row],
+) -> bool:
     """Grant the active workspace the accepted twin ``rows`` and record
     the new grants and promotions on ``batch_st`` for a mount-loss
     rollback. Returns False when the grant failed (the file is booked
     failed and the gate answers ``_GATE_SKIPPED``).
     """
     try:
+        # ``run_import_job`` activates the workspace before any batch runs.
         new_grants, promoted = db.photo_visibility.grant_verified_twins_tracked(
-            db.active_workspace_id, rows,
+            cast("int", db.active_workspace_id), rows,
         )
         db.commit()
     except Exception as exc:
@@ -120,8 +140,10 @@ def _grant_twin_visibility(state, batch_st, db, rel, source_file, rows):
     return True
 
 
-def _twin_rows_and_source_hash(state, db, checker, token, *, rel,
-                               source_file):
+def _twin_rows_and_source_hash(
+    state: _ImportRunState, db: Database, checker: DuplicateChecker, token: DupToken, *, rel: str,
+    source_file: Path,
+) -> tuple[list[sqlite3.Row], str | None] | None:
     """Cataloged twin rows for ``token`` and the source hash to verify
     them against, or ``None`` when hashing the source failed (the file is
     booked failed).
@@ -147,7 +169,7 @@ def _twin_rows_and_source_hash(state, db, checker, token, *, rel,
     return twin_rows, src_hash
 
 
-def _intra_run_token_proven(state, token, src_hash):
+def _intra_run_token_proven(state: _ImportRunState, token: DupToken, src_hash: str | None) -> bool:
     """True when this run's own landing already proves ``token``'s bytes."""
     # An intra-run token is byte-proven by this session's
     # own copy_and_hash_verify — safe to skip without
@@ -180,8 +202,10 @@ def _intra_run_token_proven(state, token, src_hash):
     )
 
 
-def _byte_verified_twins(state, batch_st, ctx, twin_rows, src_hash,
-                         stop_requested):
+def _byte_verified_twins(
+    state: _ImportRunState, batch_st: _ImportBatchState, ctx: _DestContext,
+    twin_rows: list[sqlite3.Row], src_hash: str | None, stop_requested: StopCheck,
+) -> tuple[bool, list[sqlite3.Row]]:
     """Re-hash each off-card cataloged twin against ``src_hash``.
 
     Returns ``(accept, verified_twin_rows)``. A Stop that interrupts a
