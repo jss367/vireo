@@ -12,12 +12,15 @@ workspace and works with none active.
 
 Callers reach it as ``db.pending_archives`` (a fresh repository per access,
 see ``Database.pending_archives``); there are no forwarding wrappers on
-``Database``. Registering a transfer and reading one by id still live in the
-``pending_archives`` module.
+``Database``. The ``pending_archives`` module's ``register_pending_archive``
+and ``get_pending_archive`` run their SQL here (``register``, ``get``), both
+scoped to the active workspace.
 """
 
+import json
 import sqlite3
 from collections.abc import Callable
+from typing import Any
 
 
 class PendingArchiveRepository:
@@ -25,6 +28,27 @@ class PendingArchiveRepository:
                  workspace_id_fn: Callable[[], int]) -> None:
         self.conn = conn
         self.workspace_id_fn = workspace_id_fn
+
+    def register(
+        self, archive_id: str, destination: str, staging_destination: str, target: Any,
+    ) -> None:
+        """Record a transfer for the active workspace (kept if the id exists) and commit.
+
+        ``target`` is stored as JSON in ``target_json``.
+        """
+        self.conn.execute(
+            "INSERT OR IGNORE INTO pending_archives "
+            "(id, workspace_id, destination, staging_destination, target_json) VALUES (?, ?, ?, ?, ?)",
+            (archive_id, self.workspace_id_fn(), destination, staging_destination, json.dumps(target)),
+        )
+        self.conn.commit()
+
+    def get(self, archive_id: str) -> sqlite3.Row | None:
+        """One of the active workspace's transfers by id, or None."""
+        return self.conn.execute(
+            "SELECT * FROM pending_archives WHERE id = ? AND workspace_id = ?",
+            (archive_id, self.workspace_id_fn()),
+        ).fetchone()
 
     def open_with_review_collection(self) -> list[sqlite3.Row]:
         """The workspace's transfers not yet ``complete``, oldest first.
