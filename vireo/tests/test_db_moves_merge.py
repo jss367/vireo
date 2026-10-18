@@ -1,9 +1,9 @@
 """Behavior pins for the moves/merge domain of ``Database``.
 
 Covers the saved move rules, the folder/photo move writers
-(``batch_update_photo_folder``, ``move_folder_path``,
-``check_filename_collisions``, ``query_move_rule_matches``), the sync-only
-grants (``_link_survivor_for_sibling_edits`` / ``get_sync_only_photo_paths``)
+(``moves_merge.batch_update_photo_folder``, ``moves_merge.move_folder_path``,
+``moves_merge.filename_collisions``, ``query_move_rule_matches``), the sync-only
+grants (``moves_merge.link_survivor_for_sibling_edits`` / ``get_sync_only_photo_paths``)
 and the staged-tree -> archive merge with its ``_*_for_merge`` helpers.
 
 Everything goes through the public ``Database`` API on a real temp database,
@@ -21,6 +21,7 @@ import sqlite3
 import pytest
 from db import Database
 from repositories.folders import FolderRepository
+from repositories.moves_merge import MovesMergeRepository
 from repositories.workspace_folders import WorkspaceFolderRepository
 
 
@@ -103,7 +104,7 @@ def _pending(db, *photo_ids):
 
 
 def test_create_move_rule_commits_and_serializes_criteria(db):
-    rid = db.create_move_rule("Keepers", "/dest", {"rating_min": 4, "flag": "flagged"})
+    rid = db.moves_merge.create_rule("Keepers", "/dest", {"rating_min": 4, "flag": "flagged"})
     assert isinstance(rid, int)
     assert not db.conn.in_transaction
     with _other(db) as other:
@@ -116,46 +117,46 @@ def test_create_move_rule_commits_and_serializes_criteria(db):
 
 
 def test_get_move_rule_returns_row_or_none(db):
-    rid = db.create_move_rule("A", "/a", {})
-    row = db.get_move_rule(rid)
+    rid = db.moves_merge.create_rule("A", "/a", {})
+    row = db.moves_merge.get_rule(rid)
     assert isinstance(row, sqlite3.Row)
     assert row["id"] == rid and row["criteria"] == "{}"
-    assert db.get_move_rule(rid + 999) is None
+    assert db.moves_merge.get_rule(rid + 999) is None
 
 
 def test_list_move_rules_orders_by_name(db):
-    assert db.list_move_rules() == []
-    b = db.create_move_rule("b", "/b", {})
-    a = db.create_move_rule("a", "/a", {})
-    rows = db.list_move_rules()
+    assert db.moves_merge.list_rules() == []
+    b = db.moves_merge.create_rule("b", "/b", {})
+    a = db.moves_merge.create_rule("a", "/a", {})
+    rows = db.moves_merge.list_rules()
     assert [r["id"] for r in rows] == [a, b]
     assert all(isinstance(r, sqlite3.Row) for r in rows)
 
 
 def test_update_move_rule_sets_only_given_fields_and_commits(db):
-    rid = db.create_move_rule("orig", "/orig", {"flag": "flagged"})
-    db.update_move_rule(rid, name="renamed")
+    rid = db.moves_merge.create_rule("orig", "/orig", {"flag": "flagged"})
+    db.moves_merge.update_rule(rid, name="renamed")
     assert not db.conn.in_transaction
     with _other(db) as other:
         row = other.execute("SELECT * FROM move_rules WHERE id = ?", (rid,)).fetchone()
     assert (row["name"], row["destination"], row["criteria"]) == (
         "renamed", "/orig", '{"flag": "flagged"}')
 
-    db.update_move_rule(rid, destination="/new", criteria={"rating_min": 2})
-    row = db.get_move_rule(rid)
+    db.moves_merge.update_rule(rid, destination="/new", criteria={"rating_min": 2})
+    row = db.moves_merge.get_rule(rid)
     assert (row["name"], row["destination"], row["criteria"]) == (
         "renamed", "/new", '{"rating_min": 2}')
 
     # An explicit None is a value, not "not provided".
-    db.update_move_rule(rid, criteria=None)
-    assert db.get_move_rule(rid)["criteria"] == "null"
+    db.moves_merge.update_rule(rid, criteria=None)
+    assert db.moves_merge.get_rule(rid)["criteria"] == "null"
 
 
 def test_update_move_rule_without_fields_runs_no_sql(db):
-    rid = db.create_move_rule("orig", "/orig", {})
+    rid = db.moves_merge.create_rule("orig", "/orig", {})
     statements = _trace(db)
     try:
-        assert db.update_move_rule(rid) is None
+        assert db.moves_merge.update_rule(rid) is None
     finally:
         _stop_trace(db)
     assert statements == []
@@ -163,10 +164,10 @@ def test_update_move_rule_without_fields_runs_no_sql(db):
 
 
 def test_update_move_rule_statement_shape(db):
-    rid = db.create_move_rule("orig", "/orig", {})
+    rid = db.moves_merge.create_rule("orig", "/orig", {})
     statements = _trace(db)
     try:
-        db.update_move_rule(rid, name="n", destination="/d", criteria={})
+        db.moves_merge.update_rule(rid, name="n", destination="/d", criteria={})
     finally:
         _stop_trace(db)
     assert [s.strip() for s in statements if s.strip() not in ("BEGIN", "COMMIT")] == [
@@ -176,21 +177,21 @@ def test_update_move_rule_statement_shape(db):
 
 
 def test_delete_move_rule_commits(db):
-    rid = db.create_move_rule("gone", "/g", {})
-    keep = db.create_move_rule("kept", "/k", {})
-    db.delete_move_rule(rid)
+    rid = db.moves_merge.create_rule("gone", "/g", {})
+    keep = db.moves_merge.create_rule("kept", "/k", {})
+    db.moves_merge.delete_rule(rid)
     assert not db.conn.in_transaction
     with _other(db) as other:
         ids = [r["id"] for r in other.execute("SELECT id FROM move_rules")]
     assert ids == [keep]
     # Deleting a missing id is a quiet no-op.
-    db.delete_move_rule(rid)
+    db.moves_merge.delete_rule(rid)
 
 
 def test_touch_move_rule_stamps_last_run_at_and_commits(db):
-    rid = db.create_move_rule("r", "/r", {})
-    other_id = db.create_move_rule("s", "/s", {})
-    db.touch_move_rule(rid)
+    rid = db.moves_merge.create_rule("r", "/r", {})
+    other_id = db.moves_merge.create_rule("s", "/s", {})
+    db.moves_merge.touch_rule(rid)
     assert not db.conn.in_transaction
     with _other(db) as other:
         rows = {r["id"]: r["last_run_at"] for r in other.execute(
@@ -199,13 +200,13 @@ def test_touch_move_rule_stamps_last_run_at_and_commits(db):
     assert rows[other_id] is None
 
 
-# -- batch_update_photo_folder / check_filename_collisions -------------------
+# -- moves_merge.batch_update_photo_folder / moves_merge.filename_collisions -------------------
 
 
 def test_batch_update_photo_folder_empty_runs_no_sql(db):
     statements = _trace(db)
     try:
-        assert db.batch_update_photo_folder([], 1) is None
+        assert db.moves_merge.batch_update_photo_folder([], 1) is None
     finally:
         _stop_trace(db)
     assert statements == []
@@ -217,7 +218,7 @@ def test_batch_update_photo_folder_moves_only_listed_photos_and_commits(db):
     a = _photo(db, src, "a.jpg")
     b = _photo(db, src, "b.jpg")
     c = _photo(db, src, "c.jpg")
-    db.batch_update_photo_folder((a, c), dst)
+    db.moves_merge.batch_update_photo_folder((a, c), dst)
     assert not db.conn.in_transaction
     with _other(db) as other:
         folders = {r["id"]: r["folder_id"] for r in other.execute(
@@ -238,23 +239,23 @@ def test_check_filename_collisions(db):
 
     statements = _trace(db)
     try:
-        assert db.check_filename_collisions([], dst) == []
+        assert db.moves_merge.filename_collisions([], dst) == []
     finally:
         _stop_trace(db)
     assert statements == []
 
-    result = db.check_filename_collisions([a, b, c], dst)
+    result = db.moves_merge.filename_collisions([a, b, c], dst)
     assert result == [{"photo_id": a, "filename": "a.jpg"}]
     assert isinstance(result[0], dict)
 
 
-# -- move_folder_path --------------------------------------------------------
+# -- moves_merge.move_folder_path --------------------------------------------------------
 
 
 def test_move_folder_path_missing_folder_is_noop(db):
     statements = _trace(db)
     try:
-        assert db.move_folder_path(12345, "/new") is None
+        assert db.moves_merge.move_folder_path(12345, "/new") is None
     finally:
         _stop_trace(db)
     assert [s for s in statements if s.lstrip().upper().startswith("UPDATE")] == []
@@ -282,7 +283,7 @@ def test_move_folder_path_rebases_subtree_and_provenance_and_commits(db):
         ("/old/shoot2", untouched))
     db.conn.commit()
 
-    db.move_folder_path(root, "/new/renamed", new_name="renamed")
+    db.moves_merge.move_folder_path(root, "/new/renamed", new_name="renamed")
 
     assert not db.conn.in_transaction
     with _other(db) as conn:
@@ -304,7 +305,7 @@ def test_move_folder_path_rebases_subtree_and_provenance_and_commits(db):
 
 def test_move_folder_path_keeps_name_without_new_name(db):
     root = _folder(db, "/a/b", root=True)
-    db.move_folder_path(root, "/a/c")
+    db.moves_merge.move_folder_path(root, "/a/c")
     row = db.conn.execute(
         "SELECT path, name FROM folders WHERE id = ?", (root,)).fetchone()
     assert (row["path"], row["name"]) == ("/a/c", "b")
@@ -319,7 +320,7 @@ def test_move_folder_path_to_same_path_skips_provenance_rewrite(db):
     db.conn.commit()
     statements = _trace(db)
     try:
-        db.move_folder_path(root, "/same", new_name="Same")
+        db.moves_merge.move_folder_path(root, "/same", new_name="Same")
     finally:
         _stop_trace(db)
     assert not any("last_move_source_folder_path" in s for s in statements)
@@ -344,7 +345,7 @@ def test_move_folder_path_relinks_through_the_facade_after_paths_change(
         return real(self, ids)
 
     monkeypatch.setattr(FolderRepository, "relink_parents_by_path", recorder)
-    db.move_folder_path(root, "/z/q")
+    db.moves_merge.move_folder_path(root, "/z/q")
     assert seen == [([root, child], {root: "/z/q", child: "/z/q/r"})]
 
 
@@ -353,27 +354,27 @@ def test_move_folder_path_rolls_back_nothing_but_commits_once(db):
     _folder(db, "/m/n", root)
     statements = _trace(db)
     try:
-        db.move_folder_path(root, "/k")
+        db.moves_merge.move_folder_path(root, "/k")
     finally:
         _stop_trace(db)
     assert [s.strip() for s in statements].count("COMMIT") == 1
 
 
-# -- _newest_location_change_key --------------------------------------------
+# -- moves_merge.newest_location_change_key --------------------------------------------
 
 
 def test_newest_location_change_key(db):
     fid = _folder(db, "/f", root=True)
     pid = _photo(db, fid, "a.jpg")
-    assert db._newest_location_change_key(pid) is None
+    assert db.moves_merge.newest_location_change_key(pid) is None
     _queue(db, pid, "rating", "3", "2030-01-01 00:00:00")
-    assert db._newest_location_change_key(pid) is None
+    assert db.moves_merge.newest_location_change_key(pid) is None
 
     older = _queue(db, pid, "location", "", "2026-01-01 00:00:00")
-    assert db._newest_location_change_key(pid) == ("2026-01-01 00:00:00", older)
+    assert db.moves_merge.newest_location_change_key(pid) == ("2026-01-01 00:00:00", older)
     newer = _queue(db, pid, "location", "", "2026-02-01 00:00:00")
     tie = _queue(db, pid, "location", "", "2026-02-01 00:00:00")
-    assert db._newest_location_change_key(pid) == ("2026-02-01 00:00:00", tie)
+    assert db.moves_merge.newest_location_change_key(pid) == ("2026-02-01 00:00:00", tie)
     assert tie > newer
 
 
@@ -381,7 +382,7 @@ def test_newest_location_change_key_null_created_at_sorts_as_empty(db):
     fid = _folder(db, "/f", root=True)
     pid = _photo(db, fid, "a.jpg")
     cid = _queue(db, pid, "location", "", None)
-    assert db._newest_location_change_key(pid) == ("", cid)
+    assert db.moves_merge.newest_location_change_key(pid) == ("", cid)
 
 
 # -- _move_location_state_for_merge -----------------------------------------
@@ -479,7 +480,7 @@ def test_reconcile_keyword_edits_without_rows_returns_zero(db, two_photos,
     calls = []
     monkeypatch.setattr(db, "_carry_keyword_associations_for_merge",
                         lambda *a: calls.append(a))
-    assert db._reconcile_conflicting_keyword_edits(loser, survivor) == 0
+    assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
     assert calls == []
 
 
@@ -491,7 +492,7 @@ def test_reconcile_keyword_edits_empty_values_still_carry_empty_grouping(
     calls = []
     monkeypatch.setattr(db, "_carry_keyword_associations_for_merge",
                         lambda *a: calls.append(a))
-    assert db._reconcile_conflicting_keyword_edits(loser, survivor) == 0
+    assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
     assert calls == [(loser, survivor, {})]
     assert len(_pending(db, loser, survivor)) == 2
 
@@ -506,7 +507,7 @@ def test_reconcile_keyword_edits_newer_remove_drops_older_add(
     unrelated = _queue(db, loser, "keyword_add", "Egret", "2026-01-03 00:00:00")
 
     with caplog.at_level(logging.INFO):
-        dropped = db._reconcile_conflicting_keyword_edits(loser, survivor)
+        dropped = db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor)
 
     assert dropped == 1
     assert db.conn.in_transaction
@@ -527,7 +528,7 @@ def test_reconcile_keyword_edits_same_side_rows_do_not_compete(db, two_photos):
     loser, survivor = two_photos
     _queue(db, loser, "keyword_add", "Heron", "2026-01-01 00:00:00")
     _queue(db, survivor, "keyword_add", "Heron", "2026-01-02 00:00:00")
-    assert db._reconcile_conflicting_keyword_edits(loser, survivor) == 0
+    assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
     assert len(_pending(db, loser, survivor)) == 2
 
 
@@ -538,7 +539,7 @@ def test_reconcile_keyword_edits_rename_pair_is_one_keep_atom(db, two_photos):
     pair_add = _queue(db, survivor, "keyword_add", "Heron", "2026-01-01 00:00:00")
     pair_rm = _queue(db, survivor, "keyword_remove", "heron", "2026-01-03 00:00:00")
     lone_rm = _queue(db, loser, "keyword_remove", "HERON", "2026-01-02 00:00:00")
-    assert db._reconcile_conflicting_keyword_edits(loser, survivor) == 1
+    assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 1
     assert [r["id"] for r in _pending(db, loser, survivor)] == [pair_add, pair_rm]
     assert lone_rm not in [r["id"] for r in _pending(db, loser, survivor)]
 
@@ -558,7 +559,7 @@ def test_carry_keyword_associations_add_and_remove(db, two_photos, monkeypatch):
     monkeypatch.setattr(db, "untag_photo", lambda *a, **k: (
         untagged.append((a, k)), real_untag(*a, **k))[1])
 
-    assert db._reconcile_conflicting_keyword_edits(loser, survivor) == 0
+    assert db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor) == 0
     assert tagged == [((survivor, heron), {"_commit": False})]
     assert untagged == [((survivor, egret), {"_commit": False})]
     assert _kw_ids(db, survivor) == [heron]
@@ -570,7 +571,7 @@ def test_carry_keyword_associations_skips_when_survivor_is_newer(db, two_photos)
     db.tag_photo(loser, heron)
     _queue(db, loser, "keyword_add", "Heron", "2026-01-01 00:00:00")
     _queue(db, survivor, "keyword_add", "Heron", "2026-01-02 00:00:00")
-    db._reconcile_conflicting_keyword_edits(loser, survivor)
+    db.moves_merge.reconcile_conflicting_keyword_edits(loser, survivor)
     assert _kw_ids(db, survivor) == []
 
 
@@ -600,10 +601,10 @@ def test_photo_keyword_ids_matching_uses_the_ascii_match_key(db, two_photos):
     other = db.add_keyword("Egret", kw_type="general")
     for kid in (upper, accented, other):
         db.tag_photo(loser, kid)
-    assert db._photo_keyword_ids_matching(loser, "great heron") == [upper]
-    assert db._photo_keyword_ids_matching(loser, "Éclair") == [accented]
-    assert db._photo_keyword_ids_matching(loser, "éclair") == []
-    assert db._photo_keyword_ids_matching(loser, "nothing") == []
+    assert db.moves_merge.photo_keyword_ids_matching(loser, "great heron") == [upper]
+    assert db.moves_merge.photo_keyword_ids_matching(loser, "Éclair") == [accented]
+    assert db.moves_merge.photo_keyword_ids_matching(loser, "éclair") == []
+    assert db.moves_merge.photo_keyword_ids_matching(loser, "nothing") == []
 
 
 # -- review-state transfer ---------------------------------------------------
@@ -627,26 +628,26 @@ def test_transfer_gps_review_takes_newest_and_prefers_survivor_on_tie(
         db, two_photos):
     loser, survivor = two_photos
     _gps(db, loser, "L1", "2026-01-02")
-    db._transfer_gps_review_for_merge(loser, survivor)
+    db.moves_merge.transfer_gps_review(loser, survivor)
     assert _gps_row(db, survivor) == ("L1", "2026-01-02")
     assert db.conn.in_transaction
     db.conn.rollback()
 
     _gps(db, survivor, "S1", "2026-01-02")
-    db._transfer_gps_review_for_merge(loser, survivor)
+    db.moves_merge.transfer_gps_review(loser, survivor)
     assert _gps_row(db, survivor) == ("S1", "2026-01-02")
 
     db.conn.execute(
         "UPDATE location_gps_reviews SET reviewed_at = '2026-01-03' "
         "WHERE photo_id = ?", (loser,))
-    db._transfer_gps_review_for_merge(loser, survivor)
+    db.moves_merge.transfer_gps_review(loser, survivor)
     assert _gps_row(db, survivor) == ("L1", "2026-01-03")
 
 
 def test_transfer_review_state_without_loser_rows_is_zero(db, two_photos):
     loser, survivor = two_photos
     _queue(db, survivor, "rating", "4", "2026-01-01 00:00:00")
-    assert db._transfer_review_state_for_merge(loser, survivor) == 0
+    assert db.moves_merge.transfer_review_state(loser, survivor) == 0
     assert db.conn.execute(
         "SELECT rating FROM photos WHERE id = ?", (survivor,)).fetchone()[0] == 0
 
@@ -659,7 +660,7 @@ def test_transfer_review_state_newest_rating_and_flag_win(db, two_photos, caplog
     old_flag = _queue(db, loser, "flag", "flagged", "2026-01-03 00:00:00")
 
     with caplog.at_level(logging.INFO):
-        dropped = db._transfer_review_state_for_merge(loser, survivor)
+        dropped = db.moves_merge.transfer_review_state(loser, survivor)
 
     assert dropped == 2
     assert db.conn.in_transaction
@@ -682,7 +683,7 @@ def test_transfer_review_state_malformed_rating_leaves_column(db, two_photos):
     db.conn.commit()
     _queue(db, survivor, "rating", "4", "2026-01-01 00:00:00")
     bad = _queue(db, loser, "rating", "five", "2026-01-02 00:00:00")
-    assert db._transfer_review_state_for_merge(loser, survivor) == 1
+    assert db.moves_merge.transfer_review_state(loser, survivor) == 1
     assert [r["id"] for r in _pending(db, loser, survivor)] == [bad]
     assert db.conn.execute(
         "SELECT rating FROM photos WHERE id = ?", (survivor,)).fetchone()[0] == 3
@@ -694,7 +695,7 @@ def test_transfer_review_state_same_photo_rows_are_not_adjudicated(
     _queue(db, loser, "rating", "1", "2026-01-01 00:00:00")
     _queue(db, loser, "rating", "4", "2026-01-02 00:00:00")
     with caplog.at_level(logging.INFO):
-        assert db._transfer_review_state_for_merge(loser, survivor) == 0
+        assert db.moves_merge.transfer_review_state(loser, survivor) == 0
     assert len(_pending(db, loser)) == 2
     assert db.conn.execute(
         "SELECT rating FROM photos WHERE id = ?", (survivor,)).fetchone()[0] == 4
@@ -705,11 +706,11 @@ def test_transfer_review_state_composes_through_the_facade(
         db, two_photos, monkeypatch):
     loser, survivor = two_photos
     calls = []
-    monkeypatch.setattr(db, "_transfer_gps_review_for_merge",
-                        lambda *a: calls.append(("gps",) + a))
-    monkeypatch.setattr(db, "_transfer_edit_recipe_for_merge",
-                        lambda *a: calls.append(("recipe",) + a) or 3)
-    assert db._transfer_review_state_for_merge(loser, survivor) == 3
+    monkeypatch.setattr(MovesMergeRepository, "transfer_gps_review",
+                        lambda self, *a: calls.append(("gps",) + a))
+    monkeypatch.setattr(MovesMergeRepository, "transfer_edit_recipe",
+                        lambda self, *a: calls.append(("recipe",) + a) or 3)
+    assert db.moves_merge.transfer_review_state(loser, survivor) == 3
     assert calls == [("gps", loser, survivor), ("recipe", loser, survivor)]
 
 
@@ -722,7 +723,7 @@ def _recipe(db, photo_id):
 
 def test_transfer_edit_recipe(db, two_photos):
     loser, survivor = two_photos
-    assert db._transfer_edit_recipe_for_merge(loser, survivor) == 0
+    assert db.moves_merge.transfer_edit_recipe(loser, survivor) == 0
 
     db.conn.execute(
         "INSERT INTO photo_edit_recipes (photo_id, recipe_json, updated_at) "
@@ -730,7 +731,7 @@ def test_transfer_edit_recipe(db, two_photos):
     db.conn.commit()
     older = _queue(db, survivor, "edit_recipe", '{"s": 1}', "2026-01-01 00:00:00")
     newer = _queue(db, loser, "edit_recipe", '{"l": 2}', "2026-01-02 00:00:00")
-    assert db._transfer_edit_recipe_for_merge(loser, survivor) == 1
+    assert db.moves_merge.transfer_edit_recipe(loser, survivor) == 1
     assert db.conn.in_transaction
     assert [r["id"] for r in _pending(db, loser, survivor)] == [newer]
     assert older not in [r["id"] for r in _pending(db, loser, survivor)]
@@ -741,14 +742,14 @@ def test_transfer_edit_recipe(db, two_photos):
 
     # A newest empty value is the "recipe cleared" edit.
     _queue(db, loser, "edit_recipe", "", "2026-01-03 00:00:00")
-    assert db._transfer_edit_recipe_for_merge(loser, survivor) == 0
+    assert db.moves_merge.transfer_edit_recipe(loser, survivor) == 0
     assert _recipe(db, survivor) is None
 
 
 def test_transfer_edit_recipe_inserts_missing_survivor_row(db, two_photos):
     loser, survivor = two_photos
     _queue(db, loser, "edit_recipe", '{"x": 1}', "2026-01-02 00:00:00")
-    assert db._transfer_edit_recipe_for_merge(loser, survivor) == 0
+    assert db.moves_merge.transfer_edit_recipe(loser, survivor) == 0
     assert _recipe(db, survivor) == '{"x": 1}'
 
 
@@ -761,12 +762,12 @@ def test_link_survivor_for_sibling_edits(db, caplog):
     fid = _folder(db, "/arch", root=True)
     pid = _photo(db, fid, "a.jpg")
 
-    assert db._link_survivor_for_sibling_edits(sibling, pid + 999) is False
+    assert db.moves_merge.link_survivor_for_sibling_edits(sibling, pid + 999) is False
     # The active workspace already sees the folder: no grant needed.
-    assert db._link_survivor_for_sibling_edits(active, pid) is False
+    assert db.moves_merge.link_survivor_for_sibling_edits(active, pid) is False
 
     with caplog.at_level(logging.INFO):
-        assert db._link_survivor_for_sibling_edits(sibling, pid) is True
+        assert db.moves_merge.link_survivor_for_sibling_edits(sibling, pid) is True
     assert db.conn.in_transaction  # caller owns the commit
     assert [tuple(r) for r in db.conn.execute(
         "SELECT workspace_id, photo_id FROM workspace_sync_only_photos")] == [
@@ -777,7 +778,7 @@ def test_link_survivor_for_sibling_edits(db, caplog):
     assert any(
         f"Granted workspace {sibling} sync-only access to photo {pid}"
         in r.getMessage() for r in caplog.records)
-    assert db._link_survivor_for_sibling_edits(sibling, pid) is False
+    assert db.moves_merge.link_survivor_for_sibling_edits(sibling, pid) is False
 
 
 def test_get_sync_only_photo_paths(db):
@@ -1003,10 +1004,10 @@ def test_merge_rolls_back_every_reparent_on_error(db, tmp_path, monkeypatch):
     counts_calls = []
     monkeypatch.setattr(db, "_new_images_cache", recorder)
 
-    def boom(losing_id, surviving_id):
+    def boom(self, losing_id, surviving_id):
         raise RuntimeError("transfer exploded")
 
-    monkeypatch.setattr(db, "_transfer_review_state_for_merge", boom)
+    monkeypatch.setattr(MovesMergeRepository, "transfer_review_state", boom)
     monkeypatch.setattr(FolderRepository, "update_counts",
                         lambda self: counts_calls.append(1))
     before_folders = [tuple(r) for r in db.conn.execute(
@@ -1030,21 +1031,26 @@ def test_merge_routes_real_collision_helpers_through_the_facade(
         db, tmp_path, monkeypatch):
     t = _collision_tree(db, tmp_path)
     calls = []
-    for name in ("_move_location_state_for_merge",
-                 "_reconcile_conflicting_keyword_edits",
-                 "_transfer_review_state_for_merge"):
-        real = getattr(db, name)
+    real_move = db._move_location_state_for_merge
 
-        def recorder(losing, surviving, _name=name, _real=real):
+    def move_recorder(losing, surviving):
+        calls.append(("_move_location_state_for_merge", losing, surviving))
+        return real_move(losing, surviving)
+
+    monkeypatch.setattr(db, "_move_location_state_for_merge", move_recorder)
+    for name in ("reconcile_conflicting_keyword_edits", "transfer_review_state"):
+        real = getattr(MovesMergeRepository, name)
+
+        def recorder(self, losing, surviving, _name=name, _real=real):
             calls.append((_name, losing, surviving))
-            return _real(losing, surviving)
+            return _real(self, losing, surviving)
 
-        monkeypatch.setattr(db, name, recorder)
+        monkeypatch.setattr(MovesMergeRepository, name, recorder)
     db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
     assert calls == [
         ("_move_location_state_for_merge", t["staged"], t["survivor"]),
-        ("_reconcile_conflicting_keyword_edits", t["staged"], t["survivor"]),
-        ("_transfer_review_state_for_merge", t["staged"], t["survivor"]),
+        ("reconcile_conflicting_keyword_edits", t["staged"], t["survivor"]),
+        ("transfer_review_state", t["staged"], t["survivor"]),
     ]
 
 
@@ -1052,21 +1058,26 @@ def test_merge_routes_phantom_helpers_through_the_facade(
         db, tmp_path, monkeypatch):
     t = _collision_tree(db, tmp_path, same_hash=False)
     calls = []
-    for name in ("_move_location_state_for_merge",
-                 "_reconcile_conflicting_keyword_edits",
-                 "_transfer_review_state_for_merge"):
-        real = getattr(db, name)
+    real_move = db._move_location_state_for_merge
 
-        def recorder(losing, surviving, _name=name, _real=real):
+    def move_recorder(losing, surviving):
+        calls.append(("_move_location_state_for_merge", losing, surviving))
+        return real_move(losing, surviving)
+
+    monkeypatch.setattr(db, "_move_location_state_for_merge", move_recorder)
+    for name in ("reconcile_conflicting_keyword_edits", "transfer_review_state"):
+        real = getattr(MovesMergeRepository, name)
+
+        def recorder(self, losing, surviving, _name=name, _real=real):
             calls.append((_name, losing, surviving))
-            return _real(losing, surviving)
+            return _real(self, losing, surviving)
 
-        monkeypatch.setattr(db, name, recorder)
+        monkeypatch.setattr(MovesMergeRepository, name, recorder)
     counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
     assert calls == [
         ("_move_location_state_for_merge", t["survivor"], t["staged"]),
-        ("_reconcile_conflicting_keyword_edits", t["survivor"], t["staged"]),
-        ("_transfer_review_state_for_merge", t["survivor"], t["staged"]),
+        ("reconcile_conflicting_keyword_edits", t["survivor"], t["staged"]),
+        ("transfer_review_state", t["survivor"], t["staged"]),
     ]
     assert counts["dropped_photo_ids"] == [t["survivor"]]
     assert db.conn.execute(
@@ -1080,15 +1091,15 @@ def test_merge_links_sibling_survivors_through_the_facade(
     sibling = db.create_workspace("Sibling")
     _queue(db, t["staged"], "flag", "flagged", "2026-01-01 00:00:00", ws=sibling)
     calls = []
-    real = db._link_survivor_for_sibling_edits
+    real = MovesMergeRepository.link_survivor_for_sibling_edits
 
-    def recorder(ws_id, photo_id):
+    def recorder(self, ws_id, photo_id):
         calls.append((ws_id, photo_id, db.conn.execute(
             "SELECT folder_id FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()[0]))
-        return real(ws_id, photo_id)
+        return real(self, ws_id, photo_id)
 
-    monkeypatch.setattr(db, "_link_survivor_for_sibling_edits", recorder)
+    monkeypatch.setattr(MovesMergeRepository, "link_survivor_for_sibling_edits", recorder)
     counts = db.merge_staged_tree_into_archive(t["stage_root"], t["arch"])
     assert calls == [(sibling, t["survivor"], t["day"])]
     # Sibling rows are preserved but not reported as active-ws identities.
@@ -1635,17 +1646,37 @@ def test_thumb_paths_for_ids_skips_photos_without_a_thumbnail(db):
 
 # -- structure ---------------------------------------------------------------
 
+# Still on ``Database``: the keyword re-tagging (which the provenance contract
+# finds through ``self.tag_photo`` / ``untag_photo``), the staged-tree merge
+# (which wires in the workspace-link, new-images and folder-count hooks), and
+# the reads that resolve the active workspace or its detector floor.
 MOVED = [
-    "create_move_rule", "get_move_rule", "list_move_rules", "update_move_rule",
-    "delete_move_rule", "touch_move_rule", "batch_update_photo_folder",
-    "move_folder_path", "_newest_location_change_key",
-    "_move_location_state_for_merge", "_reconcile_conflicting_keyword_edits",
-    "_carry_keyword_associations_for_merge", "_photo_keyword_ids_matching",
-    "_transfer_gps_review_for_merge", "_transfer_review_state_for_merge",
-    "_transfer_edit_recipe_for_merge", "_link_survivor_for_sibling_edits",
+    "_move_location_state_for_merge",
+    "_carry_keyword_associations_for_merge",
     "get_sync_only_photo_paths", "merge_staged_tree_into_archive",
-    "check_filename_collisions", "query_move_rule_matches",
+    "query_move_rule_matches",
     "_photo_syncable_in_workspace",
+]
+
+# The forwarding wrappers this domain used to have on ``Database``; callers
+# reach the same methods through ``db.moves_merge`` now.
+REMOVED_MOVES_MERGE_WRAPPERS = [
+    "create_move_rule",
+    "get_move_rule",
+    "list_move_rules",
+    "update_move_rule",
+    "delete_move_rule",
+    "touch_move_rule",
+    "batch_update_photo_folder",
+    "move_folder_path",
+    "_newest_location_change_key",
+    "_reconcile_conflicting_keyword_edits",
+    "_photo_keyword_ids_matching",
+    "_transfer_gps_review_for_merge",
+    "_transfer_review_state_for_merge",
+    "_transfer_edit_recipe_for_merge",
+    "_link_survivor_for_sibling_edits",
+    "check_filename_collisions",
 ]
 
 
@@ -1666,6 +1697,12 @@ def _self_attrs(fn):
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name) and node.value.id == "self"
     }
+
+
+def test_moves_merge_has_no_forwarding_wrappers_on_database():
+    """The domain is reached through ``db.moves_merge``; Database keeps no aliases."""
+    for name in REMOVED_MOVES_MERGE_WRAPPERS:
+        assert not hasattr(Database, name), f"Database.{name} came back; call db.moves_merge"
 
 
 @pytest.mark.parametrize("name", MOVED)
@@ -1716,9 +1753,6 @@ def test_merge_wires_every_callback_to_the_facade():
         "add_workspace_folder": "add_workspace_folder",
         "add_workspace_folder_no_commit": "_add_workspace_folder_no_commit",
         "move_location_state": "_move_location_state_for_merge",
-        "reconcile_keyword_edits": "_reconcile_conflicting_keyword_edits",
-        "transfer_review_state": "_transfer_review_state_for_merge",
-        "link_survivor_for_sibling_edits": "_link_survivor_for_sibling_edits",
     }
     call = next(
         node for node in ast.walk(_method_ast("merge_staged_tree_into_archive"))
@@ -1747,24 +1781,28 @@ def test_merge_wires_every_callback_to_the_facade():
     assert isinstance(fold, ast.Name) and fold.id == "KEYWORD_SOURCE_CONFLICT_SQL"
 
 
-@pytest.mark.parametrize("name,callback,target", [
-    ("move_folder_path", "relink_parents_by_path", "folders.relink_parents_by_path"),
-    ("_reconcile_conflicting_keyword_edits", "carry_keyword_associations",
-     "_carry_keyword_associations_for_merge"),
-    ("_transfer_review_state_for_merge", "transfer_gps_review",
-     "_transfer_gps_review_for_merge"),
-    ("_transfer_review_state_for_merge", "transfer_edit_recipe",
-     "_transfer_edit_recipe_for_merge"),
-])
-def test_helper_callbacks_route_through_the_facade(name, callback, target):
+def test_factory_binds_the_cross_domain_callbacks():
+    """The keyword carry re-tags through the façade; the relink is late-bound."""
     import ast
 
     wired = {
         kw.arg: ast.unparse(kw.value)
-        for node in ast.walk(_method_ast(name)) if isinstance(node, ast.Call)
+        for node in ast.walk(_method_ast("_moves_merge_repository"))
+        if isinstance(node, ast.Call)
         for kw in node.keywords
     }
-    assert wired[callback] == f"self.{target}"
+    assert wired["carry_keyword_associations"] == "self._carry_keyword_associations_for_merge"
+    assert wired["relink_parents_by_path"] == (
+        "lambda folder_ids: self.folders.relink_parents_by_path(folder_ids)")
+
+
+def test_relink_reaches_a_patched_folder_repository(db, monkeypatch):
+    root = _folder(db, "/p/q", root=True)
+    seen = []
+    monkeypatch.setattr(FolderRepository, "relink_parents_by_path",
+                        lambda self, ids: seen.append(list(ids)))
+    db.moves_merge.move_folder_path(root, "/z/q")
+    assert seen == [[root]]
 
 
 def test_facade_signatures_are_unchanged():
@@ -1773,30 +1811,34 @@ def test_facade_signatures_are_unchanged():
     from repositories import UNSET
 
     expected = {
-        "create_move_rule": "(self, name, destination, criteria)",
-        "get_move_rule": "(self, rule_id)",
-        "list_move_rules": "(self)",
-        "delete_move_rule": "(self, rule_id)",
-        "touch_move_rule": "(self, rule_id)",
-        "batch_update_photo_folder": "(self, photo_ids, target_folder_id)",
-        "move_folder_path": "(self, folder_id, new_path, new_name=None)",
-        "_newest_location_change_key": "(self, photo_id)",
         "_move_location_state_for_merge": "(self, losing_id, surviving_id)",
-        "_reconcile_conflicting_keyword_edits": "(self, losing_id, surviving_id)",
         "_carry_keyword_associations_for_merge": "(self, losing_id, surviving_id, by_key)",
-        "_photo_keyword_ids_matching": "(self, photo_id, match_key)",
-        "_transfer_gps_review_for_merge": "(self, losing_id, surviving_id)",
-        "_transfer_review_state_for_merge": "(self, losing_id, surviving_id)",
-        "_transfer_edit_recipe_for_merge": "(self, losing_id, surviving_id)",
-        "_link_survivor_for_sibling_edits": "(self, workspace_id, photo_id)",
         "get_sync_only_photo_paths": "(self, workspace_id=None)",
         "merge_staged_tree_into_archive": "(self, staged_root_id, archive_path)",
-        "check_filename_collisions": "(self, photo_ids, target_folder_id)",
         "query_move_rule_matches": "(self, criteria)",
     }
     for name, sig in expected.items():
         assert str(inspect.signature(getattr(Database, name))) == sig, name
-    params = inspect.signature(Database.update_move_rule).parameters
+    repo_expected = {
+        "create_rule": "(self, name, destination, criteria)",
+        "get_rule": "(self, rule_id)",
+        "list_rules": "(self)",
+        "delete_rule": "(self, rule_id)",
+        "touch_rule": "(self, rule_id)",
+        "batch_update_photo_folder": "(self, photo_ids, target_folder_id)",
+        "move_folder_path": "(self, folder_id, new_path, new_name=None)",
+        "newest_location_change_key": "(self, photo_id)",
+        "reconcile_conflicting_keyword_edits": "(self, losing_id, surviving_id)",
+        "photo_keyword_ids_matching": "(self, photo_id, match_key)",
+        "transfer_gps_review": "(self, losing_id, surviving_id)",
+        "transfer_review_state": "(self, losing_id, surviving_id)",
+        "transfer_edit_recipe": "(self, losing_id, surviving_id)",
+        "link_survivor_for_sibling_edits": "(self, workspace_id, photo_id)",
+        "filename_collisions": "(self, photo_ids, target_folder_id)",
+    }
+    for name, sig in repo_expected.items():
+        assert str(inspect.signature(getattr(MovesMergeRepository, name))) == sig, name
+    params = inspect.signature(MovesMergeRepository.update_rule).parameters
     assert list(params) == ["self", "rule_id", "name", "destination", "criteria"]
     assert all(params[p].default is UNSET for p in ("name", "destination", "criteria"))
 

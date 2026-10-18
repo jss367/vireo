@@ -2029,7 +2029,7 @@ def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
 
 
 def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
-    """Renaming/moving a source folder via ``move_folder_path`` (e.g. the
+    """Renaming/moving a source folder via ``moves_merge.move_folder_path`` (e.g. the
     whole-folder move flow) frees the old path for reuse. Without cascading
     the rename into ``photos.last_move_source_folder_path``, a new unrelated
     folder later scanned at the freed path would compare equal to the stale
@@ -2085,7 +2085,7 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     # out). The old path is now free for reuse.
     renamed_path = tmp_path / "CARD.bak"
     reusable_path.rename(renamed_path)
-    db.move_folder_path(original_fid, str(renamed_path), new_name="CARD.bak")
+    db.moves_merge.move_folder_path(original_fid, str(renamed_path), new_name="CARD.bak")
 
     # The provenance must have been rebased to the new path, not left
     # pointing at the freed one.
@@ -3228,7 +3228,7 @@ def test_normalize_destination_name_rejects_colon():
 def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
     """Catalog repoints first, so a post-commit rmtree failure is committed.
 
-    If rmtree(src_path) raises after move_folder_path has already pointed
+    If rmtree(src_path) raises after moves_merge.move_folder_path has already pointed
     the catalog at the destination, the archive IS published — the files
     exist at the destination and the catalog resolves there. Surfacing
     that as a normal ``errors`` entry would tell the caller the move
@@ -6718,7 +6718,7 @@ def test_mtime_plan_ignores_a_posix_backslash_path_collision(tmp_path):
     from a file under the destination.
 
     Exercises the planner directly rather than a whole ``move_folder``: the
-    same normalization lives in ``db.move_folder_path``'s cascade, where
+    same normalization lives in ``db.moves_merge.move_folder_path``'s cascade, where
     this layout raises ``UNIQUE constraint failed: folders.path`` on ``main``
     today. That is a pre-existing bug in a different module — this test pins
     the planner's own behavior without depending on it.

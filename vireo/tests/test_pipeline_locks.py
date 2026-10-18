@@ -1172,7 +1172,7 @@ def test_archive_destination_reserve_rejects_ancestor():
 
     Symmetry matters because either run can land first; once the leaf is
     in flight, a second pipeline aiming at the enclosing root would later
-    have to reparent the in-flight subtree, which ``move_folder_path``
+    have to reparent the in-flight subtree, which ``moves_merge.move_folder_path``
     doesn't do.
     """
     try:

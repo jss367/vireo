@@ -250,7 +250,7 @@ class _FolderCatalogRewrite:
             self.merge_counts = db.merge_staged_tree_into_archive(
                 self.folder_id, self.target.merge_reconcile_base)
         else:
-            db.move_folder_path(self.folder_id, self.target.catalog_path,
+            db.moves_merge.move_folder_path(self.folder_id, self.target.catalog_path,
                                 new_name=self.landing_name)
         db.folders.update_counts()
 

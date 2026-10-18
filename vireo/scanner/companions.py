@@ -537,7 +537,7 @@ def _delete_companion_row(
     collection entries move to the primary when the caller's block exits.
     """
     # Remove keyword associations then the duplicate JPEG record
-    db._transfer_gps_review_for_merge(companion["id"], primary["id"])
+    db.moves_merge.transfer_gps_review(companion["id"], primary["id"])
     db.companion_pairing.delete_keyword_associations(companion["id"])
     # Move the embedded-offered suppression onto the survivor so a
     # user removal survives this pairing. The FK on

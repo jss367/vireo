@@ -10896,9 +10896,9 @@ def test_missing_folder_hidden_from_collection(tmp_path):
 
 def test_create_move_rule(db):
     """Creating a move rule stores name, destination, and criteria."""
-    rule_id = db.create_move_rule("Archive hawks", "/nas/archive", {"rating_min": 3, "species": ["Red-tailed Hawk"]})
+    rule_id = db.moves_merge.create_rule("Archive hawks", "/nas/archive", {"rating_min": 3, "species": ["Red-tailed Hawk"]})
     assert rule_id is not None
-    rule = db.get_move_rule(rule_id)
+    rule = db.moves_merge.get_rule(rule_id)
     assert rule["name"] == "Archive hawks"
     assert rule["destination"] == "/nas/archive"
     import json
@@ -10907,9 +10907,9 @@ def test_create_move_rule(db):
 
 def test_list_move_rules(db):
     """Listing rules returns all saved rules."""
-    db.create_move_rule("Rule A", "/dest/a", {})
-    db.create_move_rule("Rule B", "/dest/b", {"flag": "flagged"})
-    rules = db.list_move_rules()
+    db.moves_merge.create_rule("Rule A", "/dest/a", {})
+    db.moves_merge.create_rule("Rule B", "/dest/b", {"flag": "flagged"})
+    rules = db.moves_merge.list_rules()
     assert len(rules) == 2
     names = {r["name"] for r in rules}
     assert names == {"Rule A", "Rule B"}
@@ -10917,27 +10917,27 @@ def test_list_move_rules(db):
 
 def test_update_move_rule(db):
     """Updating a rule changes its fields."""
-    rid = db.create_move_rule("Old name", "/old", {})
-    db.update_move_rule(rid, name="New name", destination="/new", criteria={"rating_min": 5})
-    rule = db.get_move_rule(rid)
+    rid = db.moves_merge.create_rule("Old name", "/old", {})
+    db.moves_merge.update_rule(rid, name="New name", destination="/new", criteria={"rating_min": 5})
+    rule = db.moves_merge.get_rule(rid)
     assert rule["name"] == "New name"
     assert rule["destination"] == "/new"
 
 
 def test_delete_move_rule(db):
     """Deleting a rule removes it."""
-    rid = db.create_move_rule("Temp", "/tmp", {})
-    db.delete_move_rule(rid)
-    assert db.get_move_rule(rid) is None
+    rid = db.moves_merge.create_rule("Temp", "/tmp", {})
+    db.moves_merge.delete_rule(rid)
+    assert db.moves_merge.get_rule(rid) is None
 
 
 def test_batch_update_photo_folder(db):
-    """batch_update_photo_folder moves photos to a new folder in one transaction."""
+    """moves_merge.batch_update_photo_folder moves photos to a new folder in one transaction."""
     fid1 = db.add_folder("/src", name="src")
     fid2 = db.add_folder("/dst", name="dst")
     p1 = db.add_photo(folder_id=fid1, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid1, filename="b.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
-    db.batch_update_photo_folder([p1, p2], fid2)
+    db.moves_merge.batch_update_photo_folder([p1, p2], fid2)
     photo1 = db.photos.get(p1)
     photo2 = db.photos.get(p2)
     assert photo1["folder_id"] == fid2
@@ -10945,11 +10945,11 @@ def test_batch_update_photo_folder(db):
 
 
 def test_move_folder_path_cascade(db):
-    """move_folder_path updates parent and all child folder paths."""
+    """moves_merge.move_folder_path updates parent and all child folder paths."""
     fid = db.add_folder("/local/2024", name="2024")
     cid = db.add_folder("/local/2024/march", name="march", parent_id=fid)
     gcid = db.add_folder("/local/2024/march/birds", name="birds", parent_id=cid)
-    db.move_folder_path(fid, "/nas/photos/2024")
+    db.moves_merge.move_folder_path(fid, "/nas/photos/2024")
     parent = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
     child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (cid,)).fetchone()
     grandchild = db.conn.execute("SELECT path FROM folders WHERE id = ?", (gcid,)).fetchone()
@@ -10970,7 +10970,7 @@ def test_move_folder_path_relinks_parent(db, destination):
                           parent_id=date)
 
     new_path = destination + "/2026-07-12"
-    db.move_folder_path(date, new_path)
+    db.moves_merge.move_folder_path(date, new_path)
 
     expected_parent = {"/photos/2026": year, "/archive": archive}.get(destination)
     tree = {row["id"]: row for row in db.folders.tree()}
@@ -11149,7 +11149,7 @@ def test_move_folder_path_does_not_touch_wildcard_siblings(db):
     sib = db.add_folder("/pics/myXdir", name="myXdir")
     sib_child = db.add_folder("/pics/myXdir/sub", name="sub", parent_id=sib)
 
-    db.move_folder_path(fid, "/dest/dir")
+    db.moves_merge.move_folder_path(fid, "/dest/dir")
 
     moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
     sibling = db.conn.execute("SELECT path FROM folders WHERE id = ?", (sib,)).fetchone()
@@ -11166,7 +11166,7 @@ def test_move_folder_path_is_case_sensitive(db):
     sib = db.add_folder("/photos/2024", name="lower-2024")
     sib_child = db.add_folder("/photos/2024/sibling", name="sibling", parent_id=sib)
 
-    db.move_folder_path(fid, "/Archive/2024")
+    db.moves_merge.move_folder_path(fid, "/Archive/2024")
 
     moved = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
     moved_child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (child,)).fetchone()
@@ -14475,7 +14475,7 @@ def test_sync_only_grant_follows_the_photo_across_a_move(db, tmp_path):
     )
     sibling_ws = db.create_workspace("Sibling")
     db.set_active_workspace(ws)
-    assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is True
+    assert db.moves_merge.link_survivor_for_sibling_edits(sibling_ws, pid) is True
     db.conn.commit()
     assert db.get_sync_only_photo_paths(sibling_ws) == {pid: str(first)}
 
@@ -14670,8 +14670,8 @@ def test_link_survivor_sync_only_grant_is_idempotent(db, tmp_path):
         folder_id=folder_id, filename="a.raf", extension=".raf",
         file_size=1, file_mtime=1.0, file_hash="H1",
     )
-    assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is True
-    assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is False
+    assert db.moves_merge.link_survivor_for_sibling_edits(sibling_ws, pid) is True
+    assert db.moves_merge.link_survivor_for_sibling_edits(sibling_ws, pid) is False
     assert db.conn.execute(
         "SELECT COUNT(*) AS n FROM workspace_sync_only_photos "
         "WHERE workspace_id = ? AND photo_id = ?",
@@ -14696,7 +14696,7 @@ def test_link_survivor_skips_when_workspace_already_owns_folder(
     db.set_active_workspace(sibling_ws)
     db.add_workspace_folder(sibling_ws, folder_id, is_root=True)
     db.set_active_workspace(ws)
-    assert db._link_survivor_for_sibling_edits(sibling_ws, pid) is False
+    assert db.moves_merge.link_survivor_for_sibling_edits(sibling_ws, pid) is False
     assert db.conn.execute(
         "SELECT COUNT(*) AS n FROM workspace_sync_only_photos "
         "WHERE workspace_id = ?", (sibling_ws,),
@@ -14921,13 +14921,13 @@ def test_folder_legacy_is_op_resolves_like_under(tmp_path, monkeypatch):
 
 
 def test_check_filename_collisions(db):
-    """check_filename_collisions detects conflicts at destination folder."""
+    """moves_merge.filename_collisions detects conflicts at destination folder."""
     fid1 = db.add_folder("/src", name="src")
     fid2 = db.add_folder("/dst", name="dst")
     db.add_photo(folder_id=fid1, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     p_dst = db.add_photo(folder_id=fid2, filename="bird.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
     p_src = db.conn.execute("SELECT id FROM photos WHERE folder_id = ? AND filename = 'bird.jpg'", (fid1,)).fetchone()["id"]
-    collisions = db.check_filename_collisions([p_src], fid2)
+    collisions = db.moves_merge.filename_collisions([p_src], fid2)
     assert len(collisions) == 1
     assert collisions[0]["filename"] == "bird.jpg"
 

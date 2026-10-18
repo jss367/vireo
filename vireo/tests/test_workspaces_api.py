@@ -841,7 +841,7 @@ def test_move_folder_job_rejected_when_folder_is_locally_staged(
 ):
     """POST /api/jobs/move-folder must refuse when the target folder is
     covered by any workspace's local_workspace_folders row. Without the
-    guard the job runs move_folder(), which reaches db.move_folder_path()
+    guard the job runs move_folder(), which reaches db.moves_merge.move_folder_path()
     and rebases the folders row out from under local_workspace_folders and
     the manifest — the owning workspace's next status would fall into
     missing-local recovery and sync/discard could no longer restore the

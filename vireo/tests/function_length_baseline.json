@@ -1,5 +1,5 @@
 {
-  "db.py:Database.merge_staged_tree_into_archive": 124,
+  "db.py:Database.merge_staged_tree_into_archive": 121,
   "export.py:_relocate_stem_files": 153,
   "models.py:_download_and_verify_file": 104,
   "models.py:_hf_download_with_retry": 124,
