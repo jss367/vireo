@@ -23,6 +23,7 @@ from pipeline_job import (
     _weighted_progress,
     run_pipeline_job,
 )
+from repositories.masks_features import PipelineFeatures
 
 
 @pytest.fixture(autouse=True)
@@ -6150,7 +6151,7 @@ def test_extract_masks_stage_warns_on_mixed_already_masked_and_subthreshold(
     )
     db.model_runs.record_detector_run(masked_id, "megadetector-v6", box_count=1)
     db.masks_features.update_pipeline_features(
-        masked_id, mask_path=str(tmp_path / "mask_a.png"),
+        masked_id, PipelineFeatures(mask_path=str(tmp_path / "mask_a.png")),
     )
 
     # Photo B: no mask, only sub-threshold detection → should be flagged.
@@ -9152,8 +9153,11 @@ def test_extract_masks_offline_folder_still_counts_cached_masks(
     from PIL import Image
     Image.new("L", (4, 4), 255).save(mask_file)
     db.masks_features.upsert_mask(
-        cached, sam2_variant, mask_file, "MegaDetector",
-        0.1, 0.1, 0.5, 0.5,
+        cached,
+        sam2_variant,
+        mask_file,
+        "MegaDetector",
+        (0.1, 0.1, 0.5, 0.5),
     )
     db.set_active_mask_variant(cached, sam2_variant)
     db.conn.execute(
@@ -17924,7 +17928,11 @@ def test_extract_masks_preflight_skips_photos_that_already_have_a_mask(
     from PIL import Image
     Image.new("L", (4, 4), 255).save(mask_file)
     db.masks_features.upsert_mask(
-        masked, sam2_variant, mask_file, "MegaDetector", 0.1, 0.1, 0.5, 0.5,
+        masked,
+        sam2_variant,
+        mask_file,
+        "MegaDetector",
+        (0.1, 0.1, 0.5, 0.5),
     )
     db.set_active_mask_variant(masked, sam2_variant)
     db.conn.execute(
@@ -17995,7 +18003,11 @@ def test_extract_masks_preflight_fully_cached_folder_does_not_fail_stage(
         mask_file = str(mask_dir / f"{pid}.{sam2_variant}.png")
         Image.new("L", (4, 4), 255).save(mask_file)
         db.masks_features.upsert_mask(
-            pid, sam2_variant, mask_file, "MegaDetector", 0.1, 0.1, 0.5, 0.5,
+            pid,
+            sam2_variant,
+            mask_file,
+            "MegaDetector",
+            (0.1, 0.1, 0.5, 0.5),
         )
         db.set_active_mask_variant(pid, sam2_variant)
         db.conn.execute(
@@ -18261,7 +18273,7 @@ def _seed_cached_mask(db, tmp_path, photo_id, sam2_variant, dinov2_variant,
     os.makedirs(mask_dir, exist_ok=True)
     mask_file = str(mask_dir / f"{photo_id}.{sam2_variant}.png")
     Image.new("L", (4, 4), 255).save(mask_file)
-    db.masks_features.upsert_mask(photo_id, sam2_variant, mask_file, detector, *prompt)
+    db.masks_features.upsert_mask(photo_id, sam2_variant, mask_file, detector, prompt)
     db.conn.execute(
         "UPDATE photos SET mask_path=?, active_mask_variant=?, "
         "dino_embedding_variant=? WHERE id=?",
