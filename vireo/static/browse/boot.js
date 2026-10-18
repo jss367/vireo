@@ -2,6 +2,38 @@
    it starts the work every other browse script defines, so nothing it
    reaches can be undefined when it runs. */
 
+/* ---------- Page hooks ---------- */
+// The shared navbar and lightbox call these through Vireo.pageHook (see
+// vireo-page-hooks.js): the native menu's photo commands, the lightbox's
+// rating/flag/label/export menu and Delete, and undo/redo. Register them
+// before the page starts, as they were globals from the moment the browse
+// scripts parsed.
+Vireo.registerPageHooks({
+  getActiveSelection: getActiveSelection,
+  getSelectedPhotoId: function() { return selectedPhotoId; },
+  getPhotos: function() { return photos; },
+  getDetailPhotoId: function() { return window._detailPhotoId ?? null; },
+  openBrowseShortcutPhoto: openBrowseShortcutPhoto,
+  moveBrowseSelection: moveBrowseSelection,
+  batchSetRating: batchSetRating,
+  batchSetFlag: batchSetFlag,
+  setRatingFor: setRatingFor,
+  setFlagFor: setFlagFor,
+  setColorLabelFor: setColorLabelFor,
+  setWildlifeExcludedFor: setWildlifeExcludedFor,
+  openExportModal: openExportModal,
+  openPhotoExportModal: openPhotoExportModal,
+  revealPhoto: revealPhoto,
+  copyPhotoPaths: copyPhotoPaths,
+  openBrowseCompare: openBrowseCompare,
+  batchAddKeyword: batchAddKeyword,
+  addToCollection: addToCollection,
+  openCaptureTimeModal: openCaptureTimeModal,
+  batchDelete: batchDelete,
+  removeDeletedLightboxPhoto: removeDeletedLightboxPhoto,
+  afterHistoryChange: afterHistoryChange,
+});
+
 /* ---------- Bootstrap ---------- */
 // ``folderHealthRefreshSeq`` must be *initialized* before ``bootstrapBrowse()``
 // is invoked, not merely declared. ``var`` hoists the declaration to the top

@@ -1,13 +1,13 @@
 // Edit History checkpoints and the saved-edit undo/redo hooks.
 // Classic page script; load boot.js after all definitions.
 
-window.beforeHistoryChange = function() {
+function beforeHistoryChange() {
   if (editorState.loading || Object.keys(editorState.savingPhotoIds).length || isEditorDirty()) {
     showToast('Save or discard your editor changes before undoing saved edits.', 'info');
     return false;
   }
   return true;
-};
+}
 
 // Undo/redo of saved edits (navbar history controls) announces when its request
 // is in flight so the editor freezes until the reload it triggers takes over.
@@ -26,9 +26,9 @@ function bindEditHistoryBusyEvents() {
   });
 }
 
-window.afterHistoryChange = async function() {
+async function afterHistoryChange() {
   if (editorState.photoId) await loadPhoto(editorState.photoId, {skipUrl: true});
-};
+}
 
 /** @param {EditorRecipe|null} recipe */ async function restoreRecipe(recipe) {
   // The history panel is also pointer-events: none while loading, but guard

@@ -32,11 +32,13 @@ declare const VireoExportPresets:{markCustom():void;modalOpened():void;subfolder
 declare const VireoExportCollisions:{schedule():void;reset():void;cancelPending():void;acknowledged(preflight:EditorExportPreflight):boolean;init(options:unknown):void};
 declare const VireoExportJob:{watch(jobId:string):void};
 declare class VireoFolderBrowser {constructor(options:{overlayId:string;defaultMode:string;modes:Record<string,{title:string;multiple:boolean;showCounts:boolean;startPath:()=>string;onSelect:(path:string)=>void}>});sequence:number;open(mode:string,options?:{skipInitialBrowse:boolean}):void}
-interface Window {beforeHistoryChange():boolean;afterHistoryChange():Promise<void>;openContextMenu?:typeof openContextMenu;renderHistoryControls?():void;setEditorSpacePan(active:boolean):void;submitToInat?(id:number):void;vireoEditNav?:{getList():number[];getLastPhoto():number|null;setList(ids:number[],current:number|null|undefined):void;setLastPhoto(id:number):void;setCopiedRecipe(recipe:EditorRecipe,metadata:{source:string|null;at:number}):Promise<void>};vireoRefreshEditRecipeCache?(updates:Record<string,EditorRecipe|null>):void;vireoRefreshNavigationHrefs?():void}
+interface Window {openContextMenu?:typeof openContextMenu;renderHistoryControls?():void;setEditorSpacePan(active:boolean):void;submitToInat?(id:number):void;vireoEditNav?:{getList():number[];getLastPhoto():number|null;setList(ids:number[],current:number|null|undefined):void;setLastPhoto(id:number):void;setCopiedRecipe(recipe:EditorRecipe,metadata:{source:string|null;at:number}):Promise<void>};vireoRefreshEditRecipeCache?(updates:Record<string,EditorRecipe|null>):void;vireoRefreshNavigationHrefs?():void}
 interface DocumentEventMap {'vireo:edit-history-busy':CustomEvent<{busy:boolean}>}
 
 type EditorPointColorKey = 'hue_range'|'saturation_range'|'luminance_range'|'hue'|'saturation'|'luminance';
 type EditorPointColor = {sample:[number,number,number]} & Partial<Record<EditorPointColorKey,number>>;
 interface EditorHistorySnapshot {recipe:EditorRecipe;cropAspect:number|null;cropEditing:boolean;localStale:boolean}
 interface EditorHistoryGesture {pointerId:number;undoBefore?:EditorHistorySnapshot[];redoBefore?:EditorHistorySnapshot[]}
-interface Window {localHistoryStatus(operation:'undo'|'redo'):{available:boolean;description:string}|null;changeLocalHistory(operation:'undo'|'redo'):boolean|null;doUndo():void;doRedo():void}
+interface Window {doUndo():void;doRedo():void}
+// The page-hook registry from vireo-page-hooks.js (types/page-hooks.d.ts).
+declare var Vireo: VireoPageHookRegistry;

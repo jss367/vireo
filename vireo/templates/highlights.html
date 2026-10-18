@@ -301,13 +301,13 @@ function appendHighlightFilterParams(params) {
   }
 }
 
-window.afterHistoryChange = async function() {
+Vireo.registerPageHooks({afterHistoryChange: async function() {
   rejectedFromGrid.clear();
   rejectedAtLoadSeq = {};
   hideHighlightUndo();
   await loadHighlights();
   updateHighlightsLightboxControls(activeLightboxPhotoId);
-};
+}, loadHighlights: loadHighlights, updateHighlightsLightboxControls: updateHighlightsLightboxControls});
 
 async function loadHighlights() {
   var params = requestScopeParams();

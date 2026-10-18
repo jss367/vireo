@@ -435,8 +435,9 @@ function bindPipelineReviewSpeciesDropdown() {
 }
 
 function registerPipelineReviewHistoryHooks() {
-    // Grouping, flags and other photo edits share the durable workspace history.
-    window.beforeHistoryChange = function() {
+  // Grouping, flags and other photo edits share the durable workspace history.
+  Vireo.registerPageHooks({
+    beforeHistoryChange: function() {
       if (Object.keys(pipelineReviewGroupFlagInFlight).length) {
         showToast('A photo edit is still finishing — try again in a moment', 'info');
         return false;
@@ -446,9 +447,9 @@ function registerPipelineReviewHistoryHooks() {
         return false;
       }
       return true;
-    };
+    },
 
-    window.afterHistoryChange = async function() {
+    afterHistoryChange: async function() {
       var seq = ++reviewScopeRequestSeq;
       var data = await safeFetch('/api/pipeline/page-init', {}, {toast: false});
       if (seq !== reviewScopeRequestSeq || !data || !data.results) return;
@@ -457,5 +458,6 @@ function registerPipelineReviewHistoryHooks() {
       cachedResultsCacheInfo = cloneReviewData(data.results_cache_info || null);
       if (!isScopedReviewView()) applyReviewResults(results, data.results_cache_info || null);
       else loadReviewScopeResults();
-    };
+    },
+  });
 }

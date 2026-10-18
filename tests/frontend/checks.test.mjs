@@ -82,12 +82,16 @@ for (const [page, contract] of Object.entries(modulePages)) {
     assert.deepEqual(messages.map(message => message.ruleId), Array(4).fill('no-restricted-syntax'));
   });
 
-  test(`${page}: shared.js writes only the listed hooks and shared latches`, async () => {
-    const allowed = [...contract.pageHooks, ...contract.sharedWrites]
-      .map(name => `window.${name} = null;`).join(' ');
+  test(`${page}: shared.js writes only the listed shared latches, never its page hooks`, async () => {
+    const allowed = contract.sharedWrites.map(name => `window.${name} = null;`).join(' ');
     assert.deepEqual(await lint(allowed, shim), []);
-    const messages = await lint(`window.notAHook = 1; window["${contract.pageHooks[0]}"] = 2;`, shim);
-    assert.deepEqual(messages.map(message => message.ruleId), ['no-restricted-syntax', 'no-restricted-syntax']);
+    const hook = contract.pageHooks[0] || 'afterHistoryChange';
+    const messages = await lint(
+      `window.notAHook = 1; window["${hook}"] = 2; window.${hook} = 3;`
+        + ' window.Vireo.registerPageHooks({});',
+      shim,
+    );
+    assert.deepEqual(messages.map(message => message.ruleId), Array(3).fill('no-restricted-syntax'));
   });
 }
 

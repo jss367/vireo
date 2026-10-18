@@ -197,10 +197,9 @@ function sendReport() {
   // matching how the native View menu switches pages.
   window.openInBrowse = function(photoId){
     var url = '/browse?photo_id=' + photoId;
+    var browseDisabledHint = Vireo.pageHook('getLightboxBrowseDisabledHint');
     if (typeof isTauri === 'function' && isTauri()) {
-      var tauriBlockedHint = typeof window.getLightboxBrowseDisabledHint === 'function'
-        ? window.getLightboxBrowseDisabledHint(photoId, true)
-        : null;
+      var tauriBlockedHint = browseDisabledHint ? browseDisabledHint(photoId, true) : null;
       if (tauriBlockedHint) {
         if (typeof showToast === 'function') showToast(tauriBlockedHint, 'warning');
         return false;
@@ -210,9 +209,7 @@ function sendReport() {
     } else {
       var opened = window.open('about:blank', '_blank');
       if (!opened) {
-        var blockedHint = typeof window.getLightboxBrowseDisabledHint === 'function'
-          ? window.getLightboxBrowseDisabledHint(photoId, true)
-          : null;
+        var blockedHint = browseDisabledHint ? browseDisabledHint(photoId, true) : null;
         if (blockedHint) {
           if (typeof showToast === 'function') showToast(blockedHint, 'warning');
           return false;

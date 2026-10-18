@@ -4,6 +4,19 @@
 /* ==================== Group Review Modal ==================== */
 /** @type {ReviewGroupState} */ var grmState = { groupId: null, model: null, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, selectedIds: new Set(), selectionAnchor: null, upgraded: false };
 
+/**
+ * The Group Review selection the shared navbar's native menu acts on while
+ * the modal is open (the getGroupModalSelection page hook).
+ * @returns {number[]}
+ */
+function grmNativeMenuSelection() {
+  if (grmState.selectedIds && grmState.selectedIds.size) {
+    return /** @type {number[]} */ (Array.from(grmState.selectedIds));
+  }
+  if (grmState.selected != null) return [/** @type {number} */ (grmState.selected)];
+  return [];
+}
+
 /** @param {string} groupId @param {string} model */ function openGroupReview(groupId, model) {
   grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, selectedIds: new Set(), selectionAnchor: null, upgraded: false };
   _grmLoupeLocked = false;

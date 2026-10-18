@@ -1,3 +1,6 @@
+// The native menu's Verify Models command (vireo-page-hooks.js).
+Vireo.registerPageHooks({verifyAllModels: verifyAllModels});
+
 loadModels();
 loadTaxonomy();
 loadSystemInfo();

@@ -2,6 +2,7 @@
   "extends": "../tsconfig.frontend.base.json",
   "files": [
     "../types/pages/lightbox.d.ts",
+    "../types/page-hooks.d.ts",
     "../vireo/static/lightbox/controls.js",
     "../vireo/static/lightbox/crop.js",
     "../vireo/static/lightbox/curation.js",
