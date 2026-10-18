@@ -20,6 +20,10 @@ add the steps above (``save_detections``, ``write_detection_batch``,
 ``get_detections``, ``get_detections_for_photos``,
 ``get_predictions_for_detection``, the misses methods and
 ``delete_detections_by_ids``).
+
+``misses`` derives and stores miss flags through the accessor too:
+``workspace_miss_rows``, ``miss_detection_rows`` and ``write_miss_flags``
+(the caller resolves the workspace and commits).
 """
 
 import sqlite3
@@ -506,13 +510,73 @@ class DetectionsRepository:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def workspace_miss_rows(
+        self, workspace_id: int, detector_confidence: float,
+    ) -> list[sqlite3.Row]:
+        """Every photo ``workspace_id`` can see, with the inputs a miss
+        derivation reads: the stored miss flags and quality signals, the best
+        animal detection at or above ``detector_confidence``
+        (``detection_conf``) and the best prediction (``max_prediction_conf``).
+        """
+        return self.conn.execute(
+            "SELECT p.id, p.folder_id, p.filename, p.companion_path, "
+            "       p.timestamp, p.burst_id, "
+            "       p.subject_size, p.crop_complete, "
+            "       p.subject_tenengrad, p.bg_tenengrad, "
+            "       p.miss_no_subject, p.miss_clipped, p.miss_oof, "
+            "       p.miss_computed_at, p.flag, "
+            "       (SELECT MAX(d.detector_confidence) FROM detections d "
+            "        WHERE d.photo_id = p.id "
+            "          AND (d.detector_model IS NULL "
+            "               OR d.detector_model != 'full-image') "
+            "          AND COALESCE(d.category, 'animal') = 'animal' "
+            "          AND d.detector_confidence >= ?) "
+            "         AS detection_conf, "
+            "       (SELECT MAX(pr.confidence) FROM predictions pr "
+            "        JOIN detections d2 ON d2.id = pr.detection_id "
+            "        WHERE d2.photo_id = p.id) "
+            "         AS max_prediction_conf "
+            "FROM photos p "
+            "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
+            "WHERE wf.workspace_id = ?",
+            (detector_confidence, workspace_id),
+        ).fetchall()
+
+    def miss_detection_rows(self, photo_ids: Sequence[int]) -> list[sqlite3.Row]:
+        """The animal, non-full-image detections of ``photo_ids`` (one chunk),
+        each photo's rows primary first: ``photo_id``, the box and
+        ``detector_confidence``. No confidence floor; callers apply one."""
+        from subjects import primary_order_sql
+
+        placeholders = ",".join("?" * len(photo_ids))
+        return self.conn.execute(
+            f"SELECT photo_id, box_x, box_y, box_w, box_h, "
+            f"       detector_confidence "
+            f"FROM detections "
+            f"WHERE photo_id IN ({placeholders}) "
+            f"  AND (detector_model IS NULL OR detector_model != 'full-image') "
+            f"  AND COALESCE(category, 'animal') = 'animal' "
+            f"ORDER BY photo_id, {primary_order_sql()}",
+            photo_ids,
+        ).fetchall()
+
+    def write_miss_flags(
+        self, updates: Iterable[tuple[int, int, int, str, int]],
+    ) -> None:
+        """Store ``(miss_no_subject, miss_clipped, miss_oof, miss_computed_at,
+        photo_id)`` for each photo, in the caller's transaction."""
+        self.conn.executemany(
+            "UPDATE photos SET miss_no_subject=?, miss_clipped=?, miss_oof=?, "
+            "miss_computed_at=? WHERE id=?",
+            updates,
+        )
+
     def attach_miss_detections(
         self, photos: list[dict[str, Any]], min_conf: float,
     ) -> list[dict[str, Any]]:
         """Add each miss photo's primary and raw-best animal detection fields."""
         import json as _json
 
-        from subjects import primary_order_sql
         photo_ids = [p["id"] for p in photos]
         # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
         # A workspace with thousands of flagged misses would otherwise raise
@@ -522,17 +586,7 @@ class DetectionsRepository:
         raw_primary = {}
         for i in range(0, len(photo_ids), CHUNK):
             chunk = photo_ids[i:i + CHUNK]
-            placeholders = ",".join("?" * len(chunk))
-            det_rows = self.conn.execute(
-                f"SELECT photo_id, box_x, box_y, box_w, box_h, "
-                f"       detector_confidence "
-                f"FROM detections "
-                f"WHERE photo_id IN ({placeholders}) "
-                f"  AND (detector_model IS NULL OR detector_model != 'full-image') "
-                f"  AND COALESCE(category, 'animal') = 'animal' "
-                f"ORDER BY photo_id, {primary_order_sql()}",
-                chunk,
-            ).fetchall()
+            det_rows = self.miss_detection_rows(chunk)
             for d in det_rows:
                 previous = raw_primary.get(d["photo_id"])
                 if previous is None or d["detector_confidence"] > previous["detector_confidence"]:

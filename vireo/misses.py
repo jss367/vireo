@@ -19,7 +19,6 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 import config as _cfg
-from db import commit_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -155,29 +154,7 @@ def _fetch_workspace_miss_rows(db, detector_confidence=None):
     if detector_confidence is None:
         detector_confidence = _effective_detector_confidence(db)
     ws_id = db.require_workspace_id()
-    rows = db.conn.execute(
-        "SELECT p.id, p.folder_id, p.filename, p.companion_path, "
-        "       p.timestamp, p.burst_id, "
-        "       p.subject_size, p.crop_complete, "
-        "       p.subject_tenengrad, p.bg_tenengrad, "
-        "       p.miss_no_subject, p.miss_clipped, p.miss_oof, "
-        "       p.miss_computed_at, p.flag, "
-        "       (SELECT MAX(d.detector_confidence) FROM detections d "
-        "        WHERE d.photo_id = p.id "
-        "          AND (d.detector_model IS NULL "
-        "               OR d.detector_model != 'full-image') "
-        "          AND COALESCE(d.category, 'animal') = 'animal' "
-        "          AND d.detector_confidence >= ?) "
-        "         AS detection_conf, "
-        "       (SELECT MAX(pr.confidence) FROM predictions pr "
-        "        JOIN detections d2 ON d2.id = pr.detection_id "
-        "        WHERE d2.photo_id = p.id) "
-        "         AS max_prediction_conf "
-        "FROM photos p "
-        "JOIN photo_workspace_visibility wf ON wf.photo_id = p.id "
-        "WHERE wf.workspace_id = ?",
-        (detector_confidence, ws_id),
-    ).fetchall()
+    rows = db.detections.workspace_miss_rows(ws_id, detector_confidence)
     return [dict(r) for r in rows]
 
 
@@ -281,24 +258,13 @@ def _attach_primary_detections(db, photos, detector_confidence):
     if not photos:
         return
     photo_ids = [p["id"] for p in photos]
-    from subjects import primary_order_sql
 
     primary = {}
     raw_primary = {}
     CHUNK = 500
     for i in range(0, len(photo_ids), CHUNK):
         chunk = photo_ids[i:i + CHUNK]
-        placeholders = ",".join("?" * len(chunk))
-        det_rows = db.conn.execute(
-            f"SELECT photo_id, box_x, box_y, box_w, box_h, "
-            f"       detector_confidence "
-            f"FROM detections "
-            f"WHERE photo_id IN ({placeholders}) "
-            f"  AND (detector_model IS NULL OR detector_model != 'full-image') "
-            f"  AND COALESCE(category, 'animal') = 'animal' "
-            f"ORDER BY photo_id, {primary_order_sql()}",
-            chunk,
-        ).fetchall()
+        det_rows = db.detections.miss_detection_rows(chunk)
         for d in det_rows:
             raw_primary[d["photo_id"]] = max(
                 raw_primary.get(d["photo_id"], 0), d["detector_confidence"],
@@ -457,10 +423,6 @@ def compute_misses_for_workspace(
         exclude_photo_ids=exclude_photo_ids, now=now,
     )
 
-    db.conn.executemany(
-        "UPDATE photos SET miss_no_subject=?, miss_clipped=?, miss_oof=?, "
-        "miss_computed_at=? WHERE id=?",
-        updates,
-    )
-    commit_with_retry(db.conn)
+    db.detections.write_miss_flags(updates)
+    db.commit_with_retry()
     return len(updates)

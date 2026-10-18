@@ -156,15 +156,7 @@ def _load_top_predictions(db, photo_ids, pause_callback):
     for pid in photo_ids:
         if pause_callback:
             pause_callback()
-        pred = db.conn.execute(
-            """SELECT pr.species, pr.confidence, pr.classifier_model,
-                      pr.scientific_name, pr.labels_fingerprint, pr.source_taxon_id
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ?
-               ORDER BY pr.confidence DESC LIMIT 1""",
-            (pid,),
-        ).fetchone()
+        pred = db.culling.top_prediction(pid)
         if pred:
             identity = species_resolver.prediction(pred)
             predictions[pid] = {
@@ -193,10 +185,7 @@ def _load_photo_signals(db, photo_ids, predictions, pause_callback):
     for pid in photo_ids:
         if pause_callback:
             pause_callback()
-        row = db.conn.execute(
-            "SELECT quality_score, sharpness, subject_sharpness, extension, timestamp, phash, filename FROM photos WHERE id = ?",
-            (pid,),
-        ).fetchone()
+        row = db.culling.photo_signals(pid)
         cm = predictions.get(pid, {}).get("classifier_model")
         if cm:
             emb_blob = db.masks_features.get_embedding(pid, cm)
@@ -226,15 +215,12 @@ def _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_ca
         progress_callback("Computing scene hashes...")
     folders_map = {
         r["id"]: r["path"]
-        for r in db.conn.execute("SELECT id, path FROM folders").fetchall()
+        for r in db.get_all_folders()
     }
     for pid in missing_phash:
         if pause_callback:
             pause_callback()
-        row = db.conn.execute(
-            "SELECT folder_id, filename, working_copy_path FROM photos WHERE id = ?",
-            (pid,),
-        ).fetchone()
+        row = db.culling.phash_source(pid)
         if not row:
             continue
         # Scope the broad except narrowly to the image-loading + hash step:
@@ -261,17 +247,14 @@ def _backfill_missing_phashes(db, missing_phash, phashes, vireo_dir, progress_ca
             log.debug("Could not compute pHash for photo %d", pid, exc_info=True)
             continue
         phashes[pid] = h
-        db.conn.execute(
-            "UPDATE photos SET phash = ? WHERE id = ?",
-            (str(h), pid),
-        )
+        db.culling.set_phash(pid, str(h))
         # Commit per photo so the writer lock is released between
         # iterations. Otherwise this loop holds the lock for the entire
         # backfill (potentially many minutes on a fresh import where
         # thousands of photos still need pHashes), starving any
         # concurrent writer (e.g. a pipeline scan whose next
         # ``add_photo`` INSERT will time out past the 30s busy_timeout).
-        db.conn.commit()
+        db.commit()
 
 
 def _group_by_species(photo_ids, predictions, extensions, separate_file_types, pause_callback):
