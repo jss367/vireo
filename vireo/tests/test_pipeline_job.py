@@ -4026,7 +4026,7 @@ def test_raw_reinference_replaces_stored_predictions(tmp_path, monkeypatch, spec
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
-    db.add_prediction(detection, "Robin", 0.2, "BioCLIP", status="accepted")
+    db.predictions.add(detection, "Robin", 0.2, "BioCLIP", status="accepted")
     db.model_runs.record_classifier_run(detection, "BioCLIP", "legacy", prediction_count=1)
     collection = db.collections.add("Test", json.dumps([{"field": "photo_ids", "value": [photo]}]))
     model = _setup_fake_downloaded_model(tmp_path, monkeypatch)
@@ -4393,8 +4393,10 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     # Patch classify_stage's prediction-photo lookup so classify_stage
     # doesn't trip on pre-existing schema issues in other migrations.
     # (This test focuses narrowly on detect_stage's already_detected seed.)
+    from repositories.predictions import PredictionRepository
+
     monkeypatch.setattr(
-        Database, "get_existing_prediction_photo_ids",
+        PredictionRepository, "get_existing_photo_ids",
         lambda self, model_name: set(),
     )
 
@@ -4870,7 +4872,7 @@ def test_pipeline_reclassify_cancel_preserves_existing_predictions(
     # name and fingerprint the pipeline will use ('BioCLIP' / 'legacy' for
     # the test stubs).  These are what must survive the cancelled reclassify.
     for det_id in detection_ids:
-        db.add_prediction(
+        db.predictions.add(
             detection_id=det_id,
             species="Pre-existing Sparrow",
             confidence=0.95,
@@ -5057,8 +5059,9 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
     # _store_grouped_predictions and FK-cascades the run keys away — but
     # that's pre-existing reclassify behavior, unrelated to the deferred
     # clear's scope.  The fix is about the clear itself, so test the clear.
-    from db import Database as _Db
-    original_clear = _Db.clear_predictions
+    from repositories.predictions import PredictionRepository
+
+    original_clear = PredictionRepository.clear
     clear_calls = []
 
     def wrapped_clear(self, model=None, collection_photo_ids=None,
@@ -5084,7 +5087,7 @@ def test_pipeline_reclassify_success_preserves_classifier_run_keys(
         })
         return result
 
-    monkeypatch.setattr(_Db, "clear_predictions", wrapped_clear)
+    monkeypatch.setattr(PredictionRepository, "clear", wrapped_clear)
 
     def fake_flush_batch(batch, clf, model_type, model_name, db_, raw_results,
                         top_k=1):
@@ -5891,7 +5894,7 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
 
     # photo_with_det must be in the skip set so the second run reuses its
     # prediction instead of re-classifying.
-    skip_set = db.get_existing_prediction_photo_ids(preds[0]["model"])
+    skip_set = db.predictions.get_existing_photo_ids(preds[0]["model"])
     assert photo_with_det in skip_set, (
         f"photo_with_det ({photo_with_det}) missing from skip set {skip_set} — "
         "its prediction is not reachable via the predictions→detections join."
@@ -8681,10 +8684,10 @@ def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
         "confidence": .19, "category": "animal",
     }])
 
-    db.add_prediction(
+    db.predictions.add(
         detection_ids[0], "Great-tailed Grackle", 0.9, "inat21",
     )
-    db.add_prediction(
+    db.predictions.add(
         detection_ids[-1], right_species, 0.9, "inat21",
     )
 
@@ -16287,7 +16290,7 @@ def test_pipeline_classify_reclassify_preserves_predictions_for_unreachable_phot
     # though the run couldn't rewrite them.
     prior_species = "PriorSpecies"
     for det_id in gone_detection_ids:
-        db.add_prediction(
+        db.predictions.add(
             detection_id=det_id,
             species=prior_species,
             confidence=0.42,
@@ -16481,7 +16484,7 @@ def test_pipeline_classify_multimodel_reclassify_per_spec_source_skips(
     # prediction then couldn't overwrite it via INSERT OR IGNORE, and the
     # user was stuck with OldModelBSpecies forever.
     OLD_B = "OldModelBSpecies"
-    db.add_prediction(
+    db.predictions.add(
         detection_id=gone_det_id,
         species=OLD_B,
         confidence=0.42,
@@ -16670,7 +16673,7 @@ def test_pipeline_classify_stale_purge_preserves_source_skipped_photos(
         detector_model="MegaDetector",
     )[0]
     OLD_SPECIES = "PreservedPriorSpecies"
-    db.add_prediction(
+    db.predictions.add(
         detection_id=old_gone_det_id,
         species=OLD_SPECIES,
         confidence=0.42,
@@ -18475,10 +18478,10 @@ def test_extract_masks_preflight_counts_rescued_weak_detections(
         photo_ids.append(pid)
         detection_ids.append(det_id)
 
-    db.add_prediction(
+    db.predictions.add(
         detection_ids[0], "Great-tailed Grackle", 0.9, "inat21",
     )
-    db.add_prediction(
+    db.predictions.add(
         detection_ids[-1], "Great-tailed Grackle", 0.9, "inat21",
     )
 

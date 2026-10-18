@@ -223,7 +223,7 @@ def test_duplicate_boxes_keep_highest_confidence_then_latest(db):
 def test_resave_upserts_in_place_and_keeps_predictions(db):
     pid = _photo(db)
     (det_id,) = db.save_detections(pid, [_d(0.5)], MODEL)
-    db.add_prediction(det_id, species="Robin", confidence=0.9, model="clf")
+    db.predictions.add(det_id, species="Robin", confidence=0.9, model="clf")
     statements = _trace(db)
     assert db.save_detections(pid, [_d(0.75)], MODEL) == [det_id]
     db.conn.set_trace_callback(None)
@@ -381,7 +381,7 @@ def test_real_manual_review_pins_the_detector_run(db):
     pid = _photo(db)
     (det_id,) = db.write_detection_batch(pid, MODEL, [_d()],
                                          runtime_fingerprint="rt")
-    db.add_prediction(det_id, species="Robin", confidence=0.9, model="clf")
+    db.predictions.add(det_id, species="Robin", confidence=0.9, model="clf")
     pred_id = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_id,),
     ).fetchone()["id"]
@@ -570,7 +570,7 @@ def test_get_predictions_for_detection_filters_and_orders(db, monkeypatch):
         ("Jay", 0.7, "clf-b", "fp1"),
         ("Crow", 0.8, "clf-a", "fp2"),
     ]:
-        db.add_prediction(det_id, species=species, confidence=conf,
+        db.predictions.add(det_id, species=species, confidence=conf,
                           model=model, labels_fingerprint=fp)
 
     def species(rows):
@@ -693,7 +693,7 @@ def test_delete_detections_by_ids_empty_is_a_no_op(db):
 def test_delete_detections_by_ids_cascades_and_commits(db):
     pid = _photo(db)
     a, b = db.save_detections(pid, [_d(x=0.1), _d(x=0.2)], MODEL)
-    db.add_prediction(a, species="Robin", confidence=0.9, model="clf")
+    db.predictions.add(a, species="Robin", confidence=0.9, model="clf")
     db.delete_detections_by_ids({a})
     assert not db.conn.in_transaction
     with _reader(db) as reader:

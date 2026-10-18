@@ -48,7 +48,7 @@ def test_add_prediction_folds_curly_apostrophe_species(tmp_path):
         ).lastrowid
         db.conn.commit()
 
-        db.add_prediction(
+        db.predictions.add(
             detection_id=det,
             species="Swinhoe’s White-eye",
             confidence=0.8,
@@ -80,7 +80,7 @@ def test_add_prediction_folds_review_row_to_normalized_species(tmp_path):
         ).lastrowid
         db.conn.commit()
 
-        db.add_prediction(
+        db.predictions.add(
             detection_id=det,
             species="Swinhoe’s White-eye",
             confidence=0.8,
@@ -129,7 +129,7 @@ def test_prime_symbol_not_folded_in_keywords(tmp_path):
 
         # A prediction whose species carries a legitimate prime stays intact
         # after add_prediction normalizes on write.
-        db.add_prediction(
+        db.predictions.add(
             detection_id=det,
             species="10′ waterfall bird",
             confidence=0.5,

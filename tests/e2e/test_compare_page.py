@@ -10,7 +10,7 @@ def test_compare_keyword_conflict_filter_includes_non_top_predictions(live_serve
         "SELECT id FROM detections WHERE photo_id = ? ORDER BY id LIMIT 1",
         (photo_id,),
     ).fetchone()["id"]
-    db.add_prediction(
+    db.predictions.add(
         detection_id=det_id,
         species="Cooper's Hawk",
         confidence=0.41,
@@ -379,14 +379,14 @@ def test_compare_treats_second_detected_species_as_additional(live_server, page)
         }],
         detector_model="test-detector-secondary",
     )[0]
-    db.add_prediction(
+    db.predictions.add(
         second_detection,
         "Cooper's Hawk",
         0.91,
         "BioCLIP-2",
         labels_fingerprint=TOL_SENTINEL,
     )
-    db.add_prediction(
+    db.predictions.add(
         second_detection,
         "Cooper's Hawk",
         0.88,
@@ -436,7 +436,7 @@ def test_compare_treats_second_detected_species_as_additional(live_server, page)
     assert {"Red-tailed Hawk", "Cooper's Hawk"} <= keyword_names
     statuses = {
         pred["model"]: pred["status"]
-        for pred in db.get_predictions(photo_ids=[photo_id])
+        for pred in db.predictions.get_rows(photo_ids=[photo_id])
         if pred["detection_id"] == second_detection
     }
     assert statuses == {"BioCLIP-2": "accepted", "iNat21": "accepted"}
@@ -549,7 +549,7 @@ def test_compare_full_load_lands_on_the_collection_when_nothing_needs_review(
         "SELECT id FROM detections WHERE photo_id = ? ORDER BY id LIMIT 1",
         (photo_id,),
     ).fetchone()["id"]
-    db.add_prediction(
+    db.predictions.add(
         detection_id=det_id,
         species="Red-tailed Hawk",
         confidence=0.95,

@@ -93,9 +93,9 @@ def test_batch_location_history_failure_rolls_back_all_writes(app_and_db, monkey
 
 def _predictions(db, pid, group=None):
     did = db.save_detections(pid, [{'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'}], detector_model='test')[0]
-    db.add_prediction(did, 'Robin', .7, 'test', labels_fingerprint='other')
-    db.add_prediction(did, 'Bald Eagle', .9, 'test', group_id=group)
-    db.add_prediction(did, 'Golden Eagle', .8, 'test', status='alternative')
+    db.predictions.add(did, 'Robin', .7, 'test', labels_fingerprint='other')
+    db.predictions.add(did, 'Bald Eagle', .9, 'test', group_id=group)
+    db.predictions.add(did, 'Golden Eagle', .8, 'test', status='alternative')
     rows = db.conn.execute('SELECT id, species FROM predictions WHERE detection_id = ?', (did,)).fetchall()
     return tuple(next(row['id'] for row in rows if row['species'] == species)
                  for species in ('Bald Eagle', 'Golden Eagle', 'Robin'))
@@ -109,13 +109,13 @@ def test_prediction_decisions_round_trip_exact_scopes(app_and_db, mode):
     group = 'burst' if mode == 'burst' else None
     ids = [_predictions(db, pid, group) for pid in pids]
     keywords_before = [db.get_photo_keywords(pid) for pid in pids]
-    before = {pred_id: db.get_prediction_status(pred_id) for rows in ids for pred_id in rows}
+    before = {pred_id: db.predictions.current_status(pred_id) for rows in ids for pred_id in rows}
     if mode == 'batch':
         response = client.post('/api/predictions/batch-reject', json={'prediction_ids': [rows[0] for rows in ids]})
     else:
         response = client.post(f'/api/predictions/{ids[0][0]}/' + ('reviewed' if mode == 'reviewed' else 'reject'))
     assert response.status_code == 200, response.json
-    after = {pred_id: db.get_prediction_status(pred_id) for pred_id in before}
+    after = {pred_id: db.predictions.current_status(pred_id) for pred_id in before}
     assert before != after
     assert all(after[rows[2]] == 'pending' for rows in ids)
     if mode == 'burst':
@@ -123,9 +123,9 @@ def test_prediction_decisions_round_trip_exact_scopes(app_and_db, mode):
     assert client.get('/api/undo/status').json['count'] == 1
     for _ in range(2):
         assert client.post('/api/undo').status_code == 200
-        assert {pid: db.get_prediction_status(pid) for pid in before} == before
+        assert {pid: db.predictions.current_status(pid) for pid in before} == before
         assert client.post('/api/redo').status_code == 200
-        assert {pid: db.get_prediction_status(pid) for pid in before} == after
+        assert {pid: db.predictions.current_status(pid) for pid in before} == after
     # Status-only undo never invents keywords.
     assert [db.get_photo_keywords(pid) for pid in pids] == keywords_before
 
@@ -254,13 +254,13 @@ def test_prediction_status_history_does_not_change_reused_id(app_and_db, directi
     did = db.save_detections(pids[0], [
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
     ], detector_model='test')[0]
-    db.add_prediction(did, 'Bald Eagle', .9, 'test')
+    db.predictions.add(did, 'Bald Eagle', .9, 'test')
     original_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
     original_time = db.conn.execute('SELECT created_at FROM predictions WHERE id = ?', (original_id,)).fetchone()[0]
     assert client.post(f'/api/predictions/{original_id}/reject').status_code == 200
     if direction == 'redo':
         assert client.post('/api/undo').status_code == 200
-    db.clear_predictions(model='test')
+    db.predictions.clear(model='test')
     if changed == 'detection':
         did = db.save_detections(pids[0], [
             {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
@@ -271,7 +271,7 @@ def test_prediction_status_history_does_not_change_reused_id(app_and_db, directi
     elif changed == 'bounds':
         db.conn.execute('UPDATE detections SET box_x = .3 WHERE id = ?', (did,))
         db.commit()
-    db.add_prediction(
+    db.predictions.add(
         did, 'Golden Eagle' if changed == 'species' else 'Bald Eagle',
         .8 if changed == 'confidence' else .9,
         'other-model' if changed == 'model' else 'test', status='reviewed',
@@ -283,7 +283,7 @@ def test_prediction_status_history_does_not_change_reused_id(app_and_db, directi
     db.conn.execute('UPDATE predictions SET created_at = ? WHERE id = ?', (replacement_time, replacement_id))
     db.commit()
     assert client.post('/api/' + direction).status_code == 200
-    assert db.get_prediction_status(replacement_id) == 'reviewed'
+    assert db.predictions.current_status(replacement_id) == 'reviewed'
 
 
 def test_id_only_prediction_status_history_cannot_change_a_current_prediction(app_and_db):
@@ -297,7 +297,7 @@ def test_id_only_prediction_status_history_cannot_change_a_current_prediction(ap
         'new_value': json.dumps({str(pred_id): 'pending'}),
     }])
     assert app.test_client().post('/api/undo').status_code == 200
-    assert db.get_prediction_status(pred_id) == 'pending'
+    assert db.predictions.current_status(pred_id) == 'pending'
 
 
 
@@ -323,16 +323,16 @@ def test_identical_prediction_recreated_in_same_second_cannot_receive_old_histor
     did = db.save_detections(pid, [
         {'box': {'x': .1, 'y': .1, 'w': .5, 'h': .5}, 'confidence': .9, 'category': 'animal'},
     ], detector_model='test')[0]
-    db.add_prediction(did, 'Bald Eagle', .9, 'test')
+    db.predictions.add(did, 'Bald Eagle', .9, 'test')
     pred_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
     assert client.post(f'/api/predictions/{pred_id}/reviewed').status_code == 200
     original_row = dict(db.conn.execute('SELECT * FROM predictions WHERE id = ?', (pred_id,)).fetchone())
     before = json.loads(db.edit_history.prediction_status_state([pred_id]))[str(pred_id)]['identity']
     if direction == 'redo':
         assert client.post('/api/undo').status_code == 200
-    db.clear_predictions(model='test')
+    db.predictions.clear(model='test')
     assert db.conn.execute('SELECT COUNT(*) FROM prediction_history_instances').fetchone()[0] == 0
-    db.add_prediction(did, 'Bald Eagle', .9, 'test', status='accepted')
+    db.predictions.add(did, 'Bald Eagle', .9, 'test', status='accepted')
     replacement_id = db.conn.execute('SELECT id FROM predictions WHERE detection_id = ?', (did,)).fetchone()[0]
     assert replacement_id == pred_id
     db.conn.execute('UPDATE predictions SET created_at = ? WHERE id = ?', (original_row['created_at'], pred_id))
@@ -343,7 +343,7 @@ def test_identical_prediction_recreated_in_same_second_cannot_receive_old_histor
     assert before['prediction_instance_id'] != after['prediction_instance_id']
     assert dict(db.conn.execute('SELECT * FROM predictions WHERE id = ?', (pred_id,)).fetchone()) == original_row
     assert client.post('/api/' + direction).status_code == 200
-    assert db.get_prediction_status(pred_id) == 'accepted'
+    assert db.predictions.current_status(pred_id) == 'accepted'
 
 
 def test_prediction_instance_is_stable_on_repeated_reads_and_catalog_reopen(app_and_db):
@@ -373,7 +373,7 @@ def test_same_prediction_instance_remains_undoable_after_metadata_enrichment(app
     client = app.test_client()
     pid = db.photos.list_page()[0]['id']
     pred_id, _, _ = _predictions(db, pid)
-    pred = db.get_prediction_decision_row(pred_id)
+    pred = db.predictions.get_decision_row(pred_id)
     assert client.post(f'/api/predictions/{pred_id}/reject').status_code == 200
     if direction == 'redo':
         assert client.post('/api/undo').status_code == 200
@@ -383,14 +383,14 @@ def test_same_prediction_instance_remains_undoable_after_metadata_enrichment(app
         db.conn.execute('UPDATE predictions SET labels_fingerprint_full = ? WHERE id = ?', ('full fingerprint', pred_id))
         db.commit()
     else:
-        db.add_prediction(
+        db.predictions.add(
             pred['detection_id'], pred['species'], .8, pred['model'],
             taxonomy={'taxon_id': 987654}, refresh_output=True, preserve_manual_review=True,
         )
     assert db.conn.execute('SELECT instance_id FROM prediction_history_instances WHERE prediction_id = ?', (pred_id,)).fetchone()[0] == instance_id
-    assert db.get_prediction_status(pred_id) == ('rejected' if direction == 'undo' else 'pending')
+    assert db.predictions.current_status(pred_id) == ('rejected' if direction == 'undo' else 'pending')
     assert client.post('/api/' + direction).status_code == 200
-    assert db.get_prediction_status(pred_id) == ('pending' if direction == 'undo' else 'rejected')
+    assert db.predictions.current_status(pred_id) == ('pending' if direction == 'undo' else 'rejected')
     # Undo/Redo changes the review, preserving the newly enriched raw fields.
     row = db.conn.execute('SELECT labels_fingerprint_full, confidence, source_taxon_id FROM predictions WHERE id = ?', (pred_id,)).fetchone()
     if enrichment == 'full_fingerprint':

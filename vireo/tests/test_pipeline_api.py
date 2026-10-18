@@ -3665,7 +3665,7 @@ def test_live_burst_gap_preserves_encounter_continuity(setup, tmp_path, endpoint
                 "box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
                 "confidence": 0.06 if i == 1 else 0.8, "category": "animal",
             }])[0]
-            db.add_prediction(did, "Bluebird", 0.99, "classifier")
+            db.predictions.add(did, "Bluebird", 0.99, "classifier")
     response = app.test_client().post(f"/api/pipeline/{endpoint}", json={
         "config": {"burst_time_gap": live_gap}, "save_cache": False,
     })

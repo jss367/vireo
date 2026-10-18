@@ -570,7 +570,7 @@ def _det(db, pid, x=0.1):
 
 
 def _pred(db, det, species, model="m1"):
-    db.add_prediction(det, species, 0.9, model)
+    db.predictions.add(det, species, 0.9, model)
     return db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ? "
         "AND classifier_model = ?",
@@ -763,7 +763,7 @@ def test_accept_prediction_grouped_skips_decided_siblings(db, lib):
     dets = [_det(db, p) for p in (p0, p1, p2)]
     preds = [_pred(db, det, "Robin") for det in dets]
     for det in dets:
-        db.update_prediction_group_info(
+        db.predictions.update_group_info(
             det, "m1", "g1", 3, 3, json.dumps({"Robin": 3}),
             labels_fingerprint="legacy",
         )

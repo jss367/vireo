@@ -335,17 +335,17 @@ def test_reinference_replaces_candidates_preserving_surviving_reviews(tmp_path, 
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
-    db.add_prediction(detection, "Robin", 0.2, "model", status="accepted",
+    db.predictions.add(detection, "Robin", 0.2, "model", status="accepted",
                       taxonomy={"genus": "old"}, labels_fingerprint="labels")
     original_id = db.conn.execute("SELECT id FROM predictions").fetchone()[0]
     other_workspace = db.create_workspace("Other")
     db.add_workspace_folder(other_workspace, folder)
     db.set_active_workspace(other_workspace)
-    db.add_prediction(detection, "Robin", 0.2, "model", status="rejected", labels_fingerprint="labels")
+    db.predictions.add(detection, "Robin", 0.2, "model", status="rejected", labels_fingerprint="labels")
     db.set_active_workspace(workspace)
-    db.add_prediction(detection, "Stale species", 0.99, "model", labels_fingerprint="labels")
-    db.add_prediction(detection, "Other labels", 0.7, "model", labels_fingerprint="other-labels")
-    db.add_prediction(detection, "Other model", 0.7, "other-model", labels_fingerprint="labels")
+    db.predictions.add(detection, "Stale species", 0.99, "model", labels_fingerprint="labels")
+    db.predictions.add(detection, "Other labels", 0.7, "model", labels_fingerprint="other-labels")
+    db.predictions.add(detection, "Other model", 0.7, "other-model", labels_fingerprint="labels")
     db.model_runs.record_classifier_run(detection, "model", "labels", prediction_count=2)
     item = {
         "detection_id": detection, "prediction": "Robin", "confidence": 0.9,
@@ -409,7 +409,7 @@ def test_reinference_refreshes_burst_metadata(tmp_path, status, new_group):
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
-    db.add_prediction(detection, "Robin", 0.2, "model", status=status,
+    db.predictions.add(detection, "Robin", 0.2, "model", status=status,
                       group_id="old-burst", vote_count=3, total_votes=4, individual='{"Robin":3}')
     item = {"detection_id": detection, "prediction": "Robin", "confidence": 0.9,
             "_replace_prediction_outputs": True}
@@ -438,7 +438,7 @@ def test_normal_cache_gate_rejects_reviewed_raw_recipe(tmp_path, status):
         "box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8},
         "confidence": 0.9, "category": "animal",
     }], detector_model="megadetector-v6")[0]
-    db.add_prediction(detection, "Robin", 0.9, "model", status=status)
+    db.predictions.add(detection, "Robin", 0.9, "model", status=status)
     db.model_runs.record_classifier_run(detection, "model", "legacy", 1,
                              runtime_fingerprint="raw-runtime", input_recipe=ra.RECIPE)
     from classify_job.cache_coverage import _all_photos_cache_satisfied

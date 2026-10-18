@@ -306,14 +306,14 @@ def test_prediction_routes_reject_foreign_workspace(app_and_db, tmp_path, action
     ws = db._ws_id()
     fid, pid = seed(db, tmp_path / "foreign")
     det_id = db.save_detections(pid, [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9}], "test-detector")[0]
-    db.add_prediction(det_id, "Robin", .9, "test-model")
+    db.predictions.add(det_id, "Robin", .9, "test-model")
     pred_id = db.conn.execute("SELECT id FROM predictions WHERE detection_id=?", (det_id,)).fetchone()[0]
     db.conn.execute("DELETE FROM workspace_folders WHERE workspace_id=? AND folder_id=?", (ws, fid))
     db.conn.commit()
     assert db.photos.get(pid, verify_workspace=True) is None
     response = app.test_client().post(f"/api/predictions/{pred_id}/{action}", json={})
     assert response.status_code == 404, response.json
-    assert db.get_review_status(pred_id, ws) != status
+    assert db.predictions.get_review_status(pred_id, ws) != status
 
 
 def test_classifier_partial_flush_is_not_a_cache_hit(db, tmp_path):

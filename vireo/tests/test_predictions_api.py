@@ -16,9 +16,9 @@ def _seed_predictions(db):
     photos = db.photos.list_page()
     det0 = _make_detection(db, photos[0]['id'])
     det1 = _make_detection(db, photos[1]['id'])
-    db.add_prediction(detection_id=det0, species='Northern Cardinal',
+    db.predictions.add(detection_id=det0, species='Northern Cardinal',
                       confidence=0.95, model='test-model', category='new', group_id='g1')
-    db.add_prediction(detection_id=det1, species='House Sparrow',
+    db.predictions.add(detection_id=det1, species='House Sparrow',
                       confidence=0.80, model='test-model', category='new', group_id='g1')
     return photos
 
@@ -90,7 +90,7 @@ def test_accept_prediction(app_and_db):
     # Get the Blue Jay prediction (not in a group for this test —
     # add a standalone prediction to avoid group-accept behavior)
     det2 = _make_detection(db, photos[2]['id'])
-    db.add_prediction(detection_id=det2, species='Blue Jay', confidence=0.90,
+    db.predictions.add(detection_id=det2, species='Blue Jay', confidence=0.90,
                       model='test-model', category='new', group_id=None)
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"
@@ -102,7 +102,7 @@ def test_accept_prediction(app_and_db):
     assert resp.get_json()['photo_ids'] == [photos[2]['id']]
 
     # Prediction status should be accepted (workspace-scoped via prediction_review)
-    assert db.get_review_status(pred['id'], db._active_workspace_id) == 'accepted'
+    assert db.predictions.get_review_status(pred['id'], db._active_workspace_id) == 'accepted'
 
     # Species keyword should have been added to the photo
     keywords = db.get_photo_keywords(photos[2]['id'])
@@ -116,7 +116,7 @@ def _burst_pair(db, group_id, species, photo_indexes=(0, 1)):
     pred_ids = []
     for offset, index in enumerate(photo_indexes):
         det = _make_detection(db, photos[index]['id'])
-        db.add_prediction(detection_id=det, species=species,
+        db.predictions.add(detection_id=det, species=species,
                           confidence=0.95 - 0.05 * offset, model='test-model',
                           category='new', group_id=group_id)
         pred_ids.append(db.conn.execute(
@@ -150,7 +150,7 @@ def test_grouped_accept_names_every_row_it_decided(app_and_db):
     assert resp.status_code == 200
     assert sorted(resp.get_json()['prediction_ids']) == sorted([pred_a, pred_b])
     assert sorted(resp.get_json()['photo_ids']) == sorted(photo_ids)
-    assert db.get_review_status(pred_b, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_b, ws) == 'accepted'
 
     # The request the loop would otherwise send next. It is a genuine refusal
     # — the row is settled — which is exactly why the client must skip it
@@ -174,7 +174,7 @@ def test_grouped_replace_names_every_row_it_decided(app_and_db):
     resp = client.post(f'/api/predictions/{pred_a}/replace-keywords')
     assert resp.status_code == 200
     assert sorted(resp.get_json()['prediction_ids']) == sorted([pred_a, pred_b])
-    assert db.get_review_status(pred_b, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_b, ws) == 'accepted'
 
 
 def test_reject_prediction(app_and_db):
@@ -191,7 +191,7 @@ def test_reject_prediction(app_and_db):
     assert resp.status_code == 200
     assert resp.get_json()['ok'] is True
 
-    assert db.get_review_status(pred['id'], db._active_workspace_id) == 'rejected'
+    assert db.predictions.get_review_status(pred['id'], db._active_workspace_id) == 'rejected'
 
     # Verify no species keyword was added
     keywords = db.get_photo_keywords(photos[0]['id'])
@@ -206,7 +206,7 @@ def test_mark_prediction_reviewed(app_and_db):
     client = app.test_client()
 
     det = _make_detection(db, photos[2]['id'])
-    db.add_prediction(detection_id=det, species='Blue Jay', confidence=0.90,
+    db.predictions.add(detection_id=det, species='Blue Jay', confidence=0.90,
                       model='test-model', category='new', group_id=None)
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"
@@ -215,7 +215,7 @@ def test_mark_prediction_reviewed(app_and_db):
     resp = client.post(f'/api/predictions/{pred["id"]}/reviewed')
     assert resp.status_code == 200
     assert resp.get_json()['ok'] is True
-    assert db.get_review_status(pred['id'], db._active_workspace_id) == 'reviewed'
+    assert db.predictions.get_review_status(pred['id'], db._active_workspace_id) == 'reviewed'
 
 
 def test_mark_prediction_reviewed_rejects_non_pending(app_and_db):
@@ -230,7 +230,7 @@ def test_mark_prediction_reviewed_rejects_non_pending(app_and_db):
     client = app.test_client()
 
     det_acc = _make_detection(db, photos[2]['id'])
-    db.add_prediction(detection_id=det_acc, species='Blue Jay', confidence=0.90,
+    db.predictions.add(detection_id=det_acc, species='Blue Jay', confidence=0.90,
                       model='test-model', category='new', group_id=None)
     accepted = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"
@@ -239,7 +239,7 @@ def test_mark_prediction_reviewed_rejects_non_pending(app_and_db):
 
     resp = client.post(f'/api/predictions/{accepted["id"]}/reviewed')
     assert resp.status_code == 409
-    assert db.get_review_status(
+    assert db.predictions.get_review_status(
         accepted['id'], db._active_workspace_id) == 'accepted'
 
     rejected = db.conn.execute(
@@ -249,7 +249,7 @@ def test_mark_prediction_reviewed_rejects_non_pending(app_and_db):
 
     resp = client.post(f'/api/predictions/{rejected["id"]}/reviewed')
     assert resp.status_code == 409
-    assert db.get_review_status(
+    assert db.predictions.get_review_status(
         rejected['id'], db._active_workspace_id) == 'rejected'
 
 
@@ -261,7 +261,7 @@ def test_mark_prediction_reviewed_missing_id_returns_404(app_and_db):
 
     resp = client.post('/api/predictions/999999/reviewed')
     assert resp.status_code == 404
-    assert db.get_review_status(999999, db._active_workspace_id) == 'pending'
+    assert db.predictions.get_review_status(999999, db._active_workspace_id) == 'pending'
 
 
 def test_reject_prediction_missing_id_returns_404(app_and_db):
@@ -278,7 +278,7 @@ def test_reject_prediction_missing_id_returns_404(app_and_db):
     resp = client.post('/api/predictions/999999/reject')
     assert resp.status_code == 404
     # And nothing got written to prediction_review for the stale id
-    assert db.get_review_status(999999, db._active_workspace_id) == 'pending'
+    assert db.predictions.get_review_status(999999, db._active_workspace_id) == 'pending'
 
 
 def test_get_prediction_group(app_and_db):
@@ -390,11 +390,11 @@ def test_predictions_include_alternatives(app_and_db):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
     det_id = det_ids[0]
-    db.add_prediction(detection_id=det_id, species='Robin', confidence=0.85,
+    db.predictions.add(detection_id=det_id, species='Robin', confidence=0.85,
                       model='test-model')
-    db.add_prediction(detection_id=det_id, species='Sparrow', confidence=0.10,
+    db.predictions.add(detection_id=det_id, species='Sparrow', confidence=0.10,
                       model='test-model')
-    db.add_prediction(detection_id=det_id, species='Finch', confidence=0.05,
+    db.predictions.add(detection_id=det_id, species='Finch', confidence=0.05,
                       model='test-model')
     # Mark alternatives in the prediction_review table for this workspace
     for sp in ('Sparrow', 'Finch'):
@@ -436,11 +436,11 @@ def test_predictions_alternatives_survive_row_level_rules(app_and_db):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
     det_id = det_ids[0]
-    db.add_prediction(detection_id=det_id, species='Robin', confidence=0.95,
+    db.predictions.add(detection_id=det_id, species='Robin', confidence=0.95,
                       model='test-model')
-    db.add_prediction(detection_id=det_id, species='Sparrow', confidence=0.10,
+    db.predictions.add(detection_id=det_id, species='Sparrow', confidence=0.10,
                       model='test-model')
-    db.add_prediction(detection_id=det_id, species='Finch', confidence=0.05,
+    db.predictions.add(detection_id=det_id, species='Finch', confidence=0.05,
                       model='test-model')
     for sp in ('Sparrow', 'Finch'):
         row = db.conn.execute(
@@ -469,9 +469,9 @@ def test_accept_alternative_prediction(app_and_db):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
     ], detector_model="MDV6")
     det_id = det_ids[0]
-    db.add_prediction(detection_id=det_id, species='Robin', confidence=0.85,
+    db.predictions.add(detection_id=det_id, species='Robin', confidence=0.85,
                       model='test-model')
-    db.add_prediction(detection_id=det_id, species='Sparrow', confidence=0.10,
+    db.predictions.add(detection_id=det_id, species='Sparrow', confidence=0.10,
                       model='test-model')
 
     ws_id = db._active_workspace_id
@@ -486,13 +486,13 @@ def test_accept_alternative_prediction(app_and_db):
     assert resp.status_code == 200
 
     # Alternative should be accepted
-    assert db.get_review_status(alt['id'], ws_id) == 'accepted'
+    assert db.predictions.get_review_status(alt['id'], ws_id) == 'accepted'
 
     # Original top-1 should be rejected
     robin = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Robin'"
     ).fetchone()
-    assert db.get_review_status(robin['id'], ws_id) == 'rejected'
+    assert db.predictions.get_review_status(robin['id'], ws_id) == 'rejected'
 
     # Sparrow keyword should be on the photo
     keywords = db.get_photo_keywords(photos[0]['id'])
@@ -514,7 +514,7 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     live_pid = photos[0]['id']
     rejected_pid = photos[1]['id']
     det_untagged = _make_detection(db, photos[2]['id'])
-    db.add_prediction(detection_id=det_untagged, species='Coyote Untagged',
+    db.predictions.add(detection_id=det_untagged, species='Coyote Untagged',
                       confidence=0.90, model='test-model', category='new',
                       group_id=None)
 
@@ -561,11 +561,11 @@ def test_get_predictions_species_rule_keeps_disagreement_rows(app_and_db):
     db.tag_photo(photos[0]['id'], robin_id)
     # Pending prediction proposes Sparrow — the reviewer wants to see it.
     det = _make_detection(db, photos[0]['id'])
-    db.add_prediction(detection_id=det, species='Sparrow', confidence=0.9,
+    db.predictions.add(detection_id=det, species='Sparrow', confidence=0.9,
                       model='test-model', category='new')
 
     rules = [{'field': 'species', 'op': 'is', 'value': 'Robin'}]
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
 
     assert [p['species'] for p in preds] == ['Sparrow'], (
         'row-level pass hid the disagreement prediction the filter selected'
@@ -585,9 +585,9 @@ def test_get_predictions_none_group_mixes_metadata_and_prediction(app_and_db):
     # Fixture: photos[0] has rating 3; give it two low-confidence preds.
     low_photo = photos[0]['id']
     det = _make_detection(db, low_photo)
-    db.add_prediction(detection_id=det, species='A', confidence=0.10,
+    db.predictions.add(detection_id=det, species='A', confidence=0.10,
                       model='test-model', category='new')
-    db.add_prediction(detection_id=det, species='B', confidence=0.05,
+    db.predictions.add(detection_id=det, species='B', confidence=0.05,
                       model='test-model', category='new')
 
     rules = {
@@ -597,7 +597,7 @@ def test_get_predictions_none_group_mixes_metadata_and_prediction(app_and_db):
             {'field': 'prediction_confidence', 'op': '>=', 'value': 0.8},
         ],
     }
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
 
     returned = sorted(p['species'] for p in preds if p['photo_id'] == low_photo)
     assert returned == ['A', 'B'], (
@@ -616,16 +616,16 @@ def test_get_predictions_all_group_still_narrows_by_prediction_confidence(app_an
     # p1 already has rating 3 in the fixture.
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
-    db.add_prediction(detection_id=det, species='High', confidence=0.95,
+    db.predictions.add(detection_id=det, species='High', confidence=0.95,
                       model='test-model', category='new')
-    db.add_prediction(detection_id=det, species='Low', confidence=0.10,
+    db.predictions.add(detection_id=det, species='Low', confidence=0.10,
                       model='test-model', category='new')
 
     rules = [
         {'field': 'rating', 'op': '>=', 'value': 3},
         {'field': 'prediction_confidence', 'op': '>=', 'value': 0.8},
     ]
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
 
     returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
     assert returned == ['High'], (
@@ -647,9 +647,9 @@ def test_get_predictions_any_group_mixes_metadata_and_prediction(app_and_db):
     # p1 has rating 3 in the fixture.
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
-    db.add_prediction(detection_id=det, species='High', confidence=0.95,
+    db.predictions.add(detection_id=det, species='High', confidence=0.95,
                       model='test-model', category='new')
-    db.add_prediction(detection_id=det, species='Low', confidence=0.10,
+    db.predictions.add(detection_id=det, species='Low', confidence=0.10,
                       model='test-model', category='new')
 
     rules = {
@@ -659,7 +659,7 @@ def test_get_predictions_any_group_mixes_metadata_and_prediction(app_and_db):
             {'field': 'prediction_confidence', 'op': '>=', 'value': 0.8},
         ],
     }
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
     returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
     assert returned == ['High'], (
         'row-level narrowing regressed for mixed `any` groups; the low-'
@@ -683,7 +683,7 @@ def test_get_predictions_any_group_none_prediction_branch_broadens(app_and_db):
     # p1 has rating 3 in the fixture.
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
-    db.add_prediction(detection_id=det, species='Low', confidence=0.10,
+    db.predictions.add(detection_id=det, species='Low', confidence=0.10,
                       model='test-model', category='new')
 
     rules = {
@@ -698,7 +698,7 @@ def test_get_predictions_any_group_none_prediction_branch_broadens(app_and_db):
             {'field': 'rating', 'op': '>=', 'value': 5},
         ],
     }
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
     returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
     assert returned == ['Low'], (
         'emptied `none` branch under `any` was dropped from the SQL; the '
@@ -719,7 +719,7 @@ def test_get_predictions_any_group_none_mixed_subgroup_broadens(app_and_db):
     photos = db.photos.list_page()
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
-    db.add_prediction(detection_id=det, species='Low', confidence=0.10,
+    db.predictions.add(detection_id=det, species='Low', confidence=0.10,
                       model='test-model', category='new')
 
     rules = {
@@ -740,7 +740,7 @@ def test_get_predictions_any_group_none_mixed_subgroup_broadens(app_and_db):
             {'field': 'rating', 'op': '>=', 'value': 999},
         ],
     }
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
     returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
     assert returned == ['Low'], (
         'emptied mixed `none` subgroup under `any` was dropped from the '
@@ -761,9 +761,9 @@ def test_get_predictions_status_is_not_keeps_pending_siblings(app_and_db):
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
     # Two predictions on the same detection.
-    db.add_prediction(detection_id=det, species='PendingPick', confidence=0.9,
+    db.predictions.add(detection_id=det, species='PendingPick', confidence=0.9,
                       model='test-model', category='new')
-    db.add_prediction(detection_id=det, species='RejectedPick', confidence=0.5,
+    db.predictions.add(detection_id=det, species='RejectedPick', confidence=0.5,
                       model='test-model', category='new')
     rejected = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id=? AND species='RejectedPick'",
@@ -772,7 +772,7 @@ def test_get_predictions_status_is_not_keeps_pending_siblings(app_and_db):
     db.update_prediction_status(rejected['id'], 'rejected')
 
     rules = [{'field': 'prediction_status', 'op': 'is not', 'value': 'rejected'}]
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
     returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
     assert 'PendingPick' in returned, (
         'is-not translated to NOT EXISTS at the photo level and dropped '
@@ -794,9 +794,9 @@ def test_get_predictions_status_not_in_keeps_pending_siblings(app_and_db):
     photos = db.photos.list_page()
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
-    db.add_prediction(detection_id=det, species='PendingPick', confidence=0.9,
+    db.predictions.add(detection_id=det, species='PendingPick', confidence=0.9,
                       model='test-model', category='new')
-    db.add_prediction(detection_id=det, species='RejectedPick', confidence=0.5,
+    db.predictions.add(detection_id=det, species='RejectedPick', confidence=0.5,
                       model='test-model', category='new')
     rejected = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id=? AND species='RejectedPick'",
@@ -806,7 +806,7 @@ def test_get_predictions_status_not_in_keeps_pending_siblings(app_and_db):
 
     rules = [{'field': 'prediction_status', 'op': 'not_in',
               'value': ['rejected', 'accepted']}]
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
     returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
     assert returned == ['PendingPick'], (
         'not_in translated to NOT EXISTS at the photo level and dropped '
@@ -826,9 +826,9 @@ def test_get_predictions_needs_review_no_keeps_non_pending_siblings(app_and_db):
     photos = db.photos.list_page()
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
-    db.add_prediction(detection_id=det, species='PendingPick', confidence=0.9,
+    db.predictions.add(detection_id=det, species='PendingPick', confidence=0.9,
                       model='test-model', category='new')
-    db.add_prediction(detection_id=det, species='RejectedPick', confidence=0.5,
+    db.predictions.add(detection_id=det, species='RejectedPick', confidence=0.5,
                       model='test-model', category='new')
     rejected = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id=? AND species='RejectedPick'",
@@ -837,7 +837,7 @@ def test_get_predictions_needs_review_no_keeps_non_pending_siblings(app_and_db):
     db.update_prediction_status(rejected['id'], 'rejected')
 
     rules = [{'field': 'needs_review', 'op': 'is', 'value': False}]
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
     returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
     assert 'RejectedPick' in returned, (
         'needs_review=false translated to NOT EXISTS(pending) at the photo '
@@ -861,13 +861,13 @@ def test_get_predictions_classifier_model_is_not_keeps_other_model_siblings(app_
     photos = db.photos.list_page()
     photo_id = photos[0]['id']
     det = _make_detection(db, photo_id)
-    db.add_prediction(detection_id=det, species='PickA', confidence=0.9,
+    db.predictions.add(detection_id=det, species='PickA', confidence=0.9,
                       model='model-a', category='new')
-    db.add_prediction(detection_id=det, species='PickB', confidence=0.5,
+    db.predictions.add(detection_id=det, species='PickB', confidence=0.5,
                       model='model-b', category='new')
 
     rules = [{'field': 'classifier_model', 'op': 'is not', 'value': 'model-a'}]
-    preds = db.get_predictions(rules=rules)
+    preds = db.predictions.get_rows(rules=rules)
     returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
     assert 'PickB' in returned, (
         'is-not translated to NOT EXISTS at the photo level and dropped '
@@ -889,7 +889,7 @@ def _one_prediction(db, species='Blue Jay', photo_index=2, model='test-model'):
     photos = db.photos.list_page()
     photo_id = photos[photo_index % len(photos)]['id']
     det = _make_detection(db, photo_id)
-    db.add_prediction(detection_id=det, species=species, confidence=0.90,
+    db.predictions.add(detection_id=det, species=species, confidence=0.90,
                       model=model, category='new', group_id=None)
     row = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
@@ -944,24 +944,24 @@ def test_undo_of_an_accept_still_works_under_the_decision_lock(app_and_db):
 
     pred_id, photo_id = _one_prediction(db, species='Unicolored Jay')
     assert client.post(f'/api/predictions/{pred_id}/accept').status_code == 200
-    assert db.get_review_status(pred_id, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_id, ws) == 'accepted'
     kw_names = {k['name'] for k in db.get_photo_keywords(photo_id)}
     assert 'Unicolored Jay' in kw_names
 
     assert client.post('/api/undo').status_code == 200
-    assert db.get_review_status(pred_id, ws) == 'pending'
+    assert db.predictions.get_review_status(pred_id, ws) == 'pending'
     kw_names = {k['name'] for k in db.get_photo_keywords(photo_id)}
     assert 'Unicolored Jay' not in kw_names
 
     assert client.post('/api/redo').status_code == 200
-    assert db.get_review_status(pred_id, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_id, ws) == 'accepted'
 
     # "Nothing to redo" returns without writing; the lock must still be gone.
     assert client.post('/api/redo').status_code == 400
     second, _ = _one_prediction(db, species='White-throated Magpie-Jay',
                                 photo_index=1)
     assert client.post(f'/api/predictions/{second}/accept').status_code == 200
-    assert db.get_review_status(second, ws) == 'accepted'
+    assert db.predictions.get_review_status(second, ws) == 'accepted'
 
 
 def test_group_apply_records_decisions_under_the_lock(app_and_db):
@@ -976,9 +976,9 @@ def test_group_apply_records_decisions_under_the_lock(app_and_db):
     pick, reject = photos[0]['id'], photos[1]['id']
     det_a = _make_detection(db, pick)
     det_b = _make_detection(db, reject)
-    db.add_prediction(detection_id=det_a, species='Azure Jay', confidence=0.9,
+    db.predictions.add(detection_id=det_a, species='Azure Jay', confidence=0.9,
                       model='test-model', category='new', group_id='gapply')
-    db.add_prediction(detection_id=det_b, species='Azure Jay', confidence=0.8,
+    db.predictions.add(detection_id=det_b, species='Azure Jay', confidence=0.8,
                       model='test-model', category='new', group_id='gapply')
     pred_a = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_a,)
@@ -993,8 +993,8 @@ def test_group_apply_records_decisions_under_the_lock(app_and_db):
         'picks': [pick], 'rejects': [reject], 'removed': [], 'species': '',
     })
     assert resp.status_code == 200
-    assert db.get_review_status(pred_a, ws) == 'accepted'
-    assert db.get_review_status(pred_b, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
 
     # The lock was released, so a following decision goes through.
     fresh, _ = _one_prediction(db, species='Plush-crested Jay')
@@ -1033,9 +1033,9 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     rejected_photo = photos[1]['id']
     det_a = _make_detection(db, accepted_photo)
     det_b = _make_detection(db, rejected_photo)
-    db.add_prediction(detection_id=det_a, species='Azure Jay', confidence=0.9,
+    db.predictions.add(detection_id=det_a, species='Azure Jay', confidence=0.9,
                       model='test-model', category='new', group_id=None)
-    db.add_prediction(detection_id=det_b, species='Azure Jay', confidence=0.8,
+    db.predictions.add(detection_id=det_b, species='Azure Jay', confidence=0.8,
                       model='test-model', category='new', group_id=None)
     pred_a = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_a,)
@@ -1054,8 +1054,8 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
         f'/api/predictions/{pred_a}/accept').status_code == 200
     assert client.post(
         f'/api/predictions/{pred_b}/reject').status_code == 200
-    assert db.get_review_status(pred_a, ws) == 'accepted'
-    assert db.get_review_status(pred_b, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
     accepted_keywords_before = {
         k['name'] for k in db.get_photo_keywords(accepted_photo)}
     assert 'Azure Jay' in accepted_keywords_before
@@ -1076,8 +1076,8 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     assert resp.get_json()['already_decided'] == 2
 
     # The lock-committed decisions survive.
-    assert db.get_review_status(pred_a, ws) == 'accepted'
-    assert db.get_review_status(pred_b, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
 
     # The keyword the accept added is still attached — same-side
     # confirmation that status and keyword did not drift apart.
@@ -1100,13 +1100,13 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     # guard preserves committed decisions without freezing the row set.
     third_photo = photos[2]['id']
     det_c = _make_detection(db, third_photo)
-    db.add_prediction(detection_id=det_c, species='Azure Jay',
+    db.predictions.add(detection_id=det_c, species='Azure Jay',
                       confidence=0.7, model='test-model',
                       category='new', group_id=None)
     pred_c = db.conn.execute(
         "SELECT id FROM predictions WHERE detection_id = ?", (det_c,)
     ).fetchone()['id']
-    assert db.get_review_status(pred_c, ws) == 'pending'
+    assert db.predictions.get_review_status(pred_c, ws) == 'pending'
     resp = client.post('/api/predictions/group/apply', json={
         'picks': [third_photo],
         'rejects': [],
@@ -1116,7 +1116,7 @@ def test_group_apply_preserves_already_decided_predictions(app_and_db):
     })
     assert resp.status_code == 200
     assert resp.get_json()['already_decided'] == 0
-    assert db.get_review_status(pred_c, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_c, ws) == 'accepted'
 
 
 def _seed_burst_group(db, group_id='gbaseline'):
@@ -1125,7 +1125,7 @@ def _seed_burst_group(db, group_id='gbaseline'):
     out = []
     for photo in photos[:2]:
         det = _make_detection(db, photo['id'])
-        db.add_prediction(detection_id=det, species='Azure Jay',
+        db.predictions.add(detection_id=det, species='Azure Jay',
                           confidence=0.9, model='test-model',
                           category='new', group_id=group_id)
         pred_id = db.conn.execute(
@@ -1157,7 +1157,7 @@ def test_group_apply_skips_photos_decided_since_the_modal_rendered(app_and_db):
     # to the whole burst — every member would then be stale, which is correct
     # but tests nothing about applying the untouched remainder.
     db.update_prediction_status(pred_a, 'rejected')
-    assert db.get_review_status(pred_a, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
     flag_before = db.photos.get(photo_a)['flag'] or 'none'
 
     resp = client.post('/api/predictions/group/apply', json={
@@ -1174,12 +1174,12 @@ def test_group_apply_skips_photos_decided_since_the_modal_rendered(app_and_db):
     # A's completed decision survives, and nothing was written for it —
     # including the keyword, which is the half an under-the-lock status guard
     # alone would still have written.
-    assert db.get_review_status(pred_a, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
     assert (db.photos.get(photo_a)['flag'] or 'none') == flag_before
     assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
 
     # The rest of the burst still applied.
-    assert db.get_review_status(pred_b, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
     assert db.photos.get(photo_b)['flag'] == 'rejected'
 
 
@@ -1206,8 +1206,8 @@ def test_group_apply_allows_a_deliberate_re_decision(app_and_db):
     })
     assert first.status_code == 200
     assert first.get_json()['already_decided'] == 0
-    assert db.get_review_status(pred_a, ws) == 'accepted'
-    assert db.get_review_status(pred_b, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
 
     # The modal is re-opened: it now displays the statuses just written, and
     # the user swaps the split.
@@ -1218,8 +1218,8 @@ def test_group_apply_allows_a_deliberate_re_decision(app_and_db):
     })
     assert second.status_code == 200
     assert second.get_json()['already_decided'] == 0
-    assert db.get_review_status(pred_a, ws) == 'rejected'
-    assert db.get_review_status(pred_b, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_b, ws) == 'accepted'
 
 
 def test_group_apply_writes_every_side_effect_in_one_transaction(
@@ -1279,7 +1279,7 @@ def test_group_apply_writes_every_side_effect_in_one_transaction(
     # Nothing was written for photo A, which the loop reached first.
     assert (db.photos.get(photo_a)['flag'] or 'none') == 'none'
     assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
-    assert db.get_review_status(pred_a, ws) == 'pending'
+    assert db.predictions.get_review_status(pred_a, ws) == 'pending'
     assert not [
         c for c in db.pending_changes.list_all() if c['photo_id'] == photo_a
     ]
@@ -1317,7 +1317,7 @@ def test_group_apply_treats_regenerated_predictions_as_stale(app_and_db):
     det_a = db.conn.execute(
         "SELECT detection_id FROM predictions WHERE id = ?", (pred_a,)
     ).fetchone()['detection_id']
-    db.add_prediction(
+    db.predictions.add(
         detection_id=det_a, species='Verdin', confidence=0.7,
         model='test-model', category='new',
         labels_fingerprint='rerun-v2',
@@ -1344,13 +1344,13 @@ def test_group_apply_treats_regenerated_predictions_as_stale(app_and_db):
 
     # Nothing was written for photo A — including the new row that the write
     # would have blindly touched — and the modal's species did not attach.
-    assert db.get_review_status(pred_a, ws) == 'pending'
-    assert db.get_review_status(new_pred_a, ws) == 'pending'
+    assert db.predictions.get_review_status(pred_a, ws) == 'pending'
+    assert db.predictions.get_review_status(new_pred_a, ws) == 'pending'
     assert (db.photos.get(photo_a)['flag'] or 'none') == flag_before
     assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(photo_a)}
 
     # Photo B, whose detections were untouched, still applies.
-    assert db.get_review_status(pred_b, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
     assert db.photos.get(photo_b)['flag'] == 'rejected'
 
 
@@ -1411,8 +1411,8 @@ def test_reject_covers_the_whole_burst_like_accept(app_and_db):
     assert resp.status_code == 200
     assert sorted(resp.get_json()['rejected_prediction_ids']) == sorted(
         [pred_a, pred_b])
-    assert db.get_review_status(pred_a, ws) == 'rejected'
-    assert db.get_review_status(pred_b, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_b, ws) == 'rejected'
 
 
 def test_reject_expansion_leaves_decided_burst_members_alone(app_and_db):
@@ -1426,7 +1426,7 @@ def test_reject_expansion_leaves_decided_burst_members_alone(app_and_db):
     resp = client.post(f'/api/predictions/{pred_a}/reject')
     assert resp.status_code == 200
     assert resp.get_json()['rejected_prediction_ids'] == [pred_a]
-    assert db.get_review_status(pred_b, ws) == 'reviewed'
+    assert db.predictions.get_review_status(pred_b, ws) == 'reviewed'
 
 
 def test_group_apply_pick_accepts_only_its_member_and_undo_restores_it(
@@ -1445,13 +1445,13 @@ def test_group_apply_pick_accepts_only_its_member_and_undo_restores_it(
     pick, reject = photos[0]['id'], photos[1]['id']
     det_pick = _make_detection(db, pick)
     det_reject = _make_detection(db, reject)
-    db.add_prediction(detection_id=det_pick, species='Canada Jay',
+    db.predictions.add(detection_id=det_pick, species='Canada Jay',
                       confidence=0.9, model='test-model', category='new',
                       group_id='galt')
-    db.add_prediction(detection_id=det_pick, species='Blue Jay',
+    db.predictions.add(detection_id=det_pick, species='Blue Jay',
                       confidence=0.1, model='test-model', category='new',
                       group_id=None)
-    db.add_prediction(detection_id=det_reject, species='Canada Jay',
+    db.predictions.add(detection_id=det_reject, species='Canada Jay',
                       confidence=0.8, model='test-model', category='new',
                       group_id='galt')
 
@@ -1474,15 +1474,15 @@ def test_group_apply_pick_accepts_only_its_member_and_undo_restores_it(
         'observed': {str(member): 'pending', str(reject_member): 'pending'},
     })
     assert resp.status_code == 200, resp.get_data(as_text=True)
-    assert db.get_review_status(member, ws) == 'accepted'
-    assert db.get_review_status(runner_up, ws) == 'rejected'
+    assert db.predictions.get_review_status(member, ws) == 'accepted'
+    assert db.predictions.get_review_status(runner_up, ws) == 'rejected'
     assert 'Canada Jay' in {k['name'] for k in db.get_photo_keywords(pick)}
 
     # Undo reverses the keyword and the pick's statuses together.
     assert client.post('/api/undo').status_code == 200
     assert 'Canada Jay' not in {k['name'] for k in db.get_photo_keywords(pick)}
-    assert db.get_review_status(member, ws) == 'pending'
-    assert db.get_review_status(runner_up, ws) == 'alternative'
+    assert db.predictions.get_review_status(member, ws) == 'pending'
+    assert db.predictions.get_review_status(runner_up, ws) == 'alternative'
 
     # The photo is reviewable again rather than stuck behind a 409.
     assert client.post(f'/api/predictions/{member}/accept').status_code == 200
@@ -1499,12 +1499,12 @@ def test_group_apply_without_species_is_undoable(app_and_db):
         'picks': [pick], 'rejects': [reject], 'removed': [], 'species': '',
     })
     assert resp.status_code == 200
-    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
 
     assert client.post('/api/undo').status_code == 200
-    assert db.get_review_status(pred_a, ws) == 'pending'
+    assert db.predictions.get_review_status(pred_a, ws) == 'pending'
     assert client.post('/api/redo').status_code == 200
-    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
 
 
 def test_group_apply_undo_restores_pick_prior_rejected_status(app_and_db):
@@ -1528,7 +1528,7 @@ def test_group_apply_undo_restores_pick_prior_rejected_status(app_and_db):
     # later re-pick. Any status the generic reset would ignore works here;
     # rejected is the case Codex named.
     db.update_prediction_status(pred_a, 'rejected')
-    assert db.get_review_status(pred_a, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
 
     resp = client.post('/api/predictions/group/apply', json={
         'picks': [pick], 'rejects': [reject], 'removed': [],
@@ -1536,7 +1536,7 @@ def test_group_apply_undo_restores_pick_prior_rejected_status(app_and_db):
         'observed': {str(pred_a): 'rejected'},
     })
     assert resp.status_code == 200, resp.get_data(as_text=True)
-    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
     assert 'Azure Jay' in {k['name'] for k in db.get_photo_keywords(pick)}
 
     # Undo must land the row back at ``rejected`` — not ``pending`` or
@@ -1544,14 +1544,14 @@ def test_group_apply_undo_restores_pick_prior_rejected_status(app_and_db):
     # forgotten and the prediction stays out of the pending queue.
     assert client.post('/api/undo').status_code == 200
     assert 'Azure Jay' not in {k['name'] for k in db.get_photo_keywords(pick)}
-    assert db.get_review_status(pred_a, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
 
     # Redo re-applies the accept, and a second undo still restores the
     # snapshot rather than settling on the generic ``pending``.
     assert client.post('/api/redo').status_code == 200
-    assert db.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
     assert client.post('/api/undo').status_code == 200
-    assert db.get_review_status(pred_a, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
 
 
 def test_group_apply_repick_rejects_accepted_sibling_and_undo_restores(app_and_db):
@@ -1572,7 +1572,7 @@ def test_group_apply_repick_rejects_accepted_sibling_and_undo_restores(app_and_d
     det = db.conn.execute(
         "SELECT detection_id FROM predictions WHERE id = ?", (pred_a,)
     ).fetchone()['detection_id']
-    db.add_prediction(detection_id=det, species='Steller Jay',
+    db.predictions.add(detection_id=det, species='Steller Jay',
                       confidence=0.4, model='test-model', category='new',
                       status='alternative')
     alt = db.conn.execute(
@@ -1589,16 +1589,16 @@ def test_group_apply_repick_rejects_accepted_sibling_and_undo_restores(app_and_d
         'observed': {str(pred_a): 'rejected'},
     })
     assert resp.status_code == 200, resp.get_data(as_text=True)
-    assert db.get_review_status(pred_a, ws) == 'accepted'
-    assert db.get_review_status(alt, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(alt, ws) == 'rejected'
 
     assert client.post('/api/undo').status_code == 200
-    assert db.get_review_status(pred_a, ws) == 'rejected'
-    assert db.get_review_status(alt, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_a, ws) == 'rejected'
+    assert db.predictions.get_review_status(alt, ws) == 'accepted'
 
     assert client.post('/api/redo').status_code == 200
-    assert db.get_review_status(pred_a, ws) == 'accepted'
-    assert db.get_review_status(alt, ws) == 'rejected'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(alt, ws) == 'rejected'
 
 
 def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
@@ -1619,8 +1619,8 @@ def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
         'prediction_ids': [pred_a, pred_b],
     })
     assert resp.status_code == 200, resp.get_data(as_text=True)
-    assert db.get_review_status(pred_a, ws) == 'accepted'
-    assert db.get_review_status(pred_b, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_b, ws) == 'accepted'
 
     original = type(db)._undo_prediction_accept_statuses
     seen_in_transaction = []
@@ -1637,13 +1637,13 @@ def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
         'a replay step committed and ended the transaction early'
     )
     assert not db.conn.in_transaction
-    assert db.get_review_status(pred_a, ws) == 'pending'
-    assert db.get_review_status(pred_b, ws) == 'pending'
+    assert db.predictions.get_review_status(pred_a, ws) == 'pending'
+    assert db.predictions.get_review_status(pred_b, ws) == 'pending'
 
     # A failure after the first photo's replay rolls the whole undo back.
     db.redo_last_undo()
-    assert db.get_review_status(pred_a, ws) == 'accepted'
-    assert db.get_review_status(pred_b, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_b, ws) == 'accepted'
     real_untag = type(db)._untag_for_edit
     untagged = []
 
@@ -1660,5 +1660,5 @@ def test_undo_replay_is_one_transaction(app_and_db, monkeypatch):
         pass
     else:
         raise AssertionError('the injected failure did not fire')
-    assert db.get_review_status(pred_a, ws) == 'accepted'
-    assert db.get_review_status(pred_b, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_a, ws) == 'accepted'
+    assert db.predictions.get_review_status(pred_b, ws) == 'accepted'

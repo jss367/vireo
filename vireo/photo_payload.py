@@ -135,7 +135,7 @@ def attach_prediction_confidence(db, photo_dicts):
     if not photo_dicts:
         return photo_dicts
     ids = [p["id"] for p in photo_dicts]
-    conf_map = db.get_top_prediction_confidences(ids)
+    conf_map = db.predictions.get_top_confidences(ids)
     for p in photo_dicts:
         p["prediction_confidence"] = conf_map.get(p["id"])
     return photo_dicts

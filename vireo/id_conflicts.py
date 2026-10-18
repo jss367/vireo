@@ -43,7 +43,7 @@ def build_comparison(db, collection_id, photo_ids=None):
             "taxonomy_available": False,
         }
 
-    preds = db.get_predictions(photo_ids=row_ids)
+    preds = db.predictions.get_rows(photo_ids=row_ids)
     detections_by_photo = db.get_detections_for_photos(row_ids)
     keywords_by_photo = db.get_keywords_for_photos(row_ids)
     species_identities = db.get_species_keywords_for_photos(row_ids, include_identities=True)

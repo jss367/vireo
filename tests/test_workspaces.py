@@ -408,7 +408,7 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
     det_ids1 = db.save_detections(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    db.add_prediction(det_ids1[0], "Robin", 0.95, "bioclip")
+    db.predictions.add(det_ids1[0], "Robin", 0.95, "bioclip")
 
     # Second workspace with a different folder + photo.
     ws2 = db.create_workspace("Other")
@@ -419,14 +419,14 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
     det_ids2 = db.save_detections(photo2, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
     ], detector_model="MDV6")
-    db.add_prediction(det_ids2[0], "Sparrow", 0.8, "bioclip")
+    db.predictions.add(det_ids2[0], "Sparrow", 0.8, "bioclip")
 
     # Each workspace sees only predictions on its own folders' photos.
-    preds_ws2 = db.get_predictions()
+    preds_ws2 = db.predictions.get_rows()
     assert len(preds_ws2) == 1
     assert preds_ws2[0]["species"] == "Sparrow"
     db.set_active_workspace(ws_id)
-    preds_ws1 = db.get_predictions()
+    preds_ws1 = db.predictions.get_rows()
     assert len(preds_ws1) == 1
     assert preds_ws1[0]["species"] == "Robin"
 
@@ -485,7 +485,7 @@ def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
     det_ids = db.save_detections(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip",
+    db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip",
                       taxonomy={"order": "Passeriformes"})
     rules = json.dumps([{"field": "taxonomy_order", "op": "equals", "value": "Passeriformes"}])
     cid = db.collections.add("Passerines", rules)
@@ -2023,7 +2023,7 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
     det_ids = db.save_detections(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip")
+    db.predictions.add(det_ids[0], "Robin", 0.95, "bioclip")
     db.queue_change(photo_id, "keyword_add", "Robin")
 
     ws2 = db.create_workspace("Target")
@@ -2038,12 +2038,12 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
 
     # Predictions follow the folder's workspace membership (detections are global).
     db.set_active_workspace(ws2)
-    preds = db.get_predictions()
+    preds = db.predictions.get_rows()
     assert len(preds) == 1
     assert preds[0]["species"] == "Robin"
 
     db.set_active_workspace(ws1)
-    assert len(db.get_predictions()) == 0
+    assert len(db.predictions.get_rows()) == 0
 
     # Pending changes moved to ws2
     db.set_active_workspace(ws2)

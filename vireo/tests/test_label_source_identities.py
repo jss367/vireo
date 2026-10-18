@@ -87,9 +87,9 @@ def _prediction_id(db, det, model, fingerprint):
 def test_backfill_puts_a_legacy_label_and_the_native_prediction_under_one_species(db, tmp_path, legacy_list):
     fp = legacy_list["fingerprint"]
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fp,
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fp,
                       taxonomy={"scientific_name": POCHARD["scientific_name"]})
-    db.add_prediction(det, "Redhead", .5, "iNat21 (EVA-02 Large)", labels_fingerprint="tol",
+    db.predictions.add(det, "Redhead", .5, "iNat21 (EVA-02 Large)", labels_fingerprint="tol",
                       taxonomy={"scientific_name": REDHEAD["scientific_name"]})
     bioclip = _prediction_id(db, det, "BioCLIP-2.5", fp)
     native = _prediction_id(db, det, "iNat21 (EVA-02 Large)", "tol")
@@ -121,7 +121,7 @@ def test_backfill_puts_a_legacy_label_and_the_native_prediction_under_one_specie
 
 def test_backfill_does_not_change_the_label_list_or_its_fingerprint(db, tmp_path, legacy_list):
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
     meta_path = legacy_list["path"].with_suffix(".json")
     before = (legacy_list["path"].read_bytes(), meta_path.read_bytes())
 
@@ -135,11 +135,11 @@ def test_backfill_does_not_change_the_label_list_or_its_fingerprint(db, tmp_path
 def test_rows_written_after_the_backfill_get_the_identity_from_every_write_path(db, tmp_path, legacy_list):
     fp = legacy_list["fingerprint"]
     first = _detection(db, tmp_path, "one.jpg")
-    db.add_prediction(first, "Redhead", .6, "BioCLIP-2.5", labels_fingerprint=fp)
+    db.predictions.add(first, "Redhead", .6, "BioCLIP-2.5", labels_fingerprint=fp)
     backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
 
     later = _detection(db, tmp_path, "two.jpg")
-    db.add_prediction(later, "Redhead", .7, "BioCLIP-2.5", labels_fingerprint=fp)
+    db.predictions.add(later, "Redhead", .7, "BioCLIP-2.5", labels_fingerprint=fp)
     assert _row(db, _prediction_id(db, later, "BioCLIP-2.5", fp))["source_taxon_id"] == 7056
 
     # The classify job's own INSERT OR REPLACE path.
@@ -150,19 +150,19 @@ def test_rows_written_after_the_backfill_get_the_identity_from_every_write_path(
     assert _row(db, _prediction_id(db, later, "BioCLIP-2.5", fp))["source_taxon_id"] == 7056
 
     # A refresh that rewrites the output without a taxonomy.
-    db.add_prediction(first, "Redhead", .65, "BioCLIP-2.5", labels_fingerprint=fp, refresh_output=True)
+    db.predictions.add(first, "Redhead", .65, "BioCLIP-2.5", labels_fingerprint=fp, refresh_output=True)
     refreshed = _row(db, _prediction_id(db, first, "BioCLIP-2.5", fp))
     assert refreshed["confidence"] == .65
     assert refreshed["source_taxon_id"] == 7056
 
     # Other label sets and explicit source identities are untouched.
-    db.add_prediction(later, "Redhead", .4, "BioCLIP-2.5", labels_fingerprint="0123456789ab")
+    db.predictions.add(later, "Redhead", .4, "BioCLIP-2.5", labels_fingerprint="0123456789ab")
     assert _row(db, _prediction_id(db, later, "BioCLIP-2.5", "0123456789ab"))["source_taxon_id"] is None
 
 
 def test_backfill_runs_once_per_label_set(db, tmp_path, legacy_list):
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
     backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
     marker = json.loads(db.get_meta(MARKER_PREFIX + legacy_list["fingerprint"]))
     assert marker == {"labels": 2, "identified": 1, "predictions_updated": 1, "unidentified": ["Mallard"]}
@@ -175,7 +175,7 @@ def test_backfill_runs_once_per_label_set(db, tmp_path, legacy_list):
 
 def test_a_name_two_taxa_share_in_the_place_stays_unidentified(db, tmp_path, legacy_list):
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
     # The fetch qualifies a shared name, so the bare legacy prompt has no
     # single taxon behind it.
     fetch = _fetch(
@@ -193,7 +193,7 @@ def test_a_name_two_taxa_share_in_the_place_stays_unidentified(db, tmp_path, leg
 
 def test_a_list_edited_since_classification_is_not_matched(db, tmp_path, legacy_list):
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
     legacy_list["path"].write_text("Mallard\nRedhead\nCanvasback\n", encoding="utf-8")
 
     assert pending_label_sets(db) == []
@@ -201,7 +201,7 @@ def test_a_list_edited_since_classification_is_not_matched(db, tmp_path, legacy_
 
 def test_an_unreachable_list_is_reported_and_retried_next_time(db, tmp_path, legacy_list):
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
 
     def offline(*args, **kwargs):
         raise RuntimeError("Could not fetch page 1 of Birds species from iNaturalist")
@@ -221,7 +221,7 @@ def test_a_list_without_its_query_is_not_looked_up(db, tmp_path, legacy_list):
     # are rather than being matched against some other region's species.
     meta_path = legacy_list["path"].with_suffix(".json")
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
     meta = json.loads(meta_path.read_text())
     meta.pop("place_id")
     meta_path.write_text(json.dumps(meta))
@@ -244,7 +244,7 @@ def test_a_list_classified_before_merging_folded_case_variants_is_matched(db, tm
     assert as_read != compute_fingerprint(load_merged_labels([{"labels_file": str(path)}]))
     db.model_runs.upsert_labels_fingerprint(as_read, path.name, [str(path)], 3)
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=as_read)
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=as_read)
 
     assert as_read in [s["fingerprint"] for s in pending_label_sets(db)]
     backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
@@ -253,12 +253,12 @@ def test_a_list_classified_before_merging_folded_case_variants_is_matched(db, tm
 
 def test_predictions_older_than_fingerprints_take_the_identity_every_list_agrees_on(db, tmp_path, legacy_list):
     old = _detection(db, tmp_path, "old.jpg")
-    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")  # labels_fingerprint='legacy'
-    db.add_prediction(old, "Mallard", .2, "BioCLIP-2.5")
-    db.add_prediction(old, "Redhead", .5, "iNat21 (EVA-02 Large)",
+    db.predictions.add(old, "Redhead", .51, "BioCLIP-2.5")  # labels_fingerprint='legacy'
+    db.predictions.add(old, "Mallard", .2, "BioCLIP-2.5")
+    db.predictions.add(old, "Redhead", .5, "iNat21 (EVA-02 Large)",
                       taxonomy={"scientific_name": REDHEAD["scientific_name"]})
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .6, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
+    db.predictions.add(det, "Redhead", .6, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
 
     result = backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
 
@@ -297,9 +297,9 @@ def test_lists_that_disagree_leave_an_old_prediction_unidentified(db, tmp_path, 
         "label_identities": {"Redhead": POCHARD},
     }))
     old = _detection(db, tmp_path, "old.jpg")
-    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+    db.predictions.add(old, "Redhead", .51, "BioCLIP-2.5")
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .6, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
+    db.predictions.add(det, "Redhead", .6, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
 
     result = backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
 
@@ -319,7 +319,7 @@ def test_old_predictions_alone_start_the_startup_job(db, tmp_path, monkeypatch, 
         "label_identities": {"Redhead": REDHEAD},
     }))
     old = _detection(db, tmp_path, "old.jpg")
-    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+    db.predictions.add(old, "Redhead", .51, "BioCLIP-2.5")
     assert pending_label_sets(db) == []
     monkeypatch.setattr("labels.fetch_species_list", _fetch(["Redhead"], {"Redhead": REDHEAD}))
     app = _app(tmp_path, monkeypatch, db)
@@ -388,7 +388,7 @@ def _wait_for_job(runner, job_type, deadline_s=5):
 
 def test_startup_job_recovers_identities_in_the_background(db, tmp_path, monkeypatch, legacy_list):
     det = _detection(db, tmp_path, "duck.jpg")
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=legacy_list["fingerprint"])
     monkeypatch.setattr("labels.fetch_species_list", _fetch(["Redhead"], {"Redhead": REDHEAD}))
     app = _app(tmp_path, monkeypatch, db)
 
@@ -414,7 +414,7 @@ def test_legacy_only_predictions_query_their_saved_lists(db, tmp_path, legacy_li
     from label_source_identities import LEGACY_MARKER
 
     old = _detection(db, tmp_path, "old.jpg")
-    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+    db.predictions.add(old, "Redhead", .51, "BioCLIP-2.5")
     fetch = _fetch(["Redhead"], {"Redhead": REDHEAD})
     assert pending_label_sets(db) == []
     result = backfill(db, fetch=fetch)
@@ -429,7 +429,7 @@ def test_failed_legacy_only_lookup_is_retried(db, tmp_path, legacy_list):
     from label_source_identities import LEGACY_MARKER
 
     old = _detection(db, tmp_path, "old.jpg")
-    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+    db.predictions.add(old, "Redhead", .51, "BioCLIP-2.5")
 
     def offline(*args, **kwargs):
         raise RuntimeError("offline")
@@ -453,10 +453,10 @@ def test_failed_pending_list_defers_legacy_consensus_until_retry(db, tmp_path, l
     fingerprint = compute_fingerprint(load_merged_labels([{"labels_file": str(path)}]))
     db.model_runs.upsert_labels_fingerprint(fingerprint, path.name, [str(path)], 1)
     old = _detection(db, tmp_path, "old.jpg")
-    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+    db.predictions.add(old, "Redhead", .51, "BioCLIP-2.5")
     current = _detection(db, tmp_path, "current.jpg")
     for fp in (fingerprint, legacy_list["fingerprint"]):
-        db.add_prediction(current, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fp)
+        db.predictions.add(current, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fp)
 
     def fetch(place_id, *args, **kwargs):
         if place_id == 1:
@@ -518,7 +518,7 @@ def test_source_change_during_lookup_keeps_old_fingerprint_unstamped(db, tmp_pat
 
     det = _detection(db, tmp_path, "duck.jpg")
     fingerprint = legacy_list["fingerprint"]
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fingerprint)
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fingerprint)
 
     def fetch(*args, **kwargs):
         if changed_file == "text":
@@ -545,7 +545,7 @@ def test_source_change_during_lookup_keeps_old_fingerprint_unstamped(db, tmp_pat
 def test_legacy_native_bioclip_taxonomy_is_not_repaired_from_list_consensus(db, tmp_path, legacy_list, taxonomy):
     """The legacy sentinel loses mode provenance, so existing ToL taxonomy is protected."""
     old = _detection(db, tmp_path, "native.jpg")
-    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5", taxonomy=taxonomy)
+    db.predictions.add(old, "Redhead", .51, "BioCLIP-2.5", taxonomy=taxonomy)
     pred_id = _prediction_id(db, old, "BioCLIP-2.5", "legacy")
     before = dict(_row(db, pred_id))
     db.conn.execute(
@@ -565,7 +565,7 @@ def test_legacy_only_source_change_during_lookup_leaves_consensus_retryable(db, 
     from label_source_identities import LEGACY_MARKER
 
     old = _detection(db, tmp_path, "old.jpg")
-    db.add_prediction(old, "Redhead", .51, "BioCLIP-2.5")
+    db.predictions.add(old, "Redhead", .51, "BioCLIP-2.5")
 
     def fetch(*args, **kwargs):
         if changed_file == 'text':
@@ -591,7 +591,7 @@ def test_replaced_sidecar_after_catalog_read_uses_current_query(db, tmp_path, le
 
     det = _detection(db, tmp_path, "old-query.jpg")
     fingerprint = legacy_list["fingerprint"] if tracked else "legacy"
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fingerprint)
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fingerprint)
     original = get_saved_labels
 
     def replace_after_read():
@@ -618,7 +618,7 @@ def test_cancel_during_final_lookup_does_not_commit_repairs(db, tmp_path, legacy
 
     det = _detection(db, tmp_path, "cancelled.jpg")
     fingerprint = legacy_list["fingerprint"] if tracked else "legacy"
-    db.add_prediction(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fingerprint)
+    db.predictions.add(det, "Redhead", .51, "BioCLIP-2.5", labels_fingerprint=fingerprint)
     cancelled = False
 
     def fetch(*args, **kwargs):
@@ -639,8 +639,8 @@ def test_null_legacy_species_does_not_block_consensus(db, tmp_path, legacy_list)
     from label_source_identities import LEGACY_MARKER
 
     det = _detection(db, tmp_path, "nullable.jpg")
-    db.add_prediction(det, None, .2, "BioCLIP-2.5")
-    db.add_prediction(det, "Redhead", .8, "BioCLIP-2.5")
+    db.predictions.add(det, None, .2, "BioCLIP-2.5")
+    db.predictions.add(det, "Redhead", .8, "BioCLIP-2.5")
     result = backfill(db, fetch=_fetch(["Redhead"], {"Redhead": REDHEAD}))
     assert result["ok"] is True
     assert result["legacy_predictions_updated"] == 1

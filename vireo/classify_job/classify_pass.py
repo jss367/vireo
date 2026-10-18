@@ -550,7 +550,7 @@ class _ClassifyPhotosPass:
         # prior fingerprint on those boxes would stay "newest" for their
         # detections and surface alongside the fallback output.
         if self.reclassify:
-            self.db.clear_predictions(
+            self.db.predictions.clear(
                 model=self.model_name,
                 collection_photo_ids=[photo["id"]],
                 labels_fingerprint=(

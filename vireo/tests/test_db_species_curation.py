@@ -182,7 +182,7 @@ def _detect(db, pid, species_conf, model="m1", fingerprint="fp1"):
         "md",
     )
     for species, conf in species_conf:
-        db.add_prediction(det_ids[0], species, conf, model,
+        db.predictions.add(det_ids[0], species, conf, model,
                           labels_fingerprint=fingerprint)
     return det_ids[0]
 
@@ -239,7 +239,7 @@ def test_highlights_candidates_folder_subtree_and_single_photo(db, cur, monkeypa
 def test_highlights_candidates_skip_rejected_and_stale_predictions(db, cur):
     p = cur["p"]
     det = _detect(db, p["plain"], [("Old Label", 0.99)], fingerprint="old")
-    db.add_prediction(det, "New Label", 0.3, "m1", labels_fingerprint="new")
+    db.predictions.add(det, "New Label", 0.3, "m1", labels_fingerprint="new")
     db.conn.execute(
         "UPDATE predictions SET created_at = '2030-01-01' WHERE species = 'New Label'"
     )

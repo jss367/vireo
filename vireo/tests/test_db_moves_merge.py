@@ -885,7 +885,7 @@ def test_query_move_rule_matches_reads_config_only_for_has_predictions(
     det = db.save_detections(p["hi"], [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.5,
          "category": "animal"}], detector_model="MDV6")[0]
-    db.add_prediction(det, species="Robin", confidence=0.9, model="bioclip")
+    db.predictions.add(det, species="Robin", confidence=0.9, model="bioclip")
     assert db.query_move_rule_matches({"has_predictions": True}) == [p["hi"]]
     assert len(calls) == 1
     # A workspace override above the detection's confidence hides it.

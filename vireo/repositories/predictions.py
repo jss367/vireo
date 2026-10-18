@@ -32,8 +32,10 @@ This module owns the SQL behind the predictions domain:
 - the classify job's two statements (``replace_row``, the ``INSERT OR
   REPLACE`` of one classifier output, and ``id_for_key``, which
   ``_existing_prediction_id`` shares), SQL unchanged from ``classify_job``.
-  They are the domain's first operations reached through the
-  ``db.predictions`` accessor rather than a ``Database`` wrapper.
+
+Callers reach these through the ``db.predictions`` accessor, which builds a
+fresh repository per access. Only the prediction-decision writers keep
+one-line ``Database`` wrappers (see below).
 
 The other method bodies were moved verbatim from ``Database``. The only edits are
 ``self._ws_id()`` -> ``self.workspace_id`` and ``NAME`` -> ``self.NAME`` for
@@ -108,6 +110,7 @@ class PredictionRepository:
         commit_with_retry,
         auto_match_review_marker,
         top_prediction_confidence_expr,
+        decided_prediction_statuses,
         facade,
     ):
         self.conn = conn
@@ -121,6 +124,9 @@ class PredictionRepository:
         self.commit_with_retry = commit_with_retry
         self.AUTO_MATCH_REVIEW_MARKER = auto_match_review_marker
         self._TOP_PREDICTION_CONFIDENCE_EXPR = top_prediction_confidence_expr
+        # ``Database.DECIDED_PREDICTION_STATUSES``: the statuses ``decided_ids``
+        # counts as a decision.
+        self.DECIDED_PREDICTION_STATUSES = decided_prediction_statuses
         # Bound ``Database`` methods, kept under their façade names.
         for name in FACADE_METHODS:
             setattr(self, name, getattr(facade, name))
@@ -1638,11 +1644,12 @@ class PredictionRepository:
             ).fetchall())
         return rows
 
-    def decided_ids(self, prediction_ids, statuses):
-        """Which of ``prediction_ids`` have one of ``statuses`` in the active workspace."""
+    def decided_ids(self, prediction_ids):
+        """Which of ``prediction_ids`` already carry a decision (``DECIDED_PREDICTION_STATUSES``) in the active workspace."""
         ws = self.workspace_id
         if not prediction_ids:
             return set()
+        statuses = self.DECIDED_PREDICTION_STATUSES
         status_ph = ",".join("?" for _ in statuses)
         found = set()
         for chunk in self._chunks(prediction_ids):

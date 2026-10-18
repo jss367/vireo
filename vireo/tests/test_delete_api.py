@@ -44,7 +44,7 @@ def test_delete_photos_removes_predictions(app_and_db):
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    db.add_prediction(det_ids[0], 'Cardinal', 0.95, 'test-model')
+    db.predictions.add(det_ids[0], 'Cardinal', 0.95, 'test-model')
 
     db.delete_photos([pid])
 

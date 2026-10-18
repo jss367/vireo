@@ -978,7 +978,7 @@ def create_review_blueprint(get_db, json_error):
 
     @bp.get("/api/read")
     def api_read():
-        return get_db().get_predictions()
+        return get_db().predictions.get_rows()
 
     return bp
 '''

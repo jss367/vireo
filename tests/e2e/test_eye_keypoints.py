@@ -106,7 +106,7 @@ def test_stage_finds_eye_on_reference_mammal(tmp_path):
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
         detector_model="MegaDetector",
     )
-    db.add_prediction(
+    db.predictions.add(
         det_ids[0],
         species="Vulpes vulpes",
         confidence=0.92,

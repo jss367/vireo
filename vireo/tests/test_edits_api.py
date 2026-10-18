@@ -1626,8 +1626,8 @@ def test_accept_prediction_records_history(app_and_db):
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    db.add_prediction(det_ids[0], 'Blue Jay', 0.95, 'test-model')
-    preds = db.get_predictions(photo_ids=[pid])
+    db.predictions.add(det_ids[0], 'Blue Jay', 0.95, 'test-model')
+    preds = db.predictions.get_rows(photo_ids=[pid])
     pred_id = preds[0]['id']
 
     resp = client.post(f'/api/predictions/{pred_id}/accept')
@@ -1649,8 +1649,8 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
-    db.add_prediction(det_ids[0], 'Blue Jay', 0.95, 'test-model')
-    pred = db.get_predictions(photo_ids=[pid])[0]
+    db.predictions.add(det_ids[0], 'Blue Jay', 0.95, 'test-model')
+    pred = db.predictions.get_rows(photo_ids=[pid])[0]
     pred_id = pred['id']
 
     # Accept
@@ -1659,7 +1659,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
 
     # Verify accepted state (review status lives in prediction_review per workspace)
     ws_id = db._active_workspace_id
-    assert db.get_review_status(pred_id, ws_id) == 'accepted'
+    assert db.predictions.get_review_status(pred_id, ws_id) == 'accepted'
     kws = {k['name'] for k in db.get_photo_keywords(pid)}
     assert 'Blue Jay' in kws
 
@@ -1668,7 +1668,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     assert resp.status_code == 200
 
     # Prediction status restored to pending
-    assert db.get_review_status(pred_id, ws_id) == 'pending'
+    assert db.predictions.get_review_status(pred_id, ws_id) == 'pending'
 
     # Keyword removed
     kws = {k['name'] for k in db.get_photo_keywords(pid)}
@@ -1687,8 +1687,8 @@ def test_reject_prediction_records_history(app_and_db):
     pid = photos[0]['id']
 
     det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
-    db.add_prediction(det_ids[0], 'House Sparrow', 0.60, 'test-model')
-    preds = db.get_predictions(photo_ids=[pid])
+    db.predictions.add(det_ids[0], 'House Sparrow', 0.60, 'test-model')
+    preds = db.predictions.get_rows(photo_ids=[pid])
     pred_id = preds[0]['id']
 
     resp = client.post(f'/api/predictions/{pred_id}/reject')
@@ -1699,11 +1699,11 @@ def test_reject_prediction_records_history(app_and_db):
     assert history[0]['action_type'] == 'prediction_status'
     assert 'House Sparrow' in history[0]['description']
 
-    assert db.get_prediction_status(pred_id) == 'rejected'
+    assert db.predictions.current_status(pred_id) == 'rejected'
     assert client.post('/api/undo').status_code == 200
-    assert db.get_prediction_status(pred_id) == 'pending'
+    assert db.predictions.current_status(pred_id) == 'pending'
     assert client.post('/api/redo').status_code == 200
-    assert db.get_prediction_status(pred_id) == 'rejected'
+    assert db.predictions.current_status(pred_id) == 'rejected'
 
 
 def test_prediction_group_apply_records_history(app_and_db):

@@ -515,7 +515,7 @@ def test_high_classifier_confidence_overrides_no_subject(tmp_path):
 
     db = Database(str(tmp_path / "m.db"))
     pid, det_id = _photo_with_weak_detection(db, "hummer", 1)
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Allen's Hummingbird", confidence=0.996,
         model="BioCLIP-2.5",
     )
@@ -561,7 +561,7 @@ def test_low_classifier_confidence_does_not_override_no_subject(tmp_path):
 
     db = Database(str(tmp_path / "m.db"))
     pid, det_id = _photo_with_weak_detection(db, "weak", 1)
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Maybe-A-Bird", confidence=0.40,
         model="BioCLIP-2.5",
     )
@@ -603,7 +603,7 @@ def test_classifier_override_threshold_is_configurable(tmp_path):
 
     db = Database(str(tmp_path / "m.db"))
     pid, det_id = _photo_with_weak_detection(db, "tunable", 1)
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Probably-A-Bird", confidence=0.50,
         model="BioCLIP-2.5",
     )

@@ -115,12 +115,12 @@ def create_predictions_blueprint(
                     pid for pid in explicit_photo_ids if pid in allowed
                 ]
             preds = (
-                db.get_predictions(photo_ids=photo_ids, status=status, rules=rules)
+                db.predictions.get_rows(photo_ids=photo_ids, status=status, rules=rules)
                 if photo_ids
                 else []
             )
         else:
-            preds = db.get_predictions(
+            preds = db.predictions.get_rows(
                 photo_ids=explicit_photo_ids, status=status, rules=rules,
             )
 
@@ -146,7 +146,7 @@ def create_predictions_blueprint(
                 if p["photo_id"] is not None
             })
             if parent_photo_ids:
-                alt_preds = db.get_predictions(
+                alt_preds = db.predictions.get_rows(
                     photo_ids=parent_photo_ids, status="alternative",
                 )
         return preds, alt_preds
@@ -233,7 +233,7 @@ def create_predictions_blueprint(
         """Add per-photo ``photo_states`` and ``match_states`` to ``response``."""
         response["photo_states"] = {
             str(pid): state
-            for pid, state in db.get_prediction_states(explicit_photo_ids).items()
+            for pid, state in db.predictions.get_states(explicit_photo_ids).items()
         }
         # Whether the best label in the list actually matched, per photo.
         # A prediction row carries a softmax confidence, which is a
@@ -519,7 +519,7 @@ def create_predictions_blueprint(
             if prediction_decisions.out_of_workspace_prediction_ids(db, [pred_id]):
                 db.rollback()
                 return json_error("Prediction does not belong to the active workspace", 404)
-            pred = db.get_prediction_decision_row(pred_id)
+            pred = db.predictions.get_decision_row(pred_id)
             if pred is None:
                 db.rollback()
                 return json_error("prediction not found", 404)
@@ -1095,7 +1095,7 @@ def create_predictions_blueprint(
         Chunked for the same reason every other id query here is — a legal
         payload runs past the 999-variable limit older SQLite builds enforce.
         """
-        return db.get_predictions_by_id(pred_ids)
+        return db.predictions.get_rows_by_ids(pred_ids)
 
     # The one definition of "already decided" for every prediction-decision
     # endpoint (batch and single-row alike). ``pending`` rows are the normal
@@ -1139,7 +1139,7 @@ def create_predictions_blueprint(
         Chunked: a legal payload runs well past the 999-variable limit older
         SQLite builds enforce.
         """
-        return db.get_decided_prediction_ids(pred_ids)
+        return db.predictions.decided_ids(pred_ids)
 
     def _prediction_status(db, pred_id):
         """Current review status of one prediction in the active workspace.
@@ -1159,7 +1159,7 @@ def create_predictions_blueprint(
         prediction id is unknown. Callers combine that with
         ``_DECIDED_PREDICTION_STATUSES`` to decide whether to 409.
         """
-        return db.get_prediction_status(pred_id)
+        return db.predictions.current_status(pred_id)
 
     def _superseded_prediction_ids(db, pred_ids):
         """Which of ``pred_ids`` belong to a label set the catalog moved past.
@@ -1194,7 +1194,7 @@ def create_predictions_blueprint(
 
         Chunked for the same reason every other id query here is.
         """
-        return db.get_superseded_prediction_ids(pred_ids)
+        return db.predictions.superseded_ids(pred_ids)
 
     def _parse_observed_statuses(body):
         """Validate ``/api/predictions/group/apply``'s render-time baseline.
@@ -1247,14 +1247,14 @@ def create_predictions_blueprint(
         if not by_photo:
             return by_photo
         if observed:
-            observed_photos = db.get_prediction_photo_ids(sorted(observed))
+            observed_photos = db.predictions.photo_ids_by_prediction(sorted(observed))
             for pred_id, photo_id in observed_photos.items():
                 if photo_id in by_photo:
                     by_photo[photo_id].append(pred_id)
         missing = [pid for pid, ids in by_photo.items() if not ids]
         if missing:
             grouped = {}
-            for row in db.get_non_alternative_predictions_for_photos(missing):
+            for row in db.predictions.non_alternative_rows_for_photos(missing):
                 by_photo[row["photo_id"]].append(row["id"])
                 if row["in_group"]:
                     grouped.setdefault(row["photo_id"], []).append(row["id"])
@@ -1286,7 +1286,7 @@ def create_predictions_blueprint(
         if not pick_to_photo:
             return {}
         out = {}
-        for row in db.get_scope_review_statuses(sorted(pick_to_photo)):
+        for row in db.predictions.scope_review_statuses(sorted(pick_to_photo)):
             photo_id = pick_to_photo[row["pick_id"]]
             out.setdefault(photo_id, {})[row["prediction_id"]] = row["status"]
         return out
@@ -1308,10 +1308,10 @@ def create_predictions_blueprint(
         for ids in pick_pred_ids.values():
             for pred_id in ids:
                 db.update_prediction_status(pred_id, "accepted", _commit=False)
-                scope = db.get_prediction_scope(pred_id)
+                scope = db.predictions.get_scope(pred_id)
                 accepted_by_scope.setdefault(tuple(scope), set()).add(pred_id)
         for scope, accepted_ids in accepted_by_scope.items():
-            sibling_ids = db.get_open_scope_sibling_ids(
+            sibling_ids = db.predictions.open_scope_sibling_ids(
                 *scope, sorted(accepted_ids),
             )
             for sid in sibling_ids:
@@ -1364,7 +1364,7 @@ def create_predictions_blueprint(
         if not observed:
             return set()
         stale = set()
-        for row in db.get_prediction_statuses_with_supersession(list(observed)):
+        for row in db.predictions.statuses_with_supersession(list(observed)):
             if (row["status"] != observed[row["prediction_id"]]
                     or row["is_superseded"]):
                 stale.add(row["photo_id"])
@@ -1449,7 +1449,7 @@ def create_predictions_blueprint(
         # chunked under SQLite's variable limit, and it stops as soon as the
         # payload outgrows a legal selection rather than resolving the rest
         # of a runaway request.
-        photo_by_pred = db.get_prediction_photo_ids(
+        photo_by_pred = db.predictions.photo_ids_by_prediction(
             pred_ids, stop_after_photos=MAX_SELECTION_PHOTOS,
         )
         if len(set(photo_by_pred.values())) > MAX_SELECTION_PHOTOS:
@@ -1538,7 +1538,7 @@ def create_predictions_blueprint(
         items = []
         species = None
         for pid in pred_ids:
-            pred = db.get_prediction_decision_row(pid)
+            pred = db.predictions.get_decision_row(pid)
             if pred is None:
                 continue
             species = species or pred["species"]
@@ -1771,7 +1771,7 @@ def create_predictions_blueprint(
             # Review state lives in prediction_review now; predictions.model
             # is renamed to classifier_model. Sibling-alternative rejection
             # goes through the workspace-scoped review table.
-            pred = db.get_prediction_decision_row(pred_id)
+            pred = db.predictions.get_decision_row(pred_id)
             # prediction_review has an FK on prediction_id; writing review
             # state for a missing pred would raise an IntegrityError and
             # return 500 where the legacy endpoint returned a harmless
@@ -1794,7 +1794,7 @@ def create_predictions_blueprint(
             # rule: it only discovers members that are still undecided.
             targets = [(pred["photo_id"], pred_id)]
             if pred["group_id"]:
-                for gp in db.get_burst_group_members(
+                for gp in db.predictions.burst_group_members(
                     pred["group_id"], pred["model"], pred_id,
                 ):
                     if gp["status"] not in _DECIDED_PREDICTION_STATUSES:
@@ -1826,8 +1826,8 @@ def create_predictions_blueprint(
 
     def _reject_prediction_row(db, pred_id):
         """Reject one prediction and its ``alternative`` siblings, in-transaction."""
-        pred = db.get_prediction_decision_row(pred_id)
-        ids = [pred_id, *db.get_alternative_sibling_ids(
+        pred = db.predictions.get_decision_row(pred_id)
+        ids = [pred_id, *db.predictions.alternative_sibling_ids(
             pred["detection_id"], pred["model"], pred["labels_fingerprint"], pred_id,
         )]
 
@@ -1841,7 +1841,7 @@ def create_predictions_blueprint(
     def api_prediction_group(group_id):
         """Get all predictions and photo data for a burst group."""
         db = get_db()
-        preds = db.get_group_predictions(group_id)
+        preds = db.predictions.get_group(group_id)
         rows = [dict(p) for p in preds]
         attach_nested_edit_recipes(db, rows)
         return jsonify(rows)

@@ -238,7 +238,7 @@ def test_photo_with_an_uncalibrated_model_keeps_the_per_run_failure():
 
 def test_prediction_round_trips_match_score(db):
     _, det = _photo(db)
-    db.add_prediction(detection_id=det, species="Yellow-breasted Chat",
+    db.predictions.add(detection_id=det, species="Yellow-breasted Chat",
                            confidence=0.999, model="BioCLIP-2.5",
                            match_score=0.3142)
     row = db.conn.execute(
@@ -250,7 +250,7 @@ def test_prediction_round_trips_match_score(db):
 def test_match_score_defaults_to_null_not_zero(db):
     """Absent must stay distinguishable from 'matched nothing'."""
     _, det = _photo(db)
-    db.add_prediction(detection_id=det, species="House Sparrow",
+    db.predictions.add(detection_id=det, species="House Sparrow",
                            confidence=0.8, model="BioCLIP-2.5")
     row = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
@@ -267,14 +267,14 @@ def test_replay_backfills_null_but_never_overwrites(db):
     _, det = _photo(db)
     kwargs = dict(detection_id=det, species="House Sparrow", confidence=0.8,
                   model="BioCLIP-2.5")
-    db.add_prediction(**kwargs)
-    db.add_prediction(**kwargs, match_score=0.30)
+    db.predictions.add(**kwargs)
+    db.predictions.add(**kwargs, match_score=0.30)
     score = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()["match_score"]
     assert score == 0.30
 
-    db.add_prediction(**kwargs, match_score=0.99)
+    db.predictions.add(**kwargs, match_score=0.99)
     score = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()["match_score"]
@@ -293,15 +293,15 @@ def test_fresh_inference_overwrites_a_prior_runtimes_score(db):
     _, det = _photo(db)
     kwargs = dict(detection_id=det, species="House Sparrow", confidence=0.8,
                   model="BioCLIP-2.5")
-    db.add_prediction(**kwargs, match_score=0.30, from_fresh_inference=True)
-    db.add_prediction(**kwargs, match_score=0.61, from_fresh_inference=True)
+    db.predictions.add(**kwargs, match_score=0.30, from_fresh_inference=True)
+    db.predictions.add(**kwargs, match_score=0.61, from_fresh_inference=True)
     score = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()["match_score"]
     assert score == 0.61
 
     # ...and a replay afterwards still does not undo the fresh measurement.
-    db.add_prediction(**kwargs, match_score=0.30)
+    db.predictions.add(**kwargs, match_score=0.30)
     score = db.conn.execute(
         "SELECT match_score FROM predictions WHERE detection_id = ?", (det,)
     ).fetchone()["match_score"]
@@ -358,14 +358,14 @@ def test_rerunning_one_list_updates_in_place(db):
 def test_clear_predictions_clears_match_scores(db):
     """A stale 'nothing matched' verdict must not outlive its predictions."""
     photo_id, det = _photo(db)
-    db.add_prediction(detection_id=det, species="House Sparrow",
+    db.predictions.add(detection_id=det, species="House Sparrow",
                            confidence=0.8, model="BioCLIP-2.5",
                            labels_fingerprint="fp1", match_score=0.3)
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "fp1", max_match_score=0.3, score_kind="cosine")
     assert db.model_runs.get_match_scores_for_photo(photo_id)
 
-    db.clear_predictions()
+    db.predictions.clear()
     assert db.model_runs.get_match_scores_for_photo(photo_id) == []
 
 
@@ -375,7 +375,7 @@ def test_clear_predictions_for_one_model_spares_the_other(db):
         db.model_runs.record_classifier_match_score(
             det, model, "fp1", max_match_score=0.3, score_kind="cosine")
 
-    db.clear_predictions(model="BioCLIP-2.5")
+    db.predictions.clear(model="BioCLIP-2.5")
     remaining = db.model_runs.get_match_scores_for_photo(photo_id)
     assert [r["classifier_model"] for r in remaining] == ["iNat21 (EVA-02 Large)"]
 
@@ -447,7 +447,7 @@ def test_predictions_api_reports_match_state_per_photo(app_and_db):
     app, db = app_and_db
     photo_id = db.photos.list_page()[0]["id"]
     det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
-    db.add_prediction(detection_id=det, species="House Sparrow",
+    db.predictions.add(detection_id=det, species="House Sparrow",
                       confidence=0.8, model="BioCLIP-2.5", match_score=0.11)
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "legacy", max_match_score=0.11, score_kind="cosine")
@@ -480,7 +480,7 @@ def test_calibrated_threshold_reaches_the_api(app_and_db):
 
     photo_id = db.photos.list_page()[0]["id"]
     det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
-    db.add_prediction(detection_id=det, species="Rufous-winged Sparrow",
+    db.predictions.add(detection_id=det, species="Rufous-winged Sparrow",
                       confidence=0.99, model="BioCLIP-2.5", match_score=0.11)
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "legacy", max_match_score=0.11,
@@ -592,13 +592,13 @@ def test_unjudged_runs_never_surface_as_failures():
 def _reclassified_against_two_lists(db):
     """One detection classified against a wide list, then a narrow one."""
     photo_id, det = _photo(db)
-    db.add_prediction(detection_id=det, species="Yellow-breasted Chat",
+    db.predictions.add(detection_id=det, species="Yellow-breasted Chat",
                       confidence=0.99, model="BioCLIP-2.5",
                       labels_fingerprint="us-wide", match_score=0.40)
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "us-wide", max_match_score=0.40,
         top_species="Yellow-breasted Chat", score_kind="cosine")
-    db.add_prediction(detection_id=det, species="Rufous-winged Sparrow",
+    db.predictions.add(detection_id=det, species="Rufous-winged Sparrow",
                       confidence=0.99, model="BioCLIP-2.5",
                       labels_fingerprint="california", match_score=0.11)
     db.model_runs.record_classifier_match_score(
@@ -669,13 +669,13 @@ def test_pipeline_reports_superseded_runs_with_the_current_verdict(app_and_db):
     db.conn.commit()
     photo_id = db.photos.list_page()[0]["id"]
     det = db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
-    db.add_prediction(detection_id=det, species="Yellow-breasted Chat",
+    db.predictions.add(detection_id=det, species="Yellow-breasted Chat",
                       confidence=0.99, model="BioCLIP-2.5",
                       labels_fingerprint="us-wide", match_score=0.40)
     db.model_runs.record_classifier_match_score(
         det, "BioCLIP-2.5", "us-wide", max_match_score=0.40,
         top_species="Yellow-breasted Chat", score_kind="cosine")
-    db.add_prediction(detection_id=det, species="Rufous-winged Sparrow",
+    db.predictions.add(detection_id=det, species="Rufous-winged Sparrow",
                       confidence=0.99, model="BioCLIP-2.5",
                       labels_fingerprint="california", match_score=0.11)
     db.model_runs.record_classifier_match_score(
@@ -805,13 +805,13 @@ def test_get_unscored_current_prediction_runs_matches_migrated_shape(db):
     ``classifier_match_scores`` row. That is the query this helper answers.
     """
     photo_id, det = _photo(db)
-    db.add_prediction(
+    db.predictions.add(
         detection_id=det, species="Rufous-winged Sparrow",
         confidence=0.99, model="Legacy-Model",
         labels_fingerprint="pre-migration",
     )
     # A scored row on a different model / detection must not appear.
-    db.add_prediction(
+    db.predictions.add(
         detection_id=det, species="Yellow-breasted Chat",
         confidence=0.99, model="BioCLIP-2.5",
         labels_fingerprint="california", match_score=0.40,

@@ -425,7 +425,7 @@ def test_api_misses_preview_uses_classifier_rescue_override(tmp_path, monkeypatc
           "confidence": 0.04, "category": "animal"}],
         detector_model="megadetector-v6",
     )[0]
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Likely Bird", confidence=0.70,
         model="BioCLIP-2.5",
     )
@@ -575,7 +575,7 @@ def test_api_misses_recompute_can_save_workspace_defaults(tmp_path, monkeypatch)
           "confidence": 0.04, "category": "animal"}],
         detector_model="megadetector-v6",
     )[0]
-    db.add_prediction(
+    db.predictions.add(
         det_id, species="Likely Bird", confidence=0.70,
         model="BioCLIP-2.5",
     )
