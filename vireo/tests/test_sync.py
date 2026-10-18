@@ -1220,7 +1220,7 @@ def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
 
 def test_sync_result_reports_partial_failure_to_the_job_layer(tmp_path, monkeypatch):
     """A run that fails on most photos must not land in history as a success."""
-    import xmp as xmp_module
+    import xmp.document as xmp_document
     from db import Database
     from sync import sync_to_xmp
 
@@ -1235,7 +1235,7 @@ def test_sync_result_reports_partial_failure_to_the_job_layer(tmp_path, monkeypa
     # Fail where the NAS actually failed: publishing the tree. Patching a
     # single writer would miss a sync that batches its mutations into one
     # publish.
-    monkeypatch.setattr(xmp_module, "_write_tree_atomic", refuse)
+    monkeypatch.setattr(xmp_document, "_write_tree_atomic", refuse)
 
     result = sync_to_xmp(db)
     assert result["synced"] == 0
@@ -1281,7 +1281,7 @@ def test_sync_failure_reason_ignores_per_photo_filename(tmp_path, monkeypatch):
     must strip the filename so the count captures the whole batch under one
     cause.
     """
-    import xmp as xmp_module
+    import xmp.document as xmp_document
     from db import Database
     from sync import sync_to_xmp
 
@@ -1296,7 +1296,7 @@ def test_sync_failure_reason_ignores_per_photo_filename(tmp_path, monkeypatch):
     def refuse_with_filename(tree, xmp_path):
         raise PermissionError(13, "Permission denied", xmp_path)
 
-    monkeypatch.setattr(xmp_module, "_write_tree_atomic", refuse_with_filename)
+    monkeypatch.setattr(xmp_document, "_write_tree_atomic", refuse_with_filename)
 
     result = sync_to_xmp(db)
 
@@ -1429,16 +1429,16 @@ def test_sync_panel_cancelled_summary_includes_failures():
 
 def _count_publishes(monkeypatch):
     """Record every sidecar publish, delegating to the real writer."""
-    import xmp as xmp_module
+    import xmp.document as xmp_document
 
     published = []
-    original = xmp_module._write_tree_atomic
+    original = xmp_document._write_tree_atomic
 
     def counting(tree, xmp_path):
         published.append(str(xmp_path))
         return original(tree, xmp_path)
 
-    monkeypatch.setattr(xmp_module, "_write_tree_atomic", counting)
+    monkeypatch.setattr(xmp_document, "_write_tree_atomic", counting)
     return published
 
 
@@ -1515,7 +1515,7 @@ def test_sync_writes_independent_sidecars_concurrently(tmp_path):
     """
     import threading
 
-    import xmp as xmp_module
+    import xmp.document as xmp_document
     from db import Database
     from sync import sync_to_xmp
 
@@ -1526,17 +1526,17 @@ def test_sync_writes_independent_sidecars_concurrently(tmp_path):
         db.queue_change(pid, "keyword_add", "Osprey")
 
     barrier = threading.Barrier(2, timeout=30)
-    original = xmp_module._write_tree_atomic
+    original = xmp_document._write_tree_atomic
 
     def publish_together(tree, xmp_path):
         barrier.wait()
         return original(tree, xmp_path)
 
-    xmp_module._write_tree_atomic = publish_together
+    xmp_document._write_tree_atomic = publish_together
     try:
         result = sync_to_xmp(db)
     finally:
-        xmp_module._write_tree_atomic = original
+        xmp_document._write_tree_atomic = original
 
     assert result["failed"] == 0, result["errors"]
     assert result["synced"] == 2
@@ -1659,7 +1659,7 @@ def test_sync_serializes_case_variant_sidecars_without_merging_them(tmp_path):
     """
     import threading
 
-    import xmp as xmp_module
+    import xmp.document as xmp_document
     from db import Database
     from sync import sync_to_xmp
     from xmp import read_keywords, write_sidecar
@@ -1686,17 +1686,17 @@ def test_sync_serializes_case_variant_sidecars_without_merging_them(tmp_path):
     db.queue_change(b_id, "keyword_add", "Kestrel")
 
     threads = []
-    original = xmp_module._write_tree_atomic
+    original = xmp_document._write_tree_atomic
 
     def record_thread(tree, path):
         threads.append(threading.current_thread().name)
         return original(tree, path)
 
-    xmp_module._write_tree_atomic = record_thread
+    xmp_document._write_tree_atomic = record_thread
     try:
         result = sync_to_xmp(db)
     finally:
-        xmp_module._write_tree_atomic = original
+        xmp_document._write_tree_atomic = original
 
     assert result["synced"] == 2, result["errors"]
     # One group means one worker: the publishes cannot have overlapped.
@@ -1726,7 +1726,7 @@ def test_sync_decouples_failure_between_case_variant_sidecars(tmp_path):
     fates would let one file's I/O error retain edits queued for the
     unrelated file next to it.
     """
-    import xmp as xmp_module
+    import xmp.document as xmp_document
     from db import Database
     from sync import sync_to_xmp
     from xmp import read_keywords, write_sidecar
@@ -1755,18 +1755,18 @@ def test_sync_decouples_failure_between_case_variant_sidecars(tmp_path):
     db.queue_change(a_id, "keyword_add", "Osprey")
     db.queue_change(b_id, "keyword_add", "Kestrel")
 
-    original = xmp_module._write_tree_atomic
+    original = xmp_document._write_tree_atomic
 
     def fail_upper_only(tree, path):
         if path == upper_path:
             raise OSError("simulated persistent write failure")
         return original(tree, path)
 
-    xmp_module._write_tree_atomic = fail_upper_only
+    xmp_document._write_tree_atomic = fail_upper_only
     try:
         result = sync_to_xmp(db)
     finally:
-        xmp_module._write_tree_atomic = original
+        xmp_document._write_tree_atomic = original
 
     assert result["synced"] == 1
     assert result["failed"] == 1
@@ -1790,7 +1790,7 @@ def test_sync_serializes_photos_whose_sidecars_are_symlinked_together(tmp_path):
     """
     import time
 
-    import xmp as xmp_module
+    import xmp.document as xmp_document
     from db import Database
     from sync import sync_to_xmp
     from xmp import read_keywords
@@ -1809,17 +1809,17 @@ def test_sync_serializes_photos_whose_sidecars_are_symlinked_together(tmp_path):
 
     # Widen the window between parse and publish so an unserialized run
     # would reliably lose one of the two keywords.
-    original = xmp_module._write_tree_atomic
+    original = xmp_document._write_tree_atomic
 
     def slow_publish(tree, path):
         time.sleep(0.05)
         return original(tree, path)
 
-    xmp_module._write_tree_atomic = slow_publish
+    xmp_document._write_tree_atomic = slow_publish
     try:
         result = sync_to_xmp(db)
     finally:
-        xmp_module._write_tree_atomic = original
+        xmp_document._write_tree_atomic = original
 
     assert result["synced"] == 2, result["errors"]
     assert read_keywords(target_xmp) == {"Osprey", "Kestrel"}
@@ -1866,7 +1866,7 @@ def test_sync_serializes_folder_rows_that_differ_only_in_case(tmp_path):
     """
     import threading
 
-    import xmp as xmp_module
+    import xmp.document as xmp_document
     from db import Database
     from sync import sync_to_xmp
     from xmp import read_keywords, write_sidecar
@@ -1891,17 +1891,17 @@ def test_sync_serializes_folder_rows_that_differ_only_in_case(tmp_path):
     db.queue_change(b_id, "keyword_add", "Kestrel")
 
     threads = []
-    original = xmp_module._write_tree_atomic
+    original = xmp_document._write_tree_atomic
 
     def record_thread(tree, path):
         threads.append(threading.current_thread().name)
         return original(tree, path)
 
-    xmp_module._write_tree_atomic = record_thread
+    xmp_document._write_tree_atomic = record_thread
     try:
         result = sync_to_xmp(db)
     finally:
-        xmp_module._write_tree_atomic = original
+        xmp_document._write_tree_atomic = original
 
     assert result["synced"] == 2, result["errors"]
     assert len(set(threads)) == 1, threads
@@ -2647,7 +2647,7 @@ def test_cancel_keyword_during_write_keeps_durable_repair(
     )
     db.queue_change(pid, initial_kind, keyword)
     opposite = {"keyword_add": "keyword_remove", "keyword_remove": "keyword_add"}
-    real_publish = xmp._write_tree_atomic
+    real_publish = xmp.document._write_tree_atomic
     observed = []
 
     def cancel_before_publish(tree, target):
@@ -2666,7 +2666,7 @@ def test_cancel_keyword_during_write_keeps_durable_repair(
         return real_publish(tree, target)
 
     with monkeypatch.context() as patch:
-        patch.setattr(xmp, "_write_tree_atomic", cancel_before_publish)
+        patch.setattr(xmp.document, "_write_tree_atomic", cancel_before_publish)
         first = sync.sync_to_xmp(db)
     assert first["ok"] is not write_fails
     desired_kind = opposite[initial_kind] if toggles % 2 else initial_kind
