@@ -45,6 +45,51 @@ class _SnapshotExclusion(TypedDict):
     files: int
 
 
+@dataclass(frozen=True)
+class _InPlaceSources:
+    """What an in-place import scans: explicit folders or a new-images snapshot."""
+
+    sources: list[str]
+    """The source folders; in snapshot mode, the snapshot's roots."""
+
+    recursive: bool
+    """Scan below each source folder."""
+
+    conflict_paths: list[str]
+    """The paths re-checked against local copies when the job registers:
+    the explicit sources, or every path in the snapshot."""
+
+    source_snapshot_id: int | None = None
+    """The frozen new-images snapshot being admitted, if any."""
+
+    snapshot_paths: list[str] | None = None
+    """The snapshot's file paths (snapshot mode only)."""
+
+    snapshot_paths_by_root: dict[str, list[str]] | None = None
+    """``snapshot_paths`` grouped by the registered root they live under."""
+
+    snapshot_exclusion: _SnapshotExclusion | None = None
+    """The folders the request excluded from the snapshot."""
+
+
+@dataclass(frozen=True)
+class _InPlaceOptions:
+    """The request's import options, validated before the workspace switch."""
+
+    import_tags: list[str]
+    location_from_gps: bool
+    explicit_after_import: bool
+    """Whether the request named ``after_import``; when it did not, the
+    import workspace's default process is resolved after the switch."""
+
+    after_import: int | None
+    """The explicitly requested after-import process."""
+
+    restart_config: JsonDict | None = None
+    """The restart provenance merged into the job config, including a
+    frozen ``after_import_snapshot`` that replaces resolving the process."""
+
+
 def restart_import_in_place(service: ImportService, db: Database, job_id: str) -> dict | ImportFailure:
     """Replay saved settings once; later attempts continue from the child run.
 
@@ -132,7 +177,6 @@ def enqueue_import_in_place(
     )
     if sources_error is not None:
         return sources_error
-    snapshot_paths = None
 
     recursive = bool(body.get("recursive", True))
     import_tags, location_from_gps, tag_options_err = (
@@ -140,24 +184,20 @@ def enqueue_import_in_place(
     )
     if tag_options_err is not None:
         return tag_options_err
-    snapshot_exclusion = None
     if source_snapshot_id is not None:
-        (
-            snapshot_paths, snapshot_paths_by_root, snapshot_exclusion,
-            snapshot_err,
-        ) = _resolve_snapshot_paths(
-            service, db, source_snapshot_id, body.get("exclude_folders"),
+        snapshot_sources, snapshot_err = _snapshot_sources(
+            service, db, body, source_snapshot_id, recursive,
         )
         if snapshot_err is not None:
             return snapshot_err
-        # Without an error ``_resolve_snapshot_paths`` returns both path sets.
-        sources = sorted(cast("dict[str, list[str]]", snapshot_paths_by_root))
-        # Re-checked atomically with ``runner.start`` below. See the
-        # explicit-sources branch of ``_requested_in_place_sources`` for
-        # why the pre-flight check is not sufficient on its own.
-        _conflict_paths = list(cast("list[str]", snapshot_paths))
+        in_place_sources = cast("_InPlaceSources", snapshot_sources)
     else:
-        snapshot_paths_by_root = None
+        # ``_requested_in_place_sources`` returned on any invalid source.
+        in_place_sources = _InPlaceSources(
+            sources=cast("list[str]", sources),
+            recursive=recursive,
+            conflict_paths=cast("list[str]", _conflict_paths),
+        )
     # Preflight an explicit after_import before creating a workspace so
     # a bad value doesn't leave an orphan Card Import behind. The
     # omitted branch has to wait until AFTER the workspace switch — see
@@ -174,34 +214,63 @@ def enqueue_import_in_place(
     if workspace_err is not None:
         return workspace_err
 
+    # Each check above returned on its error, so the casts below hold.
+    options = _InPlaceOptions(
+        import_tags=cast("list[str]", import_tags),
+        location_from_gps=cast("bool", location_from_gps),
+        explicit_after_import=cast("bool", explicit_after_import),
+        after_import=after_import,
+        restart_config=restart_config,
+    )
+
     # Everything from here to ``runner.start`` runs inside
     # ``_admit_into_import_workspace``: a ``new_workspace_name`` request
     # has already committed the workspace and switched active to it, so
     # any failure, returned or raised, must undo both. Add new checks
     # before ``_prepare_import_workspace`` or inside ``_admit_in_place_job``.
     def admit() -> str | ImportFailure:
-        # Each check above returned on its error, so the casts below hold.
         return _admit_in_place_job(
             service, db, body,
             active_ws=cast("int", active_ws),
             created_workspace=created_workspace,
-            explicit_after_import=cast("bool", explicit_after_import),
-            after_import=after_import,
-            sources=cast("list[str]", sources),
-            snapshot_paths=snapshot_paths,
-            snapshot_paths_by_root=snapshot_paths_by_root,
-            source_snapshot_id=source_snapshot_id,
-            snapshot_exclusion=snapshot_exclusion,
-            recursive=recursive,
-            import_tags=cast("list[str]", import_tags),
-            location_from_gps=cast("bool", location_from_gps),
-            conflict_paths=cast("list[str]", _conflict_paths),
-            restart_config=restart_config,
+            in_place_sources=in_place_sources,
+            options=options,
         )
 
     return service._admit_into_import_workspace(
         db, created_workspace, previous_active_ws, admit,
     )
+
+
+def _snapshot_sources(
+    service: ImportService, db: Database, body: JsonDict, source_snapshot_id: int,
+    recursive: bool,
+) -> tuple[_InPlaceSources | None, ImportFailure | None]:
+    """Resolve a snapshot request's frozen paths into what the import scans."""
+    (
+        snapshot_paths, snapshot_paths_by_root, snapshot_exclusion,
+        snapshot_err,
+    ) = _resolve_snapshot_paths(
+        service, db, source_snapshot_id, body.get("exclude_folders"),
+    )
+    if snapshot_err is not None:
+        return None, snapshot_err
+    # Without an error ``_resolve_snapshot_paths`` returns both path sets.
+    snapshot_paths = cast("list[str]", snapshot_paths)
+    snapshot_paths_by_root = cast("dict[str, list[str]]", snapshot_paths_by_root)
+    return _InPlaceSources(
+        sources=sorted(snapshot_paths_by_root),
+        recursive=recursive,
+        # Re-checked atomically with ``runner.start`` when the job
+        # registers. See the explicit-sources branch of
+        # ``_requested_in_place_sources`` for why the pre-flight check is
+        # not sufficient on its own.
+        conflict_paths=list(snapshot_paths),
+        source_snapshot_id=source_snapshot_id,
+        snapshot_paths=snapshot_paths,
+        snapshot_paths_by_root=snapshot_paths_by_root,
+        snapshot_exclusion=snapshot_exclusion,
+    ), None
 
 
 def _requested_in_place_sources(
@@ -273,18 +342,18 @@ def _explicit_after_import(
 
 def _admit_in_place_job(
     service: ImportService, db: Database, body: JsonDict, *, active_ws: int,
-    created_workspace: JsonDict | None, explicit_after_import: bool, after_import: int | None,
-    sources: list[str], snapshot_paths: list[str] | None,
-    snapshot_paths_by_root: dict[str, list[str]] | None, source_snapshot_id: int | None,
-    snapshot_exclusion: _SnapshotExclusion | None, recursive: bool, import_tags: list[str],
-    location_from_gps: bool, conflict_paths: list[str], restart_config: JsonDict | None = None,
+    created_workspace: JsonDict | None, in_place_sources: _InPlaceSources,
+    options: _InPlaceOptions,
 ) -> str | ImportFailure:
     """The admission steps after the workspace switch; returns a job id or
     an ``ImportFailure``. ``runner.start`` must stay the last step."""
+    after_import = options.after_import
+    restart_config = options.restart_config
+    source_snapshot_id = in_place_sources.source_snapshot_id
     # Resolve the omitted-default AFTER the workspace switch. Reading
     # pipeline.default_process_id off the previously-active workspace
     # would leak that workspace's override into a new-workspace import.
-    if not explicit_after_import:
+    if not options.explicit_after_import:
         after_import, err = _default_after_import(service, db)
         if err is not None:
             return err
@@ -315,14 +384,14 @@ def _admit_in_place_job(
         service=service,
         runner=runner,
         active_ws=active_ws,
-        sources=sources,
-        snapshot_paths=snapshot_paths,
-        snapshot_paths_by_root=snapshot_paths_by_root,
+        sources=in_place_sources.sources,
+        snapshot_paths=in_place_sources.snapshot_paths,
+        snapshot_paths_by_root=in_place_sources.snapshot_paths_by_root,
         source_snapshot_id=source_snapshot_id,
-        snapshot_exclusion=snapshot_exclusion,
-        recursive=recursive,
-        import_tags=import_tags,
-        location_from_gps=location_from_gps,
+        snapshot_exclusion=in_place_sources.snapshot_exclusion,
+        recursive=in_place_sources.recursive,
+        import_tags=options.import_tags,
+        location_from_gps=options.location_from_gps,
         after_import=after_import,
         after_import_snapshot=after_import_snapshot,
         thumb_cache_dir=thumb_cache_dir,
@@ -347,7 +416,7 @@ def _admit_in_place_job(
     # registration would otherwise see no import job and be admitted,
     # letting the stage rebase paths this import is about to walk.
     with stage_boundary_lock():
-        conflict = _local_copy_conflict(db, runner, conflict_paths)
+        conflict = _local_copy_conflict(db, runner, in_place_sources.conflict_paths)
         if conflict:
             return ImportFailure(conflict, 409)
         return runner.start(

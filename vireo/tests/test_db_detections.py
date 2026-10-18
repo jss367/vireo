@@ -1137,3 +1137,50 @@ def test_repository_imports_no_db_code():
         for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     }
     assert "db" not in imported
+
+
+def test_workspace_miss_rows_read_visible_photos_with_their_best_scores(db):
+    pid = _photo(db)
+    bare = _photo(db, "b.jpg")
+    _raw_det(db, pid, conf=0.3)
+    _raw_det(db, pid, conf=0.7, x=0.5)
+    _raw_det(db, pid, conf=0.95, model="full-image")
+    _raw_det(db, pid, conf=0.99, category="person", x=0.7)
+    rows = {r["id"]: r for r in db.detections.workspace_miss_rows(db.active_workspace_id, 0.5)}
+    assert set(rows) == {pid, bare}
+    assert rows[pid]["detection_conf"] == 0.7
+    assert rows[pid]["max_prediction_conf"] is None
+    assert rows[bare]["detection_conf"] is None
+    high = {r["id"]: r for r in db.detections.workspace_miss_rows(db.active_workspace_id, 0.8)}
+    assert high[pid]["detection_conf"] is None
+    other = db.create_workspace("Other")
+    assert db.detections.workspace_miss_rows(other, 0.5) == []
+
+
+def test_miss_detection_rows_skip_full_image_and_non_animal_rows(db):
+    a = _photo(db)
+    b = _photo(db, "b.jpg")
+    _raw_det(db, a, conf=0.3)
+    _raw_det(db, a, conf=0.7, x=0.5)
+    _raw_det(db, a, conf=0.9, model="full-image")
+    _raw_det(db, b, conf=0.9, category="person")
+    rows = db.detections.miss_detection_rows([a, b])
+    assert [(r["photo_id"], r["detector_confidence"]) for r in rows] == [(a, 0.7), (a, 0.3)]
+
+
+def test_write_miss_flags_updates_each_photo_without_committing(db):
+    a = _photo(db)
+    b = _photo(db, "b.jpg")
+    db.detections.write_miss_flags([(1, 0, 0, "t1", a), (0, 1, 1, "t2", b)])
+    assert db.in_transaction
+    rows = {
+        r["id"]: tuple(r)[1:] for r in db.conn.execute(
+            "SELECT id, miss_no_subject, miss_clipped, miss_oof, miss_computed_at "
+            "FROM photos WHERE id IN (?, ?)", (a, b),
+        )
+    }
+    assert rows == {a: (1, 0, 0, "t1"), b: (0, 1, 1, "t2")}
+    assert _reader(db).execute(
+        "SELECT miss_computed_at FROM photos WHERE id = ?", (a,),
+    ).fetchone()[0] is None
+    db.rollback()
