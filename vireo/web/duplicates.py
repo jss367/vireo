@@ -384,7 +384,7 @@ def create_duplicates_blueprint(
             try:
                 _drop_trashed_loser_rows(db, trashed_pids)
             except Exception:
-                # Files are already in Trash; if the row delete fails we
+                # broad: files are already in Trash; if the row delete fails we
                 # surface a 500 so the caller knows reconciliation is
                 # incomplete. Without raising, the summary count would stay
                 # inflated and the caller would have no signal that the

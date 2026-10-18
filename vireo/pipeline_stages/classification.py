@@ -752,15 +752,9 @@ class _ClassifyPass:
         det_chunk = 500
         for i in range(0, len(photo_id_list), det_chunk):
             chunk = photo_id_list[i:i + det_chunk]
-            placeholders = ",".join("?" * len(chunk))
-            rows = self.thread_db.conn.execute(
-                f"SELECT DISTINCT runtime_fingerprint "
-                f"FROM detections "
-                f"WHERE photo_id IN ({placeholders})",
-                chunk,
-            ).fetchall()
-            for row in rows:
-                detector_runtimes.add(row["runtime_fingerprint"])
+            detector_runtimes.update(
+                self.thread_db.detections.runtime_fingerprints_for_photos(chunk)
+            )
         expected = {}
         for det_rt in detector_runtimes:
             if det_rt is None:
@@ -1008,11 +1002,7 @@ class _ClassifyPass:
         )
 
         full_runtime = full_image_runtime_fingerprint()
-        identity = self.thread_db.conn.execute(
-            """SELECT file_hash, companion_path
-               FROM photos WHERE id = ?""",
-            (photo_id,),
-        ).fetchone()
+        identity = self.thread_db.model_runs.detector_source_identity(photo_id)
         full_input = None
         if identity is not None and not identity["companion_path"]:
             try:

@@ -131,12 +131,12 @@ def create_encounters_blueprint(get_db, json_error, db_path):
             confirmation.record_cache_only_confirmation()
             confirmation.apply_cache_mutation()
             db.commit()
-        except Exception:
+        except Exception:  # broad: rollback and restore the saved cache before re-raising the confirmation failure
             # A failed rollback must not skip the cache restore below or
             # replace the original error.
             try:
                 db.rollback()
-            except Exception:
+            except Exception:  # broad: any rollback failure still restores the cache and re-raises below
                 log.exception("Rollback failed after species confirmation failed")
             if confirmation.cache_saved:
                 try:
@@ -145,7 +145,7 @@ def create_encounters_blueprint(get_db, json_error, db_path):
                         confirmation.cache_dir,
                         db.active_workspace_id,
                     )
-                except Exception:
+                except Exception:  # broad: restoring the cache is best-effort; the original error re-raises below
                     log.exception("Failed to restore pipeline cache after species confirmation failed")
             raise
         # Prune oldest edit-history rows now that the transaction has landed.

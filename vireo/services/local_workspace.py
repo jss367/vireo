@@ -32,9 +32,31 @@ import time
 import unicodedata
 from contextlib import suppress
 from pathlib import Path
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn, TypedDict
 
 from file_replace import replace_file
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
+
+    from db import Database
+    from services.service_types import JsonDict
+
+    # A manifest file key: (root index, path relative to that root).
+    ManifestKey = tuple[int, str]
+    # One walked entry: (path relative to the walk root, full path, lstat).
+    WalkEntry = tuple[str, str, os.stat_result]
+    # One entry of the managed local tree: (full path, lstat).
+    LocalEntry = tuple[str, os.stat_result]
+    # Returns True once the caller wants the transfer to stop.
+    CancelCheck = Callable[[], bool]
+    # Called once before the first irreversible step; False aborts it.
+    BeginCommit = Callable[[], bool]
+    # Copy progress: (files copied, total files, bytes copied, total bytes, rel).
+    CopyProgress = Callable[[int, int, int, int, str], None]
+    # Scan or publish progress: (entries done, total entries, rel).
+    StepProgress = Callable[[int, int, str], None]
 
 MANIFEST_VERSION = 2
 
@@ -84,6 +106,33 @@ def stage_boundary_lock() -> threading.Lock:
     return _STAGE_GUARD
 
 
+class RootRecord(TypedDict):
+    """One staged source root: the catalog folder and both of its locations."""
+
+    folder_id: int
+    source_path: str
+    local_path: str
+
+
+class FolderRecord(TypedDict):
+    """One catalog folder a workspace stage rebases into the managed copy."""
+
+    folder_id: int
+    source_path: str
+    local_path: str
+    status: str
+
+
+class DiskSpace(TypedDict):
+    """Capacity of the volume a local copy would land on."""
+
+    total_bytes: int
+    free_bytes: int
+    reserve_bytes: int
+    device: int
+    probe_path: str
+
+
 class LocalWorkspaceError(RuntimeError):
     """A user-actionable local workspace failure."""
 
@@ -91,7 +140,7 @@ class LocalWorkspaceError(RuntimeError):
 class LocalWorkspaceConflict(LocalWorkspaceError):
     """The source changed after staging and must not be overwritten."""
 
-    def __init__(self, paths: list[str]):
+    def __init__(self, paths: list[str]) -> None:
         self.paths = paths
         preview = ", ".join(paths[:3])
         if len(paths) > 3:
@@ -109,7 +158,7 @@ def local_space_reserve(total_bytes: int) -> int:
     return min(LOCAL_MAX_RESERVE_BYTES, max(LOCAL_RESERVE_BYTES, proportional))
 
 
-def destination_disk_space(path: str | Path, *, cancel_check=None) -> dict:
+def destination_disk_space(path: str | Path, *, cancel_check: CancelCheck | None = None) -> DiskSpace:
     """Return capacity details for the volume containing ``path``.
 
     Destination folders commonly do not exist yet. Walk up to the closest
@@ -147,7 +196,7 @@ def destination_disk_space(path: str | Path, *, cancel_check=None) -> dict:
     }
 
 
-def destination_case_insensitive(path: str | Path, *, cancel_check=None) -> bool:
+def destination_case_insensitive(path: str | Path, *, cancel_check: CancelCheck | None = None) -> bool:
     """Probe whether the existing volume containing ``path`` folds case."""
     base = Path(path).expanduser()
     while True:
@@ -181,7 +230,7 @@ def destination_case_insensitive(path: str | Path, *, cancel_check=None) -> bool
             os.unlink(probe)
 
 
-def _estimated_destination_bytes(st) -> int:
+def _estimated_destination_bytes(st: os.stat_result) -> int:
     """Conservatively estimate allocation consumed by one copied entry."""
     if stat.S_ISREG(st.st_mode):
         units = max(
@@ -193,7 +242,7 @@ def _estimated_destination_bytes(st) -> int:
     return LOCAL_ALLOCATION_UNIT_BYTES
 
 
-def _validated_tree_entries(source: str, *, cancel_check=None):
+def _validated_tree_entries(source: str, *, cancel_check: CancelCheck | None = None) -> Iterator[WalkEntry]:
     """Yield safe, supported entries from a validated source directory."""
     if cancel_check and cancel_check():
         raise LocalWorkspaceCancelled("Folder scan cancelled")
@@ -233,7 +282,7 @@ def _validated_tree_entries(source: str, *, cancel_check=None):
         ) from exc
 
 
-def source_tree_size(source: str, *, cancel_check=None) -> tuple[int, int, int]:
+def source_tree_size(source: str, *, cancel_check: CancelCheck | None = None) -> tuple[int, int, int]:
     """Return copied-file count, logical bytes, and estimated allocated bytes."""
 
     total_files = 0
@@ -298,7 +347,7 @@ def _sync_recovery_path(vireo_dir: str, workspace_id: int) -> Path:
     return workspace_dir(vireo_dir, workspace_id) / "sync-recovery.json"
 
 
-def _write_sync_recovery(vireo_dir: str, workspace_id: int, deleted_keys) -> None:
+def _write_sync_recovery(vireo_dir: str, workspace_id: int, deleted_keys: Iterable[ManifestKey]) -> None:
     """Record the deletion set the user confirmed before the sync began.
 
     A resumed sync must not silently authorize any additional source
@@ -312,7 +361,7 @@ def _write_sync_recovery(vireo_dir: str, workspace_id: int, deleted_keys) -> Non
     _write_manifest(path, payload)
 
 
-def _load_sync_recovery(vireo_dir: str, workspace_id: int) -> set | None:
+def _load_sync_recovery(vireo_dir: str, workspace_id: int) -> set[ManifestKey] | None:
     """Return the confirmed-deletion key set from the sync recovery file, or None."""
     path = _sync_recovery_path(vireo_dir, workspace_id)
     try:
@@ -325,7 +374,7 @@ def _load_sync_recovery(vireo_dir: str, workspace_id: int) -> set | None:
     confirmed = data.get("confirmed_deletions")
     if not isinstance(confirmed, list):
         return set()
-    result = set()
+    result: set[ManifestKey] = set()
     for entry in confirmed:
         if isinstance(entry, list) and len(entry) == 2:
             root_index, rel = entry
@@ -336,17 +385,17 @@ def _load_sync_recovery(vireo_dir: str, workspace_id: int) -> set | None:
     return result
 
 
-def local_state(db, workspace_id: int) -> dict | None:
+def local_state(db: Database, workspace_id: int) -> JsonDict | None:
     """Return the workspace's local-workspace state row, or None."""
     row = db.local_workspaces.get_state(workspace_id)
     return dict(row) if row else None
 
 
-def has_local_workspace(db, workspace_id: int) -> bool:
+def has_local_workspace(db: Database, workspace_id: int) -> bool:
     return local_state(db, workspace_id) is not None
 
 
-def folder_has_local_workspace(db, folder_id: int) -> tuple[bool, int | None]:
+def folder_has_local_workspace(db: Database, folder_id: int) -> tuple[bool, int | None]:
     """True if this folder is covered by any workspace's local_workspace_folders row.
 
     Folder-level mutations (relocate/delete on ``/api/folders/<id>``) rebase or
@@ -360,16 +409,16 @@ def folder_has_local_workspace(db, folder_id: int) -> tuple[bool, int | None]:
     return True, int(row["workspace_id"])
 
 
-def _db_mappings(db, workspace_id: int) -> list[dict]:
+def _db_mappings(db: Database, workspace_id: int) -> list[JsonDict]:
     rows = db.local_workspaces.mappings(workspace_id)
     return [dict(row) for row in rows]
 
 
-def _db_roots(db, workspace_id: int) -> list[dict]:
+def _db_roots(db: Database, workspace_id: int) -> list[JsonDict]:
     return [m for m in _db_mappings(db, workspace_id) if m["is_root"]]
 
 
-def _write_manifest(path: Path, data: dict) -> None:
+def _write_manifest(path: Path, data: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     with tmp.open("w", encoding="utf-8") as handle:
@@ -381,7 +430,7 @@ def _write_manifest(path: Path, data: dict) -> None:
     replace_file(str(tmp), str(path))
 
 
-def _load_manifest(vireo_dir: str, workspace_id: int) -> dict | None:
+def _load_manifest(vireo_dir: str, workspace_id: int) -> JsonDict | None:
     path = manifest_path(vireo_dir, workspace_id)
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -448,7 +497,7 @@ def _relative(path: str, root: str) -> str:
     return rel
 
 
-def _sha256(path: str, cancel_check=None) -> str:
+def _sha256(path: str, cancel_check: CancelCheck | None = None) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         while True:
@@ -479,7 +528,9 @@ def _dest_case_insensitive(local_base: Path) -> bool:
     return destination_case_insensitive(base)
 
 
-def _open_walk_directory(dirpath: str, root: str, directory_st) -> tuple[int | None, os.stat_result | None]:
+def _open_walk_directory(
+    dirpath: str, root: str, directory_st: os.stat_result | None
+) -> tuple[int | None, os.stat_result | None]:
     """Open ``dirpath`` with ``O_NOFOLLOW`` for enumeration.
 
     Returns ``(dir_fd, swapped_st)``. ``dir_fd`` is None where the platform
@@ -519,7 +570,13 @@ def _open_walk_directory(dirpath: str, root: str, directory_st) -> tuple[int | N
         _raise_walk_error(error)
 
 
-def _scan_walk_directory(dirpath: str, root: str, dir_fd: int | None, child_directories: list, cancel_check=None):
+def _scan_walk_directory(
+    dirpath: str,
+    root: str,
+    dir_fd: int | None,
+    child_directories: list[tuple[str, os.stat_result]],
+    cancel_check: CancelCheck | None = None,
+) -> Iterator[WalkEntry]:
     """Yield the non-directory entries of one directory; queue its subdirectories.
 
     Enumerates through ``dir_fd`` when one is open (and closes it), else by
@@ -557,7 +614,7 @@ def _scan_walk_directory(dirpath: str, root: str, dir_fd: int | None, child_dire
                 os.close(dir_fd)
 
 
-def _walk_entries(root: str, *, cancel_check=None):
+def _walk_entries(root: str, *, cancel_check: CancelCheck | None = None) -> Iterator[WalkEntry]:
     """Yield ``(rel, full, lstat)`` for every entry under root.
 
     Directories are included (so callers can recreate structure, including
@@ -578,7 +635,7 @@ def _walk_entries(root: str, *, cancel_check=None):
     block, but the scan stops as soon as the current filesystem call returns
     instead of letting a directory-wide batch finish first.
     """
-    pending = [(root, None)]
+    pending: list[tuple[str, os.stat_result | None]] = [(root, None)]
     while pending:
         dirpath, directory_st = pending.pop()
         if cancel_check and cancel_check():
@@ -620,7 +677,7 @@ def _walk_entries(root: str, *, cancel_check=None):
             continue
         if directory_st is not None:
             yield _relative(dirpath, root), dirpath, current_st
-        child_directories = []
+        child_directories: list[tuple[str, os.stat_result]] = []
         yield from _scan_walk_directory(dirpath, root, dir_fd, child_directories, cancel_check)
 
         # Stack order preserves scandir's depth-first ordering.
@@ -630,14 +687,16 @@ def _walk_entries(root: str, *, cancel_check=None):
             pending.append(child)
 
 
-def _collect_source_entries(roots: list[dict], local_base: Path) -> tuple[dict[int, list], int, int]:
+def _collect_source_entries(
+    roots: Sequence[RootRecord], local_base: Path
+) -> tuple[dict[int, list[WalkEntry]], int, int]:
     """Walk every source root once; validate entries and total up the copy.
 
     Returns (entries per root index, total_files, total_bytes). The entry
     lists are reused by the copy loop so staging enumerates the (slow)
     source storage exactly once.
     """
-    per_root: dict[int, list] = {}
+    per_root: dict[int, list[WalkEntry]] = {}
     total_bytes = 0
     estimated_bytes = 0
     total_files = 0
@@ -646,7 +705,7 @@ def _collect_source_entries(roots: list[dict], local_base: Path) -> tuple[dict[i
     for index, root in enumerate(roots):
         source = root["source_path"]
         estimated_bytes += LOCAL_ALLOCATION_UNIT_BYTES
-        entries = []
+        entries: list[WalkEntry] = []
         folded_seen: dict[str, str] = {}
         for rel, full, st in _validated_tree_entries(source):
             mode = st.st_mode
@@ -749,7 +808,9 @@ def _open_source_regular_within_root(source_root: str, source: str) -> int:
                 os.close(fd)
 
 
-def _copy_regular_with_hash(source: str, destination: str, source_root: str, cancel_check=None) -> dict:
+def _copy_regular_with_hash(
+    source: str, destination: str, source_root: str, cancel_check: CancelCheck | None = None
+) -> JsonDict:
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     # A source entry that was a regular file during _walk_entries can be
     # swapped to a symlink or FIFO before we open it: a bare open() would then
@@ -824,7 +885,13 @@ def _copy_regular_with_hash(source: str, destination: str, source_root: str, can
     raise AssertionError("copy retry loop exhausted")
 
 
-def _copy_entry(source: str, destination: str, st, source_root: str, cancel_check=None) -> dict | None:
+def _copy_entry(
+    source: str,
+    destination: str,
+    st: os.stat_result,
+    source_root: str,
+    cancel_check: CancelCheck | None = None,
+) -> JsonDict | None:
     mode = st.st_mode
     if stat.S_ISDIR(mode):
         os.makedirs(destination, exist_ok=True)
@@ -865,12 +932,14 @@ def _copy_entry(source: str, destination: str, st, source_root: str, cancel_chec
     return _copy_regular_with_hash(source, destination, source_root, cancel_check)
 
 
-def _other_local_source_roots(db, workspace_id: int) -> list[str]:
+def _other_local_source_roots(db: Database, workspace_id: int) -> list[str]:
     rows = db.local_workspaces.other_source_roots(workspace_id)
     return [row["source_path"] for row in rows]
 
 
-def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], list[dict]]:
+def _root_records(
+    db: Database, workspace_id: int, local_base: Path
+) -> tuple[list[RootRecord], list[FolderRecord]]:
     roots = [dict(row) for row in db.get_workspace_folder_roots(workspace_id)]
     folders = [dict(row) for row in db.get_workspace_folders(workspace_id)]
     if not roots:
@@ -913,7 +982,7 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
                     "Remove the overlapping folder there before working locally."
                 )
 
-    root_records = []
+    root_records: list[RootRecord] = []
     for index, row in enumerate(roots):
         name = Path(row["path"].rstrip("/\\")).name or f"root-{row['id']}"
         safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)
@@ -934,7 +1003,7 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
                 "move Vireo's data directory to local storage first"
             )
 
-    folder_records = []
+    folder_records: list[FolderRecord] = []
     for folder in folders:
         matches = [root for root in root_records if _is_within(folder["path"], root["source_path"])]
         if not matches:
@@ -952,13 +1021,18 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
     return root_records, folder_records
 
 
-def _delete_state_rows(db, workspace_id: int) -> None:
+def _delete_state_rows(db: Database, workspace_id: int) -> None:
     db.local_workspaces.delete_mappings(workspace_id)
     db.local_workspaces.delete_state(workspace_id)
 
 
 def _copy_staged_entries(
-    roots: list[dict], entries_per_root: dict[int, list], manifest: dict, *, progress=None, cancel_check=None
+    roots: Sequence[RootRecord],
+    entries_per_root: Mapping[int, Sequence[WalkEntry]],
+    manifest: JsonDict,
+    *,
+    progress: CopyProgress | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> None:
     """Copy every collected source entry locally, recording each in ``manifest["files"]``."""
     total_files = manifest["total_files"]
@@ -982,7 +1056,15 @@ def _copy_staged_entries(
                 progress(copied, total_files, copied_bytes, total_bytes, rel)
 
 
-def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, cancel_check=None, begin_commit=None) -> dict:
+def stage_workspace(
+    db: Database,
+    workspace_id: int,
+    vireo_dir: str,
+    *,
+    progress: CopyProgress | None = None,
+    cancel_check: CancelCheck | None = None,
+    begin_commit: BeginCommit | None = None,
+) -> JsonDict:
     """Copy a workspace locally and atomically rebase its catalog paths."""
     with _workspace_lock(workspace_id):
         base = workspace_dir(vireo_dir, workspace_id)
@@ -1018,7 +1100,7 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
             # guard so a large workspace doesn't block other stages; a
             # failure here resolves through the 'staging' cleanup below.
             entries_per_root, total_files, total_bytes = _collect_source_entries(roots, base)
-            manifest = {
+            manifest: JsonDict = {
                 "version": MANIFEST_VERSION,
                 "workspace_id": workspace_id,
                 "created_at": time.time(),
@@ -1072,7 +1154,7 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
             raise
 
 
-def _entry_type(st) -> str:
+def _entry_type(st: os.stat_result) -> str:
     mode = st.st_mode
     if stat.S_ISLNK(mode):
         return "symlink"
@@ -1083,7 +1165,7 @@ def _entry_type(st) -> str:
     return "special"
 
 
-def _same_metadata(full: str, st, baseline: dict) -> bool:
+def _same_metadata(full: str, st: os.stat_result, baseline: Mapping[str, object]) -> bool:
     """Size + mtime_ns comparison against the staged baseline.
 
     Staging preserves the source mtime on the local copy (copystat), so an
@@ -1099,7 +1181,7 @@ def _same_metadata(full: str, st, baseline: dict) -> bool:
     return st.st_size == baseline.get("size") and st.st_mtime_ns == baseline.get("mtime_ns")
 
 
-def _same_content(first: str, second: str, cancel_check=None) -> bool:
+def _same_content(first: str, second: str, cancel_check: CancelCheck | None = None) -> bool:
     try:
         first_st = os.lstat(first)
     except FileNotFoundError:
@@ -1139,10 +1221,10 @@ def _managed_root_state(local_path: str) -> str:
     return "invalid"
 
 
-def _manifest_maps(manifest: dict) -> tuple[dict, dict]:
+def _manifest_maps(manifest: JsonDict) -> tuple[dict[ManifestKey, JsonDict], dict[ManifestKey, LocalEntry]]:
     """Return (baseline entries, current local entries with stats)."""
-    baseline = {(item["root"], item["path"]): item for item in manifest["files"]}
-    local = {}
+    baseline: dict[ManifestKey, JsonDict] = {(item["root"], item["path"]): item for item in manifest["files"]}
+    local: dict[ManifestKey, LocalEntry] = {}
     for root_index, root in enumerate(manifest["roots"]):
         root_state = _managed_root_state(root["local_path"])
         if root_state == "symlink":
@@ -1166,11 +1248,13 @@ def _manifest_maps(manifest: dict) -> tuple[dict, dict]:
     return baseline, local
 
 
-def _local_changes(manifest: dict) -> tuple[dict, dict, list, list]:
+def _local_changes(
+    manifest: JsonDict,
+) -> tuple[dict[ManifestKey, JsonDict], dict[ManifestKey, LocalEntry], list[ManifestKey], list[ManifestKey]]:
     """Return (baseline, local, changed keys, deleted keys) by metadata."""
     baseline, local = _manifest_maps(manifest)
     deleted = sorted(set(baseline) - set(local))
-    changed = []
+    changed: list[ManifestKey] = []
     for key, (full, st) in sorted(local.items()):
         original = baseline.get(key)
         if original is None or not _same_metadata(full, st, original):
@@ -1178,14 +1262,14 @@ def _local_changes(manifest: dict) -> tuple[dict, dict, list, list]:
     return baseline, local, changed, deleted
 
 
-def status(db, workspace_id: int, vireo_dir: str) -> dict:
+def status(db: Database, workspace_id: int, vireo_dir: str) -> JsonDict:
     """Return lightweight local-workspace state and local change counts."""
     state_row = local_state(db, workspace_id)
     if not state_row:
         return {"state": "remote", "workspace_id": workspace_id}
 
     roots = _db_roots(db, workspace_id)
-    result = {
+    result: JsonDict = {
         "state": state_row["state"],
         "workspace_id": workspace_id,
         "created_at": state_row.get("created_at"),
@@ -1235,7 +1319,7 @@ def status(db, workspace_id: int, vireo_dir: str) -> dict:
     return result
 
 
-def _change_summary(manifest: dict | None, manifest_error: str | None) -> dict:
+def _change_summary(manifest: JsonDict | None, manifest_error: str | None) -> JsonDict:
     """Compute change counts, degrading to an explanation instead of failing.
 
     The Workspace page must keep rendering (and keep Discard reachable) even
@@ -1305,7 +1389,9 @@ def _prepare_publish_target(remote_path: str) -> None:
         os.rmdir(dirpath)
 
 
-def _ancestor_conflicts(mutation_keys, manifest: dict, deleted_set: set) -> list[str]:
+def _ancestor_conflicts(
+    mutation_keys: Iterable[ManifestKey], manifest: JsonDict, deleted_set: AbstractSet[ManifestKey]
+) -> list[str]:
     """Source paths where a non-directory blocks a mutation.
 
     Both publishing ``a/b/c`` and deleting ``a/b/c`` need every ancestor of
@@ -1315,8 +1401,8 @@ def _ancestor_conflicts(mutation_keys, manifest: dict, deleted_set: set) -> list
     Ancestors that the deletion pass is about to remove (a local
     file→directory replacement) are not conflicts.
     """
-    conflicts = []
-    checked = set()
+    conflicts: list[str] = []
+    checked: set[str] = set()
     for root_index, rel in mutation_keys:
         source_root = manifest["roots"][root_index]["source_path"]
         parent = os.path.dirname(os.path.join(source_root, rel))
@@ -1340,7 +1426,7 @@ def _ancestor_conflicts(mutation_keys, manifest: dict, deleted_set: set) -> list
     return conflicts
 
 
-def _restore_catalog(db, workspace_id: int) -> None:
+def _restore_catalog(db: Database, workspace_id: int) -> None:
     """Atomically restore catalog paths from the recorded mapping.
 
     Runs as one transaction: merge any rows that re-tracked a source path
@@ -1406,7 +1492,7 @@ def _restore_catalog(db, workspace_id: int) -> None:
     db.invalidate_new_images_cache_for_workspace(workspace_id)
 
 
-def _verify_sync_roots(manifest: dict) -> None:
+def _verify_sync_roots(manifest: JsonDict) -> None:
     """Refuse to sync unless every source and managed local root is intact."""
     for root in manifest["roots"]:
         try:
@@ -1436,7 +1522,12 @@ def _verify_sync_roots(manifest: dict) -> None:
             )
 
 
-def _add_recovery_republish(changed: list, local: dict, resuming: bool, recovery_confirmed: set | None) -> set:
+def _add_recovery_republish(
+    changed: list[ManifestKey],
+    local: Mapping[ManifestKey, LocalEntry],
+    resuming: bool,
+    recovery_confirmed: AbstractSet[ManifestKey] | None,
+) -> set[ManifestKey]:
     """Queue confirmed deletions restored locally for republishing.
 
     Appends the restored keys to ``changed`` in place and returns them.
@@ -1450,7 +1541,7 @@ def _add_recovery_republish(changed: list, local: dict, resuming: bool, recovery
     # a source-missing conflict that recovery cannot get out of. Both
     # cases finish the previously-confirmed operation by writing the
     # current local file back to source.
-    recovery_republish: set = set()
+    recovery_republish: set[ManifestKey] = set()
     if resuming and recovery_confirmed:
         changed_set = set(changed)
         for key in recovery_confirmed:
@@ -1463,12 +1554,12 @@ def _add_recovery_republish(changed: list, local: dict, resuming: bool, recovery
 
 
 def _check_deletion_confirmation(
-    deleted: list,
+    deleted: Sequence[ManifestKey],
     *,
     allow_deletions: bool,
     confirmed_deletions: int | None,
     resuming: bool,
-    recovery_confirmed: set | None,
+    recovery_confirmed: AbstractSet[ManifestKey] | None,
 ) -> bool:
     """Refuse source deletions the user has not confirmed.
 
@@ -1507,20 +1598,20 @@ def _check_deletion_confirmation(
 
 
 def _sync_conflicts(
-    manifest: dict,
-    baseline: dict,
-    local: dict,
-    changed: list,
-    deleted: list,
-    recovery_republish: set,
-    cancel_check=None,
+    manifest: JsonDict,
+    baseline: Mapping[ManifestKey, JsonDict],
+    local: Mapping[ManifestKey, LocalEntry],
+    changed: Sequence[ManifestKey],
+    deleted: Sequence[ManifestKey],
+    recovery_republish: AbstractSet[ManifestKey],
+    cancel_check: CancelCheck | None = None,
 ) -> list[str]:
     """Source paths a sync would clobber: outside edits and blocked targets."""
     # Conflict scan. Only paths sync would write or delete can clobber
     # anything, so only those are verified — by full content hash, since
     # a source edit can preserve size and mtime. Unchanged local files
     # are never published, so a source-side edit to them simply survives.
-    conflicts = []
+    conflicts: list[str] = []
     at_risk = [key for key in changed if key in baseline] + list(deleted)
     for key in at_risk:
         root_index, rel = key
@@ -1574,7 +1665,13 @@ def _sync_conflicts(
     return conflicts
 
 
-def _publish_sync_changes(manifest: dict, local: dict, changed: list, deleted: list, progress=None) -> None:
+def _publish_sync_changes(
+    manifest: JsonDict,
+    local: Mapping[ManifestKey, LocalEntry],
+    changed: Sequence[ManifestKey],
+    deleted: Sequence[ManifestKey],
+    progress: StepProgress | None = None,
+) -> None:
     """Apply local deletions, then publish created and modified files to source."""
     total = len(changed) + len(deleted)
     done = 0
@@ -1599,16 +1696,16 @@ def _publish_sync_changes(manifest: dict, local: dict, changed: list, deleted: l
 
 
 def sync_back(
-    db,
+    db: Database,
     workspace_id: int,
     vireo_dir: str,
     *,
     allow_deletions: bool = False,
     confirmed_deletions: int | None = None,
-    progress=None,
-    cancel_check=None,
-    begin_commit=None,
-) -> dict:
+    progress: StepProgress | None = None,
+    cancel_check: CancelCheck | None = None,
+    begin_commit: BeginCommit | None = None,
+) -> JsonDict:
     """Publish local changes, restore source paths, and remove the local copy."""
     with _workspace_lock(workspace_id):
         state_row = local_state(db, workspace_id)
@@ -1621,7 +1718,7 @@ def sync_back(
         # a fresh count-bound confirmation, which is validated below against
         # the persisted recovery marker OR a fresh ``confirmed_deletions``
         # count the caller sends alongside ``confirm_deletions: true``.
-        recovery_confirmed: set | None = None
+        recovery_confirmed: set[ManifestKey] | None = None
         if resuming:
             allow_deletions = True
             recovery_confirmed = _load_sync_recovery(vireo_dir, workspace_id)
@@ -1683,7 +1780,9 @@ def sync_back(
         }
 
 
-def _source_state(remote_path: str, baseline: dict, cancel_check=None) -> tuple[bool, str | None]:
+def _source_state(
+    remote_path: str, baseline: Mapping[str, object], cancel_check: CancelCheck | None = None
+) -> tuple[bool, str | None]:
     """Compare a source entry against the staged baseline by content.
 
     Returns (matches, remote sha256 or None). The hash is computed at most
@@ -1704,7 +1803,9 @@ def _source_state(remote_path: str, baseline: dict, cancel_check=None) -> tuple[
     return remote_sha == baseline.get("sha256"), remote_sha
 
 
-def _matches_remote(local_path: str, remote_path: str, remote_sha: str | None, cancel_check=None) -> bool:
+def _matches_remote(
+    local_path: str, remote_path: str, remote_sha: str | None, cancel_check: CancelCheck | None = None
+) -> bool:
     """Check whether the local entry equals the source entry, reusing the
     remote hash computed by the conflict scan when available."""
     if remote_sha is None:
@@ -1718,7 +1819,9 @@ def _matches_remote(local_path: str, remote_path: str, remote_sha: str | None, c
     return _sha256(local_path, cancel_check) == remote_sha
 
 
-def discard_local(db, workspace_id: int, vireo_dir: str, *, acknowledge_published: bool = False) -> dict:
+def discard_local(
+    db: Database, workspace_id: int, vireo_dir: str, *, acknowledge_published: bool = False
+) -> JsonDict:
     """Restore catalog paths and remove local changes without touching source files."""
     with _workspace_lock(workspace_id):
         state_row = local_state(db, workspace_id)
