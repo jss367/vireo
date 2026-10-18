@@ -1,21 +1,30 @@
 # Misses page JavaScript
 
-`vireo/templates/misses.html` (Misses, at `/misses`) loads these classic
-scripts after the shared navbar scripts and the shared filter bar, where its
-inline page script used to be. Functions remain global for the card markup's
-`onclick` / `ondblclick` attributes, the selection bar's buttons, and the hooks
-the shared lightbox and navbar call by name (`window.afterHistoryChange`,
-`window.handleMissesLightboxFlagShortcut`, `openBrowseShortcutPhoto`).
+`vireo/templates/misses.html` (Misses, at `/misses`) is the first **module
+page** (`frontend-module-pages.json`): its scripts are ES modules, not classic
+scripts sharing page globals. The template loads one entry module after the
+shared navbar scripts and the shared filter bar:
+
+```html
+<script type="module" src="/static/misses/boot.js"></script>
+```
+
+and the browser loads every other file through `boot.js`'s imports. Each file
+imports what it uses from its siblings (`import { state } from './state.js'`)
+and exports what they use. No bundler is involved; the files are served as
+they are.
 
 | File | Responsibility |
 | --- | --- |
-| `state.js` | Page state: category order and labels, `missesData`, the tuning config and preview state, focus, `selection`, lightbox tracking, `appliedMissFilters`, and the fail-closed scope error |
+| `state.js` | Page state: the `state` object (`missesData`, the tuning config and preview state, focus, `selection`, lightbox tracking, `appliedMissFilters`, the fail-closed scope error) and the constants `CATEGORY_ORDER`, `CATEGORY_LABELS`, `MISS_TUNING_CONTROL_IDS` |
+| `shared.js` | The boundary with shared code: every navbar, lightbox, filter-bar and `vireo-utils.js` global the page uses, and `exposePageHooks()` |
 | `helpers.js` | `photoThumbnailUrl`, `parseDetectionBox`, `sortPhotos`, and `getSinceParam` |
 | `filters.js` | Reading, cloning and comparing the filter-bar payload, adding it to request bodies, and `applyMissFilters()` |
 | `scope.js` | Legacy `?collection_id=` / `?folder_id=` deep links, `noteLegacyScopeError`, and the scope banner |
 | `tuning.js` | The threshold sliders and labels, tuning status and disabled state, `loadMissConfig`, and preview, recompute and reset |
-| `loading.js` | `applyMissesPayload`, `loadMisses()` with its sequence guard, and the navbar's `afterHistoryChange` hook |
+| `loading.js` | `applyMissesPayload`, `loadMisses()` with its sequence guard, and `afterHistoryChange` |
 | `render.js` | `render()`, each category section and its cards, and section collapse |
+| `card-events.js` | The delegated click and double-click listeners on `#missesRoot` for section headers, Reject all buttons, cards and their unflag buttons |
 | `photo-open.js` | Opening a miss in the lightbox or Browse, the focused/selected photo lookups, and `pruneSelectionToVisible` |
 | `flagging.js` | Bulk reject per category, per-card and selection flag changes, per-card and lightbox unflag, and the Representative badge clearing they share |
 | `selection.js` | Clearing and toggling the selection, the selection bar, shift-click ranges, and card click and double-click |
@@ -23,32 +32,102 @@ the shared lightbox and navbar call by name (`window.afterHistoryChange`,
 | `delete.js` | Deleting the selected photos through the shared delete dialog |
 | `keyboard.js` | `setFocused`, `moveFocus`, the keydown handler, and Shift+J/K selection extension |
 | `badges.js` | Keeping Representative badges and the applied flag filter current after `lifelist:changed` and `lightbox:flagchanged` |
-| `boot.js` | Binding the listeners, the slider handlers, `VireoFilter.init()`, the legacy scope resolution, the config load, and the first load |
+| `boot.js` | The entry module: exposing the page hooks, binding every listener, the slider handlers, `VireoFilter.init()`, the legacy scope resolution, the config load, and the first load |
 
-Load `boot.js` last. The other files only declare functions and initialize
-passive state, so their relative order does not matter at load time. The six
-listeners the inline script attached at load are wrapped in
-`bindMissLightboxTracking()` (`photo-open.js`), `bindMissContextMenu()`
-(`context-menu.js`), `bindMissKeyboard()` (`keyboard.js`),
-`bindMissLifeListEvents()` and `bindMissLightboxFlagEvents()` (`badges.js`).
-Boot calls them in that order, then runs `installMissSliderHandlers()` and the
-`VireoFilter.init()` chain as the inline script did. Adding a script requires
-an explicit template tag before boot. These are not ES modules and need no
-bundler.
+## State
 
-Keep these guards intact when changing this code:
+Page state lives in one exported object, `state` in `state.js`. An ES module
+cannot reassign another module's `let`, so files write fields
+(`state.previewActive = true`) instead of rebinding variables. Constants are
+plain exports. Nothing the page declares is a global: a top-level `var` or
+`function` in a module stays in that module.
 
-- `loadMisses()` and `previewMisses()` share `missLoadRequestId`; a response
-  for an older request is dropped. `previewRequestId` does the same for
-  debounced slider previews, and `invalidateMissPreview()` bumps it.
-- `appliedMissFilters` is the filter snapshot that produced the cards on
-  screen. Recompute and bulk reject send that snapshot, not the live filter
-  bar, so they act on the photos the user is looking at.
-- `legacyScopeError` / `legacyScopeRecoveryPending` fail closed: an
-  unresolvable deep link renders an empty grid and freezes the tuning
+## The shared-code boundary
+
+The navbar, lightbox, filter bar and `vireo-utils.js` are still classic
+scripts that publish globals. Page files never reach for them directly
+(ESLint's `no-undef` fails on a bare `showToast`); they import them from
+`shared.js`, which is the one list of what the page uses from shared code.
+The forwarders there look the global up at call time, as the classic page
+did, so a shared function that is missing keeps its `typeof` guard there
+(`hasLightbox()`, `hasContextMenu()`, `hasDeleteDialog()`, and `showToast`
+that no-ops) and one replaced at runtime is still the one called. The escape
+helpers, which `_navbar.html` loads first and nobody replaces, and
+`VireoFilter`, which `_filterbar.html` loads before the page, are bound once.
+When a shared script becomes a module, change its import in `shared.js`.
+
+The other direction: the shared navbar and lightbox call a few page
+functions by name. `boot.js` hands them to `exposePageHooks()` in `shared.js`,
+which is the only code that writes `window`:
+
+- `afterHistoryChange` — the navbar's undo/redo reload
+- `loadMisses` — the Missing Originals delete refresh in `navbar-folder-banners.js`
+- `getActiveSelection` — the native menu's selected photos
+- `openBrowseShortcutPhoto` — the native menu's Open in Lightbox
+- `handleMissesLightboxFlagShortcut` — the lightbox's unflag key
+
+plus `_lightboxZoomHandled`, the lightbox's click-to-zoom latch, which
+`openLightbox()` resets. These names are listed for the page in
+`frontend-module-pages.json`; ESLint rejects any other `window` write in the
+page's files, and `vireo/tests/test_module_pages.py` checks the list against
+`shared.js`.
+
+## Load order
+
+Module scripts are deferred: `boot.js` runs after the document is parsed and
+before `DOMContentLoaded`, which is where the classic scripts at the end of
+the body ran too, so every element the page looks up exists. The browser
+evaluates the imported modules first, dependencies before dependents; they
+only declare functions and initialize passive state, and import cycles between
+them (render ↔ selection ↔ keyboard, ...) are safe because no module calls an
+import while it is being evaluated. Boot then:
+
+1. exposes the page hooks (the classic page had them as globals from parse
+   time, so this goes first),
+2. binds the controls that used to carry `onclick=` attributes (the selection
+   bar's four buttons, Recompute and Reset preview) and the delegated card
+   listeners (`card-events.js`),
+3. binds the listeners the original inline script attached at load, in its
+   order: `bindMissLightboxTracking()`, `bindMissContextMenu()`,
+   `bindMissKeyboard()`, `bindMissLifeListEvents()`,
+   `bindMissLightboxFlagEvents()`,
+4. runs `installMissSliderHandlers()` and the `VireoFilter.init()` chain.
+
+A new file is loaded by importing it from the file that uses it; a file
+nothing imports never runs (`test_module_pages.py` fails on one).
+
+## Rendered markup
+
+`render.js` builds the cards as HTML strings with data attributes
+(`data-cat`, `data-idx`, `data-photo-id`), not inline handlers.
+`card-events.js` resolves a click to the innermost of unflag button, Reject
+all button, card, section header, which is what the inline handlers did: a
+button's handler stopped propagation, the card and header handlers ignored
+clicks inside a button, and a disabled button ran nothing.
+
+## Tests
+
+Browser tests cannot read `selection` or call `previewMisses()` as globals.
+`tests/e2e/module_pages.py`'s `import_page_modules()` imports the page's
+modules from the test (`import()` returns the instances the page loaded), and
+the Misses tests read `missState` and call `pageModules.<file>.<export>`.
+
+## Guards
+
+Keep these intact when changing this code:
+
+- `loadMisses()` and `previewMisses()` share `state.missLoadRequestId`; a
+  response for an older request is dropped. `state.previewRequestId` does the
+  same for debounced slider previews, and `invalidateMissPreview()` bumps it.
+- `state.appliedMissFilters` is the filter snapshot that produced the cards
+  on screen. Recompute and bulk reject send that snapshot, not the live
+  filter bar, so they act on the photos the user is looking at.
+- `state.legacyScopeError` / `state.legacyScopeRecoveryPending` fail closed:
+  an unresolvable deep link renders an empty grid and freezes the tuning
   controls (`MISS_TUNING_CONTROL_IDS`) until a replacement filter has loaded.
   Preview, recompute and reset all return early while either is set.
-- `previewActive` disables bulk reject, per-card unflag and the selection
-  bar's unflag button; the preview endpoint does not persist flags.
+- `state.previewActive` disables bulk reject, per-card unflag and the
+  selection bar's unflag button; the preview endpoint does not persist flags.
 - `pruneSelectionToVisible()` runs after every synchronous mutation of
-  `missesData` so a follow-up bulk flag cannot act on cards no longer shown.
+  `state.missesData` so a follow-up bulk flag cannot act on cards no longer
+  shown.
