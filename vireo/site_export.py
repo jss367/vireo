@@ -108,11 +108,7 @@ def _capture_metadata(db, build_life_list, resolve_visual, include_locations,
     life_list = copy.deepcopy(build_life_list(db, photos_per_species=None))
     # The Browse tree omits offline folders. Keep their real paths here so
     # missing sources are reported (or a developed/working copy can be used).
-    folders = {f["id"]: f["path"] for f in db.conn.execute(
-        "SELECT f.id, f.path FROM folders f "
-        "JOIN workspace_visible_folders wf ON wf.folder_id = f.id WHERE wf.workspace_id = ?",
-        (db.require_workspace_id(),),
-    )}
+    folders = db.workspace_folders.visible_folder_paths(db.require_workspace_id())
     for offset in range(0, total, 200):
         progress(offset, total, "", "Reading photo metadata")
         batch = photo_ids[offset:offset + 200]
@@ -173,14 +169,14 @@ def export_site(db, vireo_dir, destination, *, build_life_list, resolve_visual,
     progress(0, 0, "", "Preparing site export")
     workspace_id = db.require_workspace_id()
     with TemporaryFile(mode="w+t", encoding="utf-8") as snapshot:
-        db.conn.execute("BEGIN")
+        db.begin()
         try:
             captured = _capture_metadata(
                 db, build_life_list, resolve_visual, include_locations, snapshot,
                 lambda *args: progress(*args, reading_snapshot=True),
             )
         finally:
-            db.conn.rollback()
+            db.rollback()
         return _render_snapshot(
             snapshot, captured, workspace_id, vireo_dir, destination, options,
             progress, begin_commit,

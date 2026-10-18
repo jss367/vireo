@@ -14,8 +14,10 @@ The ones that are scoped resolve the active workspace through
 ``self._ws_id()``; building the repository never resolves it.
 
 The GPS discrepancy decisions (``location_gps_reviews``) the Location Review
-page records are written here too; their read is part of
-``location_review.gps_discrepancies``.
+page records are written here too, and ``gps_discrepancy_rows`` is the read
+``location_review.gps_discrepancies`` compares against the sidecars.
+Callers reach the simple reads as ``db.locations`` (a fresh repository per
+access, see ``Database.locations``).
 """
 
 import time
@@ -720,6 +722,39 @@ class LocationRepository:
         ).fetchall()
 
     # -- GPS discrepancy reviews ----------------------------------------------
+
+    def gps_discrepancy_rows(self, photo_ids):
+        """Each photo's GPS beside its assigned place, for the discrepancy check.
+
+        One row per photo in ``photo_ids`` (one statement; callers chunk) that
+        carries a location keyword with coordinates, using the same leaf the
+        sync writes: the deepest-linked, newest such keyword. Rows carry the
+        photo's ``id``, ``filename``, ``companion_path``, ``timestamp``,
+        ``latitude``, ``longitude`` and ``folder_path``, the place's
+        ``keyword_id``, ``assigned_name``, ``assigned_latitude`` and
+        ``assigned_longitude``, and the recorded ``reviewed_fingerprint`` (or
+        None), ordered by timestamp then id.
+        """
+        placeholders = ','.join('?' for _ in photo_ids)
+        return self.conn.execute(f"""
+            WITH ranked AS (
+                SELECT pk.photo_id, k.id keyword_id, k.name, k.latitude, k.longitude,
+                       ROW_NUMBER() OVER (PARTITION BY pk.photo_id
+                         ORDER BY (k.parent_id IS NULL) ASC, k.id DESC) rn
+                FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id
+                WHERE pk.photo_id IN ({placeholders}) AND k.type = 'location'
+                  AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
+            )
+            SELECT p.id, p.filename, p.companion_path, p.timestamp, p.latitude, p.longitude,
+                   f.path folder_path, k.keyword_id, k.name assigned_name,
+                   k.latitude assigned_latitude, k.longitude assigned_longitude,
+                   r.fingerprint reviewed_fingerprint
+            FROM ranked k JOIN photos p ON p.id = k.photo_id
+            JOIN folders f ON f.id = p.folder_id
+            LEFT JOIN location_gps_reviews r ON r.photo_id = p.id
+            WHERE k.rn = 1
+            ORDER BY p.timestamp, p.id
+        """, photo_ids).fetchall()
 
     def delete_gps_review(self, photo_id):
         """Forget ``photo_id``'s GPS discrepancy decision. Caller owns the transaction."""

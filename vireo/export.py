@@ -987,38 +987,17 @@ def _developed_ext_preference(output_ext):
 
 def _get_photo_exif_data(db, photo_ids):
     """Return a photo_id -> exif_data map without bloating list photo queries."""
+    # Closed databases and test fakes have no connection: nothing to read.
     if not photo_ids or not hasattr(db, "conn"):
         return {}
-    out = {}
-    for i in range(0, len(photo_ids), 999):
-        chunk = photo_ids[i:i + 999]
-        placeholders = ",".join("?" for _ in chunk)
-        rows = db.conn.execute(
-            f"SELECT id, exif_data FROM photos WHERE id IN ({placeholders})",
-            list(chunk),
-        ).fetchall()
-        for row in rows:
-            out[row["id"]] = row["exif_data"]
-    return out
+    return db.photos.exif_data_by_ids(photo_ids)
 
 
 def _get_photo_camera_data(db, photo_ids):
     """Return promoted camera/exposure fields for an export selection."""
     if not photo_ids or not hasattr(db, "conn"):
         return {}
-    out = {}
-    for i in range(0, len(photo_ids), 999):
-        chunk = photo_ids[i:i + 999]
-        placeholders = ",".join("?" for _ in chunk)
-        rows = db.conn.execute(
-            f"""SELECT id, camera_make, camera_model, lens, focal_length,
-                       aperture, shutter_speed, iso
-                FROM photos WHERE id IN ({placeholders})""",
-            list(chunk),
-        ).fetchall()
-        for row in rows:
-            out[row["id"]] = dict(row)
-    return out
+    return db.photos.camera_data_by_ids(photo_ids)
 
 
 def _photo_value(photo, key, default=None):

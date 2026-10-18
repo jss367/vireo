@@ -1177,6 +1177,20 @@ def test_transfer_exact_workspace_folders_no_commit_moves_links_as_non_roots(db,
     assert cache.invalidated == []
 
 
+# -- visible folder paths ------------------------------------------------------
+
+
+def test_visible_folder_paths_reads_the_visible_view(db):
+    ws = db.require_workspace_id()
+    linked = _folder(db, "/lib/linked", status="offline")
+    _folder(db, "/lib/hidden")
+    _link_raw(db, ws, linked, 1)
+    other = db.create_workspace("Other")
+
+    assert db.workspace_folders.visible_folder_paths(ws) == {linked: "/lib/linked"}
+    assert db.workspace_folders.visible_folder_paths(other) == {}
+
+
 # -- structure -------------------------------------------------------------------
 
 _REMOVED_WRAPPERS = (

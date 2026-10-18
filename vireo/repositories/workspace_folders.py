@@ -449,6 +449,18 @@ class WorkspaceFolderRepository:
             visible.update(r["folder_id"] for r in rows)
         return visible
 
+    def visible_folder_paths(self, workspace_id: int) -> dict[int, str]:
+        """``{folder_id: path}`` of every folder the workspace sees.
+
+        Reads the ``workspace_visible_folders`` view, so offline folders and
+        photo-only grants are included.
+        """
+        return {f["id"]: f["path"] for f in self.conn.execute(
+            "SELECT f.id, f.path FROM folders f "
+            "JOIN workspace_visible_folders wf ON wf.folder_id = f.id WHERE wf.workspace_id = ?",
+            (workspace_id,),
+        )}
+
     def root_ids(self, workspace_id: int) -> list[int]:
         """Return the ids of the workspace's user-facing roots, by path."""
         rows = self.conn.execute(
