@@ -98,6 +98,39 @@ def test_prune_absent_inat_ids_clears_references_and_drops_temp_table(db, tree):
     ).fetchone()[0] == 0
 
 
+# -- species-identity lookups ---------------------------------------------------
+
+
+def _identity(row):
+    return (row["taxon_id"], row["scientific_name"], row["common_name"], row["rank"])
+
+
+def test_identity_lookups(db):
+    taxa = db.taxa
+    heron = taxa.upsert_inat_export_taxon(4956, "Ardea herodias", "species", "Animalia")
+    taxa.set_common_name(heron, "Great Blue Heron")
+    taxa.add_common_name(heron, "great blue heron", "en")
+    taxa.add_common_name(heron, "Blue crane", "en")
+    shared_a = taxa.upsert_inat_export_taxon(1, "Genus one", "genus", "Animalia")
+    shared_b = taxa.upsert_inat_export_taxon(2, "Genus two", "genus", "Plantae")
+    taxa.set_common_name(shared_a, "Shared")
+    taxa.set_common_name(shared_b, "Shared")
+    heron_identity = (4956, "Ardea herodias", "Great Blue Heron", "species")
+
+    assert _identity(taxa.identity_by_inat_id(4956)) == heron_identity
+    assert taxa.identity_by_inat_id(5) is None
+    assert [_identity(r) for r in taxa.identities_by_scientific_name("Ardea herodias")] == [heron_identity]
+    assert taxa.identities_by_scientific_name("ardea herodias") == []
+    for name in ("Ardea herodias", "Great Blue Heron", "BLUE CRANE"):
+        assert [_identity(r) for r in taxa.identities_by_any_name(name)] == [heron_identity]
+    assert len(taxa.identities_by_any_name("Shared")) == 2
+    assert [_identity(r) for r in taxa.identities_by_preferred_common_name("great BLUE heron")] == [
+        heron_identity,
+    ]
+    assert taxa.identities_by_preferred_common_name("Blue crane") == []
+    assert len(taxa.identities_by_preferred_common_name("shared")) == 2
+
+
 # -- common names and informal groups -------------------------------------------
 
 

@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import subprocess
 import tempfile
 from dataclasses import dataclass
 
@@ -1559,8 +1560,8 @@ def create_photos_blueprint(
             error = run.launch(file_paths)
             if error is not None:
                 return error
-        except Exception as e:
-            log.warning("Failed to open external editor: %s", e)
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            log.warning("Failed to open external editor: %s", e, exc_info=True)
             return json_error(str(e), 500)
 
         return jsonify({"opened": len(file_paths)})
@@ -1649,7 +1650,7 @@ def create_photos_blueprint(
         weights_path = active_model.get("weights_path", "")
         try:
             query_vec = encode_text(query, model_str=model_str, pretrained_str=weights_path)
-        except Exception as e:
+        except Exception as e:  # broad: model inference errors are undocumented; answered as a 500 with the reason
             log.exception("Text encoding failed for query=%r model=%s", query, model_name)
             return json_error(f"Text encoding failed: {e}", status=500)
 
@@ -2472,7 +2473,7 @@ class _OpenExternal:
             replace_file(tmp_path, src.out_path)
             with open(src.meta_path, "w", encoding="utf-8") as f:
                 json.dump(src.expected_meta, f, sort_keys=True)
-        except Exception:
+        except Exception:  # broad: close and remove the unpublished temporary upload, then re-raise
             if fd is not None:
                 with contextlib.suppress(OSError):
                     os.close(fd)

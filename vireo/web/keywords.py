@@ -96,7 +96,7 @@ def _location_rename_requeue_skips(db, affected):
 
     try:
         global_cfg = cfg.load()
-    except Exception:
+    except Exception:  # broad: cfg.load() absorbs read errors; this guards its type repair so the rename commits
         log.warning("Could not load config for location rename requeue", exc_info=True)
         global_cfg = {}
     for row in affected:

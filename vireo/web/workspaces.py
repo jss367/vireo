@@ -490,7 +490,7 @@ def create_workspace_blueprint(
         db = get_db()
         try:
             tabs = db.workspaces.get_tabs()
-        except Exception:
+        except (sqlite3.Error, RuntimeError):
             log.warning("Could not read workspace tabs; showing defaults", exc_info=True)
             tabs = list(DEFAULT_TABS)
         return jsonify({"tabs": tabs, "all_pages": all_pages})
@@ -675,7 +675,7 @@ def create_workspace_blueprint(
                 db.workspace_folders.mark_roots(ws_id, folder_ids)
                 ws = db.workspaces.get(ws_id)
             return jsonify(dict(ws))
-        except Exception as e:
+        except Exception as e:  # broad: creation failures (duplicate name, bad overrides) answer with the reason
             log.warning("Workspace creation failed", exc_info=True)
             return json_error(str(e))
 
@@ -991,7 +991,7 @@ def create_workspace_blueprint(
                     return json_error(move_error)
                 try:
                     target_ws_id = db.create_workspace(new_ws_name)
-                except Exception as e:
+                except Exception as e:  # broad: creation failures are answered with the reason
                     log.warning("Workspace creation for folder move failed", exc_info=True)
                     return json_error(f"Failed to create workspace: {e}")
 

@@ -49,14 +49,11 @@ CONN_USE_LIMITS = {
     "culling.py": 6,
     "export.py": 2,
     "keyword_identity.py": 48,
-    "label_source_identities.py": 8,
     "location_review.py": 1,
     "misses.py": 4,
     "schema.py": 1,
     "site_export.py": 3,
-    "species_identity.py": 5,
-    "species_identity_repair.py": 3,
-    "volume_reachability.py": 8
+    "volume_reachability.py": 8,
 }
 
 
