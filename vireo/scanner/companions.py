@@ -3,10 +3,13 @@
 The SQL lives in ``repositories/companion_pairing.py`` (``db.companion_pairing``).
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from collections import defaultdict
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 from metadata import EXIF_SUMMARY_COLUMNS
 from preview_cache import (
@@ -14,6 +17,15 @@ from preview_cache import (
     cleanup_cached_files_for_deleted_photos,
 )
 from scanner.cache_invalidation import _invalidate_derived_caches, _invalidate_raw_display_cache
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable, Iterable, Mapping
+    from pathlib import Path
+
+    from db import Database
+    from repositories.photo_row_deletion import PhotoRowDeletion
+    from scanner.scan_types import ColumnRow, PairingRow, PhotoIdentity, StrPath
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +36,7 @@ log = logging.getLogger(__name__)
 COMPANION_TIMESTAMP_TOLERANCE_SECS = 2.0
 
 
-def _companions_compatible(raw, jpeg):
+def _companions_compatible(raw: Mapping[str, Any], jpeg: Mapping[str, Any]) -> bool:
     """True unless the two rows' capture metadata says they are different shots.
 
     Missing metadata on either side is not evidence against the pair (an
@@ -57,7 +69,7 @@ _COMPANION_RAW_EXTENSIONS = frozenset(
 _COMPANION_JPEG_EXTENSIONS = frozenset({".jpg", ".jpeg"})
 
 
-def _pairing_rows_for_stem(db, folder_id, stem):
+def _pairing_rows_for_stem(db: Database, folder_id: int, stem: str) -> list[PairingRow]:
     """The cataloged pairing candidates sharing ``stem`` in one folder.
 
     Same rows ``_group_photos_by_folder_and_stem`` would put in this
@@ -71,7 +83,7 @@ def _pairing_rows_for_stem(db, folder_id, stem):
     ]
 
 
-def _group_photos_by_folder_and_stem(db):
+def _group_photos_by_folder_and_stem(db: Database) -> defaultdict[tuple[int, str], list[PairingRow]]:
     """Group pairing candidates by folder_id + base name (without extension).
 
     Candidates are every photo not yet paired, plus RAW rows that already
@@ -88,7 +100,7 @@ def _group_photos_by_folder_and_stem(db):
     return groups
 
 
-def _max_raw_jpeg_matching(raws, jpegs):
+def _max_raw_jpeg_matching(raws: list[PairingRow], jpegs: list[PairingRow]) -> list[tuple[PairingRow, PairingRow]]:
     """Return a maximum-cardinality set of ``(raw, jpeg)`` pairs where every
     pair satisfies ``_companions_compatible``.
 
@@ -122,7 +134,9 @@ def _max_raw_jpeg_matching(raws, jpegs):
     return [(raws[ri], jpegs[ji]) for ri, ji in match_r2j.items()]
 
 
-def _pick_compatible_raw_jpeg_pairs(members, log_conflicts=True):
+def _pick_compatible_raw_jpeg_pairs(
+    members: list[PairingRow], log_conflicts: bool = True,
+) -> list[tuple[PairingRow, PairingRow]]:
     """Return every ``(raw, jpeg)`` to merge from one same-stem group.
 
     A group needs at least one RAW and one JPEG, and each returned pair
@@ -216,7 +230,9 @@ def _pick_compatible_raw_jpeg_pairs(members, log_conflicts=True):
     return pairs
 
 
-def _read_metadata_transfer_rows(db, primary, companion):
+def _read_metadata_transfer_rows(
+    db: Database, primary: Mapping[str, Any], companion: Mapping[str, Any],
+) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
     """Read the columns a merge may carry from companion to primary.
 
     Returns ``(primary_full, companion_full)``.
@@ -228,7 +244,7 @@ def _read_metadata_transfer_rows(db, primary, companion):
     return primary_full, companion_full
 
 
-def _keep_companion_import_identity(db, primary, companion):
+def _keep_companion_import_identity(db: Database, primary: Mapping[str, Any], companion: Mapping[str, Any]) -> None:
     """Attach the companion's import identity to the primary."""
     # Pairing hides the JPEG row, not the JPEG's import identity. Keep
     # it attached to the RAW so re-importing a card still skips both.
@@ -237,7 +253,9 @@ def _keep_companion_import_identity(db, primary, companion):
     db.companion_pairing.keep_import_identity(primary["id"], companion["id"])
 
 
-def _fill_primary_metadata_gaps(db, primary, primary_full, companion_full):
+def _fill_primary_metadata_gaps(
+    db: Database, primary: Mapping[str, Any], primary_full: ColumnRow, companion_full: ColumnRow,
+) -> None:
     """Copy companion metadata onto the primary only where the primary lacks it."""
     updates = []
     params = []
@@ -289,14 +307,15 @@ def _fill_primary_metadata_gaps(db, primary, primary_full, companion_full):
         db.scanning.update_photo(primary["id"], updates, params)
 
 
-def _transfer_companion_keywords(db, primary, companion):
+def _transfer_companion_keywords(db: Database, primary: Mapping[str, Any], companion: Mapping[str, Any]) -> None:
     """Transfer keywords from companion to primary, keeping the stronger provenance."""
     db.keyword_provenance.carry_companion_keywords(companion["id"], primary["id"])
 
 
 def _defer_primary_display_cache_invalidation(
-    post_commit_fs_actions, primary, vireo_dir, thumb_cache_dir,
-):
+    post_commit_fs_actions: list[Callable[[], None]], primary: Mapping[str, Any],
+    vireo_dir: StrPath, thumb_cache_dir: StrPath | None,
+) -> None:
     """Queue removal of the primary's RAW display cache and JPEG thumbnail.
 
     An unedited RAW display cache may have been rendered before the
@@ -315,8 +334,8 @@ def _defer_primary_display_cache_invalidation(
     _vireo_dir = vireo_dir
 
     def _invalidate_primary_variants(
-        pid=_primary_id, td=_thumb_dir, vd=_vireo_dir,
-    ):
+        pid: int = _primary_id, td: StrPath = _thumb_dir, vd: StrPath = _vireo_dir,
+    ) -> None:
         _invalidate_raw_display_cache(vd, pid)
         jpeg_variant = os.path.join(td, f"{pid}_jpeg.jpg")
         try:
@@ -332,7 +351,7 @@ def _defer_primary_display_cache_invalidation(
     post_commit_fs_actions.append(_invalidate_primary_variants)
 
 
-def _carry_prediction_reviews_to_survivors(db, old_id, new_id):
+def _carry_prediction_reviews_to_survivors(db: Database, old_id: int, new_id: int) -> None:
     """Move review state off predictions that collided during a re-key."""
     # If a companion prediction collided with an existing primary
     # prediction, its row stayed on the old detection id. Preserve any
@@ -341,7 +360,9 @@ def _carry_prediction_reviews_to_survivors(db, old_id, new_id):
     db.companion_pairing.carry_prediction_reviews_to_survivors(old_id, new_id)
 
 
-def _rekey_companion_detections_onto_primary(db, primary, companion):
+def _rekey_companion_detections_onto_primary(
+    db: Database, primary: Mapping[str, Any], companion: Mapping[str, Any],
+) -> None:
     """Transfer detections (and their cascaded predictions) from companion to primary.
 
     Detection IDs are content-addressed on (photo_id, detector_model, box,
@@ -393,7 +414,7 @@ def _rekey_companion_detections_onto_primary(db, primary, companion):
         pairing.delete_detection(det["id"])
 
 
-def _transfer_companion_pending_changes(db, primary, companion):
+def _transfer_companion_pending_changes(db: Database, primary: Mapping[str, Any], companion: Mapping[str, Any]) -> None:
     """Transfer pending_changes from companion to primary.
 
     No dedup needed here (unlike ``_transfer_companion_inat_submissions``):
@@ -404,7 +425,9 @@ def _transfer_companion_pending_changes(db, primary, companion):
     db.companion_pairing.transfer_pending_changes(primary["id"], companion["id"])
 
 
-def _transfer_companion_inat_submissions(db, primary, companion):
+def _transfer_companion_inat_submissions(
+    db: Database, primary: Mapping[str, Any], companion: Mapping[str, Any],
+) -> None:
     """Transfer iNaturalist submissions from companion to primary.
 
     Deduplicate on (photo_id, observation_id) before reassigning to avoid
@@ -414,8 +437,10 @@ def _transfer_companion_inat_submissions(db, primary, companion):
 
 
 def _transfer_companion_edit_recipe(
-    db, primary, companion, vireo_dir, thumb_cache_dir, post_commit_fs_actions,
-):
+    db: Database, primary: Mapping[str, Any], companion: Mapping[str, Any],
+    vireo_dir: StrPath | None, thumb_cache_dir: StrPath | None,
+    post_commit_fs_actions: list[Callable[[], None]],
+) -> None:
     """Preserve non-destructive edits when a JPEG companion is folded into a RAW primary.
 
     If both already have recipes, the primary wins. When the companion's
@@ -436,8 +461,9 @@ def _transfer_companion_edit_recipe(
 
 
 def _defer_recipe_snapshot_transfer(
-    db, post_commit_fs_actions, primary, companion, vireo_dir, thumb_cache_dir,
-):
+    db: Database, post_commit_fs_actions: list[Callable[[], None]], primary: Mapping[str, Any],
+    companion: Mapping[str, Any], vireo_dir: StrPath, thumb_cache_dir: StrPath | None,
+) -> None:
     """Queue moving local-mask snapshots to the primary and invalidating its caches.
 
     Local-adjustment mask snapshots are looked up by
@@ -457,8 +483,8 @@ def _defer_recipe_snapshot_transfer(
     _vd = vireo_dir
 
     def _apply_recipe_transfer_fs(
-        pid=_primary_id, cid=_companion_id, tcd=_tcd, vd=_vd,
-    ):
+        pid: int = _primary_id, cid: int = _companion_id, tcd: StrPath | None = _tcd, vd: StrPath = _vd,
+    ) -> None:
         from local_masks import transfer_snapshots
         # transfer_snapshots falls back to a copy when the
         # rename fails, so ``failed`` means the snapshot is
@@ -501,7 +527,10 @@ def _defer_recipe_snapshot_transfer(
     post_commit_fs_actions.append(_apply_recipe_transfer_fs)
 
 
-def _delete_companion_row(db, primary, companion, photo_rows):
+def _delete_companion_row(
+    db: Database, primary: Mapping[str, Any], companion: Mapping[str, Any],
+    photo_rows: PhotoRowDeletion,
+) -> None:
     """Move the companion's remaining per-photo state to the primary, then delete its row.
 
     ``photo_rows`` is the caller's ``PhotoRowDeletion``; the companion's
@@ -524,8 +553,9 @@ def _delete_companion_row(db, primary, companion, photo_rows):
 
 
 def _defer_companion_derivative_cleanup(
-    post_commit_fs_actions, companion, vireo_dir, thumb_cache_dir, masks_dir=None,
-):
+    post_commit_fs_actions: list[Callable[[], None]], companion: Mapping[str, Any],
+    vireo_dir: StrPath, thumb_cache_dir: StrPath | None, masks_dir: str | None = None,
+) -> None:
     """Queue unlinking the deleted companion's cached derivatives.
 
     The companion's rowid is now free for SQLite to hand to the next
@@ -545,9 +575,9 @@ def _defer_companion_derivative_cleanup(
     )
 
     def _cleanup_companion(
-        cid=_companion_id, td=_thumb_dir_for_companion,
-        vd=vireo_dir, md=masks_dir,
-    ):
+        cid: int = _companion_id, td: StrPath = _thumb_dir_for_companion,
+        vd: StrPath = vireo_dir, md: str | None = masks_dir,
+    ) -> None:
         cleanup_cached_files_for_deleted_photos(
             td, [{"photo_id": cid}], vireo_dir=vd, masks_dir=md,
         )
@@ -556,9 +586,10 @@ def _defer_companion_derivative_cleanup(
 
 
 def _merge_companion_into_primary(
-    db, primary, companion, vireo_dir, thumb_cache_dir, post_commit_fs_actions,
-    photo_rows,
-):
+    db: Database, primary: PairingRow, companion: PairingRow, vireo_dir: StrPath | None,
+    thumb_cache_dir: StrPath | None, post_commit_fs_actions: list[Callable[[], None]],
+    photo_rows: PhotoRowDeletion,
+) -> bool:
     """Fold one JPEG companion row into its RAW primary inside the open transaction.
 
     Every DB write joins the caller's transaction; every filesystem change
@@ -569,8 +600,14 @@ def _merge_companion_into_primary(
     primary_full, companion_full = _read_metadata_transfer_rows(
         db, primary, companion,
     )
+    # Candidates predate these reads; a concurrent deletion or merge can
+    # remove either row. Skip before writes or deferred filesystem actions.
+    if primary_full is None or companion_full is None:
+        return False
     _keep_companion_import_identity(db, primary, companion)
-    _fill_primary_metadata_gaps(db, primary, primary_full, companion_full)
+    _fill_primary_metadata_gaps(
+        db, primary, primary_full, companion_full,
+    )
     _transfer_companion_keywords(db, primary, companion)
 
     db.companion_pairing.set_companion_path(primary["id"], companion["filename"])
@@ -587,9 +624,10 @@ def _merge_companion_into_primary(
         post_commit_fs_actions,
     )
     _delete_companion_row(db, primary, companion, photo_rows)
+    return True
 
 
-def _run_post_commit_fs_actions(post_commit_fs_actions):
+def _run_post_commit_fs_actions(post_commit_fs_actions: Iterable[Callable[[], object]]) -> None:
     """Run the deferred filesystem changes once the pairing commit is durable.
 
     Any exception here is per-action so a single failing unlink doesn't
@@ -607,25 +645,28 @@ def _run_post_commit_fs_actions(post_commit_fs_actions):
             )
 
 
-class _MergedPhotoIds(dict):
+class _MergedPhotoIds(dict[int, int]):
     """Merged ids plus the identities (companion AND surviving RAW)
     that pairing captured at merge time, so publication can refuse to
     substitute when either id's current row is not the one pairing saw.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.owners = {}
+        # ``primary_id -> (folder_id, filename)`` of each surviving RAW.
+        self.owners: dict[int, PhotoIdentity] = {}
         # ``companion_id -> (folder_id, filename)`` as pairing saw the
         # JPEG row before deleting it. The scanner compares this against
         # the identity it originally reported for that id: if the two
         # disagree, the id was reused after being reported and must not
         # be substituted with the pairing's RAW id (the two name
         # unrelated files).
-        self.companions = {}
+        self.companions: dict[int, PhotoIdentity] = {}
 
 
-def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
+def _pair_raw_jpeg_companions(
+    db: Database, vireo_dir: StrPath | None = None, thumb_cache_dir: StrPath | None = None,
+) -> _MergedPhotoIds:
     """Find raw+JPEG pairs in the same folder and merge them.
 
     When both IMG_001.cr3 and IMG_001.jpg exist in the same folder,
@@ -679,10 +720,11 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     with db.companion_pairing.row_deletion() as photo_rows:
         for (_folder_id, _base), members in groups.items():
             for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
-                _merge_companion_into_primary(
+                if not _merge_companion_into_primary(
                     db, primary, companion, vireo_dir, thumb_cache_dir,
                     post_commit_fs_actions, photo_rows,
-                )
+                ):
+                    continue
                 merged_ids[companion["id"]] = primary["id"]
                 merged_ids.owners[primary["id"]] = (
                     primary["folder_id"], primary["filename"],
@@ -724,12 +766,12 @@ class _KnownCompanions:
     pairing or deletion that ran since the snapshot is honored.
     """
 
-    def __init__(self, db):
+    def __init__(self, db: Database) -> None:
         self.db = db
         self._names_by_folder = {}
         self._folder_ids_by_path = {}
 
-    def lookup(self, folder_id, filename):
+    def lookup(self, folder_id: int, filename: str) -> sqlite3.Row | None:
         """The owning RAW and its stored companion identity, or None."""
         names = self._names_by_folder.get(folder_id)
         if names is None:
@@ -739,7 +781,7 @@ class _KnownCompanions:
             return None
         return self.db.companion_pairing.owner_of(folder_id, filename)
 
-    def lookup_path(self, image_path):
+    def lookup_path(self, image_path: Path) -> sqlite3.Row | None:
         """``lookup`` by path, resolving the folder like ``_incremental_photo_index``."""
         parent = str(image_path.parent)
         folder_ids = self._folder_ids_by_path.get(parent)
@@ -753,7 +795,7 @@ class _KnownCompanions:
         return None
 
 
-def _companion_stat_unchanged(known, stat):
+def _companion_stat_unchanged(known: sqlite3.Row, stat: os.stat_result) -> bool:
     """True when size and mtime match the identity a hash vouched for."""
     return (
         not known["needs_sync"]
@@ -764,7 +806,7 @@ def _companion_stat_unchanged(known, stat):
     )
 
 
-def _companion_bytes_unchanged(known, file_size, file_hash):
+def _companion_bytes_unchanged(known: sqlite3.Row, file_size: int, file_hash: str | None) -> bool:
     """True when freshly hashed bytes are the ones the identity stores."""
     if known["needs_sync"]:
         # Recovery verifies bytes for duplicate preview, but has not

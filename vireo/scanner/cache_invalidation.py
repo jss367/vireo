@@ -1,12 +1,21 @@
 """Dropping a photo's derived files when its source bytes change."""
 
+from __future__ import annotations
+
 import logging
 import os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
+
+    from db import Database
+    from scanner.scan_types import StrPath
 
 log = logging.getLogger(__name__)
 
 
-def _invalidate_raw_display_cache(vireo_dir, photo_id):
+def _invalidate_raw_display_cache(vireo_dir: StrPath, photo_id: int) -> None:
     display_file = os.path.join(
         vireo_dir, "originals", f"{photo_id}.display.jpg",
     )
@@ -21,7 +30,9 @@ def _invalidate_raw_display_cache(vireo_dir, photo_id):
             )
 
 
-def _invalidate_cached_thumbnails(db, vireo_dir, photo_id, thumb_cache_dir):
+def _invalidate_cached_thumbnails(
+    db: Database, vireo_dir: StrPath, photo_id: int, thumb_cache_dir: StrPath | None,
+) -> None:
     """Delete the photo's thumbnails and clear ``thumb_path`` to match."""
     thumb_dir = thumb_cache_dir or os.path.join(vireo_dir, "thumbnails")
     thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
@@ -62,7 +73,9 @@ def _invalidate_cached_thumbnails(db, vireo_dir, photo_id, thumb_cache_dir):
         db.caches.clear_thumbnail_path(photo_id)
 
 
-def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
+def _invalidate_derived_caches(
+    db: Database, vireo_dir: StrPath | None, photo_id: int, thumb_cache_dir: StrPath | None = None,
+) -> None:
     """Delete cached thumbnail / working copy / display / preview for a photo.
 
     Called when the scanner detects that an existing photo's source content
@@ -135,7 +148,7 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
         db.caches.delete_preview_rows([(photo_id, s) for s in deleted_sizes])
 
 
-def _sweep_untracked_previews_for_photos(db, vireo_dir, photo_ids):
+def _sweep_untracked_previews_for_photos(db: Database, vireo_dir: StrPath | None, photo_ids: Collection[int]) -> None:
     """Batched sweep of preview files with no preview_cache row.
 
     Legacy / orphan preview files (written by older code paths or left

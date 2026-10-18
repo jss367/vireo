@@ -1,7 +1,10 @@
 """Dimensions and capture time read from ExifTool's metadata groups."""
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime
+from typing import Any
 
 from exif_orientation import orientation_swaps_axes as _orientation_swaps_axes
 from image_loader import RAW_EXTENSIONS
@@ -10,7 +13,7 @@ from render_source import exif_orientation as _exif_orientation_from_data
 log = logging.getLogger(__name__)
 
 
-def _scaled_dimensions(width, height, max_size):
+def _scaled_dimensions(width: int | None, height: int | None, max_size: int | None) -> tuple[int, int]:
     try:
         width = int(width or 0)
         height = int(height or 0)
@@ -27,7 +30,9 @@ def _scaled_dimensions(width, height, max_size):
     return width, height
 
 
-def _oriented_dimensions(width, height, exif_data):
+def _oriented_dimensions(
+    width: int | None, height: int | None, exif_data: str | dict[str, Any] | None,
+) -> tuple[int | None, int | None]:
     """Return (width, height) rotated to match what extract_working_copy writes.
 
     Stored ``width``/``height`` come straight from the sensor/file metadata,
@@ -44,7 +49,9 @@ def _oriented_dimensions(width, height, exif_data):
     return width, height
 
 
-def _extract_dimensions(exif_group, file_group, extension=None):
+def _extract_dimensions(
+    exif_group: dict[str, Any], file_group: dict[str, Any], extension: str | None = None,
+) -> tuple[int | None, int | None]:
     """Extract width and height from ExifTool metadata groups.
 
     For standard images (JPEG, PNG, etc.):
@@ -86,7 +93,7 @@ def _extract_dimensions(exif_group, file_group, extension=None):
     return width, height
 
 
-def _extract_timestamp(exif_group):
+def _extract_timestamp(exif_group: dict[str, Any]) -> str | None:
     """Extract and normalize timestamp from ExifTool EXIF group.
 
     Checks EXIF:DateTimeOriginal first, then EXIF:CreateDate.
