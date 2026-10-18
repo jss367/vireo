@@ -413,11 +413,11 @@ def _sidecar_with_marker(path, *, marker, owned, flat, hierarchical):
 
     editor = SidecarEditor(str(path))
     editor.add_keywords(flat_keywords=set(flat), hierarchical_keywords=set(hierarchical))
-    desc = editor._description()
+    desc = editor.document.description()
     desc.set(LOCATION_KEYWORDS_MARKER, marker)
     if owned is not None:
         desc.set(LOCATION_KEYWORDS_OWNED, owned)
-    editor._dirty = True
+    editor.document.dirty = True
     editor.commit()
 
 

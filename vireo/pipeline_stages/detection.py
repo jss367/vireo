@@ -1,9 +1,19 @@
 """Detection stages for the streaming photo pipeline."""
 
+from __future__ import annotations
+
 import logging
 import time
+from typing import TYPE_CHECKING, Any
 
 from pipeline_stages.context import PipelineRun
+
+if TYPE_CHECKING:
+    import threading
+    from collections.abc import Callable
+    from types import ModuleType
+
+    from pipeline_stages.stage_types import DetectState, FilterExcluded, LoadedModels
 
 log = logging.getLogger(__name__)
 
@@ -11,14 +21,14 @@ log = logging.getLogger(__name__)
 def detect_stage(
     run: PipelineRun,
     *,
-    _filter_excluded,
-    collection_ready,
-    computation_cache_dir,
-    detect_state,
-    effective_vireo_dir,
-    loaded_models,
-    models_ready,
-):
+    _filter_excluded: FilterExcluded,
+    collection_ready: threading.Event,
+    computation_cache_dir: str | None,
+    detect_state: DetectState,
+    effective_vireo_dir: str,
+    loaded_models: LoadedModels,
+    models_ready: threading.Event,
+) -> None:
     """Run MegaDetector across every collection photo once, ahead of any
     classification. Populates detect_state so each per-model classify
     step can pull cached detections rather than re-running MegaDetector.
@@ -82,14 +92,14 @@ class _DetectPass:
 
     def __init__(
         self,
-        run,
+        run: PipelineRun,
         *,
-        filter_excluded,
-        computation_cache_dir,
-        detect_state,
-        effective_vireo_dir,
-        loaded_models,
-    ):
+        filter_excluded: FilterExcluded,
+        computation_cache_dir: str | None,
+        detect_state: DetectState,
+        effective_vireo_dir: str,
+        loaded_models: LoadedModels,
+    ) -> None:
         self.run = run
         self.filter_excluded = filter_excluded
         self.computation_cache_dir = computation_cache_dir
@@ -99,7 +109,7 @@ class _DetectPass:
 
     # -- the run -----------------------------------------------------
 
-    def run_all(self):
+    def run_all(self) -> None:
         from classify_job import _BATCH_SIZE, _detect_batch
 
         self.batch_size = _BATCH_SIZE
@@ -125,7 +135,7 @@ class _DetectPass:
 
         self._finish()
 
-    def _load_collection(self):
+    def _load_collection(self) -> None:
         run = self.run
         thread_db = run.database_factory(run.db_path)
         thread_db.set_active_workspace(run.workspace_id)
@@ -151,7 +161,7 @@ class _DetectPass:
         self.detect_state["folders"] = folders
         self.detect_state["ran"] = True
 
-    def _apply_local_cache(self):
+    def _apply_local_cache(self) -> None:
         try:
             from computation_cache import (
                 ArtifactStore,
@@ -173,7 +183,7 @@ class _DetectPass:
             )
             self.detect_state["portable_reused"] = {}
 
-    def _seed_already_detected(self):
+    def _seed_already_detected(self) -> None:
         """Reclassify semantics (see prior interleaved implementation for
         history): start with an empty already_detected so EVERY photo
         is re-detected; snapshot pre-run detection IDs so we can purge
@@ -218,7 +228,7 @@ class _DetectPass:
         run.job["_detector_runtime_fingerprint"] = detector_runtime
         self.detect_state["pre_run_det_ids"] = pre_run_det_ids
 
-    def _ensure_detector_weights(self):
+    def _ensure_detector_weights(self) -> None:
         """Ensure MegaDetector weights only when we actually need fresh
         detection work — an offline rerun over already-detected photos
         should not trigger a ~300 MB download.
@@ -232,7 +242,7 @@ class _DetectPass:
             return
         from detector import ensure_megadetector_weights
 
-        def _dl_progress(phase, current, total_steps):
+        def _dl_progress(phase: str, current: int, total_steps: int) -> None:
             # Weight download is a sub-phase of detect; don't treat
             # its bytes as detect's stage-level counter or the bar
             # jumps ahead before any photo has been detected.
@@ -255,7 +265,7 @@ class _DetectPass:
                 )
             )
 
-    def _detect_batches(self):
+    def _detect_batches(self) -> None:
         run = self.run
         photos = self.photos
         total = self.total
@@ -309,7 +319,7 @@ class _DetectPass:
 
     # -- post-detect cache reapply -----------------------------------
 
-    def _reapply_local_cache(self):
+    def _reapply_local_cache(self) -> None:
         """Reapply the local computation cache now that fresh
         detector_runs exist. Classification artifacts whose
         detector dependency was absent at the pre-detection
@@ -384,7 +394,7 @@ class _DetectPass:
                 exc_info=True,
             )
 
-    def _full_image_anchor_ids(self, cfg):
+    def _full_image_anchor_ids(self, cfg: ModuleType) -> list[int]:
         """Also broaden the anchor set to include photos
         whose only detections are noise (< detector_
         confidence) so cached full-image classifiers
@@ -456,7 +466,7 @@ class _DetectPass:
             )
         ]
 
-    def _needs_full_image_anchor(self, pid, det_conf, contextual_weak_ids):
+    def _needs_full_image_anchor(self, pid: int, det_conf: float, contextual_weak_ids: set[int]) -> bool:
         if pid in contextual_weak_ids:
             return False
         dets = self.this_run_detections.get(pid) or []
@@ -485,8 +495,10 @@ class _DetectPass:
         return not confident_non_animal
 
     def _ensure_full_image_anchor(
-        self, photo_id, full_runtime, source_input, cache_format_error,
-    ):
+        self, photo_id: int, full_runtime: str,
+        source_input: Callable[[str, str], tuple[dict[str, Any], str]],
+        cache_format_error: type[Exception],
+    ) -> None:
         thread_db = self.thread_db
         identity = thread_db.model_runs.detector_source_identity(photo_id)
         full_input = None
@@ -549,7 +561,7 @@ class _DetectPass:
                 input_fingerprint=full_input,
             )
 
-    def _known_classifier_runtimes(self, full_runtime):
+    def _known_classifier_runtimes(self, full_runtime: str) -> set[str]:
         """Compute expected classifier runtimes for any
         classifier the model_loader stage already
         resolved. Without this the classifier-runtime
@@ -601,7 +613,7 @@ class _DetectPass:
 
     # -- outcome -----------------------------------------------------
 
-    def _finish(self):
+    def _finish(self) -> None:
         run = self.run
         total = self.total
         run.stages["detect"]["status"] = "completed"

@@ -1,24 +1,44 @@
 """Model loading and shared classifier construction for the photo pipeline."""
 
+from __future__ import annotations
+
 import logging
 import math
 import os
 import time
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from classifier_cache import acquire_cached_classifier
 from pipeline_stages.context import PipelineRun
+
+if TYPE_CHECKING:
+    import threading
+    from collections.abc import Callable
+
+    from classifier import Classifier
+    from db import Database
+    from pipeline_stages.stage_types import (
+        ClassifierHandle,
+        FilterExcluded,
+        LoadedModels,
+        LoadModelBundle,
+        ModelBundle,
+        ModelSpec,
+    )
+    from taxonomy import Taxonomy
+    from timm_classifier import TimmClassifier
 
 log = logging.getLogger(__name__)
 
 
 def load_model_bundle(
-    active_model, tax, thread_db, progress_step="model_loader",
+    active_model: ModelSpec, tax: Taxonomy | None, thread_db: Database, progress_step: str = "model_loader",
     *,
     run: PipelineRun,
-    _incomplete_model_message,
-    _looks_like_missing_external_data,
-    pause_context,
-):
+    _incomplete_model_message: Callable[[str, bool], str],
+    _looks_like_missing_external_data: Callable[[BaseException], bool],
+    pause_context: threading.local,
+) -> ModelBundle:
     """Turn a resolved model spec into a ready-to-use classifier bundle.
 
     Loads labels for the model and constructs the Classifier/TimmClassifier,
@@ -39,7 +59,7 @@ def load_model_bundle(
 
     ClassifierLoadPaused = _classifier_load_paused_class()
 
-    def _construct_classifier():
+    def _construct_classifier() -> Classifier | TimmClassifier:
         load.restart_embedding_progress()
         ClassificationCancelled = _classification_cancelled_class()
 
@@ -57,7 +77,7 @@ def load_model_bundle(
         # captured callback). Cancel still fires; pause is honored at
         # the next outer ``_pause_checkpoint`` after ``load_lock`` is
         # released.
-        def cancel_check():
+        def cancel_check() -> bool:
             return (
                 run.control.should_abort_without_pause(run.abort)
                 or run.control.cancellation_requested()
@@ -87,7 +107,7 @@ def load_model_bundle(
     # (create_session_with_self_heal) which deletes corrupt weights
     # and redownloads them inside the factory. The shared acquisition
     # helper rekeys the entry to the post-load file fingerprint.
-    def _acquire():
+    def _acquire() -> ClassifierHandle:
         return acquire_cached_classifier(
             factory=_construct_classifier,
             cancel_check=lambda: (
@@ -104,8 +124,10 @@ def load_model_bundle(
 
 
 def _enter_cached_classifier(
-    load, acquire, looks_like_missing_external_data, paused_class,
-):
+    load: _BundleLoad, acquire: Callable[[], ClassifierHandle],
+    looks_like_missing_external_data: Callable[[BaseException], bool],
+    paused_class: type[BaseException],
+) -> tuple[Classifier | TimmClassifier, ClassifierHandle]:
     """Acquire and enter the shared classifier, retrying after a pause.
 
     Returns ``(clf, cache_handle)``. A load failure that looks like
@@ -171,12 +193,12 @@ class _BundleLoad:
     """State shared by the phases of one ``load_model_bundle`` call."""
 
     def __init__(
-        self, active_model, tax, thread_db, progress_step,
+        self, active_model: ModelSpec, tax: Taxonomy | None, thread_db: Database, progress_step: str,
         *,
-        run,
-        incomplete_model_message,
-        pause_context,
-    ):
+        run: PipelineRun,
+        incomplete_model_message: Callable[[str, bool], str],
+        pause_context: threading.local,
+    ) -> None:
         self.active_model = active_model
         self.tax = tax
         self.thread_db = thread_db
@@ -195,7 +217,7 @@ class _BundleLoad:
 
     # -- labels ------------------------------------------------------
 
-    def load_labels(self):
+    def load_labels(self) -> None:
         from classify_job import _load_labels, _sources_from_metas
         from labels_fingerprint import compute_fingerprint, compute_full_fingerprint
 
@@ -221,7 +243,7 @@ class _BundleLoad:
         self.label_sources = _sources_from_metas(self.label_metas)
         self._record_labels_fingerprint()
 
-    def _record_labels_fingerprint(self):
+    def _record_labels_fingerprint(self) -> None:
         from classify_job import _record_labels_fingerprint
 
         _record_labels_fingerprint(
@@ -229,7 +251,7 @@ class _BundleLoad:
             full_fingerprint=self.fp_full,
         )
 
-    def embedding_progress(self, current, total):
+    def embedding_progress(self, current: int, total: int) -> None:
         if self.embedding_start_count is None:
             self.embedding_start_count = current
             self.embedding_started = time.monotonic()
@@ -256,13 +278,13 @@ class _BundleLoad:
             phase_current=current, phase_total=total, phase_label="Species labels",
         )
 
-    def restart_embedding_progress(self):
+    def restart_embedding_progress(self) -> None:
         self.embedding_start_count = None
         self.embedding_started = time.monotonic()
 
     # -- on-disk model checks ----------------------------------------
 
-    def preflight_model_files(self):
+    def preflight_model_files(self) -> None:
         """Preflight: validate the on-disk model before handing it to
         ONNXRuntime. A stale _check_onnx_downloaded result (e.g. after
         the user deleted a .onnx.data file, or the download manifest
@@ -283,7 +305,7 @@ class _BundleLoad:
                     self.incomplete_model_message(self.model_name, self.model_is_custom)
                 )
 
-    def verify_weights_lazily(self):
+    def verify_weights_lazily(self) -> None:
         """Lazy SHA256 verification: for known models (those with an
         hf_subdir), hash every LFS file on first load in this process
         and compare against HuggingFace's reported SHA256. Catches
@@ -320,7 +342,7 @@ class _BundleLoad:
 
     # -- classifier acquisition --------------------------------------
 
-    def pause_check(self):
+    def pause_check(self) -> bool:
         """Non-parking pause probe. A pause request makes the
         classifier checkpoint the label embeddings finished so
         far and raise ``ClassifierLoadPaused`` instead of
@@ -336,7 +358,7 @@ class _BundleLoad:
         probe = getattr(self.run.runner, "pause_requested", None)
         return bool(probe is not None and probe(self.run.job["id"]))
 
-    def classifier_cache_key(self):
+    def classifier_cache_key(self) -> dict[str, Any]:
         """The keyword arguments that key this model in the classifier cache."""
         # The shared cache key includes an ordered, canonical label identity
         # when use_tol=False because Classifier captures embeddings in that
@@ -368,7 +390,7 @@ class _BundleLoad:
             "taxonomy_fingerprint": tax_fp,
         }
 
-    def cache_taxonomy_fingerprint(self):
+    def cache_taxonomy_fingerprint(self) -> str | None:
         """The timm key also varies by taxonomy fingerprint: TimmClassifier
         captures the taxonomy at construction and resolves common names /
         hierarchy from it on every prediction. Reusing a classifier loaded
@@ -383,7 +405,7 @@ class _BundleLoad:
             return taxonomy_identity(self.tax)
         return None
 
-    def park_paused_load(self):
+    def park_paused_load(self) -> None:
         run = self.run
         log.info(
             "Classifier load for %s paused; parking until "
@@ -406,7 +428,7 @@ class _BundleLoad:
         ):
             direct_wait(run.job["id"], publish_paused=False)
 
-    def raise_incomplete_model(self, load_err):
+    def raise_incomplete_model(self, load_err: BaseException) -> NoReturn:
         """ONNXRuntime signals missing external-data with a
         "model_path must not be empty" / "Initializer" error. Treat
         any load failure as an incomplete-model hint for the user —
@@ -474,7 +496,7 @@ class _BundleLoad:
 
     # -- bundle metadata ---------------------------------------------
 
-    def bundle(self, clf, cache_handle):
+    def bundle(self, clf: Classifier | TimmClassifier, cache_handle: ClassifierHandle) -> ModelBundle:
         """The ready-to-use classifier bundle the classify stage consumes."""
         portable_model_identity = self.portable_model_identity(clf)
         label_source = self.describe_label_source(clf)
@@ -494,7 +516,7 @@ class _BundleLoad:
             "active_model": self.active_model,
         }
 
-    def portable_model_identity(self, clf):
+    def portable_model_identity(self, clf: Classifier | TimmClassifier) -> dict[str, Any] | None:
         try:
             from computation_cache import (
                 classifier_model_identity,
@@ -529,7 +551,7 @@ class _BundleLoad:
             }
         return portable_model_identity
 
-    def describe_label_source(self, clf):
+    def describe_label_source(self, clf: Classifier | TimmClassifier) -> str:
         """What this model actually compares photos against — the merged
         species lists, Tree of Life, or a timm model's fixed head. The
         classify step shows it so the row names the label space, not
@@ -550,14 +572,14 @@ class _BundleLoad:
 def model_loader_stage(
     run: PipelineRun,
     *,
-    _filter_excluded,
-    _load_model_bundle,
-    loaded_models,
-    model_loader_failed,
-    models_ready,
-    resolution_error,
-    resolved_specs,
-):
+    _filter_excluded: FilterExcluded,
+    _load_model_bundle: LoadModelBundle,
+    loaded_models: LoadedModels,
+    model_loader_failed: threading.Event,
+    models_ready: threading.Event,
+    resolution_error: str | None,
+    resolved_specs: list[ModelSpec],
+) -> None:
     if run.params.skip_classify:
         run.stages["model_loader"]["status"] = "skipped"
         run.runner.update_step(run.job["id"], "model_loader", status="completed",
@@ -659,7 +681,7 @@ def _is_classification_cancellation(run: PipelineRun, err: BaseException) -> boo
     )
 
 
-def _load_run_taxonomy(run: PipelineRun, loaded_models: dict):
+def _load_run_taxonomy(run: PipelineRun, loaded_models: dict) -> Taxonomy | None:
     """Download the taxonomy if requested, then load it for every classifier."""
     # Download taxonomy if missing/unusable and requested. Mirrors the
     # availability check used by /api/pipeline/page-init: a 0-byte stub
@@ -704,7 +726,8 @@ def _load_run_taxonomy(run: PipelineRun, loaded_models: dict):
 
 
 def _skip_when_no_wildlife(
-    run: PipelineRun, thread_db, collection_id: int, _filter_excluded, models_ready,
+    run: PipelineRun, thread_db: Database, collection_id: int, _filter_excluded: FilterExcluded,
+    models_ready: threading.Event,
 ) -> bool:
     """Skip the stage when every collection photo is marked not wildlife."""
     candidate_photos = _filter_excluded(
@@ -724,7 +747,9 @@ def _skip_when_no_wildlife(
     return False
 
 
-def _mark_models_loaded(run: PipelineRun, loaded_models, resolved_specs, first_name):
+def _mark_models_loaded(
+    run: PipelineRun, loaded_models: LoadedModels, resolved_specs: list[ModelSpec], first_name: str,
+) -> None:
     run.stages["model_loader"]["status"] = "completed"
     summary = ", ".join(s["name"] for s in resolved_specs)
     if "preload_error" in loaded_models:

@@ -44,7 +44,7 @@ class EditHistoryRepository:
         self.workspace_id_fn = workspace_id_fn
         # Action types that appear in history but cannot be reversed.
         self.non_undoable = non_undoable
-        # ``Database._restore_species_representative``, for the relabel
+        # ``SpeciesCurationRepository.restore_representative``, for the relabel
         # curation restores.
         self.restore_species_representative = restore_species_representative
 
@@ -520,7 +520,7 @@ class EditHistoryRepository:
         # relabel created it. If the photo was already a global
         # representative for new_species before the retag — e.g. a
         # multi-species photo picked as rep for both A and B before
-        # relabeling A→B — rename_species_representatives_species's
+        # relabeling A→B — species_curation.rename_representatives's
         # INSERT OR IGNORE skipped a duplicate and the destination
         # rep row is pre-existing; undo must leave it alone.
         # rep_dst_existed defaults to False for edit-history rows
@@ -565,7 +565,7 @@ class EditHistoryRepository:
         longer exists (state has changed since the relabel), the
         corresponding restore is a no-op. Representatives are restored
         through ``restore_species_representative`` (the façade's
-        ``_restore_species_representative``).
+        ``species_curation.restore_representative``).
         """
         restore_species_representative = self.restore_species_representative
         if not curation:
@@ -591,7 +591,7 @@ class EditHistoryRepository:
             # Only delete the (new_species, photo_id) rep row when the
             # relabel actually created it. If the photo was already a
             # global representative for new_species before the retag,
-            # rename_species_representatives_species's INSERT OR IGNORE
+            # species_curation.rename_representatives's INSERT OR IGNORE
             # skipped a duplicate and the destination row is pre-existing;
             # undo must leave it alone.
             if not dst_existed:
@@ -689,7 +689,7 @@ class EditHistoryRepository:
         )
         # Reuse the captured pre-relabel selected_order rather than
         # allocating a fresh MAX+1. The original relabel preserved the
-        # source row's order via rename_species_representatives_species,
+        # source row's order via species_curation.rename_representatives,
         # so redoing must restore that same order — otherwise an
         # undo/redo round trip can promote a secondary representative
         # above a pre-existing primary for new_species.

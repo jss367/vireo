@@ -1,10 +1,13 @@
 """Features stages for the streaming photo pipeline."""
 
+from __future__ import annotations
+
 import logging
 import os
+import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 import numpy as np
 from pipeline_locks import (
@@ -17,21 +20,80 @@ from resource_ledger import (
     bind_resource_cancel_check,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from db import Database
+    from PIL import Image
+    from pipeline_stages.stage_types import (
+        FilterExcluded,
+        PhotoRecord,
+        SourceOfflineReason,
+        SourceOfflineState,
+        StillOfflineFolderIds,
+    )
+
 log = logging.getLogger(__name__)
+
+
+class _MaskFileFactory(Protocol):
+    """``pipeline_job._StagedMaskFile``: stages a new mask generation."""
+
+    def create(
+        self, mask: np.ndarray, masks_dir: str, photo_id: int, variant: str,
+        save_mask: Callable[[np.ndarray, str, int, str], str],
+        previous_path: str | None = ...,
+    ) -> _MaskFileStage: ...
+
+
+class _ExtractMasksEarlyExit(Protocol):
+    """``pipeline_job._extract_masks_early_exit``.
+
+    Returns the stage status, the runner step status, extra step fields and
+    the stage's result payload.
+    """
+
+    def __call__(
+        self, reason_key: str, subthreshold: int, preflight_unreadable: int,
+        preflight_masked: int, offline_latched: bool, outage_error: str | None = ...,
+    ) -> tuple[str, str, dict[str, Any], dict[str, Any]]: ...
+
+
+class _PreflightMaskOutcomes(Protocol):
+    """``pipeline_job._preflight_mask_outcomes``: ``(already_masked, at_risk)`` ids."""
+
+    def __call__(
+        self, thread_db: Database, dropped_photos: list[sqlite3.Row],
+        sam2_variant: str | None, dinov2_variant: str | None,
+        detector_confidence: float, contextual_weak_ids: set[int] | None = ...,
+        weak_detection_confidence: float | None = ...,
+        raw_subject_analysis: bool = ...,
+    ) -> tuple[set[int], set[int]]: ...
+
+
+class _MaskEntry(TypedDict):
+    """One worklist photo and the primary detection that prompts its mask."""
+
+    photo: sqlite3.Row
+    detection_id: int
+    det_box: dict[str, float]
+    detector_model: str
+    # The detection's normalized ``(x, y, w, h)`` box, stored as provenance.
+    prompt: tuple[float, ...]
 
 
 def extract_masks_stage(
     run: PipelineRun,
     *,
-    _StagedMaskFile,
-    _extract_masks_early_exit,
-    _filter_excluded,
-    _preflight_mask_outcomes,
-    _rollback_failed_mask_photo,
-    _source_offline_reason,
-    _still_offline_folder_ids_of,
-    source_offline_state,
-):
+    _StagedMaskFile: _MaskFileFactory,
+    _extract_masks_early_exit: _ExtractMasksEarlyExit,
+    _filter_excluded: FilterExcluded,
+    _preflight_mask_outcomes: _PreflightMaskOutcomes,
+    _rollback_failed_mask_photo: Callable[[Database, int], None],
+    _source_offline_reason: SourceOfflineReason,
+    _still_offline_folder_ids_of: StillOfflineFolderIds,
+    source_offline_state: SourceOfflineState,
+) -> None:
     """Run SAM2 mask extraction + DINOv2 embeddings after classify."""
     if run.params.skip_extract_masks or run.abort.is_set() or not run.collection_id:
         run.stages["extract_masks"]["status"] = "skipped"
@@ -82,7 +144,7 @@ def extract_masks_stage(
     run.update_stages(run.runner, run.job["id"], run.stages)
 
 
-def _row_folder_id(row):
+def _row_folder_id(row: PhotoRecord) -> int | None:
     # sqlite.Row raises IndexError on missing columns; a
     # test-shape dict raises KeyError. Both mean "no
     # folder to probe" for this row — leave it in place
@@ -118,7 +180,7 @@ class _MaskFileStage(Protocol):
     def finish(self) -> None: ...
 
 
-def _primary_detection_entry(p, primary):
+def _primary_detection_entry(p: sqlite3.Row, primary: sqlite3.Row) -> _MaskEntry:
     """The worklist entry for a photo's selected primary detection."""
     return {
         "photo": p,
@@ -147,7 +209,7 @@ def _primary_detection_entry(p, primary):
     }
 
 
-def _mask_subject_size(mask):
+def _mask_subject_size(mask: np.ndarray) -> float | None:
     # Mask-derived subject_size: fraction of frame
     # covered by the boolean mask. Replaces the
     # detection-bbox approximation classify uses.
@@ -163,13 +225,14 @@ def _mask_subject_size(mask):
 class _MaskPhoto:
     """One worklist photo: its source paths and in-flight mask generation."""
 
-    entry: dict
-    photo: object
-    det_box: dict
+    entry: _MaskEntry
+    photo: sqlite3.Row
+    det_box: dict[str, float]
     photo_id: int
     folder_path: str
     image_path: str
-    existing: object = None
+    # The photo's stored ``photo_masks`` row for this SAM variant, if any.
+    existing: dict[str, Any] | None = None
     mask_file_stage: _MaskFileStage | None = None
 
 
@@ -178,17 +241,17 @@ class _MaskPass:
 
     def __init__(
         self,
-        run,
+        run: PipelineRun,
         *,
-        staged_mask_file,
-        extract_masks_early_exit,
-        filter_excluded,
-        preflight_mask_outcomes,
-        rollback_failed_mask_photo,
-        source_offline_reason,
-        still_offline_folder_ids_of,
-        source_offline_state,
-    ):
+        staged_mask_file: _MaskFileFactory,
+        extract_masks_early_exit: _ExtractMasksEarlyExit,
+        filter_excluded: FilterExcluded,
+        preflight_mask_outcomes: _PreflightMaskOutcomes,
+        rollback_failed_mask_photo: Callable[[Database, int], None],
+        source_offline_reason: SourceOfflineReason,
+        still_offline_folder_ids_of: StillOfflineFolderIds,
+        source_offline_state: SourceOfflineState,
+    ) -> None:
         self.run = run
         self.staged_mask_file = staged_mask_file
         self.extract_masks_early_exit = extract_masks_early_exit
@@ -228,7 +291,7 @@ class _MaskPass:
 
     # -- setup -------------------------------------------------------
 
-    def setup(self):
+    def setup(self) -> None:
         import config as cfg
         from dino_embed import embed, embed_batch, embedding_to_blob
         from masking import (
@@ -294,7 +357,7 @@ class _MaskPass:
         )
         self.contextual_weak_ids = self._find_contextual_weak_ids()
 
-    def _find_contextual_weak_ids(self):
+    def _find_contextual_weak_ids(self) -> set[int]:
         contextual_weak_ids: set = set()
         if (
             self.weak_rescue_enabled
@@ -341,7 +404,7 @@ class _MaskPass:
                 }
         return contextual_weak_ids
 
-    def drop_offline_folders(self):
+    def drop_offline_folders(self) -> None:
         """Drop photos whose folder is offline.
 
         Without this we'd render_proxy every one of them, they'd all skip
@@ -430,7 +493,7 @@ class _MaskPass:
             len(dropped_ids), len(still_offline_folder_ids),
         )
 
-    def _dropped_mask_outcomes(self, dropped):
+    def _dropped_mask_outcomes(self, dropped: list[sqlite3.Row]) -> tuple[set[int], set[int]]:
         """Split offline-dropped photos into already-masked and at-risk ids."""
         # The unreadable count exists to explain `no_subject_mask`
         # rejections in Process Review. A dropped photo that
@@ -459,7 +522,7 @@ class _MaskPass:
             ),
         )
 
-    def map_primary_detections(self):
+    def map_primary_detections(self) -> None:
         """Build a map of photo_id -> selected primary detection.
 
         Built from the detections table. Only photos with detections and
@@ -522,7 +585,7 @@ class _MaskPass:
             photo_det_map[pid] for pid in photo_det_map
         ]
 
-    def _qualifying_detections(self, p):
+    def _qualifying_detections(self, p: sqlite3.Row) -> list[sqlite3.Row]:
         """The detections that may drive this photo's mask, primary first."""
         thread_db = self.thread_db
         # Pass the captured detector_confidence explicitly so the
@@ -554,7 +617,7 @@ class _MaskPass:
             if d["detector_model"] != "full-image"
         ]
 
-    def open_worklist(self):
+    def open_worklist(self) -> None:
         self.folders = {f["id"]: f["path"] for f in self.thread_db.get_folder_tree()}
         self.total = len(self.photos_to_process)
         # Now that ``total`` is known, build the preflight outage
@@ -611,7 +674,7 @@ class _MaskPass:
 
     # -- early exits -------------------------------------------------
 
-    def exit_without_mask_candidates(self):
+    def exit_without_mask_candidates(self) -> bool:
         """Explain an empty worklist on the step; True when the stage is done."""
         # If the input collection has photos but none carry detections,
         # surface a clear status instead of silently completing with
@@ -679,7 +742,7 @@ class _MaskPass:
             return True
         return False
 
-    def _subthreshold_reason(self):
+    def _subthreshold_reason(self) -> tuple[str, str]:
         reason = (
             f"{self.photos_subthreshold_only} photo(s) have detections but every "
             f"detection is below the current detector_confidence threshold "
@@ -693,7 +756,7 @@ class _MaskPass:
         )
         return reason, summary
 
-    def _exit_early(self, em_reason, reason, summary):
+    def _exit_early(self, em_reason: str, reason: str, summary: str) -> None:
         run = self.run
         log.warning("Pipeline extract-masks: %s", reason)
         exit_status, exit_step_status, exit_step_extra, exit_payload = (
@@ -724,12 +787,12 @@ class _MaskPass:
 
     # -- photo loop --------------------------------------------------
 
-    def _dl_progress(self, phase, current, total_steps):
+    def _dl_progress(self, phase: str, current: int, total_steps: int) -> None:
         self.run.emit_progress(
             self.run.runner, self.run.job["id"], self.run.stages, "extract_masks", phase,
         )
 
-    def _ensure_weights(self):
+    def _ensure_weights(self) -> None:
         if self._weights_ensured:
             return
         self.ensure_sam2_weights(
@@ -740,7 +803,7 @@ class _MaskPass:
         )
         self._weights_ensured = True
 
-    def _defer_weight_download(self):
+    def _defer_weight_download(self) -> None:
         # Auto-download SAM2 + DINOv2 weights on first pipeline run.
         # Mirrors the MegaDetector auto-download pattern (commit 90cd0f9):
         # without this, first-time users hit 1 FileNotFoundError per
@@ -762,7 +825,7 @@ class _MaskPass:
         self.ensure_sam2_weights = ensure_sam2_weights
         self._weights_ensured = False
 
-    def _mask_photo(self, entry):
+    def _mask_photo(self, entry: _MaskEntry) -> _MaskPhoto:
         photo = entry["photo"]
         det_box = entry["det_box"]
         photo_id = photo["id"]
@@ -776,7 +839,7 @@ class _MaskPass:
             image_path=os.path.join(folder_path, photo["filename"]),
         )
 
-    def _report_photo_progress(self, i):
+    def _report_photo_progress(self, i: int) -> None:
         run = self.run
         self.processed = i + 1
         run.stages["extract_masks"]["count"] = self.processed
@@ -790,7 +853,7 @@ class _MaskPass:
             rate=round(self.processed / max(time.time() - self.start_time, 0.01) * 60, 1),
         )
 
-    def extract_all(self):
+    def extract_all(self) -> None:
         run = self.run
         self._defer_weight_download()
 
@@ -883,7 +946,7 @@ class _MaskPass:
             self._report_photo_progress(i)
             i += 1
 
-    def _extract_photo(self, i, item):
+    def _extract_photo(self, i: int, item: _MaskPhoto) -> str | None:
         """Mask one photo under its lock; say how the loop moves on."""
         run = self.run
         current = self._sync_primary_subject(item.photo_id)
@@ -966,7 +1029,7 @@ class _MaskPass:
         self.masked += 1
         return None
 
-    def _sync_primary_subject(self, photo_id):
+    def _sync_primary_subject(self, photo_id: int) -> list[dict[str, Any]]:
         """Resolve both state and extraction against the same candidate set,
         including MDv6-only weak rescue. Synchronizing under the lock clears
         old eye/DINO results when the effective primary changed.
@@ -986,7 +1049,7 @@ class _MaskPass:
             detector_model=subject_detector,
         )
 
-    def _reuse_cached_mask(self, item):
+    def _reuse_cached_mask(self, item: _MaskPhoto) -> bool:
         """Re-activate an unchanged cached mask instead of rerunning SAM.
 
         Cache hit: a row already exists for (photo, variant) AND its stored
@@ -1053,7 +1116,7 @@ class _MaskPass:
             == self.dinov2_variant
         )
 
-    def _count_unreadable_source(self, item):
+    def _count_unreadable_source(self, item: _MaskPhoto) -> None:
         self.em_unreadable += 1
         offline = self.source_offline_reason(
             item.folder_path, item.image_path,
@@ -1078,7 +1141,9 @@ class _MaskPass:
                 item.photo["folder_id"],
             )
 
-    def _analyze_subject(self, item, proxy, mask):
+    def _analyze_subject(
+        self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray,
+    ) -> tuple[float, dict[str, Any], dict[str, Any] | None]:
         completeness = self.crop_completeness(mask)
         features = self.compute_all_quality_features(proxy, mask)
         features["quality_input_recipe"] = None
@@ -1104,7 +1169,10 @@ class _MaskPass:
                 features["quality_input_recipe"] = RECIPE
         return completeness, features, analysis_report
 
-    def _store_mask(self, item, proxy, mask, completeness, features, analysis_report):
+    def _store_mask(
+        self, item: _MaskPhoto, proxy: Image.Image, mask: np.ndarray, completeness: float,
+        features: dict[str, Any], analysis_report: dict[str, Any] | None,
+    ) -> None:
         thread_db = self.thread_db
         entry = item.entry
         photo_id = item.photo_id
@@ -1187,7 +1255,7 @@ class _MaskPass:
         item.mask_file_stage.finish()
         item.mask_file_stage = None
 
-    def _dino_embeddings(self, proxy, mask):
+    def _dino_embeddings(self, proxy: Image.Image, mask: np.ndarray) -> tuple[bytes | None, bytes]:
         """Return the (subject, global) DINOv2 embedding blobs for a mask."""
         # GPU serialisation lives inside dino_embed.embed /
         # embed_batch (around the session.run call). The wider
@@ -1209,7 +1277,7 @@ class _MaskPass:
 
     # -- rollup ------------------------------------------------------
 
-    def finish_cancelled(self):
+    def finish_cancelled(self) -> None:
         """Distinguish a user cancel from a clean completion: pin a
         "Cancelled" summary on the final step update so the job tree
         doesn't report a half-done stage as if it ran to term. Mirrors the
@@ -1253,7 +1321,7 @@ class _MaskPass:
             "cancelled": True,
         }
 
-    def finalize(self):
+    def finalize(self) -> None:
         run = self.run
         em_failed = self.em_failed
         em_unreadable = self.em_unreadable
@@ -1356,9 +1424,9 @@ class _MaskPass:
 def eye_keypoints_stage(
     run: PipelineRun,
     *,
-    _still_offline_folder_ids_of,
-    source_offline_state,
-):
+    _still_offline_folder_ids_of: StillOfflineFolderIds,
+    source_offline_state: SourceOfflineState,
+) -> None:
     """Run per-photo eye keypoint detection between mask extraction and scoring.
 
     No-op when the stage is disabled by config, when no SuperAnimal
@@ -1428,18 +1496,18 @@ class _EyeKeypointPass:
 
     def __init__(
         self,
-        run,
+        run: PipelineRun,
         *,
-        still_offline_folder_ids_of,
-        source_offline_state,
-    ):
+        still_offline_folder_ids_of: StillOfflineFolderIds,
+        source_offline_state: SourceOfflineState,
+    ) -> None:
         self.run = run
         self.still_offline_folder_ids_of = still_offline_folder_ids_of
         self.source_offline_state = source_offline_state
 
     # -- setup -------------------------------------------------------
 
-    def setup(self):
+    def setup(self) -> None:
         import config as cfg
         from pipeline import (
             _resolve_collection_photo_ids,
@@ -1470,7 +1538,7 @@ class _EyeKeypointPass:
         if self.run.params.eye_detect_override is not None:
             self.pipeline_cfg["eye_detect_enabled"] = self.run.params.eye_detect_override
 
-    def exit_on_preflight_skip(self):
+    def exit_on_preflight_skip(self) -> bool:
         """Mirror the stage-level preflight so a no-op run doesn't pay the
         O(N) eligibility join cost or report a misleading
         "0 of N processed" summary on large libraries.
@@ -1494,7 +1562,7 @@ class _EyeKeypointPass:
 
     # -- worklist ----------------------------------------------------
 
-    def load_worklist(self):
+    def load_worklist(self) -> None:
         params = self.run.params
         self.eye_exclude_ids = set(params.exclude_photo_ids or ())
         collection_photo_ids = (
@@ -1524,7 +1592,7 @@ class _EyeKeypointPass:
                 if p["id"] not in params.exclude_photo_ids
             ]
 
-    def drop_offline_folders(self):
+    def drop_offline_folders(self) -> None:
         """Drop photos whose folder is offline.
 
         eye_keypoints also opens the source image (via the pipeline
@@ -1590,12 +1658,12 @@ class _EyeKeypointPass:
                 len(still_offline_folder_ids),
             )
 
-    def start_counting(self):
+    def start_counting(self) -> None:
         self.total = len(self.photos)
         self.start_time = time.time()
         self.processed = 0
 
-    def _progress(self, phase, current, total_steps):
+    def _progress(self, phase: str, current: int, total_steps: int) -> None:
         run = self.run
         self.processed = current
         run.stages["eye_keypoints"]["count"] = current
@@ -1613,7 +1681,7 @@ class _EyeKeypointPass:
 
     # -- weights -----------------------------------------------------
 
-    def exit_without_weights(self):
+    def exit_without_weights(self) -> bool:
         """Auto-download SuperAnimal weights on first pipeline run.
 
         Mirrors the SAM2/DINOv2 auto-download pattern in extract_masks
@@ -1666,7 +1734,7 @@ class _EyeKeypointPass:
             return True
         return False
 
-    def _needed_models(self, resolve_keypoint_model):
+    def _needed_models(self, resolve_keypoint_model: Callable[[Database, dict[str, Any]], str | None]) -> list[str]:
         # Mirror Gate 1 in _process_photo_for_eye: rows whose
         # classifier confidence is below eye_classifier_conf_gate
         # get skipped at run time, so they shouldn't influence
@@ -1685,7 +1753,7 @@ class _EyeKeypointPass:
                 needed_models.append(model_name)
         return needed_models
 
-    def _dl_progress(self, phase, current, total_steps):
+    def _dl_progress(self, phase: str, current: int, total_steps: int) -> None:
         """A separate download-progress callback, so a cancel during/just
         after weight download doesn't leak the download counter into
         ``processed`` (which would surface as e.g. "Cancelled (1 of N
@@ -1695,7 +1763,7 @@ class _EyeKeypointPass:
             self.run.runner, self.run.job["id"], self.run.stages, "eye_keypoints", phase,
         )
 
-    def _finish_download_cancelled(self):
+    def _finish_download_cancelled(self) -> None:
         """A cancel or pause that fires while another thread holds the
         per-model download lock surfaces as ResourceWaitCancelled from
         ``acquire_session_cache_lock`` — that is a cooperative cancel, not
@@ -1718,7 +1786,7 @@ class _EyeKeypointPass:
         }
         run.update_stages(run.runner, run.job["id"], run.stages)
 
-    def _skip_failed_download(self, dl_err):
+    def _skip_failed_download(self, dl_err: Exception) -> None:
         run = self.run
         log.warning(
             "Eye keypoints stage skipped — weight download "
@@ -1743,7 +1811,7 @@ class _EyeKeypointPass:
 
     # -- detection and rollup ----------------------------------------
 
-    def detect(self):
+    def detect(self) -> None:
         run = self.run
         self.detect_eye_keypoints_stage(
             self.thread_db, config=self.pipeline_cfg, progress_callback=self._progress,
@@ -1752,7 +1820,7 @@ class _EyeKeypointPass:
             abort_check=lambda: run.control.should_abort(run.abort),
         )
 
-    def finalize(self):
+    def finalize(self) -> None:
         run = self.run
         run.stages["eye_keypoints"]["status"] = "completed"
         if run.control.should_abort(run.abort):
@@ -1773,11 +1841,11 @@ class _EyeKeypointPass:
             "processed": self.processed, "total": self.total,
         }
 
-    def finish_cancelled(self):
+    def finish_cancelled(self) -> None:
         self.run.stages["eye_keypoints"]["status"] = "completed"
         self._report_cancelled()
 
-    def _report_cancelled(self):
+    def _report_cancelled(self) -> None:
         run = self.run
         summary = (
             f"Cancelled ({self.processed} of {self.total} processed)"

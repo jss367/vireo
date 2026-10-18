@@ -69,7 +69,9 @@ def missing_xmp(tmp_path):
 ])
 @pytest.mark.parametrize("failure", ["serialize", "replace"])
 def test_failed_sidecar_update_preserves_original(sample_xmp, monkeypatch, writer, args, failure):
-    import xmp
+    from xml.etree import ElementTree
+
+    import xmp.publish
 
     write_gps_location(sample_xmp, 30, 40)
     path = Path(sample_xmp)
@@ -83,9 +85,9 @@ def test_failed_sidecar_update_preserves_original(sample_xmp, monkeypatch, write
         raise OSError("replacement failed")
 
     if failure == "serialize":
-        monkeypatch.setitem(xmp.ET._serialize, "xml", failed_serializer)
+        monkeypatch.setitem(ElementTree._serialize, "xml", failed_serializer)
     else:
-        monkeypatch.setattr(xmp.os, "replace", failed_replace)
+        monkeypatch.setattr(xmp.publish.os, "replace", failed_replace)
     with pytest.raises(OSError):
         writer(sample_xmp, *args)
 
@@ -567,7 +569,7 @@ def test_atomic_sidecar_preserves_linux_acl(sample_xmp):
 
 
 def test_failed_access_metadata_copy_preserves_sidecar(sample_xmp, monkeypatch):
-    import xmp
+    import xmp.publish
 
     path = Path(sample_xmp)
     original = path.read_bytes()
@@ -575,7 +577,7 @@ def test_failed_access_metadata_copy_preserves_sidecar(sample_xmp, monkeypatch):
     def fail_copy(*args):
         raise PermissionError("cannot preserve ownership or ACL")
 
-    monkeypatch.setattr(xmp, "_preserve_sidecar_access", fail_copy)
+    monkeypatch.setattr(xmp.publish, "_preserve_sidecar_access", fail_copy)
     with pytest.raises(PermissionError):
         write_rating(sample_xmp, 5)
     assert path.read_bytes() == original
@@ -632,7 +634,7 @@ def test_preserve_sidecar_access_copies_xattrs_before_acl_on_darwin(
     and ``os.replace`` would publish a sidecar without it. Portable because
     every darwin-specific dependency is patched out.
     """
-    import xmp
+    import xmp.publish
 
     source = tmp_path / "source"
     source.write_bytes(b"src")
@@ -669,12 +671,12 @@ def test_preserve_sidecar_access_copies_xattrs_before_acl_on_darwin(
         def get_errno():
             return 0
 
-    monkeypatch.setattr(xmp, "_copy_xattrs", fake_copy_xattrs)
-    monkeypatch.setattr(xmp, "_darwin_xattr", lambda: (_FakeCtypes, None))
+    monkeypatch.setattr(xmp.publish, "_copy_xattrs", fake_copy_xattrs)
+    monkeypatch.setattr(xmp.publish, "_darwin_xattr", lambda: (_FakeCtypes, None))
     # Force the darwin branch even off macOS so this is testable everywhere.
-    monkeypatch.setattr(xmp.sys, "platform", "darwin")
+    monkeypatch.setattr(xmp.publish.sys, "platform", "darwin")
 
-    xmp._preserve_sidecar_access(source, destination, source.stat())
+    xmp.publish._preserve_sidecar_access(source, destination, source.stat())
     assert events == ["xattrs", "acl"], events
 
 
@@ -714,13 +716,13 @@ def test_copy_xattrs_skips_attributes_no_process_may_set():
     attempt to set it. Copying attributes as a block made each already-written
     sidecar on an SMB share permanently unwritable.
     """
-    import xmp
+    import xmp.publish
 
     store, *api = _fake_xattr_store(
         {"com.apple.provenance": b"", "com.vireo.keep": b"value"},
         refuse="com.apple.provenance",
     )
-    xmp._copy_xattrs("source", "dest", *api)
+    xmp.publish._copy_xattrs("source", "dest", *api)
     assert store["dest"] == {"com.vireo.keep": b"value"}
 
 
@@ -728,25 +730,25 @@ def test_copy_xattrs_raises_on_errors_that_are_not_structural():
     """A full disk is a real failure — do not publish a half-copied sidecar."""
     import errno
 
-    import xmp
+    import xmp.publish
 
     _, *api = _fake_xattr_store(
         {"com.vireo.keep": b"value"}, refuse="com.vireo.keep",
         refuse_errno=errno.ENOSPC,
     )
     with pytest.raises(OSError):
-        xmp._copy_xattrs("source", "dest", *api)
+        xmp.publish._copy_xattrs("source", "dest", *api)
 
 
 def test_copy_xattrs_never_skips_access_control_attributes():
     """Linux stores ACLs as xattrs; dropping one would widen access."""
-    import xmp
+    import xmp.publish
 
     _, *api = _fake_xattr_store(
         {"system.posix_acl_access": b"acl"}, refuse="system.posix_acl_access",
     )
     with pytest.raises(PermissionError):
-        xmp._copy_xattrs("source", "dest", *api)
+        xmp.publish._copy_xattrs("source", "dest", *api)
 
 
 @pytest.mark.parametrize(
@@ -762,11 +764,11 @@ def test_copy_xattrs_never_skips_non_posix_acl_namespaces(attribute):
     the attribute would publish a sidecar with weaker access than the
     original; the previous all-or-nothing copy aborted in that case.
     """
-    import xmp
+    import xmp.publish
 
     _, *api = _fake_xattr_store({attribute: b"acl"}, refuse=attribute)
     with pytest.raises(PermissionError):
-        xmp._copy_xattrs("source", "dest", *api)
+        xmp.publish._copy_xattrs("source", "dest", *api)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX extended attributes")
@@ -774,12 +776,12 @@ def test_sidecar_update_survives_unsettable_source_xattr(sample_xmp, monkeypatch
     """End to end: an uncopyable source attribute still rewrites the sidecar."""
     import errno
 
-    import xmp
+    import xmp.publish
 
     name = "com.apple.provenance"
     if sys.platform == "darwin":
         target, list_fn, get_fn, set_fn = (
-            xmp, "_darwin_list_xattrs", "_darwin_get_xattr", "_darwin_set_xattr",
+            xmp.publish, "_darwin_list_xattrs", "_darwin_get_xattr", "_darwin_set_xattr",
         )
     else:
         target, list_fn, get_fn, set_fn = (
@@ -815,16 +817,16 @@ def test_sidecar_update_survives_unsettable_source_xattr(sample_xmp, monkeypatch
 
 def _count_publishes(monkeypatch):
     """Record every sidecar publish, delegating to the real writer."""
-    import xmp
+    import xmp.document
 
     published = []
-    original = xmp._write_tree_atomic
+    original = xmp.document._write_tree_atomic
 
     def counting(tree, xmp_path):
         published.append(str(xmp_path))
         return original(tree, xmp_path)
 
-    monkeypatch.setattr(xmp, "_write_tree_atomic", counting)
+    monkeypatch.setattr(xmp.document, "_write_tree_atomic", counting)
     return published
 
 
@@ -1358,16 +1360,16 @@ def test_remove_vireo_location_keywords_falls_back_to_normalized_when_lightroom_
 
     # Simulate Lightroom rewriting the exact entry in place.
     rewritten = SidecarEditor(path)
-    desc = rewritten._description()
-    dc_bag = rewritten._bag(desc, "http://purl.org/dc/elements/1.1/", "subject")
+    desc = rewritten.document.description()
+    dc_bag = rewritten.keywords._bag(desc, "http://purl.org/dc/elements/1.1/", "subject")
     for li in dc_bag.findall(f"{{{NS_RDF}}}li"):
         if li.text == "Paris":
             li.text = "PARIS"
-    lr_bag = rewritten._bag(desc, NS_LR, "hierarchicalSubject")
+    lr_bag = rewritten.keywords._bag(desc, NS_LR, "hierarchicalSubject")
     for li in lr_bag.findall(f"{{{NS_RDF}}}li"):
         if li.text == "France|Paris":
             li.text = "france|paris"
-    rewritten._dirty = True
+    rewritten.document.dirty = True
     rewritten.commit()
     assert desc.get(LOCATION_KEYWORDS_MARKER) == "France|Paris"
 
@@ -1400,12 +1402,12 @@ def test_remove_vireo_location_keywords_normalized_fallback_removes_only_one_var
 
     # Rewrite our exact entry to "PARIS" and have the user add "paris" too.
     tampered = SidecarEditor(path)
-    desc = tampered._description()
-    dc_bag = tampered._bag(desc, "http://purl.org/dc/elements/1.1/", "subject")
+    desc = tampered.document.description()
+    dc_bag = tampered.keywords._bag(desc, "http://purl.org/dc/elements/1.1/", "subject")
     for li in dc_bag.findall(f"{{{NS_RDF}}}li"):
         if li.text == "Paris":
             li.text = "PARIS"
-    tampered._dirty = True
+    tampered.document.dirty = True
     tampered.commit()
 
     tampered = SidecarEditor(path)
@@ -1413,7 +1415,7 @@ def test_remove_vireo_location_keywords_normalized_fallback_removes_only_one_var
     tampered.commit()
     assert read_keywords(path) == {"PARIS", "paris"}
     assert (
-        tampered._description().get(LOCATION_KEYWORDS_MARKER) == "France|Paris"
+        tampered.document.description().get(LOCATION_KEYWORDS_MARKER) == "France|Paris"
     )
 
     cleanup = SidecarEditor(path)
@@ -1499,9 +1501,9 @@ def test_remove_vireo_location_keywords_defaults_to_both_on_legacy_marker(tmp_pa
     )
     # Simulate a legacy write: the marker is present, the companion is not.
     editor = SidecarEditor(path)
-    desc = editor._description()
+    desc = editor.document.description()
     desc.set(LOCATION_KEYWORDS_MARKER, "United States|Kumeyaay Lake")
-    editor._dirty = True
+    editor.document.dirty = True
     editor.commit()
 
     cleanup = SidecarEditor(path)
