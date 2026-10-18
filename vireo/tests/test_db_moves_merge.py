@@ -1432,6 +1432,204 @@ def test_photo_syncable_in_workspace_checks_membership_through_the_facade(
     assert statements == []
 
 
+# -- move.py's file-move job SQL (``db.moves_merge``) ------------------------
+
+
+def _committed(db, sql, params=()):
+    with _other(db) as conn:
+        return [tuple(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def test_folder_lookups_for_file_moves(db):
+    a = _folder(db, "/lib/a", root=True)
+    b = _folder(db, "/lib/a/b", a)
+    c = _folder(db, "/lib/a_c", root=True)
+    moves = db.moves_merge
+
+    assert sorted(tuple(r) for r in moves.folders_except(a)) == [
+        (b, "/lib/a/b"), (c, "/lib/a_c")]
+    assert moves.folder_path_row(b)["path"] == "/lib/a/b"
+    assert moves.folder_path_row(b + 999) is None
+    assert tuple(moves.folder_source_row(b)) == (b, "/lib/a/b", "b")
+    assert moves.folder_source_row(b + 999) is None
+    assert moves.folder_id_row("/lib/a/b")["id"] == b
+    assert moves.folder_id_row("/lib/a/missing") is None
+    # LIKE: the caller filters ``_`` matches on a literal prefix.
+    assert sorted(r["path"] for r in moves.folder_paths_below("/lib/a")) == [
+        "/lib/a/b"]
+    assert sorted(r["path"] for r in moves.folder_paths_below("/lib/a_")) == []
+
+
+def test_folders_except_is_an_unfetched_cursor(db):
+    _folder(db, "/x", root=True)
+    rows = db.moves_merge.folders_except(-1)
+    assert isinstance(rows, sqlite3.Cursor)
+
+
+def test_insert_folder_if_absent_does_not_commit_or_link(db):
+    parent = _folder(db, "/lib", root=True)
+    moves = db.moves_merge
+    cur = moves.insert_folder_if_absent("/lib/new", "new", parent)
+    assert cur.rowcount == 1
+    new_id = cur.lastrowid
+    assert db.in_transaction
+    assert _committed(db, "SELECT id FROM folders WHERE path = ?", ("/lib/new",)) == []
+    db.commit()
+    assert _committed(
+        db, "SELECT id, name, parent_id FROM folders WHERE path = ?",
+        ("/lib/new",)) == [(new_id, "new", parent)]
+    assert _committed(
+        db, "SELECT 1 FROM workspace_folders WHERE folder_id = ?", (new_id,)) == []
+    again = moves.insert_folder_if_absent("/lib/new", "other", None)
+    assert again.rowcount == 0
+
+
+def test_date_move_subtree_photos_registers_functions_first(db):
+    root = _folder(db, "/lib", root=True)
+    child = _folder(db, "/lib/kid", root)
+    other = _folder(db, "/elsewhere", root=True)
+    p_root = _photo(db, root, "r.jpg", timestamp="2026-01-02T03:04:05")
+    p_child = _photo(db, child, "k.jpg")
+    _photo(db, other, "o.jpg")
+    seen = []
+
+    def descends(path):
+        seen.append(path)
+        return int(path.startswith("/lib/"))
+
+    rows = db.moves_merge.date_move_subtree_photos(
+        root, "VIREO_TEST_DESCENDS(f.path) = ?", (1,),
+        [("VIREO_TEST_DESCENDS", 1, descends)],
+    )
+    assert [r["id"] for r in rows] == [p_root, p_child]
+    assert rows[0].keys() == ["id", "filename", "exif_data", "timestamp", "file_mtime"]
+    assert rows[0]["timestamp"] == "2026-01-02T03:04:05"
+    assert "/elsewhere" in seen
+    assert [r["id"] for r in db.moves_merge.date_move_subtree_photos(
+        child, "0", ())] == [p_child]
+
+
+def test_subtree_and_under_path_photo_reads(db):
+    root = _folder(db, "/lib/shoot", root=True)
+    child = _folder(db, "/lib/shoot/day", root)
+    sibling = _folder(db, "/lib/shoot2", root=True)
+    p_root = _photo(db, root, "a.jpg", file_size=5, file_mtime=2.0)
+    p_child = _photo(db, child, "b.jpg")
+    _photo(db, sibling, "c.jpg")
+    moves = db.moves_merge
+
+    rows = moves.subtree_photo_rows("/lib/shoot", "/lib/shoot/")
+    assert sorted((r["id"], r["folder_path"]) for r in rows) == [
+        (p_root, "/lib/shoot"), (p_child, "/lib/shoot/day")]
+    first = next(r for r in rows if r["id"] == p_root)
+    assert (first["filename"], first["file_mtime"], first["file_size"]) == (
+        "a.jpg", 2.0, 5)
+    assert sorted(r["id"] for r in moves.photo_ids_under_path("/lib/shoot")) == [
+        p_root, p_child]
+
+
+def test_move_provenance_reads_and_clear_without_commit(db):
+    dest = _folder(db, "/dest", root=True)
+    src = _folder(db, "/src", root=True)
+    p1 = _photo(db, dest, "IMG_1.jpg")
+    p2 = _photo(db, dest, "IMG_1.cr3")
+    _photo(db, src, "IMG_2.jpg")
+    db.conn.execute(
+        "UPDATE photos SET last_move_source_folder_path = '/src' "
+        "WHERE id IN (?, ?)", (p1, p2))
+    db.commit()
+    moves = db.moves_merge
+
+    assert sorted(tuple(r) for r in moves.move_provenance_in_folder(dest)) == [
+        ("IMG_1.cr3", "/src"), ("IMG_1.jpg", "/src")]
+    assert [r["filename"] for r in moves.filenames_in_folder(src)] == ["IMG_2.jpg"]
+    assert sorted(tuple(r) for r in moves.photos_moved_from("/src")) == [
+        (p1, "IMG_1.jpg"), (p2, "IMG_1.cr3")]
+
+    moves.clear_move_source([p1])
+    assert db.in_transaction
+    assert sorted(_committed(
+        db, "SELECT id FROM photos WHERE last_move_source_folder_path = '/src'"
+    )) == sorted([(p1,), (p2,)])
+    db.commit()
+    assert _committed(
+        db, "SELECT id FROM photos WHERE last_move_source_folder_path = '/src'"
+    ) == [(p2,)]
+
+
+def test_photo_move_savepoint_commits_the_repoint(db):
+    src = _folder(db, "/src", root=True)
+    dest = _folder(db, "/dest", root=True)
+    pid = _photo(db, src, "a.jpg")
+    moves = db.moves_merge
+    with moves.photo_move_savepoint():
+        moves.repoint_moved_photo(pid, dest, "/src")
+    assert not db.in_transaction
+    assert _committed(
+        db, "SELECT folder_id, last_move_source_folder_path FROM photos "
+        "WHERE id = ?", (pid,)) == [(dest, "/src")]
+
+
+def test_photo_move_savepoint_rolls_back_to_itself_and_reraises(db):
+    src = _folder(db, "/src", root=True)
+    dest = _folder(db, "/dest", root=True)
+    pid = _photo(db, src, "a.jpg")
+    # Work already pending on the connection stays pending: only the
+    # savepoint's own writes are undone.
+    db.conn.execute("UPDATE photos SET rating = 4 WHERE id = ?", (pid,))
+    moves = db.moves_merge
+    with pytest.raises(KeyboardInterrupt):
+        with moves.photo_move_savepoint():
+            moves.repoint_moved_photo(pid, dest, "/src")
+            raise KeyboardInterrupt
+    assert db.in_transaction
+    row = db.conn.execute(
+        "SELECT folder_id, last_move_source_folder_path, rating FROM photos "
+        "WHERE id = ?", (pid,)).fetchone()
+    assert tuple(row) == (src, None, 4)
+    db.rollback()
+
+
+def test_restamp_mtimes_moves_only_pinned_markers_without_commit(db):
+    folder = _folder(db, "/f", root=True)
+    pinned = _photo(db, folder, "a.jpg", file_size=10, file_mtime=1.0)
+    raced = _photo(db, folder, "b.jpg", file_size=10, file_mtime=7.0)
+    db.conn.execute(
+        "UPDATE photos SET working_copy_evicted_mtime = 1.0, "
+        "working_copy_failed_mtime = -1 WHERE id = ?", (pinned,))
+    for pid, size in ((pinned, 10), (raced, 99)):
+        db.conn.execute(
+            "INSERT INTO offline_originals (photo_id, source_size, source_mtime, "
+            "cached_at, status) VALUES (?, ?, 1.0, 0, 'ok')", (pid, size))
+    db.commit()
+    updates = [(5.0, pinned, 1.0, 10), (5.0, raced, 1.0, 10)]
+    moves = db.moves_merge
+
+    assert moves.restamp_photo_mtimes(updates) == 1
+    moves.restamp_offline_original_mtimes(updates)
+    assert db.in_transaction
+    assert _committed(db, "SELECT file_mtime FROM photos WHERE id = ?", (pinned,)) == [(1.0,)]
+    db.commit()
+    assert _committed(
+        db, "SELECT file_mtime, working_copy_evicted_mtime, "
+        "working_copy_failed_mtime FROM photos WHERE id = ?", (pinned,)
+    ) == [(5.0, 5.0, -1)]
+    assert _committed(db, "SELECT file_mtime FROM photos WHERE id = ?", (raced,)) == [(7.0,)]
+    assert sorted(_committed(
+        db, "SELECT photo_id, source_mtime FROM offline_originals")) == sorted(
+        [(pinned, 5.0), (raced, 1.0)])
+
+
+def test_thumb_paths_for_ids_skips_photos_without_a_thumbnail(db):
+    folder = _folder(db, "/f", root=True)
+    with_thumb = _photo(db, folder, "a.jpg")
+    without = _photo(db, folder, "b.jpg")
+    db.conn.execute("UPDATE photos SET thumb_path = 't/a.jpg' WHERE id = ?", (with_thumb,))
+    db.commit()
+    rows = db.moves_merge.thumb_paths_for_ids([with_thumb, without, without + 999])
+    assert [tuple(r) for r in rows] == [(with_thumb, "t/a.jpg")]
+
+
 # -- structure ---------------------------------------------------------------
 
 MOVED = [
@@ -1591,3 +1789,46 @@ def test_facade_signatures_are_unchanged():
     params = inspect.signature(Database.update_move_rule).parameters
     assert list(params) == ["self", "rule_id", "name", "destination", "criteria"]
     assert all(params[p].default is UNSET for p in ("name", "destination", "criteria"))
+
+
+def test_moves_merge_is_a_fresh_repository_on_the_connection_per_access(db):
+    """``db.moves_merge`` builds a new repository each time, never a cached one."""
+    from repositories.moves_merge import MovesMergeRepository
+
+    first, second = db.moves_merge, db.moves_merge
+    assert isinstance(first, MovesMergeRepository)
+    assert first is not second
+    assert first.conn is db.conn
+
+
+def test_moves_merge_accessor_builds_through_the_factory():
+    import ast
+    import inspect
+    import textwrap
+
+    accessor = Database.__dict__["moves_merge"]
+    assert isinstance(accessor, property)
+    source = textwrap.dedent(inspect.getsource(accessor.fget))
+    attrs = {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    assert "_moves_merge_repository" in attrs
+    assert "conn" not in attrs
+
+
+def test_move_module_reaches_sql_only_through_the_accessor():
+    """``move.py`` moves originals; its catalog SQL lives in the repository."""
+    import ast
+    from pathlib import Path
+
+    import move
+
+    tree = ast.parse(Path(move.__file__).read_text())
+    assert not [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "conn"
+    ]
