@@ -2,18 +2,29 @@
 bytes already at the destination.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import stat as stat_mod
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from import_job.copy_verify import DestReadCancelled, _hash_dest_file
 from import_job.destination import _is_source_backed_dest
 from import_job.siblings import _companion_key, _sibling_blocks_slot, _slot_for
 from import_job.state import _counts, _LandedFile, _record_checker
 from scanner import EMPTY_FILE_SHA256
+
+if TYPE_CHECKING:
+    from import_dedup import DuplicateChecker
+    from import_job.destination import _DestContext
+    from import_job.import_types import StopCheck
+    from import_job.state import _ImportBatchState, _ImportRunState
+    # An adoptable candidate: ``(dest_path, verified_hash, record_hash)``.
+    _Adoption = tuple[str, str, str | None]
 
 log = logging.getLogger(__name__)
 
@@ -35,8 +46,10 @@ class _CardFile:
     mtime_ns: int
 
 
-def _book_adoption(state, batch_st, checker, src, *, dest_path,
-                   verified_hash, record_hash):
+def _book_adoption(
+    state: _ImportRunState, batch_st: _ImportBatchState, checker: DuplicateChecker | None,
+    src: _CardFile, *, dest_path: str, verified_hash: str, record_hash: str | None,
+) -> None:
     """Book one crash-recovery adoption: count the duplicate skip, fold
     the file into ``landed`` with origin "skipped_duplicate" (see the
     rsync call site's rationale comment for why adoptions ride
@@ -89,8 +102,11 @@ _WALK_PLACED = "placed"
 _WALK_CANCELLED = "cancelled"
 
 
-def _resolve_dest_collision(state, batch_st, ctx, src, *, checker, claims,
-                            stop_requested):
+def _resolve_dest_collision(
+    state: _ImportRunState, batch_st: _ImportBatchState, ctx: _DestContext, src: _CardFile, *,
+    checker: DuplicateChecker | None, claims: dict[str, str | None] | None,
+    stop_requested: StopCheck,
+) -> tuple[str, str | None]:
     """Walk the primary basename and its numeric suffixes to an adoption,
     an intra-batch duplicate skip, or a free destination basename.
 
@@ -186,7 +202,7 @@ def _resolve_dest_collision(state, batch_st, ctx, src, *, checker, claims,
         return _WALK_PLACED, candidate
 
 
-def _stopped_while_advancing(counter, stop_requested):
+def _stopped_while_advancing(counter: int, stop_requested: StopCheck) -> bool:
     """The collision walk's cancellation poll; True means return
     ``_WALK_CANCELLED``.
     """
@@ -216,8 +232,10 @@ def _stopped_while_advancing(counter, stop_requested):
     return stop_requested()
 
 
-def _skip_claimed_identical_sibling(state, batch_st, claimed_hash, src, *,
-                                    checker):
+def _skip_claimed_identical_sibling(
+    state: _ImportRunState, batch_st: _ImportBatchState, claimed_hash: str | None, src: _CardFile,
+    *, checker: DuplicateChecker | None,
+) -> bool:
     """Book an intra-batch duplicate skip against a claimed basename.
 
     Returns True when the file was booked (the walk is done), False when
@@ -243,7 +261,10 @@ def _skip_claimed_identical_sibling(state, batch_st, claimed_hash, src, *,
     return False
 
 
-def _existing_candidate_adoption(state, ctx, src, *, cand_path, stop_requested):
+def _existing_candidate_adoption(
+    state: _ImportRunState, ctx: _DestContext, src: _CardFile, *, cand_path: str,
+    stop_requested: StopCheck,
+) -> _Adoption | None:
     """Decide whether the existing entry at ``cand_path`` holds this
     source's bytes.
 
@@ -317,8 +338,10 @@ def _existing_candidate_adoption(state, ctx, src, *, cand_path, stop_requested):
     )
 
 
-def _candidate_bytes_adoption(source_file, cand_path, cand_size, *,
-                              src_size, src_hash_fn, stop_requested):
+def _candidate_bytes_adoption(
+    source_file: Path, cand_path: str, cand_size: int, *, src_size: int,
+    src_hash_fn: Callable[[], str | None], stop_requested: StopCheck,
+) -> _Adoption | None:
     """Compare a regular-file candidate's bytes with the source's.
 
     Returns ``(dest_path, verified_hash, record_hash)`` on a match, or
@@ -388,8 +411,11 @@ def _candidate_bytes_adoption(source_file, cand_path, cand_size, *,
     return None
 
 
-def _settle_adoption(state, batch_st, ctx, adopt, src, *, checker, claims,
-                     stop_requested, slot, anchor, candidate):
+def _settle_adoption(
+    state: _ImportRunState, batch_st: _ImportBatchState, ctx: _DestContext, adopt: _Adoption,
+    src: _CardFile, *, checker: DuplicateChecker | None, claims: dict[str, str | None] | None,
+    stop_requested: StopCheck, slot: int, anchor: int | None, candidate: str,
+) -> bool:
     """Book an adoptable candidate unless its companion group cannot
     settle at ``slot``; returns True when booked, False to advance.
     """

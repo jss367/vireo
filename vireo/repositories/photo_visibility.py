@@ -71,7 +71,7 @@ class PhotoVisibilityRepository:
             )
 
     def grant_verified_twins(
-        self, workspace_id: int, rows: Sequence[Mapping[str, Any]],
+        self, workspace_id: int, rows: Sequence[sqlite3.Row | Mapping[str, Any]],
     ) -> None:
         self.grant(workspace_id, [row["id"] for row in rows])
         for row in rows:
@@ -82,7 +82,7 @@ class PhotoVisibilityRepository:
                 )
 
     def grant_verified_twins_tracked(
-        self, workspace_id: int, rows: Sequence[Mapping[str, Any]],
+        self, workspace_id: int, rows: Sequence[sqlite3.Row | Mapping[str, Any]],
     ) -> tuple[list[int], list[int]]:
         """Like :meth:`grant_verified_twins`, but report what this call changed.
 
