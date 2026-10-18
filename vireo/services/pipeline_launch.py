@@ -12,14 +12,32 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import TYPE_CHECKING, Protocol
 
 from db import Database
 from runtime_warnings import build_cpu_runtime_warning, runtime_warning_work_units
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from jobs import JobRunner
+    from pipeline_stages.context import PipelineParams
+    from services.service_types import JobDict, JobResult, JsonDict
+
 log = logging.getLogger(__name__)
 
 
-def apply_no_model_auto_skip(params):
+class ErrorBuilder[E](Protocol):
+    """Builds the caller's error answer from a message and a status.
+
+    The routes pass ``web.responses.json_error``; the import service passes
+    its ``ImportFailure`` dataclass, so the answer's type follows the caller.
+    """
+
+    def __call__(self, message: str, /, status: int = ...) -> E: ...
+
+
+def apply_no_model_auto_skip(params: PipelineParams) -> str | None:
     """Auto-skip classify stages when no model is available.
 
     Mutates ``params`` (skip_classify/skip_extract_masks/skip_regroup)
@@ -59,9 +77,9 @@ def apply_no_model_auto_skip(params):
         "Download a model in Settings to enable species identification."
     )
 
-def resolve_remote_archive_target(
-    db, remote_target_id, remote_subpath, *, json_error,
-):
+def resolve_remote_archive_target[E](
+    db: Database, remote_target_id: str, remote_subpath: str, *, json_error: ErrorBuilder[E],
+) -> tuple[JsonDict, str, None] | tuple[None, None, E]:
     """Shared remote-archive-target resolution for the import-photos
     and pipeline routes.
 
@@ -115,7 +133,7 @@ def resolve_remote_archive_target(
     return remote_archive_config, rsync_bin, None
 
 
-def _record_after_move_skip(runner, job, result, skip):
+def _record_after_move_skip(runner: JobRunner, job: JobDict, result: JobResult, skip: str) -> None:
     """Record why a chained process run's NAS moves were not enqueued."""
     if isinstance(result, dict):
         result["after_move_skipped"] = skip
@@ -132,7 +150,10 @@ def _record_after_move_skip(runner, job, result, skip):
     log.info("after-process move skipped: %s", skip)
 
 
-def _record_after_move_outcome(runner, job, result, after_move, move_ids, failures):
+def _record_after_move_outcome(
+    runner: JobRunner, job: JobDict, result: JobResult, after_move: JsonDict,
+    move_ids: list[str], failures: list[str],
+) -> None:
     """Record the chained moves' handoff on the result, job and step tree."""
     if isinstance(result, dict):
         if move_ids:
@@ -181,7 +202,7 @@ def _record_after_move_outcome(runner, job, result, after_move, move_ids, failur
         )
 
 
-def _process_pipeline_params(collection_id, expanded):
+def _process_pipeline_params(collection_id: int, expanded: JsonDict) -> PipelineParams:
     """Build the collection-scoped ``PipelineParams`` for a saved process."""
     from pipeline_job import PipelineParams
 
@@ -205,7 +226,7 @@ def _process_pipeline_params(collection_id, expanded):
     )
 
 
-def _missing_labels_blocker(thread_db, params, process_id):
+def _missing_labels_blocker(thread_db: Database, params: PipelineParams, process_id: int) -> str | None:
     """Return the pause message when Classify has no species list, else None."""
     if not params.skip_classify:
         from classify_job import _load_labels
@@ -236,7 +257,10 @@ def _missing_labels_blocker(thread_db, params, process_id):
     return None
 
 
-def _process_job_config(thread_db, collection_id, process_id, params, chained_from):
+def _process_job_config(
+    thread_db: Database, collection_id: int, process_id: int, params: PipelineParams,
+    chained_from: str | None,
+) -> JsonDict:
     """Build the jobs-panel config for a chained/by-id process run."""
     job_config = {
         "source": None,
@@ -245,7 +269,7 @@ def _process_job_config(thread_db, collection_id, process_id, params, chained_fr
         "collection_name": next(
             (
                 c["name"]
-                for c in thread_db.get_collections()
+                for c in thread_db.collections.list_all()
                 if c["id"] == collection_id
             ),
             None,
@@ -277,16 +301,20 @@ class PipelineChain:
     """
 
     def __init__(
-        self, *, get_runner, db_path, config,
-        invalidate_missing_originals, enqueue_move_folder_job,
-    ):
+        self, *, get_runner: Callable[[], JobRunner], db_path: str, config: Mapping[str, object],
+        invalidate_missing_originals: Callable[[], None],
+        # ``FolderMoves.enqueue_job``, which returns the move job's id. Its
+        # signature is typed in ``services.folder_moves``; ``...`` here keeps
+        # this hook independent of that module's keyword arguments.
+        enqueue_move_folder_job: Callable[..., str],
+    ) -> None:
         self._get_runner = get_runner
         self._db_path = db_path
         self._config = config
         self._invalidate_missing_originals = invalidate_missing_originals
         self._enqueue_move_folder_job = enqueue_move_folder_job
 
-    def chain_after_move(self, job, result, after_move, workspace_id):
+    def chain_after_move(self, job: JobDict, result: JobResult, after_move: JsonDict, workspace_id: int) -> None:
         """Enqueue the chained NAS moves when a chained process run ends.
 
         Decision table (spec §4): fires on success AND failure; skips only on
@@ -325,7 +353,9 @@ class PipelineChain:
             log.exception("after-process move chaining failed")
             self._record_chaining_failure(job, result, e)
 
-    def _enqueue_after_moves(self, thread_db, runner, job, after_move, workspace_id):
+    def _enqueue_after_moves(
+        self, thread_db: Database, runner: JobRunner, job: JobDict, after_move: JsonDict, workspace_id: int,
+    ) -> tuple[list[str], list[str]]:
         """Enqueue one move-folder job per chained folder.
 
         Returns ``(move_ids, failures)``; a folder whose enqueue raises is
@@ -335,7 +365,8 @@ class PipelineChain:
         # move_job_ids is complete immediately) but their transfers run
         # one at a time — see the why-comment in _start_move_folder_job.
         serialize_lock = threading.Lock()
-        move_ids, failures = [], []
+        move_ids: list[str] = []
+        failures: list[str] = []
         for entry in after_move["folders"]:
             try:
                 move_ids.append(self._enqueue_move_folder_job(
@@ -353,7 +384,7 @@ class PipelineChain:
                 failures.append(f"{entry['subpath']}: {e}")
         return move_ids, failures
 
-    def _record_chaining_failure(self, job, result, e):
+    def _record_chaining_failure(self, job: JobDict, result: JobResult, e: Exception) -> None:
         """Surface a failure of the chaining machinery itself."""
         msg = f"after-process move chaining failed: {e}"
         # Same visibility rule as above: the step tree is the only
@@ -379,10 +410,12 @@ class PipelineChain:
             # record it on the job itself (see the dedup note above).
             job["errors"].append(msg)
 
-    def enqueue_process_job(self, thread_db, runner, workspace_id, *,
-                             collection_id, process_id,
-                             chained_from=None, expanded=None,
-                             after_move=None):
+    def enqueue_process_job(
+        self, thread_db: Database, runner: JobRunner, workspace_id: int, *,
+        collection_id: int, process_id: int,
+        chained_from: str | None = None, expanded: JsonDict | None = None,
+        after_move: JsonDict | None = None,
+    ) -> tuple[str | None, str | None, str | None]:
         """Enqueue a collection-scoped process run for a saved-process id.
 
         The after-import chaining hook's path into the pipeline. Runs on a
@@ -424,7 +457,7 @@ class PipelineChain:
 
         work_units = runtime_warning_work_units(
             "pipeline collection",
-            lambda: thread_db.count_collection_photos(collection_id),
+            lambda: thread_db.collections.count_photos(collection_id),
         )
         runtime_warning = None
         if not (params.skip_classify and params.skip_extract_masks):
@@ -434,7 +467,7 @@ class PipelineChain:
                 reason="large_pipeline_ml_job_cpu_only",
             )
 
-        def work(job):
+        def work(job: JobDict) -> JobResult:
             result = None
             try:
                 result = run_pipeline_job(

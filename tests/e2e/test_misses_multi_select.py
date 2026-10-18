@@ -11,6 +11,16 @@ from urllib.parse import quote
 import pytest
 from playwright.sync_api import expect
 
+from e2e.module_pages import import_page_modules
+
+
+def _expose_miss_modules(page):
+    """The Misses page is ES modules: its state and functions are not globals.
+    Hand the test the page's own instances as ``missState`` (the state object)
+    and ``pageModules.<file>`` (each module's exports)."""
+    import_page_modules(page, "misses", ["state", "tuning", "flagging", "keyboard"])
+    page.evaluate("window.missState = pageModules.state.state")
+
 
 def _seed_misses(db, photo_ids, category="no_subject"):
     """Mark each given photo as a miss in the named category."""
@@ -51,7 +61,7 @@ def test_collection_and_rating_filters_limit_visible_misses(live_server, page):
     db = live_server["db"]
     pids = live_server["data"]["photos"]
     _seed_misses(db, pids, "no_subject")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Hawk review",
         json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
     )
@@ -118,7 +128,7 @@ def test_malformed_legacy_scope_id_fails_closed(live_server, page, scope_key):
     pids = live_server["data"]["photos"]
     _seed_misses(db, pids, "no_subject")
     if scope_key == "collection_id":
-        scope_id = db.add_collection(
+        scope_id = db.collections.add(
             "Hawk review",
             json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
         )
@@ -142,7 +152,7 @@ def test_filter_bootstrap_failure_keeps_requested_scope_closed(
     pids = live_server["data"]["photos"]
     _seed_misses(db, pids, "no_subject")
     if scope_key == "collection_id":
-        scope_id = db.add_collection(
+        scope_id = db.collections.add(
             "Hawk review",
             json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
         )
@@ -302,18 +312,19 @@ def test_scope_recovery_stays_frozen_until_replacement_load(live_server, page):
     })()""")
 
     page.goto(f"{url}/misses?collection_id=999999")
+    _expose_miss_modules(page)
     expect(page.locator("#scopeBanner")).to_be_visible()
     page.wait_for_function("window.releaseHeldConfig != null")
 
     page.evaluate("VireoFilter.addRule('rating', '>=', 4)")
     page.wait_for_function("window.releaseHeldMisses != null")
     page.evaluate("window.releaseHeldConfig()")
-    page.wait_for_function("window.missConfigLoaded === true")
+    page.wait_for_function("window.missState && missState.missConfigLoaded === true")
 
     # Config is ready, but the replacement filters are not yet applied.
     expect(page.locator("#missRecomputeBtn")).to_be_disabled()
     expect(page.locator("#missCfgNoSubject")).to_be_disabled()
-    page.evaluate("previewMisses(); recomputeMisses()")
+    page.evaluate("pageModules.tuning.previewMisses(); pageModules.tuning.recomputeMisses()")
     page.wait_for_timeout(100)
     assert page.evaluate("window.previewCalls") == 0
     assert page.evaluate("window.recomputeCalls") == 0
@@ -332,7 +343,7 @@ def test_collections_fetch_failure_fails_closed(live_server, page):
     db = live_server["db"]
     pids = live_server["data"]["photos"]
     _seed_misses(db, pids, "no_subject")
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Hawk review",
         json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
     )
@@ -400,6 +411,7 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
     _seed_misses(db, pids, "no_subject")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(5)
     page.evaluate("""() => {
       window.missesFetchCalls = [];
@@ -439,7 +451,7 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
         f"window.missesFetchCalls.filter(u => u.startsWith('/api/misses') && !u.includes('/recompute') && !u.includes('/preview')).length > {calls_before_release}",
         timeout=3000,
     )
-    assert page.evaluate("originalMissConfig.miss_det_confidence") == saved_threshold
+    assert page.evaluate("missState.originalMissConfig.miss_det_confidence") == saved_threshold
 
 
 def test_bulk_reject_uses_filters_that_rendered_visible_cards(live_server, page):
@@ -572,6 +584,7 @@ def test_ctrl_click_toggles_selection(live_server, page):
     _seed_misses(db, pids, "no_subject")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']").wait_for(
         state="visible", timeout=3000,
     )
@@ -579,12 +592,12 @@ def test_ctrl_click_toggles_selection(live_server, page):
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']"))
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{pids[2]}']"))
 
-    selected = page.evaluate("Array.from(selection)")
+    selected = page.evaluate("Array.from(missState.selection)")
     assert sorted(selected) == sorted([pids[0], pids[2]])
 
     # Toggle the first one off.
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']"))
-    selected = page.evaluate("Array.from(selection)")
+    selected = page.evaluate("Array.from(missState.selection)")
     assert selected == [pids[2]]
 
 
@@ -595,6 +608,7 @@ def test_shift_click_selects_range_within_category(live_server, page):
     _seed_misses(db, pids, "clipped")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     page.locator(f"[data-testid='miss-card-clipped-{pids[0]}']").wait_for(
         state="visible", timeout=3000,
     )
@@ -605,7 +619,7 @@ def test_shift_click_selects_range_within_category(live_server, page):
         modifiers=["Shift"],
     )
 
-    selected = page.evaluate("Array.from(selection)")
+    selected = page.evaluate("Array.from(missState.selection)")
     # /api/misses orders by timestamp DESC, so the in-page indices may not
     # match seed order. Verify by count + that both endpoints are present.
     assert len(selected) >= 2
@@ -620,6 +634,7 @@ def test_shift_j_extends_selection(live_server, page):
     _seed_misses(db, pids, "oof")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     page.locator(f"[data-testid='miss-card-oof-{pids[0]}']").wait_for(
         state="visible", timeout=3000,
     )
@@ -628,7 +643,7 @@ def test_shift_j_extends_selection(live_server, page):
     page.keyboard.press("Shift+J")  # extend by 1
     page.keyboard.press("Shift+J")  # extend by 1 more
 
-    selected_count = page.evaluate("selection.size")
+    selected_count = page.evaluate("missState.selection.size")
     assert selected_count >= 2
 
 
@@ -639,15 +654,16 @@ def test_escape_clears_selection(live_server, page):
     _seed_misses(db, pids, "no_subject")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']").wait_for(
         state="visible", timeout=3000,
     )
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']"))
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{pids[1]}']"))
-    assert page.evaluate("selection.size") == 2
+    assert page.evaluate("missState.selection.size") == 2
 
     page.keyboard.press("Escape")
-    assert page.evaluate("selection.size") == 0
+    assert page.evaluate("missState.selection.size") == 0
 
 
 def test_x_with_selection_bulk_rejects(live_server, page):
@@ -657,12 +673,13 @@ def test_x_with_selection_bulk_rejects(live_server, page):
     _seed_misses(db, pids, "no_subject")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']").wait_for(
         state="visible", timeout=3000,
     )
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']"))
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{pids[2]}']"))
-    assert page.evaluate("selection.size") == 2
+    assert page.evaluate("missState.selection.size") == 2
 
     page.keyboard.press("x")
 
@@ -676,7 +693,7 @@ def test_x_with_selection_bulk_rejects(live_server, page):
     assert untouched["flag"] in (None, "none"), f"pids[1] was modified: {untouched['flag']!r}"
 
     # Selection cleared after bulk apply.
-    page.wait_for_function("selection.size === 0", timeout=3000)
+    page.wait_for_function("missState.selection.size === 0", timeout=3000)
 
 
 def test_p_with_selection_bulk_flags(live_server, page):
@@ -707,20 +724,21 @@ def test_x_without_selection_falls_back_to_focused(live_server, page):
     _seed_misses(db, pids, "no_subject")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']").wait_for(
         state="visible", timeout=3000,
     )
 
     # Focus the first card with j (no selection set).
     page.keyboard.press("j")
-    assert page.evaluate("selection.size") == 0
+    assert page.evaluate("missState.selection.size") == 0
 
     page.keyboard.press("x")
 
     # Exactly the focused card should be rejected. The other miss-photos must
     # remain unflagged.
     focused_pid = page.evaluate(
-        "missesData[focusedCategory][focusedIndex].id"
+        "missState.missesData[missState.focusedCategory][missState.focusedIndex].id"
     )
     assert _wait_for_flag(db, focused_pid, "rejected") == "rejected"
 
@@ -771,13 +789,14 @@ def test_per_card_unflag_prunes_selection_when_last_card_gone(live_server, page)
     _seed_misses(db, [pid, other], "no_subject")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
     other_card = page.locator(f"[data-testid='miss-card-no_subject-{other}']")
     card.wait_for(state="visible", timeout=3000)
 
     _ctrl_click(page, card)
     _ctrl_click(page, other_card)
-    assert page.evaluate("selection.size") == 2
+    assert page.evaluate("missState.selection.size") == 2
 
     # Click the per-card unflag-as-miss button on the first card.
     page.locator(
@@ -787,11 +806,11 @@ def test_per_card_unflag_prunes_selection_when_last_card_gone(live_server, page)
     # That card is now gone from the only category that contained it, so its
     # id must be pruned. The other selection survives.
     page.wait_for_function(
-        f"!selection.has({pid})",
+        f"!missState.selection.has({pid})",
         timeout=3000,
     )
-    assert page.evaluate("selection.size") == 1
-    assert page.evaluate(f"selection.has({other})")
+    assert page.evaluate("missState.selection.size") == 1
+    assert page.evaluate(f"missState.selection.has({other})")
 
 
 def test_bulk_reject_category_prunes_selected_ids_synchronously(live_server, page):
@@ -807,6 +826,7 @@ def test_bulk_reject_category_prunes_selected_ids_synchronously(live_server, pag
     _seed_misses(db, [c], "clipped")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     page.locator(f"[data-testid='miss-card-no_subject-{a}']").wait_for(
         state="visible", timeout=3000,
     )
@@ -817,7 +837,7 @@ def test_bulk_reject_category_prunes_selected_ids_synchronously(live_server, pag
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{a}']"))
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-no_subject-{b}']"))
     _ctrl_click(page, page.locator(f"[data-testid='miss-card-clipped-{c}']"))
-    assert page.evaluate("selection.size") == 3
+    assert page.evaluate("missState.selection.size") == 3
 
     # Auto-confirm the window.confirm dialog the bulk-reject button raises.
     page.once("dialog", lambda d: d.accept())
@@ -826,7 +846,7 @@ def test_bulk_reject_category_prunes_selected_ids_synchronously(live_server, pag
     # The two no_subject ids must drop out synchronously — the third (clipped)
     # remains.
     page.wait_for_function(
-        f"!selection.has({a}) && !selection.has({b}) && selection.has({c})",
+        f"!missState.selection.has({a}) && !missState.selection.has({b}) && missState.selection.has({c})",
         timeout=3000,
     )
 
@@ -843,13 +863,14 @@ def test_per_card_unflag_keeps_selection_when_other_category_still_renders(live_
     _seed_misses(db, [pid], "oof")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     clipped_card = page.locator(f"[data-testid='miss-card-clipped-{pid}']")
     oof_card = page.locator(f"[data-testid='miss-card-oof-{pid}']")
     clipped_card.wait_for(state="visible", timeout=3000)
     oof_card.wait_for(state="visible", timeout=3000)
 
     _ctrl_click(page, clipped_card)
-    assert page.evaluate(f"selection.has({pid})")
+    assert page.evaluate(f"missState.selection.has({pid})")
 
     # Unflag just the clipped card.
     page.locator(
@@ -862,7 +883,7 @@ def test_per_card_unflag_keeps_selection_when_other_category_still_renders(live_
         f"document.querySelector('[data-testid=\"miss-card-clipped-{pid}\"]') === null",
         timeout=3000,
     )
-    assert page.evaluate(f"selection.has({pid})"), (
+    assert page.evaluate(f"missState.selection.has({pid})"), (
         "id was wrongly pruned even though another category still renders it"
     )
     oof_class = oof_card.get_attribute("class") or ""
@@ -877,13 +898,14 @@ def test_plain_click_selects_without_opening_lightbox(live_server, page):
     _seed_misses(db, pids, "oof")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     card = page.locator(f"[data-testid='miss-card-oof-{pids[0]}']")
     card.wait_for(state="visible", timeout=3000)
 
     card.click()
 
-    assert page.evaluate("selection.size") == 1
-    assert page.evaluate(f"selection.has({pids[0]})")
+    assert page.evaluate("missState.selection.size") == 1
+    assert page.evaluate(f"missState.selection.has({pids[0]})")
     assert "selected" in (card.get_attribute("class") or "")
     assert not page.evaluate(
         "document.getElementById('lightboxOverlay').classList.contains('active')"
@@ -983,6 +1005,7 @@ def test_selection_bar_unmarks_selected_misses(live_server, page):
     _seed_misses(db, [a, b], "no_subject")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     first = page.locator(f"[data-testid='miss-card-no_subject-{a}']")
     second = page.locator(f"[data-testid='miss-card-no_subject-{b}']")
     first.wait_for(state="visible", timeout=3000)
@@ -990,7 +1013,7 @@ def test_selection_bar_unmarks_selected_misses(live_server, page):
 
     first.click()
     _ctrl_click(page, second)
-    assert page.evaluate("selection.size") == 2
+    assert page.evaluate("missState.selection.size") == 2
 
     page.get_by_role("button", name="Unmark missed").click()
 
@@ -1014,11 +1037,12 @@ def test_u_unmarks_clicked_miss(live_server, page):
     _seed_misses(db, [pid], "no_subject")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     card = page.locator(f"[data-testid='miss-card-no_subject-{pid}']")
     card.wait_for(state="visible", timeout=3000)
 
     card.click()
-    assert page.evaluate("selection.size") == 1
+    assert page.evaluate("missState.selection.size") == 1
 
     page.keyboard.press("u")
 
@@ -1041,6 +1065,7 @@ def test_selection_bar_deletes_selected_misses_from_vireo(live_server, page):
     _seed_misses(db, [a, b], "clipped")
 
     page.goto(f"{url}/misses")
+    _expose_miss_modules(page)
     first = page.locator(f"[data-testid='miss-card-clipped-{a}']")
     second = page.locator(f"[data-testid='miss-card-clipped-{b}']")
     first.wait_for(state="visible", timeout=3000)
@@ -1048,7 +1073,7 @@ def test_selection_bar_deletes_selected_misses_from_vireo(live_server, page):
 
     first.click()
     _ctrl_click(page, second)
-    assert page.evaluate("selection.size") == 2
+    assert page.evaluate("missState.selection.size") == 2
 
     page.get_by_role("button", name="Delete selected").click()
     page.locator("#deleteModal.open").wait_for(state="visible", timeout=3000)
@@ -1129,10 +1154,11 @@ def test_toolbar_history_restores_rejected_miss_membership(live_server, page):
     ids = live_server['data']['photos'][:2]
     _seed_misses(live_server['db'], ids)
     page.goto(live_server['url'] + '/misses')
+    _expose_miss_modules(page)
     cards = page.locator("[data-testid^='miss-card-no_subject-']")
     expect(cards).to_have_count(2)
     page.on('dialog', lambda dialog: dialog.accept())
-    page.evaluate("bulkReject('no_subject')")
+    page.evaluate("pageModules.flagging.bulkReject('no_subject')")
     expect(cards).to_have_count(0)
     expect(page.locator('#historyUndoBtn')).to_be_enabled()
     page.locator('#historyUndoBtn').click()

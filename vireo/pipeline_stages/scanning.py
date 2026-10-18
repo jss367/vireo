@@ -14,8 +14,9 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pipeline_stages.context import PipelineRun
 
@@ -25,43 +26,71 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ScanStageSettings:
+    """What this run's scanner stage catalogs and where it writes.
+
+    Plain values fixed when the pipeline job is wired; the collection,
+    thumbnail and previews stages read some of the same ones.
+    """
+
+    skip_scan: bool = False
+    """Repair metadata over the collection instead of cataloging sources."""
+    snapshot_paths: Any = None
+    """The file paths of the new-images snapshot the run is scoped to, or
+    None."""
+    final_destination: Any = None
+    """The archive a locally processed run ends up in (for a remote target,
+    its local mount path); None otherwise."""
+    remote_archive: Any = None
+    """The resolved remote archive target, or None."""
+    effective_vireo_dir: str | None = None
+    effective_thumb_cache_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class ScanStageHooks:
+    """The pipeline job's helpers the scanner stage calls."""
+
+    filter_excluded: Callable[..., Any]
+    """Drops the photos the user excluded in the preview."""
+    find_broken_metadata_folders: Callable[..., Any]
+    missing_archive_mount_root: Callable[..., Any]
+    """The archive volume's mount root when it is not mounted, else None."""
+    missing_originals_invalidator: Callable[[], Any] | None = None
+    """Drops the Missing Originals cache after the scan changed the catalog."""
+
+
+@dataclass(frozen=True)
+class ScanHandoff:
+    """How scanned photos reach the thumbnail stage's queue."""
+
+    put_scan_item: Callable[[Any], Any]
+    """Queues one ``(photo_id, path)`` item, or ``sentinel`` at the end."""
+    sentinel: Any
+    """The end-of-stream item."""
+    prepare_scan_item: Callable[[Any], Any] | None = None
+    """Context manager that waits for queue room before the photo id is
+    published, yielding the enqueue (or None when the run aborted)."""
+
+
 def scanner_stage(
     run: PipelineRun,
     *,
-    _SENTINEL,
-    _filter_excluded,
-    _find_broken_metadata_folders,
-    _missing_archive_mount_root,
-    _put_scan_item,
-    collected_photo_ids,
-    effective_thumb_cache_dir,
-    effective_vireo_dir,
-    final_destination,
-    missing_originals_invalidator,
-    remote_archive,
-    skip_scan,
-    snapshot_paths,
-    _prepare_scan_item=None,
+    settings: ScanStageSettings,
+    hooks: ScanStageHooks,
+    handoff: ScanHandoff,
+    collected_photo_ids: list,
 ):
     # Note: stages["scan"]["status"] is NOT set to "running" here. It is
     # flipped to "running" just before each do_scan() call below, so
     # numScan doesn't pulse during the ingest sub-phase.
     scan = _ScanPass(
         run,
-        sentinel=_SENTINEL,
-        filter_excluded=_filter_excluded,
-        find_broken_metadata_folders=_find_broken_metadata_folders,
-        missing_archive_mount_root=_missing_archive_mount_root,
-        put_scan_item=_put_scan_item,
-        prepare_scan_item=_prepare_scan_item,
+        settings=settings,
+        hooks=hooks,
+        handoff=handoff,
         collected_photo_ids=collected_photo_ids,
-        effective_thumb_cache_dir=effective_thumb_cache_dir,
-        effective_vireo_dir=effective_vireo_dir,
-        final_destination=final_destination,
-        missing_originals_invalidator=missing_originals_invalidator,
-        remote_archive=remote_archive,
-        skip_scan=skip_scan,
-        snapshot_paths=snapshot_paths,
     )
     try:
         import config as cfg
@@ -171,7 +200,7 @@ class _ScannedPhotoCallback:
             return
         canonical = scan._canonical_photo_path(photo_id, path)
         published = False
-        with scan.prepare_scan_item((photo_id, canonical)) as enqueue:
+        with scan.handoff.prepare_scan_item((photo_id, canonical)) as enqueue:
             def publish():
                 nonlocal published
                 if enqueue is None:
@@ -239,36 +268,16 @@ class _ScanPass:
         self,
         run,
         *,
-        sentinel,
-        filter_excluded,
-        find_broken_metadata_folders,
-        missing_archive_mount_root,
-        put_scan_item,
-        collected_photo_ids,
-        effective_thumb_cache_dir,
-        effective_vireo_dir,
-        final_destination,
-        missing_originals_invalidator,
-        remote_archive,
-        skip_scan,
-        snapshot_paths,
-        prepare_scan_item=None,
+        settings: ScanStageSettings,
+        hooks: ScanStageHooks,
+        handoff: ScanHandoff,
+        collected_photo_ids: list,
     ):
         self.run = run
-        self.sentinel = sentinel
-        self.filter_excluded = filter_excluded
-        self.find_broken_metadata_folders = find_broken_metadata_folders
-        self.missing_archive_mount_root = missing_archive_mount_root
-        self.put_scan_item = put_scan_item
-        self.prepare_scan_item = prepare_scan_item
+        self.settings = settings
+        self.hooks = hooks
+        self.handoff = handoff
         self.collected_photo_ids = collected_photo_ids
-        self.effective_thumb_cache_dir = effective_thumb_cache_dir
-        self.effective_vireo_dir = effective_vireo_dir
-        self.final_destination = final_destination
-        self.missing_originals_invalidator = missing_originals_invalidator
-        self.remote_archive = remote_archive
-        self.skip_scan = skip_scan
-        self.snapshot_paths = snapshot_paths
         # Dedupes `_on_scanned_photo` by photo_id so a rescan that sees
         # both members of a RAW/JPEG pair (the RAW through its own row,
         # the companion JPEG under the same owner id via
@@ -333,7 +342,7 @@ class _ScanPass:
         self.effective_cfg = thread_db.get_effective_config(cfg.load())
         self.pipeline_cfg = self.effective_cfg.get("pipeline", {})
 
-        if self.skip_scan:
+        if self.settings.skip_scan:
             self._repair_collection_metadata()
             return
 
@@ -379,16 +388,16 @@ class _ScanPass:
                 # already invalidate here — mirror that for
                 # pipeline scans so GET /api/photos/missing does
                 # not keep serving the pre-scan photo list.
-                if self.missing_originals_invalidator is not None:
+                if self.hooks.missing_originals_invalidator is not None:
                     try:
-                        self.missing_originals_invalidator()
+                        self.hooks.missing_originals_invalidator()
                     except Exception:
                         log.exception(
                             "Failed to invalidate missing-originals "
                             "cache for %s",
                             scanned_root,
                         )
-        self.put_scan_item(self.sentinel)
+        self.handoff.put_scan_item(self.handoff.sentinel)
         run.update_stages(run.runner, run.job["id"], run.stages)
 
     # -- scanner callbacks and shared step updates -------------------
@@ -427,7 +436,7 @@ class _ScanPass:
         self._collected_ids.add(photo_id)
         # Abort/pause-aware: a blocking put would wedge the scanner
         # if the thumbnail consumer parked or failed on a full queue.
-        self.put_scan_item((photo_id, canonical))
+        self.handoff.put_scan_item((photo_id, canonical))
         run.stages["scan"]["count"] = len(self.collected_photo_ids)
         run.runner.update_step(run.job["id"], "scan",
                                current_file=os.path.basename(canonical))
@@ -598,7 +607,7 @@ class _ScanPass:
         # (pairing runs at the end), so clearing per-invocation keeps the
         # pair/companion dedup inside one pass intact.
         self._reported_photo_ids.clear()
-        if (self.prepare_scan_item is not None
+        if (self.handoff.prepare_scan_item is not None
                 and hooks.photo == self._on_scanned_photo):
             hooks = replace(hooks, photo=_ScannedPhotoCallback(self))
         self.do_scan(
@@ -607,8 +616,8 @@ class _ScanPass:
                 options,
                 incremental=True,
                 extract_full_metadata=self.pipeline_cfg.get("extract_full_metadata", True),
-                vireo_dir=self.effective_vireo_dir,
-                thumb_cache_dir=self.effective_thumb_cache_dir,
+                vireo_dir=self.settings.effective_vireo_dir,
+                thumb_cache_dir=self.settings.effective_thumb_cache_dir,
             ),
             hooks=replace(
                 hooks,
@@ -654,14 +663,14 @@ class _ScanPass:
         nothing's broken, we keep the historical "Skipped" summary.
         """
         run = self.run
-        coll_photos = self._db().get_collection_photos(
+        coll_photos = self._db().collections.get_photos(
             run.collection_id, per_page=999999,
         )
         # Respect the user's preview-time exclusions: photos removed
         # from this run must not be rescanned or have their metadata
         # rewritten as a side effect of repair.
-        in_scope_photos = self.filter_excluded(coll_photos)
-        broken = self.find_broken_metadata_folders(
+        in_scope_photos = self.hooks.filter_excluded(coll_photos)
+        broken = self.hooks.find_broken_metadata_folders(
             self.thread_db, [p["id"] for p in in_scope_photos],
         )
         if not broken:
@@ -671,7 +680,7 @@ class _ScanPass:
                 summary="Skipped (using collection)",
             )
             run.update_stages(run.runner, run.job["id"], run.stages)
-            self.put_scan_item(self.sentinel)
+            self.handoff.put_scan_item(self.handoff.sentinel)
             return
 
         total_broken = sum(len(paths) for _, paths in broken)
@@ -691,7 +700,7 @@ class _ScanPass:
 
         if self.cancel_requested():
             self.mark_scan_cancelled()
-            self.put_scan_item(self.sentinel)
+            self.handoff.put_scan_item(self.handoff.sentinel)
             return
 
         summary = f"{total_broken} photos repaired"
@@ -706,7 +715,7 @@ class _ScanPass:
         run.runner.update_step(
             run.job["id"], "scan", status="completed", summary=summary,
         )
-        self.put_scan_item(self.sentinel)
+        self.handoff.put_scan_item(self.handoff.sentinel)
 
     def _on_repaired_photo(self, photo_id, path):
         # Display-only callback for the repair path: updates the
@@ -953,7 +962,7 @@ class _ScanPass:
                 status="completed", summary="Skipped",
             )
         run.abort.set()
-        self.put_scan_item(self.sentinel)
+        self.handoff.put_scan_item(self.handoff.sentinel)
 
     def _run_storage_preflight(self, sources):
         """Check the staging and archive volumes before any copying.
@@ -968,12 +977,12 @@ class _ScanPass:
         run.update_stages(run.runner, run.job["id"], run.stages)
 
         try:
-            if self.remote_archive is not None and not self._check_remote_archive():
+            if self.settings.remote_archive is not None and not self._check_remote_archive():
                 return False
             if not self._check_tracked_destination():
                 return False
             archive_parent = archive_space_path = None
-            if self.remote_archive is None:
+            if self.settings.remote_archive is None:
                 checked = self._check_local_archive_parent()
                 if checked is None:
                     return False
@@ -1017,7 +1026,7 @@ class _ScanPass:
         """Refuse a remote archive with no GNU rsync or no connection."""
         import move as move_mod
 
-        remote_archive = self.remote_archive
+        remote_archive = self.settings.remote_archive
         # Refuse BEFORE staging/processing hours of
         # work, in the same spirit as the local
         # archive-parent checks below: a missing GNU
@@ -1086,7 +1095,7 @@ class _ScanPass:
             _path_equal_or_descends,
             _tracked_destination_overlap,
         )
-        final_destination = self.final_destination
+        final_destination = self.settings.final_destination
         # For a remote archive, final_destination is the
         # catalog-facing MOUNT path (see where
         # remote_archive is resolved) — the tracked check
@@ -1139,7 +1148,7 @@ class _ScanPass:
         legitimately be unmounted while archiving
         over SSH (that's the point of this mode).
         """
-        final_destination = self.final_destination
+        final_destination = self.settings.final_destination
         archive_parent = os.path.dirname(
             os.path.normpath(final_destination),
         )
@@ -1169,8 +1178,8 @@ class _ScanPass:
             else archive_parent
         )
         missing_mount_root = (
-            self.missing_archive_mount_root(final_destination)
-            or self.missing_archive_mount_root(archive_parent)
+            self.hooks.missing_archive_mount_root(final_destination)
+            or self.hooks.missing_archive_mount_root(archive_parent)
         )
         if missing_mount_root:
             self._bail_storage(
@@ -1195,7 +1204,7 @@ class _ScanPass:
 
         Returns False after ``_bail_storage`` refused the run.
         """
-        if self.remote_archive is not None:
+        if self.settings.remote_archive is not None:
             # The conflict report walks the destination
             # tree, which for a remote archive lives on
             # the NAS and isn't locally walkable. The
@@ -1220,12 +1229,12 @@ class _ScanPass:
         # — ingest will not copy it, so it cannot
         # conflict at archive time.
         archive_report = archive_conflict_report(
-            self.final_destination,
+            self.settings.final_destination,
             selected_files,
             self.run.params.folder_template,
             duplicate_checker=self._fresh_checker(),
             indexed_paths=self._indexed_archive_paths(
-                self.final_destination,
+                self.settings.final_destination,
             ),
         )
         archive_conflicts = (
@@ -1347,7 +1356,7 @@ class _ScanPass:
                 selected_files, self._fresh_checker(),
             )
         source_bytes = total_file_bytes(planning_files)
-        if self.remote_archive is not None:
+        if self.settings.remote_archive is not None:
             return self._plan_remote_storage(source_bytes)
 
         from local_processing import existing_archive_bytes, storage_plan
@@ -1359,7 +1368,7 @@ class _ScanPass:
         # already published so the preflight doesn't
         # reject a retry whose remaining delta would fit.
         existing_bytes = existing_archive_bytes(
-            self.final_destination,
+            self.settings.final_destination,
             planning_files,
             run.params.folder_template,
         )
@@ -1389,7 +1398,7 @@ class _ScanPass:
         )
         from move import _remote_free_bytes
 
-        remote_archive = self.remote_archive
+        remote_archive = self.settings.remote_archive
         remote_summary_bits = []
         plan = storage_plan(
             self.run.params.destination, source_bytes,
@@ -1456,16 +1465,16 @@ class _ScanPass:
         run.result["local_processing"] = {
             **plan,
             "staging_destination": run.params.destination,
-            "final_destination": self.final_destination,
+            "final_destination": self.settings.final_destination,
         }
-        if self.remote_archive is not None:
-            target = self.remote_archive["target"]
+        if self.settings.remote_archive is not None:
+            target = self.settings.remote_archive["target"]
             run.result["local_processing"]["remote"] = {
                 "target_id": target["id"],
                 "target_name": target["name"],
                 "host": target["host"],
                 "user": target["user"],
-                "ssh_destination": self.remote_archive["ssh_final"],
+                "ssh_destination": self.settings.remote_archive["ssh_final"],
                 "free_space_checked": (
                     plan["archive_free_bytes"] is not None
                 ),
@@ -1480,14 +1489,14 @@ class _ScanPass:
         # drive) than the staging volume running out
         # (free space on ~/.vireo or batch later).
         if not plan.get("archive_enough", True):
-            if self.remote_archive is not None:
+            if self.settings.remote_archive is not None:
                 self._bail_storage(
                     "Remote archive needs about "
                     f"{format_bytes(plan['archive_required_bytes'])}, "
                     "but only "
                     f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
                     "is free at "
-                    f"{self.remote_archive['display']} after "
+                    f"{self.settings.remote_archive['display']} after "
                     "the free-space reserve. Free space "
                     "on the remote volume or pick a "
                     "different target or subpath."
@@ -1586,7 +1595,7 @@ class _ScanPass:
         # re-surfaced by a later banner probe). Skipping it at
         # scan time keeps it uncataloged so the next probe
         # rediscovers it.
-        snapshot_paths = self.snapshot_paths
+        snapshot_paths = self.settings.snapshot_paths
         for src_folder in sources:
             self.scanned_roots.append(src_folder)
             snapshot_restrict_dirs = None
@@ -1714,7 +1723,7 @@ def _collection_stage_body(
     from datetime import datetime as dt
 
     name = "Pipeline " + dt.now().strftime("%Y-%m-%d %H:%M")
-    run.collection_id = thread_db.add_collection(
+    run.collection_id = thread_db.collections.add(
         name,
         json.dumps([{"field": "photo_ids", "value": collected_photo_ids}]),
     )

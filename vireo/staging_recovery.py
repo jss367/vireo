@@ -121,16 +121,7 @@ def _resolve_entry(vireo_dir: str, cleanup_root: str, pause_callback=None) -> St
 
 def _catalog_candidates(db, filename: str, size: int, staging_root: str) -> list[dict]:
     ws_id = db.require_workspace_id()
-    rows = db.conn.execute(
-        """SELECT p.id AS photo_id, p.filename, p.file_size, f.path AS folder_path
-             FROM photos p
-             JOIN folders f ON f.id = p.folder_id
-             JOIN photo_workspace_visibility wf ON wf.photo_id = p.id
-                                      AND wf.workspace_id = ?
-            WHERE p.filename = ? AND p.file_size = ?
-            ORDER BY f.path, p.id""",
-        (ws_id, filename, int(size)),
-    ).fetchall()
+    rows = db.photo_visibility.name_size_matches(ws_id, filename, size)
     out = []
     for row in rows:
         folder_path = row["folder_path"]

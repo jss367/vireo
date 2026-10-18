@@ -1432,7 +1432,7 @@ def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
     """
     from unittest.mock import MagicMock
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -1472,14 +1472,15 @@ def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
         photos=photos,
         folders=folders,
         detection_map=detection_map,
-        existing_preds=set(),
-        clf=mock_clf,
-        model_type="bioclip",
-        model_name="BioCLIP",
+        model=ClassifierModel(
+            clf=mock_clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            labels_fingerprint="fp-x",
+        ),
         runner=runner,
         job=job,
         db=mock_db,
-        labels_fingerprint="fp-x",
     )
 
     # The classifier must have actually been invoked — if the gate
@@ -1503,7 +1504,7 @@ def test_classify_photos_honors_measured_zero_candidate_run(tmp_path):
     """
     from unittest.mock import MagicMock
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -1536,14 +1537,15 @@ def test_classify_photos_honors_measured_zero_candidate_run(tmp_path):
         photos=photos,
         folders=folders,
         detection_map=detection_map,
-        existing_preds=set(),
-        clf=mock_clf,
-        model_type="bioclip",
-        model_name="BioCLIP",
+        model=ClassifierModel(
+            clf=mock_clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            labels_fingerprint="fp-x",
+        ),
         runner=runner,
         job=job,
         db=mock_db,
-        labels_fingerprint="fp-x",
     )
 
     assert not mock_clf.classify_batch_with_embedding.called, (
@@ -1577,7 +1579,7 @@ def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch)
                       model="BioCLIP", labels_fingerprint="legacy")
 
     # Seed a collection the classify path can consume.
-    coll_id = db.add_collection("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
+    coll_id = db.collections.add("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
 
     # Force the classifier constructor to raise — simulates
     # weight-corruption or missing-weights at load time.
@@ -1656,7 +1658,7 @@ def test_reclassify_skips_purge_when_cancelled_during_model_load(tmp_path, monke
     db.add_prediction(det_id, species="Robin", confidence=0.9,
                       model="BioCLIP", labels_fingerprint="legacy")
 
-    coll_id = db.add_collection("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
+    coll_id = db.collections.add("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
 
     runner = FakeRunner()
 
@@ -1780,7 +1782,7 @@ def test_reclassify_finalizes_steps_on_resource_wait_cancel_during_load(
         model="BioCLIP", labels_fingerprint="legacy",
     )
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -1887,7 +1889,7 @@ def test_classify_factory_cancel_check_uses_pure_cancel_probe(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -2006,7 +2008,7 @@ def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
     """
     from unittest.mock import MagicMock
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -2032,14 +2034,15 @@ def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
         photos=photos,
         folders=folders,
         detection_map={},  # no real detections → full-image branch
-        existing_preds=set(),
-        clf=mock_clf,
-        model_type="bioclip",
-        model_name="BioCLIP",
+        model=ClassifierModel(
+            clf=mock_clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            labels_fingerprint="fp-x",
+        ),
         runner=runner,
         job=job,
         db=mock_db,
-        labels_fingerprint="fp-x",
     )
 
     assert skipped == 1, "cached full-image detection should count as skipped"
@@ -2064,7 +2067,7 @@ def test_classify_photos_honors_measured_zero_candidate_full_image_run(tmp_path)
     """
     from unittest.mock import MagicMock
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -2095,14 +2098,15 @@ def test_classify_photos_honors_measured_zero_candidate_full_image_run(tmp_path)
         photos=photos,
         folders=folders,
         detection_map={},  # no real detections → full-image branch
-        existing_preds=set(),
-        clf=mock_clf,
-        model_type="bioclip",
-        model_name="BioCLIP",
+        model=ClassifierModel(
+            clf=mock_clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            labels_fingerprint="fp-x",
+        ),
         runner=runner,
         job=job,
         db=mock_db,
-        labels_fingerprint="fp-x",
     )
 
     mock_db.model_runs.has_classifier_match_score.assert_called_with(999, "BioCLIP", "fp-x")
@@ -3930,7 +3934,7 @@ def test_classify_photos_iterates_over_detections(tmp_path):
     from unittest.mock import MagicMock, patch
 
     import numpy as np
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -3954,7 +3958,6 @@ def test_classify_photos_iterates_over_detections(tmp_path):
              "confidence": 0.80, "category": "animal"},
         ]
     }
-    existing_preds = set()
 
     fake_embedding = np.ones(512, dtype=np.float32)
     fake_preds_1 = [{"species": "Northern Cardinal", "score": 0.95, "taxonomy": None}]
@@ -3976,10 +3979,11 @@ def test_classify_photos_iterates_over_detections(tmp_path):
             photos=photos,
             folders=folders,
             detection_map=detection_map,
-            existing_preds=existing_preds,
-            clf=mock_clf,
-            model_type="bioclip",
-            model_name="BioCLIP",
+            model=ClassifierModel(
+                clf=mock_clf,
+                model_type="bioclip",
+                model_name="BioCLIP",
+            ),
             runner=runner,
             job=job,
             db=mock_db,
@@ -4002,7 +4006,7 @@ def test_classify_photos_new_photo(tmp_path):
     from unittest.mock import MagicMock, patch
 
     import numpy as np
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -4018,7 +4022,6 @@ def test_classify_photos_new_photo(tmp_path):
     ]
     folders = {10: str(tmp_path)}
     detection_map = {}
-    existing_preds = set()
 
     fake_embedding = np.ones(512, dtype=np.float32)
     fake_preds = [{"species": "Northern Cardinal", "score": 0.95, "taxonomy": None}]
@@ -4037,10 +4040,11 @@ def test_classify_photos_new_photo(tmp_path):
             photos=photos,
             folders=folders,
             detection_map=detection_map,
-            existing_preds=existing_preds,
-            clf=mock_clf,
-            model_type="bioclip",
-            model_name="BioCLIP",
+            model=ClassifierModel(
+                clf=mock_clf,
+                model_type="bioclip",
+                model_name="BioCLIP",
+            ),
             runner=runner,
             job=job,
             db=mock_db,
@@ -4072,7 +4076,7 @@ def test_classify_photos_skips_existing(tmp_path):
     """
     from unittest.mock import MagicMock
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -4103,10 +4107,11 @@ def test_classify_photos_skips_existing(tmp_path):
         photos=photos,
         folders=folders,
         detection_map=detection_map,
-        existing_preds=set(),  # dead parameter post-refactor
-        clf=mock_clf,
-        model_type="bioclip",
-        model_name="BioCLIP",
+        model=ClassifierModel(
+            clf=mock_clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+        ),
         runner=runner,
         job=job,
         db=mock_db,
@@ -4763,7 +4768,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
 
     # Set up mock DB
     mock_db_instance = MagicMock()
-    mock_db_instance.get_collection_photos.return_value = [
+    mock_db_instance.collections.get_photos.return_value = [
         {"id": 1, "filename": "bird.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
     ]
@@ -4835,7 +4840,7 @@ def test_api_route_calls_run_classify_job(app_and_db):
 
     # Create a collection so the request is valid
     import json as _json
-    col_id = db.add_collection("Test", _json.dumps([{"type": "all"}]))
+    col_id = db.collections.add("Test", _json.dumps([{"type": "all"}]))
 
     captured = {}
 
@@ -5023,7 +5028,7 @@ def _setup_two_photo_classify_workspace(tmp_path):
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "static",
         json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
     )
@@ -5273,7 +5278,7 @@ def test_classify_job_short_circuits_when_all_photos_skipped(tmp_path):
     # Tag p1 with a genre keyword so the skip-gate filters it out.
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),
     )
@@ -5350,7 +5355,7 @@ def test_classify_job_zero_photos_skips_model_resolution(tmp_path):
     # Tag with a genre keyword so the subject-skip gate filters it out.
     scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "static-only-tagged",
         json.dumps([{"field": "photo_ids", "value": [p1]}]),
     )
@@ -5687,7 +5692,7 @@ def test_classify_photos_stops_when_cancelled(tmp_path):
     """A cancelled job exits the classification loop without inference."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     runner.cancelled = True
@@ -5700,10 +5705,11 @@ def test_classify_photos_stops_when_cancelled(tmp_path):
                      "timestamp": None}],
             folders={10: str(tmp_path)},
             detection_map={},
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="test-model",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="test-model",
+            ),
             runner=runner,
             job=job,
             db=MagicMock(),
@@ -5723,7 +5729,7 @@ def test_classify_photos_drops_pending_batch_on_mid_loop_cancel(tmp_path):
     cancelled."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     # Flip cancelled to True after the first photo has been processed
     # (queued into batch, but batch < _BATCH_SIZE so not yet flushed).
@@ -5765,10 +5771,11 @@ def test_classify_photos_drops_pending_batch_on_mid_loop_cancel(tmp_path):
             photos=photos,
             folders=folders,
             detection_map={},
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="test-model",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="test-model",
+            ),
             runner=runner,
             job=job,
             db=mock_db,
@@ -5830,7 +5837,7 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
     """
     from unittest.mock import MagicMock, patch
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -5859,14 +5866,15 @@ def test_classify_photos_reclassify_clears_predictions_per_photo(tmp_path):
             photos=photos,
             folders=folders,
             detection_map={},
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="BioCLIP",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="BioCLIP",
+                labels_fingerprint="fp-x",
+            ),
             runner=runner,
             job=job,
             db=mock_db,
-            labels_fingerprint="fp-x",
             reclassify=True,
         )
 
@@ -5908,7 +5916,7 @@ def test_classify_photos_no_reclassify_skips_predictions_clear(tmp_path):
     every normal pass."""
     from unittest.mock import MagicMock, patch
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     job = _make_job()
@@ -5933,14 +5941,15 @@ def test_classify_photos_no_reclassify_skips_predictions_clear(tmp_path):
             photos=photos,
             folders=folders,
             detection_map={},
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="BioCLIP",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="BioCLIP",
+                labels_fingerprint="fp-x",
+            ),
             runner=runner,
             job=job,
             db=mock_db,
-            labels_fingerprint="fp-x",
             reclassify=False,
         )
 
@@ -5962,7 +5971,7 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
     from unittest.mock import patch
 
     import config as cfg
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
     from db import Database
 
     # Hermetic global config (per repo testing conventions).
@@ -6038,14 +6047,15 @@ def test_classify_photos_reclassify_preserves_unclassified_tail_on_cancel(tmp_pa
             photos=photos,
             folders=folders,
             detection_map=detection_map,
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="BioCLIP",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="BioCLIP",
+                labels_fingerprint="legacy",
+            ),
             runner=runner,
             job=job,
             db=db,
-            labels_fingerprint="legacy",
             reclassify=True,
         )
 
@@ -6078,7 +6088,7 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
     from unittest.mock import patch
 
     import config as cfg
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
     from db import Database
 
     # Hermetic global config (per repo testing conventions).
@@ -6123,14 +6133,15 @@ def test_classify_photos_full_image_fallback_replaces_stale_predictions_on_recla
                      "timestamp": None}],
             folders={folder_id: str(tmp_path)},
             detection_map={},
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="BioCLIP",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="BioCLIP",
+                labels_fingerprint="legacy",
+            ),
             runner=runner,
             job=job,
             db=db,
-            labels_fingerprint="legacy",
             reclassify=True,
         )
 
@@ -6175,7 +6186,7 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
     from unittest.mock import MagicMock, patch
 
     import config as cfg
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
     from db import Database
 
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
@@ -6218,14 +6229,15 @@ def test_classify_photos_full_image_fallback_clears_stale_predictions_across_fin
                      "timestamp": None}],
             folders={folder_id: str(tmp_path)},
             detection_map={},
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="BioCLIP",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="BioCLIP",
+                labels_fingerprint="fp-new",
+            ),
             runner=runner,
             job=job,
             db=db,
-            labels_fingerprint="fp-new",
             reclassify=True,
         )
 
@@ -6268,7 +6280,7 @@ def test_classify_photos_reclassify_flushes_pending_batch_on_cancel(tmp_path):
     """
     from unittest.mock import MagicMock, patch
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
     from db import Database
 
     db_path = str(tmp_path / "test.db")
@@ -6343,14 +6355,15 @@ def test_classify_photos_reclassify_flushes_pending_batch_on_cancel(tmp_path):
             photos=photos,
             folders=folders,
             detection_map=detection_map,
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="BioCLIP",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="BioCLIP",
+                labels_fingerprint="legacy",
+            ),
             runner=runner,
             job=job,
             db=db,
-            labels_fingerprint="legacy",
             reclassify=True,
         )
 
@@ -6377,7 +6390,7 @@ def test_classify_photos_no_reclassify_drops_pending_batch_on_cancel(tmp_path):
     """
     from unittest.mock import MagicMock, patch
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     class FlipRunner(FakeRunner):
         def __init__(self):
@@ -6411,10 +6424,11 @@ def test_classify_photos_no_reclassify_drops_pending_batch_on_cancel(tmp_path):
             photos=photos,
             folders=folders,
             detection_map={},
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="test-model",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="test-model",
+            ),
             runner=runner,
             job=job,
             db=mock_db,
@@ -6441,7 +6455,7 @@ def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
     """
     from unittest.mock import MagicMock, patch
 
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     runner = FakeRunner()
     runner.cancelled = True  # post-detect cancel signal already set
@@ -6472,14 +6486,15 @@ def test_classify_photos_finish_cleared_only_ignores_cancel(tmp_path):
             photos=photos,
             folders=folders,
             detection_map=detection_map,
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="BioCLIP",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="BioCLIP",
+                labels_fingerprint="fp-x",
+            ),
             runner=runner,
             job=job,
             db=mock_db,
-            labels_fingerprint="fp-x",
             reclassify=True,
             finish_cleared_only=True,
         )
@@ -6526,7 +6541,7 @@ def test_run_classify_job_reclassify_cancel_after_detect_classifies_processed(tm
     # cancel-recovery path; the "untouched" one was never reached by
     # detection so it has no entry in detection_map.
     mock_db_instance = MagicMock()
-    mock_db_instance.get_collection_photos.return_value = [
+    mock_db_instance.collections.get_photos.return_value = [
         {"id": 1, "filename": "processed.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
         {"id": 2, "filename": "untouched.jpg", "folder_id": 10,
@@ -6651,7 +6666,7 @@ def test_run_classify_job_finish_cleared_only_suspends_resource_cancel(tmp_path)
     job = _make_job()
 
     mock_db_instance = MagicMock()
-    mock_db_instance.get_collection_photos.return_value = [
+    mock_db_instance.collections.get_photos.return_value = [
         {"id": 1, "filename": "processed.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
     ]
@@ -6773,7 +6788,7 @@ def test_classify_photos_reclassify_cancel_flushes_pending_batch(tmp_path):
     from unittest.mock import MagicMock, patch
 
     import numpy as np
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     class MidClassifyCancelRunner(FakeRunner):
         def __init__(self):
@@ -6856,16 +6871,17 @@ def test_classify_photos_reclassify_cancel_flushes_pending_batch(tmp_path):
             photos=photos,
             folders=folders,
             detection_map=detection_map,
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="TestModel",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="TestModel",
+                top_k=1,
+                labels_fingerprint="fp",
+            ),
             runner=runner,
             job=job,
             db=fake_db,
-            top_k=1,
             vireo_dir=str(tmp_path),
-            labels_fingerprint="fp",
             reclassify=True,
             finish_cleared_only=False,
         )
@@ -6900,7 +6916,7 @@ def test_classify_photos_reclassify_cancel_mid_batch_flush_preserves_cleared(tmp
 
     import numpy as np
     from classify_job import _BATCH_SIZE
-    from classify_job.classify_pass import _classify_photos
+    from classify_job.classify_pass import ClassifierModel, _classify_photos
 
     class NeverCancelRunner(FakeRunner):
         def is_cancelled(self, job_id):
@@ -6975,16 +6991,17 @@ def test_classify_photos_reclassify_cancel_mid_batch_flush_preserves_cleared(tmp
             photos=photos,
             folders=folders,
             detection_map=detection_map,
-            existing_preds=set(),
-            clf=clf,
-            model_type="bioclip",
-            model_name="TestModel",
+            model=ClassifierModel(
+                clf=clf,
+                model_type="bioclip",
+                model_name="TestModel",
+                top_k=1,
+                labels_fingerprint="fp",
+            ),
             runner=runner,
             job=job,
             db=fake_db,
-            top_k=1,
             vireo_dir=str(tmp_path),
-            labels_fingerprint="fp",
             reclassify=True,
             finish_cleared_only=False,
         )
@@ -7043,7 +7060,7 @@ def test_run_classify_job_reclassify_cancel_classifies_empty_scene_processed(tmp
     mock_db_instance = MagicMock()
     # Two photos: photo 1 was re-detected as empty (state mutated),
     # photo 2 was never reached.
-    mock_db_instance.get_collection_photos.return_value = [
+    mock_db_instance.collections.get_photos.return_value = [
         {"id": 1, "filename": "empty.jpg", "folder_id": 10,
          "timestamp": "2024-01-15T10:00:00"},
         {"id": 2, "filename": "untouched.jpg", "folder_id": 10,
@@ -7176,7 +7193,7 @@ def test_empty_collection_finalizes_all_step_rows(tmp_path):
     db = Database(db_path)
     ws = db.ensure_default_workspace()
     db.set_active_workspace(ws)
-    coll_id = db.add_collection("empty", "[]")
+    coll_id = db.collections.add("empty", "[]")
 
     runner = FakeRunner()
     job = _make_job()
@@ -7219,7 +7236,7 @@ def test_precancelled_job_finalizes_all_step_rows(tmp_path):
         folder_id, "a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + "]}]",
     )
 
@@ -7948,7 +7965,7 @@ def test_finalize_cached_only_respects_workspace_detector_threshold(
     db.model_runs.record_classifier_run(det_ids[0], "BioCLIP", "fp-cached",
                              prediction_count=1)
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -8016,7 +8033,7 @@ def test_cached_only_shortcut_rearms_timm_label_desc_heal(
     db.model_runs.record_classifier_run(
         det_id, "timm-inat21", "fp-cached", prediction_count=1,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8131,7 +8148,7 @@ def test_finalize_cached_only_includes_zero_confidence_full_image_anchor(
     db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "empty", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8188,7 +8205,7 @@ def test_finalize_cached_only_treats_null_category_as_animal(
         detection_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
     db.conn.commit()
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "legacy", json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
 
@@ -8252,7 +8269,7 @@ def test_cached_only_path_publishes_label_source_on_classify_step(
     db.model_runs.record_classifier_run(
         det_id, "BioCLIP", "fp-cached", prediction_count=1,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8373,7 +8390,7 @@ def test_cached_only_path_publishes_source_when_peek_fails(
         sources=["/imported/california.txt"],
         label_count=1327,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8461,7 +8478,7 @@ def test_cached_only_path_names_source_of_a_run_that_matched_nothing(
         sources=["/imported/california.txt"],
         label_count=1327,
     )
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
 
@@ -8725,7 +8742,7 @@ def test_run_classify_job_short_circuits_when_cache_covers_every_photo(
     db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                              prediction_count=1)
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -8797,7 +8814,7 @@ def test_run_classify_job_rejects_unknown_model_id_before_cache_shortcut(
     db.model_runs.record_classifier_run(det_id, "SomeOtherModel", "fp-x",
                              prediction_count=1)
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 
@@ -8870,7 +8887,7 @@ def test_run_classify_job_reconciles_group_metadata_on_reuse(
         db.model_runs.record_classifier_run(det_id, "BioCLIP", "fp-cached",
                                  prediction_count=1)
 
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c",
         '[{"field":"photo_ids","value":['
         + str(pid_a) + ',' + str(pid_b) + ']}]',
@@ -9325,7 +9342,7 @@ def test_classify_factory_pause_parks_outside_load_lock_then_retries(
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
          "confidence": 0.9, "category": "animal"},
     ], detector_model="megadetector-v6")
-    coll_id = db.add_collection(
+    coll_id = db.collections.add(
         "c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]',
     )
 

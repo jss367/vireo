@@ -1,14 +1,17 @@
 """Persistence for the on-disk caches: the preview LRU and offline originals.
 
-It also reads the "do not adopt this preview" markers in
-``preview_cache_invalidations``; ``preview_cache`` still creates that table
-lazily and writes it.
+It also reads and writes the "do not adopt this preview" markers in
+``preview_cache_invalidations`` (``preview_cache.mark_preview_cache_invalid``
+decides when to commit them).
 
 The caches are catalog-wide (keyed by photo id, not by workspace), so the
 repository takes no workspace id. The lock-retry helpers
 (``execute_with_retry`` / ``commit_with_retry``) live in ``db``; the façade
 passes them in so this module imports no ``db`` code and a monkeypatch of
 ``db.commit_with_retry`` still reaches the offline-original writes.
+
+The thumbnail cache's catalog column, ``photos.thumb_path``, is reconciled
+with the files on disk here too, for ``thumbnails.backfill_thumb_paths``.
 
 Callers reach it as ``db.caches`` (a fresh repository per access, see
 ``Database.caches``); there are no forwarding wrappers on ``Database``.
@@ -291,24 +294,55 @@ class CachesRepository:
             "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
         ).fetchone()["c"]
 
+    def mark_preview_invalidated(self, photo_id: int, size: int | str) -> None:
+        """Record the "do not adopt this preview" marker; the caller commits."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO preview_cache_invalidations (photo_id, size) "
+            "VALUES (?, ?)",
+            (photo_id, size),
+        )
+
     def clear_preview_invalidation(self, photo_id: int, size: int | str) -> None:
         self.conn.execute(
             "DELETE FROM preview_cache_invalidations WHERE photo_id=? AND size=?",
             (photo_id, size),
         )
 
+    def photo_exists(self, photo_id: int) -> bool:
+        """True when the catalog still has this photo.
+
+        ``preview_cache`` rows reference ``photos``; the startup preview
+        adoption checks this before tracking (or instead unlinks) a file.
+        """
+        return self.conn.execute(
+            "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+        ).fetchone() is not None
+
     def clear_thumbnail_path(self, pid: int) -> None:
         self.conn.execute(
             "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
         )
 
+    def thumbnail_path_rows(self) -> list[sqlite3.Row]:
+        """``(id, thumb_path)`` of every photo, for the thumb_path reconciliation."""
+        return self.conn.execute(
+            "SELECT id, thumb_path FROM photos"
+        ).fetchall()
+
     def set_thumbnail_paths(self, pairs: Iterable[tuple[str, int]]) -> None:
-        """Record each ``(thumb_path, photo_id)`` pair's thumbnail filename,
-        in the caller's transaction (the pipeline's thumbnail stage batches
-        them and commits after)."""
+        """Set ``thumb_path`` for ``(thumb_path, photo_id)`` pairs; the caller
+        commits (the pipeline's thumbnail stage batches them, and the
+        thumb_path reconciliation stamps them in one transaction)."""
         self.conn.executemany(
             "UPDATE photos SET thumb_path=? WHERE id=?",
             pairs,
+        )
+
+    def clear_thumbnail_paths(self, ids: Iterable[tuple[int]]) -> None:
+        """Clear ``thumb_path`` for ``(photo_id,)`` rows; the caller commits."""
+        self.conn.executemany(
+            "UPDATE photos SET thumb_path=NULL WHERE id=?",
+            ids,
         )
 
     def delete_preview_rows(self, removed_preview_rows: Sequence[tuple[int, int]]) -> None:

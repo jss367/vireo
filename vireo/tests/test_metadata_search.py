@@ -85,7 +85,7 @@ def test_boolean_search_matches_catalog(catalog):
     ]
     for (query, expected), parsed in zip(cases, parse_queries([q for q, _ in cases]), strict=True):
         assert "error" not in parsed, (query, parsed)
-        assert set(db.query_photo_ids(parsed["rules"])) == {ids[name] for name in expected}, query
+        assert set(db.collections.query_photo_ids(parsed["rules"])) == {ids[name] for name in expected}, query
 
 
 @pytest.mark.parametrize("term, names", [
@@ -105,9 +105,9 @@ def test_boolean_search_matches_catalog(catalog):
 def test_metadata_values_and_negative_complement(catalog, term, names):
     db, ids = catalog
     rule = {"field": "metadata", "op": "contains", "value": term}
-    assert set(db.query_photo_ids([rule])) == {ids[name] for name in names}
+    assert set(db.collections.query_photo_ids([rule])) == {ids[name] for name in names}
     rule["op"] = "not_contains"
-    assert set(db.query_photo_ids([rule])) == {pid for name, pid in ids.items() if name not in names}
+    assert set(db.collections.query_photo_ids([rule])) == {pid for name, pid in ids.items() if name not in names}
 
 
 def test_invalid_search_syntax():
@@ -130,8 +130,8 @@ def test_keyword_scope_matches_keyword_names_only(catalog):
     [keyword] = parse_queries(['"Lake visit" OR Perched'], {"field": "keyword"})
     assert {r["field"] for r in keyword["rules"][0]["rules"]} == {"keyword"}
     # The folder name matches every photo as metadata, never as a keyword.
-    assert set(db.query_photo_ids(metadata["rules"])) == set(ids.values())
-    assert set(db.query_photo_ids(keyword["rules"])) == {ids["hawk"], ids["owl"]}
+    assert set(db.collections.query_photo_ids(metadata["rules"])) == set(ids.values())
+    assert set(db.collections.query_photo_ids(keyword["rules"])) == {ids["hawk"], ids["owl"]}
 
 
 def test_number_search_matches_where_a_number_starts(catalog):
@@ -160,7 +160,7 @@ def test_number_search_matches_where_a_number_starts(catalog):
     db.conn.commit()
 
     def search(term):
-        return set(db.query_photo_ids([{"field": "metadata", "op": "contains", "value": term}]))
+        return set(db.collections.query_photo_ids([{"field": "metadata", "op": "contains", "value": term}]))
 
     assert search("7688") == {filename, file_number}
     assert search("0712") == {filename, file_number, noise}  # folder names are text
@@ -179,7 +179,7 @@ def test_metadata_search_excludes_exiftool_file_size(catalog):
     }), ids["empty"]))
     for term in ("3183", "31837688", "31 MB"):
         rule = {"field": "metadata", "op": "contains", "value": term}
-        assert ids["empty"] not in db.query_photo_ids([rule])
+        assert ids["empty"] not in db.collections.query_photo_ids([rule])
 
 
 @pytest.mark.parametrize("number,term,expected", [
@@ -197,7 +197,7 @@ def test_scalar_numbers_do_not_match_inside_exponents(catalog, number, term, exp
         db.conn.execute("UPDATE photos SET exif_data=? WHERE id=?",
                         (json.dumps({"EXIF": {"Number": number}}), ids["empty"]))
     rule = {"field": "metadata", "op": "contains", "value": term}
-    assert (ids["empty"] in db.query_photo_ids([rule])) == expected
+    assert (ids["empty"] in db.collections.query_photo_ids([rule])) == expected
 
 
 @pytest.mark.parametrize("op,value", [("is", "hawk"), ("contains", ""), ("contains", None),
@@ -205,7 +205,7 @@ def test_scalar_numbers_do_not_match_inside_exponents(catalog, number, term, exp
 def test_invalid_metadata_rules_are_rejected(catalog, op, value):
     db, _ = catalog
     with pytest.raises(ValueError):
-        db.query_photo_ids([{"field": "metadata", "op": op, "value": value}])
+        db.collections.query_photo_ids([{"field": "metadata", "op": op, "value": value}])
 
 
 def test_metadata_search_sees_edits_and_scopes(catalog):
@@ -213,16 +213,16 @@ def test_metadata_search_sees_edits_and_scopes(catalog):
     rules = [{"field": "metadata", "op": "contains", "value": "Perched"}]
     keyword_id = db.conn.execute("SELECT id FROM keywords WHERE name='Perched'").fetchone()[0]
     db.conn.execute("UPDATE keywords SET name='Resting' WHERE id=?", (keyword_id,))
-    assert db.query_photo_ids(rules) == []
+    assert db.collections.query_photo_ids(rules) == []
     rules[0]["value"] = "Resting"
-    assert set(db.query_photo_ids(rules)) == {ids["hawk"], ids["owl"]}
+    assert set(db.collections.query_photo_ids(rules)) == {ids["hawk"], ids["owl"]}
     db.untag_photo(ids["hawk"], keyword_id)
-    assert db.query_photo_ids(rules) == [ids["owl"]]
-    collection = db.add_collection("Resting birds", json.dumps(rules))
-    assert db.count_photos_for_rules([], collection_id=collection) == 1
+    assert db.collections.query_photo_ids(rules) == [ids["owl"]]
+    collection = db.collections.add("Resting birds", json.dumps(rules))
+    assert db.collections.count_photos_for_rules([], collection_id=collection) == 1
     other_ws = db.create_workspace("Other workspace")
     db.set_active_workspace(other_ws)
-    assert db.query_photo_ids(rules) == []
+    assert db.collections.query_photo_ids(rules) == []
 
 
 def test_metadata_search_uses_current_visible_predictions(catalog):
@@ -239,7 +239,7 @@ def test_metadata_search_uses_current_visible_predictions(catalog):
         )
     db.conn.commit()
     def search(value):
-        return db.query_photo_ids([{"field": "metadata", "op": "contains", "value": value}])
+        return db.collections.query_photo_ids([{"field": "metadata", "op": "contains", "value": value}])
     assert search("Old species") == []
     assert search("New species") == [ids["empty"]]
     assert search("Strix nebulosa") == [ids["empty"]]
@@ -268,7 +268,7 @@ def test_metadata_search_ignores_guessed_binomials_on_custom_labels(catalog):
                       taxonomy={"scientific_name": "Amazona viridigenalis"})
 
     def search(value):
-        return db.query_photo_ids([{"field": "metadata", "op": "contains", "value": value}])
+        return db.collections.query_photo_ids([{"field": "metadata", "op": "contains", "value": value}])
     assert search("rhodocorytha") == []
     assert search("Lilac-crowned") == [ids["empty"]]
     assert search("Amazona") == [ids["empty"]]
@@ -298,7 +298,7 @@ def test_metadata_search_ignores_predictions_on_identified_photos(catalog):
     db.conn.commit()
 
     def search(value, op="contains"):
-        return sorted(db.query_photo_ids([{"field": "metadata", "op": op, "value": value}]))
+        return sorted(db.collections.query_photo_ids([{"field": "metadata", "op": op, "value": value}]))
 
     # owl is identified as Barn Owl; hawk only has a non-species keyword and
     # robin only a genus, so their predictions still answer search.
@@ -316,11 +316,11 @@ def test_color_search_is_workspace_scoped_for_shared_photos(catalog):
     folder = db.conn.execute("SELECT folder_id FROM photos WHERE id=?", (ids["robin"],)).fetchone()[0]
     db.add_workspace_folder(other_ws, folder)
     rule = [{"field": "metadata", "op": "contains", "value": "purple"}]
-    assert db.query_photo_ids(rule) == [ids["robin"]]
+    assert db.collections.query_photo_ids(rule) == [ids["robin"]]
     db.set_active_workspace(other_ws)
-    assert db.query_photo_ids(rule) == []
+    assert db.collections.query_photo_ids(rule) == []
     db.set_active_workspace(original_ws)
-    assert db.query_photo_ids(rule) == [ids["robin"]]
+    assert db.collections.query_photo_ids(rule) == [ids["robin"]]
 
 
 @pytest.mark.parametrize("raw_exif, term", [
@@ -349,9 +349,9 @@ def test_exif_prefilter_never_drops_a_rendered_match(catalog, raw_exif, term, in
         db.conn.execute("DELETE FROM photo_exif_search_text WHERE photo_id=?", (ids["robin"],))
     db.conn.commit()
     rule = {"field": "metadata", "op": "contains", "value": term}
-    assert ids["robin"] in db.query_photo_ids([rule])
+    assert ids["robin"] in db.collections.query_photo_ids([rule])
     rule["op"] = "not_contains"
-    assert ids["robin"] not in db.query_photo_ids([rule])
+    assert ids["robin"] not in db.collections.query_photo_ids([rule])
 
 
 @pytest.mark.parametrize("term, shortcut", [
@@ -374,9 +374,9 @@ def test_tag_names_never_match(catalog, indexed):
         db.conn.execute("DELETE FROM photo_exif_search_text WHERE photo_id=?", (ids["robin"],))
     db.conn.commit()
     rule = {"field": "metadata", "op": "contains", "value": "long"}
-    assert ids["robin"] not in db.query_photo_ids([rule])
+    assert ids["robin"] not in db.collections.query_photo_ids([rule])
     rule["value"] = "122 deg"
-    assert ids["robin"] in db.query_photo_ids([rule])
+    assert ids["robin"] in db.collections.query_photo_ids([rule])
 
 
 def test_browse_summary_runs_the_metadata_filter_once(catalog):

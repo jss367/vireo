@@ -1,36 +1,40 @@
 // Threshold tuning: the slider controls and labels, the tuning status and
 // disabled state, loading the config, and preview, recompute and reset.
-// Classic page script; load boot.js after all definitions.
+// ES module.
+
+import { state, MISS_TUNING_CONTROL_IDS } from './state.js';
+import { showToast } from './shared.js';
+import { getSinceParam } from './helpers.js';
+import {
+  addFilterPayloadToBody, cloneMissFilterPayload, missFilterPayload, sameMissFilterPayload,
+} from './filters.js';
+import { applyMissesPayload, loadMisses } from './loading.js';
 
 /** @param {string} text */ function setMissTuningStatus(text) {
   var el = /** @type {HTMLElement} */ (document.getElementById('missTuningStatus'));
   if (el) el.textContent = text || '';
 }
 
-/** @param {boolean} disabled */ function setMissTuningDisabled(disabled) {
+/** @param {boolean} disabled */ export function setMissTuningDisabled(disabled) {
   MISS_TUNING_CONTROL_IDS.forEach(function(id) {
     var el = document.getElementById(id);
     if (el instanceof HTMLInputElement || el instanceof HTMLButtonElement) el.disabled = !!disabled;
   });
 }
 
-function invalidateMissPreview() {
-  previewRequestId++;
-  if (previewTimer) {
-    clearTimeout(previewTimer);
-    previewTimer = null;
+export function invalidateMissPreview() {
+  state.previewRequestId++;
+  if (state.previewTimer) {
+    clearTimeout(state.previewTimer);
+    state.previewTimer = null;
   }
-}
-
-/** @param {string} id */ function percentValue(id) {
-  return parseInt(/** @type {HTMLInputElement} */ (document.getElementById(id)).value, 10) / 100;
 }
 
 /** @param {MissBody} body @param {keyof MissConfig} key @param {string} id @param {number} scale */ function addChangedSliderValue(body, key, id, scale) {
   var raw = parseInt(/** @type {HTMLInputElement} */ (document.getElementById(id)).value, 10);
   var baseline = null;
-  if (missConfig && missConfig[key] != null) {
-    baseline = Math.round(Number(missConfig[key]) * scale);
+  if (state.missConfig && state.missConfig[key] != null) {
+    baseline = Math.round(Number(state.missConfig[key]) * scale);
   }
   if (baseline == null || raw !== baseline) {
     body[key] = raw / scale;
@@ -72,7 +76,7 @@ function updateMissSliderLabels() {
   updateMissSliderLabels();
 }
 
-function installMissSliderHandlers() {
+export function installMissSliderHandlers() {
   [
     'missCfgDetectorFloor',
     'missCfgNoSubject',
@@ -89,20 +93,20 @@ function installMissSliderHandlers() {
   });
 }
 
-async function loadMissConfig() {
-  missConfigLoaded = false;
+export async function loadMissConfig() {
+  state.missConfigLoaded = false;
   setMissTuningDisabled(true);
   try {
     var r = await fetch('/api/misses/config');
     if (!r.ok) throw new Error('http ' + r.status);
-    missConfig = await r.json();
-    originalMissConfig = Object.assign({}, missConfig);
-    if (missConfig) setMissSliders(missConfig);
-    missConfigLoaded = true;
+    state.missConfig = await r.json();
+    state.originalMissConfig = Object.assign({}, state.missConfig);
+    if (state.missConfig) setMissSliders(state.missConfig);
+    state.missConfigLoaded = true;
     // Keep the tuning group frozen when a fail-closed scope is in effect;
     // loadMisses() will re-enable it once a user-supplied replacement
     // filter loads successfully.
-    if (!legacyScopeError && !legacyScopeRecoveryPending) {
+    if (!state.legacyScopeError && !state.legacyScopeRecoveryPending) {
       setMissTuningDisabled(false);
     }
     setMissTuningStatus('Preview uses current sliders');
@@ -112,25 +116,25 @@ async function loadMissConfig() {
 }
 
 function scheduleMissPreview() {
-  if (!missConfigLoaded) return;
-  if (legacyScopeError || legacyScopeRecoveryPending) return;
-  if (previewTimer) clearTimeout(previewTimer);
-  previewTimer = setTimeout(previewMisses, 250);
+  if (!state.missConfigLoaded) return;
+  if (state.legacyScopeError || state.legacyScopeRecoveryPending) return;
+  if (state.previewTimer) clearTimeout(state.previewTimer);
+  state.previewTimer = setTimeout(previewMisses, 250);
 }
 
-async function previewMisses() {
-  if (!missConfigLoaded) return;
+export async function previewMisses() {
+  if (!state.missConfigLoaded) return;
   // Defense in depth: sliders are disabled while a deep-link scope is
   // unresolved, but any caller that reaches here anyway must not POST the
   // empty rule payload to /api/misses/preview and repopulate the grid with
   // photos outside the user's scope.
-  if (legacyScopeError || legacyScopeRecoveryPending) return;
-  if (previewTimer) {
-    clearTimeout(previewTimer);
-    previewTimer = null;
+  if (state.legacyScopeError || state.legacyScopeRecoveryPending) return;
+  if (state.previewTimer) {
+    clearTimeout(state.previewTimer);
+    state.previewTimer = null;
   }
-  var requestId = ++previewRequestId;
-  missLoadRequestId++;
+  var requestId = ++state.previewRequestId;
+  state.missLoadRequestId++;
   var requestedFilters = missFilterPayload();
   var body = collectMissThresholds();
   addFilterPayloadToBody(body, requestedFilters);
@@ -145,35 +149,35 @@ async function previewMisses() {
     });
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
-    if (requestId !== previewRequestId) return;
-    appliedMissFilters = cloneMissFilterPayload(requestedFilters);
-    previewActive = true;
-    previewPayload = data;
+    if (requestId !== state.previewRequestId) return;
+    state.appliedMissFilters = cloneMissFilterPayload(requestedFilters);
+    state.previewActive = true;
+    state.previewPayload = data;
     applyMissesPayload(data);
     setMissTuningStatus('Preview only');
   } catch (e) {
-    if (requestId !== previewRequestId) return;
+    if (requestId !== state.previewRequestId) return;
     setMissTuningStatus('Preview failed');
   }
 }
 
-async function recomputeMisses() {
-  if (!missConfigLoaded) return;
-  if (legacyScopeError || legacyScopeRecoveryPending) return;
+export async function recomputeMisses() {
+  if (!state.missConfigLoaded) return;
+  if (state.legacyScopeError || state.legacyScopeRecoveryPending) return;
   invalidateMissPreview();
-  var requestId = ++missLoadRequestId;
+  var requestId = ++state.missLoadRequestId;
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('missRecomputeBtn'));
   // Recompute the photos that produced the cards the user is looking at.
   // Live controls may already represent a newer filter whose load is pending.
-  var requestedFilters = cloneMissFilterPayload(appliedMissFilters);
+  var requestedFilters = cloneMissFilterPayload(state.appliedMissFilters);
   var body = collectMissThresholds();
   addFilterPayloadToBody(body, requestedFilters);
   var since = getSinceParam();
   if (since) body.since = since;
   body.save_defaults = !!/** @type {HTMLInputElement} */ (document.getElementById('missSaveDefaults')).checked;
   if (btn) btn.disabled = true;
-  previewActive = false;
-  previewPayload = null;
+  state.previewActive = false;
+  state.previewPayload = null;
   setMissTuningStatus('Recomputing...');
   try {
     var r = await fetch('/api/misses/recompute', {
@@ -183,10 +187,10 @@ async function recomputeMisses() {
     });
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
-    if (requestId !== missLoadRequestId) {
+    if (requestId !== state.missLoadRequestId) {
       if (data.config && data.saved_defaults) {
-        missConfig = data.config;
-        originalMissConfig = Object.assign({}, data.config);
+        state.missConfig = data.config;
+        state.originalMissConfig = Object.assign({}, data.config);
       }
       setMissTuningStatus('Recomputed previous filters; refreshing current view');
       loadMisses();
@@ -194,40 +198,40 @@ async function recomputeMisses() {
     }
     if (!sameMissFilterPayload(missFilterPayload(), requestedFilters)) {
       if (data.config && data.saved_defaults) {
-        missConfig = data.config;
-        originalMissConfig = Object.assign({}, data.config);
+        state.missConfig = data.config;
+        state.originalMissConfig = Object.assign({}, data.config);
       }
       setMissTuningStatus('Recomputed visible photos; refreshing filters');
       loadMisses();
       return;
     }
-    appliedMissFilters = cloneMissFilterPayload(requestedFilters);
-    previewActive = false;
-    previewPayload = null;
+    state.appliedMissFilters = cloneMissFilterPayload(requestedFilters);
+    state.previewActive = false;
+    state.previewPayload = null;
     applyMissesPayload(data);
     if (data.config && data.saved_defaults) {
-      missConfig = data.config;
-      originalMissConfig = Object.assign({}, data.config);
+      state.missConfig = data.config;
+      state.originalMissConfig = Object.assign({}, data.config);
     }
     setMissTuningStatus('Updated ' + (data.updated || 0) + ' photos');
-    if (typeof showToast === 'function') showToast('Recomputed misses', 'success');
+    showToast('Recomputed misses', 'success');
   } catch (e) {
     setMissTuningStatus('Recompute failed');
-    if (typeof showToast === 'function') showToast('Recompute failed', 'error');
+    showToast('Recompute failed', 'error');
   } finally {
-    if (btn && missConfigLoaded && !legacyScopeError && !legacyScopeRecoveryPending) {
+    if (btn && state.missConfigLoaded && !state.legacyScopeError && !state.legacyScopeRecoveryPending) {
       btn.disabled = false;
     }
   }
 }
 
-function resetMissThresholds() {
-  if (!missConfigLoaded || !originalMissConfig) return;
-  if (legacyScopeError || legacyScopeRecoveryPending) return;
+export function resetMissThresholds() {
+  if (!state.missConfigLoaded || !state.originalMissConfig) return;
+  if (state.legacyScopeError || state.legacyScopeRecoveryPending) return;
   invalidateMissPreview();
-  setMissSliders(originalMissConfig);
-  previewActive = false;
-  previewPayload = null;
+  setMissSliders(state.originalMissConfig);
+  state.previewActive = false;
+  state.previewPayload = null;
   setMissTuningStatus('Preview reset');
   loadMisses();
 }

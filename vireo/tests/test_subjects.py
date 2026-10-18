@@ -232,8 +232,7 @@ def test_activate_mask_survives_floor_change_without_state_sync(db, subject_phot
     db.masks_features.upsert_mask(
         photo_id=photo_id, variant='test', path='mask.png',
         detector_model=det_lo['detector_model'],
-        prompt_x=det_lo['box_x'], prompt_y=det_lo['box_y'],
-        prompt_w=det_lo['box_w'], prompt_h=det_lo['box_h'],
+        prompt=(det_lo['box_x'], det_lo['box_y'], det_lo['box_w'], det_lo['box_h']),
     )
     db.set_active_mask_variant(photo_id, 'test')
 
@@ -317,8 +316,7 @@ def test_eye_stage_survives_floor_change_without_state_sync(db, subject_photo):
     db.masks_features.upsert_mask(
         photo_id=photo_id, variant='test', path='mask.png',
         detector_model=det_lo['detector_model'],
-        prompt_x=det_lo['box_x'], prompt_y=det_lo['box_y'],
-        prompt_w=det_lo['box_w'], prompt_h=det_lo['box_h'],
+        prompt=(det_lo['box_x'], det_lo['box_y'], det_lo['box_w'], det_lo['box_h']),
     )
     db.set_active_mask_variant(photo_id, 'test')
     rows = db.list_photos_for_eye_keypoint_stage([photo_id])

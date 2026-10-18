@@ -11,6 +11,7 @@ from pipeline_locks import (
     acquire_photo_mask,
 )
 from pipeline_stages.context import PipelineRun
+from repositories.masks_features import MaskQuality, PipelineFeatures
 from resource_ledger import (
     ResourceWaitCancelled,
     bind_resource_cancel_check,
@@ -270,7 +271,7 @@ class _MaskPass:
         os.makedirs(self.masks_dir, exist_ok=True)
 
         self.photos = self.filter_excluded(
-            self.thread_db.get_collection_photos(self.run.collection_id, per_page=999999),
+            self.thread_db.collections.get_photos(self.run.collection_id, per_page=999999),
         )
 
         # The mask loop applies two detection-confidence floors: a
@@ -1134,21 +1135,20 @@ class _MaskPass:
             variant=self.sam2_variant,
             path=mask_path,
             detector_model=entry["detector_model"],
-            prompt_x=entry["prompt"][0],
-            prompt_y=entry["prompt"][1],
-            prompt_w=entry["prompt"][2],
-            prompt_h=entry["prompt"][3],
-            subject_size=mask_subject_size,
-            subject_tenengrad=mask_subject_tenengrad,
-            bg_tenengrad=mask_bg_tenengrad,
-            crop_complete=completeness,
-            quality_input_recipe=features.pop("quality_input_recipe", None),
-            subject_clip_high=features.pop("subject_clip_high", None),
-            subject_clip_low=features.pop("subject_clip_low", None),
-            subject_y_median=features.pop("subject_y_median", None),
-            bg_separation=features.pop("bg_separation", None),
-            phash_crop=features.pop("phash_crop", None),
-            noise_estimate=features.pop("noise_estimate", None),
+            prompt=entry["prompt"],
+            quality=MaskQuality(
+                subject_size=mask_subject_size,
+                subject_tenengrad=mask_subject_tenengrad,
+                bg_tenengrad=mask_bg_tenengrad,
+                crop_complete=completeness,
+                quality_input_recipe=features.pop("quality_input_recipe", None),
+                subject_clip_high=features.pop("subject_clip_high", None),
+                subject_clip_low=features.pop("subject_clip_low", None),
+                subject_y_median=features.pop("subject_y_median", None),
+                bg_separation=features.pop("bg_separation", None),
+                phash_crop=features.pop("phash_crop", None),
+                noise_estimate=features.pop("noise_estimate", None),
+            ),
             _commit=False,
         )
         thread_db.set_active_mask_variant(
@@ -1163,7 +1163,7 @@ class _MaskPass:
         # intentionally NOT passed here.
         if features:
             thread_db.masks_features.update_pipeline_features(
-                photo_id, **features, _commit=False,
+                photo_id, PipelineFeatures(**features), _commit=False,
             )
         if analysis_report is not None:
             thread_db.masks_features.save_subject_raw_analysis(
