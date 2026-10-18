@@ -53,9 +53,80 @@ import logging
 import os
 import time
 from contextvars import ContextVar
+from typing import TYPE_CHECKING
 
 from services.hf_cache_lock import DOWNLOAD_LOCK
 from services.hf_cache_tree import CacheTree, HubLocks, UnsafeCacheCleanup
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Container, Iterable, Iterator, Mapping, Sequence
+    from typing import NoReturn, Protocol, TypedDict
+
+    from services.service_types import JsonDict
+
+    class _PathOps(Protocol):
+        """The ``os.path`` predicates the collection walk uses."""
+
+        def isdir(self, path: str, /) -> bool: ...
+        def isfile(self, path: str, /) -> bool: ...
+        def islink(self, path: str, /) -> bool: ...
+        def realpath(self, path: str, /) -> str: ...
+
+    class _CacheFs(Protocol):
+        """``os`` itself, or the ``CacheTree`` pinned for a cleanup."""
+
+        @property
+        def path(self) -> _PathOps: ...
+        def listdir(self, path: str, /) -> list[str]: ...
+        def lstat(self, path: str, /) -> os.stat_result: ...
+        def walk(self, path: str, /) -> Iterator[tuple[str, list[str], list[str]]]: ...
+
+    # The TypedDicts live here because the descriptor-safety tests execute
+    # this module's top-level classes and functions without its imports.
+    class _SnapshotFiles(TypedDict):
+        """One group's snapshot files and the blob (with size) each resolves to."""
+
+        files: list[str]
+        blobs: dict[str, int]
+
+    class CacheEntry(TypedDict):
+        """One ``inventory`` entry, as the Storage page shows it."""
+
+        key: str
+        name: str
+        size: int
+        shared_size: int
+        installed: bool
+        install_path: str | None
+        file_count: int
+        retained_size: int
+        removable: bool
+        retained_reason: str | None
+
+    class CacheInventory(TypedDict):
+        """What ``inventory`` returns."""
+
+        path: str
+        size: int
+        entries: list[CacheEntry]
+        unused_size: int
+        retained_size: int
+        installed_size: int
+
+    class CacheRemovalFailure(TypedDict):
+        """A snapshot link or blob a removal could not delete."""
+
+        key: str
+        path: str
+        error: str
+
+    class CacheRemoval(TypedDict):
+        """What ``remove`` / ``remove_unused`` return (and a failed purge carries)."""
+
+        removed: list[str]
+        failed: list[CacheRemovalFailure]
+        freed: int
+
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +134,7 @@ UNREFERENCED_SUFFIX = "#unreferenced"
 _ACTIVE_TREE: ContextVar[CacheTree | None] = ContextVar("hf_cache_tree", default=None)
 
 
-def _fs():
+def _fs() -> _CacheFs:
     tree = _ACTIVE_TREE.get()
     return tree if tree is not None else os
 
@@ -75,7 +146,7 @@ class DownloadInProgress(RuntimeError):
 class CachePurgeIncomplete(RuntimeError):
     """Model removal finished, but its cache purge did not fully succeed."""
 
-    def __init__(self, result):
+    def __init__(self, result: CacheRemoval) -> None:
         super().__init__("Some Hugging Face cache entries could not be removed")
         self.result = result
 
@@ -83,21 +154,23 @@ class CachePurgeIncomplete(RuntimeError):
 INCOMPLETE_GRACE_SECS = 24 * 3600
 
 
-def _models_dir(models_dir):
+def _models_dir(models_dir: str | None) -> str:
     if models_dir is not None:
         return models_dir
     import models
     return models.DEFAULT_MODELS_DIR
 
 
-def _cache_dir(cache_dir):
+def _cache_dir(cache_dir: str | None) -> str:
     if cache_dir is not None:
         return cache_dir
     from services.storage_paths import huggingface_cache_dir
     return huggingface_cache_dir()
 
 
-def _repo_dirs(cache_dir, extra_repos=(), *, managed_only=True):
+def _repo_dirs(
+    cache_dir: str, extra_repos: Iterable[str] = (), *, managed_only: bool = True,
+) -> list[tuple[str, str]]:
     """Vireo-relevant ``models--*`` directories under the hub cache (no symlinks).
 
     The whitelist is the explicit list built from ``KNOWN_MODELS`` and the
@@ -125,28 +198,28 @@ def _repo_dirs(cache_dir, extra_repos=(), *, managed_only=True):
     return out
 
 
-def _repo_id(dir_name):
+def _repo_id(dir_name: str) -> str:
     return dir_name.removeprefix("models--").replace("--", "/")
 
 
-def _onnx_repo_dir_name():
+def _onnx_repo_dir_name() -> str:
     from models import ONNX_REPO
     return "models--" + ONNX_REPO.replace("/", "--")
 
 
-def _is_install_dir(path):
+def _is_install_dir(path: str) -> bool:
     """A model directory, even an empty one a download has just created."""
     return bool(path) and os.path.isdir(path)
 
 
-def _within(path, root):
+def _within(path: str, root: str) -> bool:
     """True when ``path``'s parent resolves to ``root`` or somewhere beneath it."""
     root = _fs().path.realpath(root)
     parent = _fs().path.realpath(os.path.dirname(path))
     return parent == root or parent.startswith(root + os.sep)
 
 
-def _install_candidates(models_dir):
+def _install_candidates(models_dir: str) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """Map cache groups to the directories that would hold their install.
 
     Returns ``{onnx_subfolder: [dirs]}`` and ``{repo_id: [dirs]}``.
@@ -177,7 +250,7 @@ def _install_candidates(models_dir):
     return by_subfolder, by_repo
 
 
-def _display_name(subfolder):
+def _display_name(subfolder: str) -> str:
     import models as models_mod
     for km in models_mod.KNOWN_MODELS:
         if km.get("hf_subdir", km["id"]) == subfolder:
@@ -185,7 +258,7 @@ def _display_name(subfolder):
     return subfolder
 
 
-def _record(entry, path):
+def _record(entry: _SnapshotFiles, path: str) -> str | None:
     """Add one snapshot file to a group, resolving a symlink to its blob."""
     entry["files"].append(path)
     target = _fs().path.realpath(path) if _fs().path.islink(path) else path
@@ -196,7 +269,7 @@ def _record(entry, path):
     return target if target != path else None
 
 
-def _scan_repo(repo_dir, onnx):
+def _scan_repo(repo_dir: str, onnx: bool) -> tuple[dict[str, _SnapshotFiles], set[str]]:
     """Return ``(groups, referenced_blobs)`` for one repo directory.
 
     ``groups`` maps a group name (the ONNX subfolder, or ``""`` for a whole
@@ -205,7 +278,7 @@ def _scan_repo(repo_dir, onnx):
     (no-symlink layouts) are recorded as their own blob. Symlinked
     directories are not entered at any level.
     """
-    groups: dict[str, dict] = {}
+    groups: dict[str, _SnapshotFiles] = {}
     referenced: set[str] = set()
     snapshots = os.path.join(repo_dir, "snapshots")
     if _fs().path.islink(snapshots) or not _fs().path.isdir(snapshots):
@@ -227,7 +300,7 @@ def _scan_repo(repo_dir, onnx):
     return groups, referenced
 
 
-def _blob_files(repo_dir):
+def _blob_files(repo_dir: str) -> dict[str, os.stat_result]:
     """``{name: lstat}`` for the regular files directly in ``blobs/``."""
     blobs_dir = os.path.join(repo_dir, "blobs")
     if _fs().path.islink(blobs_dir) or not _fs().path.isdir(blobs_dir):
@@ -244,7 +317,7 @@ def _blob_files(repo_dir):
     return out
 
 
-def _unreferenced_blobs(repo_dir, referenced):
+def _unreferenced_blobs(repo_dir: str, referenced: Container[str]) -> dict[str, int]:
     cutoff = time.time() - INCOMPLETE_GRACE_SECS
     out = {}
     for path, st in _blob_files(repo_dir).items():
@@ -256,7 +329,7 @@ def _unreferenced_blobs(repo_dir, referenced):
     return out
 
 
-def _reclaimable_blobs(group):
+def _reclaimable_blobs(group: JsonDict) -> dict[str, int]:
     """Only eligible hub blobs have download locks cleanup can establish."""
     if not group.get("cleanup_eligible", True):
         return {}
@@ -265,7 +338,7 @@ def _reclaimable_blobs(group):
             if os.path.dirname(path) == blobs_dir}
 
 
-def _size_groups(found):
+def _size_groups(found: Mapping[str, JsonDict]) -> None:
     """Set each group's ``size`` to the bytes only it references."""
     referrers: dict[str, set[str]] = {}
     for group in found.values():
@@ -280,7 +353,9 @@ def _size_groups(found):
         group["removable"] = bool(reclaimable)
 
 
-def _collect(cache_dir, models_dir, extra_repos=(), *, reporting=False):
+def _collect(
+    cache_dir: str, models_dir: str, extra_repos: Sequence[str] = (), *, reporting: bool = False,
+) -> tuple[int, dict[str, JsonDict]]:
     """Every group across every Vireo repo, keyed, with install status."""
     from services.storage_paths import directory_bytes
 
@@ -321,7 +396,7 @@ def _collect(cache_dir, models_dir, extra_repos=(), *, reporting=False):
     return total, found
 
 
-def _public(group):
+def _public(group: JsonDict) -> CacheEntry:
     return {
         "key": group["key"], "name": group["name"], "size": group["size"],
         "shared_size": group["shared_size"], "installed": group["installed"],
@@ -332,7 +407,7 @@ def _public(group):
     }
 
 
-def inventory(cache_dir=None, models_dir=None):
+def inventory(cache_dir: str | None = None, models_dir: str | None = None) -> CacheInventory:
     """Describe the Vireo entries in the hub cache, per model.
 
     ``size`` is the bytes the Vireo repos occupy on disk; ``entries`` splits
@@ -365,7 +440,7 @@ def inventory(cache_dir=None, models_dir=None):
     }
 
 
-def _remove_repo_if_empty(_repo_dir):
+def _remove_repo_if_empty(_repo_dir: str) -> bool:
     """Keep directory anchors and metadata, including after the last payload.
 
     Even empty-directory pruning can race a rename replacement. No cleanup
@@ -374,18 +449,18 @@ def _remove_repo_if_empty(_repo_dir):
     return False
 
 
-def _unlink_within(root, path):
+def _unlink_within(root: str, path: str) -> None:
     tree = _ACTIVE_TREE.get()
     if tree is None or os.path.abspath(root) != tree.root:
         raise UnsafeCacheCleanup("Deletion requires the tree pinned during collection")
     tree.unlink(path)
 
 
-def _rmdir_within(_root, _path):
+def _rmdir_within(_root: str, _path: str) -> NoReturn:
     raise UnsafeCacheCleanup("Cache directory pruning is disabled")
 
 
-def _download_lock_targets(found):
+def _download_lock_targets(found: Mapping[str, JsonDict]) -> set[str]:
     """Lock both existing hub locks and all blob etags, even absent lockfiles."""
     targets = set()
     for repo_dir in dict.fromkeys(group["repo_dir"] for group in found.values()):
@@ -406,7 +481,7 @@ def _download_lock_targets(found):
     return targets
 
 
-def _unlink_snapshot_files(group, failures):
+def _unlink_snapshot_files(group: JsonDict, failures: list[CacheRemovalFailure]) -> int:
     """Remove selected snapshot links; retain unverifiable plain copies."""
     cache_dir = os.path.dirname(group["repo_dir"])
     snapshots = os.path.join(group["repo_dir"], "snapshots")
@@ -424,14 +499,16 @@ def _unlink_snapshot_files(group, failures):
     return 0  # Reclaimable payload bytes are counted at their blob, once.
 
 
-def _delete_groups(groups):
+def _delete_groups(groups: Iterable[JsonDict]) -> tuple[int, list[CacheRemovalFailure]]:
     """Private callers cannot supply stale paths outside locked collection."""
     if _ACTIVE_TREE.get() is None:
         raise UnsafeCacheCleanup("Groups must be collected inside the cleanup transaction")
     return _delete_groups_locked(groups)
 
 
-def _collect_locked(cache_dir, models_dir, locks, extra_repos=()):
+def _collect_locked(
+    cache_dir: str, models_dir: str, locks: HubLocks, extra_repos: Sequence[str] = (),
+) -> dict[str, JsonDict]:
     # Recollect after acquiring newly discovered targets. A late *different*
     # blob is never selected without its lock; same-etag writers must wait.
     for _attempt in range(4):
@@ -446,7 +523,10 @@ def _collect_locked(cache_dir, models_dir, locks, extra_repos=()):
     raise DownloadInProgress("cache download targets keep changing")
 
 
-def _delete_selected(cache_dir, models_dir, select, *, extra_repos=()):
+def _delete_selected(
+    cache_dir: str, models_dir: str, select: Callable[[dict[str, JsonDict]], list[JsonDict]], *,
+    extra_repos: Sequence[str] = (),
+) -> CacheRemoval:
     """Pin first, then collect/select/delete under the same download guards."""
     try:
         acquired = DOWNLOAD_LOCK.acquire(blocking=False)
@@ -484,9 +564,9 @@ def _delete_selected(cache_dir, models_dir, select, *, extra_repos=()):
         DOWNLOAD_LOCK.release()
 
 
-def _delete_groups_locked(groups):
+def _delete_groups_locked(groups: Iterable[JsonDict]) -> tuple[int, list[CacheRemovalFailure]]:
     freed = 0
-    failures: list[dict] = []
+    failures: list[CacheRemovalFailure] = []
     # repo_dir -> blob -> (owner keys, size); a blob two selected groups share
     # has every owner recorded so a failed unlink is attributed to each.
     candidate_blobs: dict[str, dict[str, tuple[set[str], int]]] = {}
@@ -516,7 +596,7 @@ def _delete_groups_locked(groups):
     return freed, failures
 
 
-def _result(groups, freed, failures):
+def _result(groups: Iterable[JsonDict], freed: int, failures: list[CacheRemovalFailure]) -> CacheRemoval:
     failed_keys = {f["key"] for f in failures}
     return {
         "removed": [g["key"] for g in groups if g["key"] not in failed_keys],
@@ -525,14 +605,14 @@ def _result(groups, freed, failures):
     }
 
 
-def remove(keys, cache_dir=None, models_dir=None):
+def remove(keys: Sequence[str], cache_dir: str | None = None, models_dir: str | None = None) -> CacheRemoval:
     """Remove the entries named by ``keys``.
 
     Unknown keys raise ``KeyError``; a key whose entry backs an installed
     model raises ``ValueError``. Both are decided on state collected under
     the download locks, not on what the page inventoried earlier.
     """
-    def select(found):
+    def select(found: dict[str, JsonDict]) -> list[JsonDict]:
         missing = [k for k in keys if k not in found]
         if missing:
             raise KeyError(missing[0])
@@ -548,7 +628,7 @@ def remove(keys, cache_dir=None, models_dir=None):
     return result
 
 
-def remove_unused(cache_dir=None, models_dir=None):
+def remove_unused(cache_dir: str | None = None, models_dir: str | None = None) -> CacheRemoval:
     """Remove every entry that backs no installed model."""
     result = _delete_selected(
         _cache_dir(cache_dir), _models_dir(models_dir),
@@ -559,7 +639,9 @@ def remove_unused(cache_dir=None, models_dir=None):
     return result
 
 
-def _purge_keys(keys, cache_dir, models_dir, *, extra_repos=()):
+def _purge_keys(
+    keys: Sequence[str], cache_dir: str, models_dir: str, *, extra_repos: Sequence[str] = (),
+) -> int:
     """Delete the entries for ``keys`` that exist and back no model directory.
 
     Collected under the download locks like a Storage-page removal: the
@@ -581,8 +663,9 @@ def _purge_keys(keys, cache_dir, models_dir, *, extra_repos=()):
     return result["freed"]
 
 
-def purge_outcome(operation, identifier):
+def purge_outcome(operation: Callable[[str], object], identifier: str) -> JsonDict:
     """Preserve model-removal success and report any cache cleanup failure."""
+    result: Mapping[str, object]
     try:
         operation(identifier)
         return {}
@@ -594,7 +677,7 @@ def purge_outcome(operation, identifier):
     return {"ok": False, "cache_cleanup": result}
 
 
-def purge_subfolder(subfolder, cache_dir=None, models_dir=None):
+def purge_subfolder(subfolder: str, cache_dir: str | None = None, models_dir: str | None = None) -> int:
     """Drop the ONNX repo's cache entry for ``subfolder`` after its install went.
 
     Called after a Settings delete, so the cache copy leaves with the install
@@ -607,7 +690,9 @@ def purge_subfolder(subfolder, cache_dir=None, models_dir=None):
     return freed
 
 
-def purge_model(model_id, cache_dir=None, models_dir=None, *, hf_source=""):
+def purge_model(
+    model_id: str, cache_dir: str | None = None, models_dir: str | None = None, *, hf_source: str = "",
+) -> int:
     """Drop every cache entry a removed model's download produced.
 
     ``hf_source`` is the ``hf-hub:<owner>/<repo>`` identifier captured from

@@ -23,10 +23,24 @@ from __future__ import annotations
 import json
 import logging
 import math
+from typing import TYPE_CHECKING, Protocol, cast
 
 import places
 from db import Database
 from services.visual_scope import VISUAL_COLLECTION_MSG, coerce_collection_id
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable, Iterable, Iterator, Mapping
+
+    from services.service_types import ErrorResponse, JsonDict, JsonError
+
+    # ``resolve_exif_place_for_photo``'s answer: the normalized place
+    # details, or None and the short reason the photo could not be resolved.
+    ExifPlaceResult = tuple[JsonDict, None] | tuple[None, str]
+
+    # A ``BulkGpsLocations`` answer: the value, or None and the error response.
+    type ValueOrError[T] = tuple[T, None] | tuple[None, ErrorResponse]
 
 log = logging.getLogger(__name__)
 
@@ -35,13 +49,19 @@ REVERSE_GEOCODE_CACHE_LANGUAGE_KEY = "_vireo_result_language"
 _REVERSE_GEOCODE_CACHE_LEGACY = object()
 
 
-def gps_location_chunks(values, size=800):
+class LocationEditErrors(Protocol):
+    """The members of ``web.location_edits.LocationErrors`` used here."""
+
+    def photo_location_edit_error(self, db: Database, photo_id: int) -> ErrorResponse | None: ...
+
+
+def gps_location_chunks[T](values: Iterable[T], size: int = 800) -> Iterator[list[T]]:
     values = list(values)
     for idx in range(0, len(values), size):
         yield values[idx:idx + size]
 
 
-def location_keyword_photo_ids(db, photo_ids):
+def location_keyword_photo_ids(db: Database, photo_ids: Iterable[int]) -> set[int]:
     """Return ids that already have any linked location keyword."""
     if not photo_ids:
         return set()
@@ -52,7 +72,7 @@ def location_keyword_photo_ids(db, photo_ids):
     return found
 
 
-def decode_cached_reverse_geocode(cached, language):
+def decode_cached_reverse_geocode(cached: Mapping[str, str | None], language: str | None) -> tuple[bool, JsonDict]:
     """Return ``(matches_language, details)`` for a cached response.
 
     Rows written before the language field existed have no
@@ -80,7 +100,7 @@ def decode_cached_reverse_geocode(cached, language):
     return cached_language == language, details
 
 
-def encode_cached_reverse_geocode(details, language):
+def encode_cached_reverse_geocode(details: object, language: str | None) -> str:
     """Serialize details with the requested language for cache matching.
 
     The language key is always written — including as ``null`` for
@@ -94,8 +114,9 @@ def encode_cached_reverse_geocode(details, language):
 
 
 def resolve_exif_place_for_photo(
-    db, photo, api_key, language, grid_cache,
-):
+    db: Database, photo: sqlite3.Row, api_key: str, language: str | None,
+    grid_cache: dict[tuple[int, int], ExifPlaceResult],
+) -> ExifPlaceResult:
     """Resolve one photo's EXIF coordinates into normalized place details.
 
     Returns ``(details, reason)`` where ``details`` is the normalized
@@ -173,7 +194,7 @@ def resolve_exif_place_for_photo(
     return result
 
 
-def summarize_details(details):
+def summarize_details(details: JsonDict | None) -> str:
     """Build a short human-friendly summary string from a Place Details dict.
 
     Format: ``"<leaf name> · <broadest 1-2 parents>"``. Google's
@@ -220,11 +241,11 @@ class BulkGpsLocations:
     return ``(value, error_response)`` pairs with exactly one set.
     """
 
-    def __init__(self, *, json_error, location_errors):
+    def __init__(self, *, json_error: JsonError, location_errors: LocationEditErrors) -> None:
         self._json_error = json_error
         self._location_errors = location_errors
 
-    def normalize_photo_id_list(self, raw_ids):
+    def normalize_photo_id_list(self, raw_ids: object) -> ValueOrError[list[int]]:
         """Validate and de-dupe a JSON ``photo_ids`` list, preserving order."""
         json_error = self._json_error
         if not isinstance(raw_ids, list) or not raw_ids:
@@ -241,7 +262,7 @@ class BulkGpsLocations:
             return None, json_error("photo_ids required", 400)
         return photo_ids, None
 
-    def source_ids(self, db, body):
+    def source_ids(self, db: Database, body: JsonDict) -> ValueOrError[list[int]]:
         """Return source photo ids from either ``photo_ids`` or ``collection_id``."""
         json_error = self._json_error
         raw_ids = body.get("photo_ids")
@@ -262,9 +283,10 @@ class BulkGpsLocations:
         # picker filters these out, but reject here as the boundary.
         if row["visual_json"] is not None:
             return None, json_error(VISUAL_COLLECTION_MSG, 400)
-        return db.get_collection_photo_ids(collection_id), None
+        return db.collections.get_photo_ids(collection_id), None
 
-    def payload(self, db, body, cancel_check=None):
+    def payload(self, db: Database, body: JsonDict,
+                cancel_check: Callable[[], bool] | None = None) -> ValueOrError[JsonDict]:
         """Build preview/apply data for resolving locations from EXIF GPS."""
         photo_ids, error = self.source_ids(db, body)
         if error is not None:
@@ -320,6 +342,7 @@ class BulkGpsLocations:
                     "reason": reason,
                 })
                 continue
+            details = cast("JsonDict", details)  # a None reason means details were resolved
 
             place_id = details.get("place_id")
             if place_id not in groups:

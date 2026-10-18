@@ -38,7 +38,7 @@ def review_source(db, source, expected_device=None, expected_inode=None):
         raise ValueError("The original folder has been replaced by a file")
     source_rows = _source_folder_rows(db, source)
     for row in source_rows:
-        if db.conn.execute("SELECT 1 FROM photos WHERE folder_id = ? LIMIT 1", (row["id"],)).fetchone():
+        if db.source_cleanup.folder_has_photos(row["id"]):
             raise ValueError("The original folder still contains cataloged photos")
 
     for row in source_rows or [{"id": None, "path": source}]:
@@ -88,10 +88,7 @@ def _protect_local_sources(db, source):
         from .path_guard import path_contains
     except ImportError:
         from path_guard import path_contains
-    mappings = db.conn.execute(
-        "SELECT source_path, local_path FROM local_workspace_folders "
-        "UNION SELECT source_path, local_path FROM local_folder_mappings"
-    )
+    mappings = db.source_cleanup.local_copy_paths()
     for mapping in mappings:
         for path in (mapping["source_path"], mapping["local_path"]):
             if path_contains(source, path) or path_contains(path, source):
@@ -111,11 +108,7 @@ def _folder_owned_elsewhere(db, folder):
         return True
     # The database accessor above uses stored path strings. Also cover physical
     # aliases of recursive roots while honoring the same removal view.
-    for root in db.conn.execute(
-        "SELECT wf.workspace_id, f.path FROM workspace_folders wf "
-        "JOIN folders f ON f.id = wf.folder_id "
-        "WHERE wf.is_root = 1 AND wf.workspace_id IS NOT ?", (db.active_workspace_id,),
-    ):
+    for root in db.source_cleanup.other_workspace_roots(db.active_workspace_id):
         if folder["id"] in db.workspace_folders.removed_ids(root["workspace_id"]):
             continue
         if _path_equal_or_descends(folder["path"], root["path"], case_insensitive_root=None):
@@ -132,13 +125,13 @@ def _source_folder_rows(db, source):
     # Existing ancestors are compared by filesystem identity, so case aliases
     # work on APFS/NTFS without conflating distinct case-sensitive directories.
     # Do not create case-probe directories during a read-only review.
-    return [row for row in db.conn.execute("SELECT id, path FROM folders")
+    return [row for row in db.source_cleanup.folder_paths()
             if _path_equal_or_descends(row["path"], source, case_insensitive_root=None)]
 
 
 def _remove_empty_source(db, source, expected_device, expected_inode):
     """Retire empty catalog rows and remove the directory under a writer lock."""
-    db.conn.execute("BEGIN IMMEDIATE")
+    db.begin_immediate()
     try:
         # Recheck after obtaining the writer lock: a scanner may have added
         # photos or workspace links since the initial filesystem inventory.
@@ -149,21 +142,18 @@ def _remove_empty_source(db, source, expected_device, expected_inode):
                       key=lambda row: len(row["path"]), reverse=True)
         for row in rows:
             # A missing directory still needs the same catalog protections.
-            if db.conn.execute("SELECT 1 FROM photos WHERE folder_id = ? LIMIT 1", (row["id"],)).fetchone():
+            if db.source_cleanup.folder_has_photos(row["id"]):
                 raise ValueError("The original folder still contains cataloged photos")
             if _folder_owned_elsewhere(db, row):
                 raise ValueError("The original folder is still used by another workspace")
-            db.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (row["id"],))
-            db.conn.execute("DELETE FROM folders WHERE id = ?", (row["id"],))
-            db.conn.execute("UPDATE photos SET last_move_source_folder_path = NULL "
-                            "WHERE last_move_source_folder_path = ?", (row["path"],))
+            db.source_cleanup.retire_folder(row["id"], row["path"])
         # A failed rmdir rolls back the catalog changes. It never removes new
         # files, parent folders, or a directory retained by another workspace.
         if review["state"] == "empty":
             os.rmdir(source)
-        db.conn.commit()
+        db.commit()
     except Exception:
-        db.conn.rollback()
+        db.rollback()
         raise
     if db.active_workspace_id is not None:
         db._new_images_cache.invalidate_workspaces(db._db_path, [db.active_workspace_id])

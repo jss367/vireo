@@ -17,8 +17,6 @@ import threading
 import time
 from contextlib import contextmanager
 
-from db import commit_with_retry
-
 log = logging.getLogger(__name__)
 
 DEFAULT_QUOTA_MB = 20 * 1024
@@ -161,13 +159,11 @@ def _begin_stable_eviction_transaction(db, expected_data_version):
     race before the lock was acquired so this pass can leave the new row and
     its file untouched.
     """
-    db.conn.execute("BEGIN IMMEDIATE")
-    current_data_version = db.conn.execute(
-        "PRAGMA data_version"
-    ).fetchone()[0]
+    db.begin_immediate()
+    current_data_version = db.scanning.data_version()
     if current_data_version == expected_data_version:
         return True
-    db.conn.rollback()
+    db.rollback()
     return False
 
 
@@ -494,13 +490,9 @@ def _clear_stale_tracked_rows(db, stale_tracked_ids):
         for pid, path in stale_tracked_ids
         if not os.path.exists(path)
     ]
-    db.conn.executemany(
-        "UPDATE photos SET working_copy_path=NULL "
-        "WHERE id=? AND working_copy_path=?",
-        still_missing,
-    )
+    db.working_copies.clear_missing_tracked(still_missing)
     if still_missing:
-        commit_with_retry(db.conn)
+        db.commit_with_retry()
 
 
 def _remove_eviction_candidates(entries, total, max_bytes, protect_paths):
@@ -557,14 +549,8 @@ def _record_evictions(db, evicted):
         # row if the file is still missing.
         if os.path.exists(path):
             continue
-        db.conn.execute(
-            "UPDATE photos SET working_copy_path=NULL, "
-            "working_copy_evicted_mtime=COALESCE(file_mtime, -1) "
-            "WHERE id=? AND (working_copy_path IS NULL "
-            "OR working_copy_path=?)",
-            (photo_id, expected_rel),
-        )
-    commit_with_retry(db.conn)
+        db.working_copies.record_eviction(photo_id, expected_rel)
+    db.commit_with_retry()
 
 
 def _evict_once(
@@ -582,12 +568,8 @@ def _evict_once(
 
     ``protect_paths`` — see ``evict_if_over_quota``.
     """
-    catalog_data_version = db.conn.execute(
-        "PRAGMA data_version"
-    ).fetchone()[0]
-    rows = db.conn.execute(
-        "SELECT id, working_copy_path, file_mtime FROM photos "
-    ).fetchall()
+    catalog_data_version = db.scanning.data_version()
+    rows = db.working_copies.eviction_rows()
     files, total = _scan_working_dir(working_dir)
     entries, stale_tracked_ids = _eviction_candidates(
         rows, files, working_dir, startup=startup,

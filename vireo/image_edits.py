@@ -656,28 +656,15 @@ def _apply_adjustments(
     import numpy as np
 
     try:
-        from .tone import RANGE_RADIUS, apply_adjustments
+        from .tone import RANGE_RADIUS, LocalAdjustments, ToneAdjustments, apply_adjustments
     except ImportError:
-        from tone import RANGE_RADIUS, apply_adjustments
+        from tone import RANGE_RADIUS, LocalAdjustments, ToneAdjustments, apply_adjustments
 
     img = _promote_to_rgb(img)
 
-    exposure = adjustments.get("exposure", 0.0)
-    white_balance = adjustments.get("white_balance")
-    highlights = adjustments.get("highlights", 0.0)
-    shadows = adjustments.get("shadows", 0.0)
-    whites = adjustments.get("whites", 0.0)
-    blacks = adjustments.get("blacks", 0.0)
-    contrast = adjustments.get("contrast", 0.0)
-    vibrance = adjustments.get("vibrance", 0.0)
-    saturation = adjustments.get("saturation", 0.0)
-    tone_curve = adjustments.get("tone_curve")
-    point_curves = adjustments.get("point_curves")
-    point_color = adjustments.get("point_color")
-    hsl = adjustments.get("hsl")
-    color_grading = adjustments.get("color_grading")
+    controls = ToneAdjustments.from_mapping(adjustments)
 
-    spatial = highlights or shadows or (
+    spatial = controls.highlights or controls.shadows or (
         local_weight is not None and any(
             region.get("shadows") or region.get("highlights")
             for region in (local_subject or {}, local_background or {})
@@ -694,7 +681,10 @@ def _apply_adjustments(
 
     columns_per_tile, rows_per_tile = _adjust_tile_shape(
         width, height, spatial=spatial,
-        color_ops=tone_curve or point_curves or point_color or hsl or color_grading,
+        color_ops=(
+            controls.tone_curve or controls.point_curves or controls.point_color
+            or controls.hsl or controls.color_grading
+        ),
     )
     for top in range(0, height, rows_per_tile):
         bottom = min(top + rows_per_tile, height)
@@ -707,25 +697,15 @@ def _apply_adjustments(
                 tile /= 255.0
             adj = apply_adjustments(
                 tile[..., :3],
-                exposure=exposure,
-                white_balance=white_balance,
-                highlights=highlights,
-                shadows=shadows,
-                whites=whites,
-                blacks=blacks,
-                contrast=contrast,
-                vibrance=vibrance,
-                saturation=saturation,
-                tone_curve=tone_curve,
-                point_curves=point_curves,
-                point_color=point_color,
-                hsl=hsl,
-                color_grading=color_grading,
-                local_weight=(
-                    local_weight[start:end, left:right] if local_weight is not None else None
+                controls,
+                local=(
+                    LocalAdjustments(
+                        weight=local_weight[start:end, left:right],
+                        subject=local_subject,
+                        background=local_background,
+                    )
+                    if local_weight is not None else None
                 ),
-                local_subject=local_subject,
-                local_background=local_background,
                 input_linear=floating and img.encoding == "linear",
                 range_radius=range_radius,
             )

@@ -28,14 +28,14 @@ def _read(root, path):
 def test_complete_export_preserves_albums_metadata_and_workspace_scope(tmp_path, monkeypatch):
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
     pids = db.get_photo_ids()
-    default_albums = {row['id'] for row in db.get_collections()}
-    first = db.add_collection('../Same / name', json.dumps([
+    default_albums = {row['id'] for row in db.collections.list_all()}
+    first = db.collections.add('../Same / name', json.dumps([
         {'field': 'photo_ids', 'value': pids[:2]},
     ]))
-    second = db.add_collection('../Same / name', json.dumps([
+    second = db.collections.add('../Same / name', json.dumps([
         {'field': 'photo_ids', 'value': pids[1:]},
     ]))
-    empty = db.add_collection('Empty', '[{"field":"photo_ids","value":[]}]')
+    empty = db.collections.add('Empty', '[{"field":"photo_ids","value":[]}]')
     db.conn.execute('UPDATE photos SET exif_data = ? WHERE id = ?', (
         json.dumps({'XMP': {'Title': 'A cardinal', 'Description': 'In the garden'},
                     'EXIF': {'UserComment': 'Morning walk'}}), pids[0],
@@ -47,7 +47,7 @@ def test_complete_export_preserves_albums_metadata_and_workspace_scope(tmp_path,
     other_folder = db.add_folder(str(tmp_path / 'other'), name='other')
     foreign = db.add_photo(folder_id=other_folder, filename='private.jpg', extension='.jpg',
                            file_size=1, file_mtime=1)
-    db.add_collection('Other album', '[]')
+    db.collections.add('Other album', '[]')
     db.set_active_workspace(original_ws)
 
     destination = tmp_path / 'exports'
@@ -151,7 +151,7 @@ def test_album_definitions_respect_location_export_option(tmp_path, monkeypatch,
         {'field': 'gps_lat', 'op': 'equals', 'value': latitude},
         {'mode': 'any', 'rules': [{'field': 'gps_lng', 'op': 'equals', 'value': longitude}]},
     ]}
-    album_id = db.add_collection('Selected photos', json.dumps(rules))
+    album_id = db.collections.add('Selected photos', json.dumps(rules))
     job = _run_export(app, tmp_path / 'export', include_locations=include_locations)
     assert job['status'] == 'completed', job
     root = Path(job['result']['destination'])
@@ -184,18 +184,19 @@ def test_site_export_applies_saved_crop(tmp_path, monkeypatch):
 
 def test_export_metadata_is_consistent_when_workspace_changes_during_capture(tmp_path, monkeypatch):
     import site_export
-    from db import Database
 
     app, db, meta = _seed_publish_app(tmp_path, monkeypatch)
     pid = meta['p1']
-    album_id = db.add_collection('Original album', json.dumps([
+    album_id = db.collections.add('Original album', json.dumps([
         {'field': 'photo_ids', 'value': [pid]},
     ]))
     db.set_photo_edit_recipe(pid, {'crop': {'x': 0, 'y': 0, 'w': 0.5, 'h': 1}})
     db.conn.execute('UPDATE photos SET latitude = 10, longitude = 20, exif_data = ? WHERE id = ?',
                     (json.dumps({'XMP': {'Title': 'Original title'}}), pid))
     db.conn.commit()
-    original_collections = Database.get_collections
+    from repositories.collections import CollectionRepository
+
+    original_collections = CollectionRepository.list_all
     original_load = site_export.load_export_image
     readers = []
 
@@ -213,14 +214,14 @@ def test_export_metadata_is_consistent_when_workspace_changes_during_capture(tmp
                                (json.dumps({'XMP': {'Title': 'Changed title'}}), pid))
                 writer.execute('DELETE FROM photo_edit_recipes WHERE photo_id = ?', (pid,))
                 writer.execute("UPDATE collections SET name = 'Changed album', rules = '[]' WHERE id = ?", (album_id,))
-                writer.execute('DELETE FROM workspace_folders WHERE workspace_id = ?', (reader._ws_id(),))
+                writer.execute('DELETE FROM workspace_folders WHERE workspace_id = ?', (reader.workspace_id,))
         return rows
 
     def render_after_transaction_is_released(*args, **kwargs):
         assert readers and not readers[0].conn.in_transaction
         return original_load(*args, **kwargs)
 
-    monkeypatch.setattr(Database, 'get_collections', edit_after_ids_are_captured)
+    monkeypatch.setattr(CollectionRepository, 'list_all', edit_after_ids_are_captured)
     monkeypatch.setattr(site_export, 'load_export_image', render_after_transaction_is_released)
     job = _run_export(app, tmp_path / 'export', include_locations=True)
     assert job['status'] == 'completed', job
@@ -384,7 +385,7 @@ def test_visual_album_never_silently_exports_metadata_only_matches(tmp_path, mon
     from site_export import export_site
 
     _, db, meta = _seed_publish_app(tmp_path, monkeypatch)
-    album_id = db.add_collection('Visual birds', '[]', '{"prompt":"bird","strength":"medium"}')
+    album_id = db.collections.add('Visual birds', '[]', '{"prompt":"bird","strength":"medium"}')
 
     def resolve(*args, **kwargs):
         return ({'status': 'ok' if visual_available else 'no_model'},

@@ -254,7 +254,7 @@ class JobRunner:
         self._worker_threads = set()
         self._shutting_down = False
         if db:
-            self._db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
+            self._db_path = db.job_history.catalog_file()
             # job_history is part of the canonical schema (canonical_schema.
             # FORMERLY_LAZY_OBJECTS); the runner only reconciles its rows.
             self._startup_sweep(db)
@@ -399,10 +399,7 @@ class JobRunner:
         """
         now = datetime.now().isoformat()
         msg = INTERRUPTED_BY_RESTART
-        rows = db.conn.execute(
-            "SELECT id, status, result, tree, progress, error_count "
-            "FROM job_history WHERE status IN ('running', 'queued')",
-        ).fetchall()
+        rows = db.job_history.unfinished()
         for row in rows:
             was_queued = row["status"] == "queued"
             result = _load_json(row["result"])
@@ -434,22 +431,16 @@ class JobRunner:
                 # which _chained_job_exists must not treat as proof the
                 # import handed its photos to processing).
                 result["never_started"] = True
-            db.conn.execute(
-                "UPDATE job_history "
-                "SET status='failed', finished_at=?, result=?, error_count=?, "
-                "    tree=?, summary=?, progress=? "
-                "WHERE id = ?",
-                (
-                    last_progress_at or now,
-                    json.dumps(result, default=str),
-                    int(row["error_count"] or 0) + 1,
-                    json.dumps(tree) if tree else row["tree"],
-                    self._interrupted_summary(msg, was_queued, tree, progress),
-                    json.dumps(progress, default=str) if progress else None,
-                    row["id"],
-                ),
+            db.job_history.mark_interrupted(
+                row["id"],
+                last_progress_at or now,
+                json.dumps(result, default=str),
+                int(row["error_count"] or 0) + 1,
+                json.dumps(tree) if tree else row["tree"],
+                self._interrupted_summary(msg, was_queued, tree, progress),
+                json.dumps(progress, default=str) if progress else None,
             )
-        db.conn.commit()
+        db.commit()
 
     @staticmethod
     def _interrupted_summary(msg, was_queued, tree, progress):
@@ -1940,21 +1931,7 @@ class JobRunner:
         try:
             ws_id = db.active_workspace_id
             terminal = ("completed", "failed", "cancelled")
-            placeholders = ",".join(["?"] * len(terminal))
-            if ws_id is not None:
-                rows = db.conn.execute(
-                    f"SELECT * FROM job_history "
-                    f"WHERE workspace_id = ? AND status IN ({placeholders}) "
-                    f"ORDER BY started_at DESC LIMIT ?",
-                    (ws_id, *terminal, limit),
-                ).fetchall()
-            else:
-                rows = db.conn.execute(
-                    f"SELECT * FROM job_history "
-                    f"WHERE status IN ({placeholders}) "
-                    f"ORDER BY started_at DESC LIMIT ?",
-                    (*terminal, limit),
-                ).fetchall()
+            rows = db.job_history.terminal(ws_id, terminal, limit)
             result = []
             for r in rows:
                 d = dict(r)

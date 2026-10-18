@@ -1,11 +1,14 @@
 // Pure helpers: thumbnail URLs, detection_box parsing, photo sort order, and
 // the ?since= URL parameter.
-// Classic page script; load boot.js after all definitions.
+// ES module.
 
-/** @param {MissPhoto} p */ function photoThumbnailUrl(p) {
+import { sharedThumbnailUrl } from './shared.js';
+
+/** @param {MissPhoto} p */ export function photoThumbnailUrl(p) {
   if (!p || p.id == null) return '';
-  return window.vireoThumbnailUrl
-    ? window.vireoThumbnailUrl(p)
+  var shared = sharedThumbnailUrl();
+  return shared
+    ? shared(p)
     : '/thumbnails/' + p.id + '.jpg';
 }
 
@@ -14,7 +17,7 @@
  * where x/y/w/h are normalized [0,1] image coordinates.
  * Returns null if missing or unparseable.
  */
-/** @param {MissPhoto["detection_box"]} raw */ function parseDetectionBox(raw) {
+/** @param {MissPhoto["detection_box"]} raw */ export function parseDetectionBox(raw) {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
   try {
@@ -27,7 +30,7 @@
 }
 
 /* ---------- Sorting: burst_id first, then filename ---------- */
-/** @param {MissPhoto[]} photos */ function sortPhotos(photos) {
+/** @param {MissPhoto[]} photos */ export function sortPhotos(photos) {
   return photos.slice().sort(function(a, b) {
     var ab = a.burst_id || '';
     var bb = b.burst_id || '';
@@ -40,7 +43,7 @@
 }
 
 /* ---------- URL param: ?since=<iso-ts> scopes to current pipeline run ---------- */
-function getSinceParam() {
+export function getSinceParam() {
   try {
     var u = new URL(window.location.href);
     var s = u.searchParams.get('since');

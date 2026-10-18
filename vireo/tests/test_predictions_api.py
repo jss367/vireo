@@ -370,7 +370,7 @@ def test_predictions_for_collection(app_and_db):
 
     # Create a static collection containing only the first photo
     rules = json.dumps([{"field": "photo_ids", "value": [photos[0]['id']]}])
-    coll_id = db.add_collection('Test Collection', rules)
+    coll_id = db.collections.add('Test Collection', rules)
 
     resp = client.get(f'/api/predictions?collection_id={coll_id}')
     assert resp.status_code == 200

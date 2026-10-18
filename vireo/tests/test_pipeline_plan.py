@@ -10,6 +10,7 @@ import os
 import sys
 
 import pytest
+from repositories.masks_features import PipelineFeatures
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -42,7 +43,7 @@ def _mark_sam_done(db, photo_id, path, variant="sam2-small"):
     db.masks_features.upsert_mask(
         photo_id, variant, path,
         detector_model="megadetector-v6",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        prompt=(0.1, 0.1, 0.5, 0.5),
     )
     db.set_active_mask_variant(photo_id, variant)
 
@@ -487,7 +488,7 @@ def test_count_photos_pending_masks_is_variant_aware(tmp_path):
         db.masks_features.upsert_mask(
             pid, "sam2-large", f"/m/{pid}.large.png",
             detector_model="megadetector-v6",
-            prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+            prompt=(0.1, 0.1, 0.5, 0.5),
         )
         db.set_active_mask_variant(pid, "sam2-large")
 
@@ -505,7 +506,7 @@ def test_count_photos_pending_masks_selected_variant_requires_cache_row(tmp_path
     db.masks_features.upsert_mask(
         p_done, "sam2-small", "/m/done.small.png",
         detector_model="megadetector-v6",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        prompt=(0.1, 0.1, 0.5, 0.5),
     )
     db.set_active_mask_variant(p_done, "sam2-small")
     db.conn.execute(
@@ -554,7 +555,7 @@ def test_extract_plan_warns_when_other_sam_variant_has_coverage(tmp_path):
         db.masks_features.upsert_mask(
             pid, "sam2-large", f"/m/{pid}.large.png",
             detector_model="megadetector-v6",
-            prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+            prompt=(0.1, 0.1, 0.5, 0.5),
         )
         db.set_active_mask_variant(pid, "sam2-large")
 
@@ -780,7 +781,7 @@ def test_count_eye_keypoint_eligible_ignores_stale_masks(tmp_path):
     db.masks_features.upsert_mask(
         pid, "sam2-small", "/m/a.png",
         detector_model="megadetector-v6",
-        prompt_x=0.9, prompt_y=0.9, prompt_w=0.05, prompt_h=0.05,
+        prompt=(0.9, 0.9, 0.05, 0.05),
     )
     db.conn.execute(
         "UPDATE photos SET active_mask_variant=? WHERE id=?",
@@ -2057,7 +2058,7 @@ def test_extract_plan_done_prior_when_all_masks_present(tmp_path):
     db.masks_features.upsert_mask(
         pid, "sam2-small", "/m/a.png",
         detector_model="megadetector-v6",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        prompt=(0.1, 0.1, 0.5, 0.5),
     )
     db.set_active_mask_variant(pid, "sam2-small")
     plan = compute_plan(db, _params(), str(tmp_path / "test.db"))
@@ -2073,7 +2074,7 @@ def test_extract_plan_will_run_when_some_photos_missing_masks(tmp_path):
     db.masks_features.upsert_mask(
         pid_done, "sam2-small", "/m/done.png",
         detector_model="megadetector-v6",
-        prompt_x=0.1, prompt_y=0.1, prompt_w=0.5, prompt_h=0.5,
+        prompt=(0.1, 0.1, 0.5, 0.5),
     )
     db.set_active_mask_variant(pid_done, "sam2-small")
     _add_photo_with_detection(db, folder_id, "todo.jpg")
@@ -2835,7 +2836,7 @@ def test_extract_plan_restores_normal_quality_only_in_selected_scope(tmp_path):
 
     db, folder_id = _make_db(tmp_path)
     photo_id, _ = _add_photo_with_detection(db, folder_id, "bird.jpg")
-    db.masks_features.update_pipeline_features(photo_id, quality_input_recipe="linear-raw-subject-v1")
+    db.masks_features.update_pipeline_features(photo_id, PipelineFeatures(quality_input_recipe="linear-raw-subject-v1"))
     params = PipelinePlanParams()
     config = {"sam2_variant": "sam2-small"}
     plan = _extract_plan(db, params, [photo_id], config)
@@ -3082,7 +3083,7 @@ def test_api_pipeline_plan_rejects_visual_collection(app_and_db):
     import json as json_mod
 
     app, db = app_and_db
-    cid = db.add_collection(
+    cid = db.collections.add(
         "Visual pipeline scope",
         json_mod.dumps([]),
         visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
@@ -4123,7 +4124,7 @@ def test_regroup_plan_skips_empty_resolved_scope(tmp_path, scope):
     if scope == "folder":
         selection = {"photo_ids": []}
     elif scope == "collection":
-        selection = {"collection_id": db.add_collection(
+        selection = {"collection_id": db.collections.add(
             "Empty selection", '[{"field": "rating", "op": ">=", "value": 5}]',
         )}
     else:
