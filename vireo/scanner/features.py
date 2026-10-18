@@ -146,6 +146,7 @@ class _FeatureHasher:
         mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
         pool = ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx)
         paused = False
+        pending: deque[tuple[Path, str, Future[FileFeatures]]] = deque()
         try:
             # Bounded in-flight window instead of pool.map(): on Python
             # 3.11 Executor.map eagerly submits every input, so on a
@@ -161,7 +162,6 @@ class _FeatureHasher:
             # running lets the enclosing frame drain workers and
             # release CPU permits before we park.
             max_in_flight = workers * 4
-            pending = deque()
             while remaining:
                 self._check_cancelled_no_park()
                 image_path, path_str = remaining[0]

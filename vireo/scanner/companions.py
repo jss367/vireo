@@ -9,7 +9,7 @@ import logging
 import os
 from collections import defaultdict
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from metadata import EXIF_SUMMARY_COLUMNS
 from preview_cache import (
@@ -589,7 +589,7 @@ def _merge_companion_into_primary(
     db: Database, primary: PairingRow, companion: PairingRow, vireo_dir: StrPath | None,
     thumb_cache_dir: StrPath | None, post_commit_fs_actions: list[Callable[[], None]],
     photo_rows: PhotoRowDeletion,
-) -> None:
+) -> bool:
     """Fold one JPEG companion row into its RAW primary inside the open transaction.
 
     Every DB write joins the caller's transaction; every filesystem change
@@ -600,11 +600,13 @@ def _merge_companion_into_primary(
     primary_full, companion_full = _read_metadata_transfer_rows(
         db, primary, companion,
     )
+    # Candidates predate these reads; a concurrent deletion or merge can
+    # remove either row. Skip before writes or deferred filesystem actions.
+    if primary_full is None or companion_full is None:
+        return False
     _keep_companion_import_identity(db, primary, companion)
-    # Both rows were read for this pair inside the pairing transaction.
     _fill_primary_metadata_gaps(
-        db, primary, cast("sqlite3.Row", primary_full),
-        cast("sqlite3.Row", companion_full),
+        db, primary, primary_full, companion_full,
     )
     _transfer_companion_keywords(db, primary, companion)
 
@@ -622,6 +624,7 @@ def _merge_companion_into_primary(
         post_commit_fs_actions,
     )
     _delete_companion_row(db, primary, companion, photo_rows)
+    return True
 
 
 def _run_post_commit_fs_actions(post_commit_fs_actions: Iterable[Callable[[], object]]) -> None:
@@ -717,10 +720,11 @@ def _pair_raw_jpeg_companions(
     with db.companion_pairing.row_deletion() as photo_rows:
         for (_folder_id, _base), members in groups.items():
             for primary, companion in _pick_compatible_raw_jpeg_pairs(members):
-                _merge_companion_into_primary(
+                if not _merge_companion_into_primary(
                     db, primary, companion, vireo_dir, thumb_cache_dir,
                     post_commit_fs_actions, photo_rows,
-                )
+                ):
+                    continue
                 merged_ids[companion["id"]] = primary["id"]
                 merged_ids.owners[primary["id"]] = (
                     primary["folder_id"], primary["filename"],

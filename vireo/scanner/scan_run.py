@@ -256,7 +256,11 @@ class _ScanRun:
         self.options = options
         # The rebased spellings ``_resolve_scan_root`` returned, not the
         # caller's ``options`` values.
-        self.restrict_dirs = resolved.restrict_dirs
+        # Discovery and folder registration both traverse this scope. Retain
+        # it once so a caller-provided generator is reusable by both passes.
+        self.restrict_dirs = (
+            None if resolved.restrict_dirs is None else tuple(resolved.restrict_dirs)
+        )
         self.signals = _ScanSignals(
             control.cancel_check, hooks.status,
             _status_callback_supports_phase(hooks.status),
@@ -271,7 +275,7 @@ class _ScanRun:
         self.discovery = _Discovery(
             root, resolved.root_path, resolved.frozen_files,
             signals=self.signals,
-            restrict_dirs=resolved.restrict_dirs,
+            restrict_dirs=self.restrict_dirs,
             restrict_files=resolved.restrict_files,
             skip_paths=resolved.skip_paths,
             recursive=options.recursive,
