@@ -6,16 +6,22 @@ queries) resolve it through ``workspace_id_fn`` (``Database._ws_id``) before
 running any SQL, so with no workspace active they raise ``RuntimeError``
 having touched nothing; building the repository never resolves it. The
 hash-check verdict write is catalog-wide, takes the photo id as an argument
-and never resolves a workspace.
+and never resolves a workspace. So are the repair helpers the audit module
+runs: removing confirmed orphan rows (through ``photo_row_deletion``, never
+committing; ``audit.remove_orphans`` commits), the cataloged names in one
+folder that ``import_untracked`` compares before and after its scan, and one
+photo's filename and folder path for the orphan recheck.
 
 Callers reach it as ``db.audit`` (a fresh repository per access, see
 ``Database.audit``); there are no forwarding wrappers on ``Database``.
 """
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any
+
+from repositories.photo_row_deletion import photo_row_deletion
 
 
 class AuditRepository:
@@ -164,3 +170,43 @@ class AuditRepository:
             )
         if commit:
             self.conn.commit()
+
+    # -- repairs ---------------------------------------------------------------
+
+    def remove_orphan_rows(self, photo_ids: Sequence[int]) -> None:
+        """Delete the catalog rows of orphaned photos, in the caller's transaction.
+
+        For each photo, drops its ``photo_keywords``, embedded-keyword offers
+        and ``pending_changes`` first, then deletes the photo rows through
+        ``photo_row_deletion`` so static collections drop them too. Catalog
+        wide (the caller confirms the ids); does not commit.
+        """
+        with photo_row_deletion(self.conn) as photo_rows:
+            for pid in photo_ids:
+                self.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
+                self.conn.execute(
+                    "DELETE FROM photo_embedded_keyword_offered WHERE photo_id = ?", (pid,),
+                )
+                self.conn.execute("DELETE FROM pending_changes WHERE photo_id = ?", (pid,))
+            photo_rows.delete(dict.fromkeys(photo_ids))
+
+    def cataloged_names_in_folder(self, folder_path: str) -> list[sqlite3.Row]:
+        """Filenames and companion paths of the photos in the folder stored at ``folder_path``.
+
+        One column per row: each photo's ``filename``, plus the
+        ``companion_path`` of those that have one (``UNION``, so duplicates
+        collapse). Catalog-wide.
+        """
+        return self.conn.execute(
+            "SELECT p.filename FROM photos p JOIN folders f ON f.id=p.folder_id WHERE f.path=? "
+            "UNION SELECT p.companion_path FROM photos p JOIN folders f ON f.id=p.folder_id "
+            "WHERE f.path=? AND p.companion_path IS NOT NULL",
+            (folder_path, folder_path),
+        ).fetchall()
+
+    def photo_location(self, photo_id: int) -> sqlite3.Row | None:
+        """``filename`` and folder ``path`` of one photo, or None (no row, or no folder row)."""
+        return self.conn.execute(
+            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id=p.folder_id WHERE p.id=?",
+            (photo_id,),
+        ).fetchone()

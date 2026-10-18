@@ -446,17 +446,12 @@ def _referenced_refs(db):
     """Every local.mask.ref reachable from current recipes or edit history."""
     refs = set()
     pattern = re.compile(r'"ref":\s*"([0-9a-f]{12})"')
-    queries = (
-        "SELECT recipe_json AS v FROM photo_edit_recipes "
-        "WHERE recipe_json LIKE '%\"local\"%'",
-        "SELECT old_value AS v FROM edit_history_items "
-        "WHERE old_value LIKE '%\"local\"%'",
-        "SELECT new_value AS v FROM edit_history_items "
-        "WHERE new_value LIKE '%\"local\"%'",
-    )
-    for query in queries:
-        for row in db.conn.execute(query).fetchall():
-            refs.update(pattern.findall(row["v"] or ""))
+    values = [
+        *db.edits.recipes_with_local_adjustments(),
+        *db.edit_history.item_values_with_local_adjustments(),
+    ]
+    for value in values:
+        refs.update(pattern.findall(value or ""))
     return refs
 
 

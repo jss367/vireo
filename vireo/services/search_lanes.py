@@ -14,10 +14,18 @@ when the page would have discarded its response, and never by another
 window or another loader.
 """
 
+from __future__ import annotations
+
 import re
 import sqlite3
 import threading
 from collections import OrderedDict
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from db import Database
 
 LANE_HEADER = "X-Vireo-Search-Lane"
 SEQ_HEADER = "X-Vireo-Search-Seq"
@@ -35,12 +43,12 @@ PROGRESS_INSTRUCTIONS = 20_000
 class SearchLanes:
     """The newest sequence number claimed on each lane."""
 
-    def __init__(self, max_lanes=MAX_LANES):
+    def __init__(self, max_lanes: int = MAX_LANES) -> None:
         self._lock = threading.Lock()
-        self._latest = OrderedDict()
+        self._latest: OrderedDict[str, int] = OrderedDict()
         self._max_lanes = max_lanes
 
-    def claim(self, lane, seq):
+    def claim(self, lane: str, seq: int) -> Callable[[], bool]:
         """Record a request for ``seq`` on ``lane``.
 
         Returns a callable reporting whether a newer request has claimed the
@@ -55,7 +63,7 @@ class SearchLanes:
             while len(self._latest) > self._max_lanes:
                 self._latest.popitem(last=False)
 
-        def superseded():
+        def superseded() -> bool:
             with self._lock:
                 latest = self._latest.get(lane)
             return latest is not None and latest > seq
@@ -68,7 +76,7 @@ class SearchLanes:
 SEARCH_LANES = SearchLanes()
 
 
-def parse_lane(lane, seq):
+def parse_lane(lane: str | None, seq: str | None) -> tuple[str, int] | None:
     """Validate the two header values; ``None`` when either is absent or bad."""
     if not lane or not seq or not _LANE_PATTERN.fullmatch(lane):
         return None
@@ -77,7 +85,9 @@ def parse_lane(lane, seq):
     return lane, int(seq)
 
 
-def cancel_when_superseded(conn, superseded):
+def cancel_when_superseded(
+    conn: Database | sqlite3.Connection, superseded: Callable[[], bool],
+) -> None:
     """Interrupt ``conn``'s running statement once ``superseded()`` is true.
 
     ``conn`` is a ``Database`` or a ``sqlite3.Connection``: anything with
@@ -88,7 +98,9 @@ def cancel_when_superseded(conn, superseded):
     )
 
 
-def is_superseded_interrupt(exc, superseded):
+def is_superseded_interrupt(
+    exc: BaseException, superseded: Callable[[], bool] | None,
+) -> bool:
     """Whether ``exc`` is SQLite abandoning work for a superseded request."""
     return (
         superseded is not None
