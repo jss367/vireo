@@ -1,16 +1,17 @@
-<!-- Browse Compare Overlay -->
-<div class="browse-compare-overlay" id="browseCompareOverlay" onclick="browseCompare.close(event)">
-  <div class="browse-compare-toolbar" onclick="event.stopPropagation()">
+<!-- Browse Compare Overlay. The page binds its data-compare-control markup
+     with VireoBrowseCompare.bindControls (vireo-browse-compare.js). -->
+<div class="browse-compare-overlay" id="browseCompareOverlay" data-compare-control="close">
+  <div class="browse-compare-toolbar" data-compare-control="stop">
     <span class="browse-compare-title">Compare</span>
     <span class="browse-compare-count" id="browseCompareCount"></span>
     <span class="browse-compare-hint">Scroll to zoom · drag to pan · double-click to toggle</span>
     <span class="browse-compare-spacer"></span>
-    <button class="browse-compare-btn" onclick="browseCompare.resetViews()" title="Fit both photos to their panes">Reset views</button>
-    <button class="browse-compare-btn" id="browseComparePrev" onclick="browseCompare.step(-1)" title="Previous pair">Previous</button>
-    <button class="browse-compare-btn" id="browseCompareNext" onclick="browseCompare.step(1)" title="Next pair">Next</button>
-    <button class="browse-compare-close" onclick="browseCompare.close(event)" title="Close">&times;</button>
+    <button class="browse-compare-btn" data-compare-control="reset" title="Fit both photos to their panes">Reset views</button>
+    <button class="browse-compare-btn" id="browseComparePrev" data-compare-control="prev" title="Previous pair">Previous</button>
+    <button class="browse-compare-btn" id="browseCompareNext" data-compare-control="next" title="Next pair">Next</button>
+    <button class="browse-compare-close" data-compare-control="close" title="Close">&times;</button>
   </div>
-  <div class="browse-compare-stage" onclick="event.stopPropagation()">
+  <div class="browse-compare-stage" data-compare-control="stop">
     <div class="browse-compare-pane">
       <div class="browse-compare-image-wrap" id="browseCompareWrapA" data-pane="A" title="Scroll to zoom, then drag to pan">
         <span class="browse-compare-zoom-badge" id="browseCompareZoomA">Fit</span>

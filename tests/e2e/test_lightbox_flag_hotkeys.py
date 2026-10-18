@@ -104,8 +104,8 @@ def test_lightbox_x_not_overwritten_by_slow_initial_metadata(live_server, page):
     )
 
     page.evaluate(
-        "pid => { const p = photos.find(x => x.id === pid);"
-        " openLightbox(pid, p ? p.filename : '', photos); }",
+        "pid => { const p = browseState.photos.find(x => x.id === pid);"
+        " openLightbox(pid, p ? p.filename : '', browseState.photos); }",
         pid,
     )
     page.wait_for_function(
@@ -169,8 +169,8 @@ def test_lightbox_reopen_ignores_stale_metadata_from_previous_open(live_server, 
     page.route(f"**/api/photos/{pid}", hold_first_photo_fetch)
 
     page.evaluate(
-        "pid => { const p = photos.find(x => x.id === pid);"
-        " openLightbox(pid, p ? p.filename : '', photos); }",
+        "pid => { const p = browseState.photos.find(x => x.id === pid);"
+        " openLightbox(pid, p ? p.filename : '', browseState.photos); }",
         pid,
     )
     page.wait_for_function(
@@ -184,8 +184,8 @@ def test_lightbox_reopen_ignores_stale_metadata_from_previous_open(live_server, 
 
     page.evaluate("closeLightbox()")
     page.evaluate(
-        "pid => { const p = photos.find(x => x.id === pid);"
-        " openLightbox(pid, p ? p.filename : '', photos); }",
+        "pid => { const p = browseState.photos.find(x => x.id === pid);"
+        " openLightbox(pid, p ? p.filename : '', browseState.photos); }",
         pid,
     )
     page.wait_for_function(
@@ -325,12 +325,12 @@ def test_lightbox_honors_modifier_rebind(live_server, page):
     # thing a real settings rebind achieves via the reload that follows.
     page.wait_for_function(
         "window._vireoShortcuts && window._vireoShortcuts.browse"
-        " && typeof _shortcuts !== 'undefined' && _shortcuts !== null",
+        " && typeof pageModules.config._shortcuts !== 'undefined' && pageModules.config._shortcuts !== null",
         timeout=3000,
     )
     page.evaluate(
         "window._vireoShortcuts.browse.flag = 'ctrl+p';"
-        "_shortcuts.flag = 'ctrl+p';"
+        "pageModules.config._shortcuts.flag = 'ctrl+p';"
     )
 
     # Bare 'p' should now be a no-op (modifier mismatch).

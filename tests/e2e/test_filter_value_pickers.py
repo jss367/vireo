@@ -164,6 +164,6 @@ def test_saved_multi_value_rules_survive_collection_editor(live_server, page):
     ]}
     cid = live_server['db'].collections.add('Selected birds', json.dumps(rules))
     _open_browse(page, live_server)
-    page.evaluate('cid => editCollection(cid)', cid)
+    page.evaluate('cid => pageModules.collectionEditor.editCollection(cid)', cid)
     expect(page.locator('.collection-preserved-rule')).to_contain_text('Red-tailed Hawk, American Robin')
-    assert page.evaluate('serializeCollectionRules()') == rules
+    assert page.evaluate('pageModules.collectionEditor.serializeCollectionRules()') == rules

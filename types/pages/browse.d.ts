@@ -107,6 +107,9 @@ declare function showDeleteDialog(ids: number[], companionCount: number, callbac
 declare function developPhotos(ids: number[]): Promise<void>;
 declare function openPanoramaModal(ids: number[]): void;
 declare function closePanoramaModal(): void;
+declare function startPanorama(): Promise<void>;
+declare function openPipeline(photoId: number): void;
+declare function vireoTogglePairSource(photoId: number): void;
 declare function isTauri(): boolean;
 declare function pickDirectory(title: string, options?: {defaultPath?: string}): Promise<string | null>;
 declare function _vireoPairSource(id: number): string | null;
@@ -117,7 +120,6 @@ interface BrowseReloadOptions {preserveScroll?: boolean; preserveAnchor?: boolea
 interface BrowseLoadState<T> {workspaceId?: number | null}
 interface BrowseAnchor {viewportOnly?: boolean}
 // browse.html loads request/state/loader owners before any page action runs.
-type BrowseInitializedPanels = Required<NonNullable<VireoNamespace['browse']>> & {selectionPanel: BrowseSelectionPanel & {bindActions(): void}};
 
 interface BrowsePhoto {is_species_representative?: boolean}
 interface BrowseEditClipboard {recipe: Record<string, unknown>; source?: string | null; at?: number}
@@ -131,7 +133,11 @@ interface BrowseEditNavigation {
   setCopiedRecipe(recipe: Record<string, unknown> | null | undefined, meta: {source: string | null, at: number}): Promise<void>;
 }
 declare var VireoBatchEdits: {open(ids: number[]): Promise<void>; paste(ids: number[]): Promise<{count: number, skipped: number[]} | null>; resultMessage(data: {count: number, skipped: number[]}): string};
-declare var VireoBrowseCompare: {create(options: {findPhoto: (id: number) => BrowsePhoto | null; fetch: typeof safeFetch; showToast: typeof showToast}): {open(ids: number[]): Promise<void> | void; isOpen(): boolean; close(): void; step(delta: number): void}};
+interface BrowseCompareController {open(ids: number[]): Promise<void> | void; isOpen(): boolean; close(event?: Event): void; step(delta: number): void; resetViews(): void}
+declare var VireoBrowseCompare: {
+  create(options: {findPhoto: (id: number) => BrowsePhoto | null; fetch: typeof safeFetch; showToast: typeof showToast}): BrowseCompareController;
+  bindControls(document: Document, getCompare: () => BrowseCompareController | null): void;
+};
 interface BrowseKeywordRefreshOptions {skipPanels?: boolean; skipDetail?: boolean; reportFailure?: boolean}
 interface BrowsePhoto {species_representatives?: {species: string; is_current_photo?: boolean; is_species_representative?: boolean}[]}
 interface BrowseCollection {can_add_photos?: boolean; rules?: string | BrowseRule | BrowseRule[]}

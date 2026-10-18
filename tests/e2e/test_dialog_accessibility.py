@@ -194,7 +194,7 @@ def open_browse(page, live_server):
 @pytest.mark.parametrize("dismiss", ["escape", "cancel"])
 def test_collection_dialog_keyboard_and_cleanup(live_server, page, dismiss):
     open_browse(page, live_server)
-    selection = page.evaluate("getActiveSelection()")
+    selection = page.evaluate("pageModules.selection.getActiveSelection()")
     opener = page.get_by_role("button", name="+ New Collection", exact=True)
     opener.click()
     dialog = page.get_by_role("dialog", name="New Smart Collection", exact=True)
@@ -213,15 +213,15 @@ def test_collection_dialog_keyboard_and_cleanup(live_server, page, dismiss):
         cancel.click()
     expect(dialog).to_be_hidden()
     expect(opener).to_be_focused()
-    assert page.evaluate("getActiveSelection()") == selection
-    assert page.evaluate("[collectionEditingId, _previewTimer]") == [None, None]
+    assert page.evaluate("pageModules.selection.getActiveSelection()") == selection
+    assert page.evaluate("[pageModules.collectionEditor.collectionEditingId, pageModules.collectionEditor._previewTimer]") == [None, None]
     assert not page.locator(".main-layout").evaluate("el => el.inert")
 
 
 @pytest.mark.parametrize("dismiss", ["escape", "cancel"])
 def test_batch_keyword_dialog_returns_focus_without_clearing_selection(live_server, page, dismiss):
     open_browse(page, live_server)
-    selection = page.evaluate("getActiveSelection()")
+    selection = page.evaluate("pageModules.selection.getActiveSelection()")
     opener = page.locator("#batchBar").get_by_role("button", name="+ Keyword", exact=True)
     opener.click()
     dialog = page.get_by_role("dialog", name="Add keyword to 1 photos", exact=True)
@@ -239,7 +239,7 @@ def test_batch_keyword_dialog_returns_focus_without_clearing_selection(live_serv
     expect(dialog).to_be_hidden()
     expect(opener).to_be_focused()
     expect(page.locator("#batchKeywordSuggestions")).not_to_have_class("keyword-suggestion-list open")
-    assert page.evaluate("getActiveSelection()") == selection
+    assert page.evaluate("pageModules.selection.getActiveSelection()") == selection
 
 
 def test_batch_collection_choices_work_with_keyboard_and_restore_opener(live_server, page):
@@ -255,7 +255,7 @@ def test_batch_collection_choices_work_with_keyboard_and_restore_opener(live_ser
     expect(choice).to_be_focused()
     choice.press("Space")
     expect(choice).to_have_attribute("aria-pressed", "true")
-    assert page.evaluate("_batchCollectionSelectedId") == collection_id
+    assert page.evaluate("pageModules.batchActions._batchCollectionSelectedId") == collection_id
     choice.press("Escape")
     expect(dialog).to_be_hidden()
     expect(opener).to_be_focused()
@@ -265,12 +265,12 @@ def test_edit_collection_escape_clears_edit_state(live_server, page):
     open_browse(page, live_server)
     opener = page.get_by_role("button", name="+ New Collection", exact=True)
     opener.focus()
-    page.evaluate("showCollectionModal({id: 123, name: 'Existing collection', rules: []})")
+    page.evaluate("pageModules.collectionEditor.showCollectionModal({id: 123, name: 'Existing collection', rules: []})")
     dialog = page.get_by_role("dialog", name="Edit Smart Collection", exact=True)
     expect(dialog.get_by_role("textbox", name="Collection name")).to_have_value("Existing collection")
     page.keyboard.press("Escape")
     expect(opener).to_be_focused()
-    assert page.evaluate("collectionEditingId") is None
+    assert page.evaluate("pageModules.collectionEditor.collectionEditingId") is None
 
 
 def test_edit_rules_context_menu_restores_focus_to_collection_row(live_server, page):
@@ -304,7 +304,7 @@ def test_confirm_batch_collection_moves_focus_to_grid_not_hidden_opener(live_ser
     dialog = page.get_by_role("dialog", name="Add 1 photo(s) to collection", exact=True)
     choice = dialog.get_by_role("button", name="Pick target", exact=True)
     choice.click()
-    assert page.evaluate("_batchCollectionSelectedId") == collection_id
+    assert page.evaluate("pageModules.batchActions._batchCollectionSelectedId") == collection_id
     dialog.get_by_role("button", name="Add", exact=True).click()
     expect(dialog).to_be_hidden()
     # The batch bar hides once the selection is cleared, so the opener is no
@@ -365,7 +365,7 @@ def test_confirm_batch_collection_preserves_focus_moved_during_pending_add(live_
     # Release the stalled request. confirmBatchCollection resolves, runs
     # clearSelection(), and reaches the focus fallback.
     page.evaluate("window._releasePending = true")
-    page.wait_for_function("window.getActiveSelection && getActiveSelection().length === 0")
+    page.wait_for_function("window.pageModules && pageModules.selection.getActiveSelection && pageModules.selection.getActiveSelection().length === 0")
     # Focus must stay on the user's deliberate choice, not snap to #grid.
     expect(page.locator("#userChosenAnchor")).to_be_focused()
 
@@ -744,7 +744,7 @@ def test_add_to_collection_dismisses_lightbox_opened_during_pending_fetch(live_s
     page.evaluate("""() => {
       const card = document.querySelector('.grid-card');
       const id = parseInt(card.dataset.id, 10);
-      openLightbox(id, card.dataset.filename || '', availableBrowsePhotos());
+      openLightbox(id, card.dataset.filename || '', pageModules.lightbox.availableBrowsePhotos());
     }""")
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
     # Release the stalled fetch. addToCollection must close the lightbox
@@ -809,7 +809,7 @@ def test_save_collection_restores_focus_after_superseding_render(live_server, pa
     # Kick off a concurrent loadCollections() that will bump the gen
     # counter past saveCollection's own gen. This matches the folder-
     # health refresh race the Codex finding describes.
-    page.evaluate("loadCollections()")
+    page.evaluate("pageModules.sidebarCollections.loadCollections()")
     dialog.get_by_role("button", name="Update", exact=True).click()
     expect(dialog).to_be_hidden()
     # Wait until the second (superseding) GET is signalled stalled; by
@@ -866,7 +866,7 @@ def test_save_collection_preserves_focus_moved_to_sibling_row_during_pending_ref
     name = dialog.get_by_role("textbox", name="Collection name", exact=True)
     expect(name).to_have_value("Sibling source")
     name.fill("Sibling source renamed")
-    page.evaluate("loadCollections()")
+    page.evaluate("pageModules.sidebarCollections.loadCollections()")
     dialog.get_by_role("button", name="Update", exact=True).click()
     expect(dialog).to_be_hidden()
     # Before releasing the superseding render, the user tabs to the
@@ -929,7 +929,7 @@ def test_save_collection_restores_focus_after_slow_superseding_render(live_serve
     name = dialog.get_by_role("textbox", name="Collection name", exact=True)
     expect(name).to_have_value("Slow supersede")
     name.fill("Slow supersede renamed")
-    page.evaluate("loadCollections()")
+    page.evaluate("pageModules.sidebarCollections.loadCollections()")
     dialog.get_by_role("button", name="Update", exact=True).click()
     expect(dialog).to_be_hidden()
     page.wait_for_function("window._supersedingGetSignalled === true")

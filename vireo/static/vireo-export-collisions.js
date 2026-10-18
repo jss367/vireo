@@ -6,7 +6,8 @@
  * /api/jobs/export/preflight which names would actually change for the
  * current settings, and shows #exportCollisionNotice only when some would.
  *
- * Each host page defines buildExportPreflightRequest(), returning the
+ * Each host page registers a buildExportPreflightRequest page hook
+ * (vireo-page-hooks.js), returning the
  * name-deciding settings (photos, destination, template, format, ...), or
  * null when they cannot describe an export yet (e.g. an out-of-range custom
  * size). The check re-runs, debounced, whenever that request changes: on
@@ -141,9 +142,8 @@ var VireoExportCollisions = (function() {
   }
 
   function currentRequest() {
-    return typeof buildExportPreflightRequest === 'function'
-      ? buildExportPreflightRequest()
-      : null;
+    var build = Vireo.pageHook('buildExportPreflightRequest');
+    return build ? build() : null;
   }
 
   /** @param {ExportPreflightRequest} body @param {number} generation */

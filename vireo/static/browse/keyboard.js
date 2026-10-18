@@ -1,6 +1,27 @@
-/* Browse: keyboard shortcuts and grid arrow-key navigation.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: keyboard shortcuts and grid arrow-key navigation. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import {
+  closeLightbox, closePanoramaModal, exitLightboxFullscreen, matchesShortcut,
+  preferredScrollBehavior,
+} from './shared.js';
+import {
+  batchSetColorLabel, batchSetFlag, batchSetRating, hideBatchCollectionModal,
+  hideBatchKeywordModal,
+} from './batch-actions.js';
+import { hideCollectionModal } from './collection-editor.js';
+import { _shortcuts } from './config.js';
+import { closeDetail, redoLast, undoLast } from './detail.js';
+import { setColorLabel, setFlag, setRating } from './edit-actions.js';
+import { closeExportModal } from './export.js';
+import {
+  browseKeyMatchesConfiguredShortcut, browsePhotoIsAvailable, openBrowseShortcutPhoto,
+} from './lightbox.js';
+import { loadPhotos } from './loading.js';
+import { browseCompare, openBrowseCompare } from './selection-panel.js';
+import {
+  clearSelection, getActiveSelection, selectAllMatchingPhotos, selectPhoto,
+} from './selection.js';
 
 /* ---------- Keyboard Shortcuts ---------- */
 document.addEventListener('keydown', function(e) {
@@ -100,8 +121,8 @@ document.addEventListener('keydown', function(e) {
   // Must stay aligned with updateBatchBar(): any non-empty selectedPhotos is
   // actionable (size >= 1, not > 1), otherwise shortcuts silently no-op while
   // the bar advertises "1 selected" after cmd-click reduces the set to one.
-  var useBatch = selectedPhotos.size >= 1;
-  var hasActive = useBatch || selectedPhotoId;
+  var useBatch = state.selectedPhotos.size >= 1;
+  var hasActive = useBatch || state.selectedPhotoId;
 
   if (matchesShortcut(e, _shortcuts.compare || 'c')) {
     var compareIds = getActiveSelection();
@@ -117,7 +138,7 @@ document.addEventListener('keydown', function(e) {
     for (var r = 0; r <= 5; r++) {
       if (matchesShortcut(e, _shortcuts['rate_' + r])) {
         if (useBatch) batchSetRating(r);
-        else if (selectedPhotoId != null) setRating(selectedPhotoId, r);
+        else if (state.selectedPhotoId != null) setRating(state.selectedPhotoId, r);
         return;
       }
     }
@@ -149,7 +170,7 @@ document.addEventListener('keydown', function(e) {
       return;
     }
     if (browseViewKey === 'g') {
-      if (typeof exitLightboxFullscreen === 'function') exitLightboxFullscreen();
+      exitLightboxFullscreen();
       if (/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) closeLightbox();
       e.preventDefault();
       return;
@@ -157,7 +178,7 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-function getBrowseGridColumnCount() {
+export function getBrowseGridColumnCount() {
   var grid = /** @type {HTMLElement} */ (document.getElementById('grid'));
   if (grid) {
     var template = window.getComputedStyle(grid).gridTemplateColumns || '';
@@ -177,34 +198,34 @@ function getBrowseGridColumnCount() {
   return Math.max(1, count);
 }
 
-async function moveBrowseSelection(/** @type {number} */ delta, /** @type {KeyboardEvent | undefined} */ e = undefined) {
-  var nextIndex = selectedIndex < 0 && delta > 0 ? 0 : selectedIndex + delta;
+export async function moveBrowseSelection(/** @type {number} */ delta, /** @type {KeyboardEvent | undefined} */ e = undefined) {
+  var nextIndex = state.selectedIndex < 0 && delta > 0 ? 0 : state.selectedIndex + delta;
   while (true) {
-    while (nextIndex >= 0 && nextIndex < photos.length && photos[nextIndex] &&
-           !browsePhotoIsAvailable(/** @type {BrowsePhoto} */ (photos[nextIndex]))) {
+    while (nextIndex >= 0 && nextIndex < state.photos.length && state.photos[nextIndex] &&
+           !browsePhotoIsAvailable(/** @type {BrowsePhoto} */ (state.photos[nextIndex]))) {
       nextIndex += delta > 0 ? 1 : -1;
     }
-    if (nextIndex >= 0 && nextIndex < photos.length && photos[nextIndex]) break;
-    if (delta <= 0 || nextIndex < 0 || allLoaded) return;
+    if (nextIndex >= 0 && nextIndex < state.photos.length && state.photos[nextIndex]) break;
+    if (delta <= 0 || nextIndex < 0 || state.allLoaded) return;
 
     // Skipping trailing offline cards can move us beyond the loaded window.
     // Fetch the next page and resume the skip until an available row appears
     // or the dataset is exhausted.
-    var beforeLength = photos.length;
+    var beforeLength = state.photos.length;
     await loadPhotos();
-    if (photos.length === beforeLength) return;
+    if (state.photos.length === beforeLength) return;
   }
   var selectionEvent = {
     shiftKey: !!(e && e.shiftKey),
     metaKey: !!(e && e.metaKey),
     ctrlKey: !!(e && e.ctrlKey),
   };
-  var photo = photos[nextIndex]; if (!photo) return;
+  var photo = state.photos[nextIndex]; if (!photo) return;
   selectPhoto(selectionEvent, photo.id, nextIndex);
-  scrollToCard(selectedIndex);
+  scrollToCard(state.selectedIndex);
 }
 
-function scrollToCard(/** @type {number} */ idx) {
+export function scrollToCard(/** @type {number} */ idx) {
   var cards = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.grid-card'));
   var card = cards[idx]; if (card) card.scrollIntoView({ block: 'nearest', behavior: preferredScrollBehavior() });
 }

@@ -1,18 +1,19 @@
-/* Browse: keyword autocomplete for the keyword inputs.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: keyword autocomplete for the keyword inputs. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import { escapeHtml, safeFetch } from './shared.js';
 
-function invalidateKeywordAutocompleteCache() {
-  keywordAutocompleteCache = null;
-  keywordAutocompletePromise = null;
+export function invalidateKeywordAutocompleteCache() {
+  state.keywordAutocompleteCache = null;
+  state.keywordAutocompletePromise = null;
 }
 
-async function loadKeywordAutocompleteOptions(/** @type {boolean | undefined} */ force = undefined) {
-  if (!force && keywordAutocompleteCache !== null) return keywordAutocompleteCache;
-  if (!force && keywordAutocompletePromise) return keywordAutocompletePromise;
-  keywordAutocompletePromise = safeFetch('/api/keywords/all', {}, { toast: false })
+export async function loadKeywordAutocompleteOptions(/** @type {boolean | undefined} */ force = undefined) {
+  if (!force && state.keywordAutocompleteCache !== null) return state.keywordAutocompleteCache;
+  if (!force && state.keywordAutocompletePromise) return state.keywordAutocompletePromise;
+  state.keywordAutocompletePromise = safeFetch('/api/keywords/all', {}, { toast: false })
     .then(function(/** @type {BrowseKeyword[]} */ rows) {
-      keywordAutocompleteCache = (rows || [])
+      state.keywordAutocompleteCache = (rows || [])
         .filter(function(k) { return k && k.name; })
         .map(function(k) {
           return {
@@ -27,20 +28,20 @@ async function loadKeywordAutocompleteOptions(/** @type {boolean | undefined} */
         .sort(function(a, b) {
           return a.search.localeCompare(b.search) || a.id - b.id;
         });
-      return keywordAutocompleteCache || [];
+      return state.keywordAutocompleteCache || [];
     })
     .catch(function() {
       return [];
     })
     .finally(function() {
-      keywordAutocompletePromise = null;
+      state.keywordAutocompletePromise = null;
     });
-  return keywordAutocompletePromise;
+  return state.keywordAutocompletePromise;
 }
 
-function getKeywordAutocompleteState(/** @type {string} */ inputId) {
-  if (!keywordAutocompleteStates[inputId]) {
-    keywordAutocompleteStates[inputId] = {
+export function getKeywordAutocompleteState(/** @type {string} */ inputId) {
+  if (!state.keywordAutocompleteStates[inputId]) {
+    state.keywordAutocompleteStates[inputId] = {
       matches: [],
       activeIndex: -1,
       selectedKeyword: null,
@@ -48,10 +49,10 @@ function getKeywordAutocompleteState(/** @type {string} */ inputId) {
       submitFn: null,
     };
   }
-  return keywordAutocompleteStates[inputId];
+  return state.keywordAutocompleteStates[inputId];
 }
 
-function keywordMatchScore(/** @type {string} */ search, /** @type {string} */ query) {
+export function keywordMatchScore(/** @type {string} */ search, /** @type {string} */ query) {
   if (search === query) return 0;
   if (search.indexOf(query) === 0) return 1;
   if (search.split(/[\s\-_/]+/).some(function(part) { return part.indexOf(query) === 0; })) return 2;
@@ -59,30 +60,30 @@ function keywordMatchScore(/** @type {string} */ search, /** @type {string} */ q
   return idx === -1 ? 99 : 3 + idx / 1000;
 }
 
-function hideKeywordSuggestions(/** @type {string} */ inputId) {
-  var state = getKeywordAutocompleteState(inputId);
-  const dropdown = document.getElementById(state.dropdownId);
+export function hideKeywordSuggestions(/** @type {string} */ inputId) {
+  var acState = getKeywordAutocompleteState(inputId);
+  const dropdown = document.getElementById(acState.dropdownId);
   if (dropdown) {
     dropdown.classList.remove('open');
     dropdown.innerHTML = '';
   }
-  state.matches = [];
-  state.activeIndex = -1;
+  acState.matches = [];
+  acState.activeIndex = -1;
 }
 
 function renderKeywordSuggestions(/** @type {string} */ inputId) {
   const input = /** @type {HTMLInputElement | null} */ (document.getElementById(inputId));
-  var state = getKeywordAutocompleteState(inputId);
-  const dropdown = document.getElementById(state.dropdownId);
+  var acState = getKeywordAutocompleteState(inputId);
+  const dropdown = document.getElementById(acState.dropdownId);
   if (!input || !dropdown) return;
   var query = input.value.trim().toLowerCase();
-  state.selectedKeyword = null;
-  if (!query || !keywordAutocompleteCache || !keywordAutocompleteCache.length) {
+  acState.selectedKeyword = null;
+  if (!query || !state.keywordAutocompleteCache || !state.keywordAutocompleteCache.length) {
     hideKeywordSuggestions(inputId);
     return;
   }
 
-  state.matches = keywordAutocompleteCache
+  acState.matches = state.keywordAutocompleteCache
     .map(function(k) {
       return { keyword: k, score: keywordMatchScore(k.search, query) };
     })
@@ -93,14 +94,14 @@ function renderKeywordSuggestions(/** @type {string} */ inputId) {
     .slice(0, 8)
     .map(function(item) { return item.keyword; });
 
-  if (!state.matches.length) {
+  if (!acState.matches.length) {
     hideKeywordSuggestions(inputId);
     return;
   }
-  if (state.activeIndex < 0 || state.activeIndex >= state.matches.length) state.activeIndex = 0;
+  if (acState.activeIndex < 0 || acState.activeIndex >= acState.matches.length) acState.activeIndex = 0;
 
-  dropdown.innerHTML = state.matches.map(function(k, idx) {
-    var active = idx === state.activeIndex ? ' active' : '';
+  dropdown.innerHTML = acState.matches.map(function(k, idx) {
+    var active = idx === acState.activeIndex ? ' active' : '';
     var count = k.photo_count === 1 ? '1 photo' : k.photo_count + ' photos';
     return '<div class="keyword-suggestion-option' + active + '" role="option" data-index="' + idx + '">' +
       '<span class="keyword-suggestion-name">' + escapeHtml(k.name) + '</span>' +
@@ -112,24 +113,24 @@ function renderKeywordSuggestions(/** @type {string} */ inputId) {
 
 function chooseKeywordSuggestion(/** @type {string} */ inputId, /** @type {number} */ index) {
   const input = /** @type {HTMLInputElement | null} */ (document.getElementById(inputId));
-  var state = getKeywordAutocompleteState(inputId);
-  var keyword = state.matches[index];
+  var acState = getKeywordAutocompleteState(inputId);
+  var keyword = acState.matches[index];
   if (!input || !keyword) return;
   input.value = keyword.name;
-  state.selectedKeyword = keyword;
+  acState.selectedKeyword = keyword;
   hideKeywordSuggestions(inputId);
-  if (typeof state.submitFn === 'function') {
-    state.submitFn(keyword);
+  if (typeof acState.submitFn === 'function') {
+    acState.submitFn(keyword);
   }
 }
 
-function bindKeywordAutocomplete(/** @type {string} */ inputId, /** @type {string} */ dropdownId, /** @type {(keyword: BrowseKeywordOption | null) => void} */ submitFn) {
+export function bindKeywordAutocomplete(/** @type {string} */ inputId, /** @type {string} */ dropdownId, /** @type {(keyword: BrowseKeywordOption | null) => void} */ submitFn) {
   const input = /** @type {HTMLInputElement | null} */ (document.getElementById(inputId));
   const dropdown = document.getElementById(dropdownId);
   if (!input || !dropdown) return;
-  var state = getKeywordAutocompleteState(inputId);
-  state.dropdownId = dropdownId;
-  state.submitFn = submitFn;
+  var acState = getKeywordAutocompleteState(inputId);
+  acState.dropdownId = dropdownId;
+  acState.submitFn = submitFn;
 
   input.addEventListener('focus', function() {
     loadKeywordAutocompleteOptions().then(function() { renderKeywordSuggestions(inputId); });

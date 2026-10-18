@@ -38,7 +38,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     expect(cards).to_have_count(3)
     expect(page.locator("#filterSummary")).to_contain_text("3 items · 1 stack · 5 photos")
     assert page.evaluate(
-        """() => browseStackCoverCompare(
+        """() => pageModules.stacks.browseStackCoverCompare(
           {id: 1, rating: 0, width: 1, height: 1},
           {id: 2, rating: null, width: 999, height: 999}
         ) < 0"""
@@ -95,8 +95,8 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     expect(tray.locator(".det-box")).to_have_count(0)
     assert page.evaluate(
         """coverId => {
-          var cover = photos.find(function(photo) { return photo.id === coverId; });
-          var member = browseStackMembers[String(coverId)].find(function(photo) {
+          var cover = browseState.photos.find(function(photo) { return photo.id === coverId; });
+          var member = browseState.browseStackMembers[String(coverId)].find(function(photo) {
             return photo.id === coverId;
           });
           return cover === member;
@@ -107,7 +107,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     badge.click()
     expect(tray).to_be_hidden()
     assert page.evaluate(
-        "coverId => browsePhotoNavigationList(coverId) === photos",
+        "coverId => pageModules.stacks.browsePhotoNavigationList(coverId) === browseState.photos",
         burst_ids[1],
     )
     badge.click()
@@ -122,7 +122,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     expect(page.locator("#lightboxFilename")).to_have_text("hawk3.jpg")
     page.keyboard.press("Escape")
     page.wait_for_function(
-        "photoId => selectedPhotoId === photoId",
+        "photoId => browseState.selectedPhotoId === photoId",
         arg=burst_ids[2],
     )
     expect(page.locator("#detailFilename")).to_have_text("hawk3.jpg")
@@ -140,11 +140,11 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     )
     other_hidden_member.click(button="right")
     page.wait_for_function(
-        "photoId => selectedPhotoId === photoId",
+        "photoId => browseState.selectedPhotoId === photoId",
         arg=burst_ids[0],
     )
     assert page.evaluate(
-        "coverId => selectedIndex === photos.findIndex(function(photo) { return photo.id === coverId; })",
+        "coverId => browseState.selectedIndex === browseState.photos.findIndex(function(photo) { return photo.id === coverId; })",
         burst_ids[1],
     )
     page.evaluate("() => closeContextMenu()")
@@ -159,9 +159,9 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
         }""",
         burst_ids[1],
     )
-    page.evaluate("() => setColorLabel('red')")
+    page.evaluate("() => pageModules.editActions.setColorLabel('red')")
     page.wait_for_function(
-        "photoId => colorLabels[photoId] === 'red'",
+        "photoId => browseState.colorLabels[photoId] === 'red'",
         arg=burst_ids[2],
     )
     expect(tray).not_to_have_attribute("data-before-color-refresh", "1")
@@ -178,12 +178,12 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     tray.get_by_role("button", name="Collapse stack").click()
     multi_collapse_state = page.evaluate(
         """() => {
-          var preview = getBrowseShortcutPhoto();
+          var preview = pageModules.lightbox.getBrowseShortcutPhoto();
           return {
-            selectedPhotoId: selectedPhotoId,
-            selectedIds: Array.from(selectedPhotos),
+            selectedPhotoId: browseState.selectedPhotoId,
+            selectedIds: Array.from(browseState.selectedPhotos),
             previewId: preview && preview.photo.id,
-            topLevelNavigation: !!preview && preview.navigationPhotos === photos,
+            topLevelNavigation: !!preview && preview.navigationPhotos === browseState.photos,
           };
         }"""
     )
@@ -200,12 +200,12 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     tray.get_by_role("button", name="Collapse stack").click()
     expect(tray).to_be_hidden()
     page.wait_for_function(
-        "coverId => selectedPhotoId === coverId",
+        "coverId => browseState.selectedPhotoId === coverId",
         arg=burst_ids[1],
     )
     expect(page.locator("#detailFilename")).to_have_text("hawk2.jpg")
     assert page.evaluate(
-        "coverId => browsePhotoNavigationList(coverId) === photos",
+        "coverId => pageModules.stacks.browsePhotoNavigationList(coverId) === browseState.photos",
         burst_ids[1],
     )
     badge.click()
@@ -222,25 +222,25 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     expect(tray).to_be_hidden()
     assert page.evaluate(
         """coverId => {
-          var preview = getBrowseShortcutPhoto();
-          return selectedPhotos.size === 3 && selectedPhotoId === coverId
-            && preview.photo.id === coverId && preview.navigationPhotos === photos;
+          var preview = pageModules.lightbox.getBrowseShortcutPhoto();
+          return browseState.selectedPhotos.size === 3 && browseState.selectedPhotoId === coverId
+            && preview.photo.id === coverId && preview.navigationPhotos === browseState.photos;
         }""",
         burst_ids[1],
     )
     badge.click()
     expect(tray).to_be_visible()
 
-    page.evaluate("() => setSelectionWildlifeExcluded(true)")
+    page.evaluate("() => pageModules.selectionPanel.setSelectionWildlifeExcluded(true)")
     page.wait_for_function(
         """ids => ids.every(function(id) {
-          var photo = findBrowsePhoto(id);
+          var photo = pageModules.selectionPanel.findBrowsePhoto(id);
           return photo && photo.wildlife_excluded;
         })""",
         arg=burst_ids,
     )
     expect(tray.locator(".no-wildlife-badge")).to_have_count(3)
-    page.evaluate("() => setSelectionWildlifeExcluded(false)")
+    page.evaluate("() => pageModules.selectionPanel.setSelectionWildlifeExcluded(false)")
     expect(tray.locator(".no-wildlife-badge")).to_have_count(0)
 
     page.evaluate(
@@ -268,7 +268,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     page.locator("#batchBar button", has_text="★5").click()
     page.wait_for_function(
         """ids => ids.every(function(id) {
-          var photo = findBrowsePhoto(id);
+          var photo = pageModules.selectionPanel.findBrowsePhoto(id);
           return photo && photo.rating === 5;
         })""",
         arg=burst_ids,
@@ -277,7 +277,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     page.locator("#batchBar button", has_text="Flag").click()
     page.wait_for_function(
         """ids => ids.every(function(id) {
-          var photo = findBrowsePhoto(id);
+          var photo = pageModules.selectionPanel.findBrowsePhoto(id);
           return photo && photo.flag === 'flagged';
         })""",
         arg=burst_ids,
@@ -286,18 +286,18 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
 
     page.evaluate(
         """ids => {
-          photos.find(function(photo) { return photo.browse_stack; })._similarity = 0.95;
-          bestBatchData = {
+          browseState.photos.find(function(photo) { return photo.browse_stack; })._similarity = 0.95;
+          browseState.bestBatchData = {
             best_photo_id: ids[0],
             suggested_reject_ids: ids.slice(1),
           };
-          return applyBestBatchPickAndReject();
+          return pageModules.bestBatch.applyBestBatchPickAndReject();
         }""",
         burst_ids,
     )
     page.wait_for_function(
         """ids => ids.every(function(id, index) {
-          var photo = findBrowsePhoto(id);
+          var photo = pageModules.selectionPanel.findBrowsePhoto(id);
           return photo && photo.flag === (index === 0 ? 'flagged' : 'rejected');
         })""",
         arg=burst_ids,
@@ -311,7 +311,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     )).to_be_visible()
     expect(page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')).to_have_count(0)
     assert page.evaluate(
-        "coverId => photos.find(function(photo) { return photo.id === coverId; })._similarity",
+        "coverId => browseState.photos.find(function(photo) { return photo.id === coverId; })._similarity",
         burst_ids[0],
     ) == 0.95
 
@@ -322,21 +322,21 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
 
     # A collapsed stack has no hydrated member cache. Rejecting its current
     # cover still hydrates that one group and promotes the correct replacement.
-    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+    assert page.evaluate("() => Object.keys(browseState.browseStackMembers).length") == 0
     # A collapsed stack card stands for its whole stack, so one click selects
     # every frame behind it and the panel opens as the batch inspector. No
     # member cache is needed: the cover carries its member ids.
     page.locator(f'.grid-card[data-id="{burst_ids[0]}"]').click()
     page.wait_for_function(
-        """ids => selectedPhotoId === null && selectedPhotos.size === ids.length
-          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        """ids => browseState.selectedPhotoId === null && browseState.selectedPhotos.size === ids.length
+          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
         arg=burst_ids,
     )
     expect(page.locator("#selectionCount")).to_have_text(
         "3 photos selected \u00b7 1 stack"
     )
     page.evaluate(
-        "photoId => setFlagFor(photoId, 'rejected')",
+        "photoId => pageModules.contextMenus.setFlagFor(photoId, 'rejected')",
         burst_ids[0],
     )
     expect(page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')).to_be_visible()
@@ -344,8 +344,8 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     # Promoting a new cover moves no photo in or out of the stack, so the
     # selection the click made survives it intact.
     page.wait_for_function(
-        """ids => selectedPhotos.size === ids.length
-          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        """ids => browseState.selectedPhotos.size === ids.length
+          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
         arg=burst_ids,
     )
     expect(page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')).to_have_class(
@@ -356,29 +356,29 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     # batch. Exact selected IDs stay unchanged while preview maps the now-hidden
     # focused member to the collapsed replacement cover.
     page.evaluate(
-        "photoId => setFlagFor(photoId, 'flagged')",
+        "photoId => pageModules.contextMenus.setFlagFor(photoId, 'flagged')",
         burst_ids[0],
     )
     expect(page.locator(f'.grid-card[data-id="{burst_ids[0]}"]')).to_be_visible()
     page.evaluate(
         """ids => {
-          selectedPhotoId = ids[0];
-          selectedIndex = photos.findIndex(function(photo) { return photo.id === ids[0]; });
-          selectedPhotos = new Set([ids[0], ids[1]]);
+          browseState.selectedPhotoId = ids[0];
+          browseState.selectedIndex = browseState.photos.findIndex(function(photo) { return photo.id === ids[0]; });
+          browseState.selectedPhotos = new Set([ids[0], ids[1]]);
         }""",
         [burst_ids[0], live_server["data"]["photos"][3]],
     )
     page.evaluate(
-        "photoId => setFlagFor(photoId, 'rejected')",
+        "photoId => pageModules.contextMenus.setFlagFor(photoId, 'rejected')",
         burst_ids[0],
     )
     assert page.evaluate(
         """ids => {
-          var active = getActiveSelection();
-          var preview = getBrowseShortcutPhoto();
-          return selectedPhotoId === ids[0]
+          var active = pageModules.selection.getActiveSelection();
+          var preview = pageModules.lightbox.getBrowseShortcutPhoto();
+          return browseState.selectedPhotoId === ids[0]
             && active.length === 2 && active.includes(ids[0]) && active.includes(ids[1])
-            && preview.photo.id !== ids[0] && preview.navigationPhotos === photos;
+            && preview.photo.id !== ids[0] && preview.navigationPhotos === browseState.photos;
         }""",
         [burst_ids[0], live_server["data"]["photos"][3]],
     )
@@ -387,30 +387,30 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
         """async coverId => {
           var originalSafeFetch = safeFetch;
           var memberLoads = 0;
-          delete browseStackMembers[String(coverId)];
-          browseStackErrors[String(coverId)] = 'Could not load this stack.';
-          expandedBrowseStacks.delete(coverId);
+          delete browseState.browseStackMembers[String(coverId)];
+          browseState.browseStackErrors[String(coverId)] = 'Could not load this stack.';
+          browseState.expandedBrowseStacks.delete(coverId);
           safeFetch = function(url) {
             if (url === '/api/photos/by-ids') memberLoads++;
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            await toggleBrowseStack(null, coverId);
+            await pageModules.stacks.toggleBrowseStack(null, coverId);
           } finally {
             safeFetch = originalSafeFetch;
           }
           return memberLoads === 1
-            && !!browseStackMembers[String(coverId)]
-            && !browseStackErrors[String(coverId)];
+            && !!browseState.browseStackMembers[String(coverId)]
+            && !browseState.browseStackErrors[String(coverId)];
         }""",
         burst_ids[1],
     )
 
     hydration_chunks = page.evaluate(
         """async coverId => {
-          var cover = photos.find(function(photo) { return photo.id === coverId; });
+          var cover = browseState.photos.find(function(photo) { return photo.id === coverId; });
           cover.browse_stack.photo_ids = Array(501).fill(coverId);
-          delete browseStackMembers[String(coverId)];
+          delete browseState.browseStackMembers[String(coverId)];
           var originalSafeFetch = safeFetch;
           var chunks = [];
           safeFetch = function(url, options) {
@@ -420,7 +420,7 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            await reconcileBrowseStackCovers([coverId]);
+            await pageModules.stacks.reconcileBrowseStackCovers([coverId]);
           } finally {
             safeFetch = originalSafeFetch;
           }
@@ -433,12 +433,12 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
     assert page.evaluate(
         """async args => {
           var coverId = args.coverId;
-          var oldCover = photos.find(function(photo) { return photo.id === coverId; });
-          var oldIndex = photos.indexOf(oldCover);
+          var oldCover = browseState.photos.find(function(photo) { return photo.id === coverId; });
+          var oldIndex = browseState.photos.indexOf(oldCover);
           var stack = oldCover.browse_stack;
           stack.photo_ids = args.memberIds;
-          delete browseStackMembers[String(coverId)];
-          expandedBrowseStacks.delete(coverId);
+          delete browseState.browseStackMembers[String(coverId)];
+          browseState.expandedBrowseStacks.delete(coverId);
           var releaseExpand;
           var originalSafeFetch = safeFetch;
           safeFetch = function(url) {
@@ -447,18 +447,18 @@ def test_browse_stacks_collapse_expand_and_select(live_server, page):
             }
             return originalSafeFetch.apply(this, arguments);
           };
-          var pendingExpand = toggleBrowseStack(null, coverId);
+          var pendingExpand = pageModules.stacks.toggleBrowseStack(null, coverId);
           await new Promise(function(resolve) { setTimeout(resolve, 0); });
           oldCover.browse_stack = null;
           var replacement = Object.assign({}, oldCover, {
             id: coverId + 100000,
             browse_stack: stack,
           });
-          photos[oldIndex] = replacement;
+          browseState.photos[oldIndex] = replacement;
           releaseExpand({photos: [oldCover]});
           await pendingExpand;
           safeFetch = originalSafeFetch;
-          return browseStackMembers[String(coverId)] === undefined;
+          return browseState.browseStackMembers[String(coverId)] === undefined;
         }""",
         {"coverId": burst_ids[1], "memberIds": burst_ids},
     )
@@ -483,9 +483,9 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     page.goto(f"{live_server['url']}/browse")
     page.wait_for_function("VireoFilter.isReady()")
     page.locator("#browseStacksToggle").check()
-    page.evaluate("updateThumbSize(400)")
+    page.evaluate("pageModules.viewControls.updateThumbSize(400)")
     page.evaluate("VireoFilter.addRule('keyword', 'is', 'Portfolio')")
-    page.wait_for_function("() => photos.length === 1")
+    page.wait_for_function("() => browseState.photos.length === 1")
 
     selected_id = burst_ids[0]
     selected = page.locator(f'.grid-card[data-id="{selected_id}"]')
@@ -496,15 +496,15 @@ def test_clearing_filters_preserves_photo_that_becomes_hidden_stack_member(
     )
 
     page.click(".vf-clear")
-    page.wait_for_function("id => selectedPhotoId === id", arg=selected_id)
+    page.wait_for_function("id => browseState.selectedPhotoId === id", arg=selected_id)
     member = page.locator(f'.browse-stack-member[data-id="{selected_id}"]')
     member.wait_for(state="visible")
     page.wait_for_timeout(100)
 
     expect(member).to_have_class("browse-stack-member selected")
-    assert page.evaluate("selectedPhotos.size") == 0
+    assert page.evaluate("browseState.selectedPhotos.size") == 0
     assert page.evaluate(
-        "id => expandedBrowseStacks.has(browseStackCoverIdForPhoto(id))",
+        "id => browseState.expandedBrowseStacks.has(pageModules.stacks.browseStackCoverIdForPhoto(id))",
         selected_id,
     )
     top_after = member.evaluate(
@@ -545,7 +545,7 @@ def test_entering_a_stack_batch_retires_the_previous_detail_owner(
     def focus_then(enter_stack):
         other.click()
         page.wait_for_function(
-            "photoId => window._detailPhotoId === photoId", arg=other_id,
+            "photoId => browseState.detailPhotoId === photoId", arg=other_id,
         )
         # Stand in for a suggestion the detail panel had painted for it.
         page.evaluate(
@@ -562,7 +562,7 @@ def test_entering_a_stack_batch_retires_the_previous_detail_owner(
             """() => {
               var sugg = document.getElementById('locationExifSuggestion');
               return {
-                owner: window._detailPhotoId,
+                owner: browseState.detailPhotoId,
                 suggestionOwner: sugg.dataset.photoId || null,
                 suggestionHidden: sugg.hidden,
               };
@@ -633,7 +633,7 @@ def test_cover_dropped_from_the_tray_leaves_a_partial_mark(live_server, page):
     expect(tray).to_be_hidden()
 
     # Two of three frames are actionable, and the card says so.
-    assert page.evaluate("() => getActiveSelection().length") == 2
+    assert page.evaluate("() => pageModules.selection.getActiveSelection().length") == 2
     expect(page.locator("#batchCount")).to_have_text("2 selected")
     expect(cover).to_have_class("grid-card has-browse-stack stack-partial")
 
@@ -671,16 +671,16 @@ def test_delete_dialog_refuses_a_selection_that_moved_under_it(
     # the same window a slow request opens for a real click.
     outcome = page.evaluate(
         """async otherId => {
-          var pending = batchDelete();
-          var idx = photos.findIndex(function(p) { return p.id === otherId; });
-          selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+          var pending = pageModules.batchActions.batchDelete();
+          var idx = browseState.photos.findIndex(function(p) { return p.id === otherId; });
+          pageModules.selection.selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
                       otherId, idx);
           await pending;
           return {
             modalOpen: document.getElementById('deleteModal')
               .classList.contains('open'),
-            active: getActiveSelection(),
-            remaining: photos.length,
+            active: pageModules.selection.getActiveSelection(),
+            remaining: browseState.photos.length,
           };
         }""",
         other_id,
@@ -743,9 +743,9 @@ def test_deleting_a_selected_stacks_cover_drops_its_orphaned_frames(
 
     # Every frame of that stack is gone from the selection — the two hidden
     # ones along with the deleted cover.
-    active = page.evaluate("() => getActiveSelection()")
+    active = page.evaluate("() => pageModules.selection.getActiveSelection()")
     assert all(pid not in active for pid in burst_ids), active
-    assert page.evaluate(f"() => photos.some(p => p.id === {other_id})") is True
+    assert page.evaluate(f"() => browseState.photos.some(p => p.id === {other_id})") is True
 
 
 def test_native_menu_delete_of_a_cover_drops_its_orphaned_frames(
@@ -788,7 +788,7 @@ def test_native_menu_delete_of_a_cover_drops_its_orphaned_frames(
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
 
-    active = page.evaluate("() => getActiveSelection()")
+    active = page.evaluate("() => pageModules.selection.getActiveSelection()")
     assert all(pid not in active for pid in burst_ids), active
 
 
@@ -832,8 +832,8 @@ def test_cancelled_delete_does_not_leave_a_stack_gesture_armed(
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        """ids => selectedPhotos.size === ids.length
-          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        """ids => browseState.selectedPhotos.size === ids.length
+          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
         burst_ids,
     )
 
@@ -878,8 +878,8 @@ def test_badge_double_click_does_not_claim_a_deliberate_batch(live_server, page)
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        """ids => selectedPhotos.size === ids.length
-          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        """ids => browseState.selectedPhotos.size === ids.length
+          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
         burst_ids,
     )
 
@@ -914,7 +914,7 @@ def test_delete_dialog_counts_companions_of_unloaded_stack_members(
     cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
     cover.click()
     expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
-    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+    assert page.evaluate("() => Object.keys(browseState.browseStackMembers).length") == 0
 
     page.locator("#batchBar button", has_text="Delete").click()
     expect(page.locator("#deleteModal")).to_have_class("modal-overlay open")
@@ -953,15 +953,15 @@ def test_undo_keeps_a_whole_stack_selected(live_server, page):
     # A colour label edits every frame without moving any of them between
     # stacks, so the reload that follows the undo must hand the whole
     # selection back.
-    page.evaluate("() => batchSetColorLabel('red')")
+    page.evaluate("() => pageModules.batchActions.batchSetColorLabel('red')")
     page.wait_for_function(
-        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        "ids => ids.every(function(id) { return browseState.colorLabels[id] === 'red'; })",
         arg=burst_ids,
     )
     page.evaluate("() => doUndo()")
     page.wait_for_function(
-        """ids => selectedPhotos.size === ids.length
-          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        """ids => browseState.selectedPhotos.size === ids.length
+          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
         arg=burst_ids,
     )
     expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
@@ -998,37 +998,38 @@ def test_undo_hydration_does_not_clobber_a_fresh_selection(live_server, page):
     expect(page.locator("#batchCount")).to_have_text("3 selected · 1 stack")
     # The stack has never been expanded, so its hidden frames are in no
     # member cache — the case the restore hydrates for.
-    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+    assert page.evaluate("() => Object.keys(browseState.browseStackMembers).length") == 0
 
     # Colour label edits every frame in the selection but does not move
     # any of them between stacks, so the reload's own restore is what
     # would put the stack back — the same handler under test.
-    page.evaluate("() => batchSetColorLabel('red')")
+    page.evaluate("() => pageModules.batchActions.batchSetColorLabel('red')")
     page.wait_for_function(
-        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        "ids => ids.every(function(id) { return browseState.colorLabels[id] === 'red'; })",
         arg=burst_ids,
     )
 
     # Put the click inside the restore's async window by construction rather
     # than by timing, so the race runs on every machine. The seam is the
-    # hydration call itself: wrapping window.fetch would do nothing here,
-    # because vireo-api.js binds the native fetch at load and replaces the
-    # global, so app requests never see a later patch.
+    # hydration's member request, which Browse makes through the navbar's
+    # safeFetch (looked up on window at call time, see browse/shared.js):
+    # wrapping window.fetch would do nothing here, because vireo-api.js binds
+    # the native fetch at load.
     page.evaluate(
         """otherId => {
-          var orig = hydrateBrowseStackCoverMembers;
+          var orig = window.safeFetch;
           window.__pickedDuringHydration = false;
-          hydrateBrowseStackCoverMembers = function(cover, windowIsCurrent) {
-            if (!window.__pickedDuringHydration) {
+          window.safeFetch = function(url) {
+            if (url === '/api/photos/by-ids' && !window.__pickedDuringHydration) {
               window.__pickedDuringHydration = true;
-              var idx = photos.findIndex(function(p) { return p.id === otherId; });
-              selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
+              var idx = browseState.photos.findIndex(function(p) { return p.id === otherId; });
+              pageModules.selection.selectPhoto({shiftKey: false, metaKey: false, ctrlKey: false},
                           otherId, idx);
             }
             return orig.apply(this, arguments);
           };
           window.__restoreHydrate = function() {
-            hydrateBrowseStackCoverMembers = orig;
+            window.safeFetch = orig;
             delete window.__restoreHydrate;
           };
         }""",
@@ -1045,8 +1046,8 @@ def test_undo_hydration_does_not_clobber_a_fresh_selection(live_server, page):
     # would count them — a single-card pick leaves it reading one photo, with
     # no stack note, since one card is still an actionable selection.
     assert page.evaluate("() => window.__pickedDuringHydration") is True
-    assert page.evaluate("() => getActiveSelection()") == [other_id]
-    assert page.evaluate("() => selectedPhotoId") == other_id
+    assert page.evaluate("() => pageModules.selection.getActiveSelection()") == [other_id]
+    assert page.evaluate("() => browseState.selectedPhotoId") == other_id
     expect(page.locator("#batchCount")).to_have_text("1 selected")
 
 
@@ -1078,21 +1079,22 @@ def test_right_clicking_a_stack_mid_hydration_abandons_the_restore(
     cover = page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')
     cover.click()
     expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
-    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+    assert page.evaluate("() => Object.keys(browseState.browseStackMembers).length") == 0
 
-    page.evaluate("() => batchSetColorLabel('red')")
+    page.evaluate("() => pageModules.batchActions.batchSetColorLabel('red')")
     page.wait_for_function(
-        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        "ids => ids.every(function(id) { return browseState.colorLabels[id] === 'red'; })",
         arg=burst_ids,
     )
 
     # Right-click the other stack the moment the restore starts hydrating.
     page.evaluate(
         """otherCoverId => {
-          var orig = hydrateBrowseStackCoverMembers;
+          // The restore's member request (see the previous test).
+          var orig = window.safeFetch;
           window.__coercedDuringHydration = false;
-          hydrateBrowseStackCoverMembers = function() {
-            if (!window.__coercedDuringHydration) {
+          window.safeFetch = function(url) {
+            if (url === '/api/photos/by-ids' && !window.__coercedDuringHydration) {
               window.__coercedDuringHydration = true;
               var card = document.querySelector(
                 '.grid-card[data-id="' + otherCoverId + '"]'
@@ -1105,7 +1107,7 @@ def test_right_clicking_a_stack_mid_hydration_abandons_the_restore(
             return orig.apply(this, arguments);
           };
           window.__restoreHydrate = function() {
-            hydrateBrowseStackCoverMembers = orig;
+            window.safeFetch = orig;
             delete window.__restoreHydrate;
           };
         }""",
@@ -1119,7 +1121,7 @@ def test_right_clicking_a_stack_mid_hydration_abandons_the_restore(
 
     assert page.evaluate("() => window.__coercedDuringHydration") is True
     # The right-clicked stack, and nothing from the pre-undo one.
-    active = sorted(page.evaluate("() => getActiveSelection()"))
+    active = sorted(page.evaluate("() => pageModules.selection.getActiveSelection()"))
     assert active == sorted(other_burst), active
 
 
@@ -1149,18 +1151,19 @@ def test_right_clicking_a_single_card_mid_hydration_abandons_the_restore(
     page.locator(f'.grid-card[data-id="{burst_ids[1]}"]').click()
     expect(page.locator("#batchCount")).to_have_text("3 selected \u00b7 1 stack")
 
-    page.evaluate("() => batchSetColorLabel('red')")
+    page.evaluate("() => pageModules.batchActions.batchSetColorLabel('red')")
     page.wait_for_function(
-        "ids => ids.every(function(id) { return colorLabels[id] === 'red'; })",
+        "ids => ids.every(function(id) { return browseState.colorLabels[id] === 'red'; })",
         arg=burst_ids,
     )
 
     page.evaluate(
         """otherId => {
-          var orig = hydrateBrowseStackCoverMembers;
+          // The restore's member request (see the previous test).
+          var orig = window.safeFetch;
           window.__coercedDuringHydration = false;
-          hydrateBrowseStackCoverMembers = function() {
-            if (!window.__coercedDuringHydration) {
+          window.safeFetch = function(url) {
+            if (url === '/api/photos/by-ids' && !window.__coercedDuringHydration) {
               window.__coercedDuringHydration = true;
               var card = document.querySelector(
                 '.grid-card[data-id="' + otherId + '"]'
@@ -1173,7 +1176,7 @@ def test_right_clicking_a_single_card_mid_hydration_abandons_the_restore(
             return orig.apply(this, arguments);
           };
           window.__restoreHydrate = function() {
-            hydrateBrowseStackCoverMembers = orig;
+            window.safeFetch = orig;
             delete window.__restoreHydrate;
           };
         }""",
@@ -1186,7 +1189,7 @@ def test_right_clicking_a_single_card_mid_hydration_abandons_the_restore(
         page.evaluate("() => window.__restoreHydrate && window.__restoreHydrate()")
 
     assert page.evaluate("() => window.__coercedDuringHydration") is True
-    assert page.evaluate("() => getActiveSelection()") == [other_id]
+    assert page.evaluate("() => pageModules.selection.getActiveSelection()") == [other_id]
 
 
 def test_cmd_clicking_a_selected_stack_deselects_it_as_a_unit(live_server, page):
@@ -1222,13 +1225,13 @@ def test_cmd_clicking_a_selected_stack_deselects_it_as_a_unit(live_server, page)
     expect(tray.locator(".browse-stack-member")).to_have_count(3)
     tray.get_by_role("button", name="Collapse stack").click()
     page.wait_for_function(
-        "coverId => selectedPhotoId === coverId && selectedPhotos.size === 3",
+        "coverId => browseState.selectedPhotoId === coverId && browseState.selectedPhotos.size === 3",
         arg=burst_ids[1],
     )
 
     cover.click(modifiers=["Meta"])
     page.wait_for_function(
-        "() => getActiveSelection().length === 0 && selectedPhotoId === null"
+        "() => pageModules.selection.getActiveSelection().length === 0 && browseState.selectedPhotoId === null"
     )
     expect(page.locator("#batchBar")).to_be_hidden()
     expect(cover).to_have_class("grid-card has-browse-stack")
@@ -1271,10 +1274,10 @@ def test_deleting_a_stacks_cover_in_the_lightbox_drops_its_dangling_members(
     page.keyboard.press("Escape")
 
     page.wait_for_function(
-        "photoId => selectedPhotoId === photoId && selectedPhotos.size === 0",
+        "photoId => browseState.selectedPhotoId === photoId && browseState.selectedPhotos.size === 0",
         arg=other_id,
     )
-    assert page.evaluate("() => getActiveSelection()") == [other_id]
+    assert page.evaluate("() => pageModules.selection.getActiveSelection()") == [other_id]
 
 
 def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
@@ -1310,8 +1313,8 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
     page.keyboard.press("Escape")
     page.wait_for_function(
-        """ids => selectedPhotos.size === ids.length
-          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        """ids => browseState.selectedPhotos.size === ids.length
+          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
         arg=burst_ids,
     )
 
@@ -1319,14 +1322,14 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     # gesture has to be a fresh one: a double-click over a stack that was
     # already selected reaffirms that batch rather than creating it, and
     # batches are preserved (see the Select all case below).
-    page.evaluate("() => clearSelection()")
+    page.evaluate("() => pageModules.selection.clearSelection()")
     cover.dblclick()
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
     page.locator("[title='Next (\u2192)']").click()
     expect(page.locator("#lightboxFilename")).to_have_text("robin1.jpg")
     page.keyboard.press("Escape")
     page.wait_for_function(
-        "photoId => selectedPhotoId === photoId && selectedPhotos.size === 0",
+        "photoId => browseState.selectedPhotoId === photoId && browseState.selectedPhotos.size === 0",
         arg=other_id,
     )
     expect(page.locator("#detailFilename")).to_have_text("robin1.jpg")
@@ -1338,8 +1341,8 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     expect(page.locator("#lightboxFilename")).to_have_text("hawk2.jpg")
     page.keyboard.press("Escape")
     page.wait_for_function(
-        """ids => selectedPhotos.size === ids.length
-          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        """ids => browseState.selectedPhotos.size === ids.length
+          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
         arg=burst_ids,
     )
     page.keyboard.press("e")
@@ -1349,8 +1352,8 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        """ids => selectedPhotos.size === ids.length
-          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        """ids => browseState.selectedPhotos.size === ids.length
+          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
         burst_ids,
     )
 
@@ -1371,8 +1374,8 @@ def test_lightbox_navigation_follows_a_double_clicked_stack(live_server, page):
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        """ids => selectedPhotos.size === ids.length
-          && ids.every(function(id) { return selectedPhotos.has(id); })""",
+        """ids => browseState.selectedPhotos.size === ids.length
+          && ids.every(function(id) { return browseState.selectedPhotos.has(id); })""",
         burst_ids,
     )
 
@@ -1413,8 +1416,8 @@ def test_double_clicking_a_preselected_stack_preserves_the_batch(
     tray.get_by_role("button", name="Collapse stack").click()
     expect(tray).to_be_hidden()
     page.wait_for_function(
-        "ids => selectedPhotos.size === ids.length"
-        " && ids.every(function(id) { return selectedPhotos.has(id); })",
+        "ids => browseState.selectedPhotos.size === ids.length"
+        " && ids.every(function(id) { return browseState.selectedPhotos.has(id); })",
         arg=burst_ids,
     )
 
@@ -1428,8 +1431,8 @@ def test_double_clicking_a_preselected_stack_preserves_the_batch(
     page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.evaluate(
-        "ids => selectedPhotos.size === ids.length"
-        " && ids.every(function(id) { return selectedPhotos.has(id); })",
+        "ids => browseState.selectedPhotos.size === ids.length"
+        " && ids.every(function(id) { return browseState.selectedPhotos.has(id); })",
         burst_ids,
     )
 
@@ -1558,40 +1561,46 @@ def test_stack_metadata_callbacks_follow_promoted_cover(live_server, page):
           var promotedId = ids[0];
           // The colour dot only renders for someone who has the colour field
           // on their cards, which this profile does not by default.
-          if (cardFields.indexOf('color_label') === -1) {
-            cardFields = cardFields.concat(['color_label']);
+          if (browseState.cardFields.indexOf('color_label') === -1) {
+            browseState.cardFields = browseState.cardFields.concat(['color_label']);
           }
-          var originalLoadInatStatus = loadInatStatus;
-          var originalFetchColorLabels = fetchColorLabels;
+          // Hold the iNaturalist and colour-label reads (Browse makes them
+          // through the navbar's safeFetch, looked up on window at call
+          // time) and answer them when the test says: the real loaders land
+          // the data in the maps the cards read, so the assertions below are
+          // about what the member card shows.
+          var originalSafeFetch = window.safeFetch;
           var releaseInat;
           var releaseColors;
-          // Each fake lands its metadata the way the real fetch does — into
-          // the shared map the cards read — so the assertions below are about
-          // what the member card shows, not about which function repainted it.
-          loadInatStatus = function() {
-            return new Promise(function(resolve) {
-              releaseInat = function() {
-                inatSubmitted[String(promotedId)] = true;
-                resolve();
-              };
-            });
-          };
-          fetchColorLabels = function() {
-            return new Promise(function(resolve) {
-              releaseColors = function() {
-                colorLabels[promotedId] = 'red';
-                resolve();
-              };
-            });
+          window.safeFetch = function(url) {
+            if (url.indexOf('/api/inat/submissions?') === 0) {
+              return new Promise(function(resolve) {
+                releaseInat = function() {
+                  var data = {};
+                  data[String(promotedId)] = {observation_url: 'https://example.invalid/1'};
+                  resolve(data);
+                };
+              });
+            }
+            if (url.indexOf('/api/photos/color_labels?') === 0) {
+              return new Promise(function(resolve) {
+                releaseColors = function() {
+                  var data = {};
+                  data[String(promotedId)] = 'red';
+                  resolve(data);
+                };
+              });
+            }
+            return originalSafeFetch.apply(this, arguments);
           };
           try {
-            await toggleBrowseStack(null, oldCoverId);
-            var members = browseStackMembers[String(oldCoverId)];
+            await pageModules.stacks.toggleBrowseStack(null, oldCoverId);
+            var members = browseState.browseStackMembers[String(oldCoverId)];
             members.find(function(photo) { return photo.id === oldCoverId; }).flag = 'rejected';
             members.find(function(photo) { return photo.id === promotedId; }).flag = 'flagged';
-            await reconcileBrowseStackCovers([oldCoverId, promotedId]);
+            await pageModules.stacks.reconcileBrowseStackCovers([oldCoverId, promotedId]);
 
-            var currentCoverId = browseStackCoverIdForPhoto(oldCoverId);
+            var currentCoverId = pageModules.stacks.browseStackCoverIdForPhoto(oldCoverId);
             var memberSelector = '.browse-stack-tray[data-stack-cover-id="'
               + currentCoverId + '"] .browse-stack-member[data-id="'
               + promotedId + '"]';
@@ -1619,8 +1628,7 @@ def test_stack_metadata_callbacks_follow_promoted_cover(live_server, page):
                 .dataset.sameNode === '1',
             };
           } finally {
-            loadInatStatus = originalLoadInatStatus;
-            fetchColorLabels = originalFetchColorLabels;
+            window.safeFetch = originalSafeFetch;
           }
         }""",
         burst_ids,
@@ -1646,7 +1654,7 @@ def test_concurrent_stack_hydration_uses_newest_request(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     page.locator("#browseStacksToggle").check()
     expect(page.locator(f'.grid-card[data-id="{burst_ids[1]}"]')).to_be_visible()
-    assert page.evaluate("() => Object.keys(browseStackMembers).length") == 0
+    assert page.evaluate("() => Object.keys(browseState.browseStackMembers).length") == 0
 
     hydration_state = page.evaluate(
         """async ids => {
@@ -1667,8 +1675,8 @@ def test_concurrent_stack_hydration_uses_newest_request(live_server, page):
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            var first = reconcileBrowseStackCovers([oldCoverId]);
-            var second = reconcileBrowseStackCovers([oldCoverId]);
+            var first = pageModules.stacks.reconcileBrowseStackCovers([oldCoverId]);
+            var second = pageModules.stacks.reconcileBrowseStackCovers([oldCoverId]);
             while (releases.length < 2) {
               await new Promise(function(resolve) { setTimeout(resolve, 0); });
             }
@@ -1677,7 +1685,7 @@ def test_concurrent_stack_hydration_uses_newest_request(live_server, page):
             // issued after a newer mutation and must remain authoritative.
             releases[0](JSON.parse(JSON.stringify(baseline)));
             await first;
-            var keysAfterOlderResponse = Object.keys(browseStackMembers);
+            var keysAfterOlderResponse = Object.keys(browseState.browseStackMembers);
 
             var newerResponse = JSON.parse(JSON.stringify(baseline));
             newerResponse.photos.forEach(function(photo) {
@@ -1688,9 +1696,9 @@ def test_concurrent_stack_hydration_uses_newest_request(live_server, page):
             await second;
             return {
               keysAfterOlderResponse: keysAfterOlderResponse,
-              cacheKeys: Object.keys(browseStackMembers).map(Number),
-              currentCoverId: browseStackCoverIdForPhoto(oldCoverId),
-              gridHasPromotedCover: photos.some(function(photo) {
+              cacheKeys: Object.keys(browseState.browseStackMembers).map(Number),
+              currentCoverId: pageModules.stacks.browseStackCoverIdForPhoto(oldCoverId),
+              gridHasPromotedCover: browseState.photos.some(function(photo) {
                 return photo.id === promotedId && !!photo.browse_stack;
               }),
             };
@@ -1756,7 +1764,7 @@ def test_shift_range_from_stack_member_keeps_selection_honest(live_server, page)
             }))).sort(function(a, b) { return a - b; });
           }
           return {
-            active: getActiveSelection().slice().sort(function(a, b) { return a - b; }),
+            active: pageModules.selection.getActiveSelection().slice().sort(function(a, b) { return a - b; }),
             highlighted: ids(document.querySelectorAll(
               '.grid-card.selected, .browse-stack-member.selected'
             )),
@@ -1779,7 +1787,7 @@ def test_shift_range_from_stack_member_keeps_selection_honest(live_server, page)
     page.locator("#batchBar button", has_text="Export").click()
     expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
     export_ids = page.evaluate(
-        "() => (_exportPhotoIds || getActiveSelection()).slice()"
+        "() => (pageModules.export._exportPhotoIds || pageModules.selection.getActiveSelection()).slice()"
     )
     assert sorted(export_ids) == selection_state["active"]
     page.locator("#exportOverlay button", has_text="Cancel").click()
@@ -1828,29 +1836,29 @@ def test_stack_edit_during_expansion_outlives_the_pending_response(live_server, 
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            var expansion = toggleBrowseStack(null, coverId);
+            var expansion = pageModules.stacks.toggleBrowseStack(null, coverId);
             while (!release) {
               await new Promise(function(resolve) { setTimeout(resolve, 0); });
             }
             var loadingWhileSelectable = !!document.querySelector(
               '.browse-stack-tray[data-stack-cover-id="' + coverId + '"] .browse-stack-loading'
             );
-            selectBrowseStackAll(null, coverId);
-            var selected = getActiveSelection().slice().sort(function(a, b) { return a - b; });
-            await setSelectionWildlifeExcluded(true);
+            pageModules.stacks.selectBrowseStackAll(null, coverId);
+            var selected = pageModules.selection.getActiveSelection().slice().sort(function(a, b) { return a - b; });
+            await pageModules.selectionPanel.setSelectionWildlifeExcluded(true);
             // Only now does the response fetched before the edit arrive.
             release(JSON.parse(JSON.stringify(preEdit)));
             await expansion;
             return {
               loadingWhileSelectable: loadingWhileSelectable,
               selected: selected,
-              cached: (browseStackMembers[String(coverId)] || []).map(function(photo) {
+              cached: (browseState.browseStackMembers[String(coverId)] || []).map(function(photo) {
                 return [photo.id, photo.wildlife_excluded ? 1 : 0];
               }).sort(function(a, b) { return a[0] - b[0]; }),
               badges: document.querySelectorAll(
                 '.browse-stack-tray[data-stack-cover-id="' + coverId + '"] .no-wildlife-badge'
               ).length,
-              error: browseStackErrors[String(coverId)] || null,
+              error: browseState.browseStackErrors[String(coverId)] || null,
             };
           } finally {
             safeFetch = originalSafeFetch;
@@ -1906,12 +1914,12 @@ def test_stack_expansion_response_yields_to_fresher_hydration(live_server, page)
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            var expansion = toggleBrowseStack(null, coverId);
+            var expansion = pageModules.stacks.toggleBrowseStack(null, coverId);
             while (held.length < 1) {
               await new Promise(function(resolve) { setTimeout(resolve, 0); });
             }
-            selectBrowseStackAll(null, coverId);
-            var rated = batchSetRating(4);
+            pageModules.stacks.selectBrowseStackAll(null, coverId);
+            var rated = pageModules.batchActions.batchSetRating(4);
             // batchSetRating -> reconcileBrowseStackCovers issues the second
             // by-ids request, this one after the rating committed.
             while (held.length < 2) {
@@ -1923,10 +1931,10 @@ def test_stack_expansion_response_yields_to_fresher_hydration(live_server, page)
             held[0](JSON.parse(JSON.stringify(preEdit)));
             await expansion;
             return {
-              cached: (browseStackMembers[String(coverId)] || []).map(function(photo) {
+              cached: (browseState.browseStackMembers[String(coverId)] || []).map(function(photo) {
                 return [photo.id, photo.rating];
               }).sort(function(a, b) { return a[0] - b[0]; }),
-              error: browseStackErrors[String(coverId)] || null,
+              error: browseState.browseStackErrors[String(coverId)] || null,
             };
           } finally {
             safeFetch = originalSafeFetch;
@@ -1991,23 +1999,23 @@ def test_generic_member_edit_invalidates_pending_cover_hydration(live_server, pa
             // Rating edit routed through reconcileBrowseStackCovers begins the
             // uncached cover's hydration; the /api/photos/by-ids response is
             // captured for release after the wildlife edit lands.
-            var hydration = reconcileBrowseStackCovers([hiddenId]);
+            var hydration = pageModules.stacks.reconcileBrowseStackCovers([hiddenId]);
             while (!release) {
               await new Promise(function(resolve) { setTimeout(resolve, 0); });
             }
             // Generic member mutation whose only cache-invalidation hook is
             // refreshExpandedBrowseStackMembers. It must mark the pending
             // hydration so the delayed response cannot land.
-            refreshExpandedBrowseStackMembers([hiddenId]);
+            pageModules.stacks.refreshExpandedBrowseStackMembers([hiddenId]);
             release(stalePayload);
             await hydration;
-            var cached = browseStackMembers[String(coverId)] || [];
+            var cached = browseState.browseStackMembers[String(coverId)] || [];
             return {
               filenames: cached.map(function(photo) {
                 return photo.filename;
               }).sort(),
-              error: browseStackErrors[String(coverId)] || null,
-              recheck: browseStackCoverRecheck.has(coverId),
+              error: browseState.browseStackErrors[String(coverId)] || null,
+              recheck: browseState.browseStackCoverRecheck.has(coverId),
             };
           } finally {
             safeFetch = originalSafeFetch;
@@ -2062,13 +2070,13 @@ def test_cover_hydration_retries_transient_by_ids_failure(live_server, page):
           try {
             // Flagging a hidden member makes it outrank the quality-picked
             // cover, so a completed reconciliation must promote it.
-            await setFlagFor(hiddenId, 'flagged');
+            await pageModules.contextMenus.setFlagFor(hiddenId, 'flagged');
             return {
               failed: failed,
-              coverIds: photos.filter(function(photo) {
+              coverIds: browseState.photos.filter(function(photo) {
                 return !!photo.browse_stack;
               }).map(function(photo) { return photo.id; }),
-              recheck: browseStackCoverRecheck.has(coverId),
+              recheck: browseState.browseStackCoverRecheck.has(coverId),
               toasts: document.getElementById('toastContainer').textContent,
             };
           } finally {
@@ -2118,10 +2126,10 @@ def test_unresolvable_cover_hydration_is_reported_and_recoverable(live_server, p
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            await setFlagFor(hiddenId, 'flagged');
+            await pageModules.contextMenus.setFlagFor(hiddenId, 'flagged');
             return {
               attempts: attempts,
-              recheck: browseStackCoverRecheck.has(coverId),
+              recheck: browseState.browseStackCoverRecheck.has(coverId),
               toasts: document.getElementById('toastContainer').textContent,
             };
           } finally {
@@ -2147,7 +2155,7 @@ def test_unresolvable_cover_hydration_is_reported_and_recoverable(live_server, p
     expect(promoted).not_to_have_class(re.compile("needs-recheck"))
     tray = page.locator(f'.browse-stack-tray[data-stack-cover-id="{burst_ids[0]}"]')
     expect(tray.locator(".browse-stack-member")).to_have_count(3)
-    assert page.evaluate("id => browseStackCoverRecheck.has(id)", burst_ids[1]) is False
+    assert page.evaluate("id => browseState.browseStackCoverRecheck.has(id)", burst_ids[1]) is False
 
 
 def test_expanding_stack_over_500_chunks_by_ids_requests(live_server, page):
@@ -2175,15 +2183,15 @@ def test_expanding_stack_over_500_chunks_by_ids_requests(live_server, page):
 
     outcome = page.evaluate(
         """async coverId => {
-          var cover = photos.find(function(photo) { return photo.id === coverId; });
+          var cover = browseState.photos.find(function(photo) { return photo.id === coverId; });
           // Simulate a stack whose photo_ids list exceeds the /api/photos/by-ids
           // 500-id cap. The server-side ordering is irrelevant to this test;
           // what matters is that the client stops surfacing a permanent
           // "too large" error and chunks its fetches instead.
           cover.browse_stack.photo_ids = Array(501).fill(coverId);
-          delete browseStackMembers[String(coverId)];
-          delete browseStackErrors[String(coverId)];
-          expandedBrowseStacks.delete(coverId);
+          delete browseState.browseStackMembers[String(coverId)];
+          delete browseState.browseStackErrors[String(coverId)];
+          browseState.expandedBrowseStacks.delete(coverId);
           var originalSafeFetch = safeFetch;
           var chunks = [];
           safeFetch = function(url, options) {
@@ -2194,15 +2202,15 @@ def test_expanding_stack_over_500_chunks_by_ids_requests(live_server, page):
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            await toggleBrowseStack(null, coverId);
+            await pageModules.stacks.toggleBrowseStack(null, coverId);
           } finally {
             safeFetch = originalSafeFetch;
           }
           return {
             chunks: chunks,
-            error: browseStackErrors[String(coverId)] || null,
-            cached: !!browseStackMembers[String(coverId)],
-            expanded: expandedBrowseStacks.has(coverId),
+            error: browseState.browseStackErrors[String(coverId)] || null,
+            cached: !!browseState.browseStackMembers[String(coverId)],
+            expanded: browseState.expandedBrowseStacks.has(coverId),
           };
         }""",
         burst_ids[1],
@@ -2247,26 +2255,26 @@ def test_recollapse_and_reexpand_marks_all_expansion_requests_stale(live_server,
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            var expansion1 = toggleBrowseStack(null, coverId);
+            var expansion1 = pageModules.stacks.toggleBrowseStack(null, coverId);
             while (held.length < 1) {
               await new Promise(function(resolve) { setTimeout(resolve, 0); });
             }
             var trackedAfterFirst = (
-              browseStackExpansionRequests[String(coverId)] || []
+              browseState.browseStackExpansionRequests[String(coverId)] || []
             ).length;
             // Collapse does not cancel the in-flight request.
-            await toggleBrowseStack(null, coverId);
-            var expansion2 = toggleBrowseStack(null, coverId);
+            await pageModules.stacks.toggleBrowseStack(null, coverId);
+            var expansion2 = pageModules.stacks.toggleBrowseStack(null, coverId);
             while (held.length < 2) {
               await new Promise(function(resolve) { setTimeout(resolve, 0); });
             }
-            var trackedList = browseStackExpansionRequests[String(coverId)] || [];
+            var trackedList = browseState.browseStackExpansionRequests[String(coverId)] || [];
             var trackedAfterReexpand = trackedList.length;
             var allNotStale = trackedList.every(function(r) { return !r.stale; });
             // Simulate a stack-wide edit that runs while both requests are
             // in flight (setSelectionWildlifeExcluded and friends all funnel
             // through markBrowseStackExpansionsStale for exactly this case).
-            markBrowseStackExpansionsStale(ids);
+            pageModules.stacks.markBrowseStackExpansionsStale(ids);
             var allStaleAfterMark = trackedList.every(function(r) { return r.stale; });
             // Settle every pending promise so the outer expansions terminate.
             // Retries after markStale will push additional resolves, so drain
@@ -2348,7 +2356,7 @@ def test_shift_click_stack_member_from_grid_anchor_range_selects(live_server, pa
             }))).sort(function(a, b) { return a - b; });
           }
           return {
-            active: getActiveSelection().slice().sort(function(a, b) { return a - b; }),
+            active: pageModules.selection.getActiveSelection().slice().sort(function(a, b) { return a - b; }),
             highlighted: ids(document.querySelectorAll(
               '.grid-card.selected, .browse-stack-member.selected'
             )),
@@ -2393,10 +2401,10 @@ def test_export_preview_resolves_unloaded_stack_member(live_server, page):
 
     # The stack is collapsed, so the hidden member is in no client cache.
     assert page.evaluate(
-        "id => !findBrowsePhoto(id)", burst_ids[0]
+        "id => !pageModules.selectionPanel.findBrowsePhoto(id)", burst_ids[0]
     ) is True
 
-    page.evaluate("id => openExportModal([id])", burst_ids[0])
+    page.evaluate("id => pageModules.export.openExportModal([id])", burst_ids[0])
     expect(page.locator("#exportOverlay")).to_have_class("modal-overlay open")
     preview = page.locator("#exportPreview")
     # Resolved from the server: the hidden member's own filename.
@@ -2427,8 +2435,8 @@ def test_color_label_chunk_failure_marks_nothing_fetched(live_server, page):
           var originalSafeFetch = safeFetch;
           var results = {};
           async function run(secondChunk) {
-            colorLabels = {};
-            colorLabelsFetched = new Set();
+            browseState.colorLabels = {};
+            browseState.colorLabelsFetched = new Set();
             safeFetch = function(url) {
               if (url.indexOf('/api/photos/color_labels') !== 0) {
                 return originalSafeFetch.apply(this, arguments);
@@ -2443,7 +2451,7 @@ def test_color_label_chunk_failure_marks_nothing_fetched(live_server, page):
               return secondChunk();
             };
             try {
-              await fetchColorLabels(ids);
+              await pageModules.editActions.fetchColorLabels(ids);
             } catch (err) {
               // A rejected chunk propagates; the caller's follow-up is
               // skipped, which is the fail-closed outcome under test.
@@ -2451,10 +2459,10 @@ def test_color_label_chunk_failure_marks_nothing_fetched(live_server, page):
               safeFetch = originalSafeFetch;
             }
             return {
-              fetchedFirst: colorLabelsFetched.has(1),
-              fetchedLast: colorLabelsFetched.has(501),
-              labelFirst: colorLabels['1'] === undefined ? null : colorLabels['1'],
-              strayErrorKey: Object.prototype.hasOwnProperty.call(colorLabels, 'error'),
+              fetchedFirst: browseState.colorLabelsFetched.has(1),
+              fetchedLast: browseState.colorLabelsFetched.has(501),
+              labelFirst: browseState.colorLabels['1'] === undefined ? null : browseState.colorLabels['1'],
+              strayErrorKey: Object.prototype.hasOwnProperty.call(browseState.colorLabels, 'error'),
             };
           }
           results.rejected = await run(function() {
@@ -2523,11 +2531,11 @@ def test_export_preview_ignores_response_from_a_closed_modal(live_server, page):
             return document.getElementById('exportPreview').textContent;
           };
           try {
-            openExportModal([photoId]);
+            pageModules.export.openExportModal([photoId]);
             await tick();
             var firstSessionFetches = pending.length;
-            closeExportModal();
-            openExportModal([photoId]);
+            pageModules.export.closeExportModal();
+            pageModules.export.openExportModal([photoId]);
             await tick();
             var fetchesAfterReopen = pending.length;
             // The first session's response finally arrives.
@@ -2555,7 +2563,7 @@ def test_export_preview_ignores_response_from_a_closed_modal(live_server, page):
             };
           } finally {
             safeFetch = originalSafeFetch;
-            closeExportModal();
+            pageModules.export.closeExportModal();
           }
         }""",
         burst_ids[0],
@@ -2600,10 +2608,10 @@ def test_select_all_matching_puts_stack_cover_first_outside_collections(
 
     outcome = page.evaluate(
         """async () => {
-          await selectAllMatchingPhotos();
+          await pageModules.selection.selectAllMatchingPhotos();
           return {
-            collectionScoped: !!(activeCollectionId && !dashboardCollectionScope),
-            selected: Array.from(selectedPhotos),
+            collectionScoped: !!(browseState.activeCollectionId && !browseState.dashboardCollectionScope),
+            selected: Array.from(browseState.selectedPhotos),
             firstCardId: parseInt(
               document.querySelector('#grid > .grid-card').dataset.id, 10
             ),
@@ -2657,8 +2665,8 @@ def test_stack_metadata_lookups_chunk_their_get_urls(live_server, page):
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            await loadInatStatus(ids);
-            await fetchColorLabels(ids);
+            await pageModules.batchActions.loadInatStatus(ids);
+            await pageModules.editActions.fetchColorLabels(ids);
           } finally {
             safeFetch = originalSafeFetch;
           }
@@ -2667,10 +2675,10 @@ def test_stack_metadata_lookups_chunk_their_get_urls(live_server, page):
             colorChunks: colorChunks,
             // Results from every chunk have to survive the merge, not just
             // the last one.
-            inatSubmitted: [inatSubmitted['1'], inatSubmitted['501']],
-            colorLabels: [colorLabels['1'], colorLabels['501']],
-            fetchedFirst: colorLabelsFetched.has(1),
-            fetchedLast: colorLabelsFetched.has(501),
+            inatSubmitted: [browseState.inatSubmitted['1'], browseState.inatSubmitted['501']],
+            colorLabels: [browseState.colorLabels['1'], browseState.colorLabels['501']],
+            fetchedFirst: browseState.colorLabelsFetched.has(1),
+            fetchedLast: browseState.colorLabelsFetched.has(501),
           };
         }"""
     )
@@ -2708,7 +2716,7 @@ def test_navbar_undo_restores_stack_cover_and_member_state(live_server, page):
 
     # Flagging a hidden member outranks the quality-picked cover, so the
     # edit promotes it and caches the stack's members.
-    assert page.evaluate("id => setFlagFor(id, 'flagged')", burst_ids[0]) is True
+    assert page.evaluate("id => pageModules.contextMenus.setFlagFor(id, 'flagged')", burst_ids[0]) is True
     expect(
         page.locator(f'.grid-card[data-id="{burst_ids[0]}"] .browse-stack-badge')
     ).to_be_visible()
@@ -2729,14 +2737,14 @@ def test_navbar_undo_restores_stack_cover_and_member_state(live_server, page):
     # flagged, so a later reconciliation cannot re-promote it.
     page.wait_for_function(
         """id => {
-          var member = findBrowsePhoto(id);
+          var member = pageModules.selectionPanel.findBrowsePhoto(id);
           return !!member && (member.flag == null || member.flag === 'none');
         }""",
         arg=burst_ids[0],
     )
     assert page.evaluate(
         """ids => {
-          var members = browseStackMembers[String(ids[1])] || [];
+          var members = browseState.browseStackMembers[String(ids[1])] || [];
           return members.map(function(m) { return m.id; }).sort(function(a, b) {
             return a - b;
           });
@@ -2745,20 +2753,20 @@ def test_navbar_undo_restores_stack_cover_and_member_state(live_server, page):
     ) == sorted(burst_ids)
     # No silent staleness marker left behind by the reconciliation.
     assert page.evaluate(
-        "ids => ids.some(id => browseStackCoverRecheck.has(id))", burst_ids
+        "ids => ids.some(id => browseState.browseStackCoverRecheck.has(id))", burst_ids
     ) is False
 
     # Ratings are the other reversible cover input and travel the same path:
     # an undo has to put the cached member's value back too, or the next
     # reconciliation ranks the stack on a rating the database no longer holds.
-    before = page.evaluate("id => findBrowsePhoto(id).rating", burst_ids[2])
-    page.evaluate("id => setRatingFor(id, 4)", burst_ids[2])
+    before = page.evaluate("id => pageModules.selectionPanel.findBrowsePhoto(id).rating", burst_ids[2])
+    page.evaluate("id => pageModules.contextMenus.setRatingFor(id, 4)", burst_ids[2])
     page.wait_for_function(
-        "id => findBrowsePhoto(id).rating === 4", arg=burst_ids[2]
+        "id => pageModules.selectionPanel.findBrowsePhoto(id).rating === 4", arg=burst_ids[2]
     )
     page.evaluate("() => doUndo()")
     page.wait_for_function(
-        """args => findBrowsePhoto(args[0]).rating === args[1]""",
+        """args => pageModules.selectionPanel.findBrowsePhoto(args[0]).rating === args[1]""",
         arg=[burst_ids[2], before],
     )
 
@@ -2811,23 +2819,23 @@ def test_keyword_edit_on_unloaded_members_invalidates_pending_expansion(
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            var expansion = toggleBrowseStack(null, coverId);
+            var expansion = pageModules.stacks.toggleBrowseStack(null, coverId);
             while (!release) {
               await new Promise(function(resolve) { setTimeout(resolve, 0); });
             }
             // The hidden member is loaded nowhere yet, so this call has no
             // local row to patch — but the edit still committed, and the
             // response in flight predates it.
-            var loadedNowhere = findBrowsePhoto(hiddenId) === null;
-            await _refreshBrowseKeywordState([hiddenId]);
+            var loadedNowhere = pageModules.selectionPanel.findBrowsePhoto(hiddenId) === null;
+            await pageModules.batchActions._refreshBrowseKeywordState([hiddenId]);
             release(stalePayload);
             await expansion;
             return {
               loadedNowhere: loadedNowhere,
-              filenames: (browseStackMembers[String(coverId)] || []).map(
+              filenames: (browseState.browseStackMembers[String(coverId)] || []).map(
                 function(photo) { return photo.filename; }
               ).sort(),
-              error: browseStackErrors[String(coverId)] || null,
+              error: browseState.browseStackErrors[String(coverId)] || null,
             };
           } finally {
             safeFetch = originalSafeFetch;
@@ -2887,20 +2895,20 @@ def test_keyword_edit_on_unloaded_members_invalidates_pending_hydration(
             return originalSafeFetch.apply(this, arguments);
           };
           try {
-            var hydration = reconcileBrowseStackCovers([hiddenId]);
+            var hydration = pageModules.stacks.reconcileBrowseStackCovers([hiddenId]);
             while (!release) {
               await new Promise(function(resolve) { setTimeout(resolve, 0); });
             }
-            var loadedNowhere = findBrowsePhoto(hiddenId) === null;
-            await _refreshBrowseKeywordState([hiddenId]);
+            var loadedNowhere = pageModules.selectionPanel.findBrowsePhoto(hiddenId) === null;
+            await pageModules.batchActions._refreshBrowseKeywordState([hiddenId]);
             release(stalePayload);
             await hydration;
             return {
               loadedNowhere: loadedNowhere,
-              filenames: (browseStackMembers[String(coverId)] || []).map(
+              filenames: (browseState.browseStackMembers[String(coverId)] || []).map(
                 function(photo) { return photo.filename; }
               ).sort(),
-              recheck: browseStackCoverRecheck.has(coverId),
+              recheck: browseState.browseStackCoverRecheck.has(coverId),
             };
           } finally {
             safeFetch = originalSafeFetch;

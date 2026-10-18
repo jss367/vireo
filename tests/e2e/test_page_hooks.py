@@ -10,6 +10,12 @@ should, so a lost registration fails here instead of in the desktop app.
 import pytest
 
 _HISTORY = {"beforeHistoryChange", "afterHistoryChange"}
+# The export modal's shared controllers (vireo-export-presets.js,
+# vireo-export-collisions.js) call back into Browse and the Photo Editor.
+_EXPORT_MODAL = {
+    "applyExportPreset", "markExportCustom", "updateExportFormatControls",
+    "updateExportPreview", "selectedExportMetadataFields", "buildExportPreflightRequest",
+}
 
 EXPECTED_HOOKS = {
     "/browse": {
@@ -20,7 +26,7 @@ EXPECTED_HOOKS = {
         "revealPhoto", "copyPhotoPaths", "openBrowseCompare", "batchAddKeyword",
         "addToCollection", "openCaptureTimeModal", "batchDelete",
         "removeDeletedLightboxPhoto", "afterHistoryChange", "runSync",
-    },
+    } | _EXPORT_MODAL,
     "/misses": {
         "getActiveSelection", "openBrowseShortcutPhoto", "afterHistoryChange",
         "loadMisses", "handleMissesLightboxFlagShortcut",
@@ -40,7 +46,7 @@ EXPECTED_HOOKS = {
     } | _HISTORY,
     "/locations/review": _HISTORY | {"runSync"},
     "/life-list": {"afterHistoryChange", "openExportModal"},
-    "/edit": _HISTORY | {"openExportModal", "localHistoryStatus", "changeLocalHistory"},
+    "/edit": _HISTORY | _EXPORT_MODAL | {"openExportModal", "localHistoryStatus", "changeLocalHistory"},
     "/pipeline/rapid-review": _HISTORY,
     "/cull": _HISTORY,
     "/highlights": {"afterHistoryChange", "loadHighlights", "updateHighlightsLightboxControls"},

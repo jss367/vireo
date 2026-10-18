@@ -11,12 +11,18 @@ function walk(n,fn){
   fn(n);
   Object.values(n).forEach(v=>Array.isArray(v)?v.forEach(x=>walk(x,fn)):walk(v,fn));
 }
+// The browse files are ES modules: find each function whether or not it is
+// exported. Their page state is `state.<field>`; the context is its own
+// `state` (see page()), so tests read and set fields on the context.
+function declarations(s){
+  return parse(s,{
+    ecmaVersion:'latest',sourceType:'module'
+  }).body.map(n=>n.type==='ExportNamedDeclaration'&&n.declaration?n.declaration:n);
+}
 function functions(c,file,names){
-  const s=source(file),ast=parse(s,{
-    ecmaVersion:'latest'
-  });
+  const s=source(file),body=declarations(s);
   for(const name of names){
-    const n=ast.body.find(n=>n.type==='FunctionDeclaration'&&n.id.name===name);
+    const n=body.find(n=>n.type==='FunctionDeclaration'&&n.id.name===name);
     assert(n,name);
     vm.runInContext(s.slice(n.start,n.end),c);
   }
@@ -83,23 +89,20 @@ function page(){
     }),pendingArchiveFolderStatuses:()=>({
     }),folderLocalStatusMarkup:()=>'',Element:function(){
     },
-    getBrowseRules:()=>rules.length?rules:null,browseStacksEnabled:()=>false,hasCollectionAvailabilityScope:()=>false,BROWSE_MAX_FOCUS_CANDIDATES:200,loadEpoch:0,
-    Vireo:{
-      api:{
-        searchLaneHeaders:()=>({
-        })
-      }
-    },console
+    getBrowseRules:()=>rules.length?rules:null,browseStacksEnabled:()=>false,hasCollectionAvailabilityScope:()=>false,browseLimits:{maxFocusCandidates:200},loadEpoch:0,
+    searchLaneHeaders:()=>({
+    }),bindBrowseMarkup:no,
+    // The navbar's Missing Originals snapshot (shared.js): none taken yet.
+    missingFoldersSnapshotVersion:()=>undefined,_reconcileMissingFoldersInitSnapshot:()=>false,console
   });
   c.window=c;
+  c.state=c;
   functions(c,'sidebar-collections.js',['collectionCountMarkup','renderCollectionList','filterByCollection','refreshActiveCollectionAfterMembershipChange','highlightedCollectionId','syncSidebarHighlights']);
   functions(c,'sidebar-folders.js',['filterByFolder','renderFolderTree']);
   functions(c,'sidebar-keywords.js',['filterByKeyword','renderKeywordTree']);
   functions(c,'loading.js',['buildBrowsePageRequest','browseFilterReloadOptions','onBrowseFilterChange','settleSidebarScopeForReload']);
-  const boot=source('boot.js'),ast=parse(boot,{
-    ecmaVersion:'latest'
-  });
-  const bootstrap=ast.body.find(n=>n.type==='FunctionDeclaration'&&n.id.name==='bootstrapBrowse');
+  const boot=source('boot.js');
+  const bootstrap=declarations(boot).find(n=>n.type==='FunctionDeclaration'&&n.id.name==='bootstrapBrowse');
   let onChange;
   walk(bootstrap,n=>{
     if(n.type==='Property'&&n.key.name==='onChange'&&!onChange)onChange=n.value;

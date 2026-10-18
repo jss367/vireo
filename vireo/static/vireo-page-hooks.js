@@ -1,10 +1,11 @@
-/* Page hooks: how the shared navbar and lightbox call into the page that is open.
+/* Page hooks: how shared code calls into the page that is open.
  *
  * The navbar and lightbox are on every page, but some of their commands act on
  * page state: the native menu's Rate/Flag/Delete need the page's selection, the
  * undo/redo transport reloads the page after a change, the lightbox writes a
- * flag through the page's own model. A page hands those functions over by
- * registering them here:
+ * flag through the page's own model. Shared controllers a few pages load (the
+ * export modal's presets and collision notice) likewise call back into the
+ * page. A page hands those functions over by registering them here:
  *
  *   Vireo.registerPageHooks({getActiveSelection: getActiveSelection, ...});
  *
@@ -88,6 +89,14 @@
     'localHistoryStatus',
     // Missing Originals deletes.
     'loadMisses',
+    // The export modal's shared controllers (vireo-export-presets.js,
+    // vireo-export-collisions.js), on Browse and the Photo Editor.
+    'applyExportPreset',
+    'markExportCustom',
+    'updateExportFormatControls',
+    'updateExportPreview',
+    'selectedExportMetadataFields',
+    'buildExportPreflightRequest',
   ]));
 
   /** @type {Record<string, boolean>} */

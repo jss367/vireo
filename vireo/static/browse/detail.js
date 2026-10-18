@@ -1,16 +1,36 @@
-/* Browse: single-photo detail panel, metadata, summary panel, undo/redo.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: single-photo detail panel, metadata, summary panel, undo/redo. ES module (see
+   browse/README.md). */
+import { searchLaneSeq, state } from './state.js';
+import {
+  VireoFilter, doRedo, doUndo, escapeHtml, safeFetch, searchLaneHeaders, showToast,
+  vireoRememberPhotoEditRecipe, vireoRememberPhotoPair, vireoThumbnailUrl,
+  vireoUpdatePairSourceControls,
+} from './shared.js';
+import { _rememberKeywordNames } from './batch-actions.js';
+import { updateBatchBar } from './batch-bar.js';
+import {
+  _batchToggleMixed, updateDetailColors, updateDetailWildlifeExcluded,
+} from './edit-actions.js';
+import { getBrowseRules } from './loading.js';
+import {
+  clearExifSuggestion, maybeShowExifSuggestion, renderCoordinateStatus, renderLocationEmpty,
+  renderLocationFilled,
+} from './location.js';
+import { panelRequests } from './panel-requests.js';
+import { loadDetailPredictions } from './prediction-panels.js';
+import { refreshCardSelectionVisuals } from './selection.js';
+import { appendVisualScopeParams } from './view-controls.js';
+import { bindBrowseMarkup } from './markup.js';
 
 /* ---------- Undo / Redo ---------- */
-async function undoLast() {
-  return window.doUndo?.();
+export async function undoLast() {
+  return doUndo();
 }
-async function redoLast() {
-  return window.doRedo?.();
+export async function redoLast() {
+  return doRedo();
 }
 
-async function showUndoToast() {
+export async function showUndoToast() {
   try {
     var data = await safeFetch('/api/undo/status', {}, { toast: false });
     if (data.available) showToast(data.description + ' — Ctrl+Z to undo', 'success');
@@ -19,20 +39,20 @@ async function showUndoToast() {
 
 /* showToast is now provided globally by _navbar.html */
 
-async function loadDetail(/** @type {number} */ id) {
+export async function loadDetail(/** @type {number} */ id) {
   // If a multi-selection is already active, skip this single-photo load — it
   // would strip .batch-mode and rewire the sidebar (rating stars → setRating(id))
   // to the anchor while the user still has N photos selected. Common flow:
   // click A, then Cmd/Ctrl-click B before A's fetch returns. selectedPhotoId
   // stays A, so both the sync class removal below and the post-await
   // renderDetail(A) would overwrite the batch inspector the Cmd-click just set up.
-  if (selectedPhotos.size > 1) return;
-  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.detailPredictions.invalidate();
+  if (state.selectedPhotos.size > 1) return;
+  panelRequests.detailPredictions.invalidate();
   /** @type {HTMLElement} */ (document.getElementById('summaryPanel')).classList.add('hidden');
   var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
   // Loading a single photo's detail always exits batch mode.
   if (detail) detail.classList.remove('batch-mode');
-  if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
+  if (detail) detail.classList.toggle('visible', state.detailPhotoId === id);
 
   // Kill any stale EXIF suggestion tagged for a *different* photo before the
   // fetch returns. Otherwise: open A (suggestion shown, data-photo-id=A) →
@@ -40,13 +60,13 @@ async function loadDetail(/** @type {number} */ id) {
   // renderBatchInspector's preserveExifSuggestion check finds A's stale
   // data-photo-id, sees A is in the Select All ids, and resurrects A's
   // Accept line for the whole batch — clicking it applies A's GPS place to
-  // every selected photo. Also null _detailPhotoId so any in-flight
+  // every selected photo. Also null detailPhotoId so any in-flight
   // reverse-geocode for A can't repaint through maybeShowExifSuggestion's
   // post-await guard once the batch inspector is on screen. Codex P2 on
   // PR #1097 (17:23Z).
-  if (window._detailPhotoId !== id) {
+  if (state.detailPhotoId !== id) {
     clearExifSuggestion();
-    window._detailPhotoId = null;
+    state.detailPhotoId = null;
   }
 
   try {
@@ -54,7 +74,7 @@ async function loadDetail(/** @type {number} */ id) {
     // Re-check after the fetch: a Cmd/Ctrl-click landing during the await can
     // promote the selection to multi. The batch inspector is already rendered;
     // don't clobber it with this stale single-photo response.
-    if (selectedPhotoId === id && selectedPhotos.size <= 1) {
+    if (state.selectedPhotoId === id && state.selectedPhotos.size <= 1) {
       renderDetail(photo);
       if (detail) detail.classList.add('visible');
       // Fetched separately from /api/photos so the panel renders the same
@@ -66,26 +86,21 @@ async function loadDetail(/** @type {number} */ id) {
 }
 
 function renderDetail(/** @type {BrowsePhoto} */ photo) {
-  window._detailPhotoId = photo.id;
+  state.detailPhotoId = photo.id;
   // Single-photo view: clear any Mixed markers left over from batch mode.
   _batchToggleMixed('ratingMixed', false);
   _batchToggleMixed('flagMixed', false);
   _batchToggleMixed('colorMixed', false);
   if (
-    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
     Object.prototype.hasOwnProperty.call(photo, 'edit_recipe')
   ) {
-    window.vireoRememberPhotoEditRecipe(photo.id, photo.edit_recipe, {
+    vireoRememberPhotoEditRecipe(photo.id, photo.edit_recipe, {
       skipIfLocallyWritten: true,
     });
   }
-  if (typeof window.vireoRememberPhotoPair === 'function') {
-    window.vireoRememberPhotoPair(photo);
-  }
-  if (typeof window.vireoUpdatePairSourceControls === 'function') {
-    window.vireoUpdatePairSourceControls(photo.id);
-  }
-  var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
+  vireoRememberPhotoPair(photo);
+  vireoUpdatePairSourceControls(photo.id);
+  var detailThumb = vireoThumbnailUrl(photo);
   /** @type {HTMLImageElement} */ (document.getElementById('detailImg')).src = detailThumb;
   /** @type {HTMLElement} */ (document.getElementById('detailFilename')).textContent = photo.filename;
   renderCoordinateStatus(photo);
@@ -94,9 +109,11 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
   var ratingHtml = '';
   for (var i = 1; i <= 5; i++) {
     var cls = i <= (photo.rating || 0) ? 'detail-star active' : 'detail-star';
-    ratingHtml += '<span class="' + cls + '" onclick="setRating(' + photo.id + ',' + i + ')">&#9733;</span>';
+    ratingHtml += '<span class="' + cls + '" data-photo-id="' + photo.id + '" data-rating="' + i + '" data-browse-on="click:setDetailRating">&#9733;</span>';
   }
-  /** @type {HTMLElement} */ (document.getElementById('detailRating')).innerHTML = ratingHtml;
+  var ratingEl = /** @type {HTMLElement} */ (document.getElementById('detailRating'));
+  ratingEl.innerHTML = ratingHtml;
+  bindBrowseMarkup(ratingEl);
 
   // Flags
   updateDetailFlagButtons(photo.flag, photo.flag_note);
@@ -118,15 +135,17 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
     var dropdownHtml = '<div class="keyword-type-dropdown" data-kw-id="' + k.id + '">';
     Object.keys(kwTypeIcons).forEach(function(t) {
       var activeClass = t === ktype ? ' active' : '';
-      dropdownHtml += '<span class="keyword-type-option' + activeClass + '" onclick="setKeywordType(' + k.id + ',\'' + t + '\',this)">' + kwTypeIcons[t] + ' ' + kwTypeLabels[t] + '</span>';
+      dropdownHtml += '<span class="keyword-type-option' + activeClass + '" data-kw-id="' + k.id + '" data-kw-type="' + t + '" data-browse-on="click:setKeywordType">' + kwTypeIcons[t] + ' ' + kwTypeLabels[t] + '</span>';
     });
     dropdownHtml += '</div>';
     kwHtml += '<span class="keyword-tag">' +
-      '<span class="keyword-type-indicator" onclick="toggleTypeDropdown(this,' + k.id + ')" title="Type: ' + kwTypeLabels[ktype] + '">' + icon + dropdownHtml + '</span>' +
+      '<span class="keyword-type-indicator" data-kw-id="' + k.id + '" data-browse-on="click:toggleTypeDropdown" title="Type: ' + kwTypeLabels[ktype] + '">' + icon + dropdownHtml + '</span>' +
       escapeHtml(k.name) +
-      '<span class="remove-kw" onclick="removeKeyword(' + photo.id + ',' + k.id + ')">&times;</span></span>';
+      '<span class="remove-kw" data-photo-id="' + photo.id + '" data-kw-id="' + k.id + '" data-browse-on="click:removeKeyword">&times;</span></span>';
   });
-  /** @type {HTMLElement} */ (document.getElementById('detailKeywords')).innerHTML = kwHtml;
+  var keywordsEl = /** @type {HTMLElement} */ (document.getElementById('detailKeywords'));
+  keywordsEl.innerHTML = kwHtml;
+  bindBrowseMarkup(keywordsEl);
 
   // Location section
   if (photo.location) {
@@ -218,7 +237,7 @@ function renderDetail(/** @type {BrowsePhoto} */ photo) {
 // Also renders the note under the buttons saying who set the flag and why,
 // when the detail payload carried one. Callers that only know the flag (a
 // hand click, the batch inspector) pass no note, and a hand flag has none.
-function updateDetailFlagButtons(
+export function updateDetailFlagButtons(
   /** @type {string | null | undefined} */ flag,
   /** @type {BrowseFlagNote | null | undefined} */ note = null,
 ) {
@@ -304,7 +323,7 @@ function renderMetadataGroups(/** @type {BrowseMetadata | undefined} */ metadata
     var header = document.createElement('div');
     header.className = 'meta-group-header';
     header.innerHTML = '<span>' + escapeHtml(group) + '</span><span class="meta-group-count">' + tagNames.length + '</span>';
-    header.onclick = function() { div.classList.toggle('open'); };
+    header.addEventListener('click', function() { div.classList.toggle('open'); });
 
     var body = document.createElement('div');
     body.className = 'meta-group-body';
@@ -326,7 +345,7 @@ function renderMetadataGroups(/** @type {BrowseMetadata | undefined} */ metadata
   });
 }
 
-function filterMetadata(/** @type {string} */ query) {
+export function filterMetadata(/** @type {string} */ query) {
   var q = query.toLowerCase().trim();
   var groups = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#metadataGroups .meta-group'));
 
@@ -366,7 +385,7 @@ function filterMetadata(/** @type {string} */ query) {
   });
 }
 
-function hideDetailPanel() {
+export function hideDetailPanel() {
   /** @type {HTMLElement} */ (document.getElementById('detailContent')).classList.remove('visible');
   /** @type {HTMLElement} */ (document.getElementById('summaryPanel')).classList.remove('hidden');
 }
@@ -374,23 +393,23 @@ function hideDetailPanel() {
 // Trading a single-photo detail focus for a batch. The panel is not the only
 // thing that has to go: the EXIF suggestion element keeps its data-photo-id
 // and its Accept button, and an in-flight reverse-geocode keeps
-// window._detailPhotoId as its owner check — so a later selection that still
+// detailPhotoId as its owner check — so a later selection that still
 // contains the abandoned photo would resurrect its Accept line for the whole
 // batch, and one click would apply that one photo's place to every selected
 // photo. closeDetail() and clearSelection() have retired both since Codex P2
 // on PR #1097; the paths that enter a stack selection need it for the same
 // reason. Codex P1 on PR #1672.
-function abandonDetailFocusForBatch() {
+export function abandonDetailFocusForBatch() {
   hideDetailPanel();
   clearExifSuggestion();
-  window._detailPhotoId = null;
+  state.detailPhotoId = null;
 }
 
-function closeDetail() {
-  anchorRestoreEpoch++;
+export function closeDetail() {
+  state.anchorRestoreEpoch++;
   hideDetailPanel();
-  selectedPhotoId = null;
-  selectedIndex = -1;
+  state.selectedPhotoId = null;
+  state.selectedIndex = -1;
   // Drop any lingering EXIF suggestion attached to the closed detail photo.
   // Without this, the element keeps its data-photo-id and Accept button; a
   // later Ctrl+A (or any batch that still contains that photo) would satisfy
@@ -399,13 +418,13 @@ function closeDetail() {
   // GPS-derived place to every selected photo. Codex P2 on PR #1097.
   clearExifSuggestion();
   // Null the ambient detail-photo pointer for the same reason. maybeShowExif
-  // Suggestion's post-await guard uses window._detailPhotoId as its owner
+  // Suggestion's post-await guard uses detailPhotoId as its owner
   // check: if a reverse-geocode was in flight when we closed the panel, the
   // fetch keeps running and later resolves. With the pointer still set, a
   // Ctrl+A that includes the departed photo would satisfy both async guards
   // and repaint A's Accept line into the batch inspector. Codex P2 on
   // PR #1097 (17:04Z follow-up).
-  window._detailPhotoId = null;
+  state.detailPhotoId = null;
   // Re-highlight any cmd/shift-click selections that survive detail close.
   // A blanket .remove('selected') would leave selectedPhotos armed for batch
   // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
@@ -418,25 +437,25 @@ function closeDetail() {
 
 function buildSummaryParams() {
   var params = new URLSearchParams();
-  if (activeFolderId) params.set('folder_id', String(activeFolderId));
+  if (state.activeFolderId) params.set('folder_id', String(state.activeFolderId));
   var rules = getBrowseRules();
   if (rules) params.set('rules', JSON.stringify(rules));
   appendVisualScopeParams(params);
-  if (activeCollectionId) params.set('collection_id', String(activeCollectionId));
+  if (state.activeCollectionId) params.set('collection_id', String(state.activeCollectionId));
   return params;
 }
 
 function reconcileSummaryLoadRenders() {
-  var gen = summaryLoadGen;
-  while (gen > summaryRenderDecisionGen) {
-    var state = summaryLoadStates[gen];
-    if (!state || state.status === 'pending') return;
-    if (state.status === 'success') {
+  var gen = state.summaryLoadGen;
+  while (gen > state.summaryRenderDecisionGen) {
+    var loadState = state.summaryLoadStates[gen];
+    if (!loadState || loadState.status === 'pending') return;
+    if (loadState.status === 'success') {
       var currentKey = buildSummaryParams().toString();
-      summaryRenderDecisionGen = gen;
-      if (state.key === currentKey) state.data && renderSummary(state.data);
-      Object.keys(summaryLoadStates).forEach(function(key) {
-        if (Number(key) <= summaryLoadGen) delete summaryLoadStates[key];
+      state.summaryRenderDecisionGen = gen;
+      if (loadState.key === currentKey) loadState.data && renderSummary(loadState.data);
+      Object.keys(state.summaryLoadStates).forEach(function(key) {
+        if (Number(key) <= state.summaryLoadGen) delete state.summaryLoadStates[key];
       });
       return;
     }
@@ -444,27 +463,27 @@ function reconcileSummaryLoadRenders() {
   }
 }
 
-async function loadSummary() {
-  var gen = ++summaryLoadGen;
+export async function loadSummary() {
+  var gen = ++state.summaryLoadGen;
   var params = buildSummaryParams();
-  summaryLoadStates[gen] = {
+  state.summaryLoadStates[gen] = {
     status: 'pending',
     key: params.toString()
   };
 
   try {
     var data = await safeFetch('/api/browse/summary?' + params.toString(), {
-      headers: Vireo?.api?.searchLaneHeaders(
-        'summary', searchLaneSeq(summaryLane, params.toString())),
+      headers: searchLaneHeaders(
+        'summary', searchLaneSeq(state.summaryLane, params.toString())),
     }, { toast: false });
-    var state = summaryLoadStates[gen];
-    if (!state) return data;
-    state.status = 'success';
-    state.data = data;
+    var loadState = state.summaryLoadStates[gen];
+    if (!loadState) return data;
+    loadState.status = 'success';
+    loadState.data = data;
     reconcileSummaryLoadRenders();
     return data;
   } catch(e) {
-    var failedState = summaryLoadStates[gen];
+    var failedState = state.summaryLoadStates[gen];
     if (failedState) {
       failedState.status = 'failure';
       reconcileSummaryLoadRenders();
@@ -547,18 +566,18 @@ function renderSummary(/** @type {BrowseSummary} */ data) {
 }
 
 async function filterByTopSpecies(/** @type {string} */ species) {
-  var scopeGen = ++browseScopeGen;
+  var scopeGen = ++state.browseScopeGen;
   if (!VireoFilter.isReady()) {
-    if (!browseFilterInitPromise) return;
+    if (!state.browseFilterInitPromise) return;
     try {
-      await browseFilterInitPromise;
+      await state.browseFilterInitPromise;
     } catch (e) {
       return;
     }
-    if (!VireoFilter.isReady() || scopeGen !== browseScopeGen) return;
+    if (!VireoFilter.isReady() || scopeGen !== state.browseScopeGen) return;
   }
   // Compose with legacy collection deep links instead of dropping their scope.
-  if (activeCollectionId) dashboardCollectionScope = true;
+  if (state.activeCollectionId) state.dashboardCollectionScope = true;
   var rules = VireoFilter.getUserRules();
   if (rules && rules.mode && rules.mode !== 'all' && rules.rules.length) {
     // Narrow an OR collection as a whole, rather than adding another OR arm.

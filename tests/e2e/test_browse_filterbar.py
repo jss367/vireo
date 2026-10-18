@@ -81,14 +81,14 @@ def test_collection_open_waits_for_filter_bar_initialization(live_server, page):
     # remain pending until the held registry request is released.
     page.evaluate(
         "collectionId => { window._earlyCollectionOpen = "
-        "filterByCollection(collectionId); }",
+        "pageModules.sidebarCollections.filterByCollection(collectionId); }",
         collection_id,
     )
     held_routes[0].continue_()
 
     page.wait_for_function(
         "collectionId => VireoFilter.isReady() && "
-        "openedCollectionId === collectionId && VireoFilter.hasFilters()",
+        "browseState.openedCollectionId === collectionId && VireoFilter.hasFilters()",
         arg=collection_id,
         timeout=15000,
     )
@@ -120,22 +120,22 @@ def test_queued_collection_open_yields_to_later_folder_click(live_server, page):
     # Early collection click queues behind the pending filter-bar init...
     page.evaluate(
         "collectionId => { window._earlyCollectionOpen = "
-        "filterByCollection(collectionId); }",
+        "pageModules.sidebarCollections.filterByCollection(collectionId); }",
         collection_id,
     )
     # ...but a later folder click changes scope before it can resume. The
     # queued collection open must observe the newer scope and abort instead
     # of overwriting the folder view.
-    page.evaluate("folderId => filterByFolder(folderId)", folder_id)
+    page.evaluate("folderId => pageModules.sidebarFolders.filterByFolder(folderId)", folder_id)
     held_routes[0].continue_()
 
     page.wait_for_function("VireoFilter.isReady()", timeout=15000)
     # Give the queued collection continuation a chance to run so we can
     # assert it aborted rather than clobbering activeFolderId/openedCollectionId.
     page.wait_for_timeout(200)
-    assert page.evaluate("activeFolderId") == folder_id
-    assert page.evaluate("openedCollectionId") is None
-    assert page.evaluate("activeCollectionId") is None
+    assert page.evaluate("browseState.activeFolderId") == folder_id
+    assert page.evaluate("browseState.openedCollectionId") is None
+    assert page.evaluate("browseState.activeCollectionId") is None
 
 
 def test_queued_collection_open_yields_to_later_keyword_click(live_server, page):
@@ -169,14 +169,14 @@ def test_queued_collection_open_yields_to_later_keyword_click(live_server, page)
     # Early collection click queues behind the pending filter-bar init...
     page.evaluate(
         "collectionId => { window._earlyCollectionOpen = "
-        "filterByCollection(collectionId); }",
+        "pageModules.sidebarCollections.filterByCollection(collectionId); }",
         collection_id,
     )
     # ...but a later keyword click races in before the fields resolve. It
     # advances browseScopeGen so the queued collection open observes a newer
     # scope and aborts, then queues itself and applies once init resolves.
     page.evaluate(
-        "() => { window._earlyKeywordClick = filterByKeyword('Red-tailed Hawk'); }"
+        "() => { window._earlyKeywordClick = pageModules.sidebarKeywords.filterByKeyword('Red-tailed Hawk'); }"
     )
     held_routes[0].continue_()
 
@@ -185,16 +185,16 @@ def test_queued_collection_open_yields_to_later_keyword_click(live_server, page)
     # deep-linked collection (or bootstrap grid) showing while the user's
     # keyword selection was silently lost.
     page.wait_for_function(
-        "() => VireoFilter.isReady() && activeKeyword === 'Red-tailed Hawk' && "
+        "() => VireoFilter.isReady() && browseState.activeKeyword === 'Red-tailed Hawk' && "
         "VireoFilter.hasFilters()",
         timeout=15000,
     )
     # Give the queued collection continuation a chance to run so we can
     # assert it aborted rather than clobbering the keyword selection.
     page.wait_for_timeout(200)
-    assert page.evaluate("openedCollectionId") is None
-    assert page.evaluate("activeCollectionId") is None
-    assert page.evaluate("activeKeyword") == "Red-tailed Hawk"
+    assert page.evaluate("browseState.openedCollectionId") is None
+    assert page.evaluate("browseState.activeCollectionId") is None
+    assert page.evaluate("browseState.activeKeyword") == "Red-tailed Hawk"
 
 
 def test_deep_link_replay_yields_to_sidebar_click(live_server, page):
@@ -237,20 +237,20 @@ def test_deep_link_replay_yields_to_sidebar_click(live_server, page):
     # pending — this queues behind browseFilterInitPromise.
     page.evaluate(
         "collectionId => { window._userCollectionClick = "
-        "filterByCollection(collectionId); }",
+        "pageModules.sidebarCollections.filterByCollection(collectionId); }",
         clicked_id,
     )
     held_routes[0].continue_()
 
     page.wait_for_function(
-        "clickedId => VireoFilter.isReady() && openedCollectionId === clickedId",
+        "clickedId => VireoFilter.isReady() && browseState.openedCollectionId === clickedId",
         arg=clicked_id,
         timeout=15000,
     )
     # The deep-link replay must have skipped itself — otherwise it would
     # have reopened deep_link_id after B's queued open bailed as stale.
     page.wait_for_timeout(200)
-    assert page.evaluate("openedCollectionId") == clicked_id
+    assert page.evaluate("browseState.openedCollectionId") == clicked_id
 
 
 def test_collection_count_and_optional_grid_keep_offline_members(live_server, page):
@@ -291,9 +291,9 @@ def test_collection_count_and_optional_grid_keep_offline_members(live_server, pa
     expect(page.locator("#grid .grid-card.offline img")).to_have_count(0)
 
     # Select all remains an operational action over accessible photos only.
-    page.evaluate("selectAllMatchingPhotos()")
-    page.wait_for_function("selectedPhotos.size === 3")
-    assert set(page.evaluate("Array.from(selectedPhotos)")) == (
+    page.evaluate("pageModules.selection.selectAllMatchingPhotos()")
+    page.wait_for_function("browseState.selectedPhotos.size === 3")
+    assert set(page.evaluate("Array.from(browseState.selectedPhotos)")) == (
         set(live_server["data"]["photos"]) - offline_ids
     )
 
@@ -356,7 +356,7 @@ def test_pending_keyword_click_supersedes_deep_link_collection(live_server, page
     # Keyword click during pending init: previously dropped at the readiness
     # guard, now queued behind browseFilterInitPromise.
     page.evaluate(
-        "() => { window._earlyKeywordClick = filterByKeyword('Red-tailed Hawk'); }"
+        "() => { window._earlyKeywordClick = pageModules.sidebarKeywords.filterByKeyword('Red-tailed Hawk'); }"
     )
     held_routes[0].continue_()
 
@@ -367,8 +367,8 @@ def test_pending_keyword_click_supersedes_deep_link_collection(live_server, page
     # to 1. The gap between "All Photos" and "keyword=Red-tailed Hawk"
     # totals is what makes the fix observable.
     page.wait_for_function(
-        "() => VireoFilter.isReady() && activeKeyword === 'Red-tailed Hawk' && "
-        "activeCollectionId === null && VireoFilter.hasFilters()",
+        "() => VireoFilter.isReady() && browseState.activeKeyword === 'Red-tailed Hawk' && "
+        "browseState.activeCollectionId === null && VireoFilter.hasFilters()",
         timeout=15000,
     )
     _wait_total(page, 1)
@@ -413,14 +413,14 @@ def test_restored_url_filters_apply_after_pending_folder_click(live_server, page
     # Click yard folder while filter-bar init is pending. filterByFolder
     # bumps browseScopeGen and runs reloadBrowseResults() with no rules yet,
     # so the grid shows the 2 yard photos unfiltered by rating.
-    page.evaluate("folderId => filterByFolder(folderId)", yard_folder_id)
+    page.evaluate("folderId => pageModules.sidebarFolders.filterByFolder(folderId)", yard_folder_id)
     held_routes[0].continue_()
 
     # After init, the bootstrap .then must have applied the restored rating
     # rule against the yard folder scope; no yard photo has rating 4.
     page.wait_for_function(
         "folderId => VireoFilter.isReady() && VireoFilter.hasFilters() && "
-        "activeFolderId === folderId",
+        "browseState.activeFolderId === folderId",
         arg=yard_folder_id,
         timeout=15000,
     )
@@ -552,7 +552,7 @@ def test_shortcuts_narrow_collection_with_any_rules(live_server, page, shortcut)
         db.conn.execute("UPDATE photos SET flag='flagged' WHERE id IN (?, ?)",
                         (photos[1], photos[4]))
     _open_browse(page, live_server)
-    page.evaluate("id => filterByCollection(id)", collection_id)
+    page.evaluate("id => pageModules.sidebarCollections.filterByCollection(id)", collection_id)
     _wait_total(page, 2)
     original = page.evaluate("VireoFilter.getUserRules()")
     url = page.url
@@ -733,12 +733,12 @@ def test_clearing_filters_keeps_selected_photo_in_place(
     """Clear-all widens the grid around the current photo without resetting it."""
     _open_browse(page, live_server)
     selected_id = live_server["data"]["photos"][3]
-    page.evaluate("updateThumbSize(400)")
+    page.evaluate("pageModules.viewControls.updateThumbSize(400)")
 
     # Use a normal rule rather than quick search so this exercises the
     # explicit clear-all reason instead of quickSearchCleared.
     page.evaluate("VireoFilter.addRule('keyword', 'is', 'American Robin')")
-    page.wait_for_function("() => photos.length === 1")
+    page.wait_for_function("() => browseState.photos.length === 1")
     selected = page.locator(f'.grid-card[data-id="{selected_id}"]')
     selected.click()
 
@@ -759,12 +759,12 @@ def test_clearing_filters_keeps_selected_photo_in_place(
     else:
         page.click(".vf-clear")
     page.wait_for_function(
-        "(id) => photos.length === 5 && selectedPhotoId === id",
+        "(id) => browseState.photos.length === 5 && browseState.selectedPhotoId === id",
         arg=selected_id,
     )
     page.wait_for_timeout(100)  # allow the anchor-restoration animation frame
 
-    assert page.evaluate("selectedPhotos.size") == 0
+    assert page.evaluate("browseState.selectedPhotos.size") == 0
     expect(selected).to_have_class("grid-card selected")
     top_after = page.evaluate(
         """(id) => {
@@ -784,7 +784,7 @@ def test_clear_without_filters_does_not_reload(live_server, page, clear_action):
     selected = page.locator(".grid-card").last
     selected.click()
     selected_id = int(selected.get_attribute("data-id"))
-    epoch_before = page.evaluate("loadEpoch")
+    epoch_before = page.evaluate("browseState.loadEpoch")
 
     if clear_action == "popover":
         page.click(".vf-filters-btn")
@@ -803,10 +803,10 @@ def test_clear_without_filters_does_not_reload(live_server, page, clear_action):
     )
     page.wait_for_timeout(300)
 
-    assert page.evaluate("loadEpoch") == epoch_before
+    assert page.evaluate("browseState.loadEpoch") == epoch_before
     assert not page.evaluate("VireoFilter.hasFilters()")
     assert page.locator(".vf-search input").input_value() == ""
-    assert page.evaluate("selectedPhotoId") == selected_id
+    assert page.evaluate("browseState.selectedPhotoId") == selected_id
     expect(selected).to_have_class("grid-card selected")
 
 
@@ -883,7 +883,7 @@ def test_select_all_matches_filtered_grid(live_server, page):
     search.press("Escape")  # blur: select-all is a grid shortcut, not an input one
     page.keyboard.press("ControlOrMeta+a")
     page.wait_for_function(
-        "window.selectedPhotos && selectedPhotos.size === 3", timeout=8000,
+        "browseState.selectedPhotos && browseState.selectedPhotos.size === 3", timeout=8000,
     )
 
 
@@ -985,7 +985,7 @@ def test_save_as_collection_and_reopen(live_server, page, width, legacy_layout_c
     page.fill(".vf-save-name", "Soaring hawks")
     page.click(".vf-save-confirm")
     page.wait_for_function(
-        "window.collectionsById && Object.values(collectionsById)"
+        "browseState.collectionsById && Object.values(browseState.collectionsById)"
         ".some(c => c.name === 'Soaring hawks')",
         timeout=8000,
     )
@@ -1003,9 +1003,9 @@ def test_save_as_collection_and_reopen(live_server, page, width, legacy_layout_c
         "!VireoFilter.hasFilters()", timeout=8000,
     )
     cid = page.evaluate(
-        "Object.values(collectionsById).find(c => c.name === 'Soaring hawks').id"
+        "Object.values(browseState.collectionsById).find(c => c.name === 'Soaring hawks').id"
     )
-    page.evaluate(f"filterByCollection({cid})")
+    page.evaluate(f"pageModules.sidebarCollections.filterByCollection({cid})")
     # Narrow panes can move the restored chip behind the overflow button.
     # Check that it exists, then open Filters to inspect the full expression.
     page.wait_for_selector(".vf-chip.visual", state="attached", timeout=8000)
@@ -1093,7 +1093,7 @@ def test_top_species_filters_predictions_and_preserves_scope(live_server, page, 
     }[scope]
     expected_ids = live_server["data"]["photos"][:3 if scope == "folder" else 2]
     page.goto(f"{live_server['url']}/browse?{query}")
-    page.wait_for_function("VireoFilter.isReady() && !loading")
+    page.wait_for_function("VireoFilter.isReady() && !browseState.loading")
     row = page.locator("#summarySpeciesList button").filter(has_text="Red-tailed Hawk")
     expect(row.locator(".summary-species-count")).to_have_text(str(len(expected_ids)))
     if activation == "click":
@@ -1103,7 +1103,7 @@ def test_top_species_filters_predictions_and_preserves_scope(live_server, page, 
         row.press(activation)
     expect(page.locator(".vf-chips")).to_contain_text("Top predicted species is Red-tailed Hawk")
     expect(page.locator("#grid .grid-card")).to_have_count(len(expected_ids))
-    assert page.evaluate("activeFolderId") == (None if scope == "collection" else folder_id)
+    assert page.evaluate("browseState.activeFolderId") == (None if scope == "collection" else folder_id)
     assert set(page.locator("#grid .grid-card").evaluate_all(
         "cards => cards.map(card => Number(card.dataset.id))"
     )) == set(expected_ids)
@@ -1121,7 +1121,7 @@ def test_top_species_narrows_match_any_collection(live_server, page):
         ]
     }))
     page.goto(f"{live_server['url']}/browse?collection_id={cid}")
-    page.wait_for_function("VireoFilter.isReady() && !loading")
+    page.wait_for_function("VireoFilter.isReady() && !browseState.loading")
     expect(page.locator("#grid .grid-card")).to_have_count(5)
     page.locator("#summarySpeciesList button").filter(has_text="Red-tailed Hawk").click()
     expect(page.locator("#grid .grid-card")).to_have_count(3)
@@ -1310,7 +1310,7 @@ def test_sidebar_highlights_follow_scope_switches(live_server, page):
     )
     _open_browse(page, live_server)
 
-    page.evaluate("folderId => filterByFolder(folderId)", folder_id)
+    page.evaluate("folderId => pageModules.sidebarFolders.filterByFolder(folderId)", folder_id)
     expect(folder_row).to_have_class(re.compile(r"\bactive\b"))
     expect(active_rows).to_have_count(1)
 
@@ -1326,7 +1326,7 @@ def test_sidebar_highlights_follow_scope_switches(live_server, page):
 
     collection_row.click()
     expect(collection_row).to_have_class(re.compile(r"\bactive\b"))
-    page.evaluate("filterByKeyword('Red-tailed Hawk')")
+    page.evaluate("pageModules.sidebarKeywords.filterByKeyword('Red-tailed Hawk')")
     expect(page.locator('#keywordTree .tree-item[data-keyword="Red-tailed Hawk"]')).to_have_class(
         re.compile(r"\bactive\b")
     )

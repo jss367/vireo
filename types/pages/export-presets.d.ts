@@ -23,11 +23,8 @@ interface ExportPresetControls {
 }
 declare function safeFetch<T>(url: string, init?: RequestInit, options?: {toast?: boolean}): Promise<T>;
 declare function showToast(message: string, type?: string): void;
-declare function updateExportFormatControls(): void;
-declare function updateExportPreview(): void;
-declare function selectedExportMetadataFields(): string[];
-declare function applyExportPreset(value: string): void;
-declare function markExportCustom(): void;
+// The host page's export-modal hooks (types/page-hooks.d.ts).
+declare var Vireo: VireoPageHookRegistry;
 declare const VireoViewPreferences: {
   read(key: string): string | null;
   write(key: string, value: string): void;

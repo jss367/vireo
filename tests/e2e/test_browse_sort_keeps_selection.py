@@ -50,7 +50,7 @@ def _open_browse(page, live_server):
     page.goto(live_server["url"] + "/browse")
     page.wait_for_selector("#grid .grid-card", timeout=15000)
     page.wait_for_function(
-        "() => photos.length > 0 && !loading && browseDatasetReady", timeout=15000
+        "() => browseState.photos.length > 0 && !browseState.loading && browseState.browseDatasetReady", timeout=15000
     )
     assert page.evaluate("document.getElementById('sortSelect').value") == "date"
 
@@ -58,17 +58,17 @@ def _open_browse(page, live_server):
 def _scroll_until_loaded(page, wanted):
     """Page the grid in until ``wanted`` photos are loaded."""
     for _ in range(40):
-        if page.evaluate("photos.length") >= wanted:
+        if page.evaluate("browseState.photos.length") >= wanted:
             return
         page.evaluate(
             "() => { const c = document.getElementById('gridContainer');"
             "        c.scrollTop = c.scrollHeight; }"
         )
         page.wait_for_timeout(300)
-        page.wait_for_function("() => !loading", timeout=15000)
+        page.wait_for_function("() => !browseState.loading", timeout=15000)
     raise AssertionError(
         f"grid never loaded {wanted} photos (stopped at "
-        f"{page.evaluate('photos.length')})"
+        f"{page.evaluate('browseState.photos.length')})"
     )
 
 
@@ -79,7 +79,7 @@ def _select_photo_at(page, index):
     page.wait_for_timeout(300)
     card.click()
     expect(page.locator("#addKeywordInput")).to_be_visible()
-    photo_id = page.evaluate("selectedPhotoId")
+    photo_id = page.evaluate("browseState.selectedPhotoId")
     assert photo_id is not None
     return photo_id
 
@@ -122,7 +122,7 @@ def _change_sort(page, value):
     page.select_option("#sortSelect", value)
     page.wait_for_timeout(600)
     page.wait_for_function(
-        "() => !loading && browseDatasetReady", timeout=15000
+        "() => !browseState.loading && browseState.browseDatasetReady", timeout=15000
     )
 
 
@@ -170,7 +170,7 @@ def test_sort_change_keeps_the_selected_photo(live_server, page):
 
     _change_sort(page, "name_desc")
 
-    assert page.evaluate("selectedPhotoId") == photo_id, (
+    assert page.evaluate("browseState.selectedPhotoId") == photo_id, (
         "re-sorting dropped the selection"
     )
     card = page.locator(f"#grid .grid-card[data-id='{photo_id}']")
@@ -244,12 +244,12 @@ def test_second_sort_change_mid_flight_keeps_the_photo(live_server, page):
     page.wait_for_timeout(150)
     page.select_option("#sortSelect", "rating")
     page.wait_for_timeout(2500)
-    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    page.wait_for_function("() => !browseState.loading && browseState.browseDatasetReady", timeout=15000)
     assert page.evaluate("window.__focusStalled") is True, (
         "the focused request was never stalled"
     )
     assert page.evaluate("document.getElementById('sortSelect').value") == "rating"
-    assert page.evaluate("selectedPhotoId") == photo_id, (
+    assert page.evaluate("browseState.selectedPhotoId") == photo_id, (
         "the second sort change dropped the photo the first one was holding"
     )
     expect(
@@ -281,11 +281,11 @@ def test_health_refresh_mid_sort_keeps_the_photo(live_server, page):
         "  new CustomEvent('vireo:folder-health-changed', {detail: {}}))"
     )
     page.wait_for_timeout(2500)
-    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    page.wait_for_function("() => !browseState.loading && browseState.browseDatasetReady", timeout=15000)
     assert page.evaluate("window.__focusStalled") is True, (
         "the focused request was never stalled"
     )
-    assert page.evaluate("selectedPhotoId") == photo_id, (
+    assert page.evaluate("browseState.selectedPhotoId") == photo_id, (
         "a health refresh landing mid-sort dropped the photo"
     )
 
@@ -319,15 +319,15 @@ def test_scope_change_mid_sort_drops_the_photo(live_server, page):
     # A sidebar folder click — this bumps browseScopeGen — and then another
     # sort change, which is what reaches the inherit branch at all.
     other_folder = live_server["data"]["folders"][1]
-    page.evaluate("id => filterByFolder(id)", other_folder)
+    page.evaluate("id => pageModules.sidebarFolders.filterByFolder(id)", other_folder)
     page.wait_for_timeout(100)
     page.select_option("#sortSelect", "rating")
     page.wait_for_timeout(2500)
-    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    page.wait_for_function("() => !browseState.loading && browseState.browseDatasetReady", timeout=15000)
     assert page.evaluate("window.__focusStalled") is True, (
         "the focused request was never stalled"
     )
-    assert page.evaluate("selectedPhotoId") != photo_id, (
+    assert page.evaluate("browseState.selectedPhotoId") != photo_id, (
         "a photo from the scope the user left was resurrected as the selection"
     )
 
@@ -360,11 +360,11 @@ def test_filter_change_mid_sort_drops_the_pending_anchor(live_server, page):
     page.wait_for_timeout(100)
     page.select_option("#sortSelect", "rating")
     page.wait_for_timeout(2500)
-    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    page.wait_for_function("() => !browseState.loading && browseState.browseDatasetReady", timeout=15000)
     assert page.evaluate("window.__focusStalled") is True, (
         "the focused request was never stalled"
     )
-    assert page.evaluate("selectedPhotoId") != photo_id, (
+    assert page.evaluate("browseState.selectedPhotoId") != photo_id, (
         "a filter change mid-sort left the pending anchor behind and the "
         "next sort resurrected the cleared selection"
     )
@@ -381,7 +381,7 @@ def test_stacked_grid_counts_cards_not_photos_in_the_banner(live_server, page):
     _open_browse(page, live_server)
     page.locator("#browseStacksToggle").check()
     page.wait_for_timeout(600)
-    page.wait_for_function("() => !loading && browseDatasetReady", timeout=15000)
+    page.wait_for_function("() => !browseState.loading && browseState.browseDatasetReady", timeout=15000)
     _scroll_until_loaded(page, 100)
     _select_photo_at(page, 80)
 
@@ -393,8 +393,8 @@ def test_stacked_grid_counts_cards_not_photos_in_the_banner(live_server, page):
     state = page.evaluate("""() => {
       const banner = document.getElementById('loadPreviousPhotosBanner');
       return {
-        earliestPage,
-        perPage,
+        earliestPage: browseState.earliestPage,
+        perPage: browseState.perPage,
         shown: banner.style.display !== 'none',
         text: document.getElementById('loadPreviousPhotosText').textContent,
       };
@@ -438,8 +438,8 @@ def test_sort_change_says_how_much_of_the_grid_is_missing(live_server, page):
       const banner = document.getElementById('loadPreviousPhotosBanner');
       const text = document.getElementById('loadPreviousPhotosText');
       return {
-        earliestPage,
-        perPage,
+        earliestPage: browseState.earliestPage,
+        perPage: browseState.perPage,
         shown: banner.style.display !== 'none',
         text: text.textContent,
       };
@@ -454,7 +454,7 @@ def test_sort_change_says_how_much_of_the_grid_is_missing(live_server, page):
         )
     else:
         assert not state["shown"], "banner shown while the grid starts at #1"
-    assert page.evaluate("selectedPhotoId") == photo_id
+    assert page.evaluate("browseState.selectedPhotoId") == photo_id
 
 
 def test_sort_change_without_a_selection_still_starts_at_the_top(live_server, page):
@@ -469,7 +469,7 @@ def test_sort_change_without_a_selection_still_starts_at_the_top(live_server, pa
 
     _change_sort(page, "name_desc")
 
-    assert page.evaluate("earliestPage") == 1
+    assert page.evaluate("browseState.earliestPage") == 1
     assert page.evaluate(
         "document.getElementById('gridContainer').scrollTop"
     ) == 0
@@ -480,7 +480,7 @@ def _enable_stacks(page):
     page.locator("#browseStacksToggle").check()
     page.wait_for_timeout(400)
     page.wait_for_function(
-        "() => !loading && browseDatasetReady", timeout=15000
+        "() => !browseState.loading && browseState.browseDatasetReady", timeout=15000
     )
 
 
@@ -488,7 +488,7 @@ def _loaded_stack_cover_id(page):
     """The cover of the one collapsed stack in the loaded window, or None."""
     return page.evaluate(
         """() => {
-             const cover = photos.find(
+             const cover = browseState.photos.find(
                p => p.browse_stack && p.browse_stack.count > 1
              );
              return cover ? cover.id : null;
@@ -560,18 +560,18 @@ def test_sort_change_keeps_the_selected_stack(live_server, page):
     page.wait_for_timeout(300)
     card.click()
     page.wait_for_function(
-        """ids => selectedPhotoId === null && selectedPhotos.size === ids.length
-             && ids.every(id => selectedPhotos.has(id))""",
+        """ids => browseState.selectedPhotoId === null && browseState.selectedPhotos.size === ids.length
+             && ids.every(id => browseState.selectedPhotos.has(id))""",
         arg=burst_ids,
     )
 
     _change_sort(page, "name_desc")
 
-    assert page.evaluate("selectedPhotoId") is None
-    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+    assert page.evaluate("browseState.selectedPhotoId") is None
+    assert sorted(page.evaluate("() => Array.from(browseState.selectedPhotos)")) == sorted(
         burst_ids
     ), "re-sorting dropped the selected stack"
-    assert page.evaluate("earliestPage") > 1, (
+    assert page.evaluate("browseState.earliestPage") > 1, (
         "the grid restarted at page 1 instead of jumping to the stack"
     )
     assert _ids_on_screen(page, burst_ids), (
@@ -595,16 +595,16 @@ def test_sort_change_holds_the_place_of_a_batch_selection(live_server, page):
     _scroll_until_loaded(page, 100)
     _select_photo_at(page, 80)
     page.locator("#grid .grid-card").nth(81).click(modifiers=["ControlOrMeta"])
-    page.wait_for_function("() => selectedPhotos.size === 2")
+    page.wait_for_function("() => browseState.selectedPhotos.size === 2")
     anchored_id = _topmost_card_id(page)
     assert anchored_id is not None
 
     _change_sort(page, "name_desc")
 
-    assert page.evaluate("selectedPhotos.size") == 0, (
+    assert page.evaluate("browseState.selectedPhotos.size") == 0, (
         "a loose batch cannot survive a re-sort — its ids may not be loaded"
     )
-    assert page.evaluate("earliestPage") > 1, (
+    assert page.evaluate("browseState.earliestPage") > 1, (
         "the grid restarted at page 1 instead of holding the batch's place"
     )
     assert _ids_on_screen(page, [anchored_id]) == [anchored_id], (
@@ -646,15 +646,15 @@ def test_sort_change_keeps_a_stack_selected_from_a_collapsed_tray(
     badge.click()
     expect(tray).to_be_hidden()
     page.wait_for_function(
-        """args => selectedPhotoId === args.cover
-             && args.ids.every(id => selectedPhotos.has(id))
-             && selectedPhotos.size === args.ids.length""",
+        """args => browseState.selectedPhotoId === args.cover
+             && args.ids.every(id => browseState.selectedPhotos.has(id))
+             && browseState.selectedPhotos.size === args.ids.length""",
         arg={"cover": cover_id, "ids": burst_ids},
     )
 
     _change_sort(page, "name_desc")
 
-    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+    assert sorted(page.evaluate("() => Array.from(browseState.selectedPhotos)")) == sorted(
         burst_ids
     ), "re-sorting dropped a stack selected through the tray"
     assert _ids_on_screen(page, burst_ids), (
@@ -706,7 +706,7 @@ def test_history_reload_restores_the_frames_the_user_picked(live_server, page):
 
     cover_id = page.evaluate(
         """ids => {
-             const cover = photos.find(
+             const cover = browseState.photos.find(
                p => p.browse_stack && p.browse_stack.count > 1
                  && ids.includes(p.id)
              );
@@ -720,8 +720,8 @@ def test_history_reload_restores_the_frames_the_user_picked(live_server, page):
     page.wait_for_timeout(300)
     card.click()
     page.wait_for_function(
-        """ids => selectedPhotos.size === ids.length
-             && ids.every(id => selectedPhotos.has(id))""",
+        """ids => browseState.selectedPhotos.size === ids.length
+             && ids.every(id => browseState.selectedPhotos.has(id))""",
         arg=picked,
     )
 
@@ -729,15 +729,15 @@ def test_history_reload_restores_the_frames_the_user_picked(live_server, page):
     # that was keeping it apart from its neighbours, so all four merge.
     for photo_id in picked:
         db.tag_photo(photo_id, keyword_id)
-    page.evaluate("() => afterHistoryChange()")
-    page.wait_for_function("() => !loading", timeout=15000)
+    page.evaluate("() => pageModules.predictionPanels.afterHistoryChange()")
+    page.wait_for_function("() => !browseState.loading", timeout=15000)
 
-    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+    assert sorted(page.evaluate("() => Array.from(browseState.selectedPhotos)")) == sorted(
         picked
     ), "the merged-in frames were selected without the user picking them"
     merged_cover = page.evaluate(
         """ids => {
-             const cover = photos.find(
+             const cover = browseState.photos.find(
                p => p.browse_stack && ids.some(id => p.browse_stack.photo_ids.includes(id))
              );
              return cover ? {id: cover.id, count: cover.browse_stack.count} : null;
@@ -776,7 +776,7 @@ def test_expression_reload_bounds_its_search_for_a_missing_stack(
     assert cover_id in burst_ids
     page.locator(f"#grid .grid-card[data-id='{cover_id}']").click()
     page.wait_for_function(
-        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+        "ids => ids.every(id => browseState.selectedPhotos.has(id))", arg=burst_ids
     )
 
     # The expression the user just loaded does not contain the stack.
@@ -787,16 +787,16 @@ def test_expression_reload_bounds_its_search_for_a_missing_stack(
 
     calls = _capture_queries(page)
     page.evaluate(
-        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+        "() => pageModules.loading.resetAndLoad(pageModules.loading.browseFilterReloadOptions({reason: 'expressionLoaded'}))"
     )
-    page.wait_for_function("() => !loading", timeout=15000)
+    page.wait_for_function("() => !browseState.loading", timeout=15000)
 
     # 400 photos is 8 pages; the bounded scan stops one page past the
     # anchor's old position, so a handful of requests is the whole budget.
     assert len(calls) <= 4, (
         f"the reload paged through the result set: {len(calls)} queries"
     )
-    assert page.evaluate("selectedPhotos.size") == 0, (
+    assert page.evaluate("browseState.selectedPhotos.size") == 0, (
         "the stack is gone from this expression — nothing should stay selected"
     )
 
@@ -822,7 +822,7 @@ def test_expression_reload_finds_a_stack_that_moved(live_server, page):
     assert cover_id in burst_ids
     page.locator(f"#grid .grid-card[data-id='{cover_id}']").click()
     page.wait_for_function(
-        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+        "ids => ids.every(id => browseState.selectedPhotos.has(id))", arg=burst_ids
     )
 
     # The reload moves the stack from the first page to the last.
@@ -835,11 +835,11 @@ def test_expression_reload_finds_a_stack_that_moved(live_server, page):
 
     calls = _capture_queries(page)
     page.evaluate(
-        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+        "() => pageModules.loading.resetAndLoad(pageModules.loading.browseFilterReloadOptions({reason: 'expressionLoaded'}))"
     )
-    page.wait_for_function("() => !loading", timeout=15000)
+    page.wait_for_function("() => !browseState.loading", timeout=15000)
 
-    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+    assert sorted(page.evaluate("() => Array.from(browseState.selectedPhotos)")) == sorted(
         burst_ids
     ), "the reload gave up before reaching the stack and dropped it"
     assert _ids_on_screen(page, burst_ids), (
@@ -848,7 +848,7 @@ def test_expression_reload_finds_a_stack_that_moved(live_server, page):
     # The server places it: one focused query, not eight pages of paging
     # towards it.
     assert len(calls) <= 2, f"{len(calls)} queries to reach the stack"
-    assert page.evaluate("earliestPage") > 1, (
+    assert page.evaluate("browseState.earliestPage") > 1, (
         "the grid paged to the stack instead of being served its page"
     )
 
@@ -877,7 +877,7 @@ def test_expression_reload_falls_back_to_a_surviving_frame(live_server, page):
     page.wait_for_timeout(300)
     card.click()
     page.wait_for_function(
-        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+        "ids => ids.every(id => browseState.selectedPhotos.has(id))", arg=burst_ids
     )
 
     # The expression the user loads keeps the burst but not its cover.
@@ -886,11 +886,11 @@ def test_expression_reload_falls_back_to_a_surviving_frame(live_server, page):
         db.conn.execute("DELETE FROM photos WHERE id = ?", (cover_id,))
 
     page.evaluate(
-        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+        "() => pageModules.loading.resetAndLoad(pageModules.loading.browseFilterReloadOptions({reason: 'expressionLoaded'}))"
     )
-    page.wait_for_function("() => !loading", timeout=15000)
+    page.wait_for_function("() => !browseState.loading", timeout=15000)
 
-    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+    assert sorted(page.evaluate("() => Array.from(browseState.selectedPhotos)")) == sorted(
         survivors
     ), "the frames that survived the reload were cleared along with the cover"
     assert _ids_on_screen(page, survivors), (
@@ -923,7 +923,7 @@ def test_expression_reload_asks_about_every_picked_frame_at_once(
     card.scroll_into_view_if_needed()
     page.wait_for_timeout(300)
     card.click()
-    picked = page.evaluate("() => Array.from(selectedPhotos)")
+    picked = page.evaluate("() => Array.from(browseState.selectedPhotos)")
     assert len(picked) == 6, picked
 
     # Everything the fallback would have reached one attempt at a time.
@@ -937,11 +937,11 @@ def test_expression_reload_asks_about_every_picked_frame_at_once(
 
     calls = _capture_queries(page)
     page.evaluate(
-        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+        "() => pageModules.loading.resetAndLoad(pageModules.loading.browseFilterReloadOptions({reason: 'expressionLoaded'}))"
     )
-    page.wait_for_function("() => !loading", timeout=15000)
+    page.wait_for_function("() => !browseState.loading", timeout=15000)
 
-    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+    assert sorted(page.evaluate("() => Array.from(browseState.selectedPhotos)")) == sorted(
         survivors
     ), "the frames past the old attempt cap were dropped from the selection"
     assert _ids_on_screen(page, survivors), (
@@ -986,16 +986,16 @@ def test_sort_change_leaves_the_selected_stack_collapsed(live_server, page):
     page.wait_for_timeout(300)
     card.click()
     page.wait_for_function(
-        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+        "ids => ids.every(id => browseState.selectedPhotos.has(id))", arg=burst_ids
     )
 
     _change_sort(page, "name_desc")
 
-    assert page.evaluate("() => expandedBrowseStacks.size") == 0, (
+    assert page.evaluate("() => browseState.expandedBrowseStacks.size") == 0, (
         "the re-sort opened the tray of the stack it was keeping"
     )
     expect(page.locator(".browse-stack-tray")).to_have_count(0)
-    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+    assert sorted(page.evaluate("() => Array.from(browseState.selectedPhotos)")) == sorted(
         burst_ids
     )
     assert _ids_on_screen(page, [cover_id]) == [cover_id], (
@@ -1021,7 +1021,7 @@ def test_sort_change_keeps_a_huge_stack_inside_the_lookup_limit(
     _open_browse(page, live_server)
     _enable_stacks(page)
     # Stand in for a burst with more frames than the lookup accepts.
-    page.evaluate("() => { BROWSE_MAX_FOCUS_CANDIDATES = 3; }")
+    page.evaluate("() => { pageModules.state.browseLimits.maxFocusCandidates = 3; }")
     _scroll_until_loaded(page, 110)
 
     cover_id = _loaded_stack_cover_id(page)
@@ -1030,7 +1030,7 @@ def test_sort_change_keeps_a_huge_stack_inside_the_lookup_limit(
     page.wait_for_timeout(300)
     card.click()
     page.wait_for_function(
-        "ids => ids.every(id => selectedPhotos.has(id))", arg=burst_ids
+        "ids => ids.every(id => browseState.selectedPhotos.has(id))", arg=burst_ids
     )
 
     calls = _capture_queries(page)
@@ -1044,7 +1044,7 @@ def test_sort_change_keeps_a_huge_stack_inside_the_lookup_limit(
             f"{len(candidates)} fallback ids sent past the lookup limit"
         )
         assert call["response"] is not None, "the focused query failed"
-    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+    assert sorted(page.evaluate("() => Array.from(browseState.selectedPhotos)")) == sorted(
         burst_ids
     ), "the selection was dropped"
     assert _ids_on_screen(page, burst_ids), "the stack is off screen"
@@ -1068,7 +1068,7 @@ def test_expression_reload_asks_past_the_first_lookup_of_candidates(
     _open_browse(page, live_server)
     _enable_stacks(page)
     # Stand in for a burst longer than one lookup: three candidates a time.
-    page.evaluate("() => { BROWSE_MAX_FOCUS_CANDIDATES = 3; }")
+    page.evaluate("() => { pageModules.state.browseLimits.maxFocusCandidates = 3; }")
     _scroll_until_loaded(page, 110)
 
     cover_id = _loaded_stack_cover_id(page)
@@ -1076,7 +1076,7 @@ def test_expression_reload_asks_past_the_first_lookup_of_candidates(
     card.scroll_into_view_if_needed()
     page.wait_for_timeout(300)
     card.click()
-    picked = page.evaluate("() => Array.from(selectedPhotos)")
+    picked = page.evaluate("() => Array.from(browseState.selectedPhotos)")
     assert len(picked) == 6, picked
 
     # The expression keeps only the tail: everything in the first lookup is
@@ -1089,11 +1089,11 @@ def test_expression_reload_asks_past_the_first_lookup_of_candidates(
 
     calls = _capture_queries(page)
     page.evaluate(
-        "() => resetAndLoad(browseFilterReloadOptions({reason: 'expressionLoaded'}))"
+        "() => pageModules.loading.resetAndLoad(pageModules.loading.browseFilterReloadOptions({reason: 'expressionLoaded'}))"
     )
-    page.wait_for_function("() => !loading", timeout=15000)
+    page.wait_for_function("() => !browseState.loading", timeout=15000)
 
-    assert sorted(page.evaluate("() => Array.from(selectedPhotos)")) == sorted(
+    assert sorted(page.evaluate("() => Array.from(browseState.selectedPhotos)")) == sorted(
         survivors
     ), "the frames past the first lookup were never asked about"
     assert _ids_on_screen(page, survivors), (

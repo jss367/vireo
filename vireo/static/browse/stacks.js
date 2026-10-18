@@ -1,13 +1,33 @@
-/* Browse: burst stacks: membership, badges, trays, cover reconciliation.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: burst stacks: membership, badges, trays, cover reconciliation. ES module (see
+   browse/README.md). */
+import {
+  _pushBrowseStackExpansionRequest, _removeBrowseStackExpansionRequest, state,
+} from './state.js';
+import {
+  _vireoPairSource, escapeAttr, escapeHtml, openLightbox, pairKnownByPhoto, safeFetch,
+  showToast, vireoPhotoHasOrientationEdit, vireoRememberPhotoEditRecipe, vireoRememberPhotoPair,
+  vireoThumbnailUrl,
+} from './shared.js';
+import { loadInatStatus } from './batch-actions.js';
+import { openSelectedInBurstReview, updateBatchBar } from './batch-bar.js';
+import {
+  cardColorLabelAttr, renderCardInfo, renderDetectionBoxes, renderSpeciesBadges,
+} from './cards.js';
+import { abandonDetailFocusForBatch, loadDetail } from './detail.js';
+import { fetchColorLabels } from './edit-actions.js';
+import { refreshColorLabelControlsIn, refreshStackMemberCards, renderGrid } from './grid.js';
+import { availableBrowsePhotos, browseAvailableLightboxPhotos } from './lightbox.js';
+import { observeBrowseWindow } from './loading.js';
+import { openBrowseCompare } from './selection-panel.js';
+import { refreshCardSelectionVisuals, selectPhoto } from './selection.js';
+import { bindBrowseMarkup } from './markup.js';
 
-function browseStacksEnabled() {
+export function browseStacksEnabled() {
   var toggle = /** @type {HTMLInputElement} */ (document.getElementById('browseStacksToggle'));
   return !!(toggle && toggle.checked);
 }
 
-function browseStackLabel(/** @type {string} */ kind, /** @type {number | undefined} */ count = undefined) {
+function browseStackLabel(/** @type {string} */ kind) {
   return kind === 'duplicate' ? 'Exact duplicates' : 'Burst';
 }
 
@@ -25,7 +45,7 @@ function browseStackLabel(/** @type {string} */ kind, /** @type {number | undefi
 // so every id returned here is actionable. The cover leads the list for the
 // same reason Select-all flattens cover-first: Best Batch, burst review and
 // the export preview all start from the card the user can see.
-function browseStackMemberIdsFor(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
+export function browseStackMemberIdsFor(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
   var stack = photo && photo.browse_stack;
   if (!photo || !stack || stack.count < 2) return null;
   var members = (stack.photo_ids || []).filter(function(id) {
@@ -38,8 +58,8 @@ function browseStackMemberIdsFor(/** @type {BrowsePhoto | null | undefined} */ p
 // By id, for the callers that only have one. Stack cards are top-level grid
 // cards, so an id that is not in ``photos`` — a tray member — is a single
 // photo by construction.
-function browseStackMemberIds(/** @type {number} */ photoId) {
-  return browseStackMemberIdsFor(photos.find(function(p) {
+export function browseStackMemberIds(/** @type {number} */ photoId) {
+  return browseStackMemberIdsFor(state.photos.find(function(p) {
     return p.id === photoId;
   }));
 }
@@ -49,7 +69,7 @@ function browseStackMemberIds(/** @type {number} */ photoId) {
 // that are restoring a focus rather than making a selection — a tray member
 // click, a collapsing tray, a closing lightbox — where expanding to the
 // stack would escalate a view action into a 15-photo batch.
-function browseSelectionIdsForClick(/** @type {number} */ photoId, /** @type {{stackAware?: boolean}} */ opts = {}) {
+export function browseSelectionIdsForClick(/** @type {number} */ photoId, /** @type {{stackAware?: boolean}} */ opts = {}) {
   if (opts && opts.stackAware === false) return [photoId];
   return browseStackMemberIds(photoId) || [photoId];
 }
@@ -58,11 +78,11 @@ function browseSelectionIdsForClick(/** @type {number} */ photoId, /** @type {{s
 // cover's grid slot, so the top-level range loop cannot tell them apart and
 // would take the whole stack. Range over the tray's own member order
 // instead, which is the order the user is looking at.
-function browseStackMemberRange(/** @type {number | null} */ anchorId, /** @type {number} */ targetId) {
+export function browseStackMemberRange(/** @type {number | null} */ anchorId, /** @type {number} */ targetId) {
   if (anchorId == null) return null;
   var coverId = browseStackCoverIdForPhoto(targetId);
   if (coverId == null || browseStackCoverIdForPhoto(anchorId) !== coverId) return null;
-  var members = browseStackMembers[String(coverId)] || [];
+  var members = state.browseStackMembers[String(coverId)] || [];
   var anchorAt = -1, targetAt = -1;
   members.forEach(function(member, at) {
     if (member.id === anchorId) anchorAt = at;
@@ -81,15 +101,15 @@ function browseStackMemberRange(/** @type {number | null} */ anchorId, /** @type
 // while the set holds only the other frames, and reading the two as an "or"
 // painted the whole stack as selected while a rating would have skipped the
 // frame on top. Codex P2 on PR #1672.
-function browseSelectionIncludes(/** @type {number} */ id) {
-  return selectedPhotos.size > 0
-    ? selectedPhotos.has(id)
-    : id === selectedPhotoId;
+export function browseSelectionIncludes(/** @type {number} */ id) {
+  return state.selectedPhotos.size > 0
+    ? state.selectedPhotos.has(id)
+    : id === state.selectedPhotoId;
 }
 
 // Which of this card's photos are in the active selection. A stack card
 // paints the full selected ring only when the whole stack is in.
-function browseCardSelectionClass(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
+export function browseCardSelectionClass(/** @type {BrowsePhoto | null | undefined} */ photo = undefined) {
   var members = browseStackMemberIdsFor(photo);
   if (!members) {
     return photo && browseSelectionIncludes(photo.id) ? ' selected' : '';
@@ -105,11 +125,11 @@ function browseCardSelectionClass(/** @type {BrowsePhoto | null | undefined} */ 
 // every selected photo: counting the stacks that happen to be loaded out of a
 // selection that reaches past the window would be a proxy, not an answer, so
 // that case says nothing rather than something cheaper.
-function browseSelectionStackNote(/** @type {number[]} */ ids) {
+export function browseSelectionStackNote(/** @type {number[]} */ ids) {
   if (!ids.length) return '';
   var remaining = new Set(ids);
   var stacks = 0;
-  photos.forEach(function(photo) {
+  state.photos.forEach(function(photo) {
     var stack = photo.browse_stack;
     var members = (stack && stack.count >= 2 && stack.photo_ids) || [];
     if (!members.length) return;
@@ -118,20 +138,20 @@ function browseSelectionStackNote(/** @type {number[]} */ ids) {
     members.forEach(function(id) { remaining.delete(id); });
   });
   if (!stacks) return '';
-  photos.forEach(function(photo) { remaining.delete(photo.id); });
+  state.photos.forEach(function(photo) { remaining.delete(photo.id); });
   if (remaining.size) return '';
   return ' · ' + stacks + (stacks === 1 ? ' stack' : ' stacks');
 }
 
-function renderBrowseStackBadge(/** @type {BrowsePhoto} */ p) {
+export function renderBrowseStackBadge(/** @type {BrowsePhoto} */ p) {
   var stack = p && p.browse_stack;
   if (!stack || stack.count < 2) return '';
-  var label = browseStackLabel(stack.kind, stack.count);
-  var expanded = expandedBrowseStacks.has(p.id);
+  var label = browseStackLabel(stack.kind);
+  var expanded = state.expandedBrowseStacks.has(p.id);
   // A cover reconciliation that could not load this stack's members leaves the
   // pre-edit cover on screen. Say that on the badge itself: the toast that
   // reported it is long gone by the time the user looks back at the grid.
-  var needsRecheck = browseStackCoverRecheck.has(p.id);
+  var needsRecheck = state.browseStackCoverRecheck.has(p.id);
   var title = label + ' · ' + stack.count + ' photos · clicking the card selects all '
     + stack.count + ', this badge expands the stack to pick single frames';
   if (needsRecheck) {
@@ -141,7 +161,7 @@ function renderBrowseStackBadge(/** @type {BrowsePhoto} */ p) {
     + (needsRecheck ? ' needs-recheck' : '') + '" '
     + 'aria-expanded="' + (expanded ? 'true' : 'false') + '" '
     + 'title="' + escapeAttr(title) + '" '
-    + 'onclick="toggleBrowseStack(event,' + p.id + ')">'
+    + 'data-cover-id="' + p.id + '" data-browse-on="click:toggleBrowseStack">'
     + '<span aria-hidden="true">&#9638;</span>' + stack.count
     + (needsRecheck ? '<span class="browse-stack-recheck" aria-hidden="true">!</span>' : '')
     + '</button>';
@@ -150,54 +170,48 @@ function renderBrowseStackBadge(/** @type {BrowsePhoto} */ p) {
 // Repaints just the stack badge for one cover. refreshGridCards() rewrites card
 // info and overlay badges but not the stack badge, and renderGrid() is far too
 // heavy to run for a marker change on a single card.
-function refreshBrowseStackBadge(/** @type {number} */ coverId) {
+export function refreshBrowseStackBadge(/** @type {number} */ coverId) {
   var card = /** @type {HTMLElement | null} */ (document.querySelector('.grid-card[data-id="' + coverId + '"]'));
   if (!card) return;
   var badge = /** @type {HTMLElement | null} */ (card.querySelector('.browse-stack-badge'));
-  var photo = photos.find(function(item) { return item.id === coverId; });
+  var photo = state.photos.find(function(item) { return item.id === coverId; });
   if (!badge || !photo) return;
   badge.outerHTML = renderBrowseStackBadge(photo);
+  bindBrowseMarkup(card);
 }
 
 function renderBrowseStackMember(/** @type {BrowsePhoto} */ p, /** @type {number} */ coverId) {
   var selectedClass = browseSelectionIncludes(p.id) ? ' selected' : '';
-  if (typeof window.vireoRememberPhotoPair === 'function') {
-    window.vireoRememberPhotoPair(p);
-  }
-  if (
-    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
-    Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
-  ) {
-    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
+  vireoRememberPhotoPair(p);
+  if (Object.prototype.hasOwnProperty.call(p, 'edit_recipe')) {
+    vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
       skipIfLocallyWritten: true,
     });
   }
-  var thumbUrl = window.vireoThumbnailUrl
-    ? window.vireoThumbnailUrl(p)
-    : '/thumbnails/' + p.id + '.jpg';
+  var thumbUrl = vireoThumbnailUrl(p);
   // tabindex="-1" matches .grid-card: the stack member stays out of Tab
   // order but is a valid programmatic focus target so a batch dialog
   // launched from this card can restore focus to it on Cancel or Escape.
   return '<div class="browse-stack-member' + selectedClass + '" '
     + 'data-id="' + p.id + '" data-filename="' + escapeAttr(p.filename) + '"'
     + cardColorLabelAttr(p.id) + ' tabindex="-1" '
-    + 'onclick="selectBrowseStackMember(event,' + p.id + ',' + coverId + ')" '
-    + 'ondblclick="openBrowseStackMember(event,' + p.id + ',' + coverId + ')">'
+    + 'data-cover-id="' + coverId + '" '
+    + 'data-browse-on="click:selectBrowseStackMember dblclick:openBrowseStackMember">'
     + '<div class="grid-card-img-wrap">'
     + '<img data-thumbnail-src="' + escapeAttr(thumbUrl) + '" decoding="async" alt="' + escapeAttr(p.filename) + '">'
     + renderDetectionBoxes(p)
-    + (inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '')
+    + (state.inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '')
     + (p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '')
     + (p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '')
-    + (cardFields.indexOf('species') === -1 ? renderSpeciesBadges(p.species, false) : '')
+    + (state.cardFields.indexOf('species') === -1 ? renderSpeciesBadges(p.species, false) : '')
     + '</div><div class="grid-card-info">' + renderCardInfo(p) + '</div></div>';
 }
 
 function renderBrowseStackTray(/** @type {BrowsePhoto} */ cover) {
   var stack = cover.browse_stack; if (!stack) return '';
-  var members = browseStackMembers[String(cover.id)];
-  var error = browseStackErrors[String(cover.id)];
-  var label = browseStackLabel(stack.kind, stack.count);
+  var members = state.browseStackMembers[String(cover.id)];
+  var error = state.browseStackErrors[String(cover.id)];
+  var label = browseStackLabel(stack.kind);
   var body = '<div class="browse-stack-loading">Loading stack…</div>';
   if (error) {
     body = '<div class="browse-stack-error">' + escapeHtml(error) + '</div>';
@@ -212,28 +226,29 @@ function renderBrowseStackTray(/** @type {BrowsePhoto} */ cover) {
     + '<span class="browse-stack-tray-title">' + escapeHtml(label) + '</span>'
     + '<span class="browse-stack-tray-subtitle">' + stack.count + ' photos</span>'
     + '</div><div class="browse-stack-tray-actions">'
-    + '<button type="button" onclick="filterToBrowseGroup(' + cover.id + ')">Filter to group</button>'
-    + '<button type="button" onclick="selectBrowseStackAll(event,' + cover.id + ')">Select all</button>'
-    + '<button type="button" onclick="reviewBrowseStack(event,' + cover.id + ')">' + reviewLabel + '</button>'
-    + '<button type="button" aria-label="Collapse stack" title="Collapse" onclick="toggleBrowseStack(event,' + cover.id + ')">&#10005;</button>'
+    + '<button type="button" data-cover-id="' + cover.id + '" data-browse-on="click:filterToBrowseGroup">Filter to group</button>'
+    + '<button type="button" data-cover-id="' + cover.id + '" data-browse-on="click:selectBrowseStackAll">Select all</button>'
+    + '<button type="button" data-cover-id="' + cover.id + '" data-browse-on="click:reviewBrowseStack">' + reviewLabel + '</button>'
+    + '<button type="button" aria-label="Collapse stack" title="Collapse" data-cover-id="' + cover.id + '" data-browse-on="click:toggleBrowseStack">&#10005;</button>'
     + '</div></div>' + body + '</div>';
 }
 
 function insertBrowseStackTray(/** @type {number} */ coverId) {
   var oldTray = /** @type {HTMLElement | null} */ (document.querySelector('.browse-stack-tray[data-stack-cover-id="' + coverId + '"]'));
   if (oldTray) oldTray.remove();
-  if (!expandedBrowseStacks.has(coverId)) return;
-  const cover = photos.find(function(photo) { return photo.id === coverId; });
+  if (!state.expandedBrowseStacks.has(coverId)) return;
+  const cover = state.photos.find(function(photo) { return photo.id === coverId; });
   var card = /** @type {HTMLElement | null} */ (document.querySelector('.grid-card[data-id="' + coverId + '"]'));
   if (!cover || !cover.browse_stack || !card) return;
   card.insertAdjacentHTML('afterend', renderBrowseStackTray(cover));
+  if (card.nextElementSibling instanceof HTMLElement) bindBrowseMarkup(card.nextElementSibling);
   var tray = /** @type {HTMLElement | null} */ (document.querySelector('.browse-stack-tray[data-stack-cover-id="' + coverId + '"]'));
   refreshColorLabelControlsIn(tray);
   refreshCardSelectionVisuals();
 }
 
-function restoreExpandedBrowseStacks() {
-  Array.from(expandedBrowseStacks).forEach(insertBrowseStackTray);
+export function restoreExpandedBrowseStacks() {
+  Array.from(state.expandedBrowseStacks).forEach(insertBrowseStackTray);
 }
 
 // Every mutation path reports the photo ids whose local state it just changed
@@ -243,11 +258,11 @@ function restoreExpandedBrowseStacks() {
 // could not reach. Mark it rather than trying to replay the mutation onto the
 // response: the set of fields an edit can touch keeps growing, and a refetch
 // is correct for all of them without per-field bookkeeping.
-function markBrowseStackExpansionsStale(/** @type {number[]} */ photoIds) {
+export function markBrowseStackExpansionsStale(/** @type {number[]} */ photoIds) {
   var wanted = (photoIds || []).map(Number);
   if (!wanted.length) return;
-  Object.keys(browseStackExpansionRequests).forEach(function(cacheKey) {
-    var requests = browseStackExpansionRequests[cacheKey] || [];
+  Object.keys(state.browseStackExpansionRequests).forEach(function(cacheKey) {
+    var requests = state.browseStackExpansionRequests[cacheKey] || [];
     requests.forEach(function(request) {
       if (!request || request.stale) return;
       request.stale = wanted.some(function(id) { return request.memberIds.has(id); });
@@ -264,35 +279,35 @@ function markBrowseStackExpansionsStale(/** @type {number[]} */ photoIds) {
 // reconcileBrowseStackCovers only supersedes hydrations it starts itself, so
 // mutation paths that don't call it (wildlife, keyword, metadata edits) rely on
 // this to invalidate a matching in-flight request.
-function markBrowseStackHydrationsStale(/** @type {number[]} */ photoIds) {
+export function markBrowseStackHydrationsStale(/** @type {number[]} */ photoIds) {
   var wanted = (photoIds || []).map(Number);
   if (!wanted.length) return;
-  Object.keys(browseStackHydrationRequests).forEach(function(cacheKey) {
-    const record = browseStackHydrationRequests[cacheKey]; if (!record) return;
+  Object.keys(state.browseStackHydrationRequests).forEach(function(cacheKey) {
+    const record = state.browseStackHydrationRequests[cacheKey]; if (!record) return;
     if (!record || !record.memberIds || record.stale) return;
     record.stale = wanted.some(function(id) { return record.memberIds.has(id); });
   });
 }
 
-function refreshExpandedBrowseStackMembers(/** @type {number[]} */ photoIds) {
+export function refreshExpandedBrowseStackMembers(/** @type {number[]} */ photoIds) {
   var wanted = new Set((photoIds || []).map(Number));
   markBrowseStackExpansionsStale(photoIds);
   markBrowseStackHydrationsStale(photoIds);
-  Object.keys(browseStackMembers).forEach(function(coverId) {
-    var members = browseStackMembers[coverId] || [];
+  Object.keys(state.browseStackMembers).forEach(function(coverId) {
+    var members = state.browseStackMembers[coverId] || [];
     if (members.some(function(member) { return wanted.has(member.id); })) {
       insertBrowseStackTray(Number(coverId));
     }
   });
 }
 
-function browseStackFlagRank(/** @type {BrowsePhoto['flag']} */ flag) {
+export function browseStackFlagRank(/** @type {BrowsePhoto['flag']} */ flag) {
   if (flag === 'flagged') return 2;
   if (flag == null || flag === 'none') return 1;
   return 0;
 }
 
-function browseStackCoverCompare(/** @type {BrowsePhoto} */ a, /** @type {BrowsePhoto} */ b) {
+export function browseStackCoverCompare(/** @type {BrowsePhoto} */ a, /** @type {BrowsePhoto} */ b) {
   var descending = [
     [browseStackFlagRank(a.flag), browseStackFlagRank(b.flag)],
     [a.quality_score, b.quality_score],
@@ -328,12 +343,12 @@ var MAX_BROWSE_STACK_HYDRATION_ATTEMPTS = 3;
 //   'unresolved' — retries exhausted; the grid still shows the pre-edit cover
 // 'unresolved' is never silent: the caller flags the stack for recheck and tells
 // the user, because the mutation that asked for this reconciliation succeeded.
-async function hydrateBrowseStackCoverMembers(/** @type {BrowsePhoto} */ cover, /** @type {() => boolean} */ windowIsCurrent) {
+export async function hydrateBrowseStackCoverMembers(/** @type {BrowsePhoto} */ cover, /** @type {() => boolean} */ windowIsCurrent) {
   var cacheKey = String(cover.id);
   var memberIds = (cover.browse_stack && cover.browse_stack.photo_ids) || [];
   for (var attempt = 1; attempt <= MAX_BROWSE_STACK_HYDRATION_ATTEMPTS; attempt++) {
-    var hydrationSeq = ++browseStackHydrationSeq;
-    browseStackHydrationRequests[cacheKey] = {
+    var hydrationSeq = ++state.browseStackHydrationSeq;
+    state.browseStackHydrationRequests[cacheKey] = {
       seq: hydrationSeq,
       stale: false,
       memberIds: new Set(memberIds.map(Number)),
@@ -350,9 +365,9 @@ async function hydrateBrowseStackCoverMembers(/** @type {BrowsePhoto} */ cover, 
         hydratedMembers = hydratedMembers.concat(data.photos || []);
       }
     } catch (e) {
-      var errorRecord = browseStackHydrationRequests[cacheKey];
+      var errorRecord = state.browseStackHydrationRequests[cacheKey];
       if (errorRecord && errorRecord.seq === hydrationSeq) {
-        delete browseStackHydrationRequests[cacheKey];
+        delete state.browseStackHydrationRequests[cacheKey];
       }
       if (!windowIsCurrent()) return 'window';
       // The edit itself already committed on the server. Retry the read rather
@@ -371,21 +386,21 @@ async function hydrateBrowseStackCoverMembers(/** @type {BrowsePhoto} */ cover, 
     // Overlapping edits may hydrate the same collapsed stack. Request order
     // tracks mutation freshness, so only the newest request may cache even when
     // an older response happens to arrive first.
-    var currentRecord = browseStackHydrationRequests[cacheKey];
+    var currentRecord = state.browseStackHydrationRequests[cacheKey];
     if (!currentRecord || currentRecord.seq !== hydrationSeq) return 'superseded';
     if (currentRecord.stale) {
       // A generic member edit (wildlife, keyword, metadata) landed while this
       // response was in flight, so it holds pre-edit rows for members that had
       // no cache entry to patch. Never cache that; refetch the post-edit truth.
-      delete browseStackHydrationRequests[cacheKey];
+      delete state.browseStackHydrationRequests[cacheKey];
       if (attempt < MAX_BROWSE_STACK_HYDRATION_ATTEMPTS) continue;
       return 'unresolved';
     }
-    delete browseStackHydrationRequests[cacheKey];
+    delete state.browseStackHydrationRequests[cacheKey];
     // Expansion can also hydrate this key while reconciliation is in flight;
     // and another response may already have promoted a replacement.
-    if (browseStackMembers[cacheKey] || !cover.browse_stack
-        || !photos.some(function(photo) {
+    if (state.browseStackMembers[cacheKey] || !cover.browse_stack
+        || !state.photos.some(function(photo) {
           return photo === cover && photo.id === cover.id;
         })) {
       return 'superseded';
@@ -393,7 +408,7 @@ async function hydrateBrowseStackCoverMembers(/** @type {BrowsePhoto} */ cover, 
     var stack = cover.browse_stack;
     var similarity = cover.similarity;
     var clientSimilarity = cover._similarity;
-    browseStackMembers[cacheKey] = hydratedMembers.map(function(member) {
+    state.browseStackMembers[cacheKey] = hydratedMembers.map(function(member) {
       if (member.id !== cover.id) return member;
       Object.assign(cover, member);
       cover.browse_stack = stack;
@@ -406,7 +421,7 @@ async function hydrateBrowseStackCoverMembers(/** @type {BrowsePhoto} */ cover, 
   return 'unresolved';
 }
 
-async function reconcileBrowseStackCovers(/** @type {number[]} */ photoIds) {
+export async function reconcileBrowseStackCovers(/** @type {number[]} */ photoIds) {
   var wanted = new Set((photoIds || []).map(Number));
   // Callers run this straight after applying the edit locally, before the
   // trailing refreshExpandedBrowseStackMembers(). Marking here too closes the
@@ -416,8 +431,8 @@ async function reconcileBrowseStackCovers(/** @type {number[]} */ photoIds) {
   var windowIsCurrent = observeBrowseWindow();
   var focusedReplacementId = null;
   var refreshFocusedDetail = false;
-  var uncachedCovers = photos.filter(function(photo) {
-    if (!photo.browse_stack || browseStackMembers[String(photo.id)]) return false;
+  var uncachedCovers = state.photos.filter(function(photo) {
+    if (!photo.browse_stack || state.browseStackMembers[String(photo.id)]) return false;
     return wanted.has(photo.id) || (photo.browse_stack.photo_ids || []).some(function(id) {
       return wanted.has(id);
     });
@@ -431,52 +446,52 @@ async function reconcileBrowseStackCovers(/** @type {number[]} */ photoIds) {
     if (status === 'unresolved') unresolvedCovers.push(uncachedCover.id);
     // Members are loaded, so the cover below is recomputed from the full stack:
     // any earlier recheck marker on this cover is now satisfied.
-    if (status === 'hydrated') browseStackCoverRecheck.delete(uncachedCover.id);
+    if (status === 'hydrated') state.browseStackCoverRecheck.delete(uncachedCover.id);
   }
-  unresolvedCovers.forEach(function(coverId) { browseStackCoverRecheck.add(coverId); });
+  unresolvedCovers.forEach(function(coverId) { state.browseStackCoverRecheck.add(coverId); });
 
   var changed = false;
-  Object.keys(browseStackMembers).forEach(function(oldKey) {
-    var members = browseStackMembers[oldKey] || [];
+  Object.keys(state.browseStackMembers).forEach(function(oldKey) {
+    var members = state.browseStackMembers[oldKey] || [];
     if (!members.some(function(member) { return wanted.has(member.id); })) return;
     var oldCoverId = Number(oldKey);
-    var oldIndex = photos.findIndex(function(photo) { return photo.id === oldCoverId; });
+    var oldIndex = state.photos.findIndex(function(photo) { return photo.id === oldCoverId; });
     if (oldIndex < 0 || !members.length) return;
     var newCover = members.slice().sort(browseStackCoverCompare)[0];
     if (!newCover || newCover.id === oldCoverId) return;
 
-    var oldCover = photos[oldIndex]; if (!oldCover) return;
+    var oldCover = state.photos[oldIndex]; if (!oldCover) return;
     var stack = oldCover.browse_stack;
     oldCover.browse_stack = null;
     newCover.browse_stack = stack;
     if (oldCover.similarity !== undefined) newCover.similarity = oldCover.similarity;
     if (oldCover._similarity !== undefined) newCover._similarity = oldCover._similarity;
-    photos[oldIndex] = newCover;
+    state.photos[oldIndex] = newCover;
 
     var newKey = String(newCover.id);
-    browseStackMembers[newKey] = members;
-    delete browseStackMembers[oldKey];
-    if (Object.prototype.hasOwnProperty.call(browseStackErrors, oldKey)) {
-      browseStackErrors[newKey] = browseStackErrors[oldKey] || '';
-      delete browseStackErrors[oldKey];
+    state.browseStackMembers[newKey] = members;
+    delete state.browseStackMembers[oldKey];
+    if (Object.prototype.hasOwnProperty.call(state.browseStackErrors, oldKey)) {
+      state.browseStackErrors[newKey] = state.browseStackErrors[oldKey] || '';
+      delete state.browseStackErrors[oldKey];
     }
     // The cover was just recomputed from the whole member list, so a recheck
     // marker left over from an earlier failed hydration no longer applies.
-    browseStackCoverRecheck.delete(oldCoverId);
-    if (expandedBrowseStacks.delete(oldCoverId)) {
-      expandedBrowseStacks.add(newCover.id);
+    state.browseStackCoverRecheck.delete(oldCoverId);
+    if (state.expandedBrowseStacks.delete(oldCoverId)) {
+      state.expandedBrowseStacks.add(newCover.id);
     }
-    if (selectedPhotoId != null && members.some(function(member) {
-      return member.id === selectedPhotoId;
+    if (state.selectedPhotoId != null && members.some(function(member) {
+      return member.id === state.selectedPhotoId;
     })) {
-      selectedIndex = oldIndex;
+      state.selectedIndex = oldIndex;
       // The demoted cover is gone from the top-level photos array. Grid
       // selection and preview navigation both look it up there and would
       // otherwise land on an unselected card with an index of -1 in the
       // navigation list. Hand focus to the newly promoted cover, which now
       // occupies that grid slot.
-      if (selectedPhotoId === oldCoverId && selectedPhotos.size === 0) {
-        selectedPhotoId = newCover.id;
+      if (state.selectedPhotoId === oldCoverId && state.selectedPhotos.size === 0) {
+        state.selectedPhotoId = newCover.id;
         focusedReplacementId = newCover.id;
         refreshFocusedDetail = /** @type {HTMLElement} */ (document.getElementById('detailContent')).classList.contains('visible');
       }
@@ -508,15 +523,15 @@ async function reconcileBrowseStackCovers(/** @type {number[]} */ photoIds) {
   return changed;
 }
 
-function browsePhotoNavigationList(/** @type {number} */ photoId) {
+export function browsePhotoNavigationList(/** @type {number} */ photoId) {
   // Prefer an expanded stack's member list even for its cover, which also
   // exists in the top-level grid. Opening that cover from the tray should
   // navigate to its neighboring frames, not to the next stack cover.
-  var stackIds = Object.keys(browseStackMembers);
+  var stackIds = Object.keys(state.browseStackMembers);
   for (var i = 0; i < stackIds.length; i++) {
-    if (!expandedBrowseStacks.has(Number(stackIds[i]))) continue;
+    if (!state.expandedBrowseStacks.has(Number(stackIds[i]))) continue;
     var stackId = stackIds[i]; if (!stackId) continue;
-    var members = browseStackMembers[stackId] || [];
+    var members = state.browseStackMembers[stackId] || [];
     if (members.some(function(photo) { return photo.id === photoId; })) {
       return members;
     }
@@ -530,15 +545,15 @@ function browsePhotoNavigationList(/** @type {number} */ photoId) {
 // True for either shape ``browsePhotoNavigationList`` returns as its
 // top-level fallback: ``photos`` itself, or the available-only list used
 // while offline collection members are shown.
-function browseNavigationListIsTopLevel(/** @type {BrowsePhoto[]} */ list) {
-  return list === photos || list === browseAvailableLightboxPhotos;
+export function browseNavigationListIsTopLevel(/** @type {BrowsePhoto[]} */ list) {
+  return list === state.photos || list === browseAvailableLightboxPhotos;
 }
 
-function browseStackCoverIdForPhoto(/** @type {number | null} */ photoId) {
-  var stackIds = Object.keys(browseStackMembers);
+export function browseStackCoverIdForPhoto(/** @type {number | null} */ photoId) {
+  var stackIds = Object.keys(state.browseStackMembers);
   for (var i = 0; i < stackIds.length; i++) {
     var stackId = stackIds[i]; if (!stackId) continue;
-    if ((browseStackMembers[stackId] || []).some(function(photo) {
+    if ((state.browseStackMembers[stackId] || []).some(function(photo) {
       return photo.id === photoId;
     })) {
       return Number(stackIds[i]);
@@ -547,39 +562,39 @@ function browseStackCoverIdForPhoto(/** @type {number | null} */ photoId) {
   return null;
 }
 
-function loadedBrowsePhotoIds() {
-  var ids = new Set(photos.map(function(photo) { return photo.id; }));
-  Object.keys(browseStackMembers).forEach(function(coverId) {
-    (browseStackMembers[coverId] || []).forEach(function(photo) {
+export function loadedBrowsePhotoIds() {
+  var ids = new Set(state.photos.map(function(photo) { return photo.id; }));
+  Object.keys(state.browseStackMembers).forEach(function(coverId) {
+    (state.browseStackMembers[coverId] || []).forEach(function(photo) {
       ids.add(photo.id);
     });
   });
   return Array.from(ids);
 }
 
-async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @type {number} */ coverId) {
+export async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @type {number} */ coverId) {
   if (event) {
     event.preventDefault();
     event.stopPropagation();
   }
-  var coverCandidate = photos.find(function(photo) { return photo.id === coverId; });
+  var coverCandidate = state.photos.find(function(photo) { return photo.id === coverId; });
   if (!coverCandidate || !coverCandidate.browse_stack) return; const cover = coverCandidate;
   var badge = /** @type {HTMLElement | null} */ (document.querySelector('.grid-card[data-id="' + coverId + '"] .browse-stack-badge'));
-  if (expandedBrowseStacks.has(coverId)) {
-    var members = browseStackMembers[String(coverId)] || [];
-    var selectedHiddenMember = selectedPhotoId !== coverId && members.some(function(member) {
-      return member.id === selectedPhotoId;
+  if (state.expandedBrowseStacks.has(coverId)) {
+    var members = state.browseStackMembers[String(coverId)] || [];
+    var selectedHiddenMember = state.selectedPhotoId !== coverId && members.some(function(member) {
+      return member.id === state.selectedPhotoId;
     });
     // A stack-wide Select all clears selectedPhotoId but leaves every member
     // ID in selectedPhotos. Once the tray collapses, hidden members are gone
     // from the navigation list, so a preview shortcut would fall through to
     // the first hidden member and yield a 0/N lightbox. Detect that case so
     // we can re-pin focus to the visible cover after removing the tray.
-    var batchHasHiddenMembers = selectedPhotoId == null && selectedPhotos.size > 0
+    var batchHasHiddenMembers = state.selectedPhotoId == null && state.selectedPhotos.size > 0
       && members.some(function(member) {
-        return member.id !== coverId && selectedPhotos.has(member.id);
+        return member.id !== coverId && state.selectedPhotos.has(member.id);
       });
-    expandedBrowseStacks.delete(coverId);
+    state.expandedBrowseStacks.delete(coverId);
     var tray = /** @type {HTMLElement | null} */ (document.querySelector('.browse-stack-tray[data-stack-cover-id="' + coverId + '"]'));
     if (tray) tray.remove();
     if (badge) badge.setAttribute('aria-expanded', 'false');
@@ -588,12 +603,12 @@ async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @ty
     // Hand that focus back to the visible cover while retaining the warm
     // member cache for a cheap re-expand and for batch state reconciliation.
     if (selectedHiddenMember) {
-      var coverIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
-      if (selectedPhotos.size > 0) {
+      var coverIndex = state.photos.findIndex(function(photo) { return photo.id === coverId; });
+      if (state.selectedPhotos.size > 0) {
         // Keep the exact multi-selection intact. The focused hidden member is
         // still an active batch target, and getBrowseShortcutPhoto maps that
         // focus to the collapsed cover solely for preview/navigation.
-        selectedIndex = coverIndex;
+        state.selectedIndex = coverIndex;
         refreshCardSelectionVisuals();
       } else {
         // stackAware: false — collapsing a tray is a view action. It hands
@@ -607,22 +622,22 @@ async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @ty
       // Preserve the batch (Select all) selection but pin single-photo focus
       // to the visible cover so preview shortcuts, keyboard navigation, and
       // the grid caret all resolve inside the top-level cover list.
-      selectedPhotoId = coverId;
-      selectedIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
+      state.selectedPhotoId = coverId;
+      state.selectedIndex = state.photos.findIndex(function(photo) { return photo.id === coverId; });
       refreshCardSelectionVisuals();
     }
     return;
   }
 
-  expandedBrowseStacks.add(coverId);
+  state.expandedBrowseStacks.add(coverId);
   if (badge) badge.setAttribute('aria-expanded', 'true');
   insertBrowseStackTray(coverId);
   var cacheKey = String(coverId);
-  if (browseStackMembers[cacheKey]) return;
+  if (state.browseStackMembers[cacheKey]) return;
   // Errors are presentation state, not a durable cache result. Re-expanding
   // after collapse retries a transient failure instead of pinning the stack
   // to its first failed request until the whole Browse dataset reloads.
-  delete browseStackErrors[cacheKey];
+  delete state.browseStackErrors[cacheKey];
   insertBrowseStackTray(coverId);
   var memberIds = cover.browse_stack?.photo_ids || [];
   var windowIsCurrent = observeBrowseWindow();
@@ -631,7 +646,7 @@ async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @ty
     // expansion request is in flight. The dataset epoch stays current in
     // that case, so also verify the captured cover still owns this grid slot
     // before writing its old cache key.
-    return windowIsCurrent() && !!cover.browse_stack && photos.some(function(photo) {
+    return windowIsCurrent() && !!cover.browse_stack && state.photos.some(function(photo) {
       return photo === cover && photo.id === coverId;
     });
   }
@@ -664,7 +679,7 @@ async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @ty
           abortedForRace = true;
           break;
         }
-        if (request.stale || browseStackMembers[cacheKey]) {
+        if (request.stale || state.browseStackMembers[cacheKey]) {
           // An edit or a fresher hydration landed mid-chunk. Stop fetching
           // the rest of the stack and let the outer loop's stale / cache
           // branches decide what to do; the partial payload is worthless
@@ -676,14 +691,14 @@ async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @ty
     } catch (error) {
       _removeBrowseStackExpansionRequest(cacheKey, request);
       if (!coverStillOwnsSlot()) return;
-      browseStackErrors[cacheKey] = 'Could not load this stack.';
+      state.browseStackErrors[cacheKey] = 'Could not load this stack.';
       insertBrowseStackTray(coverId);
       return;
     }
     if (abortedForRace) return;
     _removeBrowseStackExpansionRequest(cacheKey, request);
     if (!coverStillOwnsSlot()) return;
-    if (browseStackMembers[cacheKey]) {
+    if (state.browseStackMembers[cacheKey]) {
       // Cover reconciliation hydrated this key while we were in flight. It
       // issued its fetch after the edit that triggered it, so its cache is
       // strictly fresher than this response — keep it and just finish the
@@ -696,7 +711,7 @@ async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @ty
       // pre-edit values for them. Never paint that: the tray keeps saying
       // "Loading stack…" while we go fetch the post-edit truth.
       if (attempt < MAX_EXPANSION_ATTEMPTS) continue;
-      browseStackErrors[cacheKey] =
+      state.browseStackErrors[cacheKey] =
         'This stack kept changing while it loaded. Collapse and expand it to see current state.';
       insertBrowseStackTray(coverId);
       return;
@@ -705,17 +720,17 @@ async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @ty
     // rendered in both places; sharing one object keeps rating/flag/keyword/
     // wildlife/location mutations from updating the grid copy while leaving
     // a stale duplicate in the expanded tray.
-    browseStackMembers[cacheKey] = hydrated.map(function(photo) {
+    state.browseStackMembers[cacheKey] = hydrated.map(function(photo) {
       return photo.id === coverId ? cover : photo;
     });
     break;
   }
   insertBrowseStackTray(coverId);
-  var loadedIds = (browseStackMembers[cacheKey] || []).map(function(photo) {
+  var loadedIds = (state.browseStackMembers[cacheKey] || []).map(function(photo) {
     return photo.id;
   });
   if (!loadedIds.length) return;
-  if (browseStackCoverRecheck.delete(coverId)) {
+  if (state.browseStackCoverRecheck.delete(coverId)) {
     // An earlier edit's cover reconciliation could not load these members, so
     // the grid has been showing a possibly-demoted cover ever since. The
     // members are cached now, so recompute the cover from them — expanding is
@@ -738,9 +753,9 @@ async function toggleBrowseStack(/** @type {MouseEvent | null} */ event, /** @ty
   fetchColorLabels(loadedIds).then(refreshCurrentStackTray);
 }
 
-function selectBrowseStackMember(/** @type {MouseEvent | null} */ event, /** @type {number} */ photoId, /** @type {number} */ coverId) {
+export function selectBrowseStackMember(/** @type {MouseEvent | null} */ event, /** @type {number} */ photoId, /** @type {number} */ coverId) {
   if (event) event.stopPropagation();
-  var coverIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
+  var coverIndex = state.photos.findIndex(function(photo) { return photo.id === coverId; });
   // Pass shiftKey through so a top-level anchor + Shift-click on a hidden
   // member range-selects instead of dropping the modifier (symmetric with
   // the reverse direction: member anchor + Shift-click on a top-level
@@ -757,19 +772,19 @@ function selectBrowseStackMember(/** @type {MouseEvent | null} */ event, /** @ty
   }, photoId, coverIndex, { stackAware: false });
 }
 
-function selectBrowseStackAll(/** @type {MouseEvent | null} */ event, /** @type {number} */ coverId) {
+export function selectBrowseStackAll(/** @type {MouseEvent | null} */ event, /** @type {number} */ coverId) {
   if (event) {
     event.preventDefault();
     event.stopPropagation();
   }
-  var coverCandidate = photos.find(function(photo) { return photo.id === coverId; });
+  var coverCandidate = state.photos.find(function(photo) { return photo.id === coverId; });
   if (!coverCandidate || !coverCandidate.browse_stack) return; const cover = coverCandidate;
-  anchorRestoreEpoch++;
-  selectedPhotoId = null;
-  selectedIndex = photos.findIndex(function(photo) { return photo.id === coverId; });
+  state.anchorRestoreEpoch++;
+  state.selectedPhotoId = null;
+  state.selectedIndex = state.photos.findIndex(function(photo) { return photo.id === coverId; });
   // Same list, in the same cover-first order, that clicking the collapsed
   // card produces — the tray button and the card must not disagree.
-  selectedPhotos = new Set(
+  state.selectedPhotos = new Set(
     browseStackMemberIds(coverId) || cover.browse_stack?.photo_ids || []
   );
   abandonDetailFocusForBatch();
@@ -777,9 +792,9 @@ function selectBrowseStackAll(/** @type {MouseEvent | null} */ event, /** @type 
   updateBatchBar();
 }
 
-function reviewBrowseStack(/** @type {MouseEvent | null} */ event, /** @type {number} */ coverId) {
+export function reviewBrowseStack(/** @type {MouseEvent | null} */ event, /** @type {number} */ coverId) {
   selectBrowseStackAll(event, coverId);
-  const cover = photos.find(function(photo) { return photo.id === coverId; });
+  const cover = state.photos.find(function(photo) { return photo.id === coverId; });
   if (cover && cover.browse_stack && cover.browse_stack.kind === 'duplicate') {
     openBrowseCompare();
   } else {
@@ -787,12 +802,12 @@ function reviewBrowseStack(/** @type {MouseEvent | null} */ event, /** @type {nu
   }
 }
 
-function openBrowseStackMember(/** @type {MouseEvent | null} */ event, /** @type {number} */ photoId, /** @type {number} */ coverId) {
+export function openBrowseStackMember(/** @type {MouseEvent | null} */ event, /** @type {number} */ photoId, /** @type {number} */ coverId) {
   if (event) {
     event.preventDefault();
     event.stopPropagation();
   }
-  var members = browseStackMembers[String(coverId)] || [];
+  var members = state.browseStackMembers[String(coverId)] || [];
   var photo = members.find(function(member) { return member.id === photoId; });
   openLightbox(photoId, photo ? photo.filename : '', members);
 }
@@ -802,12 +817,11 @@ document.addEventListener('lightbox:renderchanged', function(e) {
   ids.forEach(function(id) {
     var hideDetectionOverlays = (
       (
-        _vireoPairKnownByPhoto[String(id)] &&
+        pairKnownByPhoto()[String(id)] &&
         _vireoPairSource(id) === 'jpeg'
       ) ||
       (
-        typeof window.vireoPhotoHasOrientationEdit === 'function' &&
-        window.vireoPhotoHasOrientationEdit(id)
+        vireoPhotoHasOrientationEdit(id)
       )
     );
     /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll(

@@ -1,6 +1,13 @@
-/* Browse: folder tree sidebar and folder local/archive status.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: folder tree sidebar and folder local/archive status. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import {
+  VireoFilter, escapeAttr, escapeHtml, localFolderData, pendingArchives, safeFetch,
+} from './shared.js';
+import { loadCalendarData } from './calendar.js';
+import { clearOfflineCollectionState, syncSidebarHighlights } from './sidebar-collections.js';
+import { reloadBrowseResults } from './view-controls.js';
+import { bindBrowseMarkup } from './markup.js';
 
 /* ---------- Folder Tree ---------- */
 function reconcileFolderLoadRenders() {
@@ -9,22 +16,22 @@ function reconcileFolderLoadRenders() {
   // newest success instead of leaving the pre-transition tree in the DOM.
   // This handles both completion orders: success-before-failure and
   // failure-before-success.
-  var gen = folderLoadGen;
-  while (gen > folderRenderDecisionGen) {
-    var state = folderLoadStates[gen];
-    if (!state || state.status === 'pending') return;
-    if (state.status === 'success') {
-      var shouldRender = !state.shouldRender || state.shouldRender();
-      folderRenderDecisionGen = gen;
+  var gen = state.folderLoadGen;
+  while (gen > state.folderRenderDecisionGen) {
+    var loadState = state.folderLoadStates[gen];
+    if (!loadState || loadState.status === 'pending') return;
+    if (loadState.status === 'success') {
+      var shouldRender = !loadState.shouldRender || loadState.shouldRender();
+      state.folderRenderDecisionGen = gen;
       if (shouldRender) {
         // Update browseWorkspaceId in lockstep with the rendered rows so
         // the destructive Remove action always targets the workspace the
         // user actually sees.
-        if (state.workspaceId != null) browseWorkspaceId = state.workspaceId;
-        state.data && renderFolderTree(state.data);
+        if (loadState.workspaceId != null) state.browseWorkspaceId = loadState.workspaceId;
+        loadState.data && renderFolderTree(loadState.data);
       }
-      Object.keys(folderLoadStates).forEach(function(key) {
-        if (Number(key) <= folderLoadGen) delete folderLoadStates[key];
+      Object.keys(state.folderLoadStates).forEach(function(key) {
+        if (Number(key) <= state.folderLoadGen) delete state.folderLoadStates[key];
       });
       return;
     }
@@ -32,9 +39,9 @@ function reconcileFolderLoadRenders() {
   }
 }
 
-async function loadFolders(/** @type {{shouldRender?: () => boolean}} */ opts = {}) {
-  var myGen = ++folderLoadGen;
-  folderLoadStates[myGen] = {
+export async function loadFolders(/** @type {{shouldRender?: () => boolean}} */ opts = {}) {
+  var myGen = ++state.folderLoadGen;
+  state.folderLoadStates[myGen] = {
     status: 'pending',
     shouldRender: opts && opts.shouldRender
   };
@@ -51,16 +58,16 @@ async function loadFolders(/** @type {{shouldRender?: () => boolean}} */ opts = 
       '/api/folders?with_workspace=1', {}, { toast: false }
     );
     var data = (payload && payload.folders) || [];
-    var state = folderLoadStates[myGen];
-    if (!state) return data;
-    state.status = 'success';
-    state.data = data;
-    state.workspaceId = (payload && payload.active_workspace_id != null)
+    var loadState = state.folderLoadStates[myGen];
+    if (!loadState) return data;
+    loadState.status = 'success';
+    loadState.data = data;
+    loadState.workspaceId = (payload && payload.active_workspace_id != null)
       ? Number(payload.active_workspace_id) : null;
     reconcileFolderLoadRenders();
     return data;
   } catch(e) {
-    var failedState = folderLoadStates[myGen];
+    var failedState = state.folderLoadStates[myGen];
     if (failedState) {
       failedState.status = 'failure';
       reconcileFolderLoadRenders();
@@ -76,7 +83,7 @@ async function loadFolders(/** @type {{shouldRender?: () => boolean}} */ opts = 
   }
 }
 
-function renderFolderTree(/** @type {BrowseFolder[]} */ folders) {
+export function renderFolderTree(/** @type {BrowseFolder[]} */ folders) {
   var rows = folders.slice();
   var byParent = /** @type {Record<string, BrowseFolder[]>} */ ({});
   rows.forEach(function(f) {
@@ -97,7 +104,7 @@ function renderFolderTree(/** @type {BrowseFolder[]} */ folders) {
     if (!byParent['root']) byParent['root'] = [];
     byParent['root'].push(row);
   });
-  browseFolderRows = rows;
+  state.browseFolderRows = rows;
 
   // Single post-order pass: each subtree's rollup is computed once and cached.
   // (Per-node recomputation during render would be O(n^2) on deep trees.)
@@ -119,12 +126,12 @@ function renderFolderTree(/** @type {BrowseFolder[]} */ folders) {
       var hasChildren = byParent[f.id] && (byParent[f.id]?.length || 0) > 0;
       var indent = '';
       for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
-      var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
-      var activeClass = activeFolderId === f.id ? ' active' : '';
+      var toggle = hasChildren ? '<span class="tree-toggle" data-browse-on="click:toggleTree">&#9654;</span>' : '<span class="tree-indent"></span>';
+      var activeClass = state.activeFolderId === f.id ? ' active' : '';
       var partialBadge = f.status === 'partial'
         ? '<span class="folder-status-partial" title="Scan did not complete — re-scan to finish">partial</span>'
         : '';
-      html += '<div class="tree-item' + activeClass + '" onclick="filterByFolder(' + f.id + ')" data-folder-id="' + f.id + '" data-workspace-root="' + (f.is_workspace_root ? '1' : '0') + '">' +
+      html += '<div class="tree-item' + activeClass + '" data-browse-on="click:filterByFolder" data-folder-id="' + f.id + '" data-workspace-root="' + (f.is_workspace_root ? '1' : '0') + '">' +
         indent + toggle +
         // A folder row shows only its leaf name, which can be as opaque as
         // "12" for a date-templated import. The full path on hover is the
@@ -143,14 +150,16 @@ function renderFolderTree(/** @type {BrowseFolder[]} */ folders) {
     return html;
   }
 
-  /** @type {HTMLElement} */ (document.getElementById('folderTree')).innerHTML = buildTree('root', 0);
+  var folderTree = /** @type {HTMLElement} */ (document.getElementById('folderTree'));
+  folderTree.innerHTML = buildTree('root', 0);
+  bindBrowseMarkup(folderTree);
 }
 
 /** @overload @param {BrowseFolder[]} folders @param {Record<string, BrowseFolder[]>} byParent @param {{wantsSynthetic: true}} options @returns {BrowseFolderStatusResult} */
 /** @overload @param {BrowseFolder[]} folders @param {Record<string, BrowseFolder[]>} byParent @param {{wantsSynthetic?: false}} [options] @returns {Record<string, BrowseFolderStatus>} */
 function folderLocalStatuses(/** @type {BrowseFolder[]} */ folders, /** @type {Record<string, BrowseFolder[]>} */ byParent, /** @type {{wantsSynthetic?: boolean} | undefined} */ options) {
   var wantsSynthetic = !!(options && options.wantsSynthetic);
-  var localData = window.vireoLocalFolderData;
+  var localData = localFolderData();
   if (!localData || localData.legacy_workspace_session) {
     return wantsSynthetic ? {statuses: {}, synthetic: []} : {};
   }
@@ -346,7 +355,7 @@ function pendingArchiveFolderStatuses() {
   // staging tree is in the catalog like any other folder, so without this
   // badge the sidebar row is indistinguishable from a folder that already
   // lives on the destination storage.
-  var items = window.vireoPendingArchives;
+  var items = pendingArchives();
   if (!Array.isArray(items)) return {};
   var statuses = /** @type {Record<string, BrowseFolderStatus>} */ ({});
   items.forEach(function(item) {
@@ -398,7 +407,7 @@ function refreshFolderLocalStatusIndicators() {
   // a recovery discard. Rebuild the input so ``synthetic`` reliably
   // enumerates exactly the phantoms the current local-folder state
   // requires (Codex review r3792082333).
-  var realFolders = browseFolderRows.filter(function(f) {
+  var realFolders = state.browseFolderRows.filter(function(f) {
     return !f.__synthetic_missing_local;
   });
   var byParent = /** @type {Record<string, BrowseFolder[]>} */ ({});
@@ -415,7 +424,7 @@ function refreshFolderLocalStatusIndicators() {
     neededPhantomIds[Number(row.id)] = true;
   });
   var existingPhantomIds = /** @type {Record<string, boolean>} */ ({});
-  browseFolderRows.forEach(function(f) {
+  state.browseFolderRows.forEach(function(f) {
     if (f.__synthetic_missing_local) existingPhantomIds[Number(f.id)] = true;
   });
   var newPhantomNeeded = Object.keys(neededPhantomIds).some(function(id) {
@@ -453,7 +462,7 @@ window.addEventListener('vireo:local-folder-status-changed', function() {
   refreshFolderLocalStatusIndicators();
 });
 
-function toggleTree(/** @type {Event} */ e, /** @type {HTMLElement} */ el) {
+export function toggleTree(/** @type {Event} */ e, /** @type {HTMLElement} */ el) {
   e.stopPropagation();
   var next = /** @type {HTMLElement | null} */ (el.closest('.tree-item'))?.nextElementSibling;
   if (next && next.classList.contains('tree-children')) {
@@ -462,12 +471,12 @@ function toggleTree(/** @type {Event} */ e, /** @type {HTMLElement} */ el) {
   }
 }
 
-function filterByFolder(/** @type {number} */ folderId) {
-  browseScopeGen++;
-  if (activeFolderId === folderId) {
-    activeFolderId = null;
+export function filterByFolder(/** @type {number} */ folderId) {
+  state.browseScopeGen++;
+  if (state.activeFolderId === folderId) {
+    state.activeFolderId = null;
   } else {
-    activeFolderId = folderId;
+    state.activeFolderId = folderId;
   }
   // If the current keyword highlight came from a sidebar click,
   // filterByKeyword also installed a VireoFilter 'keyword' rule — that
@@ -481,9 +490,9 @@ function filterByFolder(/** @type {number} */ folderId) {
   // via the filter chip, activeKeyword lingers but there's no keyword
   // rule left to remove — removeField returns false and we still need
   // to run our own reload for the folder change.
-  var hadSidebarKeyword = activeKeyword !== null;
-  activeKeyword = null;
-  activeCollectionId = null;
+  var hadSidebarKeyword = state.activeKeyword !== null;
+  state.activeKeyword = null;
+  state.activeCollectionId = null;
   // Sidebar scope changes leave the "reopened collection" association
   // stale: without this, tagging a keyword next fires
   // refreshActiveCollectionAfterMembershipChange, which sees
@@ -494,12 +503,12 @@ function filterByFolder(/** @type {number} */ folderId) {
   // VireoFilter.addRule → onChange → the openedCollectionId clear at
   // browse init, but filterByFolder's reloadBrowseResults() path
   // bypasses VireoFilter, so clear it explicitly here.
-  openedCollectionId = null;
+  state.openedCollectionId = null;
   clearOfflineCollectionState();
   syncSidebarHighlights();
-  if (hadSidebarKeyword && window.VireoFilter && VireoFilter.isReady()) {
+  if (hadSidebarKeyword && VireoFilter && VireoFilter.isReady()) {
     if (VireoFilter.removeField('keyword', { reason: 'scopeChanged' })) return;
   }
-  if (timelineMode) loadCalendarData();
+  if (state.timelineMode) loadCalendarData();
   reloadBrowseResults();
 }

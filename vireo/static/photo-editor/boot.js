@@ -6,6 +6,13 @@ Vireo.registerPageHooks({
   beforeHistoryChange: beforeHistoryChange,
   afterHistoryChange: afterHistoryChange,
   openExportModal: openExportModal,
+  // The export modal's shared controllers.
+  applyExportPreset: applyExportPreset,
+  markExportCustom: markExportCustom,
+  updateExportFormatControls: updateExportFormatControls,
+  updateExportPreview: updateExportPreview,
+  selectedExportMetadataFields: selectedExportMetadataFields,
+  buildExportPreflightRequest: buildExportPreflightRequest,
 });
 
 // Preserve setup order: edit-history busy listener, export folder browser and

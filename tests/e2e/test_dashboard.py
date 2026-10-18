@@ -156,7 +156,7 @@ def test_dashboard_scoped_visual_collection_link_loads_visual_clause(live_server
     )
     # dashboardCollectionScope was cleared so subsequent filter edits behave
     # like a plain reopen, not a scoped drilldown.
-    assert page.evaluate("dashboardCollectionScope") is False
+    assert page.evaluate("browseState.dashboardCollectionScope") is False
 
 
 def test_dashboard_rejects_reversed_url_dates_and_labels_open_ranges(live_server, page):

@@ -44,7 +44,7 @@ def test_scripted_scroll_uses_current_motion_preference(live_server, page, surfa
         page.emulate_media(reduced_motion=preference)
         page.evaluate('motionScrollCalls = []')
         if surface == 'browse':
-            page.evaluate('scrollToCard(0)')
+            page.evaluate('pageModules.keyboard.scrollToCard(0)')
             calls = page.evaluate('motionScrollCalls')
             assert len(calls) == 1 and calls[0]['card']
             assert calls[0]['block'] == 'nearest'
@@ -83,5 +83,5 @@ def test_browse_deep_link_uses_current_motion_preference(live_server, page):
     for preference, behavior in [('no-preference', 'smooth'), ('reduce', 'auto'), ('no-preference', 'smooth')]:
         page.emulate_media(reduced_motion=preference)
         page.evaluate('deepLinkScrollCalls = []')
-        page.evaluate('id => _runPhotoDeepLink(id)', photo_id)
+        page.evaluate('id => pageModules.boot._runPhotoDeepLink(id)', photo_id)
         assert page.evaluate('deepLinkScrollCalls') == [{'block': 'center', 'behavior': behavior}]

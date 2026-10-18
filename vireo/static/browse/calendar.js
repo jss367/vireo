@@ -1,16 +1,19 @@
-/* Browse: timeline calendar heatmap.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: timeline calendar heatmap. ES module (see
+   browse/README.md). */
+import { searchLaneSeq, state } from './state.js';
+import { VireoFilter, safeFetch, searchLaneHeaders } from './shared.js';
+import { getBrowseRules } from './loading.js';
+import { appendVisualScopeParams } from './view-controls.js';
 
 /* ---------- Calendar Heatmap ---------- */
-function toggleTimelineMode() {
-  timelineMode = !timelineMode;
+export function toggleTimelineMode() {
+  state.timelineMode = !state.timelineMode;
   var btn = /** @type {HTMLButtonElement} */ (document.getElementById('calToggle'));
-  btn.style.color = timelineMode ? 'var(--accent)' : 'var(--text-muted)';
-  btn.style.borderColor = timelineMode ? 'var(--accent)' : 'var(--border-secondary)';
+  btn.style.color = state.timelineMode ? 'var(--accent)' : 'var(--text-muted)';
+  btn.style.borderColor = state.timelineMode ? 'var(--accent)' : 'var(--border-secondary)';
 
   var container = /** @type {HTMLElement} */ (document.getElementById('calendarContainer'));
-  if (timelineMode) {
+  if (state.timelineMode) {
     container.classList.add('active');
     loadCalendarData();
   } else {
@@ -21,13 +24,13 @@ function toggleTimelineMode() {
 
 function buildCalendarParams() {
   var params = new URLSearchParams();
-  params.set('year', String(calendarYear));
-  if (activeFolderId) params.set('folder_id', String(activeFolderId));
+  params.set('year', String(state.calendarYear));
+  if (state.activeFolderId) params.set('folder_id', String(state.activeFolderId));
   // Dashboard-scoped Browse composes the collection with active filters —
   // without this the calendar shows counts from the whole workspace/folder
   // and a day-click applies a date chip based on photos not in the collection.
-  if (activeCollectionId && dashboardCollectionScope) {
-    params.set('collection_id', String(activeCollectionId));
+  if (state.activeCollectionId && state.dashboardCollectionScope) {
+    params.set('collection_id', String(state.activeCollectionId));
   }
   // Strip any root-level `timestamp` rule from the calendar's own request.
   // selectCalendarDay adds/replaces exactly such a rule, and the filter
@@ -43,19 +46,19 @@ function buildCalendarParams() {
 }
 
 function reconcileCalendarLoadRenders() {
-  var gen = calendarDataLoadGen;
-  while (gen > calendarRenderDecisionGen) {
-    var state = calendarDataLoadStates[gen];
-    if (!state || state.status === 'pending') return;
-    if (state.status === 'success' && state.data) {
+  var gen = state.calendarDataLoadGen;
+  while (gen > state.calendarRenderDecisionGen) {
+    var loadState = state.calendarDataLoadStates[gen];
+    if (!loadState || loadState.status === 'pending') return;
+    if (loadState.status === 'success' && loadState.data) {
       var currentKey = buildCalendarParams().toString();
-      calendarRenderDecisionGen = gen;
-      if (state.key === currentKey) {
-        calendarData = state.data;
+      state.calendarRenderDecisionGen = gen;
+      if (loadState.key === currentKey) {
+        state.calendarData = loadState.data;
         renderCalendar();
       }
-      Object.keys(calendarDataLoadStates).forEach(function(key) {
-        if (Number(key) <= calendarDataLoadGen) delete calendarDataLoadStates[key];
+      Object.keys(state.calendarDataLoadStates).forEach(function(key) {
+        if (Number(key) <= state.calendarDataLoadGen) delete state.calendarDataLoadStates[key];
       });
       return;
     }
@@ -63,27 +66,27 @@ function reconcileCalendarLoadRenders() {
   }
 }
 
-async function loadCalendarData() {
-  var gen = ++calendarDataLoadGen;
+export async function loadCalendarData() {
+  var gen = ++state.calendarDataLoadGen;
   var params = buildCalendarParams();
-  calendarDataLoadStates[gen] = {
+  state.calendarDataLoadStates[gen] = {
     status: 'pending',
     key: params.toString()
   };
 
   try {
     var data = await safeFetch('/api/photos/calendar?' + params.toString(), {
-      headers: Vireo?.api?.searchLaneHeaders(
-        'calendar', searchLaneSeq(calendarLane, params.toString())),
+      headers: searchLaneHeaders(
+        'calendar', searchLaneSeq(state.calendarLane, params.toString())),
     });
-    var state = calendarDataLoadStates[gen];
-    if (!state) return data;
-    state.status = 'success';
-    state.data = data;
+    var loadState = state.calendarDataLoadStates[gen];
+    if (!loadState) return data;
+    loadState.status = 'success';
+    loadState.data = data;
     reconcileCalendarLoadRenders();
     return data;
   } catch(e) {
-    var failedState = calendarDataLoadStates[gen];
+    var failedState = state.calendarDataLoadStates[gen];
     if (failedState) {
       failedState.status = 'failure';
       reconcileCalendarLoadRenders();
@@ -103,14 +106,14 @@ function getBrowseRulesWithoutTimestamp() {
 }
 
 function renderCalendar() {
-  if (!calendarData) return;
+  if (!state.calendarData) return;
 
-  /** @type {HTMLElement} */ (document.getElementById('calYearLabel')).textContent = String(calendarData.year);
-  /** @type {HTMLButtonElement} */ (document.getElementById('calYearPrev')).disabled = calendarData.year <= calendarData.min_year;
-  /** @type {HTMLButtonElement} */ (document.getElementById('calYearNext')).disabled = calendarData.year >= calendarData.max_year;
+  /** @type {HTMLElement} */ (document.getElementById('calYearLabel')).textContent = String(state.calendarData.year);
+  /** @type {HTMLButtonElement} */ (document.getElementById('calYearPrev')).disabled = state.calendarData.year <= state.calendarData.min_year;
+  /** @type {HTMLButtonElement} */ (document.getElementById('calYearNext')).disabled = state.calendarData.year >= state.calendarData.max_year;
 
   // Compute intensity thresholds from data
-  var counts = Object.values(calendarData.days);
+  var counts = Object.values(state.calendarData.days);
   var maxCount = counts.length ? Math.max(...counts) : 0;
   var t1 = Math.max(1, Math.ceil(maxCount * 0.15));
   var t2 = Math.max(2, Math.ceil(maxCount * 0.40));
@@ -143,24 +146,24 @@ function renderCalendar() {
     grid.appendChild(label);
   }
 
-  var jan1 = new Date(calendarData.year, 0, 1);
+  var jan1 = new Date(state.calendarData.year, 0, 1);
   var startDow = jan1.getDay();
-  var isLeap = (calendarData.year % 4 === 0 && (calendarData.year % 100 !== 0 || calendarData.year % 400 === 0));
+  var isLeap = (state.calendarData.year % 4 === 0 && (state.calendarData.year % 100 !== 0 || state.calendarData.year % 400 === 0));
   var daysInYear = isLeap ? 366 : 365;
 
   for (var i = 0; i < daysInYear; i++) {
-    var dt = new Date(calendarData.year, 0, 1 + i);
+    var dt = new Date(state.calendarData.year, 0, 1 + i);
     var dow = dt.getDay();
     var weekNum = Math.floor((i + startDow) / 7);
     var dateStr = dt.getFullYear() + '-' +
         String(dt.getMonth() + 1).padStart(2, '0') + '-' +
         String(dt.getDate()).padStart(2, '0');
-    var count = calendarData.days[dateStr] || 0;
+    var count = state.calendarData.days[dateStr] || 0;
     var level = getLevel(count);
 
     var cell = document.createElement('div');
     cell.className = 'day-cell' + (level ? ' level-' + level : ' empty') +
-        (selectedDay === dateStr ? ' selected' : '');
+        (state.selectedDay === dateStr ? ' selected' : '');
     cell.style.gridRow = String(dow + 1);
     cell.style.gridColumn = String(weekNum + 2);
     cell.dataset.date = dateStr;
@@ -168,7 +171,7 @@ function renderCalendar() {
 
     cell.addEventListener('click', function() {
       var d = this.dataset.date || '';
-      if (selectedDay === d) {
+      if (state.selectedDay === d) {
         clearCalendarSelection();
       } else {
         selectCalendarDay(d, parseInt(this.dataset.count || '0'));
@@ -200,7 +203,7 @@ function renderCalendar() {
   }
 }
 
-function selectCalendarDay(/** @type {string} */ dateStr, /** @type {number} */ count) {
+export function selectCalendarDay(/** @type {string} */ dateStr, /** @type {number} */ count) {
   // /api/photos/calendar can resolve before VireoFilter.init() has
   // loaded /api/filters/fields, so a click that lands in that window
   // would reach addRule -> makeRule with state.fields still null and
@@ -208,8 +211,8 @@ function selectCalendarDay(/** @type {string} */ dateStr, /** @type {number} */ 
   // in a half-selected state (chip up, no filter applied). Bail out
   // until the filter registry is ready; the click will succeed on the
   // next attempt once the field payload lands.
-  if (!window.VireoFilter || !VireoFilter.isReady()) return;
-  selectedDay = dateStr;
+  if (!VireoFilter || !VireoFilter.isReady()) return;
+  state.selectedDay = dateStr;
   var dateObj = new Date(dateStr + 'T12:00:00');
   var formatted = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   /** @type {HTMLElement} */ (document.getElementById('calSelectionText')).textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
@@ -222,12 +225,12 @@ function selectCalendarDay(/** @type {string} */ dateStr, /** @type {number} */ 
   // for later requests (infinite scroll, select-all, summary, calendar).
   // Dashboard-scoped collection Browse composes collection + rules and
   // must keep activeCollectionId.
-  if (!dashboardCollectionScope) activeCollectionId = null;
+  if (!state.dashboardCollectionScope) state.activeCollectionId = null;
   VireoFilter.addRule('timestamp', 'between', [dateStr, dateStr]);
   renderCalendar(); // update selected state
 }
 
-function clearCalendarSelection() {
+export function clearCalendarSelection() {
   // Only drop collection scope when a day was actually selected — that
   // scope is what selectCalendarDay cleared, and its removal here pairs
   // with the removeField('timestamp') reload. Toggling the calendar off
@@ -241,18 +244,18 @@ function clearCalendarSelection() {
   // with a manual capture-date rule from a deep link or the filter
   // popover (never entered via the calendar) toggling the calendar on
   // and back off would otherwise silently clear their date filter.
-  var hadSelection = selectedDay !== null;
-  selectedDay = null;
+  var hadSelection = state.selectedDay !== null;
+  state.selectedDay = null;
   /** @type {HTMLElement} */ (document.getElementById('calSelection')).classList.remove('active');
-  if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
-  if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
-  if (calendarData) renderCalendar();
+  if (hadSelection && !state.dashboardCollectionScope) state.activeCollectionId = null;
+  if (hadSelection && VireoFilter) VireoFilter.removeField('timestamp');
+  if (state.calendarData) renderCalendar();
 }
 
-function calendarChangeYear(/** @type {number} */ delta) {
-  if (delta < 0 && calendarData && calendarYear <= calendarData.min_year) return;
-  if (delta > 0 && calendarData && calendarYear >= calendarData.max_year) return;
-  calendarYear += delta;
+export function calendarChangeYear(/** @type {number} */ delta) {
+  if (delta < 0 && state.calendarData && state.calendarYear <= state.calendarData.min_year) return;
+  if (delta > 0 && state.calendarData && state.calendarYear >= state.calendarData.max_year) return;
+  state.calendarYear += delta;
   // Same guards as clearCalendarSelection: only touch collection scope
   // and only removeField('timestamp') when a day was actually picked
   // (that day-pick is what dropped scope and set the timestamp rule).
@@ -260,10 +263,10 @@ function calendarChangeYear(/** @type {number} */ delta) {
   // selecting a day silently widens later requests to the workspace,
   // and stepping through years with a manual timestamp rule active
   // would silently clear the user's date filter.
-  var hadSelection = selectedDay !== null;
-  selectedDay = null;
+  var hadSelection = state.selectedDay !== null;
+  state.selectedDay = null;
   /** @type {HTMLElement} */ (document.getElementById('calSelection')).classList.remove('active');
-  if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
-  if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
+  if (hadSelection && !state.dashboardCollectionScope) state.activeCollectionId = null;
+  if (hadSelection && VireoFilter) VireoFilter.removeField('timestamp');
   loadCalendarData();
 }

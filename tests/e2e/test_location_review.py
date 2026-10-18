@@ -2004,7 +2004,7 @@ def test_browse_review_on_map_opens_the_selected_photos(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
     page.evaluate(
-        "photoId => { selectedPhotos.add(photoId); updateBatchBar(); }",
+        "photoId => { browseState.selectedPhotos.add(photoId); pageModules.batchBar.updateBatchBar(); }",
         photo_id,
     )
 

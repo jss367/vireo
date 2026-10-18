@@ -1,6 +1,13 @@
-/* Browse: collections sidebar, counts, offline members, membership refresh.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: collections sidebar, counts, offline members, membership refresh. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import { VireoFilter, escapeHtml, safeFetch, showToast } from './shared.js';
+import { collectionAcceptsManualPhotos } from './batch-actions.js';
+import { resetAndLoad } from './loading.js';
+import { loadFolders } from './sidebar-folders.js';
+import { loadKeywords } from './sidebar-keywords.js';
+import { reloadBrowseResults } from './view-controls.js';
+import { bindBrowseMarkup } from './markup.js';
 
 function collectionCountMarkup(/** @type {BrowseCollection} */ collection) {
   if (collection.photo_count == null) return '';
@@ -15,11 +22,11 @@ function collectionCountMarkup(/** @type {BrowseCollection} */ collection) {
   return html;
 }
 
-function renderCollectionList(/** @type {BrowseCollection[]} */ collections) {
-  collectionsById = {};
+export function renderCollectionList(/** @type {BrowseCollection[]} */ collections) {
+  state.collectionsById = {};
   var html = '';
   collections.forEach(function(c) {
-    collectionsById[c.id] = c;
+    state.collectionsById[c.id] = c;
     var canAddPhotos = collectionAcceptsManualPhotos(c);
     var kind = canAddPhotos ? 'manual' : 'smart';
     var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
@@ -31,7 +38,7 @@ function renderCollectionList(/** @type {BrowseCollection[]} */ collections) {
     // Suppress location review on unavailable collections because the review
     // page resolves the same collection rules when it builds its queue.
     var resolveBtn = (c.name === 'GPS Without Location Keyword' && !unavailable)
-      ? '<button class="collection-resolve-btn" type="button" title="Review photo locations on a map" onclick="event.stopPropagation(); reviewLocationsForCollection(' + c.id + ')">Review on Map</button>'
+      ? '<button class="collection-resolve-btn" type="button" title="Review photo locations on a map" data-collection-id="' + c.id + '" data-browse-on="click:reviewCollectionLocations">Review on Map</button>'
       : '';
     var itemClass = 'tree-item' + (unavailable ? ' unavailable' : '') +
       (c.id === highlightedCollectionId() ? ' active' : '');
@@ -47,32 +54,34 @@ function renderCollectionList(/** @type {BrowseCollection[]} */ collections) {
     // tabindex="-1" keeps the row out of Tab order (clicks already select
     // it) while letting the context menu's Edit Rules return focus here on
     // Escape/Cancel — a plain <div> cannot receive programmatic focus.
-    html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" tabindex="-1"' + titleAttr + ' onclick="filterByCollection(' + c.id + ')">' +
+    html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" tabindex="-1"' + titleAttr + ' data-browse-on="click:filterByCollection">' +
       '<span class="collection-name">' + escapeHtml(c.name) + '</span>' + visualMark +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
       resolveBtn +
       trailing + '</div>';
   });
-  /** @type {HTMLElement} */ (document.getElementById('collectionList')).innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
+  var collectionList = /** @type {HTMLElement} */ (document.getElementById('collectionList'));
+  collectionList.innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
+  bindBrowseMarkup(collectionList);
 }
 
 /* The collection the grid is showing: one opened into the filter bar, or a
    Dashboard deep link's collection scope. */
 function highlightedCollectionId() {
-  return openedCollectionId != null ? openedCollectionId : activeCollectionId;
+  return state.openedCollectionId != null ? state.openedCollectionId : state.activeCollectionId;
 }
 
 /* Mark the sidebar rows that describe the grid. Every scope switch changes
    the state variables in more than one tree (opening a collection clears the
    folder), so all three trees are repainted together; repainting only the
    tree that was clicked left a cleared folder highlighted over All Photos. */
-function syncSidebarHighlights() {
+export function syncSidebarHighlights() {
   var collectionId = highlightedCollectionId();
   /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#folderTree .tree-item')).forEach(function(el) {
-    el.classList.toggle('active', parseInt(el.dataset.folderId || '') === activeFolderId);
+    el.classList.toggle('active', parseInt(el.dataset.folderId || '') === state.activeFolderId);
   });
   /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#keywordTree .tree-item')).forEach(function(el) {
-    el.classList.toggle('active', el.dataset.keyword === activeKeyword);
+    el.classList.toggle('active', el.dataset.keyword === state.activeKeyword);
   });
   /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#collectionList .tree-item')).forEach(function(el) {
     el.classList.toggle('active', parseInt(el.dataset.collectionId || '') === collectionId);
@@ -89,16 +98,16 @@ function reconcileCollectionLoadRenders() {
   // a subsequent mutation-triggered reload that transiently fails, so the
   // collection stays absent until the next explicit list refresh
   // (Codex review r3687331931).
-  var gen = collectionLoadGen;
-  while (gen > collectionRenderDecisionGen) {
-    var state = collectionLoadStates[gen];
-    if (!state || state.status === 'pending') return;
-    if (state.status === 'success' && state.data) {
-      var shouldRender = !state.shouldRender || state.shouldRender();
-      collectionRenderDecisionGen = gen;
-      if (shouldRender) renderCollectionList(state.data);
-      Object.keys(collectionLoadStates).forEach(function(key) {
-        if (Number(key) <= collectionLoadGen) delete collectionLoadStates[key];
+  var gen = state.collectionLoadGen;
+  while (gen > state.collectionRenderDecisionGen) {
+    var loadState = state.collectionLoadStates[gen];
+    if (!loadState || loadState.status === 'pending') return;
+    if (loadState.status === 'success' && loadState.data) {
+      var shouldRender = !loadState.shouldRender || loadState.shouldRender();
+      state.collectionRenderDecisionGen = gen;
+      if (shouldRender) renderCollectionList(loadState.data);
+      Object.keys(state.collectionLoadStates).forEach(function(key) {
+        if (Number(key) <= state.collectionLoadGen) delete state.collectionLoadStates[key];
       });
       return;
     }
@@ -106,22 +115,22 @@ function reconcileCollectionLoadRenders() {
   }
 }
 
-async function loadCollections(/** @type {{shouldRender?: () => boolean} | undefined} */ opts = undefined) {
-  var myGen = ++collectionLoadGen;
-  collectionLoadStates[myGen] = {
+export async function loadCollections(/** @type {{shouldRender?: () => boolean} | undefined} */ opts = undefined) {
+  var myGen = ++state.collectionLoadGen;
+  state.collectionLoadStates[myGen] = {
     status: 'pending',
     shouldRender: opts && opts.shouldRender
   };
   try {
     var data = await safeFetch('/api/collections', {}, { toast: false });
-    var state = collectionLoadStates[myGen];
-    if (!state) return data;
-    state.status = 'success';
-    state.data = data;
+    var loadState = state.collectionLoadStates[myGen];
+    if (!loadState) return data;
+    loadState.status = 'success';
+    loadState.data = data;
     reconcileCollectionLoadRenders();
     return data;
   } catch(e) {
-    var failedState = collectionLoadStates[myGen];
+    var failedState = state.collectionLoadStates[myGen];
     if (failedState) {
       failedState.status = 'failure';
       reconcileCollectionLoadRenders();
@@ -130,11 +139,11 @@ async function loadCollections(/** @type {{shouldRender?: () => boolean} | undef
   }
 }
 
-async function loadCollectionCounts() {
-  var gen = ++collectionCountLoadGen;
+export async function loadCollectionCounts() {
+  var gen = ++state.collectionCountLoadGen;
   try {
     var data = await safeFetch('/api/collections', {}, { toast: false });
-    if (gen !== collectionCountLoadGen) return;
+    if (gen !== state.collectionCountLoadGen) return;
     if (!data) return;
     var items = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#collectionList .tree-item'));
     /** @type {Record<string, BrowseCollection>} */ var metaById = {};
@@ -151,7 +160,7 @@ async function loadCollectionCounts() {
       if (!meta) return;
       // Keep our in-memory copy in sync so filterByCollection's guard fires
       // for collections that transitioned to (or out of) unavailable.
-      collectionsById[id] = meta;
+      state.collectionsById[id] = meta;
       var wasUnavailable = el.classList.contains('unavailable');
       var isUnavailable = !!meta.count_error;
       if (wasUnavailable !== isUnavailable) {
@@ -184,50 +193,50 @@ async function loadCollectionCounts() {
   } catch(e) {}
 }
 
-function scheduleCollectionCountsRefresh() {
-  if (collectionCountRefreshTimer) clearTimeout(collectionCountRefreshTimer);
-  collectionCountRefreshTimer = setTimeout(function() {
-    collectionCountRefreshTimer = null;
+export function scheduleCollectionCountsRefresh() {
+  if (state.collectionCountRefreshTimer) clearTimeout(state.collectionCountRefreshTimer);
+  state.collectionCountRefreshTimer = setTimeout(function() {
+    state.collectionCountRefreshTimer = null;
     loadCollectionCounts();
   }, 150);
 }
 
-function hasCollectionAvailabilityScope() {
-  return openedCollectionId != null || activeCollectionId != null;
+export function hasCollectionAvailabilityScope() {
+  return state.openedCollectionId != null || state.activeCollectionId != null;
 }
 
 function renderOfflineCollectionNotice() {
   var notice = /** @type {HTMLElement} */ (document.getElementById('offlineCollectionNotice'));
   if (!notice) return;
-  if (!hasCollectionAvailabilityScope() || collectionOfflineTotal <= 0) {
+  if (!hasCollectionAvailabilityScope() || state.collectionOfflineTotal <= 0) {
     notice.style.display = 'none';
     return;
   }
   var text = /** @type {HTMLElement} */ (document.getElementById('offlineCollectionText'));
   var toggle = /** @type {HTMLButtonElement} */ (document.getElementById('offlineCollectionToggle'));
-  var available = collectionAvailableTotal.toLocaleString();
-  var inventory = collectionInventoryTotal.toLocaleString();
-  var offline = collectionOfflineTotal.toLocaleString();
+  var available = state.collectionAvailableTotal.toLocaleString();
+  var inventory = state.collectionInventoryTotal.toLocaleString();
+  var offline = state.collectionOfflineTotal.toLocaleString();
   text.textContent = available + ' of ' + inventory + ' photos available \u00b7 ' +
     offline + ' offline' +
-    (showOfflineCollectionPhotos
+    (state.showOfflineCollectionPhotos
       ? ' (shown read-only)'
       : ' (hidden)');
-  toggle.textContent = showOfflineCollectionPhotos
+  toggle.textContent = state.showOfflineCollectionPhotos
     ? 'Hide offline photos'
     : 'Show offline photos';
   notice.style.display = 'flex';
 }
 
-function clearOfflineCollectionState() {
-  showOfflineCollectionPhotos = false;
-  collectionInventoryTotal = 0;
-  collectionAvailableTotal = 0;
-  collectionOfflineTotal = 0;
+export function clearOfflineCollectionState() {
+  state.showOfflineCollectionPhotos = false;
+  state.collectionInventoryTotal = 0;
+  state.collectionAvailableTotal = 0;
+  state.collectionOfflineTotal = 0;
   renderOfflineCollectionNotice();
 }
 
-function updateOfflineCollectionState(/** @type {BrowseAvailability} */ data) {
+export function updateOfflineCollectionState(/** @type {BrowseAvailability} */ data) {
   if (!hasCollectionAvailabilityScope()) {
     clearOfflineCollectionState();
     return;
@@ -238,36 +247,36 @@ function updateOfflineCollectionState(/** @type {BrowseAvailability} */ data) {
   var photoTotal = data.underlying_total != null
     ? Number(data.underlying_total) || 0
     : Number(data.total) || 0;
-  collectionInventoryTotal = data.inventory_total != null
+  state.collectionInventoryTotal = data.inventory_total != null
     ? Number(data.inventory_total) || 0
     : photoTotal;
-  collectionAvailableTotal = data.available_total != null
+  state.collectionAvailableTotal = data.available_total != null
     ? Number(data.available_total) || 0
     : photoTotal;
-  collectionOfflineTotal = Number(data.offline_total || 0);
+  state.collectionOfflineTotal = Number(data.offline_total || 0);
   // Visual collections intentionally skip sidebar counts until their prompt
   // is resolved. Once opened, promote the resolved membership into the same
   // total/offline presentation as metadata collections.
-  var collectionId = openedCollectionId != null
-    ? openedCollectionId
-    : activeCollectionId;
-  var meta = collectionId == null ? undefined : collectionsById[collectionId];
+  var collectionId = state.openedCollectionId != null
+    ? state.openedCollectionId
+    : state.activeCollectionId;
+  var meta = collectionId == null ? undefined : state.collectionsById[collectionId];
   if (meta && data.inventory_total != null) {
-    meta.photo_count = collectionInventoryTotal;
-    meta.available_photo_count = collectionAvailableTotal;
-    meta.offline_photo_count = collectionOfflineTotal;
+    meta.photo_count = state.collectionInventoryTotal;
+    meta.available_photo_count = state.collectionAvailableTotal;
+    meta.offline_photo_count = state.collectionOfflineTotal;
     var row = /** @type {HTMLElement | null} */ (document.querySelector(
       '#collectionList .tree-item[data-collection-id="' + collectionId + '"] .count'
     ));
     if (row) row.innerHTML = collectionCountMarkup(meta);
   }
-  if (collectionOfflineTotal <= 0) showOfflineCollectionPhotos = false;
+  if (state.collectionOfflineTotal <= 0) state.showOfflineCollectionPhotos = false;
   renderOfflineCollectionNotice();
 }
 
-function toggleOfflineCollectionPhotos() {
-  if (!hasCollectionAvailabilityScope() || collectionOfflineTotal <= 0) return;
-  showOfflineCollectionPhotos = !showOfflineCollectionPhotos;
+export function toggleOfflineCollectionPhotos() {
+  if (!hasCollectionAvailabilityScope() || state.collectionOfflineTotal <= 0) return;
+  state.showOfflineCollectionPhotos = !state.showOfflineCollectionPhotos;
   renderOfflineCollectionNotice();
   resetAndLoad({ preserveCollection: true });
 }
@@ -278,9 +287,9 @@ function toggleOfflineCollectionPhotos() {
    adding a keyword cannot change which photos a "Rating >= 3" filter matches,
    and reloading for it costs the user their place in the grid and their
    selection for nothing. */
-var MUTATION_KEYWORD = 'keyword';
-var MUTATION_PREDICTION = 'prediction';
-var MUTATION_WILDLIFE = 'wildlife_excluded';
+export var MUTATION_KEYWORD = 'keyword';
+export var MUTATION_PREDICTION = 'prediction';
+export var MUTATION_WILDLIFE = 'wildlife_excluded';
 
 /* Sorts whose key is the photo's top prediction confidence — mirrors
    _PREDICTION_CONFIDENCE_SORTS in vireo/db.py. */
@@ -293,14 +302,14 @@ var PREDICTION_CONFIDENCE_SORTS = ['prediction_confidence',
    reload heuristic below may use it — a card that wants to describe its own
    badge reads the server's per-card
    ``prediction_confidence_is_stack_lead`` flag instead. */
-function sortSelectRanksOnPredictionConfidence() {
+export function sortSelectRanksOnPredictionConfidence() {
   var el = /** @type {HTMLSelectElement} */ (document.getElementById('sortSelect'));
   return !!el && PREDICTION_CONFIDENCE_SORTS.indexOf(el.value) !== -1;
 }
 
-function refreshActiveCollectionAfterMembershipChange(/** @type {string[]} */ mutations) {
-  if (activeCollectionId) {
-    filterByCollection(activeCollectionId, { preserveAnchor: false });
+export function refreshActiveCollectionAfterMembershipChange(/** @type {string[]} */ mutations) {
+  if (state.activeCollectionId) {
+    filterByCollection(state.activeCollectionId, { preserveAnchor: false });
     return;
   }
   // A collection opened into the filter bar carries a static rules snapshot
@@ -310,29 +319,29 @@ function refreshActiveCollectionAfterMembershipChange(/** @type {string[]} */ mu
   // just made from Browse doesn't show up in the current grid (CodeRabbit
   // review r3620473562). Refetch the collection metadata and reopen so
   // the bar's photo_ids expression matches the fresh membership.
-  if (openedCollectionId) {
-    var reopenId = openedCollectionId;
+  if (state.openedCollectionId) {
+    var reopenId = state.openedCollectionId;
     // Ensure filterByCollection sees the freshest rules/visual_json, not
     // whatever the last renderCollectionList cached; loadCollections
     // (called by callers of this function) refreshes collectionsById via
     // loadCollectionCounts, but that's async — sequence with a fetch.
     safeFetch('/api/collections', {}, { toast: false }).then(function(list) {
       if (Array.isArray(list)) {
-        list.forEach(function(c) { collectionsById[c.id] = c; });
+        list.forEach(function(c) { state.collectionsById[c.id] = c; });
       }
       // The user can switch scope (folder click, keyword click, filter
       // change) while this fetch is in flight; those paths clear
       // ``openedCollectionId``. Reopening unconditionally would reinstate
       // the old collection and wipe the user's new scope (Codex review
       // r3622743705). Only reopen if the same collection is still open.
-      if (openedCollectionId === reopenId) {
+      if (state.openedCollectionId === reopenId) {
         filterByCollection(reopenId, { preserveAnchor: false });
       }
     }).catch(function() {
       // Even without the refresh, opening the cached copy is closer to
       // right than leaving the stale expression in place — but still
       // only if the user hasn't already moved on.
-      if (openedCollectionId === reopenId) {
+      if (state.openedCollectionId === reopenId) {
         filterByCollection(reopenId, { preserveAnchor: false });
       }
     });
@@ -358,7 +367,7 @@ function refreshActiveCollectionAfterMembershipChange(/** @type {string[]} */ mu
     // A batch spanning several cards has no single-photo anchor. Keep its
     // grid window and surviving selection so accepting a species can be
     // followed by another edit on those same photos.
-    reloadBrowseResults(selectedPhotos.size > 0
+    reloadBrowseResults(state.selectedPhotos.size > 0
       ? { preserveScroll: true }
       : { preserveAnchor: true, focusAnchor: true });
     return;
@@ -368,7 +377,7 @@ function refreshActiveCollectionAfterMembershipChange(/** @type {string[]} */ mu
   // re-evaluate it so photos that no longer match leave the grid — but only
   // when the expression reads something this edit can actually move. A
   // caller that doesn't say what it changed is treated as "anything".
-  if (!window.VireoFilter || !VireoFilter.hasFilters()) return;
+  if (!VireoFilter || !VireoFilter.hasFilters()) return;
   if (mutations && VireoFilter.dependsOnMutation &&
       !VireoFilter.dependsOnMutation(mutations)) {
     return;
@@ -376,13 +385,13 @@ function refreshActiveCollectionAfterMembershipChange(/** @type {string[]} */ mu
   resetAndLoad({ preserveAnchor: false, preserveScroll: true });
 }
 
-function refreshBrowseSidebarCounts() {
+export function refreshBrowseSidebarCounts() {
   loadFolders();
   loadKeywords();
   loadCollectionCounts();
 }
 
-async function filterByCollection(/** @type {number} */ id, /** @type {{preserveAnchor?: boolean} | undefined} */ options = undefined) {
+export async function filterByCollection(/** @type {number} */ id, /** @type {{preserveAnchor?: boolean} | undefined} */ options = undefined) {
   // The sidebar collection list is rendered from the initial /photos payload,
   // so a slow /api/filters/fields (or workspace) round-trip leaves clickable
   // collections in the DOM before VireoFilter.init resolves. Without this
@@ -392,11 +401,11 @@ async function filterByCollection(/** @type {number} */ id, /** @type {{preserve
   // the click, though: wait for the in-flight init and apply the collection
   // as soon as the filter bar is ready. The bootstrap deep-link caller fires
   // from inside browseFilterInitPromise.then(...), so it proceeds immediately.
-  var myScopeGen = ++browseScopeGen;
-  if (window.VireoFilter && !VireoFilter.isReady()) {
-    if (!browseFilterInitPromise) return;
+  var myScopeGen = ++state.browseScopeGen;
+  if (VireoFilter && !VireoFilter.isReady()) {
+    if (!state.browseFilterInitPromise) return;
     try {
-      await browseFilterInitPromise;
+      await state.browseFilterInitPromise;
     } catch (e) {
       return;
     }
@@ -405,24 +414,22 @@ async function filterByCollection(/** @type {number} */ id, /** @type {{preserve
     // generation while we were waiting for filter-bar init. Applying this
     // stale collection now would clobber the user's newer selection
     // (Codex review r3624395785).
-    if (browseScopeGen !== myScopeGen) return;
+    if (state.browseScopeGen !== myScopeGen) return;
   }
   // Guard: degraded (count_error) collections can't resolve their rules.
-  var collectionMeta = collectionsById[id];
+  var collectionMeta = state.collectionsById[id];
   if (!collectionMeta) {
     // Programmatic callers (deep links, tests, refresh paths) can race the
     // sidebar render — fetch the list before giving up.
     await loadCollections();
-    collectionMeta = collectionsById[id];
+    collectionMeta = state.collectionsById[id];
   }
   if (collectionMeta && collectionMeta.count_error) {
-    if (typeof showToast === 'function') {
-      showToast(
-        (collectionMeta.name || 'This collection') +
-          " is unavailable \u2014 its rules could not be resolved. Right-click \u2192 Edit Rules to fix it.",
-        'error'
-      );
-    }
+    showToast(
+      (collectionMeta.name || 'This collection') +
+        " is unavailable \u2014 its rules could not be resolved. Right-click \u2192 Edit Rules to fix it.",
+      'error'
+    );
     return;
   }
   if (!collectionMeta) return;
@@ -430,14 +437,14 @@ async function filterByCollection(/** @type {number} */ id, /** @type {{preserve
   // editable chips (rules + visual clause round-trip). The expression IS
   // the filter; loadExpression's onChange reload refreshes the grid with
   // anchor preservation handled by the shared path.
-  activeFolderId = null;
-  activeKeyword = null;
-  activeCollectionId = null;
-  dashboardCollectionScope = false;
+  state.activeFolderId = null;
+  state.activeKeyword = null;
+  state.activeCollectionId = null;
+  state.dashboardCollectionScope = false;
   clearOfflineCollectionState();
   // Track which collection is currently loaded so post-membership refresh
   // can pull fresh rules/photo_ids without waiting for a user reopen.
-  openedCollectionId = id;
+  state.openedCollectionId = id;
   syncSidebarHighlights();
   var rules;
   var visual;

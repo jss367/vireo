@@ -1,6 +1,36 @@
-/* Browse: batch edits over the selection (rating, flag, keywords, delete, collections, capture time, iNaturalist).
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: batch edits over the selection (rating, flag, keywords, delete, collections, capture time, iNaturalist). ES module (see
+   browse/README.md). */
+import { _noteColorLabelEdits, state } from './state.js';
+import {
+  VireoDialog, closeCommandPalette, closeHelpModal, closeLightbox, closeReportModal,
+  developPhotos, escapeAttr, escapeHtml, lightboxEscToken, safeEventSource, safeFetch,
+  setNativeMenuPhotoIdsOverride, showDeleteDialog, showToast, submitToInatBatch,
+} from './shared.js';
+import { updateBatchBar } from './batch-bar.js';
+import { loadSummary, showUndoToast, updateDetailFlagButtons } from './detail.js';
+import {
+  _recoverColorLabelsAfterFailedWrite, refreshPendingSyncBanner, renderBatchInspector,
+} from './edit-actions.js';
+import { refreshGridCards, renderGrid } from './grid.js';
+import {
+  getKeywordAutocompleteState, hideKeywordSuggestions, invalidateKeywordAutocompleteCache,
+} from './keyword-autocomplete.js';
+import { resetAndLoad } from './loading.js';
+import { panelRequests } from './panel-requests.js';
+import { refreshPredictionPanels } from './prediction-panels.js';
+import { findBrowsePhoto, loadSelectionKeywordSuggestions } from './selection-panel.js';
+import { clearSelection, getActiveSelection, selectionIdsKey } from './selection.js';
+import {
+  MUTATION_KEYWORD, loadCollections, refreshActiveCollectionAfterMembershipChange,
+  refreshBrowseSidebarCounts, scheduleCollectionCountsRefresh,
+} from './sidebar-collections.js';
+import { loadKeywords } from './sidebar-keywords.js';
+import {
+  browseStackFlagRank, browseStacksEnabled, markBrowseStackExpansionsStale,
+  markBrowseStackHydrationsStale, reconcileBrowseStackCovers, refreshExpandedBrowseStackMembers,
+} from './stacks.js';
+import { updateFilterSummary } from './view-controls.js';
+import { bindBrowseMarkup } from './markup.js';
 
 var batchKeywordDialog = VireoDialog.create(/** @type {HTMLElement} */ (document.getElementById('batchKeywordModal')), {
   initialFocus: /** @type {HTMLInputElement} */ (document.getElementById('batchKeywordInput')),
@@ -12,7 +42,7 @@ var batchCollectionDialog = VireoDialog.create(/** @type {HTMLElement} */ (docum
 });
 
 /* ---------- iNaturalist ---------- */
-async function loadInatStatus(/** @type {number[]} */ photoIds) {
+export async function loadInatStatus(/** @type {number[]} */ photoIds) {
   if (photoIds.length === 0) return;
   try {
     // Chunk the GET URL so oversized stacks (or any large id set) don't
@@ -27,17 +57,16 @@ async function loadInatStatus(/** @type {number[]} */ photoIds) {
         {}, { toast: false },
       );
       if (data && !data.error) {
-        for (var k in data) inatSubmitted[k] = true;
+        for (var k in data) state.inatSubmitted[k] = true;
       }
     }
   } catch(e) {}
 }
 
-function batchSubmitInat() {
+export function batchSubmitInat() {
   var ids = getActiveSelection();
   if (ids.length === 0) {
-    if (typeof showToast === 'function') showToast('Select one or more photos to send to iNaturalist.', 'error');
-    else alert('Select one or more photos to send to iNaturalist.');
+    showToast('Select one or more photos to send to iNaturalist.', 'error');
     return;
   }
   submitToInatBatch(ids);
@@ -49,7 +78,7 @@ function batchSubmitInat() {
 // re-render path, so without this the stars/flag/color chips display the
 // pre-edit state — and clicking the same star clears the value the shortcut
 // just applied (batchRate treats matching-unanimous as toggle-off).
-function _refreshBatchInspectorIfActive() {
+export function _refreshBatchInspectorIfActive() {
   var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
   if (detail && detail.classList.contains('batch-mode')) {
     // State-only refresh — the selection did not change. Preserve any
@@ -58,7 +87,7 @@ function _refreshBatchInspectorIfActive() {
   }
 }
 
-async function batchSetRating(/** @type {number} */ rating, /** @type {number[] | undefined} */ photoIds = undefined) {
+export async function batchSetRating(/** @type {number} */ rating, /** @type {number[] | undefined} */ photoIds = undefined) {
   var ids = photoIds ? photoIds.slice() : getActiveSelection();
   try {
     await safeFetch('/api/batch/rating', {
@@ -86,7 +115,7 @@ async function batchSetRating(/** @type {number} */ rating, /** @type {number[] 
 // until a reload. Un-rejecting is left as-is: the client can't know whether
 // the DB preference still points at this photo, so the badge stays hidden
 // until the page reloads rather than lighting up incorrectly.
-function _clearRepresentativeStateIfIneligible(/** @type {number} */ photoId, /** @type {BrowsePhoto['flag']} */ flag) {
+export function _clearRepresentativeStateIfIneligible(/** @type {number} */ photoId, /** @type {BrowsePhoto['flag']} */ flag) {
   if (flag !== 'rejected') return;
   var p = findBrowsePhoto(photoId);
   if (!p) return;
@@ -107,7 +136,7 @@ function _clearRepresentativeStateIfIneligible(/** @type {number} */ photoId, /*
 // lookup returned null and _clearRepresentativeStateAfterKeywordRemoval
 // no-oped — the grid badge/context-menu state stayed stale until reload.
 /** @type {Record<string, string>} */ var _keywordNamesById = {};
-function _rememberKeywordNames(/** @type {BrowseKeyword[]} */ keywords) {
+export function _rememberKeywordNames(/** @type {BrowseKeyword[]} */ keywords) {
   if (!Array.isArray(keywords)) return;
   keywords.forEach(function(k) {
     if (k && typeof k.id === 'number' && typeof k.name === 'string') {
@@ -116,13 +145,13 @@ function _rememberKeywordNames(/** @type {BrowseKeyword[]} */ keywords) {
   });
 }
 
-function _keywordNameFromCache(/** @type {number} */ keywordId) {
+export function _keywordNameFromCache(/** @type {number} */ keywordId) {
   if (Object.prototype.hasOwnProperty.call(_keywordNamesById, keywordId)) {
     return _keywordNamesById[keywordId];
   }
-  if (!Array.isArray(keywordAutocompleteCache)) return null;
-  for (var i = 0; i < keywordAutocompleteCache.length; i++) {
-    var k = keywordAutocompleteCache[i];
+  if (!Array.isArray(state.keywordAutocompleteCache)) return null;
+  for (var i = 0; i < state.keywordAutocompleteCache.length; i++) {
+    var k = state.keywordAutocompleteCache[i];
     if (k && k.id === keywordId) return k.name;
   }
   return null;
@@ -142,7 +171,7 @@ function _keywordNameFromCache(/** @type {number} */ keywordId) {
 // moved are recorded and only their stacks are reconciled: keyword callers see
 // no rating/flag change and so pay nothing, while any future caller gets the
 // cover fixed for free instead of silently drifting.
-async function _refreshBrowseKeywordState(/** @type {readonly number[]} */ photoIds, /** @type {BrowseKeywordRefreshOptions} */ opts = {}) {
+export async function _refreshBrowseKeywordState(/** @type {readonly number[]} */ photoIds, /** @type {BrowseKeywordRefreshOptions} */ opts = {}) {
   opts = opts || {};
   // Species keywords are exactly the input the prediction panels' ambiguity
   // and "N missing" counts are computed from, so repaint them here rather
@@ -251,7 +280,7 @@ async function _refreshBrowseKeywordState(/** @type {readonly number[]} */ photo
 // counts. Non-species keywords never appear in life_list, so the filter
 // no-ops for those. If the cache lookup fails to resolve the name, we
 // leave state alone rather than clearing the wrong entry.
-function _clearRepresentativeStateAfterKeywordRemoval(/** @type {readonly number[]} */ photoIds, /** @type {string | null} */ keywordName) {
+export function _clearRepresentativeStateAfterKeywordRemoval(/** @type {readonly number[]} */ photoIds, /** @type {string | null} */ keywordName) {
   if (!Array.isArray(photoIds) || !photoIds.length) return;
   if (!keywordName) return;
   /** @type {number[]} */ var touched = [];
@@ -278,7 +307,7 @@ function _clearRepresentativeStateAfterKeywordRemoval(/** @type {readonly number
   }
 }
 
-async function batchSetFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag, /** @type {number[] | undefined} */ photoIds = undefined) {
+export async function batchSetFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag, /** @type {number[] | undefined} */ photoIds = undefined) {
   var ids = photoIds ? photoIds.slice() : getActiveSelection();
   try {
     await safeFetch('/api/batch/flag', {
@@ -294,7 +323,7 @@ async function batchSetFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag
   await reconcileBrowseStackCovers(ids);
   refreshGridCards(ids);
   refreshExpandedBrowseStackMembers(ids);
-  if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
+  if (state.selectedPhotoId != null && ids.indexOf(state.selectedPhotoId) !== -1) {
     updateDetailFlagButtons(flag);
   }
   _refreshBatchInspectorIfActive();
@@ -302,7 +331,7 @@ async function batchSetFlag(/** @type {NonNullable<BrowsePhoto['flag']>} */ flag
   showUndoToast();
 }
 
-async function batchSetColorLabel(/** @type {string | null} */ color, /** @type {number[] | undefined} */ photoIds = undefined) {
+export async function batchSetColorLabel(/** @type {string | null} */ color, /** @type {number[] | undefined} */ photoIds = undefined) {
   var ids = photoIds ? photoIds.slice() : getActiveSelection();
   if (!ids.length) return;
   _noteColorLabelEdits(ids);
@@ -314,9 +343,9 @@ async function batchSetColorLabel(/** @type {string | null} */ color, /** @type 
   } catch(e) { _recoverColorLabelsAfterFailedWrite(ids); return; }
   _noteColorLabelEdits(ids);
   ids.forEach(function(id) {
-    if (color) colorLabels[id] = color;
-    else delete colorLabels[id];
-    colorLabelsFetched.add(id);
+    if (color) state.colorLabels[id] = color;
+    else delete state.colorLabels[id];
+    state.colorLabelsFetched.add(id);
   });
   refreshGridCards(ids);
   refreshExpandedBrowseStackMembers(ids);
@@ -325,7 +354,7 @@ async function batchSetColorLabel(/** @type {string | null} */ color, /** @type 
   showUndoToast();
 }
 
-function batchAddKeyword(/** @type {Element | null | undefined} */ returnFocus = undefined) {
+export function batchAddKeyword(/** @type {Element | null | undefined} */ returnFocus = undefined) {
   /** @type {HTMLElement} */ (document.getElementById('batchKeywordTitle')).textContent = 'Add keyword to ' + getActiveSelection().length + ' photos';
   /** @type {HTMLInputElement} */ (document.getElementById('batchKeywordInput')).value = '';
   getKeywordAutocompleteState('batchKeywordInput').selectedKeyword = null;
@@ -333,21 +362,21 @@ function batchAddKeyword(/** @type {Element | null | undefined} */ returnFocus =
   batchKeywordDialog.open(returnFocus);
 }
 
-function hideBatchKeywordModal() {
+export function hideBatchKeywordModal() {
   batchKeywordDialog.close();
   hideKeywordSuggestions('batchKeywordInput');
-  window._vireoNativeMenuPhotoIdsOverride = null;
+  setNativeMenuPhotoIdsOverride(null);
 }
 
-async function confirmBatchKeyword() {
+export async function confirmBatchKeyword() {
   var input = /** @type {HTMLInputElement} */ (document.getElementById('batchKeywordInput'));
   var name = input.value.trim();
   if (!name) return;
   var ids = getActiveSelection();
   hideBatchKeywordModal();
-  var state = getKeywordAutocompleteState('batchKeywordInput');
-  var selectedKeyword = state.selectedKeyword && state.selectedKeyword.name === name
-    ? state.selectedKeyword
+  var acState = getKeywordAutocompleteState('batchKeywordInput');
+  var selectedKeyword = acState.selectedKeyword && acState.selectedKeyword.name === name
+    ? acState.selectedKeyword
     : null;
   var payload = selectedKeyword && selectedKeyword.id
     ? {photo_ids: ids, keyword_id: selectedKeyword.id}
@@ -364,7 +393,7 @@ async function confirmBatchKeyword() {
   // refresh were in flight. Loading the pre-await ``ids`` here would win the
   // sequence race and leave the panel's Add/Remove buttons bound to photos
   // that are no longer selected.
-  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
+  panelRequests.keywords.invalidate();
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();
@@ -375,7 +404,7 @@ async function confirmBatchKeyword() {
 
 var _batchDeleteRequestSeq = 0;
 
-async function batchDelete() {
+export async function batchDelete() {
   var ids = getActiveSelection();
   if (ids.length === 0) return;
   // Ask the server how many of these carry a companion file. A selection can
@@ -455,23 +484,23 @@ async function batchDelete() {
     // so the logical item count cannot be updated arithmetically. Reload the
     // current scope from the authoritative projection.
     if (browseStacksEnabled()) {
-      selectedPhotos.clear();
-      selectedPhotoId = null;
-      selectedIndex = -1;
+      state.selectedPhotos.clear();
+      state.selectedPhotoId = null;
+      state.selectedIndex = -1;
       updateBatchBar();
       resetAndLoad({preserveCollection: true});
       loadSummary();
       refreshBrowseSidebarCounts();
       return;
     }
-    photos = photos.filter(function(p) { return !deletedSet.has(p.id); });
-    totalPhotos = Math.max(0, totalPhotos - (data.deleted || 0));
-    totalUnderlyingPhotos = Math.max(0, totalUnderlyingPhotos - (data.deleted || 0));
-    selectedPhotos = new Set(Array.from(selectedPhotos).filter(function(id) {
+    state.photos = state.photos.filter(function(p) { return !deletedSet.has(p.id); });
+    state.totalPhotos = Math.max(0, state.totalPhotos - (data.deleted || 0));
+    state.totalUnderlyingPhotos = Math.max(0, state.totalUnderlyingPhotos - (data.deleted || 0));
+    state.selectedPhotos = new Set(Array.from(state.selectedPhotos).filter(function(id) {
       return !deletedSet.has(id);
     }));
-    if (selectedPhotoId != null && deletedSet.has(selectedPhotoId)) {
-      selectedPhotoId = null;
+    if (state.selectedPhotoId != null && deletedSet.has(state.selectedPhotoId)) {
+      state.selectedPhotoId = null;
     }
     // Re-sync the batch bar (count, compare/best/burst buttons, selection
     // inspector) against the shrunk selection. Just hiding the bar when the
@@ -492,7 +521,7 @@ async function batchDelete() {
 }
 
 /** @type {BrowseCollection[]} */ var _batchCollections = [];
-/** @type {number | null} */ var _batchCollectionSelectedId = null;
+/** @type {number | null} */ export var _batchCollectionSelectedId = null;
 // Codex P2: generation counter for addToCollection(). Each invocation
 // captures the next value before awaiting /api/collections and bails
 // after the await when a newer invocation has superseded it, so a stale
@@ -500,7 +529,7 @@ async function batchDelete() {
 // the dialog on top of them.
 var _addToCollectionInvocation = 0;
 
-function collectionAcceptsManualPhotos(/** @type {BrowseCollection} */ collection) {
+export function collectionAcceptsManualPhotos(/** @type {BrowseCollection} */ collection) {
   if (typeof collection.can_add_photos === 'boolean') {
     return collection.can_add_photos;
   }
@@ -529,13 +558,13 @@ function collectionAcceptsManualPhotos(/** @type {BrowseCollection} */ collectio
   }
 }
 
-async function addToCollection(/** @type {Element | null | undefined} */ returnFocus = undefined) {
+export async function addToCollection(/** @type {Element | null | undefined} */ returnFocus = undefined) {
   // WebKit does not focus buttons on pointer clicks. The template passes the
   // opener explicitly; native-menu/shortcut calls retain the current focus.
   returnFocus = returnFocus || document.activeElement;
   var activeIds = getActiveSelection();
   if (activeIds.length === 0) {
-    window._vireoNativeMenuPhotoIdsOverride = null;
+    setNativeMenuPhotoIdsOverride(null);
     return;
   }
 
@@ -544,7 +573,7 @@ async function addToCollection(/** @type {Element | null | undefined} */ returnF
   try {
     collections = await safeFetch('/api/collections', {}, { toast: false });
   } catch(e) {
-    window._vireoNativeMenuPhotoIdsOverride = null;
+    setNativeMenuPhotoIdsOverride(null);
     return;
   }
   // Codex P2: if the user re-triggered Add while this request was pending,
@@ -561,12 +590,14 @@ async function addToCollection(/** @type {Element | null | undefined} */ returnF
 
   var listHtml = '';
   collections.forEach(function(c) {
-    listHtml += '<button type="button" class="batch-coll-item" aria-pressed="false" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')">' + escapeHtml(c.name) + '</button>';
+    listHtml += '<button type="button" class="batch-coll-item" aria-pressed="false" data-id="' + c.id + '" data-browse-on="click:pickBatchCollection">' + escapeHtml(c.name) + '</button>';
   });
   if (collections.length === 0) {
     listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No manual collections yet</div>';
   }
-  /** @type {HTMLElement} */ (document.getElementById('batchCollectionList')).innerHTML = listHtml;
+  var collectionList = /** @type {HTMLElement} */ (document.getElementById('batchCollectionList'));
+  collectionList.innerHTML = listHtml;
+  bindBrowseMarkup(collectionList);
   /** @type {HTMLInputElement} */ (document.getElementById('batchCollectionNewName')).value = '';
   // Codex P2: while the /api/collections request was in flight, the help
   // overlay (F1 / ? icon), the Report Issue overlay (⚠ nav icon), the
@@ -582,25 +613,19 @@ async function addToCollection(/** @type {Element | null | undefined} */ returnF
   // overlay, and closing the dialog would restore focus behind a
   // still-open sibling. Dismiss each before the dialog takes the top of
   // the stack so no opener-guarded sibling races the open path. The
-  // lightbox is only closed when actually open (window._lbEscToken is the
+  // lightbox is only closed when actually open (lightboxEscToken() is the
   // same signal closeLightbox() uses internally for wasOpen), since
   // closeLightbox() resets viewport/decode state unconditionally.
-  if (typeof window.closeHelpModal === 'function') {
-    window.closeHelpModal();
-  }
-  if (typeof window.closeReportModal === 'function') {
-    window.closeReportModal();
-  }
-  if (typeof window.closeCommandPalette === 'function') {
-    window.closeCommandPalette();
-  }
-  if (window._lbEscToken && typeof window.closeLightbox === 'function') {
-    window.closeLightbox();
+  closeHelpModal();
+  closeReportModal();
+  closeCommandPalette();
+  if (lightboxEscToken()) {
+    closeLightbox();
   }
   batchCollectionDialog.open(returnFocus);
 }
 
-function pickBatchCollection(/** @type {number} */ id) {
+export function pickBatchCollection(/** @type {number} */ id) {
   _batchCollectionSelectedId = id;
   /** @type {HTMLInputElement} */ (document.getElementById('batchCollectionNewName')).value = '';
   /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.batch-coll-item')).forEach(function(el) {
@@ -608,12 +633,12 @@ function pickBatchCollection(/** @type {number} */ id) {
   });
 }
 
-function hideBatchCollectionModal() {
+export function hideBatchCollectionModal() {
   batchCollectionDialog.close();
-  window._vireoNativeMenuPhotoIdsOverride = null;
+  setNativeMenuPhotoIdsOverride(null);
 }
 
-async function confirmBatchCollection() {
+export async function confirmBatchCollection() {
   var newName = /** @type {HTMLInputElement} */ (document.getElementById('batchCollectionNewName')).value.trim();
   var ids = getActiveSelection();
   var collectionId = _batchCollectionSelectedId;
@@ -674,18 +699,16 @@ async function confirmBatchCollection() {
   }
 }
 
-function reviewLocationsForCollection(/** @type {number} */ collectionId, /** @type {string} */ mode = '') {
+export function reviewLocationsForCollection(/** @type {number} */ collectionId, /** @type {string} */ mode = '') {
   // Same guard as filterByCollection: degraded collections would just
   // re-hit the unresolvable rules while building the review queue.
-  var collectionMeta = collectionsById[collectionId];
+  var collectionMeta = state.collectionsById[collectionId];
   if (collectionMeta && collectionMeta.count_error) {
-    if (typeof showToast === 'function') {
-      showToast(
-        (collectionMeta.name || 'This collection') +
-          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
-        'error'
-      );
-    }
+    showToast(
+      (collectionMeta.name || 'This collection') +
+        " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+      'error'
+    );
     return;
   }
   sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
@@ -693,16 +716,14 @@ function reviewLocationsForCollection(/** @type {number} */ collectionId, /** @t
   window.location.href = '/locations/review?collection_id=' + encodeURIComponent(collectionId) + (mode === 'time' ? '&mode=time' : '');
 }
 
-function reviewLocationsForSelection(/** @type {string} */ mode = '') {
+export function reviewLocationsForSelection(/** @type {string} */ mode = '') {
   var ids = getActiveSelection();
   if (!ids.length) return;
   var payload;
   try {
     payload = JSON.stringify({photo_ids: ids});
   } catch (e) {
-    if (typeof showToast === 'function') {
-      showToast('Could not open location review for this selection.', 'error');
-    }
+    showToast('Could not open location review for this selection.', 'error');
     return;
   }
   try {
@@ -713,14 +734,12 @@ function reviewLocationsForSelection(/** @type {string} */ mode = '') {
     // exceed it, in which case setItem throws synchronously. Guide the
     // user to the collection-based flow, which passes an id in the URL
     // and never touches sessionStorage for the id list.
-    if (typeof showToast === 'function') {
-      showToast(
-        'Selection is too large to open location review directly (' +
-          ids.length.toLocaleString() +
-          ' photos). Save the selection as a collection first, then use Review on Map from the collection menu.',
-        'error'
-      );
-    }
+    showToast(
+      'Selection is too large to open location review directly (' +
+        ids.length.toLocaleString() +
+        ' photos). Save the selection as a collection first, then use Review on Map from the collection menu.',
+      'error'
+    );
     return;
   }
   sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
@@ -750,7 +769,7 @@ function buildCaptureTimePayload() {
   };
 }
 
-function syncCaptureTimeFieldState() {
+export function syncCaptureTimeFieldState() {
   var mode = getCaptureTimeMode();
   var targetInput = /** @type {HTMLInputElement} */ (document.getElementById('captureTimeTargetOffset'));
   var shiftInput = /** @type {HTMLInputElement} */ (document.getElementById('captureTimeManualShift'));
@@ -805,7 +824,7 @@ function renderCaptureTimePreview(/** @type {BrowseCaptureTimePreview} */ data) 
   /** @type {HTMLElement} */ (document.getElementById('captureTimePreview')).innerHTML = html;
 }
 
-async function updateCaptureTimePreview() {
+export async function updateCaptureTimePreview() {
   var modal = /** @type {HTMLElement} */ (document.getElementById('captureTimeModal'));
   if (!modal.classList.contains('open')) return;
   var payload = buildCaptureTimePayload();
@@ -836,7 +855,7 @@ async function updateCaptureTimePreview() {
   }
 }
 
-function openCaptureTimeModal() {
+export function openCaptureTimeModal() {
   var ids = getActiveSelection();
   if (!ids.length) return;
   /** @type {HTMLElement} */ (document.getElementById('captureTimeTitle')).textContent = 'Adjust Capture Time for ' + ids.length + ' photo' + (ids.length === 1 ? '' : 's');
@@ -847,12 +866,12 @@ function openCaptureTimeModal() {
   updateCaptureTimePreview();
 }
 
-function hideCaptureTimeModal() {
+export function hideCaptureTimeModal() {
   /** @type {HTMLElement} */ (document.getElementById('captureTimeModal')).classList.remove('open');
-  window._vireoNativeMenuPhotoIdsOverride = null;
+  setNativeMenuPhotoIdsOverride(null);
 }
 
-async function startCaptureTimeJob() {
+export async function startCaptureTimeJob() {
   var payload = buildCaptureTimePayload();
   if (!payload.photo_ids.length) return;
   var applyBtn = /** @type {HTMLButtonElement} */ (document.getElementById('captureTimeApplyBtn'));
@@ -898,7 +917,7 @@ async function startCaptureTimeJob() {
   }
 }
 
-function developSelected() {
+export function developSelected() {
   var ids = getActiveSelection();
   if (!ids.length) return;
   developPhotos(ids);

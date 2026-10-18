@@ -1,11 +1,17 @@
-/* Browse: export modal, offline copies, full-resolution preparation.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: export modal, offline copies, full-resolution preparation. ES module (see
+   browse/README.md). */
+import {
+  VireoExportCollisions, VireoExportJob, VireoExportPresets, VireoFolderBrowser,
+  VireoViewPreferences, _lbPhotoData, closeLightbox, isTauri, pickDirectory, safeEventSource,
+  safeFetch, showToast,
+} from './shared.js';
+import { findBrowsePhoto } from './selection-panel.js';
+import { getActiveSelection } from './selection.js';
 
 /* ---------- Export Modal ---------- */
 var exportRequestGeneration = 0;
 var exportDismissible = true;
-var _exportPhotoIds = /** @type {number[] | null} */ (null);
+export var _exportPhotoIds = /** @type {number[] | null} */ (null);
 
 function setExportControlsBusy(/** @type {boolean} */ busy) {
   /** @type {NodeListOf<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>} */ (document.querySelectorAll('#exportOverlay input, #exportOverlay select, #exportOverlay button')).forEach(function(control) {
@@ -41,7 +47,7 @@ function migrateExportCaptureDateTimePreference() {
   );
 }
 
-function openExportModal(/** @type {number[] | undefined} */ photoIds = undefined) {
+export function openExportModal(/** @type {number[] | undefined} */ photoIds = undefined) {
   var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
   if (activeIds.length === 0) return;
   exportRequestGeneration++;
@@ -86,14 +92,14 @@ function openExportModal(/** @type {number[] | undefined} */ photoIds = undefine
 // this capability. Other pages use openExportModal for unrelated exports
 // (for example Life List data), so the context menu must not key off that
 // generic function name.
-function openPhotoExportModal(/** @type {number[]} */ photoIds) {
+export function openPhotoExportModal(/** @type {number[]} */ photoIds) {
   if (/** @type {HTMLElement} */ (document.getElementById('lightboxOverlay')).classList.contains('active')) {
     closeLightbox();
   }
   openExportModal(photoIds);
 }
 
-function selectedExportMetadataFields() {
+export function selectedExportMetadataFields() {
   return Array.from(/** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.export-metadata-option input:checked')))
     .reduce(function(fields, input) {
       if (input.value === 'capture_date_time') {
@@ -115,7 +121,7 @@ function selectedExportMetadataFields() {
     }, /** @type {string[]} */ ([]));
 }
 
-function closeExportModal() {
+export function closeExportModal() {
   if (!exportDismissible) return;
   exportRequestGeneration++;
   VireoExportCollisions.reset();
@@ -124,7 +130,7 @@ function closeExportModal() {
   _exportPhotoIds = null;
 }
 
-const exportFolderBrowser = new VireoFolderBrowser({
+export const exportFolderBrowser = new VireoFolderBrowser({
   overlayId: 'folderBrowser',
   defaultMode: 'destination',
   modes: {
@@ -151,29 +157,27 @@ const exportFolderBrowser = new VireoFolderBrowser({
   },
 });
 
-async function browseForExportDestination() {
+export async function browseForExportDestination() {
   var destination = /** @type {HTMLInputElement} */ (document.getElementById('exportDest'));
-  if (typeof pickDirectory === 'function') {
-    var seqBeforePicker = exportFolderBrowser.sequence;
-    var result = await pickDirectory('Select export folder', {
-      defaultPath: destination.value.trim() || undefined,
-    });
-    if (result) {
-      destination.value = Array.isArray(result) ? result[0] : result;
-      VireoExportPresets.markCustom();
-      VireoExportCollisions.schedule();
-      return;
-    }
-    if (typeof isTauri === 'function' && isTauri()) return;
-    if (exportFolderBrowser.sequence !== seqBeforePicker) {
-      exportFolderBrowser.open('destination', {skipInitialBrowse: true});
-      return;
-    }
+  var seqBeforePicker = exportFolderBrowser.sequence;
+  var result = await pickDirectory('Select export folder', {
+    defaultPath: destination.value.trim() || undefined,
+  });
+  if (result) {
+    destination.value = Array.isArray(result) ? result[0] : result;
+    VireoExportPresets.markCustom();
+    VireoExportCollisions.schedule();
+    return;
+  }
+  if (isTauri()) return;
+  if (exportFolderBrowser.sequence !== seqBeforePicker) {
+    exportFolderBrowser.open('destination', {skipInitialBrowse: true});
+    return;
   }
   exportFolderBrowser.open('destination');
 }
 
-function insertTemplateVar(/** @type {string} */ v) {
+export function insertTemplateVar(/** @type {string} */ v) {
   var input = /** @type {HTMLInputElement} */ (document.getElementById('exportTemplate'));
   var start = input.selectionStart || 0;
   var end = input.selectionEnd || 0;
@@ -191,13 +195,13 @@ function exportExtensionForFormat(/** @type {string} */ format) {
   return 'jpg';
 }
 
-function updateExportFormatControls() {
+export function updateExportFormatControls() {
   var isJpeg = /** @type {HTMLSelectElement} */ (document.getElementById('exportFormat')).value === 'jpg';
   /** @type {HTMLElement} */ (document.getElementById('exportQualityLabel')).style.display = isJpeg ? 'block' : 'none';
   /** @type {HTMLElement} */ (document.getElementById('exportQualityRow')).style.display = isJpeg ? 'flex' : 'none';
 }
 
-function applyExportPreset(/** @type {string} */ preset) {
+export function applyExportPreset(/** @type {string} */ preset) {
   var resize = '';
   var customResize = '';
   var format = 'jpg';
@@ -225,7 +229,7 @@ function applyExportPreset(/** @type {string} */ preset) {
   updateExportPreview();
 }
 
-function markExportCustom() {
+export function markExportCustom() {
   /** @type {HTMLSelectElement} */ (document.getElementById('exportPreset')).value = 'custom';
 }
 
@@ -277,7 +281,7 @@ function hydrateExportPreviewPhoto(/** @type {number} */ photoId) {
   return request;
 }
 
-function updateExportPreview() {
+export function updateExportPreview() {
   // Programmatic control changes (presets, inserted template variables)
   // repaint through here without firing input events.
   VireoExportCollisions.schedule();
@@ -290,7 +294,7 @@ function updateExportPreview() {
   // Find Similar and other shared-lightbox entry points can display photos
   // outside Browse's currently loaded page. Their metadata remains available
   // through the lightbox cache/list after the viewer closes for this modal.
-  if (!photo && typeof _lbPhotoData === 'function') photo = _lbPhotoData(firstId);
+  if (!photo) photo = _lbPhotoData(firstId);
   // Select-all-matching with Stacks enabled puts every underlying member id
   // in selectedPhotos, but browseStackMembers only carries trays the user
   // expanded — and the selection spans pages the grid never loaded. So the
@@ -361,7 +365,7 @@ function updateExportPreview() {
 // The settings that decide where each file lands and what it is called:
 // everything the filename-collision preflight needs.
 /** @returns {BrowseExportRequest | null} */
-function buildExportPreflightRequest() {
+export function buildExportPreflightRequest() {
   var activeIds = (_exportPhotoIds || getActiveSelection()).slice();
   if (activeIds.length === 0) return null;
   var resizeSelect = /** @type {HTMLSelectElement} */ (document.getElementById('exportResize')).value;
@@ -382,7 +386,7 @@ function buildExportPreflightRequest() {
   };
 }
 
-async function startExport() {
+export async function startExport() {
   var requestGeneration = ++exportRequestGeneration;
   var exportRequest = buildExportPreflightRequest();
   if (!exportRequest) return;
@@ -463,7 +467,7 @@ async function startExport() {
   }
 }
 
-async function makeAvailableOffline() {
+export async function makeAvailableOffline() {
   var activeIds = getActiveSelection();
   if (activeIds.length === 0) return;
   try {
@@ -486,7 +490,7 @@ async function makeAvailableOffline() {
   }
 }
 
-var _prepareFullResolutionJobId = /** @type {string | null} */ (null);
+export var _prepareFullResolutionJobId = /** @type {string | null} */ (null);
 
 function _setPrepareFullResolutionButton(/** @type {boolean} */ running, /** @type {number | undefined} */ current = undefined, /** @type {number | undefined} */ total = undefined) {
   var btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('prepareFullResolutionBtn'));
@@ -501,7 +505,7 @@ function _setPrepareFullResolutionButton(/** @type {boolean} */ running, /** @ty
   }
 }
 
-async function prepareFullResolutionSelection(/** @type {number[]} */ photoIds) {
+export async function prepareFullResolutionSelection(/** @type {number[]} */ photoIds) {
   var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
   if (!activeIds.length || _prepareFullResolutionJobId) return;
   _setPrepareFullResolutionButton(true);

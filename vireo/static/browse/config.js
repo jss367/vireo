@@ -1,19 +1,20 @@
-/* Browse: /api/config fetch, keyboard shortcut defaults, config application.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: /api/config fetch, keyboard shortcut defaults, config application. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import { VireoViewPreferences, safeFetch, setKeyboardShortcuts } from './shared.js';
 
-/** @type {Record<string, string> | null} */ var _shortcuts = null;
+/** @type {Record<string, string> | null} */ export var _shortcuts = null;
 var _BROWSE_SC_DEFAULTS = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
   flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',redo:'ctrl+shift+z',select_all:'ctrl+a',zoom:'z',
   compare:'c',color_red:'6',color_yellow:'7',color_green:'8',color_blue:'9'};
-var _cfgPromise = (async function() {
+export var _cfgPromise = (async function() {
   try {
     var cfg = await /** @type {Promise<BrowseConfig>} */ (safeFetch('/api/config', {}, { toast: false }));
     var saved = (cfg.keyboard_shortcuts || {}).browse || {};
     _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS, saved);
-    window._vireoShortcuts = cfg.keyboard_shortcuts || {};
-    window.GOOGLE_MAPS_API_KEY = cfg.google_maps_api_key || '';
-    window.GOOGLE_MAPS_PREFER_ENGLISH = cfg.google_maps_prefer_english !== false;
+    setKeyboardShortcuts(cfg.keyboard_shortcuts || {});
+    state.googleMapsApiKey = cfg.google_maps_api_key || '';
+    state.googleMapsPreferEnglish = cfg.google_maps_prefer_english !== false;
     return cfg;
   } catch(e) {
     _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS);
@@ -21,9 +22,9 @@ var _cfgPromise = (async function() {
   }
 })();
 
-function applyBrowseConfig(/** @type {BrowseConfig | null | undefined} */ cfg = undefined) {
+export function applyBrowseConfig(/** @type {BrowseConfig | null | undefined} */ cfg = undefined) {
   if (!cfg) return;
-  if (cfg.photos_per_page) perPage = cfg.photos_per_page;
+  if (cfg.photos_per_page) state.perPage = cfg.photos_per_page;
   if (cfg.browse_thumb_default && VireoViewPreferences.read('vireo.browse.thumbSize') === null) {
     var slider = /** @type {HTMLInputElement} */ (document.getElementById('thumbSizeSlider'));
     if (slider) {
@@ -31,5 +32,5 @@ function applyBrowseConfig(/** @type {BrowseConfig | null | undefined} */ cfg = 
       slider.dispatchEvent(new Event('input'));
     }
   }
-  if (Array.isArray(cfg.browse_card_fields)) cardFields = cfg.browse_card_fields;
+  if (Array.isArray(cfg.browse_card_fields)) state.cardFields = cfg.browse_card_fields;
 }

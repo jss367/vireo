@@ -104,7 +104,24 @@ interface VireoPageHooks {
 
   // ---- Missing Originals deletes (navbar-folder-banners.js) ----
   loadMisses?(): unknown;
+
+  // ---- The export modal (vireo-export-presets.js, vireo-export-collisions.js) ----
+  /** Apply a built-in preset (``original-jpg``, ...) to the modal's controls. */
+  applyExportPreset?(preset: string): void;
+  /** Mark the modal's settings as edited away from any preset. */
+  markExportCustom?(): void;
+  /** Show and hide the controls the chosen format uses. */
+  updateExportFormatControls?(): void;
+  /** Repaint the file-name preview. */
+  updateExportPreview?(): void;
+  /** The metadata fields the modal's checkboxes select. */
+  selectedExportMetadataFields?(): string[];
+  /** The name-deciding settings for the collision preflight, or null when the
+   * controls cannot describe an export yet. */
+  buildExportPreflightRequest?(): VireoExportPreflightRequest | null;
 }
+
+interface VireoExportPreflightRequest {photo_ids: number[]; destination: string}
 
 type VireoPageHookName = keyof VireoPageHooks;
 

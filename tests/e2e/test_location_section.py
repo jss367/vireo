@@ -64,18 +64,18 @@ def _seed_reverse_geocode_cache(live_server, lat, lng, place_id, details):
 
 
 def _wait_for_detail_loaded(page):
-    """Wait until the detail panel's photo id is set on `window`.
+    """Wait until the detail panel's photo id is set (``browseState.detailPhotoId``).
 
-    `_submitLocationText` (browse.html) bails silently if `_detailPhotoId` is
+    `_submitLocationText` (browse/location.js) bails silently if it is
     falsy, so pressing Enter before the detail finishes loading races and the
     free-text POST is dropped. Tests must wait for this before pressing Enter.
     """
-    page.wait_for_function("() => !!window._detailPhotoId")
+    page.wait_for_function("() => !!browseState.detailPhotoId")
 
 
 def _set_api_key(key="test-key"):
     """Write a Google Maps key into the (monkeypatched) config.json so:
-      - browse.html's _cfgPromise sees `window.GOOGLE_MAPS_API_KEY` set,
+      - Browse's _cfgPromise sees `browseState.googleMapsApiKey` set,
         which gates the `maybeShowExifSuggestion` fetch path; AND
       - the server's reverse-geocode + set-location routes accept the request.
     """
@@ -262,7 +262,7 @@ def test_saved_location_enter_does_not_steal_google_keyboard_pick(live_server, p
     expect(page.locator("#locationKeywordSuggestions")).to_be_visible()
 
     # Simulate Google place_changed having just handled the keyboard pick.
-    page.evaluate("window._locationLastPickedAt = Date.now();")
+    page.evaluate("pageModules.location.locationPick.lastPickedAt = Date.now();")
     inp.press("Enter")
     page.wait_for_timeout(600)
 
@@ -282,7 +282,7 @@ def test_enter_after_place_changed_does_not_submit_freetext(live_server, page):
     deferred-cancel logic, the keydown handler would POST a free-text
     submit before place_changed could route the place_id POST.
 
-    We simulate place_changed firing (by bumping _locationLastPickedAt
+    We simulate place_changed firing (by bumping locationPick.lastPickedAt
     just before pressing Enter) and verify NO free-text POST is sent.
     """
     url = live_server["url"]
@@ -304,7 +304,7 @@ def test_enter_after_place_changed_does_not_submit_freetext(live_server, page):
     ) else None)
 
     # Simulate place_changed having just fired — like a keyboard pick.
-    page.evaluate("window._locationLastPickedAt = Date.now();")
+    page.evaluate("pageModules.location.locationPick.lastPickedAt = Date.now();")
     inp.press("Enter")
 
     # Wait past the 300ms defer window plus margin.
@@ -315,7 +315,7 @@ def test_enter_after_place_changed_does_not_submit_freetext(live_server, page):
     # that's expected for this regression test.)
     assert text_posts == [], (
         f"keydown handler must defer to place_changed when "
-        f"_locationLastPickedAt is recent; got POSTs: {text_posts}"
+        f"locationPick.lastPickedAt is recent; got POSTs: {text_posts}"
     )
     # Sanity: we should still be in the empty state (no submit happened).
     expect(page.locator("#locationEmpty")).to_be_visible()
@@ -534,10 +534,10 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
 
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
-    page.evaluate("(collectionId) => filterByCollection(collectionId)", collection_id)
+    page.evaluate("(collectionId) => pageModules.sidebarCollections.filterByCollection(collectionId)", collection_id)
     page.wait_for_function(
         # Collections open into the filter bar as an expression (Phase 5).
-        "() => window.VireoFilter && VireoFilter.hasFilters() && photos.length === 3",
+        "() => window.VireoFilter && VireoFilter.hasFilters() && browseState.photos.length === 3",
     )
 
     page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
@@ -545,11 +545,11 @@ def test_exif_accept_batches_selection_and_refreshes_smart_collection(
     expect(page.locator("#locationExifSuggestion button.accept-btn")).to_be_visible()
     page.locator(f".grid-card[data-id='{photo_ids[1]}']").click(modifiers=["Meta"])
     page.locator(f".grid-card[data-id='{photo_ids[2]}']").click(modifiers=["Meta"])
-    page.wait_for_function("() => selectedPhotos.size === 3")
+    page.wait_for_function("() => browseState.selectedPhotos.size === 3")
 
     page.locator("#locationExifSuggestion button.accept-btn").click()
     page.wait_for_function(
-        "() => window.VireoFilter && VireoFilter.hasFilters() && photos.length === 0"
+        "() => window.VireoFilter && VireoFilter.hasFilters() && browseState.photos.length === 0"
     )
 
     for photo_id in photo_ids:
@@ -607,20 +607,20 @@ def test_exif_suggestion_clears_when_anchor_leaves_selection(
 
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
     expect(accept).to_be_visible()
 
     page.locator(f".grid-card[data-id='{anchor}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 1 && !selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 1 && !browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
 
     page.locator(f".grid-card[data-id='{other_c}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 2 && !selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 2 && !browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
 
@@ -687,7 +687,7 @@ def test_exif_suggestion_cleared_by_filled_location_render(
     ) == ""
 
     page.locator(f".grid-card[data-id='{photo_a}']").click(modifiers=["Meta"])
-    page.wait_for_function("() => selectedPhotos.size === 2")
+    page.wait_for_function("() => browseState.selectedPhotos.size === 2")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -760,17 +760,17 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_anchor_dropped(
     # While the response is held, drive the anchor-dropped batch sequence.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
     page.locator(f".grid-card[data-id='{anchor}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 1 && !selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 1 && !browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
     page.locator(f".grid-card[data-id='{other_c}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 2 && !selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 2 && !browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
 
@@ -910,7 +910,7 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_location_saved(
     # preserveExifSuggestion; if the fix didn't hold, the preserved
     # (stale) suggestion for A would become visible here.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
-    page.wait_for_function("() => selectedPhotos.size === 2")
+    page.wait_for_function("() => browseState.selectedPhotos.size === 2")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -987,13 +987,13 @@ def test_exif_suggestion_cleared_by_close_detail(
     # closeDetail() path (Escape would also call clearSelection and empty
     # selectedPhotos, masking the bug).
     page.locator(".detail-close").click()
-    page.wait_for_function("() => window.selectedPhotoId == null")
+    page.wait_for_function("() => browseState.selectedPhotoId == null")
 
     # Select All — includes the closed anchor, so the batch inspector opens
     # with A in ids. Without the fix, keepSugg would be true and A's Accept
     # line would flash back into the batch panel.
-    page.evaluate("() => selectAllMatchingPhotos()")
-    page.wait_for_function("() => selectedPhotos.size >= 3")
+    page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
+    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -1064,7 +1064,7 @@ def test_exif_suggestion_cleared_by_anchor_drop_then_select_all(
     # is preserved by design.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
     expect(accept).to_be_visible()
@@ -1076,16 +1076,16 @@ def test_exif_suggestion_cleared_by_anchor_drop_then_select_all(
     # into the next batch that includes A.
     page.locator(f".grid-card[data-id='{anchor}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 1 && !selectedPhotos.has(id) && "
-        "window.selectedPhotoId == null",
+        "(id) => browseState.selectedPhotos.size === 1 && !browseState.selectedPhotos.has(id) && "
+        "browseState.selectedPhotoId == null",
         arg=anchor,
     )
 
     # Select All — includes the dropped anchor, so the batch inspector opens
     # with A back in ids. Without the fix, keepSugg would be true and A's
     # Accept line would flash back into the batch panel.
-    page.evaluate("() => selectAllMatchingPhotos()")
-    page.wait_for_function("() => selectedPhotos.size >= 3")
+    page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
+    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -1151,7 +1151,7 @@ def test_exif_suggestion_cleared_by_batch_clear_then_select_all(
     # Grow to batch {A, B} — A is still the focused anchor.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
     expect(accept).to_be_visible()
@@ -1159,9 +1159,9 @@ def test_exif_suggestion_cleared_by_batch_clear_then_select_all(
     # Click the batch-bar Clear button by invoking the same function it does.
     # This is the code path the fix targets — clearSelection() bypasses
     # closeDetail and the selectPhoto deselect scrub, so it needs its own.
-    page.evaluate("() => clearSelection()")
+    page.evaluate("() => pageModules.selection.clearSelection()")
     page.wait_for_function(
-        "() => selectedPhotos.size === 0 && window.selectedPhotoId == null"
+        "() => browseState.selectedPhotos.size === 0 && browseState.selectedPhotoId == null"
     )
 
     # Immediately after Clear, the suggestion must already be scrubbed —
@@ -1177,8 +1177,8 @@ def test_exif_suggestion_cleared_by_batch_clear_then_select_all(
     # Select All — includes the previously-open anchor. Without the fix,
     # keepSugg would be true (owner A is in the new ids) and A's Accept line
     # would flash back into the batch panel.
-    page.evaluate("() => selectAllMatchingPhotos()")
-    page.wait_for_function("() => selectedPhotos.size >= 3")
+    page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
+    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -1257,13 +1257,13 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_close_detail(
     # Close the detail panel via the × button — the real closeDetail()
     # path. Escape would also clear selectedPhotos, hiding the bug.
     page.locator(".detail-close").click()
-    page.wait_for_function("() => window.selectedPhotoId == null")
+    page.wait_for_function("() => browseState.selectedPhotoId == null")
     # The scrub null-ed the ambient owner pointer synchronously.
-    assert page.evaluate("() => window._detailPhotoId") is None
+    assert page.evaluate("() => browseState.detailPhotoId") is None
 
     # Select All — the departed anchor is back in the selection.
-    page.evaluate("() => selectAllMatchingPhotos()")
-    page.wait_for_function("() => selectedPhotos.size >= 3")
+    page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
+    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
 
     # Now release the held reverse-geocode response. Without the fix, the
     # completion path would repaint A's Accept line into the batch panel
@@ -1353,22 +1353,22 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_clear(
     # Grow to batch {A, B} — A is still the focused anchor.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
 
     # Click the batch-bar Clear button by invoking the same function it
     # does. This is the code path the fix targets — clearSelection()
     # bypasses closeDetail entirely, so it needs its own scrubs.
-    page.evaluate("() => clearSelection()")
+    page.evaluate("() => pageModules.selection.clearSelection()")
     page.wait_for_function(
-        "() => selectedPhotos.size === 0 && window.selectedPhotoId == null"
+        "() => browseState.selectedPhotos.size === 0 && browseState.selectedPhotoId == null"
     )
-    assert page.evaluate("() => window._detailPhotoId") is None
+    assert page.evaluate("() => browseState.detailPhotoId") is None
 
     # Select All — A is back in the batch.
-    page.evaluate("() => selectAllMatchingPhotos()")
-    page.wait_for_function("() => selectedPhotos.size >= 3")
+    page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
+    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
 
     # Release the held reverse-geocode response.
     held_routes[0].fulfill(
@@ -1460,7 +1460,7 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_location_s
     # pass when the held response resolves.
     page.locator(f".grid-card[data-id='{other_b}']").click(modifiers=["Meta"])
     page.wait_for_function(
-        "(id) => selectedPhotos.size === 2 && selectedPhotos.has(id)",
+        "(id) => browseState.selectedPhotos.size === 2 && browseState.selectedPhotos.has(id)",
         arg=anchor,
     )
 
@@ -1478,7 +1478,7 @@ def test_exif_suggestion_bails_when_slow_geocode_resolves_after_batch_location_s
     # Wait for the batch save to complete: A and B both persisted, and the
     # batch inspector has re-rendered (so #locationFilled is hidden again).
     page.wait_for_function(
-        "() => selectedPhotos.size === 2"
+        "() => browseState.selectedPhotos.size === 2"
         " && document.getElementById('locationFilled').hidden === true"
     )
     for _ in range(50):
@@ -1626,7 +1626,7 @@ def test_exif_suggestion_cleared_by_loaddetail_before_select_all(
             break
         page.wait_for_timeout(100)
     assert held_routes, "/api/photos/B fetch was never issued"
-    assert page.evaluate("() => window._detailPhotoId") is None
+    assert page.evaluate("() => browseState.detailPhotoId") is None
     assert page.evaluate(
         "() => document.getElementById('locationExifSuggestion').dataset.photoId || ''"
     ) == ""
@@ -1635,8 +1635,8 @@ def test_exif_suggestion_cleared_by_loaddetail_before_select_all(
     # scrub, keepSugg would be true (A's data-photo-id still present, A in
     # the Select All ids) and A's Accept line would flash back into the
     # batch inspector.
-    page.evaluate("() => selectAllMatchingPhotos()")
-    page.wait_for_function("() => selectedPhotos.size >= 3")
+    page.evaluate("() => pageModules.selection.selectAllMatchingPhotos()")
+    page.wait_for_function("() => browseState.selectedPhotos.size >= 3")
 
     expect(page.locator("#locationExifSuggestion")).to_be_hidden()
     assert page.evaluate(
@@ -1706,23 +1706,23 @@ def test_freetext_location_batches_selection_and_refreshes_smart_collection(
 
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
-    page.evaluate("(collectionId) => filterByCollection(collectionId)", collection_id)
+    page.evaluate("(collectionId) => pageModules.sidebarCollections.filterByCollection(collectionId)", collection_id)
     page.wait_for_function(
         # Collections open into the filter bar as an expression (Phase 5).
-        "() => window.VireoFilter && VireoFilter.hasFilters() && photos.length === 3",
+        "() => window.VireoFilter && VireoFilter.hasFilters() && browseState.photos.length === 3",
     )
 
     page.locator(f".grid-card[data-id='{photo_ids[0]}']").click()
     _wait_for_detail_loaded(page)
     page.locator(f".grid-card[data-id='{photo_ids[1]}']").click(modifiers=["Meta"])
     page.locator(f".grid-card[data-id='{photo_ids[2]}']").click(modifiers=["Meta"])
-    page.wait_for_function("() => selectedPhotos.size === 3")
+    page.wait_for_function("() => browseState.selectedPhotos.size === 3")
 
     inp = page.locator("#locationInput")
     inp.fill("the meadow")
     inp.press("Enter")
     page.wait_for_function(
-        "() => window.VireoFilter && VireoFilter.hasFilters() && photos.length === 0"
+        "() => window.VireoFilter && VireoFilter.hasFilters() && browseState.photos.length === 0"
     )
 
     for photo_id in photo_ids:
@@ -1763,11 +1763,11 @@ def test_location_applies_to_selection_larger_than_batch_cap(live_server, page):
     # lazy-loads far fewer than that, and multi-select is covered elsewhere.
     # What's under test is what the save path does with a big selection.
     page.evaluate(
-        "(ids) => { selectedPhotos.clear(); ids.forEach(function(id) "
-        "{ selectedPhotos.add(id); }); }",
+        "(ids) => { browseState.selectedPhotos.clear(); ids.forEach(function(id) "
+        "{ browseState.selectedPhotos.add(id); }); }",
         photo_ids,
     )
-    page.evaluate("() => _submitLocationText('Mount Laguna')")
+    page.evaluate("() => pageModules.location._submitLocationText('Mount Laguna')")
 
     tagged = db.conn.execute(
         "SELECT COUNT(DISTINCT pk.photo_id) AS n FROM photo_keywords pk "

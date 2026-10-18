@@ -1,4 +1,44 @@
 {
+  "browse": {
+    "route": "/browse",
+    "template": "browse.html",
+    "pageHooks": [
+      "addToCollection",
+      "afterHistoryChange",
+      "applyExportPreset",
+      "batchAddKeyword",
+      "batchDelete",
+      "batchSetFlag",
+      "batchSetRating",
+      "buildExportPreflightRequest",
+      "copyPhotoPaths",
+      "getActiveSelection",
+      "getDetailPhotoId",
+      "getPhotos",
+      "getSelectedPhotoId",
+      "markExportCustom",
+      "moveBrowseSelection",
+      "openBrowseCompare",
+      "openBrowseShortcutPhoto",
+      "openCaptureTimeModal",
+      "openExportModal",
+      "openPhotoExportModal",
+      "removeDeletedLightboxPhoto",
+      "revealPhoto",
+      "selectedExportMetadataFields",
+      "setColorLabelFor",
+      "setFlagFor",
+      "setRatingFor",
+      "setWildlifeExcludedFor",
+      "updateExportFormatControls",
+      "updateExportPreview"
+    ],
+    "sharedWrites": [
+      "_gmapsCallback",
+      "_vireoNativeMenuPhotoIdsOverride",
+      "_vireoShortcuts"
+    ]
+  },
   "misses": {
     "route": "/misses",
     "template": "misses.html",

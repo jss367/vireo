@@ -1,8 +1,30 @@
-/* Browse: multi-selection panel (edits paste, compare, keyword and wildlife state).
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: multi-selection panel (edits paste, compare, keyword and wildlife state). ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import {
+  VireoBatchEdits, VireoBrowseCompare, editNav, escapeHtml, safeFetch, showToast,
+} from './shared.js';
+import {
+  _clearRepresentativeStateAfterKeywordRemoval, _refreshBrowseKeywordState,
+} from './batch-actions.js';
+import { loadDetail, loadSummary, showUndoToast } from './detail.js';
+import {
+  _batchToggleMixed, refreshPendingSyncBanner, renderBatchInspector,
+} from './edit-actions.js';
+import { refreshGridCards } from './grid.js';
+import { panelLoaders } from './panel-loaders.js';
+import { panelRequests } from './panel-requests.js';
+import { loadSelectionPredictions } from './prediction-panels.js';
+import { selectionPanel } from './selection-panel-state.js';
+import { getActiveSelection } from './selection.js';
+import {
+  MUTATION_KEYWORD, MUTATION_WILDLIFE, refreshActiveCollectionAfterMembershipChange,
+  scheduleCollectionCountsRefresh,
+} from './sidebar-collections.js';
+import { loadKeywords } from './sidebar-keywords.js';
+import { browseSelectionStackNote, refreshExpandedBrowseStackMembers } from './stacks.js';
 
-function updateSelectionPanel(/** @type {number[]} */ ids) {
+export function updateSelectionPanel(/** @type {number[]} */ ids) {
   var panel = /** @type {HTMLElement} */ (document.getElementById('selectionPanel'));
   if (!panel) return;
   if (ids.length <= 1) {
@@ -15,20 +37,20 @@ function updateSelectionPanel(/** @type {number[]} */ ids) {
     _batchToggleMixed('colorMixed', false);
     var wasVisible = !panel.classList.contains('hidden');
     panel.classList.add('hidden');
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.reset();
+    panelRequests.keywords.invalidate();
+    selectionPanel.keywords.reset();
     var list = /** @type {HTMLElement} */ (document.getElementById('selectionKeywordSuggestions'));
     if (list) list.innerHTML = '';
     // Same teardown for the prediction rows — invalidation drops any
     // in-flight selection response so it can't paint into the panel the user
     // has just collapsed back to a single photo.
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.predictions.invalidate();
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.reset();
+    panelRequests.predictions.invalidate();
+    selectionPanel.predictions.reset();
     var predList = /** @type {HTMLElement} */ (document.getElementById('selectionPredictions'));
     if (predList) predList.innerHTML = '';
     renderSelectionWildlifeState([]);
-    if (wasVisible && selectedPhotoId) {
-      loadDetail(selectedPhotoId);
+    if (wasVisible && state.selectedPhotoId) {
+      loadDetail(state.selectedPhotoId);
     } else if (wasVisible) {
       var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
       var summary = /** @type {HTMLElement} */ (document.getElementById('summaryPanel'));
@@ -39,7 +61,7 @@ function updateSelectionPanel(/** @type {number[]} */ ids) {
     return;
   }
 
-  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.detailPredictions.invalidate();
+  panelRequests.detailPredictions.invalidate();
   detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
   summary = /** @type {HTMLElement} */ (document.getElementById('summaryPanel'));
   if (summary) summary.classList.add('hidden');
@@ -60,16 +82,16 @@ function updateSelectionPanel(/** @type {number[]} */ ids) {
   // designed way to apply one suggestion to many photos.
   renderBatchInspector(ids, { preserveExifSuggestion: true });
   if (ids.length > 1000) {
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.reset();
+    panelRequests.keywords.invalidate();
+    selectionPanel.keywords.reset();
     list = /** @type {HTMLElement} */ (document.getElementById('selectionKeywordSuggestions'));
     if (list) {
       list.innerHTML = '<div class="selection-empty">Keyword suggestions are available for selections of 1,000 photos or fewer.</div>';
     }
     // Say the cap out loud here too, rather than leaving an empty
     // Predictions box that reads as "nothing predicted".
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.predictions.invalidate();
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.predictions.reset();
+    panelRequests.predictions.invalidate();
+    selectionPanel.predictions.reset();
     predList = /** @type {HTMLElement} */ (document.getElementById('selectionPredictions'));
     if (predList) {
       predList.innerHTML = '<div class="selection-empty">Predictions are available for selections of 1,000 photos or fewer.</div>';
@@ -84,7 +106,8 @@ function updatePasteEditSection(/** @type {number[]} */ ids) {
   var section = /** @type {HTMLElement} */ (document.getElementById('pasteEditSection'));
   var hint = /** @type {HTMLElement} */ (document.getElementById('pasteEditHint'));
   if (!section) return;
-  var copied = window.vireoEditNav ? window.vireoEditNav.getCopiedRecipe() : null;
+  var nav = editNav();
+  var copied = nav ? nav.getCopiedRecipe() : null;
   if (!copied || !copied.recipe) {
     section.hidden = true;
     return;
@@ -106,12 +129,13 @@ function _browseHasDevelopmentSettings(/** @type {Record<string, unknown> | null
 
 var _browseDevelopmentCopySeq = 0;
 
-async function copyDevelopmentSettingsFromPhoto(/** @type {number} */ photoId) {
-  var photo = photos.find(function(candidate) { return candidate.id === Number(photoId); });
-  if (!photoId || !window.vireoEditNav) return;
+export async function copyDevelopmentSettingsFromPhoto(/** @type {number} */ photoId) {
+  var photo = state.photos.find(function(candidate) { return candidate.id === Number(photoId); });
+  var nav = editNav();
+  if (!photoId || !nav) return;
   var copySeq = ++_browseDevelopmentCopySeq;
-  var copyToken = typeof window.vireoEditNav.beginCopiedRecipe === 'function'
-    ? await window.vireoEditNav.beginCopiedRecipe()
+  var copyToken = typeof nav.beginCopiedRecipe === 'function'
+    ? await nav.beginCopiedRecipe()
     : null;
   try {
     // Fetch the authoritative recipe so a long-lived Browse tab cannot copy
@@ -120,13 +144,13 @@ async function copyDevelopmentSettingsFromPhoto(/** @type {number} */ photoId) {
     if (copySeq !== _browseDevelopmentCopySeq) return;
     if (
       copyToken &&
-      typeof window.vireoEditNav.isCopiedRecipeCurrent === 'function' &&
-      !window.vireoEditNav.isCopiedRecipeCurrent(copyToken)
+      typeof nav.isCopiedRecipeCurrent === 'function' &&
+      !nav.isCopiedRecipeCurrent(copyToken)
     ) return;
     var recipe = data && data.recipe;
     if (!_browseHasDevelopmentSettings(recipe)) {
-      if (typeof window.vireoEditNav.cancelCopiedRecipe === 'function') {
-        if (!await window.vireoEditNav.cancelCopiedRecipe(copyToken)) return;
+      if (typeof nav.cancelCopiedRecipe === 'function') {
+        if (!await nav.cancelCopiedRecipe(copyToken)) return;
       }
       showToast('This photo has no development settings to copy', 'error');
       return;
@@ -137,11 +161,11 @@ async function copyDevelopmentSettingsFromPhoto(/** @type {number} */ photoId) {
     };
     if (
       copyToken &&
-      typeof window.vireoEditNav.setCopiedRecipeIfCurrent === 'function'
+      typeof nav.setCopiedRecipeIfCurrent === 'function'
     ) {
-      if (!await window.vireoEditNav.setCopiedRecipeIfCurrent(recipe, meta, copyToken)) return;
+      if (!await nav.setCopiedRecipeIfCurrent(recipe, meta, copyToken)) return;
     } else {
-      await window.vireoEditNav.setCopiedRecipe(recipe, meta);
+      await nav.setCopiedRecipe(recipe, meta);
     }
     showToast('Development settings copied', 'success');
     updatePasteEditSection(getActiveSelection());
@@ -149,31 +173,32 @@ async function copyDevelopmentSettingsFromPhoto(/** @type {number} */ photoId) {
     if (copySeq !== _browseDevelopmentCopySeq) return;
     if (
       copyToken &&
-      typeof window.vireoEditNav.isCopiedRecipeCurrent === 'function' &&
-      !window.vireoEditNav.isCopiedRecipeCurrent(copyToken)
+      typeof nav.isCopiedRecipeCurrent === 'function' &&
+      !nav.isCopiedRecipeCurrent(copyToken)
     ) return;
-    if (typeof window.vireoEditNav.cancelCopiedRecipe === 'function') {
-      if (!await window.vireoEditNav.cancelCopiedRecipe(copyToken)) return;
+    if (typeof nav.cancelCopiedRecipe === 'function') {
+      if (!await nav.cancelCopiedRecipe(copyToken)) return;
     }
     showToast((e instanceof Error && e.message) || 'Could not copy development settings', 'error');
   }
 }
 
-async function openBatchDevelopmentEditor() {
+export async function openBatchDevelopmentEditor() {
   try { await VireoBatchEdits.open(getActiveSelection().slice()); }
   catch (error) { showToast((error instanceof Error && error.message) || 'Could not open batch editor', 'error'); }
 }
 
-var _browseDevelopmentPasteInFlight = false;
+export var _browseDevelopmentPasteInFlight = false;
 
-async function pasteEditSettingsToSelection() {
+export async function pasteEditSettingsToSelection() {
   if (_browseDevelopmentPasteInFlight) {
     showToast('A development settings paste is already running.', 'warning');
     return;
   }
   var ids = getActiveSelection();
   if (ids.length < 1) { showToast('Select photos first.', 'error'); return; }
-  var copied = window.vireoEditNav ? window.vireoEditNav.getCopiedRecipe() : null;
+  var nav = editNav();
+  var copied = nav ? nav.getCopiedRecipe() : null;
   if (!copied || !copied.recipe) {
     showToast('Copy development settings from a photo first.', 'error');
     return;
@@ -192,23 +217,23 @@ async function pasteEditSettingsToSelection() {
   }
 }
 
-const browseCompare = VireoBrowseCompare.create({
+export const browseCompare = VireoBrowseCompare.create({
   findPhoto: findBrowsePhoto,
   fetch: safeFetch,
   showToast: showToast
 });
 
-function openBrowseCompare() {
+export function openBrowseCompare() {
   return browseCompare.open(getActiveSelection());
 }
 
-function findBrowsePhoto(/** @type {number} */ id) {
-  var topLevel = photos.find(function(p) { return p.id === id; });
+export function findBrowsePhoto(/** @type {number} */ id) {
+  var topLevel = state.photos.find(function(p) { return p.id === id; });
   if (topLevel) return topLevel;
-  var coverIds = Object.keys(browseStackMembers);
+  var coverIds = Object.keys(state.browseStackMembers);
   for (var i = 0; i < coverIds.length; i++) {
     var coverKey = coverIds[i]; if (!coverKey) continue;
-    var member = (browseStackMembers[coverKey] || []).find(function(p) {
+    var member = (state.browseStackMembers[coverKey] || []).find(function(p) {
       return p.id === id;
     });
     if (member) return member;
@@ -216,21 +241,21 @@ function findBrowsePhoto(/** @type {number} */ id) {
   return null;
 }
 
-async function loadSelectionKeywordSuggestions(/** @type {number[]} */ ids) {
-  return /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelLoaders.keywords.load(ids);
+export async function loadSelectionKeywordSuggestions(/** @type {number[]} */ ids) {
+  return panelLoaders.keywords.load(ids);
 }
 
-function renderSelectionKeywordSuggestions(/** @type {SelectionKeywordSuggestion[]} */ keywords, /** @type {number} */ selectedCount) {
+export function renderSelectionKeywordSuggestions(/** @type {SelectionKeywordSuggestion[]} */ keywords, /** @type {number} */ selectedCount) {
   var list = /** @type {HTMLElement} */ (document.getElementById('selectionKeywordSuggestions'));
   if (!list) return;
   if (!keywords.length) {
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.reset();
+    selectionPanel.keywords.reset();
     list.innerHTML = '<div class="selection-empty">No keywords on selected photos.</div>';
     return;
   }
 
   var html = '';
-  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.replace(keywords);
+  selectionPanel.keywords.replace(keywords);
   var groupDefinitions = [
     { type: 'taxonomy', label: 'Species' },
     { type: 'location', label: 'Locations' },
@@ -282,7 +307,7 @@ async function renderSelectionWildlifeState(/** @type {number[]} */ ids) {
   var actions = /** @type {HTMLElement} */ (document.getElementById('selectionWildlifeActions'));
   if (!status || !actions) return;
   if (!ids || !ids.length) {
-    /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.wildlife.invalidate();
+    panelRequests.wildlife.invalidate();
     status.textContent = '';
     actions.innerHTML = '';
     return;
@@ -291,7 +316,7 @@ async function renderSelectionWildlifeState(/** @type {number[]} */ ids) {
   // "Select all matching" can include off-page photos that are absent from
   // ``photos``, and filtering client-side would omit them from the counts
   // and hide batch controls that should still be available.
-  var request = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.wildlife.begin(); if (!request) return;
+  var request = panelRequests.wildlife.begin(); if (!request) return;
   var data;
   try {
     data = await safeFetch('/api/selection/wildlife-state', {
@@ -344,7 +369,7 @@ async function renderSelectionWildlifeState(/** @type {number[]} */ ids) {
   actions.innerHTML = html;
 }
 
-async function setSelectionWildlifeExcluded(/** @type {boolean} */ excluded) {
+export async function setSelectionWildlifeExcluded(/** @type {boolean} */ excluded) {
   var ids = getActiveSelection();
   if (!ids.length) return;
   var data;
@@ -373,15 +398,15 @@ async function setSelectionWildlifeExcluded(/** @type {boolean} */ excluded) {
   // rejecting the whole selection; tell the user how many were skipped
   // so a partial apply is never invisible.
   var skipped = (data && data.skipped_count) || 0;
-  if (skipped > 0 && typeof showToast === 'function') {
+  if (skipped > 0) {
     showToast('Skipped ' + skipped + ' photo' + (skipped === 1 ? '' : 's') +
               ' not accessible in this workspace.', 'warning');
   }
   showUndoToast();
 }
 
-async function applySelectionKeyword(/** @type {number} */ keywordId) {
-  var row = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.get(keywordId);
+export async function applySelectionKeyword(/** @type {number} */ keywordId) {
+  var row = selectionPanel.keywords.get(keywordId);
   var ids = row ? row.missingPhotoIds : [];
   if (!ids.length) return;
   try {
@@ -392,7 +417,7 @@ async function applySelectionKeyword(/** @type {number} */ keywordId) {
     });
   } catch(e) { return; }
   await _refreshBrowseKeywordState(ids);
-  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
+  panelRequests.keywords.invalidate();
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();
@@ -401,8 +426,8 @@ async function applySelectionKeyword(/** @type {number} */ keywordId) {
   showUndoToast();
 }
 
-async function removeSelectionKeyword(/** @type {number} */ keywordId) {
-  var row = /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).selectionPanel.keywords.get(keywordId);
+export async function removeSelectionKeyword(/** @type {number} */ keywordId) {
+  var row = selectionPanel.keywords.get(keywordId);
   var ids = row ? row.presentPhotoIds : [];
   if (!ids.length) return;
   var removedName = row ? row.name || null : null;
@@ -415,7 +440,7 @@ async function removeSelectionKeyword(/** @type {number} */ keywordId) {
   } catch(e) { return; }
   await _refreshBrowseKeywordState(ids);
   _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
-  /** @type {BrowseInitializedPanels} */ (Vireo && Vireo.browse).panelRequests.keywords.invalidate();
+  panelRequests.keywords.invalidate();
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
   scheduleCollectionCountsRefresh();

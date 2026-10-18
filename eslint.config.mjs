@@ -132,12 +132,8 @@ const classicSharedGlobals = {
 const globalWrite = `AssignmentExpression > MemberExpression.left[object.name=${GLOBAL_OBJECTS}]`;
 
 const checkedControllers = [
-  'vireo/static/browse/panel-requests.js',
-  'vireo/static/browse/selection-panel-state.js',
-  'vireo/static/browse/selection-panel-events.js',
   'vireo/static/vireo-dialog.js',
   'vireo/static/vireo-panel-loader.js',
-  'vireo/static/browse/panel-loaders.js',
   // Small shared classic scripts: each names the page globals it exports in
   // an `exported` directive, and the navbar globals it calls are declared
   // for it below.
@@ -176,40 +172,11 @@ export default [
     },
   },
   {
-    files: ['vireo/static/browse/panel-loaders.js'],
-    languageOptions: {
-      globals: {
-        getBrowseSelection: 'readonly',
-        selectionIdsKey: 'readonly',
-        safeFetch: 'readonly',
-        renderSelectionKeywordSuggestions: 'readonly',
-        renderSelectionPredictions: 'readonly',
-        renderDetailPredictions: 'readonly',
-      },
-    },
-  },
-  {
     files: ['vireo/static/vireo-export-job.js'],
     languageOptions: {
       globals: {
         safeEventSource: 'readonly',
         showToast: 'readonly',
-      },
-    },
-  },
-  {
-    files: ['vireo/static/browse/selection-panel-events.js'],
-    languageOptions: {
-      globals: {
-        openBatchDevelopmentEditor: 'readonly',
-        pasteEditSettingsToSelection: 'readonly',
-        setSelectionWildlifeExcluded: 'readonly',
-        applySelectionKeyword: 'readonly',
-        removeSelectionKeyword: 'readonly',
-        toggleSelectionPredictions: 'readonly',
-        acceptSelectionPrediction: 'readonly',
-        showSelectionPredictionPhotos: 'readonly',
-        openPredictionInReview: 'readonly',
       },
     },
   },

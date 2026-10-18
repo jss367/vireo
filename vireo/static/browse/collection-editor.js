@@ -1,6 +1,11 @@
-/* Browse: collection rule editor modal and live match-count preview.
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: collection rule editor modal and live match-count preview. ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import { VireoDialog, VireoFilter, escapeAttr, escapeHtml, safeFetch } from './shared.js';
+import {
+  loadCollectionCounts, loadCollections, renderCollectionList,
+} from './sidebar-collections.js';
+import { bindBrowseMarkup } from './markup.js';
 
 /* ---------- Collection Modal ---------- */
 var collectionDialog = VireoDialog.create(/** @type {HTMLElement} */ (document.getElementById('collectionModal')), {
@@ -8,7 +13,7 @@ var collectionDialog = VireoDialog.create(/** @type {HTMLElement} */ (document.g
   onDismiss: hideCollectionModal,
 });
 /** @type {BrowseRuleGroup} */ var collectionEditorRoot = {mode: 'all', rules: []};
-/** @type {number | null} */ var collectionEditingId = null;
+/** @type {number | null} */ export var collectionEditingId = null;
 // Cached dropdown sources for the rule editor. Filled on first modal open
 // and reused across rule rows so toggling field=Extension or field=Folder
 // doesn't refetch on every render. Re-fetched each time the modal opens
@@ -175,7 +180,7 @@ async function loadCollectionEditorSources() {
   }
 }
 
-async function showCollectionModal(/** @type {BrowseCollection} */ collection, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
+export async function showCollectionModal(/** @type {BrowseCollection | null} */ collection, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
   // Cancel any pending/in-flight preview from a previous session before
   // resetting state — otherwise a stale response can land on the DOM and
   // briefly show the previous rule set's count in the freshly opened modal.
@@ -222,7 +227,7 @@ async function showCollectionModal(/** @type {BrowseCollection} */ collection, /
   }
 }
 
-function hideCollectionModal() {
+export function hideCollectionModal() {
   resetPreviewState();
   collectionEditingId = null;
   collectionDialog.close();
@@ -243,14 +248,14 @@ function getRuleParent(/** @type {string} */ path) {
   return {parent: parent, index: idx};
 }
 
-function addRuleRow(/** @type {string | undefined} */ groupPath = undefined) {
+export function addRuleRow(/** @type {string | undefined} */ groupPath = undefined) {
   var group = getRuleContainer(groupPath || ''); if (!group) return;
   if (!group.rules) group.rules = [];
   group.rules.push({field: 'keyword', op: 'contains', value: ''});
   renderRules();
 }
 
-function addRuleGroup(/** @type {string | undefined} */ groupPath = undefined) {
+export function addRuleGroup(/** @type {string | undefined} */ groupPath = undefined) {
   var group = getRuleContainer(groupPath || ''); if (!group) return;
   if (!group.rules) group.rules = [];
   group.rules.push({mode: 'all', rules: [
@@ -259,13 +264,13 @@ function addRuleGroup(/** @type {string | undefined} */ groupPath = undefined) {
   renderRules();
 }
 
-function removeRule(/** @type {string} */ path) {
+export function removeRule(/** @type {string} */ path) {
   var ref = getRuleParent(path);
   ref.parent?.rules?.splice(ref.index, 1);
   renderRules();
 }
 
-function updateRule(/** @type {string} */ path, /** @type {'mode' | 'field' | 'op' | 'value' | 'value_from' | 'value_to'} */ key, /** @type {string} */ val) {
+export function updateRule(/** @type {string} */ path, /** @type {'mode' | 'field' | 'op' | 'value' | 'value_from' | 'value_to'} */ key, /** @type {string} */ val) {
   var r = getRuleContainer(path);
   if (!r) return;
   if (key === 'mode') {
@@ -320,7 +325,7 @@ function updateRule(/** @type {string} */ path, /** @type {'mode' | 'field' | 'o
 }
 
 /* ---------- Live match-count preview ---------- */
-/** @type {number | null} */ var _previewTimer = null;
+/** @type {number | null} */ export var _previewTimer = null;
 var _previewSeq = 0;
 
 function schedulePreviewUpdate() {
@@ -362,7 +367,7 @@ async function updatePreviewNow() {
   }
 }
 
-function commitRuleOnEnter(/** @type {KeyboardEvent} */ e) {
+export function commitRuleOnEnter(/** @type {KeyboardEvent} */ e) {
   if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
   const t = e.currentTarget || e.target; if (!(t instanceof HTMLInputElement)) return;
   if (t && t.type === 'date') {
@@ -385,13 +390,13 @@ function renderRuleValueInput(/** @type {BrowseRule} */ r, /** @type {string} */
        'location_keyword_missing', 'inat_submitted', 'is_duplicate',
        'needs_review'].indexOf(r.field || '') !== -1) {
     var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
-    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+    return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
         '<option value="1"' + (boolVal==='1'?' selected':'') + '>Yes</option>' +
         '<option value="0"' + (boolVal==='0'?' selected':'') + '>No</option>' +
       '</select>';
   }
   if (r.field === 'color_label') {
-    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+    return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
         '<option value="red"' + (r.value==='red'?' selected':'') + '>Red</option>' +
         '<option value="yellow"' + (r.value==='yellow'?' selected':'') + '>Yellow</option>' +
         '<option value="green"' + (r.value==='green'?' selected':'') + '>Green</option>' +
@@ -400,14 +405,14 @@ function renderRuleValueInput(/** @type {BrowseRule} */ r, /** @type {string} */
       '</select>';
   }
   if (r.field === 'flag') {
-    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+    return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
         '<option value="flagged"' + (r.value==='flagged'?' selected':'') + '>Pick</option>' +
         '<option value="rejected"' + (r.value==='rejected'?' selected':'') + '>Reject</option>' +
         '<option value="none"' + (r.value==='none'?' selected':'') + '>No flag</option>' +
       '</select>';
   }
   if (r.field === 'prediction_status') {
-    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+    return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
         '<option value="pending"' + (r.value==='pending'?' selected':'') + '>Pending</option>' +
         '<option value="accepted"' + (r.value==='accepted'?' selected':'') + '>Accepted</option>' +
         '<option value="rejected"' + (r.value==='rejected'?' selected':'') + '>Rejected</option>' +
@@ -419,7 +424,7 @@ function renderRuleValueInput(/** @type {BrowseRule} */ r, /** @type {string} */
     // (legacy rule, freshly switched field), include it as a sticky
     // option so the user can see+keep it instead of having it silently
     // snap to the first known extension on next render.
-    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+    return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
         (collectionExtensions.length === 0
           ? '<option value="">(no extensions yet — scan a folder)</option>'
           : '') +
@@ -440,7 +445,7 @@ function renderRuleValueInput(/** @type {BrowseRule} */ r, /** @type {string} */
     var stickyFolder = (r.value && !paths.some(function(path) { return path === r.value; }))
       ? '<option value="' + escapeAttr(String(r.value)) + '" selected>' + escapeHtml(String(r.value)) + '</option>'
       : '';
-    return '<select onchange="updateRule(\'' + p + '\',\'value\',this.value)" style="flex:1;">' +
+    return '<select data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule" style="flex:1;">' +
         (collectionFolders.length === 0
           ? '<option value="">(no folders in this workspace)</option>'
           : '') +
@@ -455,15 +460,15 @@ function renderRuleValueInput(/** @type {BrowseRule} */ r, /** @type {string} */
       var from = Array.isArray(r.value) ? (r.value[0] || '') : '';
       var to   = Array.isArray(r.value) ? (r.value[1] || '') : '';
       return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
-          '<input type="date" value="' + escapeAttr(from) + '" onchange="updateRule(\'' + p + '\',\'value_from\',this.value)" onkeydown="commitRuleOnEnter(event)" style="flex:1;">' +
+          '<input type="date" value="' + escapeAttr(from) + '" data-rule-path="' + p + '" data-rule-key="value_from" data-browse-on="change:updateRule keydown:commitRuleOnEnter" style="flex:1;">' +
           '<span style="color:var(--text-ghost);font-size:11px;">and</span>' +
-          '<input type="date" value="' + escapeAttr(to) + '" onchange="updateRule(\'' + p + '\',\'value_to\',this.value)" onkeydown="commitRuleOnEnter(event)" style="flex:1;">' +
+          '<input type="date" value="' + escapeAttr(to) + '" data-rule-path="' + p + '" data-rule-key="value_to" data-browse-on="change:updateRule keydown:commitRuleOnEnter" style="flex:1;">' +
         '</div>';
     }
     if (r.op === 'recent_days') {
       var n = (typeof r.value === 'number' || (typeof r.value === 'string' && r.value !== '')) ? r.value : 7;
       return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
-          '<input type="number" min="1" value="' + escapeAttr(String(n)) + '" onchange="updateRule(\'' + p + '\',\'value\',this.value)" onkeydown="commitRuleOnEnter(event)" style="width:80px;">' +
+          '<input type="number" min="1" value="' + escapeAttr(String(n)) + '" data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule keydown:commitRuleOnEnter" style="width:80px;">' +
           '<span style="color:var(--text-ghost);font-size:11px;">days</span>' +
         '</div>';
     }
@@ -475,15 +480,14 @@ function renderRuleValueInput(/** @type {BrowseRule} */ r, /** @type {string} */
     var lo = Array.isArray(r.value) ? (r.value[0] == null ? '' : r.value[0]) : '';
     var hi = Array.isArray(r.value) ? (r.value[1] == null ? '' : r.value[1]) : '';
     return '<div style="flex:1;display:flex;gap:6px;align-items:center;">' +
-        '<input type="number" step="any" value="' + escapeAttr(String(lo)) + '" onchange="updateRule(\'' + p + '\',\'value_from\',this.value)" onkeydown="commitRuleOnEnter(event)" style="flex:1;">' +
+        '<input type="number" step="any" value="' + escapeAttr(String(lo)) + '" data-rule-path="' + p + '" data-rule-key="value_from" data-browse-on="change:updateRule keydown:commitRuleOnEnter" style="flex:1;">' +
         '<span style="color:var(--text-ghost);font-size:11px;">and</span>' +
-        '<input type="number" step="any" value="' + escapeAttr(String(hi)) + '" onchange="updateRule(\'' + p + '\',\'value_to\',this.value)" onkeydown="commitRuleOnEnter(event)" style="flex:1;">' +
+        '<input type="number" step="any" value="' + escapeAttr(String(hi)) + '" data-rule-path="' + p + '" data-rule-key="value_to" data-browse-on="change:updateRule keydown:commitRuleOnEnter" style="flex:1;">' +
       '</div>';
   }
   return '<input type="' + (numeric ? 'number' : 'text') + '" value="' +
     escapeAttr(String(r.value == null ? '' : r.value)) +
-    '" onchange="updateRule(\'' + p + '\',\'value\',this.value)"' +
-    ' onkeydown="commitRuleOnEnter(event)"' +
+    '" data-rule-path="' + p + '" data-rule-key="value" data-browse-on="change:updateRule keydown:commitRuleOnEnter"' +
     ' placeholder="value" style="flex:1;">';
 }
 
@@ -501,21 +505,21 @@ function renderRuleNode(/** @type {BrowseRule} */ node, /** @type {string} */ pa
     var groupHtml = '<div style="margin-left:' + indent + 'px;margin-bottom:8px;padding:8px;border:1px solid var(--border-subtle);border-radius:4px;">' +
       '<div class="rule-row" style="margin-bottom:6px;">' +
       '<span style="font-size:12px;color:var(--text-dim);">Match</span>' +
-      '<select onchange="updateRule(\'' + p + '\',\'mode\',this.value)">' +
+      '<select data-rule-path="' + p + '" data-rule-key="mode" data-browse-on="change:updateRule">' +
         '<option value="all"' + (node.mode==='all'?' selected':'') + '>all</option>' +
         '<option value="any"' + (node.mode==='any'?' selected':'') + '>any</option>' +
         '<option value="none"' + (node.mode==='none'?' selected':'') + '>none</option>' +
       '</select>' +
       '<span style="font-size:12px;color:var(--text-dim);flex:1;">of these rules</span>';
     if (path) {
-      groupHtml += '<span class="remove-rule" onclick="removeRule(\'' + p + '\')">&times;</span>';
+      groupHtml += '<span class="remove-rule" data-rule-path="' + p + '" data-browse-on="click:removeRule">&times;</span>';
     }
     groupHtml += '</div>';
     (node.rules || []).forEach(function(child, /** @type {number} */ idx) {
       groupHtml += renderRuleNode(child, path ? path + '.' + idx : String(idx), depth + 1);
     });
-    groupHtml += '<button onclick="addRuleRow(\'' + p + '\')" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;margin-right:4px;">+ Rule</button>' +
-      '<button onclick="addRuleGroup(\'' + p + '\')" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">+ Group</button>' +
+    groupHtml += '<button data-rule-path="' + p + '" data-browse-on="click:addRuleRow" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;margin-right:4px;">+ Rule</button>' +
+      '<button data-rule-path="' + p + '" data-browse-on="click:addRuleGroup" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">+ Group</button>' +
       '</div>';
     return groupHtml;
   }
@@ -523,30 +527,32 @@ function renderRuleNode(/** @type {BrowseRule} */ node, /** @type {string} */ pa
   // Preserve newer filter-bar expressions instead of presenting a text
   // input that flattens a value list on edit, or a misleading field/op.
   if (!FIELD_OPS[node.field || ''] || ops.indexOf(node.op || '') === -1) {
-    var description = window.VireoFilter
+    var description = VireoFilter
       ? VireoFilter.describeRule(node) : node.field + ' ' + node.op;
     return '<div class="rule-row" style="margin-left:' + indent + 'px;">' +
       '<span class="collection-preserved-rule" style="flex:1;">' + escapeHtml(description) + '</span>' +
-      '<span class="remove-rule" onclick="removeRule(\'' + p + '\')">&times;</span></div>';
+      '<span class="remove-rule" data-rule-path="' + p + '" data-browse-on="click:removeRule">&times;</span></div>';
   }
   var opOptions = ops.map(function(op) {
     var label = OP_LABELS[op] || op;
     return '<option value="' + escapeAttr(op) + '"' + (node.op===op?' selected':'') + '>' + escapeHtml(label) + '</option>';
   }).join('');
   return '<div class="rule-row" style="margin-left:' + indent + 'px;">' +
-    '<select onchange="updateRule(\'' + p + '\',\'field\',this.value)">' +
+    '<select data-rule-path="' + p + '" data-rule-key="field" data-browse-on="change:updateRule">' +
       renderFieldOptions(node.field) +
     '</select>' +
-    '<select onchange="updateRule(\'' + p + '\',\'op\',this.value)">' +
+    '<select data-rule-path="' + p + '" data-rule-key="op" data-browse-on="change:updateRule">' +
       opOptions +
     '</select>' +
     renderRuleValueInput(node, path) +
-    '<span class="remove-rule" onclick="removeRule(\'' + p + '\')">&times;</span>' +
+    '<span class="remove-rule" data-rule-path="' + p + '" data-browse-on="click:removeRule">&times;</span>' +
   '</div>';
 }
 
 function renderRules() {
-  /** @type {HTMLElement} */ (document.getElementById('ruleRows')).innerHTML = renderRuleNode(collectionEditorRoot, '', 0);
+  var ruleRows = /** @type {HTMLElement} */ (document.getElementById('ruleRows'));
+  ruleRows.innerHTML = renderRuleNode(collectionEditorRoot, '', 0);
+  bindBrowseMarkup(ruleRows);
   schedulePreviewUpdate();
 }
 
@@ -586,21 +592,21 @@ function coerceRuleForSave(/** @type {BrowseRule} */ node) {
   return saved;
 }
 
-function serializeCollectionRules() {
+export function serializeCollectionRules() {
   return coerceRuleForSave(collectionEditorRoot);
 }
 
-async function editCollection(/** @type {number} */ cid, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
-  var collection = collectionsById[cid];
+export async function editCollection(/** @type {number} */ cid, /** @type {HTMLElement | null | undefined} */ returnFocus = undefined) {
+  var collection = state.collectionsById[cid];
   if (!collection) {
     var list = await safeFetch('/api/collections', {}, {toast: false});
     renderCollectionList(list || []);
-    collection = collectionsById[cid];
+    collection = state.collectionsById[cid];
   }
   if (collection) showCollectionModal(collection, returnFocus);
 }
 
-async function saveCollection() {
+export async function saveCollection() {
   var name = /** @type {HTMLInputElement} */ (document.getElementById('collectionName')).value.trim();
   if (!name) return;
   var rules = serializeCollectionRules();
@@ -706,9 +712,9 @@ async function saveCollection() {
           var hardCapAt = Date.now() + 30000;
           ticker = setInterval(function() {
             var pending = (
-              typeof collectionLoadGen === 'number' &&
-              typeof collectionRenderDecisionGen === 'number' &&
-              collectionLoadGen > collectionRenderDecisionGen
+              typeof state.collectionLoadGen === 'number' &&
+              typeof state.collectionRenderDecisionGen === 'number' &&
+              state.collectionLoadGen > state.collectionRenderDecisionGen
             );
             if (!pending || Date.now() > hardCapAt) teardown();
           }, 500);

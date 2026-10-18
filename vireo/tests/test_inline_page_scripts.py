@@ -21,7 +21,6 @@ INLINE_SCRIPT_LINE_LIMITS = {
     "_sync_panel.html": 876,
     "audit.html": 480,
     "best_batch.html": 236,
-    "browse.html": 4,
     "card_cleanup.html": 915,
     "cull.html": 780,
     "duplicates.html": 820,
@@ -76,9 +75,8 @@ def test_inline_page_script_only_shrinks():
 
 
 # Pages split into a per-page directory of classic scripts under
-# vireo/static/, keyed by route. Browse has its own check in
-# test_browse_pure_helpers.py. A page converted to ES modules moves from here
-# to frontend-module-pages.json, whose pages test_module_pages.py checks.
+# vireo/static/, keyed by route. A page converted to ES modules moves from
+# here to frontend-module-pages.json, whose pages test_module_pages.py checks.
 SPLIT_PAGES = {
     "/settings": "settings",
     "/import": "import",

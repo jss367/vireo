@@ -126,7 +126,7 @@ def test_browse_menu_disabled_for_multi_select(live_server, page):
     hawk_card.wait_for(state="visible")
     hawk_card.click(modifiers=["Meta"])
     page.locator(f'.grid-card[data-id="{other}"]').click(modifiers=["Meta"])
-    assert page.evaluate("selectedPhotos.size") == 2
+    assert page.evaluate("browseState.selectedPhotos.size") == 2
 
     hawk_card.click(button="right")
     menu = page.locator(".vireo-ctx-menu")

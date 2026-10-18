@@ -1,6 +1,14 @@
-/* Browse: grid card markup (fields, badges, color labels, detection boxes).
-   Classic script sharing page globals; browse.html loads the
-   browse/*.js files in dependency order. */
+/* Browse: grid card markup (fields, badges, color labels, detection boxes). ES module (see
+   browse/README.md). */
+import { state } from './state.js';
+import {
+  VireoColorLabels, _vireoPairSource, escapeAttr, escapeHtml, vireoPhotoHasOrientationEdit,
+  vireoPhotoIsRawJpegPair, vireoRememberPhotoEditRecipe, vireoRememberPhotoPair,
+  vireoThumbnailUrl,
+} from './shared.js';
+import { fetchColorLabels, updateDetailColors } from './edit-actions.js';
+import { refreshGridCards } from './grid.js';
+import { browseCardSelectionClass, renderBrowseStackBadge } from './stacks.js';
 
 function formatFileSize(/** @type {number | null | undefined} */ bytes = undefined) {
   if (bytes == null) return '';
@@ -23,7 +31,7 @@ function cardExtensionLabel(/** @type {BrowsePhoto} */ p) {
   return label ? label + ' + ' + companion : companion;
 }
 
-function renderSpeciesBadges(/** @type {string[] | undefined} */ species, /** @type {boolean | undefined} */ inline = undefined) {
+export function renderSpeciesBadges(/** @type {string[] | undefined} */ species, /** @type {boolean | undefined} */ inline = undefined) {
   if (!Array.isArray(species) || species.length === 0) return '';
   var maxShow = 3;
   var style = inline ? ' style="position:static;padding:0;"' : '';
@@ -115,11 +123,11 @@ function renderCardField(/** @type {string} */ field, /** @type {BrowsePhoto} */
       }
       return '';
     case 'color_label':
-      var cl = colorLabels[p.id];
+      var cl = state.colorLabels[p.id];
       if (cl) {
-        if (!window.VireoColorLabels || !window.VireoColorLabels.isValid(cl)) return '';
-        var colorTitle = window.VireoColorLabels
-          ? window.VireoColorLabels.title(cl, cl.charAt(0).toUpperCase() + cl.slice(1))
+        if (!VireoColorLabels || !VireoColorLabels.isValid(cl)) return '';
+        var colorTitle = VireoColorLabels
+          ? VireoColorLabels.title(cl, cl.charAt(0).toUpperCase() + cl.slice(1))
           : cl;
         return '<span class="grid-card-color" data-color="' + escapeAttr(cl)
           + '" data-color-label-control data-color-label-base-title="'
@@ -141,18 +149,18 @@ function renderCardField(/** @type {string} */ field, /** @type {BrowsePhoto} */
 // re-stamped by refreshCardBadgesAndInfo once /api/photos/color_labels
 // resolves or the user edits a label.
 function cardColorLabel(/** @type {number} */ photoId) {
-  var cl = colorLabels[photoId];
+  var cl = state.colorLabels[photoId];
   if (!cl) return null;
-  if (window.VireoColorLabels && !window.VireoColorLabels.isValid(cl)) return null;
+  if (VireoColorLabels && !VireoColorLabels.isValid(cl)) return null;
   return cl;
 }
 
-function cardColorLabelAttr(/** @type {number} */ photoId) {
+export function cardColorLabelAttr(/** @type {number} */ photoId) {
   var cl = cardColorLabel(photoId);
   return cl ? ' data-color-label="' + escapeAttr(cl) + '"' : '';
 }
 
-function applyCardColorLabel(/** @type {HTMLElement} */ card, /** @type {number} */ photoId) {
+export function applyCardColorLabel(/** @type {HTMLElement} */ card, /** @type {number} */ photoId) {
   var cl = cardColorLabel(photoId);
   if (cl) card.setAttribute('data-color-label', cl);
   else card.removeAttribute('data-color-label');
@@ -166,44 +174,41 @@ function applyCardColorLabel(/** @type {HTMLElement} */ card, /** @type {number}
 // those ids. loadPhotos()'s paging path does its own fetch and does not use
 // this. `isCurrent` is the caller's own staleness guard: a sort change or
 // folder click during the fetch means these ids are no longer on screen.
-function hydrateColorLabelsForRenderedPage(/** @type {() => boolean} */ isCurrent) {
-  if (!photos.length) return;
-  var ids = photos.map(function(p) { return p.id; });
+export function hydrateColorLabelsForRenderedPage(/** @type {() => boolean} */ isCurrent) {
+  if (!state.photos.length) return;
+  var ids = state.photos.map(function(p) { return p.id; });
   return fetchColorLabels(ids).then(function() {
     if (!isCurrent()) return;
     refreshGridCards(ids);
     // fetchColorLabels already re-rendered a batch inspector; only the
     // single-photo panel is left to catch up.
     var detail = /** @type {HTMLElement} */ (document.getElementById('detailContent'));
-    if (selectedPhotoId != null
+    if (state.selectedPhotoId != null
         && !(detail && detail.classList.contains('batch-mode'))) {
       updateDetailColors();
     }
   });
 }
 
-function renderCardInfo(/** @type {BrowsePhoto} */ p) {
+export function renderCardInfo(/** @type {BrowsePhoto} */ p) {
   var infoHtml = '';
-  cardFields.forEach(function(field) {
+  state.cardFields.forEach(function(field) {
     infoHtml += renderCardField(field, p);
   });
   return infoHtml;
 }
 
-function renderDetectionBoxes(/** @type {BrowsePhoto} */ p) {
+export function renderDetectionBoxes(/** @type {BrowsePhoto} */ p) {
   // Shared by renderPhotoCard and renderBrowseStackMember so overlays and their
   // orientation/RAW-pair hiding stay identical between covers and expanded stack
   // members; toggleDetectionBoxes() rerenders through both paths.
-  if (!showDetectionBoxes || !Array.isArray(p.detections)) return '';
-  var isRawJpegPair = typeof window.vireoPhotoIsRawJpegPair === 'function'
-    ? window.vireoPhotoIsRawJpegPair(p)
-    : false;
+  if (!state.showDetectionBoxes || !Array.isArray(p.detections)) return '';
+  var isRawJpegPair = vireoPhotoIsRawJpegPair(p);
   var pairSource = _vireoPairSource(p.id) || 'jpeg';
   var hideDetectionOverlays = (
     (isRawJpegPair && pairSource === 'jpeg') ||
     (
-      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
-      window.vireoPhotoHasOrientationEdit(p.id)
+      vireoPhotoHasOrientationEdit(p.id)
     )
   );
   var html = '';
@@ -218,7 +223,7 @@ function renderDetectionBoxes(/** @type {BrowsePhoto} */ p) {
   return html;
 }
 
-function renderPhotoCard(/** @type {BrowsePhoto} */ p, /** @type {number} */ idx) {
+export function renderPhotoCard(/** @type {BrowsePhoto} */ p, /** @type {number} */ idx) {
   var selectedClass = browseCardSelectionClass(p);
   // Offline members render first and unconditionally: they are read-only
   // placeholders with no thumbnail, and the server never lets one join a
@@ -241,18 +246,13 @@ function renderPhotoCard(/** @type {BrowsePhoto} */ p, /** @type {number} */ idx
     '</div>';
   }
   var stackClass = p.browse_stack ? ' has-browse-stack' : '';
-  var isRawJpegPair = typeof window.vireoPhotoIsRawJpegPair === 'function'
-    ? window.vireoPhotoIsRawJpegPair(p)
-    : false;
-  if (typeof window.vireoRememberPhotoPair === 'function') {
-    window.vireoRememberPhotoPair(p);
-  }
+  var isRawJpegPair = vireoPhotoIsRawJpegPair(p);
+  vireoRememberPhotoPair(p);
   var pairSource = _vireoPairSource(p.id) || 'jpeg';
   if (
-    typeof window.vireoRememberPhotoEditRecipe === 'function' &&
     Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
   ) {
-    window.vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
+    vireoRememberPhotoEditRecipe(p.id, p.edit_recipe, {
       skipIfLocallyWritten: true,
     });
   }
@@ -263,7 +263,7 @@ function renderPhotoCard(/** @type {BrowsePhoto} */ p, /** @type {number} */ idx
   if (p._similarity !== undefined) {
     clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
   }
-  var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
+  var inatBadge = state.inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
   var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
   var pairBadge = isRawJpegPair
@@ -274,16 +274,16 @@ function renderPhotoCard(/** @type {BrowsePhoto} */ p, /** @type {number} */ idx
 
   // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
   var speciesBadgeHtml = '';
-  if (cardFields.indexOf('species') === -1) {
+  if (state.cardFields.indexOf('species') === -1) {
     speciesBadgeHtml = renderSpeciesBadges(p.species, false);
   }
 
-  var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
+  var thumbUrl = vireoThumbnailUrl(p);
   // tabindex="-1" keeps the card out of Tab order (clicks already select
-  // through onclick) while making it a valid programmatic focus target so
+  // through its click handler) while making it a valid programmatic focus target so
   // the context menu's return-focus target can land back on the card that
   // launched it; batch dialogs opened from this card use that path.
-  return '<div class="grid-card' + stackClass + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '"' + cardColorLabelAttr(p.id) + ' tabindex="-1" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
+  return '<div class="grid-card' + stackClass + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" data-filename="' + escapeAttr(p.filename) + '"' + cardColorLabelAttr(p.id) + ' tabindex="-1" data-browse-on="click:selectPhotoCard">' +
     '<div class="grid-card-img-wrap">' +
       '<img data-thumbnail-src="' + escapeAttr(thumbUrl) + '" decoding="async" alt="' + escapeAttr(p.filename) + '">' +
       renderBrowseStackBadge(p) +

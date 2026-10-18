@@ -67,7 +67,9 @@ declare function escapeAttr(value: unknown): string;
 declare const VireoBrowseCompare: {create(options: {
   findPhoto(id: number): CullSourcePhoto | undefined;
   fetch: typeof safeFetch; showToast: typeof showToast; syncZoom: boolean;
-}): CullCompareController};
+}): CullCompareController;
+  bindControls(document: Document, getCompare: () => Pick<CullCompare, 'close' | 'resetViews' | 'step'> | null): void;
+};
 interface Window {vireoThumbnailUrl?(photo: CullDisplayPhoto): string; vireoHistoryBusy?(): boolean;}
 interface DocumentEventMap {
   'lightbox:flagchanged': CustomEvent<{photoId: number; flag: string}>;

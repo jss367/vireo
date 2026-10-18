@@ -38,7 +38,7 @@ def test_panorama_selection_folder_picker_and_real_stitch(live_server, page, tmp
     item = page.locator(".vireo-ctx-menu").get_by_text("Create Panorama…", exact=True)
     expect(item).to_have_class(re.compile("vireo-ctx-disabled"))
     page.keyboard.press("Escape")
-    page.evaluate("clearSelection()")
+    page.evaluate("pageModules.selection.clearSelection()")
     for card in cards:
         card.click(modifiers=["Meta"])
     page.locator("#batchMoreBtn").click()
