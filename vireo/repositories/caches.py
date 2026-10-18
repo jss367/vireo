@@ -302,6 +302,15 @@ class CachesRepository:
             "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
         )
 
+    def set_thumbnail_paths(self, pairs: Iterable[tuple[str, int]]) -> None:
+        """Record each ``(thumb_path, photo_id)`` pair's thumbnail filename,
+        in the caller's transaction (the pipeline's thumbnail stage batches
+        them and commits after)."""
+        self.conn.executemany(
+            "UPDATE photos SET thumb_path=? WHERE id=?",
+            pairs,
+        )
+
     def delete_preview_rows(self, removed_preview_rows: Sequence[tuple[int, int]]) -> None:
         self.conn.executemany(
             "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",

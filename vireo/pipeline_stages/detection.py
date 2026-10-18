@@ -488,11 +488,7 @@ class _DetectPass:
         self, photo_id, full_runtime, source_input, cache_format_error,
     ):
         thread_db = self.thread_db
-        identity = thread_db.conn.execute(
-            """SELECT file_hash, companion_path
-               FROM photos WHERE id = ?""",
-            (photo_id,),
-        ).fetchone()
+        identity = thread_db.model_runs.detector_source_identity(photo_id)
         full_input = None
         if (
             identity is not None
@@ -537,27 +533,16 @@ class _DetectPass:
             # full-image detection artifact for this
             # photo, dropping the attached classifier
             # run.
-            thread_db.conn.execute(
-                """UPDATE detections
-                      SET runtime_fingerprint = ?
-                    WHERE photo_id = ?
-                      AND detector_model = 'full-image'
-                      AND (runtime_fingerprint IS NULL
-                           OR runtime_fingerprint != ?)""",
-                (full_runtime, photo_id, full_runtime),
+            thread_db.detections.promote_full_image_runtime(
+                photo_id, full_runtime,
             )
-            thread_db.conn.commit()
-        existing_run = thread_db.conn.execute(
-            """SELECT runtime_fingerprint FROM detector_runs
-               WHERE photo_id = ?
-                 AND detector_model = 'full-image'""",
-            (photo_id,),
-        ).fetchone()
-        if (
-            existing_run is None
-            or existing_run["runtime_fingerprint"]
-            != full_runtime
-        ):
+            thread_db.commit()
+        # ``full_runtime`` is never None, so a missing run and a run with
+        # no recorded runtime both differ from it.
+        existing_runtime = thread_db.model_runs.detector_runtime_fingerprint(
+            photo_id, "full-image",
+        )
+        if existing_runtime != full_runtime:
             thread_db.model_runs.record_detector_run(
                 photo_id, "full-image", box_count=1,
                 runtime_fingerprint=full_runtime,

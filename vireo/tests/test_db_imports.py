@@ -61,6 +61,15 @@ def test_landed_fingerprint_rows_reads_identity_of_existing_ids(db, catalog):
     }
 
 
+def test_cataloged_file_rows_lists_every_photo_with_its_folder_path(db, catalog):
+    rows = db.imports.cataloged_file_rows()
+    assert sorted((row["path"], row["filename"]) for row in rows) == [
+        ("/archive/2026", "bird.cr3"),
+        ("/archive/2026", "fox.jpg"),
+        ("/other", "fox-copy.jpg"),
+    ]
+
+
 def test_photo_hash_row_is_exact_on_folder_and_filename(db, catalog):
     row = db.imports.photo_hash_row("/archive/2026", "fox.jpg")
     assert tuple(row) == (catalog["jpg"], "h-fox")

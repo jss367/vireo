@@ -7,7 +7,8 @@ bookkeeping around it: the landed-photo fingerprints a retry verifies, the
 per-path photo and companion lookups behind hash stamping and cache
 invalidation, a resume's recovery of its parent's landings, the duplicate
 gate's twin rows, and the ``'missing'`` → ``'ok'`` promotion of a folder the
-import just proved present.
+import just proved present. It also lists every cataloged file for the
+local-processing import's archive preflight (``pipeline_stages.scanning``).
 
 Everything here is catalog-wide (photos and folders are global), so nothing
 resolves a workspace. The writes never commit: they run in the caller's
@@ -43,6 +44,18 @@ class ImportRepository:
                 JOIN folders f ON f.id = p.folder_id
                 WHERE p.id IN ({placeholders})""",
             list(photo_ids),
+        ).fetchall()
+
+    def cataloged_file_rows(self) -> list[sqlite3.Row]:
+        """``path`` (the folder's) and ``filename`` of every cataloged photo.
+
+        The local-processing import's archive preflight indexes these to tell
+        a cataloged file in the destination from unindexed copy debris.
+        """
+        return self.conn.execute(
+            """SELECT f.path, p.filename
+                 FROM photos p
+                 JOIN folders f ON f.id = p.folder_id"""
         ).fetchall()
 
     def photo_hash_row(self, folder_path: str, filename: str) -> sqlite3.Row | None:

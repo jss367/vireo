@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
-from db import commit_with_retry
 from pipeline_locks import (
     acquire_photo_mask,
 )
@@ -514,9 +513,7 @@ class _MaskPass:
                     if d["detector_model"] != "full-image"
                 ]
                 if raw_dets:
-                    has_mask = thread_db.conn.execute(
-                        "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
-                    ).fetchone()[0]
+                    has_mask = thread_db.masks_features.photo_mask_path(p["id"])
                     if not has_mask:
                         self.photos_subthreshold_only += 1
 
@@ -982,7 +979,7 @@ class _MaskPass:
             self.thread_db, photo_id, min_conf=subject_floor,
             detector_model=subject_detector,
         )
-        commit_with_retry(self.thread_db.conn)
+        self.thread_db.commit_with_retry()
         return retained(
             self.thread_db, photo_id, min_conf=subject_floor,
             detector_model=subject_detector,
@@ -1044,12 +1041,7 @@ class _MaskPass:
         # nulled the variant here before the
         # embedding could go stale (Codex P2
         # r4056402007).
-        state = self.thread_db.conn.execute(
-            "SELECT active_mask_variant, "
-            "dino_embedding_variant, quality_input_recipe FROM photos "
-            "WHERE id = ?",
-            (item.photo_id,),
-        ).fetchone()
+        state = self.thread_db.masks_features.photo_mask_state(item.photo_id)
         return bool(
             state is not None
             and not self.run.params.raw_subject_analysis
@@ -1191,7 +1183,7 @@ class _MaskPass:
         # finish removes it only after the database points
         # at the new path.
         item.mask_file_stage.install()
-        commit_with_retry(thread_db.conn)
+        thread_db.commit_with_retry()
         item.mask_file_stage.finish()
         item.mask_file_stage = None
 
