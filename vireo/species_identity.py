@@ -112,10 +112,7 @@ class SpeciesResolver:
             lookup = getattr(self.taxonomy, "lookup_id", None)
             return lookup(taxon_id) if lookup else None
         if self.db is not None:
-            row = self.db.conn.execute(
-                "SELECT inat_id AS taxon_id, name AS scientific_name, common_name, rank "
-                "FROM taxa WHERE inat_id = ?", (taxon_id,),
-            ).fetchone()
+            row = self.db.taxa.identity_by_inat_id(taxon_id)
             return dict(row) if row else None
         return None
 
@@ -140,27 +137,14 @@ class SpeciesResolver:
         if not scientific and not self._common_names_verified:
             return self._lookup(name, scientific=True) or self._preferred_common(name)
         if scientific:
-            rows = self.db.conn.execute(
-                "SELECT inat_id AS taxon_id, name AS scientific_name, common_name, rank "
-                "FROM taxa WHERE name = ?", (name,),
-            ).fetchall()
+            rows = self.db.taxa.identities_by_scientific_name(name)
             if not rows:
                 from taxonomy import load_scientific_synonyms
                 current = load_scientific_synonyms().get(name.lower())
                 if current:
-                    rows = self.db.conn.execute(
-                        "SELECT inat_id AS taxon_id, name AS scientific_name, common_name, rank "
-                        "FROM taxa WHERE name = ?", (current,),
-                    ).fetchall()
+                    rows = self.db.taxa.identities_by_scientific_name(current)
         else:
-            rows = self.db.conn.execute(
-                "SELECT DISTINCT t.inat_id AS taxon_id, t.name AS scientific_name, "
-                "t.common_name, t.rank FROM taxa t WHERE t.name = ? OR t.common_name = ? "
-                "UNION SELECT t.inat_id, t.name, t.common_name, t.rank "
-                "FROM taxa_common_names cn JOIN taxa t ON t.id = cn.taxon_id "
-                "WHERE cn.name = ? COLLATE NOCASE",
-                (name, name, name),
-            ).fetchall()
+            rows = self.db.taxa.identities_by_any_name(name)
         return dict(rows[0]) if len(rows) == 1 else None
 
     def _preferred_common(self, name):
@@ -178,10 +162,7 @@ class SpeciesResolver:
         """
         if self.db is None:
             return None
-        rows = self.db.conn.execute(
-            "SELECT DISTINCT inat_id AS taxon_id, name AS scientific_name, common_name, rank "
-            "FROM taxa WHERE lower(common_name) = lower(?) LIMIT 2", (name,),
-        ).fetchall()
+        rows = self.db.taxa.identities_by_preferred_common_name(name)
         return dict(rows[0]) if len(rows) == 1 else None
 
     def resolve(self, name, scientific_name=None, source=None):

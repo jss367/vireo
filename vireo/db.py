@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from repositories.predictions import PredictionRepository
     from repositories.processes import ProcessesRepository
     from repositories.scanning import ScanningRepository
+    from repositories.species_identity_repairs import SpeciesIdentityRepairRepository
     from repositories.stats import StatsRepository
     from repositories.sync import SyncRepository
     from repositories.taxa import TaxaRepository
@@ -2306,6 +2307,27 @@ class Database:
         ``taxonomy.py`` loaders keep their own commit points.
         """
         return self._taxa_repository()
+
+    # -- Species identity repairs (callers own the transactions) --
+
+    def _species_identity_repair_repository(self):
+        """Build the (catalog-wide) species-identity repair repository on this connection."""
+        from repositories.species_identity_repairs import SpeciesIdentityRepairRepository
+
+        return SpeciesIdentityRepairRepository(self.conn)
+
+    @property
+    def species_identity_repairs(self) -> SpeciesIdentityRepairRepository:
+        """The species-identity repair domain: ``db.species_identity_repairs.record_repair(...)`` and friends.
+
+        A domain accessor, not a cached attribute: every access builds a fresh
+        repository through ``_species_identity_repair_repository``, exactly as
+        a forwarding wrapper called at that moment would, so the connection is
+        resolved per use. Nothing in it is workspace-scoped and nothing in it
+        commits or opens a transaction; ``species_identity_repair`` and
+        ``label_source_identities`` keep their own transaction boundaries.
+        """
+        return self._species_identity_repair_repository()
 
     # -- Folders --
 
