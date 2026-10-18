@@ -1,9 +1,23 @@
 """Persist structural review edits in the workspace's ordinary undo history."""
 
+from __future__ import annotations
+
 import copy
 import json
 import os
 from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
+
+    from db import Database
+    from services.service_types import JsonDict
+
+    # An ``edit_history`` row as ``EditHistoryRepository.next_undo`` returns
+    # it. Any: its columns are mixed SQLite values.
+    HistoryEntry = Mapping[str, Any]
 
 
 class GroupingHistoryConflict(ValueError):
@@ -30,7 +44,7 @@ _CACHE_SPECIES_ENCOUNTER_FIELDS = ("confirmed_species", "confirmed_species_list"
 _CACHE_SPECIES_BURST_FIELDS = ("species_override",)
 
 
-def _grouping_signature(encounters):
+def _grouping_signature(encounters: Iterable[JsonDict] | None) -> list[JsonDict]:
     """Return an encounters snapshot without cache-only species fields."""
     signature = []
     for enc in encounters or []:
@@ -47,13 +61,16 @@ def _grouping_signature(encounters):
     return signature
 
 
-def _photo_ids_key(entry):
+def _photo_ids_key(entry: JsonDict | list[int] | None) -> tuple[int, ...]:
     """Stable dict key for the photo composition of an encounter or burst."""
     ids = entry.get("photo_ids") if isinstance(entry, dict) else entry
     return tuple(ids or ())
 
 
-def _preserve_cleared_species_overrides(target, current, expected):
+def _preserve_cleared_species_overrides(
+    target: Iterable[JsonDict] | None, current: Iterable[JsonDict] | None,
+    expected: Sequence[JsonDict] | None,
+) -> None:
     """Carry ``clearBurstOverride`` clears from current into the restored target.
 
     ``clearBurstOverride`` writes ``species_override = None`` straight through
@@ -74,8 +91,8 @@ def _preserve_cleared_species_overrides(target, current, expected):
     expected_bursts = {
         _photo_ids_key(b): b for e in expected or [] for b in e.get("bursts", []) if isinstance(b, dict)
     }
-    current_bursts = {}
-    current_encs = {}
+    current_bursts: dict[tuple[int, ...], JsonDict] = {}
+    current_encs: dict[tuple[int, ...], JsonDict] = {}
     for enc in current or []:
         if not isinstance(enc, dict):
             continue
@@ -106,7 +123,7 @@ def _preserve_cleared_species_overrides(target, current, expected):
                 b["species_override"] = None
 
 
-def _restored_summary(current_summary, encounters):
+def _restored_summary(current_summary: object, encounters: Sequence[JsonDict] | None) -> JsonDict:
     """Rebuild the cache summary's structural counts for a restored group.
 
     ``restore_grouping_edit`` swaps ``encounters`` back to an older snapshot,
@@ -134,14 +151,14 @@ def _restored_summary(current_summary, encounters):
 GROUPING_SNAPSHOT_KEYS = ("before", "after")
 
 
-def split_grouping_change(change):
+def split_grouping_change(change: JsonDict) -> tuple[JsonDict, JsonDict]:
     """Return ``(meta, snapshot)`` halves of a grouping change dict."""
     snapshot = {k: change[k] for k in GROUPING_SNAPSHOT_KEYS if k in change}
     meta = {k: v for k, v in change.items() if k not in GROUPING_SNAPSHOT_KEYS}
     return meta, snapshot
 
 
-def store_grouping_snapshot(db, edit_id, snapshot):
+def store_grouping_snapshot(db: Database, edit_id: int, snapshot: JsonDict) -> None:
     """Attach ``snapshot`` to history row ``edit_id`` (replacing any prior one)."""
     if not snapshot:
         db.edit_history.delete_grouping_payload(edit_id)
@@ -149,7 +166,10 @@ def store_grouping_snapshot(db, edit_id, snapshot):
     db.edit_history.store_grouping_payload(edit_id, json.dumps(snapshot))
 
 
-def record_grouping_edit(db, description, change, items=(), *, _commit=False):
+def record_grouping_edit(
+    db: Database, description: str, change: JsonDict,
+    items: Sequence[Mapping[str, object]] = (), *, _commit: bool = False,
+) -> int:
     """Record a ``pipeline_grouping`` edit, snapshot in the payload table.
 
     Same transaction contract as ``Database.record_edit``: with
@@ -166,14 +186,14 @@ def record_grouping_edit(db, description, change, items=(), *, _commit=False):
     return edit_id
 
 
-def convert_to_grouping_edit(db, edit_id, change):
+def convert_to_grouping_edit(db: Database, edit_id: int, change: JsonDict) -> None:
     """Rewrite an existing photo edit as the grouping edit that wraps it."""
     meta, snapshot = split_grouping_change(change)
     db.edit_history.convert_to_grouping(edit_id, json.dumps(meta))
     store_grouping_snapshot(db, edit_id, snapshot)
 
 
-def load_grouping_change(db, entry):
+def load_grouping_change(db: Database, entry: HistoryEntry) -> JsonDict:
     """Return the full change dict for a ``pipeline_grouping`` history row.
 
     Merges the snapshot half back in from ``edit_history_payloads``. Rows
@@ -189,7 +209,11 @@ def load_grouping_change(db, entry):
     return change
 
 
-def save_grouping_edit(db, before, after, description, *, photo_edit=None, items=(), label_edit=False):
+def save_grouping_edit(
+    db: Database, before: JsonDict, after: JsonDict, description: str, *,
+    photo_edit: JsonDict | None = None, items: Sequence[Mapping[str, object]] = (),
+    label_edit: bool = False,
+) -> None:
     """Save a detach and its history together, restoring the cache on failure.
 
     Callers hold the workspace regroup lock and SQLite writer transaction.
@@ -221,9 +245,10 @@ def save_grouping_edit(db, before, after, description, *, photo_edit=None, items
 
 
 def record_species_confirm_cache(
-    db, *, species, target_enc, burst_index, submitted_photo_ids,
-    new_override=None, new_encounter_state=None, description=None,
-):
+    db: Database, *, species: str, target_enc: JsonDict | None, burst_index: int | None,
+    submitted_photo_ids: Sequence[int], new_override: object = None,
+    new_encounter_state: JsonDict | None = None, description: str | None = None,
+) -> None:
     """Record an ``/api/encounters/species`` call that only wrote the cache.
 
     When every submitted photo already carries the requested species keyword,
@@ -251,7 +276,7 @@ def record_species_confirm_cache(
             return
         burst_photo_ids = list(bursts[burst_index].get("photo_ids") or [])
         prev_override = copy.deepcopy(bursts[burst_index].get("species_override"))
-        payload = {
+        payload: JsonDict = {
             "encounter_photo_ids": encounter_photo_ids,
             "burst_photo_ids": burst_photo_ids,
             "species": species,
@@ -294,7 +319,9 @@ def record_species_confirm_cache(
     )
 
 
-def _find_encounter_by_photo_ids(encounters, photo_ids):
+def _find_encounter_by_photo_ids(
+    encounters: Iterable[JsonDict] | None, photo_ids: Iterable[int] | None,
+) -> JsonDict | None:
     """Return the encounter dict whose photo_ids match, else None."""
     target_key = tuple(photo_ids or ())
     for enc in encounters or []:
@@ -303,7 +330,9 @@ def _find_encounter_by_photo_ids(encounters, photo_ids):
     return None
 
 
-def _restore_burst_confirmation(enc, change, burst_photo_ids, *, undo):
+def _restore_burst_confirmation(
+    enc: JsonDict, change: JsonDict, burst_photo_ids: list[int], *, undo: bool,
+) -> None:
     """Swap a burst's ``species_override`` for a species-confirm undo/redo.
 
     Mutates the matching burst of ``enc`` in place; raises
@@ -338,7 +367,7 @@ def _restore_burst_confirmation(enc, change, burst_photo_ids, *, undo):
         target_burst["species_override"] = copy.deepcopy(replacement)
 
 
-def _restore_encounter_confirmation(enc, change, *, undo):
+def _restore_encounter_confirmation(enc: JsonDict, change: JsonDict, *, undo: bool) -> None:
     """Swap an encounter's confirmed-species fields for a species-confirm undo/redo.
 
     Mutates ``enc`` in place; raises :class:`GroupingHistoryStale` when the
@@ -380,7 +409,7 @@ def _restore_encounter_confirmation(enc, change, *, undo):
 
 
 @contextmanager
-def restore_species_confirm_cache_edit(db, entry, *, undo):
+def restore_species_confirm_cache_edit(db: Database, entry: HistoryEntry, *, undo: bool) -> Iterator[None]:
     """Undo (or redo) a cache-only ``/api/encounters/species`` confirmation.
 
     Locates the recorded encounter / burst by its photo_ids and swaps the
@@ -439,7 +468,7 @@ def restore_species_confirm_cache_edit(db, entry, *, undo):
 
 
 @contextmanager
-def restore_grouping_edit(db, entry, *, undo):
+def restore_grouping_edit(db: Database, entry: HistoryEntry, *, undo: bool) -> Iterator[None]:
     """Restore structure, retaining history if the write/commit fails.
 
     Refuse a stale snapshot after recomputation or a later structural edit
@@ -501,7 +530,9 @@ def restore_grouping_edit(db, entry, *, undo):
         lock.release()
 
 
-def apply_grouping_photo_edit(db, entry, items, *, undo):
+def apply_grouping_photo_edit(
+    db: Database, entry: HistoryEntry, items: Iterable[sqlite3.Row], *, undo: bool,
+) -> None:
     """Replay the photo half of a grouping action without releasing its transaction."""
     change = json.loads(entry["new_value"]).get("photo_edit")
     if not change:
