@@ -245,7 +245,7 @@ def _process_job_config(thread_db, collection_id, process_id, params, chained_fr
         "collection_name": next(
             (
                 c["name"]
-                for c in thread_db.get_collections()
+                for c in thread_db.collections.list_all()
                 if c["id"] == collection_id
             ),
             None,
@@ -424,7 +424,7 @@ class PipelineChain:
 
         work_units = runtime_warning_work_units(
             "pipeline collection",
-            lambda: thread_db.count_collection_photos(collection_id),
+            lambda: thread_db.collections.count_photos(collection_id),
         )
         runtime_warning = None
         if not (params.skip_classify and params.skip_extract_masks):

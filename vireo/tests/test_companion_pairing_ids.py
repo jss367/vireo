@@ -435,7 +435,7 @@ def test_later_import_does_not_join_an_earlier_pipeline_collection(
     heron_id = _photo_ids_by_filename(db)["heron.jpg"]
     assert heron_id not in _collection_photo_ids(db, first["collection_id"])
     db.set_active_workspace(ws_id)
-    first_photos = db.get_collection_photos(
+    first_photos = db.collections.get_photos(
         first["collection_id"], per_page=999999,
     )
     assert sorted(p["filename"] for p in first_photos) == [
@@ -590,7 +590,7 @@ def test_new_photo_drops_a_stale_collection_entry_for_its_reused_id(tmp_path):
     scan(str(first), db)
     kept_id = _photo_ids_by_filename(db)["kept.jpg"]
     next_id = kept_id + 1
-    stale = db.add_collection(
+    stale = db.collections.add(
         "Pipeline old",
         json.dumps([{"field": "photo_ids", "value": [kept_id, next_id]}]),
     )
@@ -622,7 +622,7 @@ def test_new_photo_preserves_collection_created_after_insert(
     state = {}
 
     def add_membership(photo_id):
-        return writer.add_collection(
+        return writer.collections.add(
             "User selected bird",
             json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
         )
@@ -688,7 +688,7 @@ def test_new_photo_rechecks_collections_between_scan_inserts(tmp_path):
             # between the scan's inserts. The id (next in sequence) is
             # currently free; the scanner's writer lock has been released
             # for this item, so the external write lands here.
-            state["collection_id"] = writer.add_collection(
+            state["collection_id"] = writer.collections.add(
                 "Stale pick",
                 json.dumps(
                     [{"field": "photo_ids", "value": [photo_id + 1]}],
@@ -918,7 +918,7 @@ def test_add_photo_losing_a_race_keeps_concurrent_collection_entry(
             )
             self.conn.commit()
             raced_photo_ids.append(cur.lastrowid)
-            self.add_collection(
+            self.collections.add(
                 "Concurrent",
                 json.dumps(
                     [{"field": "photo_ids", "value": [cur.lastrowid]}],
@@ -1380,7 +1380,7 @@ def test_scan_refreshes_collection_membership_between_insert_commits(tmp_path, s
             return
         state["first"] = photo_id
         state["next"] = photo_id + 1
-        state["collection"] = writer.add_collection(
+        state["collection"] = writer.collections.add(
             "Selection saved during scan",
             json.dumps([{"field": "photo_ids", "value": [photo_id, photo_id + 1]}]),
         )
@@ -1402,7 +1402,7 @@ def test_scan_collection_cache_does_not_reuse_rolled_back_revision(tmp_path):
 
     db = Database(str(tmp_path / "test.db"))
     try:
-        collection = db.add_collection(
+        collection = db.collections.add(
             "Selection", json.dumps([{"field": "photo_ids", "value": [101]}]),
         )
         scanner = _CollectionMembership(db)

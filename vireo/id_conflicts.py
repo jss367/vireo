@@ -29,7 +29,7 @@ def build_comparison(db, collection_id, photo_ids=None):
     from species_identity import SpeciesResolver
     from taxonomy import load_local_taxonomy
 
-    photos = db.get_collection_photos(
+    photos = db.collections.get_photos(
         collection_id,
         per_page=999999,
         photo_ids=photo_ids,

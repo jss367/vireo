@@ -133,7 +133,7 @@ def test_api_misses_filters_by_collection_and_browse_attributes(
     client, db_with_misses,
 ):
     _, db, ids = db_with_misses
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Review subset",
         json.dumps([{
             "field": "photo_ids",
@@ -184,21 +184,23 @@ def test_api_misses_forwards_collection_to_rule_and_visual_queries(
     import models
 
     _, db, ids = db_with_misses
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "One miss",
         json.dumps([{
             "field": "photo_ids",
             "value": [ids["clipped"]],
         }]),
     )
-    original = type(db).query_photo_ids
+    from repositories.collections import CollectionRepository
+
+    original = CollectionRepository.query_photo_ids
     seen_collection_ids = []
 
     def tracked_query_photo_ids(self, rules, *args, **kwargs):
         seen_collection_ids.append(kwargs.get("collection_id"))
         return original(self, rules, *args, **kwargs)
 
-    monkeypatch.setattr(type(db), "query_photo_ids", tracked_query_photo_ids)
+    monkeypatch.setattr(CollectionRepository, "query_photo_ids", tracked_query_photo_ids)
     r = client.post("/api/misses", json={
         "collection_id": collection_id,
         "rules": [{"field": "rating", "op": ">=", "value": 0}],
@@ -272,7 +274,7 @@ def test_api_misses_reject_and_recompute_honor_collection_filter(
         "UPDATE photos SET miss_clipped=1 WHERE id=?", (ids["no_subject"],)
     )
     db.conn.commit()
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         "Only clipped",
         json.dumps([{"field": "photo_ids", "value": [ids["clipped"]]}]),
     )
@@ -752,7 +754,7 @@ def test_api_misses_rejects_visual_collection(client, db_with_misses):
     rules + visual directly, but old API callers still need this boundary.
     """
     _, db, _ = db_with_misses
-    visual_cid = db.add_collection(
+    visual_cid = db.collections.add(
         "Visual", json.dumps([{"field": "rating", "op": ">=", "value": 3}]),
         visual_json=json.dumps({"prompt": "bird", "strength": "balanced"}),
     )

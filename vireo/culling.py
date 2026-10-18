@@ -90,7 +90,7 @@ def analyze_for_culling(
 
     # Get photos with predictions and embeddings
     if collection_id:
-        photos = db.get_collection_photos(collection_id, per_page=999999)
+        photos = db.collections.get_photos(collection_id, per_page=999999)
     else:
         photos = db.get_photos(per_page=999999)
 

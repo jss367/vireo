@@ -654,7 +654,7 @@ class _ScanPass:
         nothing's broken, we keep the historical "Skipped" summary.
         """
         run = self.run
-        coll_photos = self._db().get_collection_photos(
+        coll_photos = self._db().collections.get_photos(
             run.collection_id, per_page=999999,
         )
         # Respect the user's preview-time exclusions: photos removed
@@ -1718,7 +1718,7 @@ def _collection_stage_body(
     from datetime import datetime as dt
 
     name = "Pipeline " + dt.now().strftime("%Y-%m-%d %H:%M")
-    run.collection_id = thread_db.add_collection(
+    run.collection_id = thread_db.collections.add(
         name,
         json.dumps([{"field": "photo_ids", "value": collected_photo_ids}]),
     )

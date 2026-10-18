@@ -1070,7 +1070,7 @@ def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     db_path = app.config["DB_PATH"]
     db = Database(db_path)
     db.set_active_workspace(db._active_workspace_id)
-    col_id = db.add_collection("Test", json.dumps([]))
+    col_id = db.collections.add("Test", json.dumps([]))
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -1094,7 +1094,7 @@ def test_pipeline_job_config_includes_collection_name(app_and_db, monkeypatch):
     app, _ = app_and_db
     db = Database(app.config["DB_PATH"])
     db.set_active_workspace(db._active_workspace_id)
-    col_id = db.add_collection("Costa Rica selects", json.dumps([]))
+    col_id = db.collections.add("Costa Rica selects", json.dumps([]))
 
     def fake_run(job, runner, db_path, workspace_id, params, thumb_cache_dir=None,
                  **_kwargs):
@@ -1125,7 +1125,7 @@ def test_pipeline_auto_skips_classify_when_no_model(app_and_db):
     db_path = app.config["DB_PATH"]
     db = Database(db_path)
     db.set_active_workspace(db._active_workspace_id)
-    col_id = db.add_collection("Test", json.dumps([]))
+    col_id = db.collections.add("Test", json.dumps([]))
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
@@ -1242,7 +1242,7 @@ def test_pipeline_thumbnail_step_has_progress(app_and_db, tmp_path):
     photo_ids = [r['id'] for r in db.conn.execute(
         "SELECT id FROM photos WHERE filename = 'a.jpg'"
     )]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         'Thumbnail progress',
         json.dumps([{'field': 'photo_ids', 'value': photo_ids}]),
     )
@@ -1276,7 +1276,7 @@ def test_pipeline_preview_step_has_progress(app_and_db, tmp_path):
     photo_ids = [r['id'] for r in db.conn.execute(
         "SELECT id FROM photos WHERE filename = 'a.jpg'"
     )]
-    collection_id = db.add_collection(
+    collection_id = db.collections.add(
         'Preview progress',
         json.dumps([{'field': 'photo_ids', 'value': photo_ids}]),
     )
@@ -2253,7 +2253,7 @@ def test_pipeline_with_healthy_collection_skips_scan(app_and_db):
     photo_ids = [p["id"] for p in db.conn.execute(
         "SELECT id FROM photos"
     ).fetchall()]
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "healthy", json.dumps([{"field": "photo_ids", "value": photo_ids}])
     )
 
@@ -2318,7 +2318,7 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
                     "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "broken", json.dumps([{"field": "photo_ids", "value": [pid]}])
     )
 
@@ -2392,7 +2392,7 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
                     "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner.scan_run, "extract_metadata", fake_extract)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "broken_tracked",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -2446,7 +2446,7 @@ def test_pipeline_with_broken_collection_handles_unreachable_folder(app_and_db):
     )
     db.conn.commit()
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "broken_unreachable",
         json.dumps([{"field": "photo_ids", "value": [bird1]}]),
     )
@@ -2530,7 +2530,7 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
         return real_generate(photo_id, *args, **kwargs)
     monkeypatch.setattr(thumbnails, "generate_thumbnail", counting_generate)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "broken_thumb", json.dumps([{"field": "photo_ids", "value": [pid]}])
     )
 
@@ -2597,7 +2597,7 @@ def test_pipeline_repair_respects_excluded_photo_ids(
         )
     monkeypatch.setattr(scanner.scan_run, "extract_metadata", fail_extract)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "with_excluded",
         json.dumps([{"field": "photo_ids", "value": [bird1, bird2]}]),
     )
@@ -2762,7 +2762,7 @@ def test_extract_masks_route_writes_photo_masks_row(
     )
     _patch_extract_masks_deps(monkeypatch, calls)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "extract-masks-test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -2935,7 +2935,7 @@ def test_extract_masks_route_skips_sam_when_cached(
     calls = []
     _patch_extract_masks_deps(monkeypatch, calls)
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "extract-masks-cache-test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -3507,7 +3507,7 @@ def _make_collection(app):
 
     db = Database(app.config["DB_PATH"])
     db.set_active_workspace(db._active_workspace_id)
-    return db.add_collection("Strategy test", json_mod.dumps([]))
+    return db.collections.add("Strategy test", json_mod.dumps([]))
 
 
 def _job_config(client, job_id):
@@ -3754,7 +3754,7 @@ def _folder_id_by_path(db, path):
 
 def _collection_photo_ids(db, collection_id):
     return sorted(
-        p["id"] for p in db.get_collection_photos(collection_id, per_page=999999)
+        p["id"] for p in db.collections.get_photos(collection_id, per_page=999999)
     )
 
 
@@ -4004,7 +4004,7 @@ def test_pipeline_folder_ids_with_other_scope_400(app_and_db, extra):
     fire before ``add_collection`` runs."""
     app, db = app_and_db
     root_id = _folder_id_by_path(db, "/photos/2024")
-    before = len(db.get_collections())
+    before = len(db.collections.list_all())
     with app.test_client() as client:
         resp = client.post(
             "/api/jobs/pipeline",
@@ -4012,7 +4012,7 @@ def test_pipeline_folder_ids_with_other_scope_400(app_and_db, extra):
         )
         assert resp.status_code == 400
         assert "Process only accepts photos" in resp.get_json()["error"]
-    assert len(db.get_collections()) == before
+    assert len(db.collections.list_all()) == before
 
 
 # os.path.abspath keeps the path shape on POSIX ("/abs/dest") but rewrites
@@ -4051,7 +4051,7 @@ _ABS_DEST = os.path.abspath("/abs/dest")
             "import/archive fields are no longer accepted",
         ),
         # Non-boolean miss_enabled — the type-check must fire BEFORE
-        # ``db.add_collection`` runs. Previously the check sat after
+        # ``db.collections.add`` runs. Previously the check sat after
         # materialization, so a rejected request like
         # ``{"folder_ids": [...], "miss_enabled": "false"}`` left a stray
         # "Process …" row behind.
@@ -4070,7 +4070,7 @@ def test_pipeline_folder_ids_leaves_no_stray_collection_on_400(
     accumulates junk every time the caller trips a later validation."""
     app, db = app_and_db
     root_id = _folder_id_by_path(db, "/photos/2024")
-    before = len(db.get_collections())
+    before = len(db.collections.list_all())
     with app.test_client() as client:
         resp = client.post(
             "/api/jobs/pipeline",
@@ -4078,7 +4078,7 @@ def test_pipeline_folder_ids_leaves_no_stray_collection_on_400(
         )
         assert resp.status_code == 400, resp.get_json()
         assert fragment in resp.get_json()["error"]
-    assert len(db.get_collections()) == before
+    assert len(db.collections.list_all()) == before
 
 
 def test_pipeline_folder_ids_rejects_plain_destination(app_and_db):
@@ -4090,7 +4090,7 @@ def test_pipeline_folder_ids_rejects_plain_destination(app_and_db):
     instead of a queued-but-broken run."""
     app, db = app_and_db
     root_id = _folder_id_by_path(db, "/photos/2024")
-    before = len(db.get_collections())
+    before = len(db.collections.list_all())
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
             "folder_ids": [root_id],
@@ -4099,7 +4099,7 @@ def test_pipeline_folder_ids_rejects_plain_destination(app_and_db):
         })
         assert resp.status_code == 400, resp.get_json()
         assert "import/archive fields" in resp.get_json()["error"]
-    assert len(db.get_collections()) == before
+    assert len(db.collections.list_all()) == before
 
 
 def test_pipeline_collection_id_rejects_plain_destination(app_and_db):
@@ -4220,7 +4220,7 @@ def _make_visual_collection(app):
     from db import Database
 
     with Database(app.config["DB_PATH"]) as db:
-        return db.add_collection(
+        return db.collections.add(
             "Visual test",
             json_mod.dumps([{"field": "rating", "op": ">=", "value": 3}]),
             visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
@@ -4230,7 +4230,7 @@ def _make_visual_collection(app):
 def test_pipeline_rejects_visual_collection(app_and_db, monkeypatch):
     """``/api/jobs/pipeline`` refuses a visual collection_id.
 
-    pipeline_job stages iterate ``thread_db.get_collection_photos(...)``,
+    pipeline_job stages iterate ``thread_db.collections.get_photos(...)``,
     which does not resolve ``visual_json``. Without a boundary check the
     stages would silently process every metadata match instead of the
     visually-matched subset.
@@ -4336,7 +4336,7 @@ def test_jobs_regroup_collection_scope_clears_group_fingerprint(app_and_db, monk
     ws_id = db._active_workspace_id
     db.workspaces.set_group_state(workspace_id=ws_id, fingerprint="stale", when_ts=1)
     first = db.conn.execute("SELECT MIN(id) FROM photos").fetchone()[0]
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "Subset", json.dumps([{"field": "photo_ids", "value": [first]}]),
     )
     saved = []
@@ -4536,7 +4536,7 @@ def test_jobs_regroup_coverage_uses_photo_snapshot(app_and_db, monkeypatch):
     # measured by re-resolving the collection here, it reports full coverage
     # and stamps. The loaded snapshot below excludes one photo, so the
     # snapshot-based check correctly reports partial coverage and clears.
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "MatchesAll",
         json.dumps([{"field": "photo_ids", "value": all_ids}]),
     )
@@ -4610,7 +4610,7 @@ def test_jobs_previews_rejects_non_integer_collection_id(app_and_db):
 
 def test_jobs_offline_cache_rejects_visual_collection(app_and_db):
     """``/api/jobs/offline-cache`` expands ``collection_id`` via
-    ``db.get_collection_photos(...)`` which evaluates ``rules`` only. A
+    ``db.collections.get_photos(...)`` which evaluates ``rules`` only. A
     visual collection would silently cache every metadata match instead
     of the visually-matched subset (Codex review r3621094501)."""
     app, _ = app_and_db
@@ -4644,7 +4644,7 @@ def test_pipeline_folder_ids_bad_list_field_leaves_no_stray_collection(
     the workspace's collection count is unchanged."""
     app, db = app_and_db
     root_id = _folder_id_by_path(db, "/photos/2024")
-    before = len(db.get_collections())
+    before = len(db.collections.list_all())
     with app.test_client() as client:
         resp = client.post(
             "/api/jobs/pipeline",
@@ -4654,7 +4654,7 @@ def test_pipeline_folder_ids_bad_list_field_leaves_no_stray_collection(
         # Error message names the offending field so the caller can fix it.
         offending = next(iter(extra))
         assert offending in resp.get_json()["error"]
-    assert len(db.get_collections()) == before
+    assert len(db.collections.list_all()) == before
 
 
 @pytest.mark.parametrize(
@@ -4682,7 +4682,7 @@ def test_pipeline_folder_ids_bad_list_entry_leaves_no_stray_collection(
     request boundary and confirm no collection was created."""
     app, db = app_and_db
     root_id = _folder_id_by_path(db, "/photos/2024")
-    before = len(db.get_collections())
+    before = len(db.collections.list_all())
     with app.test_client() as client:
         resp = client.post(
             "/api/jobs/pipeline",
@@ -4694,7 +4694,7 @@ def test_pipeline_folder_ids_bad_list_entry_leaves_no_stray_collection(
         # Error message points at "entries" so the caller can distinguish
         # this from the outer-list-type reject in the sibling regression.
         assert "entries" in resp.get_json()["error"]
-    assert len(db.get_collections()) == before
+    assert len(db.collections.list_all()) == before
 
 
 @pytest.mark.parametrize(
@@ -4722,7 +4722,7 @@ def test_pipeline_folder_ids_bad_model_selection_leaves_no_stray_collection(
     workspace's collection count is unchanged."""
     app, db = app_and_db
     root_id = _folder_id_by_path(db, "/photos/2024")
-    before = len(db.get_collections())
+    before = len(db.collections.list_all())
     with app.test_client() as client:
         resp = client.post(
             "/api/jobs/pipeline",
@@ -4731,7 +4731,7 @@ def test_pipeline_folder_ids_bad_model_selection_leaves_no_stray_collection(
         assert resp.status_code == 400, resp.get_json()
         offending = next(iter(extra))
         assert offending in resp.get_json()["error"]
-    assert len(db.get_collections()) == before
+    assert len(db.collections.list_all()) == before
 
 
 @pytest.mark.parametrize(
@@ -5868,7 +5868,7 @@ def test_pending_archive_deleted_collection_does_not_relink(app_and_db, tmp_path
     app, db = app_and_db
     imported = _import_for_review(app, db, tmp_path, monkeypatch)
     collection_id = imported["result"]["collection_id"]
-    db.delete_collection(collection_id)
+    db.collections.delete(collection_id)
     # Force ID reuse, as SQLite may do for the newest deleted collection.
     db.conn.execute(
         "INSERT INTO collections (id, name, workspace_id) VALUES (?, ?, ?)",
@@ -8500,7 +8500,7 @@ def test_import_in_place_no_destination_required(app_and_db, tmp_path):
     assert result["ok"] is True
     assert result["after_import_skipped"] == "import-only"
     assert result["collection_name"].startswith("Import ")
-    photos = db.get_collection_photos(
+    photos = db.collections.get_photos(
         result["collection_id"], per_page=999999,
     )
     assert [p["id"] for p in photos] == result["photo_ids"]
@@ -8631,7 +8631,7 @@ def test_import_in_place_reuses_catalog_across_workspaces(
     new_ws = job["workspace_id"]
     assert new_ws != old_ws
     db.set_active_workspace(new_ws)
-    assert {p["id"] for p in db.get_collection_photos(
+    assert {p["id"] for p in db.collections.get_photos(
         result["collection_id"], per_page=999999,
     )} == set(result["photo_ids"])
     linked_workspaces = {
@@ -9832,7 +9832,7 @@ def test_import_in_place_snapshot_normalizes_raw_companion_and_replay(
 
     assert first_job["result"]["imported"] == 1
     assert first_job["result"]["photo_ids"] == [raw_id]
-    first_collection = db.get_collection_photos(
+    first_collection = db.collections.get_photos(
         first_job["result"]["collection_id"], per_page=999999,
     )
     assert [photo["id"] for photo in first_collection] == [raw_id]
@@ -11553,7 +11553,7 @@ def test_import_chains_process_job(app_and_db, tmp_path):
         col_id = pj["config"]["collection_id"]
         assert res["collection_id"] == col_id
         assert res["collection_name"].startswith("Import ")
-        photos = db.get_collection_photos(col_id, per_page=999999)
+        photos = db.collections.get_photos(col_id, per_page=999999)
         assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
 
 
@@ -11619,7 +11619,7 @@ def test_import_retry_chains_carried_photo_ids(app_and_db, tmp_path):
         assert retry_result.get("after_import_skipped") is None
         assert retry_result.get("collection_id")
         col_id = retry_result["collection_id"]
-        photos = db.get_collection_photos(col_id, per_page=999999)
+        photos = db.collections.get_photos(col_id, per_page=999999)
         # The collection must cover the original scope so quick-look runs
         # against every photo the user intended to import.
         assert sorted(p["id"] for p in photos) == sorted(seed_ids)
@@ -11727,7 +11727,7 @@ def test_interrupted_import_resumes_with_the_photos_it_landed(
         assert sorted(result["carried_photo_ids"]) == sorted(seed_ids)
         assert result.get("process_job_id"), result
         assert sorted(
-            p["id"] for p in db.get_collection_photos(
+            p["id"] for p in db.collections.get_photos(
                 result["collection_id"], per_page=999999)
         ) == sorted(seed_ids)
         seed_folders = {
@@ -12011,7 +12011,7 @@ def test_resume_recovers_landings_its_parent_checkpoint_missed(
         assert sorted(result["carried_photo_ids"]) == landed
         assert result.get("process_job_id"), result
         assert sorted(
-            p["id"] for p in db.get_collection_photos(
+            p["id"] for p in db.collections.get_photos(
                 result["collection_id"], per_page=999999)
         ) == landed
         # Codex PR #1842 P2: every recovered id gets an expected
@@ -13050,7 +13050,7 @@ def test_import_only_choice_skips_chaining(app_and_db, tmp_path):
         assert res.get("after_import_skipped") == "import-only"
         assert "process_job_id" not in res
         assert res["collection_name"].startswith("Import ")
-        photos = db.get_collection_photos(
+        photos = db.collections.get_photos(
             res["collection_id"], per_page=999999,
         )
         assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
@@ -13545,7 +13545,7 @@ def test_extract_masks_route_reports_unreadable_sources(
         masking, "render_proxy", lambda path, longest_edge=None: None,
     )
 
-    col_id = db.add_collection(
+    col_id = db.collections.add(
         "unreadable-source-test",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -13824,7 +13824,7 @@ def test_parent_resume_recovers_photos_landed_by_unpaid_descendant(app_and_db, t
         second = wait_for_job_via_client(client, response.get_json()["job_id"])["result"]
         assert child_ids <= set(second["recovered_photo_ids"])
         assert second["chained"] is True
-        collected = {p["id"] for p in db.get_collection_photos(handoffs[-1], per_page=999999)}
+        collected = {p["id"] for p in db.collections.get_photos(handoffs[-1], per_page=999999)}
         assert set(own) | child_ids <= collected
 
 
@@ -13976,7 +13976,7 @@ def test_expanded_scope_tag_retry_preserves_paid_parent_tags(app_and_db, tmp_pat
 
 
 def _import_collection_photo_ids(db, collection_id):
-    row = next(c for c in db.get_collections() if c["id"] == collection_id)
+    row = next(c for c in db.collections.list_all() if c["id"] == collection_id)
     rules = json.loads(row["rules"])
     return sorted(next(r["value"] for r in rules if r["field"] == "photo_ids"))
 

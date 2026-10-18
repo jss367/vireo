@@ -2014,7 +2014,7 @@ def test_load_photo_features_collection_scoped(tmp_path):
 
     # Create a static collection with only p1
     rules = json.dumps([{"field": "photo_ids", "value": [p1]}])
-    cid = db.add_collection("test-coll", rules)
+    cid = db.collections.add("test-coll", rules)
 
     # Without collection_id — returns both
     all_photos = load_photo_features(db)
@@ -2578,7 +2578,7 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
         taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
     )
 
-    cid = db.add_collection(
+    cid = db.collections.add(
         "fox set",
         json.dumps([{"field": "photo_ids", "value": [pid]}]),
     )
@@ -2751,7 +2751,7 @@ def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
         taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
     )
 
-    cid = db.add_collection(
+    cid = db.collections.add(
         "both",
         json.dumps([{"field": "photo_ids", "value": [pid, other_pid]}]),
     )

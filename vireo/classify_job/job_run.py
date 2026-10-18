@@ -77,7 +77,7 @@ class _ClassifyJobRun:
         self._progress(
             0, 0, "Loading collection photos...", "Step 1/5: Loading photos",
         )
-        photos = thread_db.get_collection_photos(
+        photos = thread_db.collections.get_photos(
             self.params.collection_id, per_page=999999,
         )
 

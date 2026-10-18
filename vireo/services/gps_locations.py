@@ -262,7 +262,7 @@ class BulkGpsLocations:
         # picker filters these out, but reject here as the boundary.
         if row["visual_json"] is not None:
             return None, json_error(VISUAL_COLLECTION_MSG, 400)
-        return db.get_collection_photo_ids(collection_id), None
+        return db.collections.get_photo_ids(collection_id), None
 
     def payload(self, db, body, cancel_check=None):
         """Build preview/apply data for resolving locations from EXIF GPS."""
